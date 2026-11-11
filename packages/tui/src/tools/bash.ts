@@ -762,6 +762,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 											lang: "bash",
 											replayEpoch: options.shellReplayEpoch,
 											liveOrigin: options.executionStarted,
+											stream: options.argsComplete !== true && options.cancelled !== true,
 											preview: { lines: RUN_INPUT_PREVIEW_LINES },
 										},
 										undefined,

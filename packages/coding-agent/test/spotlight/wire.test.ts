@@ -271,7 +271,7 @@ describe("spotlight shaping hooks", () => {
 		const scorer = new RecordingScorer(client, "low");
 		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
 		expect(await scorer.score(["a", "b"], ctx)).toBeNull();
-		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1 });
+		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1, failureCauses: { timeout: 1 } });
 
 		const { session, manager } = await experimentSession(client);
 		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
@@ -280,8 +280,39 @@ describe("spotlight shaping hooks", () => {
 		expect(result.isError).toBeUndefined();
 		expect(resultText(result)).toContain(LONG_LOG.slice(LONG_LOG.lastIndexOf("\n") + 1));
 		const [entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
-		expect(entry.spotlight).toMatchObject({ failures: 1 });
+		expect(entry.spotlight).toMatchObject({ failures: 1, failureCauses: { timeout: 1 } });
 		expect(entry.error).toBeUndefined();
+	});
+
+	it("reports a lost Stencil credential once per loss, not on warm-up, and again after a re-sign-in", async () => {
+		const credential = new StencilCredential();
+		const tokens: (string | null)[] = [null, null, null, "test-token", null];
+		vi.spyOn(credential, "resolve").mockImplementation(async () => tokens.shift() ?? null);
+		const client = new SpotlightClient({
+			url: "http://spotlight.test/v1/spotlight",
+			timeoutMs: 2_000,
+			credential,
+			fetch: fakeSpotlight({ score: () => 0.5 }),
+		});
+		let missing = 0;
+		client.onCredentialMissing = () => missing++;
+		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
+		const score = async () => {
+			const scorer = new RecordingScorer(client, "low");
+			return { scores: await scorer.score(["a"], ctx), usage: scorer.usage };
+		};
+
+		// The warm-up finds no credential too, but leaves it to the first ranking: one report below, not two.
+		client.warm();
+		const unsigned = await score();
+		expect(unsigned.scores).toBeNull();
+		expect(unsigned.usage.failureCauses).toEqual({ no_credential: 1 });
+		expect(missing).toBe(1);
+		expect((await score()).scores).toBeNull();
+		expect(missing).toBe(1);
+		expect((await score()).scores).toEqual([0.5]);
+		expect((await score()).scores).toBeNull();
+		expect(missing).toBe(2);
 	});
 });
 
@@ -376,7 +407,7 @@ describe("spotlight holdout", () => {
 });
 
 describe("spotlight whole reads", () => {
-	it("shows a Markdown read and one line range as plain does, but still cuts a multi-range read", async () => {
+	it("shows a Markdown read and bounded line ranges as plain does, but still cuts an open-ended range", async () => {
 		const shaped = await experimentSession(undefined, {}, { scoreFree: 1 });
 		const plain = await plainSession();
 		// Every line is past the 400-character cap a cut read applies.
@@ -388,12 +419,18 @@ describe("spotlight whole reads", () => {
 		const read = async ({ session }: { session: ToolSession }, target: string) =>
 			resultText(await new ReadTool(session).execute("r1", { path: target }));
 
-		for (const target of ["wide.md", "wide.md:1-10,20-30", "wide.ts:5-40", "wide.ts:5+30"]) {
+		for (const target of [
+			"wide.md",
+			"wide.md:1-10,20-30",
+			"wide.ts:5-40",
+			"wide.ts:5+30",
+			"wide.ts:1-10,20-30",
+			"wide.ts:raw:5-40",
+			"wide.ts:-20",
+		]) {
 			expect(await read(shaped, target)).toBe(await read(plain, target));
 		}
-		for (const target of ["wide.ts:1-10,20-30", "wide.ts:raw:5-40"]) {
-			expect(await read(shaped, target)).not.toBe(await read(plain, target));
-		}
+		expect(await read(shaped, "wide.ts:5-")).not.toBe(await read(plain, "wide.ts:5-"));
 	});
 });
 

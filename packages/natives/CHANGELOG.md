@@ -2,16 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+
+- `OMP_APPLEFM_DISABLE=1` builds without the Apple Foundation Models bridge and never probes Xcode or the Command Line Tools; it cannot be combined with `OMP_APPLEFM_SWIFTC` ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
+
+### Changed
+
+- The macOS addon's install name is `@rpath/libpi_natives.dylib` instead of the directory it was built in ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
+- A set `OMP_APPLEFM_SWIFTC` must name a usable Swift 6.4+ compiler with a macOS 27+ SDK: the build now fails instead of falling back to Xcode, the Command Line Tools, or a build without Apple Foundation Models ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
+
+### Fixed
+
+- Fixed macOS window screenshots drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; windows spanning displays or partly off screen are captured whole at their on-screen size, except while a sheet larger than the window is open ([#17757](https://github.com/can1357/oh-my-pi/pull/17757) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.18.8] - 2026-11-11
+
+### Changed
+
+- macOS keys, typing and held keys for a window now go to a sheet attached to it that holds keyboard focus, such as an Open sheet or Finder's Go to Folder, as macOS sends them, instead of throwing `InvalidTarget` and naming the sheet; so do keys for a control of that sheet, which reports the window under it as its own ([#18675](https://github.com/can1357/oh-my-pi/pull/18675) by [@will-bogusz](https://github.com/will-bogusz))
+- Computer input no longer fails with `InputBusy` the moment another omp session's call holds the desktop, such as an `apps.open` waiting for its window: it waits up to 5 seconds for that call to finish, on macOS, Linux and Windows ([#18746](https://github.com/can1357/oh-my-pi/pull/18746) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed a crash when parsing Markdown with very deeply nested lists or block quotes, such as a line of several hundred `- ` markers, which made editing such files kill the process ([#18707](https://github.com/can1357/oh-my-pi/issues/18707))
 - Fixed the shell's `git` builtin on Windows with `bash.gitGuard` (or smart git) on failing every allowed command with exit 127 (`…\Git\cmd\git: No such file or directory`); it now runs `git.exe` ([#18722](https://github.com/can1357/oh-my-pi/issues/18722))
 - Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles ([#18745](https://github.com/can1357/oh-my-pi/pull/18745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input and takeover refusing every call, with nothing sent, while Finder is in front with its focus on the desktop and a Finder window open; Finder gets its front status back with its focus left on the desktop ([#18680](https://github.com/can1357/oh-my-pi/pull/18680) by [@will-bogusz](https://github.com/will-bogusz))
-### Changed
-
-- macOS keys, typing and held keys for a window now go to a sheet attached to it that holds keyboard focus, such as an Open sheet or Finder's Go to Folder, as macOS sends them, instead of throwing `InvalidTarget` and naming the sheet; so do keys for a control of that sheet, which reports the window under it as its own ([#18675](https://github.com/can1357/oh-my-pi/pull/18675) by [@will-bogusz](https://github.com/will-bogusz))
-- Computer input no longer fails with `InputBusy` the moment another omp session's call holds the desktop, such as an `apps.open` waiting for its window: it waits up to 5 seconds for that call to finish, on macOS, Linux and Windows ([#18746](https://github.com/can1357/oh-my-pi/pull/18746) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.6] - 2026-11-09
 

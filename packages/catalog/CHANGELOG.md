@@ -2,16 +2,42 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `web/sofya` search model ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
+- Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
+
+### Removed
+
+- Removed Devin's retired SWE-1.6 Fast from the models omp lists before Devin's live model list loads (first start, or when Devin is unreachable) ([#18795](https://github.com/can1357/oh-my-pi/pull/18795) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Devin requests now identify as Devin CLI 3000.12.43, the current stable release, instead of 3000.11.205 ([#18766](https://github.com/can1357/oh-my-pi/pull/18766) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Gemini 4 Argon and Carbon on Command Code showing no reasoning levels; both now offer low, medium, and high
+- Fixed OpenCode Zen Gemini 4 Carbon requests going to the chat-completions endpoint instead of the native Gemini endpoint Zen serves it on
+
+## [18.18.8] - 2026-11-11
+
+### Added
+
+- Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
+- Added Gemini 4 Carbon pricing on the Gemini API, Vertex AI, Google Antigravity, and Cursor ($2 input / $0.10 cached / $10 output per 1M tokens through 2026-11-30, then $4 / $0.20 / $20), instead of showing $0 ([#18734](https://github.com/can1357/oh-my-pi/pull/18734) by [@eggpeat](https://github.com/eggpeat))
+
+### Fixed
+
+- Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
+### Added
+
+- Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
+
 ## [18.18.7] - 2026-11-10
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
 - Google Antigravity now lists Gemini 4 Carbon once, with selectable low, medium, and high thinking levels, instead of a separate entry per thinking tier; on the Gemini API, Gemini 4 Carbon now offers the same thinking levels instead of none ([#18734](https://github.com/can1357/oh-my-pi/pull/18734) by [@eggpeat](https://github.com/eggpeat))
 - Factory Droid Fable 5.1, GLM 5.2 Fast and Muse Spark Open now show their list prices in the model browser and count toward session cost instead of $0 ([#18768](https://github.com/can1357/oh-my-pi/pull/18768) by [@will-bogusz](https://github.com/will-bogusz))
 - Factory Droid Gemini 4 Argon now shows Factory's 50%-off credit rate (0.8× instead of 1.6×) in the model browser until 2026-12-01 (midnight US Pacific), then 1.6× again ([#18767](https://github.com/can1357/oh-my-pi/pull/18767) by [@will-bogusz](https://github.com/will-bogusz))
-### Added
 
-- Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
-- Added Gemini 4 Carbon pricing on the Gemini API, Vertex AI, Google Antigravity, and Cursor ($2 input / $0.10 cached / $10 output per 1M tokens through 2026-11-30, then $4 / $0.20 / $20), instead of showing $0 ([#18734](https://github.com/can1357/oh-my-pi/pull/18734) by [@eggpeat](https://github.com/eggpeat))
 ### Added
 
 - Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
@@ -24,7 +50,6 @@
 ### Fixed
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
-- Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
 
 ## [18.18.6] - 2026-11-09
 

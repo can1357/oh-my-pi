@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
+import type { CredentialRotation, LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
@@ -69,13 +69,37 @@ export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undef
 }
 
 /**
- * Mark a post-rotation resolution as following a sibling-unblock wait so the
- * retry driver may resend a bearer it already tried. Used by the rotating
- * resolvers (`KeyCascade.resolver`, coding-agent `createApiKeyResolver`).
+ * Step (c) after {@link LimitsApi.rotate}: re-resolve the session credential,
+ * or return `undefined` when quota exhaustion found no sibling, so the outer
+ * retry layer honours the recorded backoff instead of resending a blocked
+ * fallback. Other declines re-resolve: a peer may have refreshed the failed
+ * bearer. A resolution after a sibling-unblock wait is marked so the retry
+ * driver may resend a bearer it already tried. Shared by every rotating
+ * resolver (`KeyCascade.resolver`, the auth gateway, coding-agent
+ * `createApiKeyResolver`).
  */
-export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResolution {
+export function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ResolvedApiKey | undefined>,
+): Promise<ResolvedApiKey | undefined>;
+export function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ApiKeyResolution>,
+): Promise<ApiKeyResolution>;
+export async function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ApiKeyResolution>,
+): Promise<ApiKeyResolution> {
+	if (!rotation.switched) {
+		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		if (isUsageLimit(error) || isUsageLimitOutcome(AIError.status(error), message)) return undefined;
+	}
+	const resolved = await resolve();
 	const apiKey = resolvedApiKeyBearer(resolved);
-	if (apiKey === undefined) return resolved;
+	if (!rotation.afterSiblingWait || apiKey === undefined) return resolved;
 	return typeof resolved === "string"
 		? { apiKey, afterSiblingWait: true }
 		: { ...resolved, apiKey, afterSiblingWait: true };

@@ -619,6 +619,20 @@ describe("model thinking derivation", () => {
 			}
 		}
 
+		// Command Code's model list carries no reasoning metadata and skips
+		// cross-provider backfill, so Gemini 4 relies on its KDL effort list.
+		for (const id of ["google/gemini-4-argon", "google/gemini-4-carbon"]) {
+			const commandCode = createModel({
+				id,
+				api: "openai-completions",
+				provider: "commandcode",
+				baseUrl: "https://api.commandcode.ai/provider/v1",
+				reasoning: false,
+			});
+			expect(commandCode.reasoning).toBe(true);
+			expect(getSupportedEfforts(commandCode)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		}
+
 		// The Argon ladder must not leak onto other Gemini 4 lines. No Gemini 4 Pro
 		// ships yet; a future one must keep the Pro low/high ladder (and must not tie with it).
 		const vertexPro4 = createModel({ id: "gemini-4-pro", api: "google-vertex", provider: "google-vertex" });

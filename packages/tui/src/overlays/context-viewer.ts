@@ -29,6 +29,7 @@ import { ensureThemeSync, theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import {
+	entryBodyText,
 	entryHeaderLine,
 	entryHeaderSpans,
 	entryMetadata,
@@ -36,7 +37,6 @@ import {
 	groupHeaderLine,
 	previewHint,
 	previewRows,
-	safeContent,
 	safeText,
 } from "./context-viewer-format";
 import {
@@ -84,7 +84,7 @@ export class ContextViewer implements Component {
 	/** Attributed usage when it can be drawn against the window (meter and map). */
 	readonly #drawableAllocation: ReadonlyMap<ContextViewCategory, number> | undefined;
 	readonly #meter: readonly NativeNode[] | undefined;
-	/** Dim notes under the legend: the scaling note when rows are attributed, then Snapcompact diagnostics. */
+	/** Dim notes under the legend: snapshot notices, the scaling note when rows are attributed, then Snapcompact diagnostics. */
 	readonly #overviewNotes: readonly string[];
 	readonly #modelLabel: string;
 
@@ -158,6 +158,7 @@ export class ContextViewer implements Component {
 		const allocation = allocateUsage(data.categories, breakdown.usedTokens);
 		this.#drawableAllocation = window > 0 && Number.isFinite(window) ? allocation : undefined;
 		this.#overviewNotes = [
+			...(data.notices ?? []),
 			...(allocation
 				? ["Category totals split Used by estimated share; the entries inside may not add up to them."]
 				: []),
@@ -379,7 +380,7 @@ export class ContextViewer implements Component {
 	#entryBodyText(): string {
 		const entry = this.#entry!;
 		if (this.#entryBodyCache?.entry !== entry) {
-			this.#entryBodyCache = { entry, text: safeContent(entry.text.trimEnd()) };
+			this.#entryBodyCache = { entry, text: entryBodyText(entry) };
 			this.#ansiEntryLayoutWidth = undefined;
 		}
 		return this.#entryBodyCache.text;

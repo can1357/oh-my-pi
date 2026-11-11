@@ -25,8 +25,54 @@ const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
 /** `/usage` stays rate-limited for minutes after a 429, so a failed refresh waits instead of re-polling. */
 const FAILURE_BACKOFF_MS = 60_000;
-/** Shared windows that gate every Claude request, whatever the model. */
-const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
+/**
+ * Shared windows that gate every Claude request, whatever the model, with the
+ * legacy bucket field and the `limits[]` kind that report each one.
+ */
+const CLAUDE_SHARED_GATES = {
+	"5h": { field: "five_hour", kind: "session" },
+	"7d": { field: "seven_day", kind: "weekly_all" },
+} as const;
+const CLAUDE_SHARED_GATE_WINDOW_IDS = Object.keys(CLAUDE_SHARED_GATES) as (keyof typeof CLAUDE_SHARED_GATES)[];
+/** Report metadata key listing shared gates the live payload declared inactive. */
+const INACTIVE_SHARED_GATES_KEY = "inactiveSharedGates";
+
+/**
+ * Shared gates the payload positively declares inactive: the bucket field is
+ * present and `null`, and the authoritative `limits[]` list carries no row of
+ * that kind. Anthropic answers `five_hour: null` with no `session` row while an
+ * account has no running 5-hour window, so that gate cannot be what blocks it.
+ * A missing field or a payload without `limits[]` proves nothing.
+ */
+function declaredInactiveSharedGates(payload: Record<string, unknown>): string[] {
+	const listed = payload.limits;
+	if (!Array.isArray(listed)) return [];
+	return CLAUDE_SHARED_GATE_WINDOW_IDS.filter(windowId => {
+		const { field, kind } = CLAUDE_SHARED_GATES[windowId];
+		return (
+			Object.hasOwn(payload, field) &&
+			payload[field] === null &&
+			!listed.some(entry => isRecord(entry) && entry.kind === kind)
+		);
+	});
+}
+
+/**
+ * Whether a report accounts for every shared gate: each one either reported a
+ * window or was declared inactive by the live payload. Healing and reset
+ * clearing judge account-wide blocks only from such complete reports.
+ */
+export function claudeReportCoversSharedGates(report: UsageReport): boolean {
+	const inactive = report.metadata?.[INACTIVE_SHARED_GATES_KEY];
+	return CLAUDE_SHARED_GATE_WINDOW_IDS.every(
+		windowId =>
+			report.limits.some(
+				limit =>
+					limit.scope.shared === true && (limit.scope.windowId === windowId || limit.window?.id === windowId),
+			) ||
+			(Array.isArray(inactive) && inactive.includes(windowId)),
+	);
+}
 
 const CLAUDE_USAGE_BETAS =
 	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
@@ -775,6 +821,7 @@ export function parseClaudeUsagePayload(
 	const payloadIdentity = extractUsageIdentity(payload);
 	const accountId = payloadIdentity.accountId ?? identity.accountId;
 	const email = payloadIdentity.email ?? identity.email;
+	const inactiveSharedGates = declaredInactiveSharedGates(raw);
 	return {
 		provider: "anthropic",
 		fetchedAt,
@@ -784,6 +831,7 @@ export function parseClaudeUsagePayload(
 			...(accountId ? { accountId } : {}),
 			...(email ? { email } : {}),
 			...(identity.orgId ? { orgId: identity.orgId } : {}),
+			...(inactiveSharedGates.length > 0 ? { [INACTIVE_SHARED_GATES_KEY]: inactiveSharedGates } : {}),
 		},
 		raw: payload,
 	};
@@ -952,11 +1000,9 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		// The endpoint returns a report as soon as one window parses, and a tier
 		// 429 can be caused by a shared wall. A payload missing a shared gate
 		// leaves the block's cause unknown, so vouch for nothing rather than
-		// clear a block that still holds.
-		const everySharedGateReported = CLAUDE_SHARED_GATE_WINDOW_IDS.every(windowId =>
-			sharedLimits.some(limit => limit.scope.windowId === windowId || limit.window?.id === windowId),
-		);
-		if (!everySharedGateReported) return [];
+		// clear a block that still holds. A gate the payload declared inactive
+		// is accounted for: no running window can be what blocks the account.
+		if (!claudeReportCoversSharedGates(report)) return [];
 		const tiers = new Set<string>();
 		for (const limit of report.limits) {
 			const tier = limit.scope.tier;

@@ -102,6 +102,8 @@ await win.type("Format Document");
 await win.press("enter");
 ```
 
+On macOS a window screenshot shows the whole window at its on-screen size, also when it spans displays or extends off screen, so pixel input maps straight to window points. A sheet larger than its window is the exception: on a window lying on one display it is cut at the window's edge, and on a window spanning displays or extending off screen the window and sheet are drawn shrunk together, so pixels no longer match window points until the sheet closes.
+
 Window methods include:
 
 - `screenshot({ silent? })`

@@ -130,6 +130,7 @@ With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval
 - Persistent worker VM keyed by `js:${sessionId}`; `reset` recreates the VM and is destructive to concurrent users of that session id.
 - Runs under Bun and exposes host globals including `Bun`, `Buffer`, `fetch`, `process`, `require`, `createRequire`, `fs`, and Web Crypto.
 - Top-level `await` and bare `return` work through async wrapping.
+- A trailing expression or top-level `return` value prints as `console.log` would. As in Python, other trailing statements print nothing: an assignment (`globalThis.items = items`, or a destructuring `({ a } = obj)`), a declaration, a loop or an `if` block. Assigned promises still settle within the run and report rejections. A parenthesized assignment prints its value, like Python's `(x := value)`.
 - Static top-level imports and dynamic imports are rewritten through the local module loader. Local filesystem imports are cache-busted between cells; bare package and scheme/URL imports retain normal cache identity.
 - Awaited regions can interleave with another session sharing the executor; synchronous code still blocks the worker event loop.
 
