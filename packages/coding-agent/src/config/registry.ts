@@ -100,6 +100,12 @@ interface DefinitionBase {
 	 */
 	credential?: true;
 	/**
+	 * Only the operator's layers (global config, `--config` overlays, runtime overrides) may set this
+	 * setting: a value in project settings is dropped with a warning when the project layer is read,
+	 * so no reader ever sees it.
+	 */
+	operatorOnly?: true;
+	/**
 	 * Array entries may be objects scoping values to working-directory prefixes
 	 * (`{ path(s)/pathPrefix(es), values | items | <valuesKey> }`, see `config/settings.ts`);
 	 * `valuesKey` names the domain-specific alias for the values list (e.g. `models`).

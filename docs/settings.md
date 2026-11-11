@@ -295,7 +295,7 @@ theme:
 
 Keep secrets out of committed project config unless your repository policy allows it. Prefer environment variables, stored auth, an auth broker, or an untracked `--config` overlay for credentials.
 
-Project settings cannot set `tui.linkMap`: a repository could otherwise send clicks on local file links to a remote URL. A project value for it is not applied to links, though it still appears in the merged value `omp config get` shows. This covers project settings only: a `.env` in the directory omp starts in can still name a config file through `PI_CONFIG_FILES`, as it can for every setting read from the global config and `--config` files. When a `--config` file or a runtime override sets the map, `/settings` shows it read-only.
+Project settings cannot set `tui.linkMap`: a repository could otherwise send clicks on local file links to a remote URL. A project value for it is dropped when project settings are read, with a warning in the log, so neither links nor `omp config get` see it. This covers project settings only: a `.env` in the directory omp starts in can still name a config file through `PI_CONFIG_FILES`, as it can for every setting read from the global config and `--config` files. When a `--config` file or a runtime override sets the map, `/settings` shows it read-only.
 
 ### One-shot overlays
 

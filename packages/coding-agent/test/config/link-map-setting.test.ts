@@ -1,36 +1,68 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { resolveMarkdownLinkHrefs } from "@oh-my-pi/pi-coding-agent/internal-urls/hyperlink-targets";
+import { cfgTuiLinkMap } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { resolveFileLink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState } from "../helpers/settings-test-state";
 
-afterEach(() => applyLinkMapSetting({}));
+afterEach(() => {
+	vi.restoreAllMocks();
+	applyLinkMapSetting({});
+});
 
 describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 	it("follows the global config and never a project's settings", async () => {
 		using dir = TempDir.createSync("@pi-link-map-scope-");
 		const agentDir = dir.join("agent");
 		const projectDir = dir.join("project");
+		const projectConfig = path.join(projectDir, ".omp", "config.yml");
 		await Bun.write(path.join(agentDir, "config.yml"), "tui:\n  linkMap:\n    /mnt/projects: file:///Z:/\n");
 		await Bun.write(
-			path.join(projectDir, ".omp", "config.yml"),
+			projectConfig,
 			"tui:\n  linkMap:\n    /mnt/projects: https://attacker.example/\n    /srv: https://attacker.example/srv/\n",
 		);
+		const warn = vi.spyOn(logger, "warn");
 		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const release = bindEffects(settings);
 		try {
 			expect(resolveFileLink({ path: "/mnt/projects/a.ts", kind: "file" })).toBe("file:///Z:/a.ts");
 			expect(resolveFileLink({ path: "/srv/a.ts", kind: "file" })).toBe("file:///srv/a.ts");
+			expect(cfgTuiLinkMap.get(settings)).toEqual({ "/mnt/projects": "file:///Z:/" });
+			// The project's value is reported when it is dropped, once: a reload reads it again and stays quiet.
+			await settings.reloadFromDisk();
+			const dropped = warn.mock.calls.filter(([, context]) => context?.setting === cfgTuiLinkMap.id);
+			expect(dropped.map(([, context]) => context?.source)).toEqual([projectConfig]);
 		} finally {
 			release();
 			settings.cancelPendingSaves();
 			// The persisted instance opened agent storage under the temp dir removed below.
+			AgentStorage.close();
+		}
+	});
+
+	it("applies an edit to a key the project also sets without a restart", async () => {
+		using dir = TempDir.createSync("@pi-link-map-edit-");
+		const agentDir = dir.join("agent");
+		const projectDir = dir.join("project");
+		await Bun.write(path.join(agentDir, "config.yml"), "tui:\n  linkMap:\n    /mnt/projects: file:///Z:/\n");
+		await Bun.write(
+			path.join(projectDir, ".omp", "config.yml"),
+			"tui:\n  linkMap:\n    /mnt/projects: https://attacker.example/\n",
+		);
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const release = bindEffects(settings);
+		try {
+			cfgTuiLinkMap.setEntry(settings, "/mnt/projects", "file:///Y:/");
+			expect(resolveFileLink({ path: "/mnt/projects/a.ts", kind: "file" })).toBe("file:///Y:/a.ts");
+		} finally {
+			release();
+			settings.cancelPendingSaves();
 			AgentStorage.close();
 		}
 	});

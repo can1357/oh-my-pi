@@ -1,4 +1,4 @@
-import { combine, effect, effectsSettings, register, type Setting } from "../config/registry";
+import { combine, effect, register, type Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -648,22 +648,18 @@ export const cfgTuiLinkMap = register({
 	id: "tui.linkMap",
 	type: "record",
 	default: EMPTY_STRING_RECORD,
+	// A repository must not be able to point clicks on local file links at a remote URL.
+	operatorOnly: true,
 	ui: {
 		tab: "appearance",
 		group: "Display",
 		label: "Link Map",
 		editor: "linkMap",
-		condition: "linkMapNotProject",
 		description:
 			"Where file links point, by path prefix: maps an absolute path, ~ or ~/... to a URI prefix in any scheme, such as file:///Z:/ for a mapped drive, https://git.contoso.example/repo/blob/main for a web view or vscode://vscode-remote/ssh-remote+host/path for VS Code Remote. The rest of the path is appended and the longest prefix wins. Read from the operator's config; project settings cannot set it",
 	},
 });
-// The effect's own argument is the merged value, which includes a project's entries. A repository must
-// not be able to point clicks on local file links at a remote URL, so only the operator's layers apply.
-effect(cfgTuiLinkMap, () => {
-	const operator = effectsSettings()?.grantAuthority();
-	applyLinkMapSetting(operator && cfgTuiLinkMap.get(operator));
-});
+effect(cfgTuiLinkMap, applyLinkMapSetting);
 
 export const cfgTuiMouse = register({
 	id: "tui.mouse",

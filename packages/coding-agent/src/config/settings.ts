@@ -659,7 +659,7 @@ export class Settings {
 	#projectShellPathSource: string | undefined;
 	/** Project files to invalidate and watch, including filtered or temporarily missing sources. */
 	#projectSourcePaths: string[] = [];
-	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
+	/** Project-layer warnings already surfaced for the current project scope; reloads stay quiet. */
 	#projectSettingsWarningsSeen = new Set<string>();
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
@@ -2757,13 +2757,12 @@ export class Settings {
 	 * over `layers` with the merged project; the read itself runs without waiting for them.
 	 */
 	#resolveProjectRead(read: ProjectSettingsDiscovery, layers: Omit<OwnLayers, "project">): ProjectSettingsReadResult {
-		let project = this.#mergeProjectItems(read.items, read.nativeModelRoles);
+		let items = read.items;
+		let project = this.#mergeProjectItems(items, read.nativeModelRoles);
 		const disabled = this.#disabledProviderIds({ ...layers, project: project.settings }, read.cwd);
-		if (read.items.some(item => disabled.has(item._source.provider))) {
-			const filtered = this.#mergeProjectItems(
-				read.items.filter(item => !disabled.has(item._source.provider)),
-				read.nativeModelRoles,
-			);
+		if (items.some(item => disabled.has(item._source.provider))) {
+			items = items.filter(item => !disabled.has(item._source.provider));
+			const filtered = this.#mergeProjectItems(items, read.nativeModelRoles);
 			const projectSwitch = getByPath(project.settings, cfgDisabledProviders.segments);
 			if (projectSwitch !== undefined) {
 				const remaining = this.#disabledProviderIds({ ...layers, project: filtered.settings }, read.cwd);
@@ -2782,8 +2781,9 @@ export class Settings {
 			}
 			project = filtered;
 		}
+		const settings = this.#migrateRawSettings(project.settings, read.quarantineInvalid);
 		return {
-			settings: this.#migrateRawSettings(project.settings, read.quarantineInvalid),
+			settings,
 			fileSettings: read.fileSettings,
 			shellPathSource: project.shellPathSource,
 			sourcePaths: [
@@ -2792,8 +2792,39 @@ export class Settings {
 					...read.items.map(item => item.path),
 				]),
 			],
-			warningsSeen: read.warningsSeen,
+			warningsSeen: this.#dropOperatorOnlySettings(settings, items, read.warningsSeen),
 		};
+	}
+
+	/**
+	 * Removes from `project`, the layer merged from `items`, every setting its definition marks
+	 * `operatorOnly`. Returns `warningsSeen` with the dropped settings added: each is reported once per
+	 * project scope, so reloads stay quiet until the project stops setting it and sets it again.
+	 */
+	#dropOperatorOnlySettings(
+		project: RawSettings,
+		items: readonly SettingsCapabilityItem[],
+		warningsSeen: Set<string>,
+	): Set<string> {
+		let seen = warningsSeen;
+		for (const setting of allSettings()) {
+			if (!setting.definition.operatorOnly || getByPath(project, setting.segments) === undefined) continue;
+			deleteByPath(project, setting.segments);
+			const source = items
+				.filter(item => getByPath(item.data, setting.segments) !== undefined)
+				.map(item => item.path)
+				.join(", ");
+			const warning = `operator-only ${setting.id}: ${source}`;
+			if (!this.#projectSettingsWarningsSeen.has(warning)) {
+				logger.warn("Settings: ignoring project value of an operator-only setting", {
+					setting: setting.id,
+					source,
+				});
+			}
+			if (seen === warningsSeen) seen = new Set(warningsSeen);
+			seen.add(warning);
+		}
+		return seen;
 	}
 
 	/** Project-level settings `items` merged in discovery order, then the native project config's model roles. */
