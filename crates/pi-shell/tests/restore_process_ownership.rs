@@ -131,7 +131,7 @@ fn a_real_legacy_owned_self_parent_restores_owned_with_a_diagnostic() {
 	// Written and reloaded by unmodified 03f6cbc7 after a frameless 0 -> 1
 	// root restore, an ordinary foreground spawn, and externalize at hold.
 	let mut store =
-		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-03f6-owned-self-parent.image"))
+		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-b73c-owned-self-parent.image"))
 			.unwrap();
 	let engine = Engine::new(EngineConfig { vpid_base: 1, ..EngineConfig::default() });
 	let mut host = FakeHost::new();
@@ -159,7 +159,7 @@ fn a_real_legacy_disowned_record_defaults_to_owned_instead_of_deleting_completio
 	// gives a direct wait its Bash-compatible 0; the process completion is
 	// retained rather than interpreting its parent id as a disown marker.
 	let mut store =
-		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-03f6-disowned.image")).unwrap();
+		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-b73c-disowned.image")).unwrap();
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
 	let (mut shell, _) = Shell::restore(
@@ -191,7 +191,7 @@ fn a_real_legacy_disown_all_exposes_completion_when_no_kept_status_exists() {
 	// untagged Proc as owned deliberately retains 7 rather than risking
 	// deletion of an indistinguishable owned child's completion.
 	let mut store =
-		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-03f6-disown-all.image")).unwrap();
+		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-b73c-disown-all.image")).unwrap();
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
 	let (mut shell, report) = Shell::restore(
@@ -213,7 +213,7 @@ fn a_real_legacy_disown_all_exposes_completion_when_no_kept_status_exists() {
 #[test]
 fn resaving_a_legacy_owned_self_parent_makes_the_resolution_explicit() {
 	let mut store =
-		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-03f6-owned-self-parent.image"))
+		MemStore::from_bytes(include_bytes!("fixtures/frames/legacy-b73c-owned-self-parent.image"))
 			.unwrap();
 	let original = postcard::to_stdvec(store.get(Key::Proc(Vpid(1))).unwrap().unwrap()).unwrap();
 	let engine = Engine::new(EngineConfig { vpid_base: 1, ..EngineConfig::default() });

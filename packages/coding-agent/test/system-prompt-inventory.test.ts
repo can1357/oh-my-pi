@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { DelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSystemPrompt as buildSdkSystemPrompt } from "@oh-my-pi/pi-coding-agent/sdk";
 import {
@@ -518,8 +519,8 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("`lsp`");
 	});
 
-	it("renders exactly one of the map-unknown-code and inline-first delegation rules per bias", async () => {
-		const renderDelegation = async (delegationBias: "eager" | "restrained" | "gated", eagerTasks: boolean) => {
+	it("renders exactly one of the map-unknown-code, explore and inline-first delegation rules per bias", async () => {
+		const renderDelegation = async (delegationBias: DelegationBias, eagerTasks: boolean) => {
 			const { systemPrompt } = await buildSystemPrompt({
 				cwd: tempDir,
 				contextFiles: [],
@@ -531,13 +532,15 @@ describe("system prompt tool inventory", () => {
 				eagerTasks,
 			});
 			const count = (needle: string) => systemPrompt[0].split(needle).length - 1;
-			return [count("Map unknown code via `task`"), count("Inline first.")];
+			return [count("Map unknown code via `task`"), count("Unfamiliar subsystem?"), count("Inline first.")];
 		};
-		expect(await renderDelegation("eager", false)).toEqual([1, 0]);
-		expect(await renderDelegation("eager", true)).toEqual([1, 0]);
-		expect(await renderDelegation("restrained", true)).toEqual([1, 0]);
-		expect(await renderDelegation("restrained", false)).toEqual([0, 1]);
-		expect(await renderDelegation("gated", true)).toEqual([0, 0]);
+		expect(await renderDelegation("eager", false)).toEqual([1, 0, 0]);
+		expect(await renderDelegation("eager", true)).toEqual([1, 0, 0]);
+		expect(await renderDelegation("balanced", false)).toEqual([0, 1, 0]);
+		expect(await renderDelegation("balanced", true)).toEqual([1, 0, 0]);
+		expect(await renderDelegation("restrained", true)).toEqual([1, 0, 0]);
+		expect(await renderDelegation("restrained", false)).toEqual([0, 0, 1]);
+		expect(await renderDelegation("gated", true)).toEqual([0, 0, 0]);
 	});
 
 	it("appends each advertised prelude's guidance as its own block", async () => {
@@ -973,7 +976,7 @@ describe("system prompt tool inventory", () => {
 	});
 
 	it("omits the read-only scout delegation gate when scout is unavailable", async () => {
-		const opts = { toolNames: ["read", "bash", "task"], tools: TOOLS };
+		const opts = { toolNames: ["read", "bash", "task"], tools: TOOLS, delegationBias: "eager" as const };
 		const withScout = (
 			await buildSystemPrompt({
 				...opts,

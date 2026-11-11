@@ -1,3 +1,4 @@
+import { heapStats } from "bun:jsc";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { generateRoomKey, importRoomKey, open, seal } from "../../src/collab/crypto";
 import { type CollabFrame, packEnvelope, unpackEnvelope } from "../../src/collab/protocol";
@@ -8,6 +9,14 @@ const HIGH_WATER_MARK = 64 * 1024;
 const DRAIN_RETRY_MS = 25;
 /** `MAX_RETIRED_PEERS` in relay-client.ts. */
 const RETIREMENT_CAP = 256;
+/** `MAX_PEER_PENDING_SENDS` in relay-client.ts. */
+const PEER_SHARE = 32;
+const GREEDY = 1;
+
+/** A one-frame welcome batch: what the newcomer reservation is actually reserved for. */
+function welcomeBatch(message: string): Iterable<CollabFrame> {
+	return [{ t: "error", message }] as CollabFrame[];
+}
 
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
 	const deadline = Date.now() + 3_000;
@@ -16,6 +25,22 @@ async function waitUntil(predicate: () => boolean, message: string): Promise<voi
 		await Bun.sleep(2);
 	}
 }
+
+/**
+ * Flush microtasks until {@link done} holds. Fake timers make a real wait
+ * impossible, and a fixed number of turns is a guess at how deep the sealing
+ * pipeline happens to be.
+ */
+async function flushUntil(done: () => boolean, message: string): Promise<void> {
+	for (let turn = 0; turn < 200; turn++) {
+		if (done()) return;
+		await Promise.resolve();
+	}
+	throw new Error(message);
+}
+
+/** Turns to let a frame appear that should not; a negative can only be bounded. */
+const SETTLE_TURNS = 20;
 
 class BackpressuredWebSocket {
 	static readonly CONNECTING = 0;
@@ -114,6 +139,71 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("sheds targeted backlog before a broadcast is allowed to kill the socket", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/shed", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		let closeReason: string | undefined;
+		socket.onClose = reason => {
+			closeReason = reason;
+		};
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// 16 guests × 32 frames fills the 256-frame queue with targeted work.
+			for (let peer = 1; peer <= 16; peer++) {
+				for (let i = 0; i < 32; i++) socket.send({ t: "error", message: `p${peer}-${i}` }, peer);
+			}
+			for (let i = 0; i < 8; i++) socket.send({ t: "bye", reason: `broadcast ${i}` });
+			const ws = BackpressuredWebSocket.instances[0]!;
+			const deadline = Date.now() + 3000;
+			while (Date.now() < deadline && !ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 0)) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			expect(closeReason).toBeUndefined();
+			expect(socket.isOpen).toBe(true);
+			// Peers 1-8 never exceeded their own share, so shedding them is the
+			// heaviest-backlog fallback making room for the broadcast.
+			expect(shed.some(peer => peer <= 8)).toBe(true);
+			expect(ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 0)).toBe(true);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("sheds a peer whose draining snapshot holds the head instead of ending the room", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/head", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		let closeReason: string | undefined;
+		socket.onClose = reason => {
+			closeReason = reason;
+		};
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// A joining guest's snapshot heads the stalled queue; the 16th 1 MiB broadcast
+			// behind it exceeds the byte budget, but fits once that snapshot is gone.
+			expect(socket.sendBatch(welcomeBatch("snapshot"), GREEDY, 8 * 1024 * 1024)).toBe(true);
+			const big = "x".repeat(1024 * 1024);
+			for (let i = 0; i < 16; i++) expect(socket.send({ t: "bye", reason: big })).toBe(true);
+			await flushUntil(() => shed.length > 0, "the snapshot's peer was never shed");
+			expect(shed).toEqual([GREEDY]);
+			expect(closeReason).toBeUndefined();
+		} finally {
+			socket.close();
+		}
+	});
+
 	it("discards a stale targeted batch across a transient reconnect", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = 0;
@@ -145,7 +235,7 @@ describe("CollabSocket send backpressure", () => {
 			socket.connect();
 			const first = BackpressuredWebSocket.instances[0]!;
 			first.open();
-			socket.sendBatch(chunks(), 7);
+			socket.sendBatch(chunks(), 7, 0);
 			// Wait for the condition the test needs — the drain blocked above the
 			// high-water mark, so the batch is still queued when the transport drops.
 			// A sleep only guesses at how long real AES-GCM takes, and the first frame
@@ -212,6 +302,106 @@ describe("CollabSocket send backpressure", () => {
 				await Bun.sleep(20);
 			}
 			expect(second.sent.map(bytes => unpackEnvelope(bytes)?.peerId)).toEqual([1]);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("drops an incoming advisory rather than evicting a quota-abiding peer", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/cheap", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// Eight peers inside their share, filling the queue with replica work and
+			// leaving no advisory backlog to reclaim.
+			for (let peer = 1; peer <= 8; peer++) {
+				for (let i = 0; i < 32; i++) socket.send({ t: "error", message: `p${peer}-${i}` }, peer);
+			}
+			socket.broadcastAdvisory({
+				t: "event",
+				event: { type: "notice", level: "info", message: "someone said hello again" },
+			} as CollabFrame);
+			await Bun.sleep(30);
+			// The notice is classified as safe to lose; it must not buy its admission
+			// with somebody else's backlog.
+			expect(shed).toEqual([]);
+			expect(socket.isOpen).toBe(true);
+			const deadline = Date.now() + 2_000;
+			while (Date.now() < deadline && ws.sent.length < 8 * 32) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			// Every peer's work is still on the wire.
+			for (let peer = 1; peer <= 8; peer++) {
+				expect(ws.sent.filter(bytes => unpackEnvelope(bytes)?.peerId === peer).length).toBe(32);
+			}
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("still refuses an oversized welcome behind a broadcast that carries replica state", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/replica", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// The other half of the rule the test above pins: what makes room for a
+			// join is the advisory classification, not being a broadcast. A `bye`
+			// carries replica state, no shed can reach a broadcast, and the floor is
+			// out of reach while it is queued — so the join is refused, and the caller
+			// undoing its registration is the whole contract of the `false`.
+			socket.send({ t: "bye", reason: "the turn ended" });
+			expect(socket.sendBatch(welcomeBatch("welcome for the newcomer"), 5, 17 * 1024 * 1024)).toBe(false);
+
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline && !ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 0)) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			expect(ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 0)).toBe(true);
+			expect(ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 5)).toBe(false);
+			expect(shed).toEqual([]);
+			expect(socket.isOpen).toBe(true);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("keeps a peer's queued welcome when its replacement is refused", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/rehello", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			socket.send({ t: "bye", reason: "the turn ended" });
+			expect(socket.sendBatch(welcomeBatch("first welcome"), 5, 1024)).toBe(true);
+			// A repeated hello whose batch cannot fit must not cost the peer the one already queued.
+			expect(socket.sendBatch(welcomeBatch("second welcome"), 5, 17 * 1024 * 1024)).toBe(false);
+
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline && !ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 5)) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			expect(ws.sent.filter(bytes => unpackEnvelope(bytes)?.peerId === 5)).toHaveLength(1);
 		} finally {
 			socket.close();
 		}
@@ -478,10 +668,66 @@ describe("CollabSocket send backpressure", () => {
 			socket.connect();
 			BackpressuredWebSocket.instances[0]!.open();
 			const text = "x".repeat(9 * 1024 * 1024);
+			// The first entry rides the empty-queue exemption; the next two exceed the budget.
 			socket.send({ t: "prompt", text });
+			socket.send({ t: "prompt", text });
+			expect(reason).toBeUndefined();
 			socket.send({ t: "prompt", text });
 			expect(reason).toContain("backlog exceeded");
 			expect(socket.isOpen).toBe(false);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("does not shed a below-budget snapshot for the live traffic queued behind it", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/floor", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			expect(socket.sendBatch(welcomeBatch("joiner"), 5, 15 * 1024 * 1024)).toBe(true);
+			const text = "x".repeat(1024 * 1024);
+			for (let i = 0; i < 4; i++) expect(socket.send({ t: "error", message: text })).toBe(true);
+			await Promise.resolve();
+			expect(shed).toEqual([]);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("delivers a snapshot larger than the whole send budget", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/oversized", role: "host", key });
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		function* chunks(): Generator<CollabFrame> {
+			for (let i = 0; i < 3; i++) yield { t: "snapshot-chunk", entries: [], final: i === 2 };
+		}
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// A session bigger than the budget still has to be shareable: with an
+			// empty queue there is nothing to protect, and admitting it is the only
+			// way the guest ever gets a replica.
+			socket.sendBatch(chunks(), 7, 64 * 1024 * 1024);
+			const deadline = Date.now() + 3_000;
+			while (ws.sent.length < 3 && Date.now() < deadline) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(10);
+			}
+			expect(ws.sent).toHaveLength(3);
+			expect(reason).toBeUndefined();
 		} finally {
 			socket.close();
 		}
@@ -516,10 +762,13 @@ describe("CollabSocket send backpressure", () => {
 			socket.connect();
 			const ws = BackpressuredWebSocket.instances[0]!;
 			ws.open();
-			socket.sendBatch(chunks(), 7);
+			socket.sendBatch(chunks(), 7, 0);
 			socket.send({ t: "bye", reason: "after snapshot" }, 7);
 			await Bun.sleep(30);
-			expect(generated).toBe(0);
+			// One of 300, and one is the bound: the drain advances the head entry by a
+			// single frame and then waits on the transport holding it, so a backpressured
+			// batch materializes exactly one chunk ahead of what it can send.
+			expect(generated).toBe(1);
 			const deadline = Date.now() + 3000;
 			while (ws.sent.length < 301 && Date.now() < deadline) {
 				ws.bufferedAmount = 0;
@@ -596,17 +845,18 @@ describe("CollabSocket send backpressure", () => {
 			if (!ws) throw new Error("CollabSocket did not construct a WebSocket");
 			ws.open();
 			socket.send({ t: "bye", reason: "slow relay" });
-			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+			for (let flush = 0; flush < SETTLE_TURNS; flush++) await Promise.resolve();
 			expect(ws.sent).toHaveLength(0);
 
 			vi.advanceTimersByTime(DRAIN_RETRY_MS);
-			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+			for (let flush = 0; flush < SETTLE_TURNS; flush++) await Promise.resolve();
 			expect(ws.sent).toHaveLength(0);
 
 			ws.bufferedAmount = 0;
 			vi.advanceTimersByTime(DRAIN_RETRY_MS);
-			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
-			expect(ws.sent).toHaveLength(1);
+			// Positive condition rather than a turn count: the send only has to happen,
+			// and how many microtasks the pipeline takes to get there is not the point.
+			await flushUntil(() => ws.sent.length === 1, "the queued frame never reached the drained transport");
 		} finally {
 			socket.close();
 		}
@@ -671,6 +921,43 @@ describe("CollabSocket send backpressure", () => {
 			vi.advanceTimersByTime(DRAIN_RETRY_MS);
 			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
 			expect(ws.sent).toHaveLength(1);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("keeps no flush bookkeeping for sends it refused behind a blocked head", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/flush-set", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// A snapshot stalled at the head keeps the broadcast behind it unprepared,
+			// so flush() stays pending for the whole flood.
+			socket.sendBatch(welcomeBatch("stalled snapshot"), GREEDY, 0);
+			expect(socket.send({ t: "error", message: "broadcast behind the snapshot" })).toBe(true);
+			const flushed = socket.flush();
+			let settled = false;
+			void flushed.then(() => {
+				settled = true;
+			});
+			// Past its share the peer is shed, and every later frame for it is refused.
+			for (let i = 0; i < PEER_SHARE; i++) socket.send({ t: "error", message: `reply ${i}` }, 2);
+			Bun.gc(true);
+			const before = heapStats().objectTypeCounts.Promise ?? 0;
+			let refused = 0;
+			for (let i = 0; i < 20_000; i++) {
+				if (!socket.send({ t: "error", message: `refused ${i}` }, 2)) refused++;
+			}
+			Bun.gc(true);
+			const after = heapStats().objectTypeCounts.Promise ?? 0;
+			expect(refused).toBe(20_000);
+			expect(after - before).toBeLessThan(1_000);
+			expect(settled).toBe(false);
 		} finally {
 			socket.close();
 		}

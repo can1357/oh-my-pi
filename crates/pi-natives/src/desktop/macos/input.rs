@@ -166,8 +166,10 @@ impl MacInput {
 				type_keys(&self.source, &unicode_keys(text), KEY_GAP, || Ok(()), post_global)
 			},
 			Target::Window(id) => {
-				let window = capture.window(id)?;
-				self.window_type(&window, text, mode, None, EntryFront::now())?;
+				// Read before anything about the target ([`EntryFront::before`]).
+				let entry_front = EntryFront::now();
+				let window = key_window(capture.window(id)?, None, capture)?;
+				self.window_type(&window, text, mode, None, entry_front)?;
 				Ok(())
 			},
 		}
@@ -187,8 +189,10 @@ impl MacInput {
 		match target {
 			Target::Desktop | Target::Display(_) => global_chord(&self.source, keys),
 			Target::Window(id) => {
-				let window = capture.window(id)?;
-				self.window_chord(&window, keys, mode, None, EntryFront::now())?;
+				// Read before anything about the target ([`EntryFront::before`]).
+				let entry_front = EntryFront::now();
+				let window = key_window(capture.window(id)?, None, capture)?;
+				self.window_chord(&window, keys, mode, None, entry_front)?;
 				Ok(())
 			},
 		}
@@ -210,7 +214,7 @@ impl MacInput {
 		entry_front: EntryFront,
 		capture: &MacCapture,
 	) -> CoreResult<ElementDelivery> {
-		let window = capture.window(id)?;
+		let window = key_window(capture.window(id)?, Some(element), capture)?;
 		match input {
 			ElementInput::Text(text) => {
 				self.window_type(&window, text, mode, Some(element), entry_front)
@@ -399,10 +403,10 @@ impl MacInput {
 				with_held_keys(&self.source, keys, KEY_GAP, post_global, || control::wait(duration))
 			},
 			Target::Window(id) => {
-				let window = capture.window(id)?;
-				let (pid, wid) = window_identity(&window)?;
 				// Read before anything about the target ([`EntryFront::before`]).
 				let entry_front = EntryFront::now();
+				let window = key_window(capture.window(id)?, None, capture)?;
+				let (pid, wid) = window_identity(&window)?;
 				let remote = process::remote_screen(pid);
 				require_phone_screen(&window, remote)?;
 				let gap = key_gap(remote);
@@ -609,6 +613,84 @@ fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
 	Ok((pid, wid))
 }
 
+/// The window keys and typing for `window` go to: the sheet attached to it,
+/// at any depth, that holds its application's keyboard focus, else `window`
+/// itself ([`sheet_key_target`]). macOS sends the sheet every key its
+/// application gets, in the background and in takeover alike, `window`
+/// cannot become key while it is up, and `window`'s own accessibility tree
+/// holds the sheet, so keys for a document window go into its Open sheet or
+/// Go to Folder sheet, as a user's would. Keys addressed to `element` follow
+/// only when it is drawn where the focused element is: a sheet's controls
+/// report the window it is attached to as theirs, so `window` is that window.
+fn key_window(
+	window: DesktopWindow,
+	element: Option<&AXUIElement>,
+	capture: &MacCapture,
+) -> CoreResult<DesktopWindow> {
+	let (pid, wid) = window_identity(&window)?;
+	let focus = ax::key_focus(pid);
+	let destination = focus.destination(pid, wid, skylight::window_parent);
+	let target = sheet_key_target(
+		wid,
+		destination,
+		|| ax::focused_sheet_id(pid),
+		element.map(|element| move || ax::innermost_window_id(element).map(|(id, _)| id)),
+		focus.element_window,
+		skylight::window_parent,
+	);
+	let Some(sheet) = target else {
+		return Ok(window);
+	};
+	capture
+		.window(&sheet.to_string())
+		.map_err(|_| key_refusal(wid, destination, None, skylight::window_parent))
+}
+
+/// The sheet keys for window `wid` go to instead of `wid`: the window keys
+/// for `wid` would reach, as `destination` shows, when it is attached to
+/// `wid` at any depth ([`focused_attachment`]) and is the sheet `sheet`
+/// reads as the application's focused window. Popovers and child windows
+/// that are not sheets keep `wid`. Keys addressed to a control go there only
+/// when `drawn`, the window the control is drawn in, holds the focused
+/// element (`element_window`), as a control of that sheet does; a control of
+/// `wid`, or of a sheet under the focused one, keeps `wid`, whose keys are
+/// refused while the sheet is up.
+fn sheet_key_target<D: FnOnce() -> Option<u32>>(
+	wid: u32,
+	destination: ax::KeyDestination,
+	sheet: impl FnOnce() -> Option<u32>,
+	drawn: Option<D>,
+	element_window: Option<u32>,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> Option<u32> {
+	let attached = focused_attachment(wid, destination, parent_of)?;
+	if sheet() != Some(attached) {
+		return None;
+	}
+	match drawn {
+		None => Some(attached),
+		Some(drawn) => (element_window.is_some() && drawn() == element_window).then_some(attached),
+	}
+}
+
+/// The window attached to `wid`, directly or through other attached windows
+/// ([`attached_under`]), that keys for `wid` would reach, as `destination`
+/// shows; `None` when they would reach `wid` or a window not attached to it.
+fn focused_attachment(
+	wid: u32,
+	destination: ax::KeyDestination,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> Option<u32> {
+	match destination {
+		ax::KeyDestination::Other(Some(other))
+			if attached_under(other, parent_of, |parent| parent == wid) =>
+		{
+			Some(other)
+		},
+		_ => None,
+	}
+}
+
 /// Screen Sharing sends the remote computer the modifiers the physical
 /// keyboard holds, which background input cannot set without shifting the
 /// user's own typing.
@@ -694,7 +776,8 @@ enum KeyboardConflict {
 /// sent only once the application reports keyboard focus in `wid`, or, when
 /// it reports no focused window, `wid` is the only window that could be key.
 /// A sheet or panel the application reports as focused is a window of its
-/// own even while attached to `wid`, so it never stands in for `wid`.
+/// own even while attached to `wid`, so it never stands in for `wid`: the
+/// callers send keys for `wid` to it instead ([`key_window`]).
 /// Candidates come from the process's accessibility windows, not
 /// `WindowServer`'s list, which also holds the per-window compositor surfaces
 /// of Chromium, Electron, and `WebKit` apps. `AXWindows` omits sheets and
@@ -717,11 +800,10 @@ fn with_background_keyboard<T>(
 	}
 	let focus = ax::key_focus(pid);
 	// The target cannot become key while a window attached to it has focus,
-	// so waiting for that would only delay the same refusal.
+	// one that took it since [`key_window`] read where keys go, so waiting
+	// for that would only delay the same refusal.
 	let destination = focus.destination(pid, wid, skylight::window_parent);
-	if let ax::KeyDestination::Other(Some(other)) = destination
-		&& attached_under(other, skylight::window_parent, |parent| parent == wid)
-	{
+	if focused_attachment(wid, destination, skylight::window_parent).is_some() {
 		return Err(key_refusal(wid, destination, conflict, skylight::window_parent));
 	}
 	let in_overlay = focus.in_overlay_of(wid, skylight::window_parent);
@@ -6507,6 +6589,55 @@ mod tests {
 		let sibling = key_refusal(41732, ax::KeyDestination::Other(Some(35240)), None, parents);
 		assert_eq!(sibling.code, ErrorCode::BackgroundUnavailable);
 		assert!(sibling.message.contains("window 35240 still is"));
+	}
+
+	#[test]
+	fn keys_for_a_window_go_to_the_sheet_focused_on_it() {
+		use ax::KeyDestination::{Other, Target, Unreported};
+		// A document window 177 with an Open sheet 186 and Go to Folder 191 on
+		// that, and another window 35240 of the application.
+		let parents = |id| match id {
+			191 => Some(186),
+			186 => Some(177),
+			_ => None,
+		};
+		let go_to = || Some(191);
+		let window_keys = |wid, destination, sheet: fn() -> Option<u32>| {
+			sheet_key_target(wid, destination, sheet, None::<fn() -> Option<u32>>, Some(191), parents)
+		};
+		// Keys for the document or the Open sheet go into the focused Go to
+		// Folder sheet.
+		assert_eq!(window_keys(177, Other(Some(191)), go_to), Some(191));
+		assert_eq!(window_keys(186, Other(Some(191)), go_to), Some(191));
+		// A focused child window that is not a sheet, such as a popover, keeps
+		// the target, whose keys are refused as before.
+		assert_eq!(window_keys(177, Other(Some(191)), || None), None);
+		// Keys for the sheet itself, for another window of the application, or
+		// that reach the target or an unknown window, stay where they were.
+		let unread = || -> Option<u32> { panic!("no sheet is read unless one is attached") };
+		assert_eq!(window_keys(191, Target(7), unread), None);
+		assert_eq!(window_keys(186, Other(Some(177)), unread), None);
+		assert_eq!(window_keys(35240, Other(Some(191)), unread), None);
+		assert_eq!(window_keys(177, Other(None), unread), None);
+		assert_eq!(window_keys(177, Unreported, unread), None);
+		// A control reports the document as its window. Its keys follow into
+		// the focused sheet only when it is drawn where the focused element is,
+		// as the Go to Folder field is; a control of the Open sheet or of the
+		// document under it, or one drawn in no window, keeps the document.
+		let control = |drawn: Option<u32>, element_window| {
+			sheet_key_target(
+				177,
+				Other(Some(191)),
+				go_to,
+				Some(move || drawn),
+				element_window,
+				parents,
+			)
+		};
+		assert_eq!(control(Some(191), Some(191)), Some(191));
+		assert_eq!(control(Some(186), Some(191)), None);
+		assert_eq!(control(Some(177), Some(191)), None);
+		assert_eq!(control(None, None), None);
 	}
 
 	#[test]

@@ -2764,11 +2764,10 @@ export class SessionTools {
 	}
 
 	/**
-	 * Replace MCP tools in the registry and enable them immediately. Refreshes
-	 * are serialized so an older asynchronous prompt rebuild cannot commit
-	 * after a newer catalog snapshot. Every connected MCP tool becomes available
-	 * (mounted under `xd://` when that transport is active, else top-level);
-	 * while vibe mode is active, activation waits for vibe exit.
+	 * Replace MCP tools in the registry, enabling newly discovered manager tools
+	 * while preserving the selection of existing ones. Refreshes are serialized
+	 * so an older asynchronous prompt rebuild cannot commit after a newer catalog
+	 * snapshot. During vibe mode, new tools wait for vibe exit.
 	 */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		const snapshot = [...mcpTools];
@@ -2783,7 +2782,7 @@ export class SessionTools {
 			if (isMCPToolName(name)) previousMcpTools.set(name, tool);
 		}
 		const previousMcpManagerToolNames = new Set(this.#mcpManagerToolNames);
-		const previousActiveMcpToolNames = this.getEnabledToolNames().filter(isMCPToolName);
+		const previousActiveMcpToolNames = new Set(this.getEnabledToolNames().filter(isMCPToolName));
 		const restorePreviousMcpTools = () => {
 			for (const name of this.#toolRegistry.keys()) {
 				if (isMCPToolName(name)) this.#toolRegistry.delete(name);
@@ -2811,21 +2810,20 @@ export class SessionTools {
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
 
-		// Connected manager tools become active immediately, except while vibe
-		// narrows the active set to the director's tools: then every MCP tool keeps
-		// its prior selection and vibe exit activates the manager set. Extension-owned
-		// MCP tools always retain their prior selection while both share one registry.
+		// Refresh replaces implementations, not an extension's selection. Walk
+		// the new registry in order so catalog reordering still updates the prompt.
+		// Names previously supplied by extensions keep their selection if ownership changes.
 		const vibeActive = this.#installedVibeToolNames.size > 0;
-		const retainedActiveMcpToolNames = previousActiveMcpToolNames.filter(
-			name => (vibeActive || this.#extensionMcpTools.has(name)) && this.#toolRegistry.has(name),
-		);
-		const nextActive = [
-			...new Set([
-				...this.#getActiveNonMCPToolNames(),
-				...(vibeActive ? [] : this.#mcpManagerToolNames),
-				...retainedActiveMcpToolNames,
-			]),
-		];
+		const nextActive = this.#getActiveNonMCPToolNames();
+		for (const name of this.#toolRegistry.keys()) {
+			if (
+				isMCPToolName(name) &&
+				(previousActiveMcpToolNames.has(name) ||
+					(!vibeActive && this.#mcpManagerToolNames.has(name) && !previousMcpTools.has(name)))
+			) {
+				nextActive.push(name);
+			}
+		}
 		try {
 			await this.#applyActiveToolsByName(nextActive);
 			if (this.#host.isDisposed()) {

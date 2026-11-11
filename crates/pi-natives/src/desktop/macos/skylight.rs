@@ -2077,17 +2077,20 @@ fn front_request(status: i32) -> CoreResult<FrontRequest> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserKey {
 	Window(u32),
-	/// It provably shows no window, as Finder after a click on the desktop or
-	/// an app that just closed its last window: only the front process is
-	/// restored.
+	/// It provably shows no window, as an app that just closed its last
+	/// window: only the front process is restored.
 	Windowless,
+	/// Its keyboard focus sits outside every window, as Finder's does on the
+	/// desktop after a click on it while its windows stay open: only the front
+	/// process is restored, which leaves that focus where it was.
+	OutsideWindows,
 }
 
 impl UserKey {
 	const fn window(self) -> Option<u32> {
 		match self {
 			Self::Window(id) => Some(id),
-			Self::Windowless => None,
+			Self::Windowless | Self::OutsideWindows => None,
 		}
 	}
 }
@@ -2095,8 +2098,10 @@ impl UserKey {
 /// The front application `pid`'s [`UserKey`]; `None` when neither its key
 /// window nor its windowlessness can be established.
 fn restoration_key(pid: pid_t) -> Option<UserKey> {
+	let (key, outside_windows) = ax::restoration_window(pid);
 	restorable_key(
-		ax::key_window_id(pid),
+		key,
+		|| outside_windows,
 		|| ax::window_records(pid).map(|records| records.iter().any(|record| record.id.is_some())),
 		|| capture::has_onscreen_window(pid),
 	)
@@ -2133,17 +2138,42 @@ fn restoration_key_in_front(
 /// [`restoration_key`]'s decision: an app with no key window counts as
 /// windowless only when both its accessibility windows (Finder's unmappable
 /// desktop entry aside) and `WindowServer`'s on-screen list show none of its
-/// windows. An unreadable answer from either refuses.
+/// windows. An unreadable answer from either refuses. An app whose focused
+/// window is no window at all (`focus_outside_windows`), as Finder's desktop
+/// after a click on it is, keeps that focus whether or not it shows windows.
 fn restorable_key(
 	key: Option<u32>,
+	focus_outside_windows: impl FnOnce() -> bool,
 	ax_lists_window: impl FnOnce() -> Option<bool>,
 	shows_window: impl FnOnce() -> Option<bool>,
 ) -> Option<UserKey> {
 	if let Some(key) = key {
 		return Some(UserKey::Window(key));
 	}
+	if focus_outside_windows() {
+		return Some(UserKey::OutsideWindows);
+	}
 	(ax_lists_window() == Some(false) && shows_window() == Some(false))
 		.then_some(UserKey::Windowless)
+}
+
+/// The window id a takeover gives the user's key back to, `None` for the
+/// front process alone, or why it cannot put the user's focus back. Takeover
+/// of a window of the user's own app (`same_app`) makes that window key, and
+/// focus outside every window, such as Finder's desktop, has no window to
+/// make key again afterwards.
+const fn takeover_key(key: Option<UserKey>, same_app: bool) -> Result<Option<u32>, &'static str> {
+	match key {
+		None => {
+			Err("cannot identify the previous key window for takeover restoration; no input was sent")
+		},
+		Some(UserKey::OutsideWindows) if same_app => Err(
+			"the user's focus sits outside every window of this window's application (as on Finder's \
+			 desktop), and taking over one of its windows could not put that focus back; no input \
+			 was sent",
+		),
+		Some(key) => Ok(key.window()),
+	}
 }
 
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
@@ -2192,13 +2222,8 @@ pub(super) fn with_foreground<T>(
 			"cannot identify the previous application for takeover restoration; no input was sent",
 		)
 	})?;
-	let previous_key = restoration_key(previous_pid)
-		.ok_or_else(|| {
-			DesktopError::input_failed(
-				"cannot identify the previous key window for takeover restoration; no input was sent",
-			)
-		})?
-		.window();
+	let previous_key = takeover_key(restoration_key(previous_pid), previous_pid == pid)
+		.map_err(DesktopError::input_failed)?;
 	let handed_back = Cell::new(false);
 	let restore = || {
 		// Keys the user types while takeover holds the front land in the target
@@ -3184,18 +3209,35 @@ mod tests {
 	}
 
 	#[test]
-	fn only_a_provably_windowless_front_app_is_restored_without_a_key_window() {
+	fn a_front_app_without_a_key_window_is_restored_only_when_nothing_is_lost() {
 		let unread = || -> Option<bool> { panic!("a known key window needs no window scan") };
-		assert_eq!(restorable_key(Some(42), unread, unread), Some(UserKey::Window(42)));
-		// TextEdit after closing its last document; Finder after a desktop click
-		// lists only its unmappable desktop, which counts as no window.
-		assert_eq!(restorable_key(None, || Some(false), || Some(false)), Some(UserKey::Windowless));
+		let unasked = || -> bool { panic!("a known key window needs no focus read") };
+		assert_eq!(restorable_key(Some(42), unasked, unread, unread), Some(UserKey::Window(42)));
+		// Finder after a click on its desktop, with its windows still open: its
+		// focused window is the desktop, which is no window, and keeps focus.
+		assert_eq!(restorable_key(None, || true, unread, unread), Some(UserKey::OutsideWindows));
+		// TextEdit after closing its last document.
+		let inside = || false;
+		assert_eq!(
+			restorable_key(None, inside, || Some(false), || Some(false)),
+			Some(UserKey::Windowless)
+		);
 		// Windows that AX or WindowServer reports, or an unreadable answer,
 		// refuse.
-		assert_eq!(restorable_key(None, || Some(true), || Some(false)), None);
-		assert_eq!(restorable_key(None, || Some(false), || Some(true)), None);
-		assert_eq!(restorable_key(None, || None, || Some(false)), None);
-		assert_eq!(restorable_key(None, || Some(false), || None), None);
+		assert_eq!(restorable_key(None, inside, || Some(true), || Some(false)), None);
+		assert_eq!(restorable_key(None, inside, || Some(false), || Some(true)), None);
+		assert_eq!(restorable_key(None, inside, || None, || Some(false)), None);
+		assert_eq!(restorable_key(None, inside, || Some(false), || None), None);
+	}
+
+	#[test]
+	fn takeover_in_the_users_own_app_refuses_focus_it_cannot_put_back() {
+		let outside = Some(UserKey::OutsideWindows);
+		assert_eq!(takeover_key(outside, false), Ok(None));
+		assert!(takeover_key(outside, true).is_err_and(|why| why.contains("outside every window")));
+		assert_eq!(takeover_key(Some(UserKey::Window(42)), true), Ok(Some(42)));
+		assert_eq!(takeover_key(Some(UserKey::Windowless), true), Ok(None));
+		assert!(takeover_key(None, false).is_err_and(|why| why.contains("previous key window")));
 	}
 
 	#[test]

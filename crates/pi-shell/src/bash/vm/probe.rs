@@ -19,7 +19,8 @@ use super::{
 use crate::bash::{
 	diag,
 	event::WaitKey,
-	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind},
+	fd::FdRef,
+	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind, msys_drive_path},
 	host::Deadline,
 	ids::Platform,
 };
@@ -73,6 +74,38 @@ pub(super) fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
 	})
 }
 
+/// `stat` (`follow`: not `lstat`) of `path`, continuing the one in flight
+/// in `sc`; `None` when it fails.
+fn poll_stat(
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	sc: &mut Scratch,
+	tcx: &mut Context<'_>,
+	path: &[u8],
+	follow: bool,
+) -> Poll<Option<Stat>> {
+	if let Some(fd) = dev_fd(path) {
+		return Poll::Ready(fd_stat(vp, fd));
+	}
+	let polled = match &mut sc.live {
+		Live::Stat(fut) => fut.poll(tcx),
+		_ => match cx.host.fs().stat(BStr::new(path), follow) {
+			FsPoll::Ready(polled) => Poll::Ready(polled),
+			FsPoll::Pending(mut fut) => {
+				let polled = fut.poll(tcx);
+				if polled.is_pending() {
+					sc.live = Live::Stat(fut);
+				}
+				polled
+			},
+		},
+	};
+	polled.map(|r| {
+		sc.live = Live::None;
+		r.ok()
+	})
+}
+
 /// Perform `probe` (or continue it); `Err` is the wait key while it is pending.
 pub fn perform(
 	k: &Kernel,
@@ -84,25 +117,25 @@ pub fn perform(
 	begin(sc, probe);
 	let mut tcx = Context::from_waker(&k.waker);
 	let res = match probe {
-		Probe::Stat { path, follow } => {
-			if let Some(fd) = dev_fd(path) {
-				return Ok(finish(sc, ProbeResult::Stat(fd_stat(vp, fd))));
-			}
-			let polled = match &mut sc.live {
-				Live::Stat(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().stat(BStr::new(path), *follow) {
-					FsPoll::Ready(polled) => Poll::Ready(polled),
-					FsPoll::Pending(mut fut) => {
-						let polled = fut.poll(&mut tcx);
-						if polled.is_pending() {
-							sc.live = Live::Stat(fut);
-						}
-						polled
-					},
-				},
+		Probe::Stat { path, follow } => match poll_stat(cx, vp, sc, &mut tcx, path, *follow) {
+			Poll::Ready(st) => ProbeResult::Stat(st),
+			Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
+		},
+		Probe::StatAll { paths, ends } => loop {
+			let done = sc.io().zsh().stats.len();
+			let Some(path) = paths.get(done) else {
+				break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
 			};
-			match polled {
-				Poll::Ready(polled) => ProbeResult::Stat(polled.ok()),
+			match poll_stat(cx, vp, sc, &mut tcx, path, true) {
+				Poll::Ready(st) => {
+					let file = st.as_ref().is_some_and(|s| s.kind != StatKind::Dir)
+						&& u32::try_from(done).is_ok_and(|d| ends.binary_search(&d).is_ok());
+					sc.io().zsh().stats.push(st);
+					// Later paths are asked only if the search goes on.
+					if file {
+						break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
+					}
+				},
 				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
 			}
 		},
@@ -223,6 +256,27 @@ pub fn perform(
 				}
 			}
 		},
+		Probe::DumpHas(q) => {
+			let (path, name) = (&q.path, &q.name);
+			let stamp = (q.mtime_ns, q.size);
+			let funcs = match k.dump_funcs(path, stamp) {
+				Some(funcs) => funcs,
+				None => match read_file(&mut tcx, cx, sc, path) {
+					Poll::Ready(Ok(data)) => {
+						let funcs = super::zsh::zwc::DumpHeader::parse(&data).map_or_else(
+							|_| std::collections::HashSet::new(),
+							|head| head.loadable(&data),
+						);
+						let funcs = std::sync::Arc::new(funcs);
+						k.cache_dump_funcs(path, stamp, std::sync::Arc::clone(&funcs));
+						funcs
+					},
+					Poll::Ready(Err(_)) => std::sync::Arc::default(),
+					Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Open, path: path.clone() }),
+				},
+			};
+			ProbeResult::Ok(funcs.contains(name.as_slice()))
+		},
 		Probe::RealPath { path } => {
 			let polled = match &mut sc.live {
 				Live::Path(fut) => fut.poll(&mut tcx),
@@ -284,12 +338,18 @@ pub fn perform(
 		},
 		Probe::Ready { fd } => {
 			// `read -t 0`: is input available, without consuming it.
-			let handle = vp.fds.handle(*fd);
+			let handle = input_handle(k, vp, *fd);
 			ProbeResult::Ok(handle.is_open() && handle.poll_read(&mut tcx, &mut []).is_ready())
 		},
 		Probe::Input { fd, delim, lines, nchars, timeout_ns, .. } => {
-			let handle = vp.fds.handle(*fd);
+			let handle = input_handle(k, vp, *fd);
 			let seekable = handle.kind() == Some(FileKind::Regular);
+			// A Windows console in line mode ends a line with `\r\n`; a Unix
+			// terminal maps the `\r` to `\n` itself (ICRNL). Pipes and files
+			// keep their `\r`, as zsh does.
+			let console_lines = delim == &Some(b'\n')
+				&& handle.kind() == Some(FileKind::Tty)
+				&& k.engine.config().platform == Platform::Windows;
 			// The bytes so far, beside `sc.live` (the timer).
 			let input = &mut sc.io.get_or_insert_with(Box::default).input;
 			let lines = (*lines).max(1) as usize;
@@ -301,7 +361,7 @@ pub fn perform(
 				let done_delim = delim.is_some() && seen >= lines;
 				if done_len || done_delim {
 					break ProbeResult::Input {
-						data:      BString::from(std::mem::take(input)),
+						data:      line_input(std::mem::take(input), console_lines),
 						eof:       false,
 						timed_out: false,
 					};
@@ -326,7 +386,7 @@ pub fn perform(
 				match polled {
 					Poll::Ready(Ok(0) | Err(_)) => {
 						break ProbeResult::Input {
-							data:      BString::from(std::mem::take(input)),
+							data:      line_input(std::mem::take(input), console_lines),
 							eof:       true,
 							timed_out: false,
 						};
@@ -375,6 +435,32 @@ pub fn perform(
 	Ok(finish(sc, res))
 }
 
+/// The fd an input probe reads: `fd` of the table, or the shell's
+/// terminal for [`Probe::TERMINAL_FD`] (a closed fd when there is none).
+fn input_handle(k: &Kernel, vp: &Vproc, fd: i32) -> FdRef {
+	if fd == Probe::TERMINAL_FD {
+		return super::jobctl::open_key_terminal(k, vp).unwrap_or_else(|| vp.fds.handle(fd));
+	}
+	vp.fds.handle(fd)
+}
+
+/// Input read, with each `\r\n` turned into `\n` for a `console`'s lines.
+fn line_input(mut data: Vec<u8>, console: bool) -> BString {
+	if !console {
+		return data.into();
+	}
+	let mut w = 0;
+	for r in 0..data.len() {
+		if data[r] == b'\r' && data.get(r + 1) == Some(&b'\n') {
+			continue;
+		}
+		data[w] = data[r];
+		w += 1;
+	}
+	data.truncate(w);
+	BString::from(data)
+}
+
 /// [`perform`] for a builtin's probe ([`Need::Probe`](super::builtins::Need)):
 /// the fd-level probes ([`Probe::Fd`]) may install descriptors in `vp`'s
 /// fd table ([`super::fdprobe`]); everything else is [`perform`].
@@ -407,6 +493,9 @@ pub(super) fn begin(sc: &mut Scratch, probe: &Probe) {
 		io.search = None;
 		io.walk = None;
 		io.input.clear();
+		if let Some(z) = io.zsh.as_mut() {
+			z.stats.clear();
+		}
 		sc.live = Live::None;
 	}
 }
@@ -566,9 +655,15 @@ pub fn absolute(cwd: &[u8], name: &[u8]) -> BString {
 	)
 }
 
-/// [`absolute`] for the configured shell platform: the Windows drive and UNC
-/// rule stays testable on any host instead of compiling only on Windows.
+/// [`absolute`] for the configured shell platform: the Windows drive, UNC
+/// and MSYS drive-alias (`/c/x` → `C:/x`) rules stay testable on any host
+/// instead of compiling only on Windows.
 pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
+	if platform == Platform::Windows
+		&& let Some(native) = msys_drive_path(name)
+	{
+		return native;
+	}
 	if name.first() == Some(&b'/') || url_root_len(name).is_some() {
 		return name.into();
 	}
@@ -584,7 +679,7 @@ pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
 }
 
 /// A Windows drive (`C:\x`, `C:/x`) or UNC (`\\srv\share`) path.
-const fn is_windows_absolute(name: &[u8]) -> bool {
+pub const fn is_windows_absolute(name: &[u8]) -> bool {
 	matches!(name, [b'\\' | b'/', b'\\' | b'/', ..])
 		|| matches!(name, [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
@@ -726,6 +821,11 @@ mod tests {
 			absolute_on(br"C:\project", br"\\server\share\app.exe", Platform::Windows),
 			br"\\server\share\app.exe".as_slice()
 		);
+		assert_eq!(
+			absolute_on(br"C:\project", b"/d/Tools/app.exe", Platform::Windows),
+			b"D:/Tools/app.exe".as_slice()
+		);
+		assert_eq!(absolute_on(b"/", b"/c/x", Platform::Linux), b"/c/x".as_slice());
 	}
 
 	#[test]
@@ -756,6 +856,16 @@ mod tests {
 		assert_eq!(absolute(b"virtual://d", b"a.txt"), "virtual://d/a.txt");
 		assert_eq!(absolute(b"virtual://", b"a"), "virtual://a");
 		assert_eq!(absolute(b"virtual://d", b"/etc"), "/etc");
+	}
+
+	/// A cooked Windows console ends a typed line with `\r\n`; kept, the
+	/// `\r` ended up in the command name (`ls^M: command not found`). A lone
+	/// `\r` is the user's own byte and stays.
+	#[test]
+	fn console_line_ends_drop_the_cr_of_crlf_only() {
+		assert_eq!(line_input(b"ls\r\n".to_vec(), true), "ls\n");
+		assert_eq!(line_input(b"a\rb\r\n\r\n".to_vec(), true), "a\rb\n\n");
+		assert_eq!(line_input(b"partial\r".to_vec(), true), "partial\r");
 	}
 
 	#[test]

@@ -436,8 +436,13 @@ export class Win32PasteMarkerNormalizer {
 		if (output) this.#onInput(output);
 		if (this.#candidate || this.#pending) {
 			this.#timer = setTimeout(() => {
-				this.flush();
-				this.#onExpired?.();
+				// A stalled loop can have the rest of this record waiting in stdin's
+				// poll queue; release only after it has had a chance to arrive.
+				this.#timer = setTimeout(() => {
+					this.#timer = undefined;
+					this.flush();
+					this.#onExpired?.();
+				});
 			}, 75);
 		}
 	}

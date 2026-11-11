@@ -126,6 +126,8 @@ import type {
 	SessionBeforeBranchResult,
 	SessionBeforeCompactEvent,
 	SessionBeforeCompactResult,
+	SessionBeforeShutdownEvent,
+	SessionBeforeShutdownResult,
 	SessionBeforeSwitchEvent,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeEvent,
@@ -180,6 +182,20 @@ export type {
 	ExtensionAskDialogChatResult,
 	ExtensionAskDialogResult,
 } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+
+import type { HtmlFormData, OptionNote } from "@oh-my-pi/pi-tui/html-form/data";
+export type { HtmlFormData, HtmlFormValue, OptionNote } from "@oh-my-pi/pi-tui/html-form/data";
+
+/** A submitted {@link ExtensionUIContext.formDialog}: form values and optional notes on selected options. */
+export interface ExtensionFormDialogResult {
+	data: HtmlFormData;
+	/**
+	 * Notes on selected options, separate from `data`. Only the interactive form
+	 * dialog collects them; ACP elicitation and field-by-field hosts never do.
+	 */
+	notes?: OptionNote[];
+	timedOut?: boolean;
+}
 
 export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): string {
 	return typeof option === "string" ? option : option.label;
@@ -343,6 +359,14 @@ export interface ExtensionUIContext {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
+
+	/**
+	 * Show an HTML `<form>` (see `@oh-my-pi/pi-tui/html-form/parse`) as an interactive form and
+	 * resolve its data on submit, `undefined` on cancel. With `timeout`, the form's current values
+	 * submit when it elapses (`timedOut: true`); input resets the countdown. Absent on hosts that
+	 * cannot draw a form; callers then fall back to field-by-field `select`/`input`/`editor`.
+	 */
+	formDialog?(html: string, dialogOptions?: ExtensionUIDialogOptions): Promise<ExtensionFormDialogResult | undefined>;
 
 	/**
 	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, `session` only when
@@ -1134,6 +1158,7 @@ export interface ResourcesDiscoverResult {
 export type {
 	SessionBeforeBranchEvent,
 	SessionBeforeCompactEvent,
+	SessionBeforeShutdownEvent,
 	SessionBeforeSwitchEvent,
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
@@ -1771,6 +1796,7 @@ export interface BeforeSubagentSpawnEventResult {
 export type {
 	SessionBeforeBranchResult,
 	SessionBeforeCompactResult,
+	SessionBeforeShutdownResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionCompactingResult,
@@ -1873,6 +1899,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
 	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
+	on(
+		event: "session_before_shutdown",
+		handler: ExtensionHandler<SessionBeforeShutdownEvent, SessionBeforeShutdownResult>,
+	): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;

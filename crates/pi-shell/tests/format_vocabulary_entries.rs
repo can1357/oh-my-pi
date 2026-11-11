@@ -12,19 +12,19 @@ use pi_shell::{
 use serde::Deserialize;
 
 const REQUIRED: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/owned-required.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/owned-required.image");
 const OPTIONAL: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/owned-optional.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/owned-optional.image");
 const RESERVED: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/reserved-required.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/reserved-required.image");
 const FRAMELESS: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/future-unknown/frameless-unknown-root.image");
 const FRAMELESS_MARKS: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/future-unknown/frameless-two-unknown-roots.image");
 const READABLE: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/base-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/base-parent-wait.image");
 const FOREIGN: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/foreign-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/foreign-parent-wait.image");
 
 struct RecordsUnavailable {
 	store:  MemStore,

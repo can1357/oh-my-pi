@@ -60,6 +60,23 @@ pub trait Host {
 	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved;
 	/// Start a native command (Rust callout or device) as a [`Task`].
 	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>>;
+	/// A command `PATH` search did not find, run natively instead
+	/// ([`Host::start`]): a host's own stand-ins for tools the system lacks.
+	/// Asked after the search, so a program on `PATH` always wins. `None` (the
+	/// default): the command is not found.
+	fn fallback(&mut self, _name: &BStr) -> Option<NativeRef> {
+		None
+	}
+	/// Whether a command [`Host::resolve`] answered with the host's own
+	/// ([`Resolved::Tool`] or [`Resolved::Native`]) is looked up on `PATH`
+	/// instead, because `argv` is written for the program of that name the
+	/// host's command shadows (on Windows, `find /c /v ""` is cmd's `FIND`,
+	/// not GNU `find`). When `PATH` has no such program, the host's command
+	/// runs after all. `false` (the default): the host's command always
+	/// wins.
+	fn defers_to_path(&mut self, _name: &BStr, _argv: &[BString]) -> bool {
+		false
+	}
 	/// Resume a task from the bytes its [`Task::checkpoint`] produced before a
 	/// snapshot. An error makes the task [`Lost`](crate::bash::Lost) (status
 	/// 137).
@@ -347,7 +364,9 @@ pub struct SpawnSpec<'a> {
 	pub cwd:         &'a BStr,
 	/// fds 0, 1, 2.
 	pub stdio:       [StdioSpec; 3],
-	/// Further fds; Unix only (Windows hosts fail with `Unsupported`).
+	/// Further fds. Windows inherits none: one a `/dev/fd/N` argument names
+	/// (a process substitution's) reaches the child as a named pipe, others
+	/// stay with the shell.
 	pub extra_fds:   Vec<(i32, StdioSpec)>,
 	/// Process group placement.
 	pub pgroup:      PgroupSpec,

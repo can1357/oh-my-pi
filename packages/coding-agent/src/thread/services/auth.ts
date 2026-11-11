@@ -157,6 +157,7 @@ function usageProviderView(provider: UsageProvider): UsageProvider {
 		validatesCredentials: provider.validatesCredentials,
 		retainLastGoodOnFailure: provider.retainLastGoodOnFailure,
 		failureBackoffMs: provider.failureBackoffMs,
+		usesRequestKey: provider.usesRequestKey,
 		fetchUsage: (params, ctx) => provider.fetchUsage(params, ctx),
 	};
 	const parse = provider.parseRateLimitHeaders;
@@ -290,6 +291,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"usage.setProvider": (storage, provider, usageProvider, apiKey) =>
 			storage.usage.setProvider(provider, usageProvider, apiKey),
 		"usage.removeProvider": (storage, provider) => storage.usage.removeProvider(provider),
+		"usage.replaceConfiguredProviders": (storage, providers) =>
+			storage.usage.replaceConfiguredProviders(new Map(providers)),
 
 		"health.model": (storage, provider, options) => storage.health.model(provider, options),
 		"health.check": (storage, options) => {

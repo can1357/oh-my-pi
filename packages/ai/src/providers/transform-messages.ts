@@ -506,6 +506,24 @@ export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): bool
 	);
 }
 
+/** Whether `msg` carries mid-conversation Anthropic request controls (`clearAt`, `effort`, `toolChanges`). */
+export function hasAnthropicMessageControls(msg: Message): boolean {
+	if (msg.role !== "developer" || msg.providerPayload?.type !== "anthropicMessage") return false;
+	const { clearAt, effort, toolChanges } = msg.providerPayload;
+	return clearAt !== undefined || effort !== undefined || (toolChanges !== undefined && toolChanges.length > 0);
+}
+
+/**
+ * Whether a `user` or `developer` message emits a non-tool-result wire turn
+ * that ends an assistant tool loop instead of being dropped as empty.
+ */
+export function isReplayTurnBoundary(msg: Message): boolean {
+	if (msg.role === "assistant" || msg.role === "toolResult") return false;
+	if (hasAnthropicMessageControls(msg)) return true;
+	if (typeof msg.content === "string") return msg.content.trim().length > 0;
+	return msg.content.some(block => (block.type === "text" && block.text.trim().length > 0) || block.type === "image");
+}
+
 function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;

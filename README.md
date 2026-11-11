@@ -44,7 +44,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 curl -fsSL https://omp.sh/install | sh
 ```
 
-Without a usable bun (or with `--binary`), the install scripts fetch the prebuilt binary from `build.stencil.so` and check its SHA-256 before installing it. Pin a release with `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` (PowerShell: `-Binary -Ref v<version>`).
+The install scripts fetch the prebuilt binary from `build.stencil.so` and check its SHA-256 before installing it; pass `--source` (PowerShell: `-Source`) to install the package with bun instead. Pin a release with `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` (PowerShell: `-Binary -Ref v<version>`).
 
 > **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
 
@@ -346,7 +346,7 @@ Auth tags below: `oauth` signs in with your provider account, `plan` routes thro
 
 Direct APIs and gateways. Mix providers per role.
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
 
 ### Coding plans
 
