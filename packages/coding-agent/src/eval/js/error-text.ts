@@ -33,8 +33,13 @@ export interface CellErrorSource {
  * frames; the error's own `stack` is left whole, so a cell that catches it can print them.
  */
 export function formatCellError(stack: string, source: CellErrorSource): string {
-	if (source.header !== undefined && stack !== source.header && !stack.startsWith(`${source.header}\n`)) {
-		return stack;
+	let header = source.header;
+	if (header !== undefined && stack !== header && !stack.startsWith(`${header}\n`)) {
+		const decoratedName = /^([^\n:]+) \[[A-Z_]+\](?=:)/.exec(stack);
+		if (decoratedName && header.startsWith(`${decoratedName[1]}:`)) {
+			header = decoratedName[0] + header.slice(decoratedName[1].length);
+		}
+		if (stack !== header && !stack.startsWith(`${header}\n`)) return stack;
 	}
 	const ompRoot = "ompRoot" in source ? source.ompRoot : OMP_ROOT;
 	const rootPrefix = ompRoot === undefined ? undefined : path.join(ompRoot, path.sep);
@@ -49,7 +54,7 @@ export function formatCellError(stack: string, source: CellErrorSource): string 
 		ompRoot !== undefined && path.basename(ompRoot) === "node_modules"
 			? path.join(ompRoot, "@oh-my-pi", path.sep)
 			: undefined;
-	const messageEnd = source.header?.length ?? 0;
+	const messageEnd = header?.length ?? 0;
 	const kept: string[] = [];
 	let hidden = 0;
 	let offset = 0;

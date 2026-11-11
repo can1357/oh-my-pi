@@ -77,6 +77,14 @@ describe("uncaught JavaScript cell errors", () => {
 		expect(result.output).not.toContain("omp frames hidden");
 	});
 
+	it("filters decorated assertion stacks without removing their diagnostic", async () => {
+		const result = await executeJs('import assert from "node:assert"; assert.strictEqual(1, 2);', options);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("AssertionError [ERR_ASSERTION]");
+		expect(result.output).toContain("omp frames hidden;");
+		expect(result.output).not.toContain(REPO_ROOT);
+	});
+
 	it("keeps multiline diagnostics when folding an unawaited rejection", async () => {
 		const message = "first $& $$\n    at map (native:1:11)\nlast";
 		const result = await executeJs(
