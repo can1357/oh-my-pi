@@ -27,7 +27,7 @@ use super::{
 	},
 	ax,
 	capture::{self, MacCapture},
-	keymap::{Keymap, Keystroke},
+	keymap::{Keymap, Keystroke, is_keypad},
 	process::{self, RemoteScreen},
 	release::{self, Route},
 	release_guard, route, skylight,
@@ -3802,7 +3802,8 @@ fn local_chord<S: Fn(char) -> Option<Keystroke>>(
 			.any(|key| matches!(key, KeyName::Ctrl | KeyName::Alt));
 	let unadded = |key: &Keystroke| {
 		!shortcut
-			|| ((!key.shift || keys.contains(&KeyName::Shift))
+			|| (!is_keypad(key.code)
+				&& (!key.shift || keys.contains(&KeyName::Shift))
 				&& (!key.option || keys.contains(&KeyName::Alt)))
 	};
 	layout_chord(
@@ -5461,6 +5462,14 @@ mod tests {
 			ctrl,
 			press(KeyName::Char('a'), 12)
 		]);
+		// The typing map can prefer an unmodified keypad digit over the
+		// shifted number row. Ctrl+1 still means the number-row shortcut.
+		let keypad = |_| Some(Keystroke { code: 83, shift: false, option: false });
+		let layout = |_| Ok(Some(keypad));
+		assert_eq!(
+			chord_keys(&window, &[KeyName::Ctrl, KeyName::Char('1')], None, layout).unwrap(),
+			[ctrl, press(KeyName::Char('1'), 18)]
+		);
 		// A chord without a character reads no layout.
 		let unread = |_| -> LayoutRead { panic!("a chord without a character reads no layout") };
 		let tab = [KeyName::Meta, KeyName::Tab];

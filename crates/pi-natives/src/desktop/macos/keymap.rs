@@ -84,7 +84,7 @@ impl Keymap {
 	}
 
 	/// Activation can switch the input source for the target document.
-	/// Do not reuse a map read before that focus change.
+	/// Its map is operation-local; returning focus can switch it back.
 	pub(super) fn fresh() -> CoreResult<Option<Arc<Self>>> {
 		cached(&CURRENT, Instant::now(), true, Self::read)
 	}
@@ -158,9 +158,9 @@ impl Keymap {
 		self.strokes.get(&character).copied()
 	}
 
-	/// The key whose Command layer gives `character`.
+	/// The non-keypad key whose Command layer gives `character`.
 	pub(super) fn command_key(&self, character: char) -> Option<u16> {
-		self.command.get(&character).copied()
+		self.command.get(&character).copied().filter(|&code| !is_keypad(code))
 	}
 }
 
@@ -174,8 +174,13 @@ fn cached(
 	read: impl FnOnce() -> CoreResult<Option<Keymap>>,
 ) -> CoreResult<Option<Arc<Keymap>>> {
 	let mut slot = slot.lock();
-	if !fresh
-		&& let Some((read_at, keymap)) = &*slot
+	if fresh {
+		// Discard the map from before activation, but do not cache the
+		// target's map: focus restoration may immediately change it again.
+		*slot = None;
+		return read().map(|keymap| keymap.map(Arc::new));
+	}
+	if let Some((read_at, keymap)) = &*slot
 		&& now.saturating_duration_since(*read_at) < KEYMAP_TTL
 	{
 		return Ok(keymap.clone());
@@ -239,7 +244,7 @@ fn current_layout() -> CoreResult<Option<(u32, Vec<u32>)>> {
 	Ok(Some((keyboard_type, layout)))
 }
 
-const fn is_keypad(code: u16) -> bool {
+pub(super) const fn is_keypad(code: u16) -> bool {
 	matches!(code, 65 | 67 | 69 | 71 | 75 | 76 | 78 | 81..=89 | 91 | 92)
 }
 
@@ -303,6 +308,15 @@ mod tests {
 		assert_eq!(keymap.stroke('a'), None);
 		assert_eq!(keymap.command_key('ф'), None);
 		assert_eq!(keymap.command_key('1'), None);
+		// AZERTY's keypad types 1 unmodified; its number-row Command layer
+		// has &, not 1. Typing can use the keypad, shortcuts must not.
+		let azerty = Keymap::build(|code, state| match (code, state) {
+			(83, _) | (18, SHIFT_STATE) => Some('1'),
+			(18, 0 | COMMAND_STATE) => Some('&'),
+			_ => None,
+		});
+		assert_eq!(azerty.stroke('1').unwrap().code, 83);
+		assert_eq!(azerty.command_key('1'), None);
 	}
 
 	#[test]
@@ -363,12 +377,10 @@ mod tests {
 		.unwrap()
 		.unwrap();
 		assert_eq!(switched.command_key('a'), Some(12));
-		assert_eq!(
-			cached(&slot, later, false, || panic!("fresh map should replace the cache"))
-				.unwrap()
-				.unwrap()
-				.command_key('a'),
-			Some(12)
-		);
+		// Returning focus selects the previous layout again. Neither the
+		// pre-activation nor the operation-local map can be reused now.
+		let restored = cached(&slot, later, false, read).unwrap().unwrap();
+		assert_eq!(restored.command_key('a'), Some(2));
+		assert_eq!(reads.get(), 4);
 	}
 }
