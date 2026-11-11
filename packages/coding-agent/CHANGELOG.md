@@ -5,6 +5,7 @@
 ### Added
 
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+- `task.keepAlive` setting (default `true`) to dispose finished task subagent sessions immediately on completion when set to `false`, while keeping `agent://` and `history://` transcripts readable ([#18816](https://github.com/can1357/oh-my-pi/pull/18816) by [@iliaal](https://github.com/iliaal))
 
 ### Fixed
 

@@ -11,6 +11,12 @@
  */
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger } from "@oh-my-pi/pi-utils";
+import type {
+	ArtifactsDirsOptions,
+	RegisterArtifactsDirOptions,
+	RetainedArtifactsBridge,
+	SessionArtifactEpochOptions,
+} from "../../internal-urls/registry-helpers";
 import type { AgentAwaitsApi } from "../../registry/agent-awaits";
 import type {
 	AdoptOptions,
@@ -91,7 +97,7 @@ export class RemoteAgentAwaits implements AgentAwaitsApi {
 }
 
 /** Worker proxy of main's {@link AgentRegistryApi}. */
-export class RemoteAgentRegistry implements AgentRegistryApi {
+export class RemoteAgentRegistry implements AgentRegistryApi, RetainedArtifactsBridge {
 	readonly awaits: AgentAwaitsApi;
 	readonly #remote: RemoteObject<AgentRegistryProtocol>;
 	readonly #listeners: ForwardedListeners<[RegistryEvent]>;
@@ -176,6 +182,54 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 
 	onChange(listener: RegistryListener): () => void {
 		return this.#listeners.add(listener);
+	}
+
+	registerArtifactsDir(dir: string, options?: RegisterArtifactsDirOptions): () => void {
+		const handle = this.#remote.callSync("registerArtifactsDir", dir, options);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			try {
+				this.#remote.callSync("unregisterArtifactHandle", handle);
+			} catch {
+				// Worker link already closed.
+			}
+		};
+	}
+
+	unregisterArtifactsDirsUnder(rootDir: string): void {
+		this.#remote.callSync("unregisterArtifactsDirsUnder", rootDir);
+	}
+
+	retainTemporaryLeaseForSession(
+		sessionId: string,
+		artifactsDir: string,
+		options?: SessionArtifactEpochOptions,
+	): () => void {
+		const handle = this.#remote.callSync("retainTemporaryLease", sessionId, artifactsDir, options);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			try {
+				this.#remote.callSync("unregisterArtifactHandle", handle);
+			} catch {
+				// Worker link already closed.
+			}
+		};
+	}
+
+	currentSessionArtifactEpoch(sessionId: string): number {
+		return this.#remote.callSync("currentSessionArtifactEpoch", sessionId);
+	}
+
+	resolveSessionArtifactOwner(sessionId: string, epoch?: number): string {
+		return this.#remote.callSync("resolveSessionArtifactOwner", sessionId, epoch);
+	}
+
+	artifactsDirsFromRegistry(options?: ArtifactsDirsOptions): string[] {
+		return this.#remote.callSync("artifactsDirsFromRegistry", options);
 	}
 }
 

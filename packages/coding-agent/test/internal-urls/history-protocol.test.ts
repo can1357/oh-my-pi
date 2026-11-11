@@ -22,6 +22,7 @@ import {
 import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
+	retainTemporaryLeaseForSession,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -870,6 +871,79 @@ describe("history:// protocol", () => {
 			expect(output.text).toContain("hello from root A");
 			expect(output.text).not.toContain("hello from root B");
 			expect(AgentRegistry.global().get("Worker")?.sessionFile).toBe(childA);
+		});
+	});
+
+	it("prefers the caller's retained transcript over another root's live running ref in resolve, locate, and index", async () => {
+		await withTempDir(async dir => {
+			const leaseA = path.join(dir, "lease-a");
+			const leaseB = path.join(dir, "lease-b");
+			const retainedFileA = path.join(leaseA, "Worker.jsonl");
+			const liveFileB = path.join(leaseB, "Worker.jsonl");
+			await Bun.write(retainedFileA, sessionFixtureJsonl("retained-alpha-transcript", "worker-a"));
+			await Bun.write(liveFileB, sessionFixtureJsonl("live-beta-on-disk", "worker-b"));
+
+			const unregisterLeaseA = registerArtifactsDir(leaseA, { sessionId: "root-a" });
+			const releaseLeaseA = retainTemporaryLeaseForSession("root-a", leaseA);
+			try {
+				AgentRegistry.global().register({
+					id: "Worker",
+					displayName: "task",
+					kind: "sub",
+					rootSessionId: "root-b",
+					session: fakeLiveSession([{ role: "user", content: "live-beta-in-memory", timestamp: 2 }]),
+					sessionFile: liveFileB,
+					status: "running",
+				});
+				AgentRegistry.global().register({
+					id: "OnlyInB",
+					displayName: "task",
+					kind: "sub",
+					rootSessionId: "root-b",
+					session: fakeLiveSession([{ role: "user", content: "only-in-b-live", timestamp: 3 }]),
+					status: "running",
+				});
+
+				const router = InternalUrlRouter.instance();
+				const ctxA = { sessionId: "root-a" };
+				const ctxB = { sessionId: "root-b" };
+
+				const resolvedA = await router.resolve("history://Worker", ctxA);
+				expect(resolvedA.content).toContain("retained-alpha-transcript");
+				expect(resolvedA.content).not.toContain("live-beta-in-memory");
+				expect(resolvedA.sourcePath).toBe(retainedFileA);
+				expect(resolvedA.notes).toEqual(["Source: session file (read-only, unregistered)"]);
+				expect(await router.locate("history://Worker", ctxA)).toBe(retainedFileA);
+
+				const indexA = await router.resolve("history://", ctxA);
+				expect(indexA.content).toContain("| Worker | on disk |");
+				expect(indexA.content).not.toContain("OnlyInB");
+				await expect(router.resolve("history://OnlyInB", ctxA)).rejects.toThrow("Unknown agent: OnlyInB");
+
+				const resolvedB = await router.resolve("history://Worker", ctxB);
+				expect(resolvedB.content).toContain("live-beta-in-memory");
+				expect(resolvedB.content).not.toContain("retained-alpha-transcript");
+				expect(resolvedB.notes).toEqual(["Source: live session"]);
+				expect(await router.locate("history://Worker", ctxB)).toBe(liveFileB);
+
+				// Even when a live ref has no stamped rootSessionId, a caller-owned retained transcript
+				// outside that ref's directory still takes precedence for the owning caller.
+				AgentRegistry.global().register({
+					id: "Worker",
+					displayName: "task",
+					kind: "sub",
+					session: fakeLiveSession([{ role: "user", content: "unowned-live-beta", timestamp: 4 }]),
+					sessionFile: liveFileB,
+					status: "running",
+				});
+				const resolvedAgainstUnowned = await router.resolve("history://Worker", ctxA);
+				expect(resolvedAgainstUnowned.content).toContain("retained-alpha-transcript");
+				expect(resolvedAgainstUnowned.content).not.toContain("unowned-live-beta");
+				expect(await router.locate("history://Worker", ctxA)).toBe(retainedFileA);
+			} finally {
+				unregisterLeaseA();
+				releaseLeaseA();
+			}
 		});
 	});
 

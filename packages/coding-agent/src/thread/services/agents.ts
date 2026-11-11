@@ -21,6 +21,15 @@
  * peer handles, and a `SessionPublisher` for every session constructed here.
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import {
+	artifactsDirsFromRegistry,
+	currentSessionArtifactEpoch,
+	installRetainedArtifactsBridge,
+	registerArtifactsDir,
+	resolveSessionArtifactOwner,
+	retainTemporaryLeaseForSession,
+	unregisterArtifactsDirsUnder,
+} from "../../internal-urls/registry-helpers";
 import { IrcBus } from "../../irc/bus";
 import { type AdoptOptions, type AgentReviver, AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, type RegistryListener } from "../../registry/agent-registry";
@@ -84,6 +93,8 @@ export class MainSessionBridge {
 	readonly #peer: WorkerPeer;
 	readonly #open = new Map<string, OpenSession>();
 	readonly #subscriptions = new Set<() => void>();
+	readonly #artifactHandles = new Map<number, () => void>();
+	#nextArtifactHandle = 1;
 	readonly #revivers = new Set<{ lifecycle: AgentLifecycleManager; id: string; revive: AgentReviver }>();
 	/** Aborts IRC waits the worker parked on main. */
 	readonly exited = new AbortController();
@@ -135,6 +146,24 @@ export class MainSessionBridge {
 	 */
 	track(stop: () => void): () => void {
 		return trackWorkerSubscription(this.#subscriptions, stop);
+	}
+
+	/**
+	 * Store an artifact-registration undo handle for this worker. Unlike
+	 * {@link track}, worker exit drops only the handle table so retained spill
+	 * roots and temporary leases survive until the root session releases them.
+	 */
+	storeArtifactHandle(off: () => void): number {
+		const handle = this.#nextArtifactHandle++;
+		this.#artifactHandles.set(handle, off);
+		return handle;
+	}
+
+	runArtifactHandle(handle: number): void {
+		const off = this.#artifactHandles.get(handle);
+		if (!off) return;
+		this.#artifactHandles.delete(handle);
+		off();
 	}
 
 	/**
@@ -192,6 +221,7 @@ export class MainSessionBridge {
 	/** The worker died: see the module doc for the ordering. */
 	exit(reason: string): void {
 		this.exited.abort(new Error(`Subagent worker ${this.#peer.threadId} exited: ${reason}`));
+		this.#artifactHandles.clear();
 		for (const stop of [...this.#subscriptions]) {
 			try {
 				stop();
@@ -268,6 +298,14 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 		awaitsHold: (registry, waiter, awaited, options) => bridge.track(registry.awaits.hold(waiter, awaited, options)),
 		awaitsBlocksOn: (registry, agent, target, sentAt) => registry.awaits.blocksOn(agent, target, sentAt),
 		awaitsSubscribe: (registry, listener) => bridge.forward(listener, forward => registry.awaits.onChange(forward)),
+		registerArtifactsDir: (_registry, dir, options) => bridge.storeArtifactHandle(registerArtifactsDir(dir, options)),
+		unregisterArtifactHandle: (_registry, handle) => bridge.runArtifactHandle(handle),
+		unregisterArtifactsDirsUnder: (_registry, rootDir) => unregisterArtifactsDirsUnder(rootDir),
+		retainTemporaryLease: (_registry, sessionId, artifactsDir, options) =>
+			bridge.storeArtifactHandle(retainTemporaryLeaseForSession(sessionId, artifactsDir, options)),
+		currentSessionArtifactEpoch: (_registry, sessionId) => currentSessionArtifactEpoch(sessionId),
+		resolveSessionArtifactOwner: (_registry, sessionId, epoch) => resolveSessionArtifactOwner(sessionId, epoch),
+		artifactsDirsFromRegistry: (_registry, options) => artifactsDirsFromRegistry(options),
 	};
 }
 
@@ -404,6 +442,7 @@ let stopPublishing: (() => void) | undefined;
 function bootWorker(globals: unknown): void {
 	if (!isWorkerGlobals(globals)) throw new Error("Malformed agents thread globals");
 	AgentRegistry.installGlobal(globals.registry);
+	installRetainedArtifactsBridge(globals.registry);
 	AgentLifecycleManager.installGlobal(globals.lifecycle);
 	IrcBus.installGlobal(globals.bus);
 	installPeerBridge(globals.bridge);

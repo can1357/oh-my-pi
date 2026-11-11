@@ -10,6 +10,34 @@ import type { ResolveContext, WriteContext } from "./types";
 
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 
+function nonEmptySessionId(value: string | null | undefined): string | undefined {
+	return value ? value : undefined;
+}
+
+/**
+ * Root session identifier for a {@link ToolSession}. Subagents inherit their
+ * root parent's {@link LocalProtocolOptions}, so `localProtocolOptions` wins
+ * over the child's own `sessionManager` id.
+ */
+export function resolveToolSessionRootId(session: ToolSession | undefined): string | undefined {
+	if (!session) return undefined;
+	return (
+		nonEmptySessionId(session.localProtocolOptions?.getSessionId?.()) ??
+		nonEmptySessionId(session.sessionManager?.getSessionId?.()) ??
+		nonEmptySessionId(session.getSessionId?.())
+	);
+}
+
+/** Root session identifier for an internal-URL {@link ResolveContext}. */
+export function resolveCallerSessionId(context: ResolveContext | undefined): string | undefined {
+	if (!context) return undefined;
+	return (
+		nonEmptySessionId(context.localProtocolOptions?.getSessionId?.()) ??
+		nonEmptySessionId(context.sessionId) ??
+		resolveToolSessionRootId(context.session)
+	);
+}
+
 /**
  * The session's `local://` mapping: its pinned {@link LocalProtocolOptions}
  * (subagents and multi-session hosts pin a parent/foreign root) or else its own
@@ -20,7 +48,8 @@ export function sessionLocalProtocolOptions(session: ToolSession): LocalProtocol
 	return (
 		session.localProtocolOptions ?? {
 			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-			getSessionId: () => session.getSessionId?.() ?? null,
+			getSessionId: () => session.getSessionId?.() ?? session.sessionManager?.getSessionId?.() ?? null,
+			getArtifactEpoch: () => session.sessionManager?.getArtifactEpoch?.(),
 		}
 	);
 }

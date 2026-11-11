@@ -15,6 +15,18 @@ import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import {
+	AgentProtocolHandler,
+	ArtifactProtocolHandler,
+	HistoryProtocolHandler,
+	InternalUrlRouter,
+	sessionResolveContext,
+} from "../../src/internal-urls";
+import {
+	artifactsDirsFromRegistry,
+	releaseRetainedSessionArtifacts,
+	resetRegisteredArtifactDirsForTests,
+} from "../../src/internal-urls/registry-helpers";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
@@ -24,13 +36,17 @@ import { AgentStorage } from "../../src/session/agent-storage";
 import type { AuthStorage } from "../../src/session/auth-storage";
 import { CostGate } from "../../src/session/cost-gate";
 import { convertToLlm } from "../../src/session/messages";
+import { CURRENT_SESSION_VERSION } from "../../src/session/session-entries";
 import { SessionManager } from "../../src/session/session-manager";
+import { TaskTool } from "../../src/task";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
 import { type AgentDefinition, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../src/task/types";
+import type { ToolSession } from "../../src/tools";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
 import { SubagentWorkerPool, setSubagentWorkerPoolForTests } from "../../src/thread/subagent-worker";
 import { EventBus } from "../../src/utils/event-bus";
+import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
@@ -45,6 +61,10 @@ const TEST_TIMEOUT_MS = 120_000;
 const SCRIPT_ID = Bun.randomUUIDv7("hex");
 const HANG_TASK = `omp-test-scripted-hang-${SCRIPT_ID}`;
 const BG_JOB_TASK = `omp-test-scripted-bg-job-${SCRIPT_ID}`;
+const NESTED_SEANCE_OUTER_TASK = `omp-test-scripted-nested-seance-outer-${SCRIPT_ID}`;
+const NESTED_SEANCE_INNER_TASK = `omp-test-scripted-nested-seance-inner-${SCRIPT_ID}`;
+const NESTED_MEM_OUTER_TASK = `omp-test-scripted-nested-mem-outer-${SCRIPT_ID}`;
+const NESTED_MEM_INNER_TASK = `omp-test-scripted-nested-mem-inner-${SCRIPT_ID}`;
 /** In the routed agent's system prompt only, so a request without it is never the run's own turn. */
 const AGENT_MARKER = `omp-test-agent-${SCRIPT_ID}`;
 
@@ -163,9 +183,41 @@ class FakeModelServer {
 			.filter(message => message.role === "system" || message.role === "developer")
 			.map(message => messageText(message.content))
 			.join("\n");
+		const rawTools: unknown = typeof body === "object" && body !== null ? Reflect.get(body, "tools") : undefined;
+		const hasTools = Array.isArray(rawTools) && rawTools.length > 0;
 		const runTurn = systemText.includes(AGENT_MARKER);
 		let reply: Reply = { text: "pong" };
-		if (runTurn && last?.role === "tool") {
+		if (hasTools && userText.includes(NESTED_SEANCE_INNER_TASK)) {
+			reply =
+				last?.role === "tool"
+					? { text: `seance spill summary: ${messageText(last.content)}` }
+					: { tool: "grep", args: { pattern: "worker-seance-spill-row", path: "worker-spill-target.txt" } };
+		} else if (hasTools && userText.includes(NESTED_SEANCE_OUTER_TASK)) {
+			if (last?.role === "tool") {
+				reply = { text: `outer seance complete: ${messageText(last.content)}` };
+			} else {
+				const markerIdx = userText.indexOf(`${NESTED_SEANCE_OUTER_TASK}::`);
+				const afterMarker =
+					markerIdx >= 0 ? userText.slice(markerIdx + `${NESTED_SEANCE_OUTER_TASK}::`.length) : "";
+				const sourceFile = afterMarker.split(/\s/)[0] ?? "";
+				reply = {
+					tool: "task",
+					args: {
+						agent: "seance",
+						name: "NestedSeance",
+						sourceSession: sourceFile,
+						task: NESTED_SEANCE_INNER_TASK,
+					},
+				};
+			}
+		} else if (userText.includes(NESTED_MEM_INNER_TASK)) {
+			reply = { text: "worker-mem-nested-payload-901" };
+		} else if (hasTools && userText.includes(NESTED_MEM_OUTER_TASK)) {
+			reply =
+				last?.role === "tool"
+					? { text: `outer mem complete: ${messageText(last.content)}` }
+					: { tool: "task", args: { agent: "task", name: "MemChild", task: NESTED_MEM_INNER_TASK } };
+		} else if (runTurn && last?.role === "tool") {
 			reply = { text: `tool said: ${messageText(last.content)}` };
 		} else if (runTurn && userText.includes(BG_JOB_TASK)) {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
@@ -241,6 +293,7 @@ beforeEach(async () => {
 	setEnv("OMP_PROFILE", undefined);
 	setEnv("PI_PROFILE", undefined);
 	__resetDirsFromEnvForTests();
+	resetRegisteredArtifactDirsForTests();
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
@@ -292,6 +345,7 @@ afterEach(async () => {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
+	resetRegisteredArtifactDirsForTests();
 	authStorage.close();
 	AgentStorage.close();
 	closeModelCache();
@@ -554,6 +608,205 @@ describe("subagent runs routed into pooled workers", () => {
 				structured: false,
 			});
 			expect(again.output).toBe("pong");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"bridges worker-homed retained spill registrations and temporary leases to main so URLs resolve after worker exit and clean up on root session release",
+		async () => {
+			const sourceSessionFile = path.join(root, "worker-seance-source.jsonl");
+			const sourceTimestamp = "2026-11-11T00:00:00.000Z";
+			await Bun.write(
+				sourceSessionFile,
+				[
+					JSON.stringify({
+						type: "session",
+						version: CURRENT_SESSION_VERSION,
+						id: "worker-seance-source",
+						timestamp: sourceTimestamp,
+						cwd,
+					}),
+					JSON.stringify({
+						type: "message",
+						id: "wsrc-u1",
+						parentId: null,
+						timestamp: sourceTimestamp,
+						message: { role: "user", content: [{ type: "text", text: "Seed source turn." }], timestamp: 1 },
+					}),
+					JSON.stringify({
+						type: "message",
+						id: "wsrc-a1",
+						parentId: "wsrc-u1",
+						timestamp: sourceTimestamp,
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "Seeded." }],
+							api: "openai-completions",
+							provider: "fake",
+							model: "fake-model",
+							usage: {
+								input: 1,
+								output: 1,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 2,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "stop",
+							timestamp: 2,
+						},
+					}),
+				].join("\n") + "\n",
+			);
+			const spillLines = Array.from(
+				{ length: 40 },
+				(_, idx) => `worker-seance-spill-row-${idx + 1}-${"w".repeat(60)}`,
+			);
+			await Bun.write(path.join(cwd, "worker-spill-target.txt"), `${spillLines.join("\n")}\n`);
+
+			const ephemeralSettings = Settings.isolated({
+				"async.enabled": false,
+				"task.keepAlive": false,
+				"task.batch": false,
+				"task.maxRecursionDepth": 2,
+				"task.workerThreads": 1,
+				"task.agentIdleTtlMs": 0,
+				"task.completionProbe": false,
+				"task.enableLsp": false,
+				"tools.artifactSpillThreshold": 1,
+				"tools.artifactHeadBytes": 0,
+				"tools.artifactTailBytes": 1,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+				"todo.reminders": false,
+				"advisor.enabled": false,
+				modelRoles: { default: MODEL },
+			});
+
+			const persistedManager = SessionManager.create(cwd, path.join(root, "persisted-root-sessions"));
+			await persistedManager.ensureOnDisk();
+			cleanups.push(() => persistedManager.close());
+			const persistedToolSession: ToolSession = {
+				cwd,
+				hasUI: false,
+				getSessionFile: () => persistedManager.getSessionFile() ?? null,
+				getArtifactsDir: () => persistedManager.getArtifactsDir(),
+				getSessionId: () => persistedManager.getSessionId(),
+				getSessionSpawns: () => "*",
+				sessionManager: persistedManager,
+				localProtocolOptions: {
+					getArtifactsDir: () => persistedManager.getArtifactsDir(),
+					getSessionId: () => persistedManager.getSessionId(),
+				},
+				settings: ephemeralSettings,
+				modelRegistry,
+				authStorage,
+				asyncJobManager: jobs,
+				costGate,
+				eventBus,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				rules: [],
+				enableLsp: false,
+				enableMCP: false,
+			};
+
+			const memManager = SessionManager.inMemory(cwd);
+			cleanups.push(() => memManager.close());
+			const foreignMemManager = SessionManager.inMemory(cwd);
+			cleanups.push(() => foreignMemManager.close());
+			const memToolSession: ToolSession = {
+				...persistedToolSession,
+				getSessionFile: () => null,
+				getArtifactsDir: () => null,
+				getSessionId: () => memManager.getSessionId(),
+				sessionManager: memManager,
+				localProtocolOptions: {
+					getArtifactsDir: () => null,
+					getSessionId: () => memManager.getSessionId(),
+				},
+			};
+
+			const persistedTaskTool = await TaskTool.create(persistedToolSession);
+			const persistedRun = await persistedTaskTool.execute("tc-worker-persisted", {
+				agent: "task",
+				name: "OuterSeance",
+				task: `${NESTED_SEANCE_OUTER_TASK}::${sourceSessionFile}`,
+			} as TaskParams);
+			expect(persistedRun.details?.results[0]?.exitCode).toBe(0);
+			expect(AgentRegistry.global().get("OuterSeance")).toBeUndefined();
+			expect(AgentRegistry.global().get("OuterSeance.NestedSeance")).toBeUndefined();
+
+			const memTaskTool = await TaskTool.create(memToolSession);
+			const memRun = await memTaskTool.execute("tc-worker-mem", {
+				agent: "task",
+				name: "MemOuter",
+				task: NESTED_MEM_OUTER_TASK,
+			} as TaskParams);
+			expect(memRun.details?.results[0]?.exitCode).toBe(0);
+			expect(AgentRegistry.global().get("MemOuter")).toBeUndefined();
+			expect(AgentRegistry.global().get("MemOuter.MemChild")).toBeUndefined();
+			expect(pool.workers().length).toBe(1);
+
+			// Terminate the pooled worker thread completely before resolving URLs or releasing sessions on main.
+			pool.dispose();
+			expect(pool.workers().length).toBe(0);
+
+			const router = new InternalUrlRouter();
+			router.register(new ArtifactProtocolHandler());
+			router.register(new AgentProtocolHandler());
+			router.register(new HistoryProtocolHandler());
+
+			const persistedContext = sessionResolveContext(persistedToolSession);
+			const foreignContext = {
+				cwd,
+				settings: ephemeralSettings,
+				sessionId: foreignMemManager.getSessionId(),
+			};
+			expect(AgentRegistry.global().list()).toEqual([]);
+			expect((await router.resolve("artifact://0", persistedContext)).content).toContain(
+				"worker-seance-spill-row-1",
+			);
+			expect(await router.locate("artifact://0", persistedContext)).toContain(
+				path.join("OuterSeance", "OuterSeance.NestedSeance", "0."),
+			);
+			expect(await router.locate("artifact://0", foreignContext)).toBeNull();
+
+			await releaseRetainedSessionArtifacts(persistedManager.getSessionId(), {
+				epoch: persistedManager.getArtifactEpoch(),
+			});
+			expect(await router.locate("artifact://0", persistedContext)).toBeNull();
+
+			const memContext = sessionResolveContext(memToolSession);
+			const memChildLocated = await router.locate("agent://MemOuter.MemChild", memContext);
+			expect(memChildLocated).not.toBeNull();
+			expect(await Bun.file(memChildLocated!).exists()).toBe(true);
+			expect((await router.resolve("agent://MemOuter.MemChild", memContext)).content).toContain(
+				"worker-mem-nested-payload-901",
+			);
+			expect((await router.resolve("history://MemOuter.MemChild", memContext)).content).toContain(
+				"worker-mem-nested-payload-901",
+			);
+			expect(await router.locate("history://MemOuter.MemChild", memContext)).toBe(
+				memChildLocated!.replace(/\.md$/, ".jsonl"),
+			);
+			expect(await router.locate("history://MemOuter.MemChild", foreignContext)).toBeNull();
+
+			await releaseRetainedSessionArtifacts(memManager.getSessionId(), {
+				epoch: memManager.getArtifactEpoch(),
+			});
+			expect(await Bun.file(memChildLocated!).exists()).toBe(false);
+			expect(artifactsDirsFromRegistry()).toEqual([]);
+
+			expect((await router.resolve("agent://OuterSeance.NestedSeance", persistedContext)).content).toContain(
+				"seance spill summary:",
+			);
+			expect((await router.resolve("history://OuterSeance.NestedSeance", persistedContext)).content).toContain(
+				"seance spill summary:",
+			);
 		},
 		TEST_TIMEOUT_MS,
 	);

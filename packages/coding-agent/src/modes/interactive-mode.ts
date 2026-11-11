@@ -1944,13 +1944,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	#linkResolveContext(): ResolveContext {
 		const session = this.viewSession;
+		const seanceSourceArtifactsDir = session.sessionManager.getSeanceSourceArtifactsDir() ?? undefined;
+		const rootManager = seanceSourceArtifactsDir ? session.sessionManager : this.session.sessionManager;
 		return {
 			cwd: session.sessionManager.getCwd(),
 			sessionFile: session.sessionFile,
+			sessionId: rootManager.getSessionId(),
+			seanceSourceArtifactsDir,
 			settings: session.settings,
 			localProtocolOptions: {
 				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
+				getSessionId: () => rootManager.getSessionId(),
+				getArtifactEpoch: () => rootManager.getArtifactEpoch?.(),
 			},
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),

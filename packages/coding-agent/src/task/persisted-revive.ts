@@ -18,6 +18,7 @@ import { MCPManager } from "../mcp/manager";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { AsyncJobManagerApi } from "../async";
 import type { PreparedExtension } from "../extensibility/extensions/types";
+import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
@@ -58,6 +59,18 @@ import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
+
+function rootSessionLocalProtocolOptions(root: AgentSessionHandle): LocalProtocolOptions | undefined {
+	const hasArtifactsDir = typeof root.sessionManager?.getArtifactsDir === "function";
+	const hasSessionId = typeof root.sessionManager?.getSessionId === "function";
+	if (!hasArtifactsDir && !hasSessionId) return undefined;
+	const hasArtifactEpoch = typeof root.sessionManager?.getArtifactEpoch === "function";
+	return {
+		...(hasArtifactsDir ? { getArtifactsDir: () => root.sessionManager.getArtifactsDir() } : {}),
+		...(hasSessionId ? { getSessionId: () => root.sessionManager.getSessionId() ?? null } : {}),
+		...(hasArtifactEpoch ? { getArtifactEpoch: () => root.sessionManager.getArtifactEpoch?.() } : {}),
+	};
+}
 
 /**
  * Ambient context the reviver needs at revive time. The top-level session is
@@ -104,6 +117,8 @@ export interface PersistedReviveSpec {
 	readonly asyncJobManager: AsyncJobManagerApi | undefined;
 	/** The root's artifact manager at revive time; a revived non-seance agent adopts it. */
 	readonly artifactManager: ArtifactManagerApi | undefined;
+	/** Root session's `local://` and retained-artifact ownership mapping, inherited by non-seance revivals. */
+	readonly localProtocolOptions?: LocalProtocolOptions;
 	readonly preparedExtensions: readonly PreparedExtension[] | undefined;
 	readonly authStorage: AuthStorage;
 	readonly modelRegistry: ModelRegistry;
@@ -226,7 +241,8 @@ export function createPersistedSubagentReviverFactory(
 				rootAgentId: ctx.session.getAgentId?.() ?? MAIN_AGENT_ID,
 				costGate: ctx.session.costGate,
 				asyncJobManager: ctx.session.asyncJobManager,
-				artifactManager: ctx.session.sessionManager.getArtifactManager() ?? undefined,
+				artifactManager: ctx.session.sessionManager.getArtifactManager?.() ?? undefined,
+				localProtocolOptions: rootSessionLocalProtocolOptions(ctx.session),
 				preparedExtensions: ctx.session.preparedExtensions,
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
@@ -251,6 +267,7 @@ export function createPersistedSubagentReviverFactory(
 export async function revivePersistedSubagent(spec: PersistedReviveSpec, expectedRef: AgentRef): Promise<AgentSession> {
 	const ref = { id: spec.id, displayName: spec.displayName, parentId: spec.parentId };
 	const { sessionFile, taskDepth, restoredSeance } = spec;
+	const rootLocalProtocolOptions = spec.localProtocolOptions ?? rootSessionLocalProtocolOptions(spec.root);
 	const seanceOptions = restoredSeance ? seanceIsolationOptions(restoredSeance.cwd) : {};
 	const registry = AgentRegistry.global();
 	// Re-open fresh on every revive: park closes the writer, so this takes
@@ -499,6 +516,9 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 						mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 						mcpToolScope: mcpFollower?.scope,
 					}),
+			rootSessionId: rootLocalProtocolOptions?.getSessionId?.() ?? undefined,
+			rootSessionEpoch: rootLocalProtocolOptions?.getArtifactEpoch?.(),
+			localProtocolOptions: rootLocalProtocolOptions,
 			...seanceOptions,
 		}));
 	} catch (error) {

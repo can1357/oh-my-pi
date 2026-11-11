@@ -35,6 +35,7 @@ import type {
 	AsyncJobType,
 } from "../../async/job-manager";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
+import { retainedLeaseArtifactsDir } from "../../internal-urls/registry-helpers";
 import type { RemoteObject } from "../rpc";
 import {
 	type AsyncJobManagerProtocol,
@@ -424,7 +425,8 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 
 	/** Forward a row's `retainedArtifactsCleanup` assignment to main. */
 	setRetainedArtifactsCleanup(jobId: string, cleanup: (() => Promise<void>) | undefined): void {
-		this.#remote.notify("setRetainedArtifactsCleanup", jobId, cleanup);
+		const artifactsDir = cleanup ? retainedLeaseArtifactsDir(cleanup) : undefined;
+		this.#remote.callSync("setRetainedArtifactsCleanup", jobId, artifactsDir, artifactsDir ? undefined : cleanup);
 	}
 
 	#row(wire: AsyncJobWire): RemoteAsyncJob {

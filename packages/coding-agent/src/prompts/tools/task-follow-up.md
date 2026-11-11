@@ -7,6 +7,8 @@
 {{else}}
 {{#if isolated}}
 {{agentId}} ran isolated and cannot be resumed or messaged — transcript at history://{{agentId}}
+{{else if disposed}}
+{{agentId}} finished — transcript at history://{{agentId}}
 {{else}}
 {{agentId}} is now idle — {{#if ircEnabled}}message it via `write agent://{{agentId}}` to follow up; {{/if}}transcript at history://{{agentId}}
 {{/if}}

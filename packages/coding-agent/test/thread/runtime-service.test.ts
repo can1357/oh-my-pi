@@ -5,6 +5,11 @@ import * as path from "node:path";
 import { MessageChannel } from "node:worker_threads";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
+import {
+	artifactsDirsFromRegistry,
+	registerArtifactsDir,
+	resetRegisteredArtifactDirsForTests,
+} from "../../src/internal-urls/registry-helpers";
 import { AgentStorage } from "../../src/session/agent-storage";
 import { ArtifactManager } from "../../src/session/artifacts";
 import { CostGate } from "../../src/session/cost-gate";
@@ -35,6 +40,7 @@ let nextWorker = 1;
 
 beforeEach(() => {
 	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-runtime-service-"));
+	resetRegisteredArtifactDirsForTests();
 });
 
 afterEach(async () => {
@@ -44,6 +50,7 @@ afterEach(async () => {
 		peer.link.close("test end");
 		worker.terminate();
 	}
+	resetRegisteredArtifactDirsForTests();
 	AgentStorage.close();
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -251,6 +258,43 @@ describe("runtime thread services: async jobs", () => {
 		entry.peer.link.close("crash");
 		manager.publishCompleted("task", "after exit", { text: "late" }, { ownerId: "Worker" });
 		expect(await manager.drainDeliveries({ timeoutMs: 1_000 })).toBe(true);
+	});
+
+	it("reconstructs temporary-lease retainedArtifactsCleanup on main so cleanup succeeds after worker exit", async () => {
+		const manager = new AsyncJobManager({ retainedArtifactsCleanupGraceMs: 0 });
+		managers.push(manager);
+		const probe = await startWorker();
+		const id = await jobId(probe, manager, "Worker");
+		const leaseDir = path.join(tmp, "worker-retained-lease");
+		const nestedSpillFile = path.join(leaseDir, "Child", "0.grep.log");
+		await Bun.write(nestedSpillFile, "spilled output\n");
+		registerArtifactsDir(leaseDir, { sessionId: "session-owner", epoch: 1 });
+		registerArtifactsDir(path.dirname(nestedSpillFile), { sessionId: "session-owner", epoch: 1 });
+
+		await probe("retainLeaseCleanup", manager, id, leaseDir);
+		await probe("finish", id, "done");
+		await manager.getJob(id)?.promise;
+
+		const entry = started.pop();
+		if (!entry) throw new Error("no worker");
+		for (const service of SERVICES) service.onWorkerExit?.(entry.peer, "idle shutdown");
+		entry.peer.link.close("idle shutdown");
+		entry.worker.terminate();
+
+		expect(await Bun.file(nestedSpillFile).exists()).toBe(true);
+		expect(artifactsDirsFromRegistry({ sessionId: "session-owner" })).toEqual([
+			path.dirname(nestedSpillFile),
+			leaseDir,
+		]);
+
+		await manager.dispose({ timeoutMs: 1_000 });
+		const deadline = Date.now() + 5_000;
+		while (artifactsDirsFromRegistry().length > 0 && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		expect(await Bun.file(nestedSpillFile).exists()).toBe(false);
+		expect(fs.existsSync(leaseDir)).toBe(false);
+		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 });
 

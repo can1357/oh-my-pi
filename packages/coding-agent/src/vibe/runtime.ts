@@ -652,6 +652,7 @@ export class VibeSessionRegistry {
 		childSessionFile: string,
 		expected?: AgentRef | null,
 		teardownDeadline?: number,
+		rootSessionId?: string,
 	): Promise<void> {
 		const registry = AgentRegistry.global();
 		const existing = registry.get(id);
@@ -679,6 +680,8 @@ export class VibeSessionRegistry {
 			displayName: id,
 			kind: "sub",
 			parentId: ownerId,
+			rootSessionId: existing?.rootSessionId ?? rootSessionId,
+			rootSessionEpoch: existing?.rootSessionEpoch,
 			session: null,
 			sessionFile: childSessionFile,
 			status: "aborted",
@@ -740,7 +743,14 @@ export class VibeSessionRegistry {
 			if (!spawn) continue;
 			const childSessionFile = await this.#resolvePersistedChild(sessionFile, spawn, { requireAgentMatch: false });
 			if (!childSessionFile) continue;
-			await this.#markTerminalRef(id, scope.ownerId, childSessionFile);
+			await this.#markTerminalRef(
+				id,
+				scope.ownerId,
+				childSessionFile,
+				undefined,
+				undefined,
+				scope.parentSessionId || undefined,
+			);
 			this.#records.delete(scopeKey(scope, id));
 		}
 
@@ -766,6 +776,7 @@ export class VibeSessionRegistry {
 					displayName: spawn.id,
 					kind: "sub",
 					parentId: scope.ownerId,
+					rootSessionId: scope.parentSessionId || undefined,
 					session: null,
 					sessionFile: childSessionFile,
 					status: "parked",

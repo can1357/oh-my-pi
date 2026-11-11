@@ -28,6 +28,7 @@ import { formatByteSize } from "../utils/video";
 export interface LocalProtocolOptions {
 	getArtifactsDir?: () => string | null;
 	getSessionId?: () => string | null;
+	getArtifactEpoch?: () => number | undefined;
 }
 
 const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;

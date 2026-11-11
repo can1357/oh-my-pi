@@ -688,6 +688,8 @@ export async function registerPersistedSubagents(
 	let vibeOwnedIds: Promise<Set<string>> | undefined;
 	const vibeOwned = () => (vibeOwnedIds ??= readPersistedVibeChildIds(sessionFile, shouldContinue));
 	const root = sessionFile.slice(0, -6);
+	const rootSessionId = await readSessionHeaderId(sessionFile);
+	if (!shouldContinue()) return;
 	const transcripts: PersistedTranscript[] = [];
 	await registerPersistedSubagentsFromDir(
 		registry,
@@ -699,6 +701,7 @@ export async function registerPersistedSubagents(
 		sessionFile,
 		options.owned,
 		options.onCopiedRef,
+		rootSessionId,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
@@ -732,6 +735,7 @@ async function registerPersistedSubagentsFromDir(
 	rootSessionFile: string,
 	owned?: Map<string, string>,
 	onCopiedRef?: (ref: AgentRef) => void,
+	rootSessionId?: string,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -782,6 +786,7 @@ async function registerPersistedSubagentsFromDir(
 					displayName,
 					kind: "advisor",
 					parentId: owner,
+					rootSessionId,
 					session: null,
 					sessionFile,
 					activity: metadata.activity,
@@ -798,6 +803,9 @@ async function registerPersistedSubagentsFromDir(
 					lastActivity: metadata.lastActivity,
 				});
 			} else if (existing) {
+				if (existing.rootSessionId === undefined && rootSessionId !== undefined) {
+					existing.rootSessionId = rootSessionId;
+				}
 				owned?.set(advisorId, sessionFile);
 				transcripts.push({
 					id: advisorId,
@@ -850,6 +858,9 @@ async function registerPersistedSubagentsFromDir(
 				}
 			}
 			if (existing.sessionFile === sessionFile) {
+				if (existing.rootSessionId === undefined && rootSessionId !== undefined) {
+					existing.rootSessionId = rootSessionId;
+				}
 				owned?.set(id, sessionFile);
 				transcripts.push({
 					id,
@@ -878,6 +889,7 @@ async function registerPersistedSubagentsFromDir(
 					displayName: id,
 					kind: "sub" as const,
 					parentId: parentId ?? MAIN_AGENT_ID,
+					rootSessionId,
 					session: null,
 					sessionFile,
 					activity: metadata.activity,
@@ -912,6 +924,7 @@ async function registerPersistedSubagentsFromDir(
 				rootSessionFile,
 				owned,
 				onCopiedRef,
+				rootSessionId,
 			);
 		}
 	}

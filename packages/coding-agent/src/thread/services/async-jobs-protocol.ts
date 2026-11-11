@@ -163,7 +163,10 @@ export type AsyncJobManagerProtocol = {
 	whenSettled: RpcMethod<[jobId: string], void>;
 	/** The job's abort signal in wire form, or undefined for unknown ids. */
 	signal: RpcMethod<[jobId: string], AbortSignal | undefined>;
-	setRetainedArtifactsCleanup: RpcMethod<[jobId: string, cleanup: (() => Promise<void>) | undefined], void>;
+	setRetainedArtifactsCleanup: RpcMethod<
+		[jobId: string, artifactsDir: string | undefined, cleanup: (() => Promise<void>) | undefined],
+		void
+	>;
 	widgetView: RpcMethod<[jobId: string], JobWidgetView | undefined>;
 	widgetCaption: RpcMethod<[jobId: string], string | undefined>;
 	widgetRequestCaption: RpcMethod<[jobId: string], void>;

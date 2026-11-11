@@ -946,6 +946,10 @@ export interface CreateAgentSessionOptions {
 
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Top-level root session ID that owns this agent in `AgentRegistry` (explicit when `localProtocolOptions` is cleared for seance isolation). */
+	rootSessionId?: string;
+	/** Artifact epoch of {@link rootSessionId} at spawn time. */
+	rootSessionEpoch?: number;
 
 	/** Settings instance. Default: Settings.init({ cwd, agentDir }) */
 	settings?: Settings;
@@ -2816,6 +2820,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const localProtocolOptions = options.localProtocolOptions ?? {
 			getArtifactsDir,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
+			getArtifactEpoch: () => sessionManager.getArtifactEpoch?.(),
 		};
 		if (options.localProtocolOptions && !options.parentTaskPrefix) {
 			LocalProtocolHandler.setOverride(options.localProtocolOptions);
@@ -4549,11 +4554,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// so that subagents launched in the same parallel batch can see each other in
 		// their initial `# IRC Peers` block (rendered inside `rebuildSystemPrompt`).
 		// The session reference is attached after construction below.
+		const resolvedRootSessionId =
+			options.rootSessionId ??
+			(agentKind === "main"
+				? sessionManager.getSessionId?.()
+				: (localProtocolOptions.getSessionId?.() ?? sessionManager.getSessionId?.())) ??
+			undefined;
+		const resolvedRootSessionEpoch =
+			options.rootSessionEpoch ??
+			(agentKind === "main"
+				? sessionManager.getArtifactEpoch?.()
+				: (localProtocolOptions.getArtifactEpoch?.() ?? sessionManager.getArtifactEpoch?.()));
 		const registrationInput = {
 			id: resolvedAgentId,
 			displayName: resolvedAgentDisplayName,
 			kind: agentKind,
 			parentId: options.parentAgentId,
+			sessionId: sessionManager.getSessionId?.() || undefined,
+			rootSessionId: resolvedRootSessionId || undefined,
+			rootSessionEpoch: resolvedRootSessionEpoch,
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,

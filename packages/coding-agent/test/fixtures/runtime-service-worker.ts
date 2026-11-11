@@ -5,6 +5,7 @@ import {
 	type AsyncJobRunResult,
 } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
+import { markRetainedLeaseCleanup } from "../../src/internal-urls/registry-helpers";
 import { runEvalWait } from "../../src/eval/handle-bridge";
 import type { JsStatusEvent } from "../../src/eval/js/shared/types";
 import { TextTap } from "../../src/job-widgets/text-tap";
@@ -169,6 +170,15 @@ const probe: RuntimeProbe = async (op, ...args) => {
 		case "localInputs": {
 			const job = manager(args[0]).getJob(String(args[1]));
 			return { hasWidgetInputs: job?.widgetInputs !== undefined, pids: job?.process?.pids() ?? null };
+		}
+		case "retainLeaseCleanup": {
+			const job = manager(args[0]).getJob(String(args[1]));
+			if (!job) throw new Error(`no job ${String(args[1])}`);
+			const dir = String(args[2]);
+			job.retainedArtifactsCleanup = markRetainedLeaseCleanup(async () => {
+				throw new Error("worker closure must not be called on main");
+			}, dir);
+			return true;
 		}
 		case "cancelAllShutdown":
 			manager(args[0]).cancelAll(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);

@@ -27,8 +27,16 @@ import type { Settings } from "../config/settings";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+import { resolveToolSessionRootId, sessionLocalProtocolOptions } from "../internal-urls/context";
+import {
+	cleanupTemporaryLeaseArtifacts,
+	currentSessionArtifactEpoch,
+	hasSpillArtifacts,
+	isReadableFile,
+	markRetainedLeaseCleanup,
+	registerArtifactsDir,
+	retainTemporaryLeaseForSession,
+} from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -83,6 +91,7 @@ import {
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
+	cfgTaskKeepAlive,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskPerCallModel,
 	ovnfsCommand,
@@ -729,6 +738,8 @@ interface ArtifactLease {
 	sessionFile: string | null;
 	artifactsDir: string;
 	temporary: boolean;
+	ownerSessionId: string | undefined;
+	ownerSessionEpoch: number | undefined;
 	unregister: (() => void) | undefined;
 }
 
@@ -736,18 +747,45 @@ async function leaseArtifacts(
 	session: ToolSession,
 	invocationKind: StructuredSubagentRequest["invocationKind"],
 ): Promise<ArtifactLease> {
+	const ownerSessionId = resolveToolSessionRootId(session);
+	const ownerSessionEpoch = ownerSessionId
+		? ((session.localProtocolOptions?.getSessionId?.() === ownerSessionId
+				? session.localProtocolOptions.getArtifactEpoch?.()
+				: undefined) ??
+			(session.sessionManager?.getSessionId?.() === ownerSessionId
+				? session.sessionManager.getArtifactEpoch?.()
+				: undefined) ??
+			currentSessionArtifactEpoch(ownerSessionId))
+		: undefined;
 	const sessionFile = session.getSessionFile();
 	if (sessionFile) {
 		const artifactsDir = sessionFile.slice(0, -6);
 		await fs.mkdir(artifactsDir, { recursive: true });
-		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
+		return {
+			sessionFile,
+			artifactsDir,
+			temporary: false,
+			ownerSessionId,
+			ownerSessionEpoch,
+			unregister: undefined,
+		};
 	}
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
 	);
 	await fs.mkdir(artifactsDir, { recursive: true });
-	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
+	return {
+		sessionFile: null,
+		artifactsDir,
+		temporary: true,
+		ownerSessionId,
+		ownerSessionEpoch,
+		unregister: registerArtifactsDir(
+			artifactsDir,
+			ownerSessionId ? { sessionId: ownerSessionId, epoch: ownerSessionEpoch } : undefined,
+		),
+	};
 }
 
 /**
@@ -776,6 +814,8 @@ function buildExecutorOptions(
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
+	keepAlive: boolean,
+	cleanupArtifacts: () => Promise<void>,
 ): ExecutorOptions {
 	const { session } = request;
 	const preparedSession = policy.preparedSession;
@@ -832,7 +872,7 @@ function buildExecutorOptions(
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
-		keepAlive: request.keepAlive,
+		keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
 		subagentEventBus: session.subagentEventBus,
@@ -870,13 +910,7 @@ function buildExecutorOptions(
 		parentArtifactManager: preparedSession ? undefined : (session.getArtifactManager?.() ?? undefined),
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
-		onRelease:
-			preparedSession !== undefined && lease.temporary
-				? async () => {
-						await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-						lease.unregister?.();
-					}
-				: undefined,
+		onRelease: keepAlive && preparedSession !== undefined && lease.temporary ? cleanupArtifacts : undefined,
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),
@@ -1032,7 +1066,20 @@ function describeSalvagedWork(result: SingleResult): string {
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
+	const keepAlive = request.keepAlive ?? cfgTaskKeepAlive.get(request.session.settings);
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
+	let childArtifactsDir: string | undefined;
+	let unregisterChildArtifactsDir: (() => void) | undefined;
+	let unregisterRetainedCleanup: (() => void) | undefined;
+	const rawCleanupArtifacts = async (): Promise<void> => {
+		unregisterRetainedCleanup?.();
+		unregisterChildArtifactsDir?.();
+		lease.unregister?.();
+		await cleanupTemporaryLeaseArtifacts(lease.artifactsDir, request.session.agentRegistry ?? AgentRegistry.global());
+	};
+	const cleanupArtifacts = lease.temporary
+		? markRetainedLeaseCleanup(rawCleanupArtifacts, lease.artifactsDir)
+		: rawCleanupArtifacts;
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
@@ -1054,7 +1101,14 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
-		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		const baseOptions = buildExecutorOptions(request, policy, lease, id, keepAlive, cleanupArtifacts);
+		if (baseOptions.parentArtifactManager === undefined && (lease.temporary || !keepAlive)) {
+			childArtifactsDir = path.join(lease.artifactsDir, id);
+			unregisterChildArtifactsDir = registerArtifactsDir(
+				childArtifactsDir,
+				lease.ownerSessionId ? { sessionId: lease.ownerSessionId, epoch: lease.ownerSessionEpoch } : undefined,
+			);
+		}
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};
@@ -1175,17 +1229,19 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error, result: settled },
 		);
 	} finally {
+		const hasDisposedTranscript =
+			!keepAlive &&
+			lease.temporary &&
+			settled !== undefined &&
+			(await isReadableFile(path.join(lease.artifactsDir, `${settled.id}.jsonl`)));
 		const shouldRetainArtifacts =
 			request.detached === true ||
 			retainSalvagedArtifact ||
-			((request.retainArtifacts || policy.preparedSession !== undefined) &&
+			hasDisposedTranscript ||
+			((request.retainArtifacts || policy.preparedSession !== undefined || !keepAlive) &&
 				(completedSuccessfully || hasValidStructuredOutput)) ||
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
-		const cleanupArtifacts = async (): Promise<void> => {
-			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-			lease.unregister?.();
-		};
 		if (shouldCleanup) {
 			if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
@@ -1195,11 +1251,21 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			} else {
 				await cleanupArtifacts();
 			}
-		} else if (lease.temporary && request.onArtifactsRetained) {
-			// Retained rather than cleaned up now: the caller (e.g. an async
-			// job body) owns disposing it once the retained handle is no
-			// longer needed, instead of it leaking for the process lifetime.
-			request.onArtifactsRetained(cleanupArtifacts);
+		} else {
+			if (unregisterChildArtifactsDir && (!childArtifactsDir || !(await hasSpillArtifacts(childArtifactsDir)))) {
+				unregisterChildArtifactsDir();
+				unregisterChildArtifactsDir = undefined;
+			}
+			if (lease.temporary && request.onArtifactsRetained) {
+				// Retained rather than cleaned up now: the caller (e.g. an async
+				// job body) owns disposing it once the retained handle is no
+				// longer needed, instead of it leaking for the process lifetime.
+				request.onArtifactsRetained(cleanupArtifacts);
+			} else if (lease.temporary && lease.ownerSessionId) {
+				unregisterRetainedCleanup = retainTemporaryLeaseForSession(lease.ownerSessionId, lease.artifactsDir, {
+					epoch: lease.ownerSessionEpoch,
+				});
+			}
 		}
 	}
 }

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AgentProtocolHandler } from "../../src/internal-urls/agent-protocol";
 import { InternalUrlRouter } from "../../src/internal-urls/router";
-import { resetRegisteredArtifactDirsForTests } from "../../src/internal-urls/registry-helpers";
+import { registerArtifactsDir, resetRegisteredArtifactDirsForTests } from "../../src/internal-urls/registry-helpers";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
 import { ArtifactManager } from "../../src/session/artifacts";
@@ -231,4 +231,84 @@ it("agent:// marks a published output as the previous run while the agent stream
 	const settled = await handler.resolve(new URL("agent://Visuals") as never);
 	expect(settled.content).toBe(published);
 	expect((await router.target("agent://Visuals"))?.kind).toBe("file");
+});
+
+it("agent:// resolves nested descendant outputs and sidecars from a root artifacts dir after subagent refs unregister while skipping non-agent subdirs", async () => {
+	const root = tempDir.path();
+	const outerArtifactsDir = path.join(root, "ephemeral-in-memory-root");
+	const parentDir = path.join(outerArtifactsDir, "Parent");
+	const childDir = path.join(parentDir, "Parent.Child");
+
+	await Bun.write(path.join(outerArtifactsDir, "Parent.jsonl"), "{}\n");
+	await Bun.write(path.join(outerArtifactsDir, "Parent.md"), "parent summary");
+	await Bun.write(path.join(parentDir, "Parent.Child.jsonl"), "{}\n");
+	await Bun.write(path.join(parentDir, "Parent.Child.md"), "child markdown summary");
+	await Bun.write(path.join(parentDir, "Parent.Child.json"), JSON.stringify({ status: "ok", items: ["alpha"] }));
+	await Bun.write(path.join(childDir, "Parent.Child.Grandchild.jsonl"), "{}\n");
+	await Bun.write(path.join(childDir, "Parent.Child.Grandchild.md"), "grandchild report");
+
+	// Non-agent subdirectories inside artifactsDir must never masquerade as agent outputs.
+	await Bun.write(path.join(outerArtifactsDir, "local", "PLAN.md"), "# Session Plan");
+	await Bun.write(
+		path.join(outerArtifactsDir, "annotation-drafts", "sid-1", "draft-00.json"),
+		JSON.stringify({ draft: true }),
+	);
+
+	const unregister = registerArtifactsDir(outerArtifactsDir);
+	try {
+		const handler = new AgentProtocolHandler();
+		const childDoc = await handler.resolve(new URL("agent://Parent.Child") as never);
+		expect(childDoc.content).toBe("child markdown summary");
+		expect(await handler.locate(new URL("agent://Parent.Child") as never)).toBe(
+			path.join(parentDir, "Parent.Child.md"),
+		);
+
+		const childField = await handler.resolve(new URL("agent://Parent.Child/items/0") as never);
+		expect(childField.content).toBe("alpha");
+		expect(childField.sourcePath).toBe(path.join(parentDir, "Parent.Child.json"));
+
+		const grandchildDoc = await handler.resolve(new URL("agent://Parent.Child.Grandchild") as never);
+		expect(grandchildDoc.content).toBe("grandchild report");
+
+		await expect(handler.resolve(new URL("agent://PLAN") as never)).rejects.toThrow("Not found: PLAN");
+
+		const completions = (await handler.complete()).map(item => item.value);
+		expect(completions).toEqual(["Parent", "Parent.Child", "Parent.Child.Grandchild"]);
+	} finally {
+		unregister();
+	}
+});
+
+it("agent:// descends into child agent stems containing .bak while still skipping .bak backup files", async () => {
+	const root = tempDir.path();
+	const outerArtifactsDir = path.join(root, "ephemeral-bak-stem-root");
+	const parentDir = path.join(outerArtifactsDir, "Parent");
+	const bakChildDir = path.join(parentDir, "Parent.bak");
+
+	await Bun.write(path.join(outerArtifactsDir, "Parent.jsonl"), "{}\n");
+	await Bun.write(path.join(outerArtifactsDir, "Parent.md"), "parent summary");
+	await Bun.write(path.join(outerArtifactsDir, "Parent.jsonl.12345.bak"), "{}\n");
+	await Bun.write(path.join(parentDir, "Parent.bak.jsonl"), "{}\n");
+	await Bun.write(path.join(parentDir, "Parent.bak.md"), "bak child summary");
+	await Bun.write(path.join(bakChildDir, "Parent.bak.Worker.jsonl"), "{}\n");
+	await Bun.write(path.join(bakChildDir, "Parent.bak.Worker.md"), "deep worker under bak");
+	await Bun.write(path.join(bakChildDir, "Parent.bak.Worker.json"), JSON.stringify({ verdict: "pass" }));
+
+	const unregister = registerArtifactsDir(outerArtifactsDir);
+	try {
+		const handler = new AgentProtocolHandler();
+		const bakChildDoc = await handler.resolve(new URL("agent://Parent.bak") as never);
+		expect(bakChildDoc.content).toBe("bak child summary");
+
+		const deepWorkerDoc = await handler.resolve(new URL("agent://Parent.bak.Worker") as never);
+		expect(deepWorkerDoc.content).toBe("deep worker under bak");
+		expect(await handler.locate(new URL("agent://Parent.bak.Worker") as never)).toBe(
+			path.join(bakChildDir, "Parent.bak.Worker.md"),
+		);
+
+		const deepWorkerField = await handler.resolve(new URL("agent://Parent.bak.Worker/verdict") as never);
+		expect(deepWorkerField.content).toBe("pass");
+	} finally {
+		unregister();
+	}
 });

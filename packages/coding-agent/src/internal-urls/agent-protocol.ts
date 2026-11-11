@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
-import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
@@ -30,7 +30,14 @@ import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "tex
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
-import { artifactsDirsFromRegistry } from "./registry-helpers";
+import { resolveCallerSessionId } from "./context";
+import {
+	agentOutputFilesFromDisk,
+	artifactsDirsFromRegistry,
+	isForeignRootAgentRef,
+	isPathWithinDirs,
+	isSameRootAgentRef,
+} from "./registry-helpers";
 import type {
 	InternalResource,
 	InternalWriteResult,
@@ -129,9 +136,22 @@ function lastAssistantText(messages: readonly AgentMessage[]): string | undefine
 }
 
 /** Whether `<id>`'s published output predates a turn the agent is streaming now. */
-function isSuperseded(registry: AgentRegistryApi, outputId: string): boolean {
+function isSuperseded(
+	registry: AgentRegistryApi,
+	outputId: string,
+	foundPath: string,
+	callerSessionId?: string,
+): boolean {
 	const ref = registry.get(outputId);
-	return ref !== undefined && ref.kind !== "advisor" && registry.isRunning(ref);
+	if (!ref || ref.kind === "advisor" || !registry.isRunning(ref)) return false;
+	if (isForeignRootAgentRef(ref, callerSessionId)) return false;
+	if (isSameRootAgentRef(ref, callerSessionId)) return true;
+	const refDirs: string[] = [];
+	const sessionArtifactsDir = ref.session?.sessionManager?.getArtifactsDir?.();
+	if (sessionArtifactsDir) refDirs.push(sessionArtifactsDir);
+	if (ref.sessionFile) refDirs.push(path.dirname(ref.sessionFile));
+	if (refDirs.length > 0 && !isPathWithinDirs(foundPath, refDirs)) return false;
+	return true;
 }
 
 /**
@@ -164,10 +184,21 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
 		if (outputId === "all" || hasPathExtraction(url)) return null;
-		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
-		return (await this.#findOutput(dirs, outputId)).foundPath ?? null;
+		const foundPath = (await this.#findOutput(dirs, outputId)).foundPath ?? null;
+		if (!foundPath) return null;
+		if (
+			isSuperseded(
+				context?.agentRegistry ?? AgentRegistry.global(),
+				outputId,
+				foundPath,
+				resolveCallerSessionId(context),
+			)
+		) {
+			return null;
+		}
+		return foundPath;
 	}
 
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
@@ -215,6 +246,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 
 		const extraction = hasPathExtraction(url);
+		const callerSessionId = resolveCallerSessionId(context);
 
 		const dirs = await this.#outputDirs(context);
 		const scan = dirs.length > 0 ? await this.#findOutput(dirs, outputId) : undefined;
@@ -224,12 +256,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			// non-terminal yield, or parked before publishing) is the same
 			// registry `write agent://<id>` delivers to: answer with its progress.
 			const ref = registry.get(outputId);
-			if (ref && ref.kind !== "advisor") return this.#resolveProgress(url, ref, extraction);
+			if (ref && ref.kind !== "advisor" && !isForeignRootAgentRef(ref, callerSessionId)) {
+				return this.#resolveProgress(url, ref, extraction);
+			}
 			if (!scan) throw new Error("No session - agent outputs unavailable");
 			if (!scan.anyDirExists) throw new Error("No artifacts directory found");
 			const registered = registry
 				.list()
-				.filter(candidate => candidate.kind !== "advisor")
+				.filter(candidate => candidate.kind !== "advisor" && !isForeignRootAgentRef(candidate, callerSessionId))
 				.map(candidate => candidate.id);
 			throw notFoundError(outputId, [...scan.availableIds, ...registered]);
 		}
@@ -249,7 +283,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		// A published file belongs to a finished run. If the agent is streaming
 		// again (follow-up or IRC wake), the file is the previous run's result;
 		// unmarked, a reader takes it as the current state.
-		if (!extraction && isSuperseded(registry, outputId)) {
+		if (!extraction && isSuperseded(registry, outputId, scan.foundPath, callerSessionId)) {
 			const publishedAt = (await fs.stat(scan.foundPath)).mtimeMs;
 			content = `${prompt.render(agentSupersededTemplate, {
 				id: outputId,
@@ -363,69 +397,34 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
 		// A seance reads the consulted source's agent outputs in place, nothing else.
-		const seanceDir = context?.session?.seanceSourceArtifactsDir;
+		const seanceDir = context?.session?.seanceSourceArtifactsDir ?? context?.seanceSourceArtifactsDir;
 		if (seanceDir) return [seanceDir];
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
 			: undefined;
-		return artifactsDirsFromRegistry(rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined);
+		const preferredDir = rootSessionFile ? rootSessionFile.slice(0, -6) : undefined;
+		const sessionId = resolveCallerSessionId(context);
+		return artifactsDirsFromRegistry(
+			preferredDir !== undefined || sessionId !== undefined ? { preferredDir, sessionId } : undefined,
+		);
 	}
 
 	/**
-	 * Scan every registered artifacts dir (in priority order) for `<id>.md`.
-	 * Returns the resolved path and its same-dir `.json` sidecar, plus the set
-	 * of available ids gathered from the scanned dirs for the not-found message.
+	 * Scan every registered artifacts dir (in priority order), including nested
+	 * subagent output directories, for `<id>.md`. Returns the resolved path and
+	 * its same-dir `.json` sidecar, plus the set of available ids gathered from
+	 * the scanned dirs for the not-found message.
 	 */
 	async #findOutput(dirs: string[], id: string): Promise<OutputScan> {
-		const byId = new Map<string, string>();
-		const jsonById = new Map<string, string>();
-		let anyDirExists = false;
-		for (const dir of dirs) {
-			let files: string[];
-			try {
-				files = await fs.readdir(dir);
-			} catch (err) {
-				if (isEnoent(err)) continue;
-				throw err;
-			}
-			anyDirExists = true;
-			for (const f of files) {
-				if (f.endsWith(".json")) {
-					const jsonId = f.slice(0, -5);
-					if (!jsonById.has(jsonId)) jsonById.set(jsonId, path.join(dir, f));
-					continue;
-				}
-				if (!f.endsWith(".md")) continue;
-				const id = f.slice(0, -3);
-				if (!byId.has(id)) byId.set(id, path.join(dir, f));
-			}
-		}
-		const availableIds = new Set(byId.keys());
-		const foundPath = byId.get(id);
+		const { outputs, sidecars, anyDirExists } = await agentOutputFilesFromDisk(dirs);
+		const availableIds = new Set(outputs.keys());
+		const foundPath = outputs.get(id);
 		if (!foundPath) return { anyDirExists, availableIds };
-		// Pair the sidecar with the SAME dir as the matched `<id>.md`: two
-		// coexisting roots can both hold `Worker`, and a first-hit sidecar
-		// from the other root would answer with a foreign agent's payload
-		// (see the `preferredDir` comment above and caller-root-ab.test.ts).
-		const sidecar = jsonById.get(id);
-		const jsonPath = sidecar && path.dirname(sidecar) === path.dirname(foundPath) ? sidecar : undefined;
-		return { foundPath, jsonPath, anyDirExists, availableIds };
+		return { foundPath, jsonPath: sidecars.get(id), anyDirExists, availableIds };
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
-		const ids = new Set<string>();
-		for (const dir of artifactsDirsFromRegistry()) {
-			let files: string[];
-			try {
-				files = await fs.readdir(dir);
-			} catch (err) {
-				if (isEnoent(err)) continue;
-				throw err;
-			}
-			for (const f of files) {
-				if (f.endsWith(".md")) ids.add(f.slice(0, -3));
-			}
-		}
-		return [...ids].sort().map(value => ({ value }));
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
+		const { outputs } = await agentOutputFilesFromDisk(await this.#outputDirs(context));
+		return [...outputs.keys()].sort().map(value => ({ value }));
 	}
 }

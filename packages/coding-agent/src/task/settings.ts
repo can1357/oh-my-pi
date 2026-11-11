@@ -551,6 +551,19 @@ export const cfgTaskCompletionProbe = register({
 	},
 });
 
+export const cfgTaskKeepAlive = register({
+	id: "task.keepAlive",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Keep Finished Subagents Alive",
+		description:
+			"Retain finished task subagents as idle sessions that can be messaged or resumed until task.agentIdleTtlMs parks them. Disable to dispose task subagent sessions immediately on completion while keeping agent:// and history:// artifacts readable.",
+	},
+});
+
 export const cfgTaskAgentIdleTtlMs = register({
 	id: "task.agentIdleTtlMs",
 	type: "number",

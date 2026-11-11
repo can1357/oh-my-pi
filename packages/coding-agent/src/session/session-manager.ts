@@ -29,6 +29,12 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
+import {
+	activateRetainedSessionArtifacts,
+	isSessionArtifactEpochReleased,
+	releaseRetainedSessionArtifacts,
+	transferRetainedSessionArtifacts,
+} from "../internal-urls/registry-helpers";
 import { ArtifactManager, type ArtifactManagerApi } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -794,6 +800,7 @@ interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
 	sessionId: string;
+	artifactEpoch: number;
 	sessionName: string | undefined;
 	titleSource: SessionTitleSource | undefined;
 	sessionFile: string | undefined;
@@ -947,6 +954,7 @@ export class SessionManager {
 	readonly #blobs: BlobStore;
 
 	#sessionId = "";
+	#artifactEpoch = 0;
 	/**
 	 * Parent-derived sibling family candidate stashed by the Task executor once
 	 * the child session exists. Session-scoped and non-persisted: the header
@@ -1321,6 +1329,7 @@ export class SessionManager {
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#artifactEpoch = transferRetainedSessionArtifacts(previousSessionId, this.#sessionId);
 		this.#taskSiblingCandidate = undefined;
 		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		// The marker goes before the carried-over fields: the session listing
@@ -2069,6 +2078,7 @@ export class SessionManager {
 			this.#storage.ensureDirSync(this.#sessionDir);
 		}
 		this.#sessionId = mintSessionId();
+		this.#artifactEpoch = activateRetainedSessionArtifacts(this.#sessionId);
 		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -2285,6 +2295,7 @@ export class SessionManager {
 			cwd: this.#cwd,
 			sessionDir: this.#sessionDir,
 			sessionId: this.#sessionId,
+			artifactEpoch: this.#artifactEpoch,
 			sessionName: this.#sessionName,
 			titleSource: this.#titleSource,
 			titleUpdatedAt: this.#titleUpdatedAt,
@@ -2343,6 +2354,7 @@ export class SessionManager {
 		// A completed moveTo drops the stash, so a rollback restores it here.
 		this.#taskSiblingCandidate = snapshot.taskSiblingCandidate;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
+		this.#artifactEpoch = snapshot.artifactEpoch;
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
 
@@ -2474,7 +2486,13 @@ export class SessionManager {
 			this.#fallbackRuntimeOnly = false;
 		}
 
+		const previousSessionId = this.#sessionId;
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		if (previousSessionId !== this.#sessionId || this.#artifactEpoch <= 0) {
+			this.#artifactEpoch = activateRetainedSessionArtifacts(this.#sessionId);
+		} else {
+			this.ensureActiveArtifactEpoch();
+		}
 		this.#expectedDiskSize = sourceSize;
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
@@ -2534,6 +2552,7 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#artifactEpoch = transferRetainedSessionArtifacts(parentSessionId, this.#sessionId);
 		this.#taskSiblingCandidate = undefined;
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#expectedDiskSize = null;
@@ -3250,6 +3269,18 @@ export class SessionManager {
 
 	getSessionId(): string {
 		return this.#sessionId;
+	}
+
+	getArtifactEpoch(): number {
+		return this.#artifactEpoch;
+	}
+
+	ensureActiveArtifactEpoch(): number {
+		if (!this.#sessionId) return 0;
+		if (this.#artifactEpoch <= 0 || isSessionArtifactEpochReleased(this.#sessionId, this.#artifactEpoch)) {
+			this.#artifactEpoch = activateRetainedSessionArtifacts(this.#sessionId);
+		}
+		return this.#artifactEpoch;
 	}
 
 	getSessionFile(): string | undefined {
@@ -4192,6 +4223,8 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 
+		const previousSessionId = this.#sessionId;
+		const previousArtifactEpoch = this.#artifactEpoch;
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
@@ -4209,6 +4242,7 @@ export class SessionManager {
 			this.#sessionFile = undefined;
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = false;
+			this.#artifactEpoch = transferRetainedSessionArtifacts(previousSessionId, newSessionId);
 			return undefined;
 		}
 
@@ -4222,6 +4256,12 @@ export class SessionManager {
 		this.#expectedDiskSize = null;
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
+		if (!sourceSessionFile || options?.copyArtifacts) {
+			this.#artifactEpoch = transferRetainedSessionArtifacts(previousSessionId, newSessionId);
+		} else {
+			this.#artifactEpoch = activateRetainedSessionArtifacts(newSessionId);
+			void releaseRetainedSessionArtifacts(previousSessionId, { epoch: previousArtifactEpoch });
+		}
 		return newSessionFile;
 	}
 

@@ -24,6 +24,7 @@ import {
 	type AsyncJobProcess,
 	type AsyncJobRegisterOptions,
 } from "../../async/job-manager";
+import { cleanupTemporaryLeaseArtifacts } from "../../internal-urls/registry-helpers";
 import { TextTap } from "../../job-widgets/text-tap";
 import type { JobTextSource, JobWidgetBrief, JobWidgetInputs } from "../../job-widgets/types";
 import type { ThreadId } from "../identity";
@@ -262,9 +263,10 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 			const job = manager.getJob(jobId);
 			return job ? toWireSignal(job.abortController.signal) : undefined;
 		},
-		setRetainedArtifactsCleanup: (manager, jobId, cleanup) => {
+		setRetainedArtifactsCleanup: (manager, jobId, artifactsDir, cleanup) => {
 			const job = manager.getJob(jobId);
-			if (job) job.retainedArtifactsCleanup = cleanup;
+			if (!job) return;
+			job.retainedArtifactsCleanup = artifactsDir ? () => cleanupTemporaryLeaseArtifacts(artifactsDir) : cleanup;
 		},
 		widgetView: (manager, jobId) => {
 			const job = manager.getJob(jobId);

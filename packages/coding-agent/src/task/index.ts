@@ -55,7 +55,7 @@ import {
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { sessionResolveContext } from "../internal-urls/context";
+import { resolveToolSessionRootId, sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
@@ -1640,14 +1640,21 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// nothing about the worktree itself: the runner keeps it when captured
 			// changes could not be written, and names that path in the result.
 			const isolated = spawnParams.isolated === true;
-			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
+			const liveRecord = AgentRegistry.global().get(agentId);
+			const parentSessionFile = this.session.getSessionFile();
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
 				isolated,
+				disposed: !isolated && !liveRecord,
 				ircEnabled,
-				resumable: !isolated && isResumable(ref),
-				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+				resumable: !isolated && isResumable(liveRecord),
+				transcriptAvailable: aborted
+					? await hasResolvableTranscript(agentId, {
+							preferredDir: parentSessionFile ? parentSessionFile.slice(0, -".jsonl".length) : undefined,
+							sessionId: resolveToolSessionRootId(this.session),
+						})
+					: true,
 			})}`;
 		};
 		return manager.register(

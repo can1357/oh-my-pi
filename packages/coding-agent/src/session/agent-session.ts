@@ -184,6 +184,7 @@ import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import { releaseRetainedSessionArtifacts } from "../internal-urls/registry-helpers";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
@@ -2169,6 +2170,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
+		this.sessionManager.ensureActiveArtifactEpoch?.();
 		// Only a recorded approval may turn a draft file into an execution reference.
 		for (const entry of this.sessionManager.getBranch().reverse()) {
 			if (entry.type !== "mode_change") continue;
@@ -5882,6 +5884,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return {
 			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 			getSessionId: () => this.sessionManager.getSessionId(),
+			getArtifactEpoch: () => this.sessionManager.getArtifactEpoch(),
 		};
 	}
 
@@ -6947,8 +6950,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// rewrites at their commit guard; hot-path appends drained above are
 		// already durable, and close() (scheduled post-seal) still flushes and
 		// closes the writer.
+		const disposedSessionId = this.sessionManager.getSessionId();
+		const disposedArtifactEpoch = this.sessionManager.getArtifactEpoch?.();
 		this.sessionManager.seal();
 		await this.sessionManager.close();
+		await releaseRetainedSessionArtifacts(disposedSessionId, { epoch: disposedArtifactEpoch });
 
 		// Release retained conversation memory. dispose() is terminal, and every
 		// revival path reopens the transcript from disk (AgentLifecycleManager
@@ -6977,6 +6983,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			void (async () => {
 				await this.agent.waitForIdle();
 				await this.#drainInFlightEventHandlers();
+				await releaseRetainedSessionArtifacts(disposedSessionId, { epoch: disposedArtifactEpoch });
 				this.#releaseRetainedSessionMemory();
 				this.#accountPoolScope?.release();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
@@ -12303,6 +12310,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
+		const previousArtifactEpoch = this.sessionManager.getArtifactEpoch?.();
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -12352,6 +12361,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+			}
+			if (previousSessionId !== this.sessionManager.getSessionId()) {
+				await releaseRetainedSessionArtifacts(previousSessionId, { epoch: previousArtifactEpoch });
 			}
 
 			this.#clearSessionScopedToolState();
@@ -14062,6 +14074,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionManager.getSessionFile();
+		const previousSessionId = this.sessionManager.getSessionId();
+		const previousArtifactEpoch = this.sessionManager.getArtifactEpoch?.();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
@@ -14331,6 +14345,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
+			if (switchingToDifferentSession && previousSessionId !== this.sessionManager.getSessionId()) {
+				await releaseRetainedSessionArtifacts(previousSessionId, { epoch: previousArtifactEpoch });
+			}
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
@@ -14537,6 +14554,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: { copyArtifacts?: boolean; requireIdleFor?: string },
 	): Promise<boolean> {
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
+		const previousArtifactEpoch = this.sessionManager.getArtifactEpoch?.();
 		const requireIdleFor = options?.requireIdleFor;
 		if (requireIdleFor) this.#assertIdleForSnapshot(requireIdleFor);
 		let skipConversationRestore = false;
@@ -14598,6 +14617,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+			}
+			if (!leafId && previousSessionId !== this.sessionManager.getSessionId()) {
+				await releaseRetainedSessionArtifacts(previousSessionId, { epoch: previousArtifactEpoch });
 			}
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();

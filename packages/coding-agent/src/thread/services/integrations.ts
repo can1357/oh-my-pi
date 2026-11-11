@@ -148,14 +148,24 @@ export function bridgeIntegrationOptions(options: ExecutorOptions): ExecutorOpti
 // ─────────────────────────────────────────────────────────────────────────────
 
 type WireLocalProtocolOptions =
-	| { readonly mode: "live"; readonly artifactsDir?: () => string | null; readonly sessionId?: () => string | null }
-	| { readonly mode: "snapshot"; readonly artifactsDir: string | null; readonly sessionId: string | null };
+	| {
+			readonly mode: "live";
+			readonly artifactsDir?: () => string | null;
+			readonly sessionId?: () => string | null;
+			readonly artifactEpoch?: () => number | undefined;
+	  }
+	| {
+			readonly mode: "snapshot";
+			readonly artifactsDir: string | null;
+			readonly sessionId: string | null;
+			readonly artifactEpoch?: number;
+	  };
 
 function isLocalProtocolOptions(value: unknown): value is LocalProtocolOptions {
 	if (typeof value !== "object" || value === null || Object.getPrototypeOf(value) !== Object.prototype) return false;
 	let getters = 0;
 	for (const key in value) {
-		if (key !== "getArtifactsDir" && key !== "getSessionId") return false;
+		if (key !== "getArtifactsDir" && key !== "getSessionId" && key !== "getArtifactEpoch") return false;
 		const getter: unknown = Reflect.get(value, key);
 		if (getter === undefined) continue;
 		if (typeof getter !== "function") return false;
@@ -165,16 +175,22 @@ function isLocalProtocolOptions(value: unknown): value is LocalProtocolOptions {
 }
 
 function encodeLocalProtocolOptions(options: LocalProtocolOptions): WireLocalProtocolOptions {
-	const { getArtifactsDir, getSessionId } = options;
+	const { getArtifactsDir, getSessionId, getArtifactEpoch } = options;
 	if (isMainThread()) {
 		return {
 			mode: "live",
 			artifactsDir: getArtifactsDir && rpcSync(() => getArtifactsDir()),
 			sessionId: getSessionId && rpcSync(() => getSessionId()),
+			artifactEpoch: getArtifactEpoch && rpcSync(() => getArtifactEpoch()),
 		};
 	}
 	// Main never blocks on a worker, so it gets the values current at send time.
-	return { mode: "snapshot", artifactsDir: getArtifactsDir?.() ?? null, sessionId: getSessionId?.() ?? null };
+	return {
+		mode: "snapshot",
+		artifactsDir: getArtifactsDir?.() ?? null,
+		sessionId: getSessionId?.() ?? null,
+		artifactEpoch: getArtifactEpoch?.(),
+	};
 }
 
 function optionalGetter(value: unknown): (() => string | null) | undefined {
@@ -185,16 +201,35 @@ function optionalGetter(value: unknown): (() => string | null) | undefined {
 	};
 }
 
+function optionalEpochGetter(value: unknown): (() => number | undefined) | undefined {
+	if (typeof value !== "function") return undefined;
+	return () => {
+		const result: unknown = value();
+		return typeof result === "number" ? result : undefined;
+	};
+}
+
 function decodeLocalProtocolOptions(data: unknown): LocalProtocolOptions {
 	if (typeof data !== "object" || data === null) throw new Error("local-protocol-options: malformed wire value");
 	const artifactsDir: unknown = Reflect.get(data, "artifactsDir");
 	const sessionId: unknown = Reflect.get(data, "sessionId");
+	const artifactEpoch: unknown = Reflect.get(data, "artifactEpoch");
 	if (Reflect.get(data, "mode") === "live") {
-		return { getArtifactsDir: optionalGetter(artifactsDir), getSessionId: optionalGetter(sessionId) };
+		const getArtifactEpoch = optionalEpochGetter(artifactEpoch);
+		return {
+			getArtifactsDir: optionalGetter(artifactsDir),
+			getSessionId: optionalGetter(sessionId),
+			...(getArtifactEpoch ? { getArtifactEpoch } : {}),
+		};
 	}
 	const dir = typeof artifactsDir === "string" ? artifactsDir : null;
 	const id = typeof sessionId === "string" ? sessionId : null;
-	return { getArtifactsDir: () => dir, getSessionId: () => id };
+	const epoch = typeof artifactEpoch === "number" ? artifactEpoch : undefined;
+	return {
+		getArtifactsDir: () => dir,
+		getSessionId: () => id,
+		...(epoch !== undefined ? { getArtifactEpoch: () => epoch } : {}),
+	};
 }
 
 const localProtocolOptionsCodec: RpcCodec<LocalProtocolOptions> = {

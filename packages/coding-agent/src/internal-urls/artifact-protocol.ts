@@ -14,7 +14,8 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import artifactDoc from "../prompts/internal-urls/artifact.md" with { type: "text" };
-import { artifactsDirsFromRegistry } from "./registry-helpers";
+import { resolveCallerSessionId } from "./context";
+import { artifactsDirsFromRegistry, resolveSessionArtifactOwner } from "./registry-helpers";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -54,9 +55,29 @@ async function scanArtifactIds(dirs: string[]): Promise<string[]> {
 	return [...ids].sort((a, b) => Number(a) - Number(b));
 }
 
-function artifactIdsForCompletion(): Promise<string[]> {
-	const dirs = artifactsDirsFromRegistry();
-	const key = dirs.join("\0");
+function candidateArtifactDirs(context?: ResolveContext): { dirs: string[]; sessionId: string | undefined } {
+	// Artifact ids are per-session counters; in multi-session hosts the same
+	// id exists in several dirs. Pin resolution to the calling session's
+	// artifacts dir first so `artifact://3` means *this* session's #3.
+	const pinnedDir = context?.localProtocolOptions?.getArtifactsDir?.() ?? null;
+	// A seance reads only its own artifacts plus the consulted source's, in
+	// place; its own ids are allocated past the source's, so neither shadows.
+	const seanceDir = context?.session?.seanceSourceArtifactsDir ?? context?.seanceSourceArtifactsDir;
+	const rawSessionId = resolveCallerSessionId(context);
+	const sessionId = rawSessionId ? resolveSessionArtifactOwner(rawSessionId) || undefined : undefined;
+	const dirs = seanceDir ? [] : artifactsDirsFromRegistry(sessionId ? { sessionId } : undefined);
+	if (seanceDir) dirs.push(...(pinnedDir ? [pinnedDir] : []), seanceDir);
+	else if (pinnedDir) {
+		const pinnedIndex = dirs.indexOf(pinnedDir);
+		if (pinnedIndex >= 0) dirs.splice(pinnedIndex, 1);
+		dirs.unshift(pinnedDir);
+	}
+	return { dirs, sessionId };
+}
+
+function artifactIdsForCompletion(context?: ResolveContext): Promise<string[]> {
+	const { dirs, sessionId } = candidateArtifactDirs(context);
+	const key = `\0${sessionId ?? ""}\0${dirs.join("\0")}`;
 	const cached = completionIds.get(key);
 	if (cached) return cached;
 	const ids = scanArtifactIds(dirs);
@@ -93,28 +114,14 @@ class MissingArtifactError extends Error {}
  */
 function callerInMemoryArtifact(id: string, context?: ResolveContext): string | null {
 	if (context?.localProtocolOptions?.getArtifactsDir?.()) return null;
-	if (context?.session?.seanceSourceArtifactsDir) return null;
+	if (context?.session?.seanceSourceArtifactsDir ?? context?.seanceSourceArtifactsDir) return null;
 	return context?.session?.sessionManager?.getArtifactContent?.(id) ?? null;
 }
 
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
 async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
-
-	// Artifact ids are per-session counters; in multi-session hosts the same
-	// id exists in several dirs. Pin resolution to the calling session's
-	// artifacts dir first so `artifact://3` means *this* session's #3.
-	const pinnedDir = context?.localProtocolOptions?.getArtifactsDir?.() ?? null;
-	// A seance reads only its own artifacts plus the consulted source's, in
-	// place; its own ids are allocated past the source's, so neither shadows.
-	const seanceDir = context?.session?.seanceSourceArtifactsDir;
-	const dirs = seanceDir ? [] : artifactsDirsFromRegistry();
-	if (seanceDir) dirs.push(...(pinnedDir ? [pinnedDir] : []), seanceDir);
-	else if (pinnedDir) {
-		const pinnedIndex = dirs.indexOf(pinnedDir);
-		if (pinnedIndex >= 0) dirs.splice(pinnedIndex, 1);
-		dirs.unshift(pinnedDir);
-	}
+	const { dirs } = candidateArtifactDirs(context);
 
 	if (dirs.length === 0) {
 		throw new MissingArtifactError("No session - artifacts unavailable");
@@ -222,7 +229,7 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
-		return (await artifactIdsForCompletion()).map(value => ({ value }));
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
+		return (await artifactIdsForCompletion(context)).map(value => ({ value }));
 	}
 }

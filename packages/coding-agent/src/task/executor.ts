@@ -4542,6 +4542,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
+	const keepAlive = options.keepAlive !== false;
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings)) || 0);
@@ -5025,6 +5026,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					mcpManager,
 					// MCP proxies are minted per build as `mcpTools` in buildSubagentSessionOptions.
 					customTools: options.customTools,
+					rootSessionId: options.localProtocolOptions?.getSessionId?.() ?? undefined,
+					rootSessionEpoch: options.localProtocolOptions?.getArtifactEpoch?.(),
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
 					// Seance isolation overrides every inherited field above in one place.
@@ -5153,7 +5156,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// except under prewalk, whose plan nudge + todo gate require the
 			// subagent to commit its own todo list before the hand-off.
 			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
-			if (sessionFile !== null) {
+			if (keepAlive && sessionFile !== null) {
 				const reviveCapture: WarmReviveCapture = {
 					sessionFile,
 					spec: sessionSpec,
@@ -5293,7 +5296,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// The run's monitor would take a wake turn's answer (a message result's
 			// last report turn, or a `yield`) as the run's result. Only a kept-alive
 			// agent has wake turns left to answer held messages in.
-			if (options.keepAlive !== false) releaseIrcWakes = session.holdIrcWakes();
+			if (keepAlive) releaseIrcWakes = session.holdIrcWakes();
 			const outcome = await driveSessionToResult(session, monitor, task, {
 				solutionSpace: options.solutionSpace,
 				structured,
@@ -5386,7 +5389,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
+				const effectiveKeepAlive = keepAlive && (!preparedSession || readyAt !== undefined);
+				if (effectiveKeepAlive) {
 					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
 				await finalizeSubagentLifecycle({
@@ -5394,7 +5398,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false && (!preparedSession || readyAt !== undefined),
+					keepAlive: effectiveKeepAlive,
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,

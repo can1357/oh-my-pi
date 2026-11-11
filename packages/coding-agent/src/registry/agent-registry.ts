@@ -70,6 +70,12 @@ export interface AgentRef {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Session ID of this agent's own session, when known. */
+	sessionId?: string;
+	/** Session ID of the top-level root session that owns this agent, when known. */
+	rootSessionId?: string;
+	/** Artifact epoch of {@link rootSessionId} at registration, for fork-forwarding alignment. */
+	rootSessionEpoch?: number;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSessionHandle | null;
@@ -117,6 +123,12 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Session ID of this agent's own session, when known. */
+	sessionId?: string;
+	/** Session ID of the top-level root session that owns this agent, when known. */
+	rootSessionId?: string;
+	/** Artifact epoch of {@link rootSessionId} at registration, for fork-forwarding alignment. */
+	rootSessionEpoch?: number;
 	session: AgentSessionHandle | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
@@ -222,6 +234,9 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: input.displayName,
 			kind: input.kind,
 			parentId: input.parentId,
+			sessionId: input.sessionId ?? (input.session?.sessionManager?.getSessionId?.() || undefined),
+			rootSessionId: input.rootSessionId,
+			rootSessionEpoch: input.rootSessionEpoch,
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
@@ -246,7 +261,15 @@ export class AgentRegistry implements AgentRegistryApi {
 	registerIfAvailable(input: RegisterInput, expected: AgentRef | null): AgentRef | undefined {
 		const current = this.#refs.get(input.id);
 		if (expected === null) return current ? undefined : this.register(input);
-		return current === expected && current.status === "parked" && !current.session ? current : undefined;
+		if (current === expected && current.status === "parked" && !current.session) {
+			if (input.sessionId !== undefined) current.sessionId = input.sessionId;
+			if (input.rootSessionId !== undefined) {
+				current.rootSessionId = input.rootSessionId;
+				current.rootSessionEpoch = input.rootSessionEpoch;
+			}
+			return current;
+		}
+		return undefined;
 	}
 
 	/**
@@ -264,6 +287,9 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: current.displayName,
 			kind: current.kind,
 			parentId: current.parentId,
+			sessionId: current.sessionId,
+			rootSessionId: current.rootSessionId,
+			rootSessionEpoch: current.rootSessionEpoch,
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",
@@ -412,6 +438,8 @@ export class AgentRegistry implements AgentRegistryApi {
 		// createAgentSession after an explicit kill.
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = session;
+		const attachedSessionId = session.sessionManager?.getSessionId?.() || undefined;
+		if (attachedSessionId) ref.sessionId = attachedSessionId;
 		if (sessionFile !== undefined) {
 			// A replacement transcript starts a new cumulative-cost identity.
 			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {

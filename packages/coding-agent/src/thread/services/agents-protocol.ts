@@ -4,6 +4,11 @@
  */
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { IrcWaitFilter } from "../../irc/bus";
+import type {
+	ArtifactsDirsOptions,
+	RegisterArtifactsDirOptions,
+	SessionArtifactEpochOptions,
+} from "../../internal-urls/registry-helpers";
 import type { AdoptOptions, AgentReleaseOptions } from "../../registry/agent-lifecycle";
 import type {
 	AgentHistorySummary,
@@ -54,6 +59,16 @@ export type AgentRegistryProtocol = {
 	awaitsBlocksOn: RpcMethod<[agent: string, target: string, sentAt: number], boolean>;
 	/** One forwarding subscription per worker; returns a sync unsubscribe. */
 	awaitsSubscribe: RpcMethod<[listener: () => void], () => void>;
+	registerArtifactsDir: RpcMethod<[dir: string, options?: RegisterArtifactsDirOptions], number>;
+	unregisterArtifactHandle: RpcMethod<[handle: number], void>;
+	unregisterArtifactsDirsUnder: RpcMethod<[rootDir: string], void>;
+	retainTemporaryLease: RpcMethod<
+		[sessionId: string, artifactsDir: string, options?: SessionArtifactEpochOptions],
+		number
+	>;
+	currentSessionArtifactEpoch: RpcMethod<[sessionId: string], number>;
+	resolveSessionArtifactOwner: RpcMethod<[sessionId: string, epoch?: number], string>;
+	artifactsDirsFromRegistry: RpcMethod<[options?: ArtifactsDirsOptions], string[]>;
 };
 
 /** `AgentLifecycleApi` over the link (the persisted reviver factory and teardown stay main-only). */
