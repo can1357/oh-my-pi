@@ -287,11 +287,13 @@ describe("AgentSession.switchSession previous-context build", () => {
 		await target.flush();
 		const targetFile = target.getSessionFile()!;
 		await target.close();
-		const built = (fragment: string) => ({
-			systemPrompt: [fragment],
+		const built = (text: string) => ({
+			systemPrompt: [text],
 			sources: {
-				blocks: [fragment],
-				sources: [{ id: "rules", kind: "instruction-files" as const, label: "rules", fragment }],
+				blocks: [text],
+				sources: [
+					{ id: "rules", kind: "instruction-files" as const, label: "rules", block: 0, start: 0, end: text.length },
+				],
 			},
 		});
 		const initial = built("previous rules");

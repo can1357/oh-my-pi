@@ -158,7 +158,6 @@ describe("context snapshot prompt sources", () => {
 			skills,
 		});
 	const entryTexts = (data: ContextViewData, id: string) => category(data, id).entries.map(entry => entry.text);
-	const notice = "Some prompt sources could not be attributed.";
 	const changedNotice =
 		"The system prompt changed after it was built (e.g. by an extension hook or SDK callback); sources in changed blocks stay in System Prompt.";
 
@@ -240,12 +239,12 @@ describe("context snapshot prompt sources", () => {
 		expect(entryTexts(edited, "system-prompt")[1]).toContain("Edited instruction body");
 	});
 
-	it("shows no notice when a replacement prompt drops every source, and keeps empty blocks listed", async () => {
+	it("keeps a replacement prompt and its empty blocks in System Prompt", async () => {
 		const built = await buildFixturePrompt();
 		const data = buildSessionContextView(
 			sessionWith({ prompt: ["Replacement policy", ""], sources: built.sources, skills }),
 		);
-		expect(data.notices).toEqual([]);
+		expect(data.notices).toEqual([changedNotice]);
 		expect(entryTexts(data, "instruction-files")).toEqual([]);
 		expect(entryTexts(data, "system-prompt")).toEqual(["Replacement policy", ""]);
 	});
@@ -267,48 +266,18 @@ describe("context snapshot prompt sources", () => {
 		expect(entryTexts(data, "system-prompt")[0]).toContain("* fixture — Use <T>");
 	});
 
-	it("notices a source whole-prompt formatting changed after an unclosed fence", async () => {
-		// Inside the earlier file's open fence the table row keeps its padding; formatted alone it is compacted.
+	it("attributes every instruction file when an earlier one leaves a code fence open", async () => {
 		const built = await buildFixturePrompt(undefined, [
 			{ path: "/nonexistent/a.md", content: "```\nunclosed" },
 			{ path: "/nonexistent/b.md", content: "| a   | b |" },
 		]);
-		expect(built.systemPrompt.join("\n")).toContain("| a   | b |");
+		// The open fence stays inside its own file: the next file is still formatted.
+		expect(built.systemPrompt.join("\n")).not.toContain("| a   | b |");
 		const data = buildSessionContextView(sessionWith({ prompt: built.systemPrompt, sources: built.sources, skills }));
-		expect(data.notices).toEqual([notice]);
-		expect(category(data, "instruction-files").entries.map(entry => entry.label)).toEqual(["/nonexistent/a.md"]);
-	});
-
-	it("leaves overlapping sources and text reserved by repeated sources in System Prompt", () => {
-		const blocks = ["alpha beta gamma delta", "one two one"];
-		const source = (id: string, fragment: string) => ({
-			id,
-			kind: id.startsWith("skill") ? ("skills" as const) : ("instruction-files" as const),
-			label: id,
-			fragment,
-		});
-		const data = buildSessionContextView(
-			sessionWith({
-				prompt: blocks,
-				sources: {
-					blocks,
-					sources: [
-						source("file-overlap", "alpha beta"),
-						source("skill-overlap", "beta gamma"),
-						source("skill-disjoint", "delta"),
-						// Built in two places: never attributed, but its locations stay reserved.
-						source("skill-repeated", "one"),
-						source("file-reserved", "two one"),
-					],
-				},
-			}),
-		);
-		expect(data.notices).toEqual([notice]);
-		expect(entryTexts(data, "skills")).toEqual(["delta"]);
-		expect(entryTexts(data, "instruction-files")).toEqual([]);
-		expect(entryTexts(data, "system-prompt")).toEqual([
-			"alpha beta gamma [Shown in Skills: skill-disjoint]",
-			"one two one",
+		expect(data.notices).toEqual([]);
+		expect(category(data, "instruction-files").entries.map(entry => entry.label)).toEqual([
+			"/nonexistent/a.md",
+			"/nonexistent/b.md",
 		]);
 	});
 });

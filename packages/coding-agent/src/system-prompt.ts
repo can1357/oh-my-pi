@@ -624,14 +624,17 @@ export interface BuildSystemPromptOptions {
 	subagent?: boolean;
 }
 
-/** A context file or skill fragment rendered by one build. */
+/** A context file or skill rendered by one build, located by construction in a built block. */
 export interface SystemPromptSource {
 	readonly id: string;
 	readonly kind: "instruction-files" | "skills";
 	readonly label: string;
 	readonly path?: string;
-	/** Rendered prompt text of this source, in the post-render form the built blocks hold. */
-	readonly fragment: string;
+	/** Index of the built block holding this source. */
+	readonly block: number;
+	/** UTF-16 range of the source in that block. */
+	readonly start: number;
+	readonly end: number;
 }
 
 /** Sources paired with the blocks they were built into; valid only while those blocks are unchanged. */
@@ -662,17 +665,36 @@ const renderContextFile = prompt.compile(contextFileTemplate.trimEnd());
 const renderContextSkill = prompt.compile(contextSkillTemplate.trimEnd());
 const renderCustomContextSkill = prompt.compile(customContextSkillTemplate.trimEnd());
 
-function collectPromptSources(
-	blocks: readonly string[],
-	candidates: readonly SystemPromptSource[],
-): SystemPromptSources {
-	const sources: SystemPromptSource[] = [];
-	for (const candidate of candidates) {
-		// The rendered template applies post-render formatting to the whole prompt; match that form.
-		const fragment = normalizePromptBlock(candidate.fragment);
-		if (fragment) sources.push({ ...candidate, fragment });
-	}
-	return { blocks: blocks.slice(), sources };
+type SourceIdentity = Pick<SystemPromptSource, "id" | "kind" | "label" | "path">;
+
+/** Drops the leading whitespace `String.trim` removes, shifting ranges with it. */
+function trimSlotted(rendered: prompt.SlottedRender): prompt.SlottedRender {
+	const text = rendered.text.trim();
+	const lead = rendered.text.length - rendered.text.trimStart().length;
+	if (lead === 0) return { text, ranges: rendered.ranges };
+	return {
+		text,
+		ranges: rendered.ranges.map(ranges =>
+			ranges.filter(range => range.start >= lead).map(range => ({ start: range.start - lead, end: range.end - lead })),
+		),
+	};
+}
+
+/** One source per slot occurrence in `rendered`, which was built as block `block`. */
+function slotSources(
+	rendered: prompt.SlottedRender,
+	block: number,
+	identities: readonly SourceIdentity[],
+): SystemPromptSource[] {
+	return rendered.ranges.flatMap((ranges, index) =>
+		ranges.map(({ start, end }, occurrence) => ({
+			...identities[index]!,
+			id: occurrence === 0 ? identities[index]!.id : `${identities[index]!.id}-${occurrence + 1}`,
+			block,
+			start,
+			end,
+		})),
+	);
 }
 
 /**
@@ -1032,15 +1054,34 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const renderedContextFiles = contextFiles.map(file => ({ ...file, fragment: renderContextFile(file) }));
+	// Each context file and skill is a slot: its wrapper is rendered and formatted on its own, so the
+	// built blocks record where it landed.
+	const renderedContextFiles = contextFiles.map(file => ({
+		...file,
+		fragment: new prompt.PromptSlot(renderContextFile(file)),
+	}));
 	// Each outer template renders skills through its own fragment wrapper; select them together.
 	const { template: selectedTemplate, renderSkill } = resolvedCustomPrompt
 		? { template: customSystemPromptTemplate, renderSkill: renderCustomContextSkill }
 		: { template: resolvedSystemPromptTemplate ?? systemPromptTemplate, renderSkill: renderContextSkill };
 	const renderedSkills = filteredSkills.map(skill => ({
 		...skill,
-		fragment: renderSkill({ name: skill.name, description: skill.description }),
+		fragment: new prompt.PromptSlot(renderSkill({ name: skill.name, description: skill.description })),
 	}));
+	const slots = [...renderedContextFiles, ...renderedSkills].map(source => source.fragment);
+	const sourceIdentities: SourceIdentity[] = [
+		...renderedContextFiles.map((file, index) => ({
+			id: `instruction-${index}`,
+			kind: "instruction-files" as const,
+			label: file.path,
+		})),
+		...renderedSkills.map((skill, index) => ({
+			id: `skill-${index}`,
+			kind: "skills" as const,
+			label: skill.name,
+			path: skill.filePath,
+		})),
+	];
 	const environment = getEnvironmentInfo();
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
@@ -1092,9 +1133,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		writeTransportOnly,
 		subagent,
 	};
-	let rendered: string;
+	let rendered: prompt.SlottedRender;
 	try {
-		rendered = prompt.render(selectedTemplate, data);
+		rendered = prompt.renderWithSlots(selectedTemplate, data, slots);
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
 		if (!hasDiscoveredTemplate) {
@@ -1104,9 +1145,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			error: String(error),
 		});
 		resolvedSystemPromptTemplate = undefined;
-		rendered = prompt.render(systemPromptTemplate, data);
+		rendered = prompt.renderWithSlots(systemPromptTemplate, data, slots);
 	}
-	const systemPrompt = [rendered];
+	const systemPrompt = [rendered.text];
+	const sources = slotSources(rendered, 0, sourceIdentities);
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);
@@ -1116,34 +1158,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// `<project-context>` block after every static block, so sessions in
 	// different directories share the static prefix and the Anthropic head
 	// cache breakpoint lands right before this block.
-	const projectPrompt = prompt
-		.render(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt })
-		.trim();
-	if (projectPrompt) {
-		systemPrompt.push(projectPrompt);
+	const projectPrompt = trimSlotted(
+		prompt.renderWithSlots(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt }, slots),
+	);
+	if (projectPrompt.text) {
+		sources.push(...slotSources(projectPrompt, systemPrompt.length, sourceIdentities));
+		systemPrompt.push(projectPrompt.text);
 	}
 
 	// Claim delivery only when the rendered block 0 actually carries the xd://
 	// section, so a template that references {{xdevDocs}} keeps mount-notice
 	// dedupe while one that omits it stays honest.
 	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 && rendered.includes("xd://")
+		!resolvedCustomPrompt && xdevTools.length > 0 && rendered.text.includes("xd://")
 			? xdevTools.map(mounted => mounted.name)
 			: undefined;
-	const sources = collectPromptSources(systemPrompt, [
-		...renderedContextFiles.map((file, index) => ({
-			id: `instruction-${index}`,
-			kind: "instruction-files" as const,
-			label: file.path,
-			fragment: file.fragment,
-		})),
-		...renderedSkills.map((skill, index) => ({
-			id: `skill-${index}`,
-			kind: "skills" as const,
-			label: skill.name,
-			path: skill.filePath,
-			fragment: skill.fragment,
-		})),
-	]);
-	return { systemPrompt, xdevCatalogNames, sources };
+	return { systemPrompt, xdevCatalogNames, sources: { blocks: systemPrompt.slice(), sources } };
 }

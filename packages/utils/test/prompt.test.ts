@@ -103,3 +103,32 @@ describe("helpers: join", () => {
 		expect(prompt.render("{{join files}}", { files: "not-an-array" })).toBe("");
 	});
 });
+
+describe("renderWithSlots", () => {
+	const template = "<list>\n{{#each items}}\n{{slot}}\n{{/each}}\n</list>\n\n\n| x  |  y |";
+
+	it("matches render and reports where each whole-line slot landed", () => {
+		const slots = [new prompt.PromptSlot("- a:  one   "), new prompt.PromptSlot("<b>\n\n\nbody\n</b>")];
+		const items = slots.map(slot => ({ slot }));
+		const result = prompt.renderWithSlots(template, { items }, slots);
+		expect(result.text).toBe(
+			prompt.render(template, { items: [{ slot: "- a:  one   " }, { slot: "<b>\n\n\nbody\n</b>" }] }),
+		);
+		expect(result.ranges.map(ranges => ranges.map(({ start, end }) => result.text.slice(start, end)))).toEqual([
+			["- a:  one"],
+			["<b>\nbody\n</b>"],
+		]);
+	});
+
+	it("keeps a code fence a slot leaves open out of the text after it", () => {
+		const slots = [new prompt.PromptSlot("```\nopen")];
+		const result = prompt.renderWithSlots(template, { items: [{ slot: slots[0] }] }, slots);
+		expect(result.text).toBe("<list>\n```\nopen\n</list>\n|x|y|");
+	});
+
+	it("formats a slot inside a line with its surroundings and leaves it untracked", () => {
+		const slots = [new prompt.PromptSlot("inline   ")];
+		const result = prompt.renderWithSlots("before {{slot}}after\n\n\nend", { slot: slots[0] }, slots);
+		expect(result).toEqual({ text: "before inline   after\nend", ranges: [[]] });
+	});
+});

@@ -546,3 +546,86 @@ export function render(template: string, context: TemplateContext = {}): string 
 	const rendered = compiled(context ?? {});
 	return format(rendered, { renderPhase: "post-render" });
 }
+
+let nextSlotId = 0;
+const SLOT_MARKER = /\uE000[0-9a-z]+\uE001/g;
+
+/**
+ * Text inserted into a template by {@link renderWithSlots}, which reports where it lands. A slot that
+ * fills a whole template line is formatted on its own (a code fence it leaves open never reaches the
+ * surrounding prompt); a slot anywhere else is formatted with its surroundings and not tracked.
+ */
+export class PromptSlot {
+	readonly #marker = `\uE000${(nextSlotId++).toString(36)}\uE001`;
+	/** Post-render form of {@link text}, as a whole-line slot appears in the output. */
+	readonly formatted: string;
+
+	constructor(readonly text: string) {
+		this.formatted = format(text, { renderPhase: "post-render" });
+	}
+
+	/** Placeholder the template interpolates; only {@link renderWithSlots} resolves it. */
+	toString(): string {
+		return this.#marker;
+	}
+}
+
+/** UTF-16 range of one slot occurrence in rendered text. */
+export interface SlotRange {
+	readonly start: number;
+	readonly end: number;
+}
+
+export interface SlottedRender {
+	readonly text: string;
+	/** Occurrences of `slots[i]`, in output order; empty when the template never emits it on its own line. */
+	readonly ranges: readonly (readonly SlotRange[])[];
+}
+
+/**
+ * {@link render} that composes `slots` into the formatted template instead of formatting them with it,
+ * so each whole-line slot's range is known by construction. Every slot interpolated by the template
+ * must be listed in `slots`.
+ */
+export function renderWithSlots(
+	template: string,
+	context: TemplateContext,
+	slots: readonly PromptSlot[],
+): SlottedRender {
+	const byMarker = new Map(slots.map((slot, index) => [String(slot), index]));
+	const slotAt = (marker: string): number => {
+		const index = byMarker.get(marker);
+		if (index === undefined) throw new Error("renderWithSlots: template emitted an unlisted slot");
+		return index;
+	};
+	// A whole-line slot stays one opaque line while the template text is formatted; any other slot
+	// is inlined first so it formats with its surroundings, as `render` would.
+	const skeleton = compile(template)(context ?? {})
+		.split("\n")
+		.map(line =>
+			byMarker.has(line) && slots[slotAt(line)]!.formatted
+				? line
+				: line.replace(SLOT_MARKER, marker => slots[slotAt(marker)]!.text),
+		)
+		.join("\n");
+	const ranges: SlotRange[][] = slots.map(() => []);
+	const parts: string[] = [];
+	let length = 0;
+	for (const line of format(skeleton, { renderPhase: "post-render" }).split("\n")) {
+		if (parts.length > 0) {
+			parts.push("\n");
+			length += 1;
+		}
+		const index = byMarker.get(line);
+		if (index === undefined) {
+			parts.push(line);
+			length += line.length;
+			continue;
+		}
+		const { formatted } = slots[index]!;
+		ranges[index]!.push({ start: length, end: length + formatted.length });
+		parts.push(formatted);
+		length += formatted.length;
+	}
+	return { text: parts.join(""), ranges };
+}
