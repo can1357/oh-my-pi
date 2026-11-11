@@ -362,6 +362,14 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 	}
 }
 
+/** Only blank strings and arrays containing nothing but blank strings are ordinary task placeholders. */
+export function isBlankModelPlaceholder(value: unknown): boolean {
+	return (
+		(typeof value === "string" && value.trim() === "") ||
+		(Array.isArray(value) && value.every(entry => typeof entry === "string" && entry.trim() === ""))
+	);
+}
+
 /** The per-call gate's refusal for `invocationKind` calls, or `undefined` when `task.perCallModel` allows them. */
 function perCallModelDisabledReason(settings: Settings, invocationKind: "task" | "eval"): string | undefined {
 	if (perCallModelEnabled(settings, invocationKind)) return undefined;
@@ -595,8 +603,13 @@ export async function resolveEffectiveSubagentPolicy(
 	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
 	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
 	const hasPreparedSeance = preparedSeance !== undefined;
-	// A `seance` name that resolved to anything but the bundled agent is an ordinary agent: its `model` is per-call.
-	const perCallSelector: unknown = request.perCallModel ?? (isBundledSeance(agent) ? undefined : request.seanceModel);
+	// Interpret the original seance value using this same resolved agent that dispatch will execute.
+	// Custom agents get ordinary task placeholders; bundled seance retains every explicit override.
+	const perCallSelector: unknown =
+		request.perCallModel ??
+		(isBundledSeance(agent) || (request.invocationKind === "task" && isBlankModelPlaceholder(request.seanceModel))
+			? undefined
+			: request.seanceModel);
 	const parentActiveModel = request.session.getActiveModel?.();
 	const userTaggedEffort =
 		sessionAgents.includes(agent) &&

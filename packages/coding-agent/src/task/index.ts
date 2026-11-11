@@ -72,10 +72,10 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
-import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
+import { copyTaskFields, repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
 	invalidModelSelectorReason,
-	normalizeModelSelector,
+	isBlankModelPlaceholder,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -249,11 +249,33 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * `schema` remains an eval-only alias and is rejected.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
-	if (Object.hasOwn(params, "schema")) {
+	// Presence here means "the caller named this field", so every test reads the value rather than
+	// `Object.hasOwn`: an own key holding `undefined` names nothing, and internal callers do produce
+	// them — `repairTaskParams` and `copyTaskFields` both materialize `context`/`tasks` that way, so a
+	// `hasOwn` test refuses a call that asked for nothing. `guardBatchAgent` in ./types tests `agent`
+	// the same way for the same reason, before undeclared-key deletion.
+	//
+	// Two presence tests are deliberately NOT value tests. `#resultParams` reads
+	// `Object.hasOwn(params, "outputSchema")` because `resolveSchema` in ./structured-subagent tests
+	// presence the same way and the carrying chain (`resolveSpawnItems`, `spawnParamsFor`) uses `in`:
+	// an own `outputSchema: undefined` is how a caller says "no schema, and ignore the agent's own",
+	// and converting it would desynchronise the two and hand that agent's schema back to a caller
+	// that said none. `copyTaskFields`' is on its destination and controls preservation, not refusal.
+	// `schema` is not declared on `TaskParams`; it is the stale alias a caller may still send.
+	if ((params as { schema?: unknown }).schema !== undefined) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}
-	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "agent")) {
+	if (batchEnabled && params.tasks !== undefined && params.agent !== undefined) {
 		return "Top-level `agent` is not part of the batch shape. Set `tasks[].agent` instead.";
+	}
+	// Every other flat-form field sent at a batch call's top level is refused with its own message —
+	// `agent` above, `task`/`taskFile` in `validateSpawnParams`, `model`/`sourceSession` in the seance
+	// checks. `isolated` has to join them rather than be quietly ignored: it is the field that decides
+	// whether a child writes into the user's live checkout, and a call that asked for isolation and
+	// silently did not get it is worse than one that was told where to put the flag. Refusing also
+	// keeps the speculative launcher and dispatch in agreement, since both refuse.
+	if (batchEnabled && params.tasks !== undefined && params.isolated !== undefined) {
+		return "Top-level `isolated` is not part of the batch shape. Set `tasks[].isolated` instead.";
 	}
 	if (!batchEnabled) {
 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
@@ -307,6 +329,27 @@ function validateTaskInput(item: TaskItem | undefined, label: string, fileEnable
 	return undefined;
 }
 
+/**
+ * Reject a `name` or `agent` that is not a string, before anything trims or interpolates one.
+ *
+ * That is safe to skip for a validated call, but `lenientArgValidation` means a call whose wire
+ * schema fails arrives raw, with nothing coerced — and `.trim()` on a `name: 123` threw a
+ * `TypeError` out of the tool instead of reporting the shape. Both call shapes run this: the batch
+ * items reach it per item, the flat form as the whole call, because the throw is reachable from
+ * either and guarding only the shape that was reported would leave the other.
+ */
+function invalidScalarReason(item: TaskItem | undefined, label: string): string | undefined {
+	for (const field of ["name", "agent"] as const) {
+		const value: unknown = item?.[field];
+		if (value !== undefined && typeof value !== "string") {
+			// Truncated like every other place this file interpolates caller data: the value can be a
+			// whole array or object, and this string goes into the result the model reads.
+			return `${label} has an invalid \`${field}\`: expected a string, got ${truncateForPrompt(Bun.inspect(value))}.`;
+		}
+	}
+	return undefined;
+}
+
 function validateSpawnParams(
 	params: TaskParams,
 	batchEnabled: boolean,
@@ -330,7 +373,9 @@ function validateSpawnParams(
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
-			const label = `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`;
+			const label = `Task ${i + 1}${typeof item?.name === "string" && item.name ? ` (\`${item.name}\`)` : ""}`;
+			const scalarError = invalidScalarReason(item, label);
+			if (scalarError) return scalarError;
 			const inputError = validateTaskInput(item, label, fileEnabled);
 			if (inputError) return inputError;
 			const effortError = validateEffort(item.effort, label);
@@ -340,6 +385,7 @@ function validateSpawnParams(
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
+			// Non-string names were rejected above, so this trim is safe even on the lenient raw path.
 			const name = item.name?.trim();
 			if (!name) continue;
 			const key = name.toLowerCase();
@@ -358,6 +404,7 @@ function validateSpawnParams(
 		return "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.";
 	}
 	return (
+		invalidScalarReason(params, "The call") ??
 		validateTaskInput(params, "The call", fileEnabled) ??
 		validateEffort(params.effort, "The call") ??
 		validateModel(params, "The call", defaultAgent, settings)
@@ -416,10 +463,27 @@ interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
 }
 
+/**
+ * The `taskFile` values a call submits, for binding and for the restriction check that reads what
+ * binding captured.
+ *
+ * A blank one names no file. It is the placeholder a model fills a declared field with, dispatch
+ * drops it, and `validateTaskInput` refuses it on its own ("must be an absolute path or local://
+ * URL"), so no run ever reads it. Resolving it anyway lands on the process working directory, and
+ * the capture that follows is what the approval gate then treats as a path this call touches — a
+ * restricted folder covering that directory would stop a call that reads nothing there.
+ *
+ * Dropping them here rather than at the restriction check is what makes the two agree: the
+ * binding stores the targets it captured, and the restriction check returns those stored targets
+ * whenever a binding exists. A filter applied only to the check's own argument is bypassed the
+ * moment the wrapper binds, which is immediately before it resolves approval.
+ */
 function submittedTaskFiles(args: unknown): string[] {
 	if (!isRecord(args)) return [];
 	const items = Array.isArray(args.tasks) ? args.tasks : [args];
-	return items.flatMap(item => (isRecord(item) && typeof item.taskFile === "string" ? [item.taskFile] : []));
+	return items.flatMap(item =>
+		isRecord(item) && typeof item.taskFile === "string" && item.taskFile.trim() !== "" ? [item.taskFile] : [],
+	);
 }
 
 /** The filesystem path a `taskFile` names; approval and dispatch share it so both see the same file. */
@@ -461,7 +525,10 @@ async function resolveTaskFile(owner: object, session: ToolSession, item: TaskIt
 				throw new Error("contains invalid UTF-8");
 			}
 			if (!task.trim()) throw new Error("must contain non-empty task instructions");
-			return { ...item, task, taskFileSha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex") };
+			return copyTaskFields(item, {
+				task,
+				taskFileSha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+			});
 		} finally {
 			await file.close();
 		}
@@ -498,6 +565,11 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
+		// Flat-form only in practice: `validateShapeParams` refuses a top-level `isolated` on a batch
+		// call, so a batch spawn never reads it here. That refusal is also what keeps the speculative
+		// launcher and dispatch in agreement — the launcher plans each streamed prefix from a call it
+		// rebuilds as `{ context, tasks }`, which carries no top-level keys at all, so a value read
+		// from one here would be a value the launcher's plan could never have.
 		spawn.isolated = params.isolated;
 	}
 	return spawn;
@@ -510,35 +582,102 @@ interface SpawnPlan {
 	spawns: TaskParams[];
 }
 
-/** A present but blank `model` (see {@link normalizeModelSelector}): "use the agent's routing", not a selector. */
-function isEmptyModelPlaceholder(model: unknown): boolean {
-	return model !== undefined && normalizeModelSelector(model) === undefined;
+/**
+ * Optional fields whose empty strings are placeholders on ordinary task calls. Seance's model
+ * override is validated separately and must not fall back to the saved model when explicitly empty.
+ */
+const BLANKABLE_KEYS = ["model", "sourceSession", "outputSchema"] as const;
+
+/** A field this pass may drop, including the conditional `task`/`taskFile` pair. */
+type BlankableKey = (typeof BLANKABLE_KEYS)[number] | "task" | "taskFile";
+
+/** An empty or whitespace-only string: the shape a model sends for a field it has nothing to put in. */
+function isBlankString(value: unknown): boolean {
+	return typeof value === "string" && value.trim() === "";
+}
+/**
+ * The keys whose array form may be filler. A key qualifies only if **both** hold:
+ *
+ * 1. A *populated* array there reaches a refusal that says what to send instead, so dropping the
+ *    empty form cannot be mistaken for accepting a malformed one.
+ * 2. Its declared wire type admits an array, so the raw streamed arguments and the validated ones
+ *    carry the same value and the speculative launcher plans what dispatch plans.
+ *
+ * Only `model` satisfies both. `invalidModelSelectorReason` gives it (1), and ./types declares it
+ * `string | string[]` on every variant, which gives it (2).
+ *
+ * `sourceSession` was a member and had to be removed: it satisfies (1) — the seance checks refuse a
+ * populated array — but ./seance declares it `string` alone, so validation rewrites an array to its
+ * JSON text. The launcher, planning from the raw arguments, dropped `sourceSession: []` and started
+ * the child; dispatch kept `"[]"` and refused the whole call, so the run was started, did work, and
+ * was discarded. Both review arms reproduced that independently. The blank-*string* arm still
+ * covers it, which is the form a model actually sends for a field the schema offered it.
+ *
+ * `outputSchema` fails (1): its declared type admits any object, an array is one, and nothing
+ * downstream shape-checks it (`resolveSchema` takes it by presence), so a populated array is
+ * forwarded rather than refused. Treating an array as filler there dropped a caller's
+ * `outputSchema: []` and handed back the agent's own schema.
+ *
+ * `task` and `taskFile` satisfy (1) — `validateTaskInput` answers a populated array with the message
+ * for the field it is — and fail (2) wherever they exist at all. `task` is declared `string` in
+ * every variant; `taskFile` is declared `string` only where `task.file` is on, and elsewhere the
+ * key is deleted outright. Either way an array never reaches dispatch as an array: validation
+ * rewrites it to its JSON text, or the key is gone. So they are excluded for the same reason as
+ * `sourceSession`, and more broadly, since `sourceSession` fails (2) only where it is declared and
+ * these two fail it in every configuration that declares them at all. The criterion **forbids**
+ * their membership. Adding `taskFile` reproduces the
+ * started-then-discarded run, measured; adding `task` does not reach the executor — without a real
+ * `taskFile` it is not among the conditional keys, and with one the launch refuses immediately
+ * because `taskFile` is present — so the violation of (2) is the reason to exclude it, not an
+ * observed start. An earlier revision of this comment claimed both were measured to start.
+ */
+const ARRAY_BLANKABLE_KEYS: Partial<Record<BlankableKey, true>> = { model: true };
+
+/** A string that names something: the other half of a `task`/`taskFile` pair that was really chosen. */
+function isRealString(value: unknown): boolean {
+	return typeof value === "string" && value.trim() !== "";
 }
 
 /**
- * Drop empty `model` placeholders from the call and its batch items so they
- * route like an omitted model. Copy-on-write: the submitted arguments are
- * never mutated, and the same reference is returned when nothing changed.
+ * Drop one of those fields when it holds an empty or whitespace-only string: it means the field
+ * was left out. Models that fill every declared property send these placeholders, and the
+ * per-call gate, the seance checks and the output-schema preflight would otherwise refuse a call
+ * that names nothing at all.
+ *
+ * `task` and `taskFile` are the conditional pair. That is what the defect is: a model that chose
+ * one of the two fills the other in with nothing, and the "exactly one of" rule then sees both as
+ * provided. So each is dropped beside a real value of the other — and, when both are blank, only
+ * `taskFile` is, because an item that names no work at all must keep its own refusal ("needs
+ * non-empty `task` instructions") rather than be told to choose between two fields it already
+ * chose between. A blank `taskFile` alone is untouched and keeps the absolute-path refusal.
+ *
+ * `null` is left alone: an `outputSchema: null` is a real signal — presence, not truthiness, makes
+ * the caller's schema win, so it is how an internal caller says "no schema, and ignore the agent's
+ * own". An array that names nothing is dropped only for a per-call `model`, not a bundled seance
+ * override; see {@link ARRAY_BLANKABLE_KEYS} for the conditions on array placeholders.
+ *
+ * The copy keeps every contract-bearing field however the caller stores it. A spread takes own
+ * enumerable properties only, and an internal caller bypassing the wire schema may hand us an
+ * object whose real `model` lives on a class prototype or a non-enumerable own property: one
+ * blank sibling would then delete that selector on the way to the gate, and the spawn would run
+ * on the agent's configured model while the approval prompt still named the requested one.
  */
-function normalizeTaskModelPlaceholders(params: TaskParams): TaskParams {
-	const originalTasks = params.tasks;
-	let normalizedTasks: TaskItem[] | undefined;
-	if (Array.isArray(originalTasks)) {
-		for (let i = 0; i < originalTasks.length; i++) {
-			const item = originalTasks[i];
-			if (!isRecord(item) || !isEmptyModelPlaceholder(item.model)) continue;
-			normalizedTasks ??= originalTasks.slice();
-			const copy = { ...item };
-			delete copy.model;
-			normalizedTasks[i] = copy;
-		}
+function withoutBlankFields<T extends TaskItem | TaskParams>(item: T, defaultAgent: string): T {
+	const agent = typeof item.agent === "string" ? item.agent.trim() || defaultAgent : defaultAgent;
+	const keys: BlankableKey[] = [...BLANKABLE_KEYS];
+	if (isRealString(item.taskFile)) keys.push("task");
+	if (isRealString(item.task) || isBlankString(item.task)) keys.push("taskFile");
+	let out = item;
+	for (const key of keys) {
+		// Resolve a seance model's meaning only after dispatch discovers the actual agent definition.
+		if (key === "model" && agent === SEANCE_AGENT_NAME) continue;
+		const blank =
+			isBlankString(item[key]) || (ARRAY_BLANKABLE_KEYS[key] === true && isBlankModelPlaceholder(item[key]));
+		if (!blank) continue;
+		if (out === item) out = copyTaskFields(item, {});
+		delete out[key];
 	}
-	const emptyRootModel = isEmptyModelPlaceholder(params.model);
-	if (!emptyRootModel && !normalizedTasks) return params;
-	const copy = { ...params };
-	if (emptyRootModel) delete copy.model;
-	if (normalizedTasks) copy.tasks = normalizedTasks;
-	return copy;
+	return out;
 }
 
 /**
@@ -554,7 +693,14 @@ function planSpawns(
 	seanceAdvertised: boolean,
 	settings: Settings,
 ): SpawnPlan | string {
-	const params = normalizeTaskModelPlaceholders(repairTaskParams(rawParams as TaskParams));
+	const repaired = repairTaskParams(rawParams as TaskParams);
+	// Only object-shaped calls and items: anything else is left for the shape checks to reject.
+	const unblanked = isRecord(repaired) ? withoutBlankFields(repaired, defaultAgent) : repaired;
+	const params = Array.isArray(unblanked.tasks)
+		? copyTaskFields(unblanked, {
+				tasks: unblanked.tasks.map(task => (isRecord(task) ? withoutBlankFields(task, defaultAgent) : task)),
+			})
+		: unblanked;
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
@@ -775,10 +921,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		bindTaskFileApproval(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
 	};
 	// Restricted folders cover task files, but approvals are never remembered per file: the grant would
-	// cover whatever the path holds later, and inline items in the same batch.
-	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
-		return taskFileRestrictionPaths(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
-	};
+	// cover whatever the path holds later, and inline items in the same batch. Both this and the
+	// binding above take the same list, so the blanks `submittedTaskFiles` drops are absent from the
+	// captured targets this returns once a binding exists.
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined =>
+		taskFileRestrictionPaths(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
 		const lines: string[] = [];
@@ -795,13 +942,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.name === "string" && params.name.trim()) {
 			lines.push(`Name: ${truncateForPrompt(params.name)}`);
 		}
-		if (typeof params.model === "string") {
+		if (typeof params.model === "string" && params.model.trim()) {
 			lines.push(`Model: ${truncateForPrompt(params.model)}`);
 		}
-		if (typeof params.task === "string") {
+		if (typeof params.task === "string" && params.task.trim()) {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
-		if (typeof params.taskFile === "string") {
+		if (typeof params.taskFile === "string" && params.taskFile.trim()) {
 			lines.push(`Task file: ${formatTaskFile(params.taskFile)}`);
 		}
 		if (typeof params.context === "string" && params.context.trim()) {
@@ -831,15 +978,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					lines.push(`Name: ${truncateForPrompt(firstTask.name)}`);
 				}
 				lines.push(`Agent: ${truncateForPrompt(effectiveAgent(firstTask))}`);
-				if ("task" in firstTask && typeof firstTask.task === "string") {
+				if ("task" in firstTask && typeof firstTask.task === "string" && firstTask.task.trim()) {
 					lines.push(`Task:\n${truncateForPrompt(firstTask.task)}`);
 				}
 			}
 			for (const [index, item] of tasks.entries()) {
-				if (isRecord(item) && typeof item.model === "string") {
+				if (isRecord(item) && typeof item.model === "string" && item.model.trim()) {
 					lines.push(`Task ${index + 1} model: ${truncateForPrompt(item.model)}`);
 				}
-				if (isRecord(item) && typeof item.taskFile === "string") {
+				if (isRecord(item) && typeof item.taskFile === "string" && item.taskFile.trim()) {
 					lines.push(`Task ${index + 1} file: ${formatTaskFile(item.taskFile)}`);
 				}
 			}
@@ -886,6 +1033,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
+			// Returning `undefined` here means "this call is invalid": at finalize the launch session
+			// discards every run it already started, and dispatch then runs them all again — including
+			// an earlier, ordinary item that had already started and done work. A call carrying a
+			// placeholder is valid, so it must never take that branch, and removing the bail that made
+			// it is the whole of what this change does to speculation.
+			//
+			// This plans from the raw streamed arguments, as it does on `main`. Normalizing them to what
+			// dispatch will see was tried and reverted: validation is whole-call, so validating a prefix
+			// that is schema-valid on its own disagrees with a finished call whose lenient path fell
+			// back to raw, which cancelled an already-adopted child. That is a route this change would
+			// have *created*; the ones that remain are reachable with the launcher planning from raw,
+			// as it does here, and the PR body names them as the pre-existing class they belong to.
 			const plan = planSpawns(
 				args,
 				this.#isBatchEnabled(),

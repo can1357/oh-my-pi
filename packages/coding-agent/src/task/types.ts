@@ -74,6 +74,10 @@ function keepGatedItemKeys<T, I>(item: FluentType<T, I>): FluentType<unknown, I>
 	});
 }
 
+// The four schemas below are the default configuration's cached fast path, and it declares no
+// per-call `model`: `createTaskSchema` adds one only while `task.perCallModel` allows task calls
+// or seance advertises its selector list, so declaring one here would hand the fast path a field
+// the gated path hides. An undeclared `model` still reaches preflight and is refused there.
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
@@ -118,10 +122,12 @@ const taskSchemaNoIsolation = type({
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
-	// Inspect the input before undeclared-key deletion can erase the requested agent.
+	// Inspect the input before undeclared-key deletion can erase the requested agent. Presence is the
+	// value, not the key: an own `agent` holding `undefined` names no agent, and refusing it would
+	// reject a call that asked for nothing — `validateShapeParams` tests the same field the same way.
 	return schema.in
 		.narrow((params, ctx) => {
-			if (params !== null && typeof params === "object" && Object.hasOwn(params, "agent")) {
+			if (params !== null && typeof params === "object" && "agent" in params && params.agent !== undefined) {
 				return ctx.reject("a batch with `agent` specified in `tasks[].agent`, not at the top level");
 			}
 			return true;
@@ -193,7 +199,21 @@ function createTaskSchema(options: {
 	// while `task.perCallModel` allows task calls, or seance's selector list. An
 	// undeclared `model` still reaches preflight (root keys survive lenient
 	// validation; batch items keep it via keepGatedItemKeys) and is refused there.
-	const gatedFields = { ...(options.perCallModel ? { "model?": "string" } : {}), ...options.seanceFields };
+	//
+	// Where it IS declared, both forms are declared with it, whether or not seance is advertised.
+	// The list form used to be seance-only, and that conditional was the defect: with the narrow
+	// declaration, argument validation rewrites an array to its JSON text, so a `model: []` the
+	// caller filled with nothing reached dispatch as the string `"[]"` — a selector the caller
+	// never wrote, which the gate then refused and the gate-on message quoted back. The
+	// speculative launcher plans from the raw arguments and saw the array, so the two sides
+	// disagreed. Widening a union is backward-compatible — every call that was valid under
+	// `string` is still valid — so this adds surface rather than changing any accepted call. A
+	// populated array is still refused, by `invalidModelSelectorReason` with the exact selector
+	// form, instead of being stringified into one.
+	const gatedFields = {
+		...(options.perCallModel ? { "model?": "string | string[]" } : {}),
+		...options.seanceFields,
+	};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({

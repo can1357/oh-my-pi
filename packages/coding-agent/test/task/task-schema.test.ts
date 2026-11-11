@@ -175,18 +175,39 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits seance fields when they are not enabled", () => {
+	// Two separate gates. Seance advertisement controls `sourceSession`; `task.perCallModel`
+	// controls whether `model` is declared at all. Neither controls the *shape* of `model`: wherever
+	// it is declared it is `string | string[]`, because while the list form was seance-only the
+	// narrow schema rewrote an array to its JSON text, so a `model: []` a caller filled with nothing
+	// reached dispatch as the string `"[]"` and the speculative launcher — which plans from the raw
+	// arguments — saw the array, so the two disagreed wherever seance was hidden.
+	it("omits seance fields when they are not enabled, while a declared `model` keeps both forms", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
 				expect(wireSchema).not.toContain('"model"');
-				// Per-call model alone advertises one string, never the seance selector list.
-				const perCall = JSON.stringify(
-					getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true }).toJsonSchema(),
-				);
-				expect(perCall).toContain('"model":{"type":"string"}');
+				// Per-call model alone advertises the selector, never the seance selector list — and it
+				// advertises both of its forms.
+				const perCallSchema = getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true });
+				const perCall = JSON.stringify(perCallSchema.toJsonSchema());
+				expect(perCall).not.toContain('"sourceSession"');
+				expect(perCall).toContain('"model"');
+				// Assert the value the schema *kept*, not merely that validation passed: with `"+": "delete"`
+				// a schema that does not declare `model` at all accepts every one of these and silently
+				// drops the key, so an acceptance-only assertion passes against the field this pins.
+				const kept = (model: unknown): unknown => {
+					const out = batchEnabled
+						? perCallSchema({ context: "c", tasks: [{ task: "x", solutionSpace: "c", model }] })
+						: perCallSchema({ task: "x", solutionSpace: "c", model });
+					expect(out instanceof type.errors).toBe(false);
+					const item = batchEnabled ? (out as { tasks: Array<{ model?: unknown }> }).tasks[0] : out;
+					return (item as { model?: unknown }).model;
+				};
+				expect(kept("openai/gpt-5.4")).toBe("openai/gpt-5.4");
+				expect(kept(["openai/gpt-5.4"])).toEqual(["openai/gpt-5.4"]);
+				expect(kept([])).toEqual([]);
 			}
 		}
 	});
@@ -245,6 +266,8 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
+		// Plan mode hides `sourceSession` and every mention of seance. `model` is absent for its own
+		// reason: this session leaves `task.perCallModel` off, so no per-call selector is declared.
 		expect(planSchema).not.toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");

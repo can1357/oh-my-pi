@@ -14,7 +14,9 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent, type AgentTool, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Agent, type AgentTool, type AgentToolResult, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -24,7 +26,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { type AgentDefinition, getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1049,4 +1051,673 @@ describe("batch model placement", () => {
 			expect(run).not.toHaveBeenCalled();
 		},
 	);
+
+	// Regression: some OpenAI models fill every declared task-tool property. With seance advertised one sent
+	// this call (captured on the wire, 2026-11-04) and the per-call gate refused `model: ""`: nothing spawned.
+	it.each([
+		["off", { tools: [], model: "", sourceSession: "", isolated: false }],
+		["off", { model: "   ", sourceSession: " " }],
+		["on", { model: "", sourceSession: "" }],
+	] as const)("dispatches a call whose model is only a placeholder (task.perCallModel %s, %j)", async (mode, fill) => {
+		const seance = loadBundledAgents().find(agent => agent.name === "seance");
+		if (!seance) throw new Error("Expected the bundled seance agent");
+		mockDiscovery([taskAgent, seance]);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": mode } }),
+		);
+		const work = { task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task", ...fill };
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-placeholder",
+			name: tool.name,
+			arguments: { context: "Shared context", tasks: [work] },
+		});
+		const result = await tool.execute("task-placeholder", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		// The spawn runs on the agent's configured model: no per-call grant was issued.
+		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+	});
+
+	for (const mode of ["off", "eval", "on"] as const) {
+		for (const batch of [false, true]) {
+			for (const agent of ["seance", "  seance  ", undefined, ""] as const) {
+				it.each([
+					["empty string", ""],
+					["whitespace", " \t\r\n"],
+					["empty array", []],
+					["one blank", [""]],
+					["all blank", ["", "  "]],
+				] as const)(
+					`refuses an empty seance override instead of using the saved model (gate ${mode}, batch ${batch}, agent ${JSON.stringify(agent)}, %s)`,
+					async (_label, model) => {
+						const seance = loadBundledAgents().find(candidate => candidate.name === "seance");
+						if (!seance) throw new Error("Expected the bundled seance agent");
+						mockDiscovery([taskAgent, seance]);
+						const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+						const tool = await TaskTool.create(
+							createSession({
+								spawns: "seance,task",
+								settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": mode },
+							}),
+						);
+						const work = {
+							agent,
+							task: "Read the saved context.",
+							solutionSpace: "read-only inspection",
+							sourceSession: "/sessions/source.jsonl",
+							model,
+						};
+						const raw = batch ? { context: "Shared context", tasks: [work] } : work;
+						const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+							type: "toolCall",
+							id: "empty-seance-override",
+							name: tool.name,
+							arguments: raw,
+						});
+						for (const args of [raw, validated]) {
+							const result = await tool.execute("empty-seance-override", args as TaskParams);
+							expect(result.isError).toBe(true);
+							expect(getFirstText(result)).toContain("invalid `model` selector");
+							expect(run).not.toHaveBeenCalled();
+						}
+					},
+				);
+			}
+		}
+	}
+
+	it.each([false, true])("drops per-call placeholders for a custom seance agent (batch %s)", async batch => {
+		mockDiscovery({ ...taskAgent, name: "seance", source: "project" });
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Custom"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const work = { agent: "seance", task: "Do work.", solutionSpace: "one way", model: "" };
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "custom-seance-placeholder",
+			name: tool.name,
+			arguments: batch ? { context: "Shared context", tasks: [work] } : work,
+		});
+		const result = await tool.execute("custom-seance-placeholder", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+	});
+
+	// The same placeholder in the other two fields whose empty string can only be filler. Each one
+	// refused the whole call before: `taskFile: ""` made `task` and `taskFile` both "provided", and
+	// `outputSchema: ""` passed its declared type and died parsing at preflight.
+	it.each([
+		["taskFile", { "task.file": true }, { taskFile: "" }],
+		["outputSchema", { "task.structured": true }, { outputSchema: "" }],
+	] as const)("dispatches a call whose %s is only a placeholder", async (_field, extra, fill) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off", ...extra },
+			}),
+		);
+		const work = { task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task", ...fill };
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-blank-field",
+			name: tool.name,
+			arguments: { context: "Shared context", tasks: [work] },
+		});
+		const result = await tool.execute("task-blank-field", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	// The fifth field, and the mirror image of the blank `taskFile` above: with `task.file` on, a model
+	// that fills every property and means to use `taskFile` sends `task: ""` beside it, and the
+	// `task`/`taskFile` choice saw both as "provided" and refused the whole call.
+	it("dispatches an item whose blank `task` sits beside a real `taskFile`", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const taskFile = path.join(os.tmpdir(), "omp-task-blank-task-probe", "work.md");
+		await Bun.write(taskFile, "Reply with the single word PONG.\n");
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off", "task.file": true },
+			}),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-blank-task",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "", taskFile, solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+			},
+		});
+		const result = await tool.execute("task-blank-task", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	// A blank `task` with no task file names no work at all. Dropping it unconditionally would turn
+	// this into the "exactly one of" message, which tells the caller to choose between two fields it
+	// already chose between. The specific refusal must survive.
+	it.each([
+		["with task.file on", { "task.file": true }],
+		["with task.file off", {}],
+	] as const)("still refuses a blank `task` that has no task file (%s)", async (_label, extra) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, ...extra } }),
+		);
+		const result = await tool.execute("task-blank-task-alone", {
+			context: "Shared context",
+			tasks: [{ task: "", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(/non-empty|missing `task`/i);
+		expect(getFirstText(result)).not.toMatch(/exactly one of/i);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The same rule pointed the other way: a blank `taskFile` with no `task` also names no work at
+	// all, and must keep its own refusal rather than be told to choose between two fields it already
+	// chose between. Dropping either half of the pair unconditionally loses one of these messages.
+	it.each([
+		["empty", ""],
+		["whitespace", "   "],
+	] as const)("still refuses a %s `taskFile` that has no task, with its own message", async (_label, taskFile) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.file": true } }),
+		);
+		const result = await tool.execute("task-blank-file-alone", {
+			context: "Shared context",
+			tasks: [{ taskFile, solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(/absolute path/i);
+		expect(getFirstText(result)).not.toMatch(/exactly one of/i);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// Both halves blank is what a model sends when it has not decided yet. Leaving both in place
+	// would hand it the "exactly one of" message — the very message this change exists to stop — so
+	// `taskFile` goes and the specific `task` refusal survives, as it does without `task.file`.
+	it.each([
+		["with task.file on", { "task.file": true }],
+		["with task.file off", {}],
+	] as const)("keeps the `task` refusal when both halves are blank (%s)", async (_label, extra) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, ...extra } }),
+		);
+		const result = await tool.execute("task-both-blank", {
+			context: "Shared context",
+			tasks: [{ task: "", taskFile: "", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(/non-empty|missing `task`/i);
+		expect(getFirstText(result)).not.toMatch(/exactly one of/i);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// An array that names nothing is filler too, and three work streams outside this one were blocked
+	// by it: the gate fires for any value that is not `undefined`, before a selector is looked at, so
+	// `model: []` was answered with "Per-call model is disabled… Omit model" for a field the caller
+	// filled with nothing.
+	//
+	// These go through `validateAgentToolArguments`, which the earlier version of them did not — they
+	// called `execute` directly while their comment cited validation as the measurement, which is how
+	// a conditional schema went unnoticed. `model` used to be widened to `string | string[]` only
+	// while seance was advertised; with it hidden, validation rewrote an array to its JSON text and
+	// `[]` reached dispatch as `"[]"`. So each row runs with seance advertised AND hidden, and in both
+	// gate modes: the declaration is unconditional now, so all four cells must agree.
+	const arrayCells = [
+		["advertised", true],
+		["hidden", false],
+	] as const;
+	const gateCells = ["off", "on"] as const;
+
+	interface ArrayModelDispatch {
+		result: AgentToolResult;
+		spawned: number;
+		grants: unknown;
+	}
+
+	async function dispatchArrayModel(
+		seanceAdvertised: boolean,
+		perCallModel: string,
+		model: unknown,
+	): Promise<ArrayModelDispatch> {
+		const seance = loadBundledAgents().find(agent => agent.name === "seance");
+		if (!seance) throw new Error("Expected the bundled seance agent");
+		mockDiscovery(seanceAdvertised ? [taskAgent, seance] : [taskAgent]);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": perCallModel } }),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-array-model",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", name: "Pong", model }],
+			},
+		});
+		const result = await tool.execute("task-array-model", args as TaskParams);
+		return { result, spawned: run.mock.calls.length, grants: run.mock.calls[0]?.[0].perCallModelGrants };
+	}
+
+	for (const [seanceLabel, seanceAdvertised] of arrayCells) {
+		for (const gate of gateCells) {
+			it.each([
+				["an empty array", [] as unknown],
+				["an array of blanks", ["", "  "]],
+			] as const)(
+				`dispatches a validated call whose model is %s (seance ${seanceLabel}, gate ${gate})`,
+				async (_label, model) => {
+					const { result, spawned, grants } = await dispatchArrayModel(seanceAdvertised, gate, model);
+					expect(getFirstText(result)).not.toMatch(/per-call model is disabled/i);
+					expect(result.isError).toBeFalsy();
+					expect(spawned).toBe(1);
+					expect(grants).toBeUndefined();
+				},
+			);
+
+			// A populated array is a real mistake, not filler, and must reach a message that says what to
+			// send instead. With the gate off that is "omit model"; with it on, the exact selector form.
+			//
+			// A non-string entry belongs here for the refusal, not for the predicate: the declared element
+			// type is `string`, so validation rewrites `[123]` to the JSON text `"[123]"` before dispatch
+			// sees it, and it never reaches the array branch at all. The predicate's non-string case is
+			// pinned on the raw path instead, below.
+			it.each([
+				["a real selector", ["openai/gpt-5.4"] as unknown, true],
+				["two selectors", ["openai/gpt-5.4", "anthropic/claude-opus-5"], true],
+				["a non-string entry", [123], false],
+			] as const)(
+				`refuses a validated call whose model is %s (seance ${seanceLabel}, gate ${gate})`,
+				async (_label, model, survivesAsArray) => {
+					const { result, spawned } = await dispatchArrayModel(seanceAdvertised, gate, model);
+					expect(result.isError).toBe(true);
+					expect(spawned).toBe(0);
+					if (gate === "off") {
+						expect(getFirstText(result)).toMatch(/Omit model to use the agent's configured model/);
+					} else {
+						expect(getFirstText(result)).toMatch(/one exact provider\/model-id selector/);
+						// A genuine string array is quoted back as the array the caller sent. A non-string one is
+						// quoted as the JSON text validation rewrote it to, which is what the caller will see.
+						const quoted = survivesAsArray ? JSON.stringify(model) : JSON.stringify(JSON.stringify(model));
+						expect(getFirstText(result)).toContain(`value ${quoted}.`);
+					}
+				},
+			);
+		}
+	}
+
+	// Where the predicate's non-string case IS reachable: an internal caller bypassing the wire schema,
+	// which is also what the lenient raw path hands dispatch when a sibling item fails validation.
+	// `every(isBlankString)` keeps a malformed selector so the gate refuses it; the looser
+	// `!some(isRealString)` called it blank and dropped it, and the task then spawned with the gate
+	// never consulted.
+	// One malformed array is enough: a numeric, object and nested-array entry all take the same
+	// non-blank-element branch of `isBlankArray` and assert the same refusal, so the extra rows covered
+	// no distinct route. The blank-array and populated-string cases above are the other two branches.
+	it("refuses an internal call whose model array holds a non-string entry", async () => {
+		const model: unknown = [123];
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const result = await tool.execute("task-raw-array-model", {
+			context: "Shared context",
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", name: "Pong", model }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The other half of the scoping, and the case it actually changes. `outputSchemaInputSchema` admits
+	// any object and an array is one, so an array `outputSchema` survives validation and nothing
+	// downstream shape-checks it. Before this change arrays were never filler for any key, so an
+	// `outputSchema: []` stayed the caller's schema; adding an array arm for every blankable key made
+	// it blank and dropped it, handing the agent's own schema to a caller that asked for none.
+	// `model` is the only key with an array arm now, which restores that.
+	it.each([
+		["an empty array", [] as unknown],
+		["an array of blanks", ["", "  "]],
+		["a populated array", [{ type: "object" }]],
+	] as const)("keeps %s as the caller's `outputSchema` rather than treating it as filler", async (_l, schema) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.structured": true } }),
+		);
+		const result = await tool.execute("task-array-output-schema", {
+			context: "Shared context",
+			tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "Arr", outputSchema: schema }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		const options = run.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+		expect(options.outputSchemaSource).toBe("caller");
+		expect(options.outputSchema).toEqual(schema);
+	});
+
+	// An item's `model` must reach the per-call gate, so a call naming a model the settings forbid is
+	// refused rather than quietly run on the agent's own. Since upstream gated the field on
+	// `task.perCallModel`, the item schema declares no `model` while the gate is off, and
+	// `keepGatedItemKeys` in ./types is what carries an undeclared one through validation. This pins
+	// that it does.
+	it("keeps an undeclared batch item's real model, so the disabled gate still refuses it", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-undeclared-model",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "Worker", model: "openai/gpt-5.4" }],
+			},
+		});
+		expect((args as TaskParams).tasks?.[0]?.model).toBe("openai/gpt-5.4");
+		const result = await tool.execute("task-undeclared-model", args as TaskParams);
+		expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// Skipped because the guarantee is missing, not because the case stopped mattering. A call whose
+	// arguments need repair (`name: 5` here) loses the key before `keepGatedItemKeys` can carry it:
+	// `validateToolArguments` repairs against the advertised schema, `coerceArgsFromIssues` deletes the
+	// value at an unrecognized key's path at any depth, and only keys dropped at the ROOT are put back.
+	// The child then runs on the agent's own model and preflight never refuses it. A call the repair
+	// cannot mend keeps the key, because the lenient fallback hands the tool its raw arguments; only
+	// the repairable middle loses it.
+	//
+	// It is upstream's, not this member's. The same probe at pristine upstream main
+	// 7027a619a41c1eccdae6a5f07de91c43e2a487e3, with no fork code present, returns the same arguments
+	// without `model`. Tracked, with the probe and both measurements, in dispatch://INFRA-2381.
+	// Un-skip this test with the fix; do not re-aim it at the guarantee that happens to hold.
+	it.skip("keeps a repaired batch item's real model, so the disabled gate still refuses it", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-repaired-model",
+			name: tool.name,
+			// `name: 5` is the repair trigger: a number where the schema wants a string.
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: 5, model: "openai/gpt-5.4" }],
+			},
+		});
+		expect((args as TaskParams).tasks?.[0]?.model).toBe("openai/gpt-5.4");
+		const result = await tool.execute("task-repaired-model", args as TaskParams);
+		expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The approval prompt is built from the raw arguments. Before the fix a call carrying these
+	// placeholders was refused, so nobody saw them; now it runs, and a prompt that announced a model
+	// or a task file the run ignores would be approving something other than what happens.
+	it("hides placeholder model and task file in the approval prompt, and keeps the real ones", async () => {
+		mockDiscovery();
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.file": true } }),
+		);
+		const lines = tool.formatApprovalDetails({
+			context: "Shared context",
+			tasks: [
+				{ task: "Do work", solutionSpace: "c", agent: "task", name: "Blank", model: "   ", taskFile: "" },
+				{ solutionSpace: "c", agent: "task", name: "Real", model: "p/real", taskFile: "/tmp/real.md" },
+			],
+		});
+		expect(lines.some(line => /^Task 1 (model|file):/.test(line))).toBe(false);
+		expect(lines).toContain("Task 2 model: p/real");
+		expect(lines.some(line => line.startsWith("Task 2 file:") && line.includes("/tmp/real.md"))).toBe(true);
+	});
+
+	it("still rejects a non-object batch item with the shape error instead of throwing", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const result = await tool.execute("task-null-item", { context: "Shared context", tasks: [null] } as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).not.toContain("TypeError");
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// On the lenient raw path nothing has coerced scalars to their declared types, and `name`/`agent`
+	// were trimmed without a check — so a numeric one threw a `TypeError` out of the tool. The trigger
+	// is a pair: a sibling that fails the wire schema while still dispatching (no `solutionSpace`) is
+	// what sends the whole call down that path.
+	it.each([
+		["name", { name: 123 }],
+		["agent", { agent: 7 }],
+	] as const)("reports a non-string %s as a shape error on the lenient raw path", async (field, fill) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-raw-scalars",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [
+					{ task: "Do work", solutionSpace: "c", agent: "task", ...fill },
+					// No `solutionSpace`: fails the wire schema, still dispatches, so the call falls back to raw.
+					{ task: "Do other work", agent: "task", name: "Sibling" },
+				],
+			},
+		});
+		const result = await tool.execute("task-raw-scalars", args as TaskParams);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toContain(`invalid \`${field}\``);
+		expect(getFirstText(result)).not.toContain("TypeError");
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The refusals above test the value, not the key. An own key holding `undefined` names nothing,
+	// and internal callers do produce them — `repairTaskParams` and `copyTaskFields` both materialize
+	// `context`/`tasks` that way — so an `Object.hasOwn` test refused a call that asked for nothing.
+	it.each([
+		["isolated", { isolated: undefined }],
+		["agent", { agent: undefined }],
+		["schema", { schema: undefined }],
+	] as const)("dispatches a batch call whose top-level %s is an own key holding undefined", async (_f, extra) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.isolation.enabled": true },
+			}),
+		);
+		const result = await tool.execute("task-own-undefined", {
+			context: "Shared context",
+			...extra,
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	// A real top-level value still gets its own actionable refusal, on the same three fields.
+	it.each([
+		["isolated", { isolated: true }, /Top-level `isolated` is not part of the batch shape/],
+		["agent", { agent: "task" }, /`agent`/],
+		["schema", { schema: { type: "object" } }, /rename the stale `schema` field/],
+	] as const)("still refuses a real top-level %s on a batch call", async (_f, extra, expected) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.isolation.enabled": true },
+			}),
+		);
+		const result = await tool.execute("task-real-top-level", {
+			context: "Shared context",
+			...extra,
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(expected);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The scalar guard covers the flat call shape too, not only batch items: the throw is reachable
+	// from either, and guarding the shape that happened to be reported would have left the other.
+	it.each([
+		["name", { name: 123 }],
+		["agent", { agent: 7 }],
+	] as const)("reports a non-string %s on a flat call instead of throwing", async (field, fill) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false, "async.enabled": false } }));
+		const result = await tool.execute("task-flat-scalars", {
+			task: "Do work",
+			solutionSpace: "c",
+			...fill,
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toContain(`invalid \`${field}\``);
+		expect(getFirstText(result)).not.toContain("TypeError");
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The boundary the four value-tests above are drawn against, pinned from the other side.
+	//
+	// `guardBatchAgent` refuses inside the wire-schema narrow, and this asserts against the schema
+	// rather than the tool because neither route through the tool shows the narrow's decision:
+	// `tool.execute` bypasses schema validation altogether, and shared validation repairs the input
+	// by dropping an own key holding `undefined` before the narrow's verdict can matter — measured,
+	// and it succeeds that way even with `lenientArgValidation` off, so this is not the lenient
+	// fallback to raw arguments an earlier version of this comment claimed. A test driven through
+	// the tool is therefore green whichever way the narrow tests presence, which is how round 6 found
+	// that restoring `Object.hasOwn` here left every committed test passing. The schema is the only
+	// place the difference is observable.
+	it("admits a batch call whose top-level agent is an own key holding undefined, and refuses a real one", () => {
+		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
+		const item = { task: "Do A.", solutionSpace: "one fixed answer", agent: "task" };
+
+		const namedNothing = schema({ context: "ctx", agent: undefined, tasks: [item] });
+		expect(isRecord(namedNothing)).toBe(true);
+		expect(String(namedNothing)).not.toContain("not at the top level");
+
+		const namedSomething = schema({ context: "ctx", agent: "task", tasks: [item] });
+		expect(String(namedSomething)).toContain("`agent` specified in `tasks[].agent`, not at the top level");
+	});
+
+	// The other half of that boundary, and the one place presence deliberately still decides.
+	// `#resultParams` reads `Object.hasOwn(params, "outputSchema")` on purpose, because
+	// `resolveSchema` in ./structured-subagent tests presence the same way and the carrying chain
+	// (`resolveSpawnItems`, `spawnParamsFor`) uses `in`. An own key holding `undefined` therefore
+	// means "no schema, and ignore the agent's own" — converting this one to a value test would
+	// desynchronise it from the resolver and hand the agent's schema back to a caller that said none.
+	it("lets an own `outputSchema: undefined` suppress the agent's own declared schema", async () => {
+		mockDiscovery({ ...taskAgent, output: { type: "object" } });
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.structured": true } }),
+		);
+		const result = await tool.execute("task-own-undefined-schema", {
+			context: "Shared context",
+			tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "Suppressed", outputSchema: undefined }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		const options = run.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+		expect(options.outputSchemaSource).toBe("caller");
+		expect(options.outputSchemaOverridesAgent).toBe(true);
+		expect(options.outputSchema).toBeUndefined();
+	});
+
+	// An internal caller bypasses the wire schema and may hold its real `model` anywhere an object can
+	// hold a property. Spreading own enumerable properties to drop a blank sibling deletes the rest,
+	// so the gate would never see the selector: the task would spawn on the agent's configured model
+	// while the approval prompt still named the requested one. Enumerability is a storage choice and
+	// says nothing about what the field means, so every one of these must still reach the gate.
+	const protoLiteral = (): Record<string, unknown> => Object.create({ model: "openai/gpt-5.4" });
+	const classGetter = (): Record<string, unknown> => {
+		// A class accessor is non-enumerable and on the prototype — the shape a spread loses twice over.
+		class Carrier {
+			get model(): string {
+				return "openai/gpt-5.4";
+			}
+		}
+		return new Carrier() as unknown as Record<string, unknown>;
+	};
+	const ownHidden = (): Record<string, unknown> => {
+		const item: Record<string, unknown> = {};
+		Object.defineProperty(item, "model", { value: "openai/gpt-5.4", enumerable: false });
+		return item;
+	};
+	const ownHiddenGetter = (): Record<string, unknown> => {
+		const item: Record<string, unknown> = {};
+		Object.defineProperty(item, "model", { get: () => "openai/gpt-5.4", enumerable: false });
+		return item;
+	};
+
+	it.each([
+		["an enumerable prototype property", protoLiteral],
+		["a class prototype getter", classGetter],
+		["a non-enumerable own property", ownHidden],
+		["a non-enumerable own getter", ownHiddenGetter],
+	] as const)("keeps a real model held as %s while dropping a blank sibling field", async (_label, make) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: {
+					"task.batch": true,
+					"async.enabled": false,
+					"task.perCallModel": "off",
+					"task.structured": true,
+				},
+			}),
+		);
+		const item = make();
+		Object.assign(item, { task: "Do work", solutionSpace: "c", agent: "task", name: "Proto", outputSchema: "" });
+		const result = await tool.execute("task-proto-model", { context: "Shared context", tasks: [item] } as never);
+		expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// `null` is not a placeholder. Presence, not truthiness, makes the caller's output schema win, so
+	// `outputSchema: null` is how a caller says "no schema, and ignore the agent's own". Dropping it
+	// would silently hand the agent's declared schema back to a spawn that asked for none.
+	it("keeps an explicit `outputSchema: null` as the caller's own schema", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.structured": true } }),
+		);
+		const result = await tool.execute("task-null-schema", {
+			context: "Shared context",
+			tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "NullSchema", outputSchema: null }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		const options = run.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+		expect(options.outputSchemaSource).toBe("caller");
+		expect(options.outputSchemaOverridesAgent).toBe(true);
+		expect(options.outputSchema).toBeNull();
+	});
 });
