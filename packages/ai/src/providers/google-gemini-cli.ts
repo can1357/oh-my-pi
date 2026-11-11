@@ -767,7 +767,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 				};
 
-				const retainCurrentBlockThoughtSignature = (thoughtSignature: string): void => {
+				// A signature-only part: an unmarked one signs the open block (Gemini's
+				// trailing part after a reply), a thought part signs thinking of its own.
+				const retainSignatureOnlyPart = (thoughtSignature: string, isThought: boolean): void => {
+					if (isThought && currentBlock?.type !== "thinking") {
+						flushVisibleText();
+						startThinkingBlock();
+					}
 					const block = currentBlock;
 					if (!block) return;
 					if (block.type === "thinking") {
@@ -874,7 +880,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									}
 								}
 							} else if (part.text === "" && part.thoughtSignature && !part.functionCall) {
-								retainCurrentBlockThoughtSignature(part.thoughtSignature);
+								retainSignatureOnlyPart(part.thoughtSignature, isThinkingPart(part));
 							}
 
 							if (part.functionCall) {

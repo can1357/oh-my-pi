@@ -669,6 +669,60 @@ describe("Google Gemini CLI alignment", () => {
 		expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
 	});
 
+	it("keeps signature-only thought parts as signed thinking blocks and replays them as thought parts", async () => {
+		// An empty `thought: true` part signs thinking of its own: it must neither sign the open
+		// text block (merging the text around it) nor vanish when no block is open.
+		// Replay keeps only well-formed base64 signatures.
+		const [thoughtSig, callSig, loneSig, secondCallSig] = ["VEhPVUdIVA==", "Q0FMTA==", "TE9ORQ==", "Q0FMTDI="];
+		const frame = (parts: unknown[], finishReason?: string) =>
+			`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts }, finishReason }] } })}\n\n`;
+		const sse = [
+			frame([{ text: "answer" }, { thought: true, text: "", thoughtSignature: thoughtSig }, { text: " more" }]),
+			frame([{ functionCall: { name: "read", args: { path: "a.ts" } }, thoughtSignature: callSig }]),
+			frame(
+				[
+					{ thought: true, text: "", thoughtSignature: loneSig },
+					{ functionCall: { name: "read", args: { path: "b.ts" } }, thoughtSignature: secondCallSig },
+				],
+				"STOP",
+			),
+		].join("");
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+		const model: Model<"google-gemini-cli"> = createModel("google-antigravity", "gemini-3.5-flash", true);
+
+		const result = await streamGoogleGeminiCli(model, createContext(), {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.content).toMatchObject([
+			{ type: "text", text: "answer" },
+			{ type: "thinking", thinking: "", thinkingSignature: thoughtSig },
+			{ type: "text", text: " more" },
+			{ type: "toolCall", name: "read", thoughtSignature: callSig },
+			{ type: "thinking", thinking: "", thinkingSignature: loneSig },
+			{ type: "toolCall", name: "read", thoughtSignature: secondCallSig },
+		]);
+		expect(result.content[0]).toEqual({ type: "text", text: "answer" });
+
+		const payload = buildRequest(
+			model,
+			{ messages: [...createContext().messages, result] },
+			"proj-123",
+			{},
+			true,
+		) as { request: { contents: Array<{ role: string; parts: unknown[] }> } };
+		expect(payload.request.contents.find(content => content.role === "model")?.parts).toEqual([
+			{ text: "answer" },
+			{ thought: true, text: "", thoughtSignature: thoughtSig },
+			{ text: " more" },
+			{ functionCall: expect.objectContaining({ name: "read" }), thoughtSignature: callSig },
+			{ thought: true, text: "", thoughtSignature: loneSig },
+			{ functionCall: expect.objectContaining({ name: "read" }), thoughtSignature: secondCallSig },
+		]);
+	});
+
 	it("surfaces account verification failures from model requests", async () => {
 		const fetchMock: FetchImpl = async () => new Response(validationRequiredBody, { status: 403 });
 		const model = createModel("google-antigravity");
