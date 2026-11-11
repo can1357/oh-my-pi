@@ -23,6 +23,7 @@ import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-role
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
+import { isLocalAgentSession } from "../../session/agent-session-handle";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -40,7 +41,10 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { expandEmoticons } from "@oh-my-pi/pi-tui/prompt/emoji-autocomplete";
 import { setCachedImageDimensions } from "@oh-my-pi/pi-tui/prompt/image-references";
-import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import {
+	createPromptActionAutocompleteProvider,
+	type SessionMentionCandidate,
+} from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 import { createModelBrowserSource } from "../model-browser-source";
 import { formatQueueShorthand, parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
@@ -94,6 +98,8 @@ import {
 	cfgTuiMouse,
 } from "../settings";
 import { cfgHideThinkingBlock } from "../../session/settings";
+import type { MessagingService } from "../../messaging/service";
+import { resolveMessagingPolicy } from "../../messaging/policy";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
 const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
@@ -2996,10 +3002,29 @@ export class InputController {
 
 	createAutocompleteProvider(commands: SlashCommand[], basePath: string): AutocompleteProvider {
 		void commandUsage.load();
+		const sessionCandidates = new WeakMap<MessagingService, { at: number; candidates: SessionMentionCandidate[] }>();
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
 			commandUsage: name => commandUsage.get(name),
+			sessionMentions: async signal => {
+				const session = this.ctx.viewSession;
+				const messaging = isLocalAgentSession(session) ? session.messaging : undefined;
+				if (!messaging || resolveMessagingPolicy(session.settings).list === "deny") return [];
+				const cached = sessionCandidates.get(messaging);
+				if (cached && Date.now() - cached.at < 5_000) return cached.candidates;
+				try {
+					const candidates = (await messaging.listSessions(signal)).map(peer => ({
+						name: peer.name ?? peer.shortId,
+						cwd: peer.cwd,
+					}));
+					if (signal?.aborted) return [];
+					sessionCandidates.set(messaging, { at: Date.now(), candidates });
+					return candidates;
+				} catch {
+					return [];
+				}
+			},
 			modelMentions: createModelMentionSource({
 				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 				registry: this.ctx.session.modelRegistry,

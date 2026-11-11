@@ -126,6 +126,8 @@ export const launchHelp = {
 			description:
 				"Animation preset: full (default), reduced (250 ms spinners, no shimmer or blink), or none (static). Overrides tui.motion and PI_MOTION for this run",
 		}),
+		name: Flags.string({ description: "Name this session for cross-session messaging" }),
+		"cross-session": Flags.boolean({ description: "Enable cross-session messaging for this run" }),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),

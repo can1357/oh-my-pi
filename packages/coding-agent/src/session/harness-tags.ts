@@ -14,3 +14,8 @@ const HARNESS_TAG_START_RE = /<(?=\s*\/?\s*(?:irc|system-[a-z][a-z-]*)(?![\w-]))
 export function escapeHarnessTags(text: string): string {
 	return text.replace(HARNESS_TAG_START_RE, "&lt;");
 }
+
+/** Other-session text is untrusted, including markup that is not a harness tag. */
+export function escapePeerText(text: string): string {
+	return text.replaceAll("<", "&lt;");
+}

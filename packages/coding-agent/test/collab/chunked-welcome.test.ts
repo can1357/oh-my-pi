@@ -96,6 +96,7 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 			switchSession: () => Promise.reject(failure),
 		},
 		session: {
+			suspendMessagingReceiving: () => () => {},
 			newSession: () => Promise.resolve(),
 			messages: [],
 		},
@@ -146,6 +147,7 @@ function makeCancelledSwitchGuestContext(
 			getCwd: () => process.cwd(),
 		},
 		session: {
+			suspendMessagingReceiving: () => () => {},
 			switchSession,
 			newSession: () => Promise.resolve(),
 			messages: [],

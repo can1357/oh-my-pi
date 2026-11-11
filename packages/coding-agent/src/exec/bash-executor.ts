@@ -58,6 +58,8 @@ export interface BashExecutorOptions {
 	sessionKey?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
+	/** Variables neutralized in inherited shell and final command environments. */
+	stripEnv?: readonly string[];
 	/** Run through the configured user shell instead of the embedded shell parsing directly. */
 	useUserShell?: boolean;
 	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
@@ -670,7 +672,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const baseShellConfig = settings.getShellConfig();
 	const shellConfig =
 		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
-	const { shell, args, env: shellEnv, prefix } = shellConfig;
+	const { shell, args, prefix } = shellConfig;
+	// Native shells overlay the C environment; empty values prevent inherited credentials from surviving.
+	const shellEnv: Record<string, string> = { ...shellConfig.env, OMP_MESSAGING_SOCKET: "", OMP_MESSAGING_TOKEN: "" };
+	for (const key of options?.stripEnv ?? []) shellEnv[key] = "";
 	const bashShell = isBashShell(shell);
 	// `!` hotkey commands on zsh/fish run in a real PTY: interactive shell
 	// startup (zle, job control, gitstatus) needs a TTY, and tools only emit
@@ -710,6 +715,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}),
 	]);
 	const commandEnv = buildNonInteractiveEnv(preflight.env, { inheritLocale: options?.useUserShell === true });
+	for (const key of options?.stripEnv ?? []) commandEnv[key] = "";
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
 	// paths, and the embedded shell runs the POSIX line better directly.

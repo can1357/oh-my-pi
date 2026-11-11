@@ -1,5 +1,5 @@
 /**
- * Prompt completion reporting for RPC mode.
+ * Prompt completion attribution shared by RPC and print mode.
  *
  * Every accepted `prompt`/`abort_and_prompt` that is not answered synchronously
  * with `data.agentInvoked: false` gets exactly one `prompt_result` frame, emitted
@@ -7,6 +7,8 @@
  * commands and failures, or after the terminal `agent_end` of the run the prompt
  * started or joined. Hosts correlate on the command `id` instead of inferring
  * ownership of an `agent_end` that carries no prompt identity.
+ * Print hosts omit wire output and capture the attributed assistant through
+ * the synchronous completion callback, before unrelated message turns can finish.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -27,6 +29,7 @@ export interface RpcPromptTicket {
 interface RunOutcome {
 	status: RpcPromptStatus;
 	error?: RpcPromptError;
+	assistantMessage?: AssistantMessage;
 }
 
 interface OpenPrompt {
@@ -38,6 +41,7 @@ interface OpenPrompt {
 	waiting: boolean;
 	/** The cost gate's latest refusal at acceptance; a newer one refused this prompt before dispatch. */
 	refusalAtBegin: CostCapRefusal | undefined;
+	onComplete?: (message: AssistantMessage | undefined) => void;
 }
 
 /**
@@ -58,10 +62,11 @@ export class RpcPromptResults {
 	#agentStarts = 0;
 	#open = new Map<RpcPromptTicket, OpenPrompt>();
 	readonly #session: SessionSettleState;
-	readonly #output: (frame: RpcPromptResultFrame) => void;
+	readonly #output: ((frame: RpcPromptResultFrame) => void) | undefined;
 	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
 	readonly #costCapRefusal: (() => CostCapRefusal | undefined) | undefined;
 	readonly #settledWithoutRun: (() => void) | undefined;
+	readonly #queueDrained: (() => boolean) | undefined;
 	#refusalAtRunStart: CostCapRefusal | undefined;
 
 	/**
@@ -70,29 +75,44 @@ export class RpcPromptResults {
 	 * @param hooks.costCapRefusal the session's latest cost-gate refusal; a new one before a prompt's run ends makes its outcome `cost_cap`.
 	 * @param hooks.settledWithoutRun a prompt reported without starting a run (refused or aborted before
 	 *   dispatch): no `agent_end` follows, so the host re-checks session settlement here.
+	 * @param hooks.queueDrained overrides RPC's displayable queue count for print's raw-queue attribution.
 	 */
 	constructor(
 		session: SessionSettleState,
-		output: (frame: RpcPromptResultFrame) => void,
+		output?: (frame: RpcPromptResultFrame) => void,
 		scheduledTurn?: RpcScheduledTurnProbe,
-		hooks?: { costCapRefusal?: () => CostCapRefusal | undefined; settledWithoutRun?: () => void },
+		hooks?: {
+			costCapRefusal?: () => CostCapRefusal | undefined;
+			settledWithoutRun?: () => void;
+			queueDrained?: () => boolean;
+		},
 	) {
 		this.#session = session;
 		this.#output = output;
 		this.#scheduledTurn = scheduledTurn;
 		this.#costCapRefusal = hooks?.costCapRefusal;
 		this.#settledWithoutRun = hooks?.settledWithoutRun;
+		this.#queueDrained = hooks?.queueDrained;
 	}
 
-	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
-	begin(id: string | undefined): RpcPromptTicket {
+	/** Open a ticket before prompt preparation; completion captures its attributed assistant synchronously. */
+	begin(id: string | undefined, onComplete?: (message: AssistantMessage | undefined) => void): RpcPromptTicket {
 		const ticket: RpcPromptTicket = { id };
 		this.#open.set(ticket, {
 			startsAtBegin: this.#agentStarts,
 			refusalAtBegin: this.#costCapRefusal?.(),
 			waiting: false,
+			onComplete,
 		});
 		return ticket;
+	}
+
+	/** Start attribution at admission, discarding unrelated runs during prompt preparation. */
+	admit(ticket: RpcPromptTicket): void {
+		const open = this.#open.get(ticket);
+		if (!open) return;
+		open.startsAtBegin = this.#agentStarts;
+		open.ownOutcome = undefined;
 	}
 
 	/** Drop a ticket whose command was rejected before it was accepted (no `prompt_result` is owed). */
@@ -158,7 +178,7 @@ export class RpcPromptResults {
 		// A request the cost gate refused during this run is its outcome, whatever message ended it.
 		const outcome = this.#costCapOutcome(this.#refusalAtRunStart) ?? runOutcome(event.messages);
 		// A still-queued steer/follow-up has not been read by the agent yet.
-		const queueDrained = this.#session.queuedMessageCount === 0;
+		const queueDrained = this.#queueDrained?.() ?? this.#session.queuedMessageCount === 0;
 		for (const [ticket, open] of this.#open) {
 			if (open.waiting) {
 				if (queueDrained) this.#report(ticket, true, outcome);
@@ -176,7 +196,11 @@ export class RpcPromptResults {
 	}
 
 	#report(ticket: RpcPromptTicket, agentInvoked: boolean, outcome: RunOutcome): void {
-		if (!this.#open.delete(ticket)) return;
+		const open = this.#open.get(ticket);
+		if (!open || !this.#open.delete(ticket)) return;
+		open.onComplete?.(outcome.assistantMessage);
+		const output = this.#output;
+		if (!output) return;
 		// A prompt command's response is written after the handler's remaining
 		// microtasks; deferring to the next macrotask keeps every prompt_result
 		// behind the response for the same id and lets queue drains land before
@@ -190,7 +214,7 @@ export class RpcPromptResults {
 				sessionSettled: isSessionSettled(this.#session, this.#scheduledTurn),
 			};
 			if (outcome.error) frame.error = outcome.error;
-			this.#output(frame);
+			output(frame);
 		});
 	}
 }
@@ -200,9 +224,11 @@ function runOutcome(messages: readonly AgentMessage[]): RunOutcome {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (message.role !== "assistant") continue;
-		if (message.stopReason === "error") return { status: "error", error: promptError(message) };
-		if (message.stopReason === "aborted") return { status: "aborted" };
-		return { status: "completed" };
+		if (message.stopReason === "error") {
+			return { status: "error", error: promptError(message), assistantMessage: message };
+		}
+		if (message.stopReason === "aborted") return { status: "aborted", assistantMessage: message };
+		return { status: "completed", assistantMessage: message };
 	}
 	return { status: "completed" };
 }
@@ -342,7 +368,12 @@ export function watchAndReportPromptResult(input: {
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
 }): Promise<void> {
 	const admitted = Promise.withResolvers<void>();
-	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(() => input.startPrompt(admitted.resolve));
+	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(() =>
+		input.startPrompt(() => {
+			input.results.admit(input.ticket);
+			admitted.resolve();
+		}),
+	);
 	reportPromptResult({
 		ticket: input.ticket,
 		prompt: trackedPrompt.prompt,

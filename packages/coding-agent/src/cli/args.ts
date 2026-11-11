@@ -30,6 +30,8 @@ export interface Args {
 	addDir?: string[];
 	profile?: string;
 	alias?: string;
+	name?: string;
+	crossSession?: boolean;
 	allowHome?: boolean;
 	provider?: string;
 	model?: string;
@@ -396,6 +398,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noContextFiles = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
+		} else if (arg === "--cross-session") {
+			result.crossSession = true;
 		} else if (arg === "--no-ui") {
 			result.noUi = true;
 		} else if (arg === "--auto-approve" || arg === "--yolo") {
