@@ -17,7 +17,7 @@ import { wrapPrefixedLine } from "../render/hanging-wrap";
 
 import { formatStatusIcon, formatTitle, PREVIEW_LIMITS } from "../render/render-utils";
 
-import { type FormAnswer, fieldQuestions, OTHER_LABEL } from "../html-form/data";
+import { type FormAnswer, fieldQuestions, OTHER_LABEL, type OptionNote } from "../html-form/data";
 import {
 	type ChoiceField,
 	type FormField,
@@ -27,10 +27,12 @@ import {
 	type TextField,
 } from "../html-form/parse";
 
-/** Answers displayed for an ask tool result. */
+/** Answers and selected-option notes displayed for an ask tool result. */
 export interface AskToolDetails {
 	/** Each named field's question and answer text, in form order (from `formAnswers`). */
 	answers: FormAnswer[];
+	/** Notes attached to selected options; separate from the answer data. */
+	notes?: OptionNote[];
 	/** The deadline submitted the form's current values instead of the user. */
 	timedOut?: boolean;
 }
@@ -94,6 +96,31 @@ function detailsAnswers(details: AskToolDetails | undefined): FormAnswer[] | und
 		answers.push({ name: typeof name === "string" ? name : "", question, answer });
 	}
 	return answers;
+}
+
+/** Well-formed selected-option notes from persisted details. */
+function detailsNotes(details: AskToolDetails | undefined): OptionNote[] {
+	const raw: unknown = details?.notes;
+	if (!Array.isArray(raw)) return [];
+	const notes: OptionNote[] = [];
+	for (const entry of raw) {
+		if (!isRecord(entry)) continue;
+		const { name, question, option, value, text } = entry;
+		if (
+			typeof name === "string" &&
+			typeof question === "string" &&
+			typeof option === "string" &&
+			typeof value === "string" &&
+			typeof text === "string"
+		) {
+			notes.push({ name, question, option, value, text });
+		}
+	}
+	return notes;
+}
+
+function notesForAnswer(answer: FormAnswer, notes: readonly OptionNote[]): OptionNote[] {
+	return notes.filter(note => note.name === answer.name && note.question === answer.question);
 }
 
 /** Shown text of an answer: masked for password fields, sanitized otherwise. */
@@ -209,8 +236,8 @@ function describeAskCall(args: AskRenderArgs): NativeToolView {
 	};
 }
 
-/** One answered field: its question over a checked answer row, or a dim placeholder when left empty. */
-function describeAnswer(answer: FormAnswer, shown: string, key: string): NativeNode {
+/** One answered field: its question over a checked answer row, notes, or a dim placeholder when left empty. */
+function describeAnswer(answer: FormAnswer, shown: string, key: string, notes: readonly OptionNote[]): NativeNode {
 	const body: NativeChild = shown
 		? row([node("icon", { name: "check", tone: "success" }), text([span(shown, "toolOutput")], { wrap: "word" })], {
 				gap: "sm",
@@ -218,11 +245,18 @@ function describeAnswer(answer: FormAnswer, shown: string, key: string): NativeN
 				role: "omp.tool.answer",
 			})
 		: text([span(NO_ANSWER, "dim")], { role: "omp.tool.answer.off" });
-	return node("section", {}, [text([span(oneLine(answer.question))], { wrap: "word" }), body], key);
+	const noteRows = notesForAnswer(answer, notes).map(note =>
+		text([span("✎ ", "dim"), span(`${oneLine(note.option)}: ${clean(note.text)}`, "em")], {
+			wrap: "word",
+			role: "omp.tool.answer.note",
+		}),
+	);
+	return node("section", {}, [text([span(oneLine(answer.question))], { wrap: "word" }), body, ...noteRows], key);
 }
 
 function describeAskResult(result: ToolRenderResult<AskToolDetails>, args: AskRenderArgs | undefined): NativeToolView {
 	const answers = detailsAnswers(result.details);
+	const notes = detailsNotes(result.details);
 	const form = argsForm(args);
 	if (!answers) {
 		const fallback = clean(resultText(result));
@@ -238,7 +272,7 @@ function describeAskResult(result: ToolRenderResult<AskToolDetails>, args: AskRe
 		tool: askHead(answers[0]?.question, answers.length > 1 ? formatCount("question", answers.length) : undefined),
 		tone: timedOut ? "warning" : undefined,
 		body: compact<NativeChild>([
-			...answers.map((answer, index) => describeAnswer(answer, answerShown(answer, passwords), `${index}`)),
+			...answers.map((answer, index) => describeAnswer(answer, answerShown(answer, passwords), `${index}`, notes)),
 			timedOut ? text([span(TIMED_OUT_NOTE, "muted")], { wrap: "word", role: "omp.tool.notice" }) : undefined,
 		]),
 	};
@@ -299,10 +333,35 @@ export const askToolRenderer = {
 			uiTheme,
 		);
 		return framedToolCard(uiTheme, ({ contentWidth }) => {
-			const content = answers.flatMap((answer, index) => [
-				...wrapPrefixedLine(" ", " ", uiTheme.fg("text", oneLine(answer.question)), contentWidth),
-				...answerLines(uiTheme, shown[index]!, contentWidth, options.expanded),
-			]);
+			const notes = detailsNotes(result.details);
+			const content = answers.flatMap((answer, index) => {
+				const base = [
+					...wrapPrefixedLine(" ", " ", uiTheme.fg("text", oneLine(answer.question)), contentWidth),
+					...answerLines(uiTheme, shown[index]!, contentWidth, options.expanded),
+				];
+				const noteIndent = "   ";
+				const noteLines: string[] = [];
+				for (const note of notesForAnswer(answer, notes)) {
+					const noteLabel = `✎ ${oneLine(note.option)}: ${oneLine(note.text)}`;
+					noteLines.push(
+						...wrapPrefixedLine(
+							noteIndent,
+							noteIndent,
+							uiTheme.italic(uiTheme.fg("muted", noteLabel)),
+							contentWidth,
+						),
+					);
+				}
+				return [
+					...base,
+					...capLines(
+						uiTheme,
+						noteLines,
+						options.expanded ? PREVIEW_LIMITS.OUTPUT_EXPANDED : PREVIEW_LIMITS.OUTPUT_COLLAPSED,
+						noteIndent,
+					),
+				];
+			});
 			// Distinguish the deadline's submission from a real user choice in the transcript.
 			if (timedOut) content.push(...wrapPrefixedLine(" ", " ", uiTheme.fg("dim", TIMED_OUT_NOTE), contentWidth));
 			return {

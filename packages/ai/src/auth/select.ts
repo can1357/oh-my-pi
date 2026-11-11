@@ -372,20 +372,21 @@ export class CredentialSelector {
 		blockScopes: string | readonly string[] | undefined,
 		options?: AuthApiKeyOptions,
 	): Promise<UsageRankingResult<OAuthCredential>> {
-		let blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
 		let usage: UsageReport | null = null;
 		let usageChecked = false;
-		if (
-			blockedUntil !== undefined &&
-			this.#deps.blocks.canHeal(provider, providerKey, selection.index, blockScopes)
-		) {
-			usage = await this.#deps.usage.report(provider, selection.credential, {
-				...options,
-				timeoutMs: this.#deps.usage.requestTimeoutMs,
-			});
+		const probed = await this.#deps.usage.probeBlocked(
+			provider,
+			providerKey,
+			selection.index,
+			selection.credential,
+			blockScopes,
+			options,
+		);
+		if (probed !== undefined) {
+			usage = probed;
 			usageChecked = true;
-			blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
 		}
+		const blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
 		if (blockedUntil === undefined && !usageChecked) {
 			usage = await this.#deps.usage.report(provider, selection.credential, {
 				...options,
