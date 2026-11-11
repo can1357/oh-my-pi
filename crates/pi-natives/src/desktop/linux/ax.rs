@@ -2925,11 +2925,11 @@ mod tests {
 		fn interrupted_masked_text_write_warns_if_the_field_may_be_empty() {
 			use std::sync::{Arc, Mutex};
 
-			struct Accessible;
+			struct Accessible([&'static str; 2]);
 			#[interface(name = "org.a11y.atspi.Accessible")]
 			impl Accessible {
-				fn get_interfaces(&self) -> Vec<&str> {
-					vec!["org.a11y.atspi.EditableText", "org.a11y.atspi.Text"]
+				fn get_interfaces(&self) -> &[&str] {
+					&self.0
 				}
 			}
 
@@ -2941,8 +2941,11 @@ mod tests {
 					self.0.lock().unwrap().chars().count() as i32
 				}
 
-				fn get_text(&self, _start: i32, _end: i32) -> String {
-					"●".repeat(self.0.lock().unwrap().chars().count())
+				fn get_text(&self, start_offset: i32, end_offset: i32) -> String {
+					std::iter::repeat_n('●', self.0.lock().unwrap().chars().count())
+						.skip(start_offset as usize)
+						.take((end_offset - start_offset) as usize)
+						.collect()
 				}
 			}
 
@@ -2978,7 +2981,10 @@ mod tests {
 					let text = Arc::new(Mutex::new("old secret".to_owned()));
 					let (mut ax, _server) = backend(HUNG_CALL_TIMEOUT, |server| {
 						server
-							.serve_at("/password", Accessible)
+							.serve_at(
+								"/password",
+								Accessible(["org.a11y.atspi.EditableText", "org.a11y.atspi.Text"]),
+							)
 							.unwrap()
 							.serve_at("/password", Text(text.clone()))
 							.unwrap()
