@@ -52,22 +52,13 @@ import {
 	isUserInterruptAbort,
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
-import {
-	approvalRestrictions,
-	formatApprovalPrompt,
-	resolveApproval,
-	sessionApprovalScope,
-} from "../../tools/approval";
-import { recoverAskHtml } from "../../tools/ask";
-import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
-import { type RunStatus, setRunStatus } from "../../utils/run-status";
+import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
 import { setTerminalTitleState } from "../../utils/title-generator";
 import {
 	assistantMessageLinkTargets,
@@ -95,7 +86,7 @@ import {
 	cfgTerminalShowImages,
 	cfgTerminalShowProgress,
 } from "../settings";
-import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
+import { cfgReadToolResultPreview } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
@@ -228,10 +219,6 @@ export class EventController {
 	 * the call's `tool_execution_end` carries its `running` start result.
 	 */
 	#settledBeforeReturn = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
-	/** Tool calls waiting on the user (an approval prompt or `ask`), with the
-	 *  `blocked` status each reports; cleared at their tool_execution_end so the
-	 *  run returns to `working` once none is left. */
-	#blockingPrompts = new Map<string, RunStatus>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
@@ -530,6 +517,14 @@ export class EventController {
 		this.#lastReadGroup?.finalize();
 		this.#lastReadGroup = undefined;
 	}
+
+	/** A rebuild may replace settled read groups while preserving groups with in-flight reads. */
+	reconcileReadGroupAfterRebuild(): void {
+		if (this.#lastReadGroup && !this.ctx.chatContainer.children.includes(this.#lastReadGroup)) {
+			this.#resetReadGroup();
+		}
+	}
+
 	/** Freeze foreground tool cards once no live agent turn can complete them. */
 	#sealAbandonedForegroundTools(): void {
 		const background = new Set<ToolExecutionHandle>();
@@ -1083,7 +1078,6 @@ export class EventController {
 		this.#toolReplyBlocks.clear();
 		this.#backgroundCallIds.clear();
 		this.#settledBeforeReturn.clear();
-		this.#blockingPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -2070,11 +2064,6 @@ export class EventController {
 		this.#updateWorkingMessageFromIntent(event.intent);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
-		const blocked = this.#blockingPrompt(renderToolName, event.args);
-		if (blocked) {
-			this.#blockingPrompts.set(event.toolCallId, blocked);
-			setRunStatus(blocked);
-		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId) && !this.#toolTimelineComponents.has(event.toolCallId)) {
 			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
@@ -2151,51 +2140,6 @@ export class EventController {
 			}
 		}
 		this.#startToolApprovalPreview(event.toolCallId);
-	}
-
-	/**
-	 * The `blocked` status of a tool call that waits on the user before it
-	 * completes: an `ask` question, or an approval prompt. The extension wrapper
-	 * waits on `uiContext.select(...)` after emitting `tool_execution_start`, so
-	 * an approval-mode / per-tool `prompt` policy is user-blocking — the run
-	 * reads `blocked`, not `working`. Mirrors the wrapper's `resolveApproval`
-	 * inputs (approvalMode + tools.approval, grants, restrictions) and prompt
-	 * text, all read from the viewed session — a focused subagent runs under its
-	 * own settings, conversation, and session approvals; uses `resolveApproval`
-	 * rather than `requiresApproval` so a `deny` policy does not throw in the
-	 * render path.
-	 */
-	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
-		if (toolName === "ask") {
-			const html = recoverAskHtml(args);
-			const form = html === undefined ? undefined : parseHtmlForm(html);
-			const question = form?.fields.find(field => field.name);
-			return {
-				state: "blocked",
-				kind: "question",
-				msg: form && question ? fieldQuestions(form).get(question) : undefined,
-			};
-		}
-		const session = this.ctx.viewSession;
-		const tool = session.getToolByName(toolName);
-		if (!tool) return undefined;
-		const sessionSettings = session.settings;
-		const mode = cfgToolsApprovalMode.get(sessionSettings);
-		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(sessionSettings);
-		const grants = mode === "always-ask-cached" ? session.getApprovalGrants() : undefined;
-		const approval = resolveApproval(
-			tool,
-			args,
-			mode,
-			userPolicies,
-			grants,
-			approvalRestrictions(sessionSettings, session.sessionManager.getCwd()),
-		);
-		if (approval.policy !== "prompt") return undefined;
-		// Approved for this session: the wrapper runs it without asking.
-		const scope = sessionApprovalScope(approval, tool.name);
-		if (scope && session.hasSessionApproval(scope.key)) return undefined;
-		return { state: "blocked", kind: "permission", msg: formatApprovalPrompt(tool, args, approval.reason) };
 	}
 
 	async #handleToolExecutionUpdate(
@@ -2320,15 +2264,6 @@ export class EventController {
 		// which only fire `tool_execution_end`, never `_update` — do not leave
 		// the UI looking idle while the session keeps streaming (#3857).
 		this.#ensureWorkingLoaderWhileStreaming();
-		// Return to `working` only when the LAST outstanding user-blocking prompt
-		// resolves: with queued approval prompts (always-ask/write), the first tool
-		// to finish must not clear the blocked signal while another prompt still
-		// waits — the run reports that prompt instead. `ask` ids are in the map too
-		// (added at tool_execution_start), so the delete also covers them without
-		// leaking ids until turn end.
-		if (this.#blockingPrompts.delete(event.toolCallId)) {
-			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
-		}
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
 				const component = this.ctx.pendingTools.get(event.toolCallId);
@@ -2643,7 +2578,7 @@ export class EventController {
 	 * retry leaves the user at the prompt). Reads the turn's own `agent_end`
 	 * messages for the reason `sendErrorNotification` does.
 	 */
-	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunStatus {
+	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunFlowStatus {
 		if (this.#retryPending) return { state: "idle" };
 		const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
 		if (last?.stopReason === "error") return { state: "error", msg: last.errorMessage };
@@ -2672,7 +2607,6 @@ export class EventController {
 		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
-		this.#blockingPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);

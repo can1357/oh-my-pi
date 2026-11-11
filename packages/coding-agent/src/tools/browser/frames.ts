@@ -8,7 +8,7 @@ import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
-import { clickElement, fillViaHandle, pressKey, typeIntoElement } from "./interactions";
+import { clickElement, fillViaHandle, pressKey, typeIntoElement, withLiveElement } from "./interactions";
 import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
 import { whileDrawing } from "./screenshot";
@@ -238,12 +238,20 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				hooks.actionOpMs,
 				async signal => {
 					const label = `frame.click(${JSON.stringify(selector)})`;
-					const handle = await actionHandle(label, selector, signal);
-					try {
-						await clickElement(handle, label, signal, { button: options?.button, clickCount: options?.count });
-					} finally {
-						await handle.dispose().catch(() => undefined);
-					}
+					await withLiveElement(
+						() => actionHandle(label, selector, signal),
+						async handle => {
+							try {
+								await clickElement(handle, label, signal, {
+									button: options?.button,
+									clickCount: options?.count,
+								});
+							} finally {
+								await handle.dispose().catch(() => undefined);
+							}
+						},
+						signal,
+					);
 				},
 				selectorOptions(selector),
 			),

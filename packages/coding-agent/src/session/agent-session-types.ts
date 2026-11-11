@@ -5,6 +5,7 @@ import type {
 	AgentToolContext,
 	StreamFn,
 	ThinkingLevel,
+	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -397,14 +398,14 @@ export interface AgentSessionConfig {
 	 */
 	advisorCreateEditTool?(): AgentTool | undefined;
 	/**
-	 * The execute-time context the advisor's bridge tools resolve approval from.
+	 * The execute-time context for the advisor's loop and bridge tools.
 	 *
 	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
 	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
 	 * with none it fails closed to `always-ask` with empty policies (no user
 	 * grant), so a bridge tool that needs a prompt cannot run unattended.
 	 */
-	advisorGetToolContext?: () => AgentToolContext | undefined;
+	advisorGetToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	/**
 	 * The live MCP connections the advisor's Cursor resource frames answer from.
 	 *

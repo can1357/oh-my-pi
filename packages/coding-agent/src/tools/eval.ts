@@ -393,6 +393,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			session.taskDepth ?? 0,
 		);
 		const perCallModel = perCallModelEnabled(session.settings, "eval");
+		const perCallModelAdvertisement =
+			session.advertisedPerCallModel?.() ??
+			(perCallModel
+				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.(), session.modelRegistry)
+				: undefined);
 		return {
 			py: backends.python,
 			js: backends.js,
@@ -405,9 +410,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
 			perCallModel,
-			perCallModelAdvertisement: perCallModel
-				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.(), session.modelRegistry)
-				: undefined,
+			perCallModelAdvertisement,
 			toolNames: session.getAdvertisedEvalToolNames?.(),
 			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};

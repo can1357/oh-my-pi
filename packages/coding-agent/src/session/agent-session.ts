@@ -239,7 +239,6 @@ import {
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
 import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
-import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { recoverAskHtml } from "../tools/ask";
 import {
@@ -572,6 +571,7 @@ import {
 	cfgThemeDark,
 	cfgThemeLight,
 } from "../modes/settings";
+import type { PerCallModelAdvertisement } from "../task/model-approval";
 import { cfgTaskBatch, cfgTaskDisabledAgents, perCallModelEnabled } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
@@ -6311,6 +6311,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					model: message.model,
 					usage: message.usage,
 					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
 					...(refresh ? { cacheRefresh: refresh } : {}),
 				},
 				{ sessionId: this.sessionId, parentId: this.sessionManager.getLeafId() },
@@ -7673,6 +7674,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	getAdvertisedSessionAgents(): readonly AgentDefinition[] {
 		return this.#tools.advertisedSessionAgents;
+	}
+
+	/**
+	 * Per-call model roles frozen into the task/eval descriptions (see
+	 * {@link SessionTools.advertisedPerCallModel}). Another instance's role edit
+	 * leaves them untouched until the next base-prompt rebuild.
+	 */
+	getAdvertisedPerCallModel(): PerCallModelAdvertisement {
+		return this.#tools.advertisedPerCallModel;
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */
@@ -13533,9 +13543,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// IRC Delivery
 	// =========================================================================
 
-	/** Surfaces and consumes every pending IRC record before automatic injection (see {@link IrcBridge.drainInboxMessages}). */
-	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
-		return this.#irc.drainInboxMessages(agentId, opts);
+	/** Whether a queued IRC message ends a `wait` (see {@link IrcBridge.hasInterrupts}). */
+	hasIrcInterrupts(): boolean {
+		return this.#irc.hasInterrupts();
 	}
 
 	/** Delivers an IRC message into this recipient session. */
@@ -16371,16 +16381,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
-	}
-
-	/** Whether the user approved approval scope `key` for the rest of this session (see {@link ExtensionRunner.hasSessionApproval}). */
-	hasSessionApproval(key: string): boolean {
-		return this.#extensionRunner?.hasSessionApproval(key) ?? false;
-	}
-
-	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */
-	getApprovalGrants(): ApprovalGrantStore {
-		return getApprovalGrants(this.settings.getAgentDir(), this.sessionManager.getSessionId());
 	}
 
 	/**

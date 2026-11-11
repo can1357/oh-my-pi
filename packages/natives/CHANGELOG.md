@@ -5,6 +5,11 @@
 ### Changed
 
 - A set `OMP_APPLEFM_SWIFTC` must name a usable Swift 6.4+ compiler with a macOS 27+ SDK: the build now fails instead of falling back to Xcode, the Command Line Tools, or a build without Apple Foundation Models ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
+### Fixed
+
+- Fixed macOS window screenshots drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; windows spanning displays or partly off screen are captured whole at their on-screen size, except while a sheet larger than the window is open ([#17757](https://github.com/can1357/oh-my-pi/pull/17757) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

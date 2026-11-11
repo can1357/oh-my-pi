@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
+
+### Removed
+
+- Removed Devin's retired SWE-1.6 Fast from the models omp lists before Devin's live model list loads (first start, or when Devin is unreachable) ([#18795](https://github.com/can1357/oh-my-pi/pull/18795) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Devin requests now identify as Devin CLI 3000.12.43, the current stable release, instead of 3000.11.205 ([#18766](https://github.com/can1357/oh-my-pi/pull/18766) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Gemini 4 Argon and Carbon on Command Code showing no reasoning levels; both now offer low, medium, and high
+- Fixed OpenCode Zen Gemini 4 Carbon requests going to the chat-completions endpoint instead of the native Gemini endpoint Zen serves it on
+
 ## [18.18.8] - 2026-11-11
 
 ### Added
@@ -12,6 +26,9 @@
 ### Fixed
 
 - Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
+### Added
+
+- Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
 
 ## [18.18.7] - 2026-11-10
 
