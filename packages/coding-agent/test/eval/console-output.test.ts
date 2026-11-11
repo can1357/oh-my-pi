@@ -136,7 +136,11 @@ describe("JS console output", () => {
 	it.each(["", "await 0; "])("reports rejected assigned promises as run errors with prefix %j", async prefix => {
 		const { hooks } = collect();
 		await expect(
-			runtime.run(`${prefix}globalThis.ompEchoItems = Promise.reject(new Error('assignment failed'))`, undefined, hooks),
+			runtime.run(
+				`${prefix}globalThis.ompEchoItems = Promise.reject(new Error('assignment failed'))`,
+				undefined,
+				hooks,
+			),
 		).rejects.toThrow("assignment failed");
 	});
 

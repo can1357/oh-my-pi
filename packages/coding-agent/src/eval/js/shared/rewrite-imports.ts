@@ -1218,9 +1218,7 @@ export function stripTypeScriptSyntax(
 const LOOKS_LIKE_TS =
 	/(?:\bimport\s+type\b|\bexport\s+type\b|\b(?:import|export)\s*\{[^}\n]*\btype\s+\w|\binterface\s+\w|\btype\s+\w+\s*=|\b(?:as|satisfies)\s+(?:[A-Z]|\bconst\b)|:\s*(?:string|number|boolean|any|unknown|void|never|object|[A-Z]\w*)\b|<\s*[A-Z]\w*\s*[,>])/;
 
-export async function wrapCode(
-	code: string,
-): Promise<{
+export async function wrapCode(code: string): Promise<{
 	source: string;
 	asyncWrapped: boolean;
 	finalExpressionReturned: boolean | null;
