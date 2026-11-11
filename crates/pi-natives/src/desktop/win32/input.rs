@@ -1119,7 +1119,7 @@ mod foreground {
 	}
 
 	/// Check before activation-capable callbacks as well as input delivery:
-	/// element SetFocus must not undo a user switch during activation settle.
+	/// element `SetFocus` must not undo a user switch during activation settle.
 	fn ensure_foreground(target: HWND) -> CoreResult<()> {
 		// SAFETY: GetForegroundWindow has no preconditions.
 		if unsafe { GetForegroundWindow() } != target {
@@ -1609,6 +1609,7 @@ mod foreground {
 
 			// SAFETY: neither foreground query has preconditions.
 			let previous = unsafe { GetForegroundWindow() };
+			// SAFETY: GetDesktopWindow has no preconditions.
 			let target = unsafe { GetDesktopWindow() };
 			assert_ne!(previous, target);
 			let called = Cell::new(false);
