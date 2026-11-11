@@ -47,7 +47,13 @@ import {
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
-import { resolveOpTimeouts, resolveWaitTimeout, ZERO_MATCH_FAIL_FAST_MS, ZERO_MATCH_POLL_MS } from "./op-timeouts";
+import {
+	resolveOpTimeouts,
+	resolveWaitTimeout,
+	untilAbortedOrReleased,
+	ZERO_MATCH_FAIL_FAST_MS,
+	ZERO_MATCH_POLL_MS,
+} from "./op-timeouts";
 import { type BrowserA11yOptions, type BrowserA11yResult, formatA11ySummary, runA11yAudit } from "./a11y/audit";
 import {
 	applyUserAgentOverride,
@@ -2702,7 +2708,27 @@ export class WorkerCore {
 								sig,
 							);
 						}
-						if (parseAriaRefSelector(selector) !== null) return enrich(await this.#resolveAriaRef(selector));
+						const ref = parseAriaRefSelector(selector);
+						if (ref !== null) {
+							while (true) {
+								const handle = await untilAbortedOrReleased(sig, resolveAriaRefHandle(page, ref), async late =>
+									late?.dispose(),
+								);
+								if (!handle && opts.hidden) return null;
+								if (handle) {
+									let keep = false;
+									try {
+										keep =
+											(!opts.visible && !opts.hidden) ||
+											(await untilAborted(sig, () => (opts.hidden ? handle.isHidden() : handle.isVisible())));
+										if (keep) return enrich(handle);
+									} finally {
+										if (!keep) await handle.dispose();
+									}
+								}
+								await untilAborted(sig, () => Bun.sleep(100));
+							}
+						}
 						const handle = (await untilAborted(sig, () =>
 							page.waitForSelector(normalizeSelector(selector), {
 								timeout: w,

@@ -1521,6 +1521,12 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async isVisible(selector: string): Promise<boolean> {
+		const spec = this.#selectorSpec(selector);
+		if (spec.kind === "ref") {
+			if (!this.#elementRefs.has(Number(spec.value))) return false;
+			const result = await this.#request("browser.is.visible", { selector: spec.ref });
+			return result.value === true;
+		}
 		return (
 			(await this.queryElement<boolean>(
 				selector,
@@ -2032,7 +2038,11 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async #selectorExists(spec: SelectorSpec): Promise<boolean> {
-		if (spec.kind === "ref") return this.#elementRefs.has(Number(spec.value));
+		if (spec.kind === "ref") {
+			if (!this.#elementRefs.has(Number(spec.value))) return false;
+			const result = await this.#request("browser.get.count", { selector: spec.ref });
+			return numberFrom(result.count, 0) > 0;
+		}
 		const script = `(() => {
 			const spec = ${JSON.stringify(spec)};
 			${PAGE_SELECTOR_HELPERS}

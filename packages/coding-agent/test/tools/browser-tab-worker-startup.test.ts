@@ -186,11 +186,26 @@ describe("OMP-owned browser evaluation", () => {
 					let attachedRef = "";
 					try { await tab.waitForSelector(ref, {state:"detached", timeout:50}); }
 					catch (e) { attachedRef = e.message; }
+					let visibleRefNotHidden = "";
+					try { await tab.waitForSelector(ref, {state:"hidden", timeout:50}); }
+					catch (e) { visibleRefNotHidden = e.message; }
+					await tab.evaluate("document.querySelector('#visible').style.display = 'none'");
+					let hiddenRefNotVisible = "";
+					try { await tab.waitForSelector(ref, {state:"visible", timeout:50}); }
+					catch (e) { hiddenRefNotVisible = e.message; }
+					const hiddenRef = await tab.waitForSelector(ref, {state:"hidden"});
+					const legacyHiddenRef = await tab.waitForSelector(ref, {hidden:true});
+					const pendingVisibleRef = tab.waitForSelector(ref, {state:"visible"});
+					await tab.evaluate("document.querySelector('#visible').style.display = ''");
+					const visibleRef = await pendingVisibleRef;
+					await Promise.all([hiddenRef.dispose(), legacyHiddenRef.dispose(), visibleRef.dispose()]);
 					await tab.evaluate("document.querySelector('#visible').remove()");
 					const detachedRef = await tab.waitForSelector(ref, {state:"detached"});
+					const removedHiddenRef = await tab.waitForSelector(ref, {state:"hidden"});
 					await Promise.all([attached.dispose(), invisible.dispose(), visible.dispose(), legacyVisible.dispose()]);
 					return { hidden, detached, invisible:!!invisible, attached:!!attached, visible:!!visible, legacyHidden,
-						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached, attachedRef, detachedRef };
+						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached, attachedRef, detachedRef,
+						visibleRefNotHidden, hiddenRefNotVisible, hiddenRef:!!hiddenRef, visibleRef:!!visibleRef, removedHiddenRef };
 				`,
 					timeoutMs: 10_000,
 					session,
@@ -209,6 +224,11 @@ describe("OMP-owned browser evaluation", () => {
 					stillAttached: expect.stringContaining("timed out"),
 					attachedRef: expect.stringContaining("timed out"),
 					detachedRef: null,
+					visibleRefNotHidden: expect.stringContaining("timed out"),
+					hiddenRefNotVisible: expect.stringContaining("timed out"),
+					hiddenRef: true,
+					visibleRef: true,
+					removedHiddenRef: null,
 				});
 			} finally {
 				await releaseTab(name, { kill: true });

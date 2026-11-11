@@ -14,9 +14,25 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 		const page = await browserHandle.browser.newPage();
 		// cmux evaluates its scripts in the page; Chromium stands in for the surface.
 		const request = spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
-			async (_method: string, params?: Record<string, unknown>) => ({
-				value: await page.evaluate(String(params?.script)),
-			}),
+			async (method: string, params?: Record<string, unknown>) => {
+				if (method === "browser.snapshot") return { refs: { "@e1": { role: "button", name: "Remove" } } };
+				if (method === "browser.is.visible") {
+					if (params?.selector !== "@e1") throw new Error("Unexpected observation ref");
+					return {
+						value: await page.$eval("#observed", element => {
+							const style = getComputedStyle(element);
+							const rect = element.getBoundingClientRect();
+							return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+						}),
+					};
+				}
+				if (method === "browser.get.count") {
+					if (params?.selector !== "@e1") throw new Error("Unexpected observation ref");
+					return { count: await page.evaluate(() => document.querySelectorAll("#observed").length) };
+				}
+				if (method !== "browser.eval") throw new Error(`Unexpected cmux request: ${method}`);
+				return { value: await page.evaluate(String(params?.script)) };
+			},
 		);
 		try {
 			const tab = new CmuxTab({
@@ -35,6 +51,25 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 			expect(await rejectionOf(tab.waitForSelector("#shown", JSON.parse('{"state":"gone"}')))).toMatchObject({
 				message: expect.stringContaining("waitForSelector() accepts"),
 			});
+			await page.setContent('<button id="observed">Remove</button>');
+			expect((await tab.observe()).elements).toMatchObject([{ id: 1, role: "button", name: "Remove" }]);
+			expect(await tab.elementExists("e1")).toBe(true);
+			expect(await tab.waitForSelector("e1", { state: "visible", timeout: 1 })).not.toBeNull();
+			expect(await rejectionOf(tab.waitForSelector("e1", { state: "hidden", timeout: 1 }))).toMatchObject({
+				message: expect.stringContaining("timed out"),
+			});
+			await page.$eval("#observed", element => element.setAttribute("style", "display:none"));
+			expect(await tab.elementExists("e1")).toBe(true);
+			expect(await tab.waitForSelector("e1", { state: "hidden", timeout: 1 })).toBeNull();
+			expect(await rejectionOf(tab.waitForSelector("e1", { state: "visible", timeout: 1 }))).toMatchObject({
+				message: expect.stringContaining("timed out"),
+			});
+			expect(await rejectionOf(tab.waitForSelector("e1", { state: "detached", timeout: 1 }))).toMatchObject({
+				message: expect.stringContaining("timed out"),
+			});
+			await page.$eval("#observed", element => element.remove());
+			expect(await tab.elementExists("e1")).toBe(false);
+			expect(await tab.waitForSelector("e1", { state: "detached", timeout: 1 })).toBeNull();
 			await page.setContent("<p>Hello <b>page</b></p>");
 			expect(await tab.text()).toBe("Hello page");
 			expect(await tab.html()).toBe("<p>Hello <b>page</b></p>");
