@@ -267,6 +267,8 @@ export class CollabGuestLink {
 	readonly agentRegistry = new AgentRegistry();
 	/** Per-agent `hasSessionFile` from the last snapshot; gates remote transcript fetches. */
 	#agentHasTranscript = new Map<string, boolean>();
+	/** Per-agent `inSession` from the last snapshot; which agents the host's task cards may draw running. */
+	#agentInHostSession = new Map<string, boolean>();
 	#pendingTranscripts = new Map<number, (r: AgentHubRemoteTranscript | null) => void>();
 	/** Host `ui-request`s presented (or queued) locally, keyed by reqId; aborting dismisses. */
 	#pendingUiRequests = new Map<number, AbortController>();
@@ -853,12 +855,16 @@ export class CollabGuestLink {
 			if (!seen.has(ref.id)) {
 				this.agentRegistry.unregister(ref.id);
 				this.#agentHasTranscript.delete(ref.id);
+				this.#agentInHostSession.delete(ref.id);
 			}
 		}
+		let cardChanged = false;
 		for (const snap of agents) {
-			if (this.agentRegistry.get(snap.id)) {
-				this.agentRegistry.setStatus(snap.id, snap.status);
-			} else {
+			// `aborted` is terminal for its generation, and a revived agent keeps its
+			// id: the host's replacement generation can never reach the mirrored
+			// tombstone through `setStatus`, so replace that ref through the
+			// registry's replace API instead of leaving the killed row on the card.
+			if (!this.agentRegistry.get(snap.id) || !this.agentRegistry.setStatus(snap.id, snap.status)) {
 				this.agentRegistry.register({
 					id: snap.id,
 					displayName: snap.displayName,
@@ -875,9 +881,25 @@ export class CollabGuestLink {
 				ref.createdAt = snap.createdAt;
 				ref.lastActivity = snap.lastActivity;
 				ref.displayName = snap.displayName;
+				// Run-scoped like the host's: a snapshot without it (a new run, or an
+				// older host) clears it, since `setStatus` keeps a running ref's lifecycle.
+				if (ref.lifecycle?.acceptedAt !== snap.acceptedAt) {
+					ref.lifecycle = { ...ref.lifecycle, acceptedAt: snap.acceptedAt };
+					cardChanged = true;
+				}
 			}
 			this.#agentHasTranscript.set(snap.id, snap.hasSessionFile);
+			// A new mirror's registration already announces the row.
+			const inSession = snap.inSession !== false;
+			const wasInSession = this.#agentInHostSession.get(snap.id);
+			if (wasInSession !== undefined && wasInSession !== inSession) cardChanged = true;
+			this.#agentInHostSession.set(snap.id, inSession);
 		}
+		// A run's acceptance or session ownership can change with its status
+		// unchanged (`running` → its own tail, or a new run inside the host's
+		// debounce window), and neither `setStatus` nor the writes above emit, so
+		// the settled card that draws this row must be repainted explicitly.
+		if (cardChanged) this.#ctx.scheduleLiveTaskCardRefresh();
 	}
 
 	#clearAgentMirror(): void {
@@ -885,6 +907,12 @@ export class CollabGuestLink {
 			this.agentRegistry.unregister(ref.id);
 		}
 		this.#agentHasTranscript.clear();
+		this.#agentInHostSession.clear();
+	}
+
+	/** Whether the host's session owns mirrored agent `id`, so its task cards may draw it running. */
+	agentInHostSession(id: string): boolean {
+		return this.#agentInHostSession.get(id) ?? false;
 	}
 
 	/** Resolve every in-flight transcript request with null (resolvers clear their own timers). */

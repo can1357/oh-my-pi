@@ -252,7 +252,9 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 		reopen: (registry, id, expected) => registry.reopen(id, expected),
 		setHistory: (registry, id, history, expectedSessionFile) => registry.setHistory(id, history, expectedSessionFile),
 		setStatus: (registry, id, status, expected) => registry.setStatus(id, status, expected),
-		markResultAccepted: (registry, id, expected, responseAt) => registry.markResultAccepted(id, expected, responseAt),
+		startRun: (registry, id, expected) => registry.startRun(id, expected),
+		markResultAccepted: (registry, id, expected, responseAt, run) =>
+			registry.markResultAccepted(id, expected, responseAt, run),
 		staleAcceptedRuns: registry => registry.staleAcceptedRuns(),
 		setActivity: (registry, id, activity) => registry.setActivity(id, activity),
 		attachSession: (registry, id, session, sessionFile, expected) =>

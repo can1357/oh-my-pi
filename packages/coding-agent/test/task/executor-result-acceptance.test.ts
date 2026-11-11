@@ -342,6 +342,33 @@ describe("runSubprocess result acceptance", () => {
 		expect(settled?.lifecycle?.terminalAt).toBeNumber();
 	});
 
+	it("does not settle a wake run that started before the previous run's acceptance was recorded", async () => {
+		const harness = createHarness();
+		registerRunning(harness.session);
+		const registry = AgentRegistry.global();
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const finish = harness.wakeObserver()?.([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "wake",
+				display: false,
+				attribution: "user",
+				timestamp: Date.now(),
+			} as unknown as AgentMessage,
+		]);
+		expect(finish).toBeDefined();
+		registry.startRun(AGENT_ID, harness.session);
+		harness.emitTerminalYield({ report: "answered while woken" });
+		// The next run starts before the driver records the first run's acceptance.
+		registry.startRun(AGENT_ID, harness.session);
+		await finish?.(undefined);
+
+		const ref = registry.get(AGENT_ID);
+		expect(ref?.status).toBe("running");
+		expect(ref?.lifecycle?.acceptedAt).toBeUndefined();
+	});
+
 	it("delivers every yield of a woken agent to its parent as a job completion", async () => {
 		const manager = new AsyncJobManager({});
 		const delivered: string[] = [];

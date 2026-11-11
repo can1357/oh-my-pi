@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On a native (TSP) surface, a task card's settled agent row draws its `agent` node as running, with the current tool, while the host reports that agent running again; terminal rows keep the recorded status. The host passes `ToolExecutionOptions.liveTaskAgents` and calls `ToolExecutionComponent.refreshLiveTaskAgents()` when its agents change ([#18724](https://github.com/can1357/oh-my-pi/pull/18724) by [@matteoantoci](https://github.com/matteoantoci))
+
 ## [18.18.8] - 2026-11-11
 
 - The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#18705](https://github.com/can1357/oh-my-pi/pull/18705) by [@yuzu-octopus](https://github.com/yuzu-octopus))

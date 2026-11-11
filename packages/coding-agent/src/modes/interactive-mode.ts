@@ -142,7 +142,7 @@ import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-import { sumSubagentTreeCost } from "./agent-hub-runtime";
+import { inTaskCardSession, liveTaskAgent, sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -180,7 +180,7 @@ import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
-import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
+import { agentTypeBadge, formatTaskId, type LiveTaskAgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import {
 	AUTO_THINKING,
@@ -1780,11 +1780,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * A guest's transcript is the host's and draws stock cards. Joining replays the host's next, so
 	 * the local blocks are left as drawn; leaving restored the local transcript while the guest still
-	 * held it, so its blocks are asked again.
+	 * held it, so its blocks are asked again, and its task cards ask the local registry which agents run.
 	 */
 	setCollabGuest(guest: CollabGuestLink | undefined): void {
 		this.#collabGuest = guest;
 		if (this.#applyTranscriptPresenters() && !guest) this.refreshTranscriptPresentation();
+		if (!guest) this.scheduleLiveTaskCardRefresh();
 	}
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;
@@ -2213,8 +2214,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Tern's native view routes link clicks itself, so claimed links stop (or start) being
 		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
 		this.#eventBusUnsubscribers.push(
-			onNativeRenderingChange(() => {
+			onNativeRenderingChange(on => {
 				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				// Task cards skip agents that run again while the terminal draws; a resumed surface catches up.
+				if (on && this.#refreshLiveTaskCards()) this.ui.requestRender();
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
@@ -4885,6 +4888,29 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * {@link liveTaskAgent} over the badge's registry and this session's observed subagents. A guest
+	 * asks the host which mirrored agents its session owns; mirrored refs carry no transcript path.
+	 */
+	readonly liveTaskAgents: LiveTaskAgentSource = id => {
+		const guest = this.collabGuest;
+		const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
+		return liveTaskAgent(
+			getRunningSubagentBadgeRegistry(guest, AgentRegistry.global()).get(id),
+			this.#observerRegistry.getSession(id),
+			guest ? ref => guest.agentInHostSession(ref.id) : ref => inTaskCardSession(ref, rootSessionFile),
+		);
+	};
+
+	/**
+	 * Repaint settled task cards through the coalesced observer sync: a collab
+	 * guest writes the host's run lifecycle straight onto its mirrored refs, so
+	 * no registry event announces the change.
+	 */
+	scheduleLiveTaskCardRefresh(): void {
+		this.#scheduleObserverUiSync("progress");
+	}
+
+	/**
 	 * Register a resumed session's persisted subagent transcripts (with usage
 	 * history) so the status line's tree cost matches the Agent Hub without it
 	 * being opened first. Once per on-disk root; registry changes re-sync the cost.
@@ -5317,7 +5343,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			todoChanged = true;
 		}
 		const hudChanged = this.#renderSubagentList();
-		if (badgeChanged || todoChanged || hudChanged) this.ui.requestRender();
+		const cardsChanged = this.#refreshLiveTaskCards();
+		if (badgeChanged || todoChanged || hudChanged || cardsChanged) this.ui.requestRender();
+	}
+
+	/**
+	 * Redraw the task cards whose settled rows list an agent that started or
+	 * stopped running again. Only a native surface draws that; terminal rows
+	 * keep the recorded status, as scrollback cannot be repainted.
+	 */
+	#refreshLiveTaskCards(): boolean {
+		let changed = false;
+		for (const block of this.chatContainer.children) {
+			if (block instanceof ToolExecutionComponent && block.refreshLiveTaskAgents()) changed = true;
+		}
+		return changed;
 	}
 
 	#cancelObserverUiSyncTimer(): void {

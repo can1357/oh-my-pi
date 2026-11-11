@@ -1353,6 +1353,8 @@ interface SubagentRunMonitor {
 	markFinalYieldForced(forced: boolean): void;
 	/** Epoch ms when the run's terminal `yield` was recorded; undefined while none is latched. */
 	yieldAcceptedAt(): number | undefined;
+	/** The registry's run number when that `yield` was recorded; undefined while none is latched. */
+	yieldRun(): number | undefined;
 	runtimeLimitExceeded(): boolean;
 	/** True once the soft-budget stop fired: the free-running turn was aborted and the run is being driven to a forced final yield. */
 	budgetStopRequested(): boolean;
@@ -1483,6 +1485,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldInvalidatedByAsync = false;
 	/** Epoch ms the current terminal yield was recorded; cleared when it is invalidated. */
 	let yieldAcceptedAt: number | undefined;
+	/** The registry's run number when {@link yieldAcceptedAt} was recorded. */
+	let yieldRun: number | undefined;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
 
@@ -1835,6 +1839,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
 				yieldAcceptedAt = Date.now();
+				// A worker's earlier `startRun` notify precedes this call on the same link.
+				yieldRun = AgentRegistry.global().get(id)?.lifecycle?.run;
 				// Submitted: the remaining work is finalization (or waiting on owned
 				// async jobs), so stop showing the last stale self-estimate.
 				if (completionProbe) progress.completionPercent = 99;
@@ -1920,6 +1926,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					yieldCalled = false;
 					yieldInvalidatedByAsync = true;
 					yieldAcceptedAt = undefined;
+					yieldRun = undefined;
 				}
 				break;
 
@@ -2381,6 +2388,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			finalYieldForced = forced;
 		},
 		yieldAcceptedAt: () => yieldAcceptedAt,
+		yieldRun: () => yieldRun,
 		runtimeLimitExceeded: () => runtimeLimitExceeded,
 		terminalError: () => terminalError,
 		hasExplicitAbortReason: () =>
@@ -3515,7 +3523,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// Acceptance boundary for an autonomous wake turn (#11079): the
 				// turn's terminal yield is settled, so terminalize the ref here
 				// even when the run-state mirror never delivers `idle`.
-				AgentRegistry.global().markResultAccepted(id, session, turnMonitor.yieldAcceptedAt());
+				AgentRegistry.global().markResultAccepted(
+					id,
+					session,
+					turnMonitor.yieldAcceptedAt(),
+					turnMonitor.yieldRun(),
+				);
 			}
 			// Read before finalization: a schema-bearing agent that answered in
 			// prose gets a missing-yield warning prepended to `result.output`.
@@ -4014,7 +4027,7 @@ async function driveFollowUpTurn(
 			if (resultDelivered(outcome, monitor, structured)) {
 				// A follow-up turn's accepted result is the run's final result too:
 				// terminalize the ref here, not just on the initial run (#11079).
-				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
+				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt(), monitor.yieldRun());
 			}
 		} finally {
 			try {
@@ -5302,7 +5315,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.
 			if (resultDelivered(outcome, monitor, structured)) {
-				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
+				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt(), monitor.yieldRun());
 			}
 			exitCode = outcome.exitCode;
 			error = outcome.error;

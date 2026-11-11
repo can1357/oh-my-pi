@@ -66,6 +66,7 @@ import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { ConversationPosition } from "./utils/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { LiveTaskAgentSource } from "@oh-my-pi/pi-tui/tools/task";
 
 export type CompactionQueuedMessage = {
 	text: string;
@@ -568,6 +569,17 @@ export interface InteractiveModeContext {
 	extractAssistantText(message: AssistantMessage): string;
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(): void;
+	/**
+	 * Request the coalesced observer-UI sync that repaints settled task cards
+	 * whose rows list an agent that started or stopped running again. A collab
+	 * guest's mirrored liveness can change with no local registry or session event.
+	 */
+	scheduleLiveTaskCardRefresh(): void;
+	/**
+	 * A subagent a settled task card row lists, while it runs again: revived or
+	 * woken by IRC or hub chat, or still running after its call settled.
+	 */
+	readonly liveTaskAgents: LiveTaskAgentSource;
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;

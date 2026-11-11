@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In Tern, a settled task card now shows an agent as running, with its current tool, while it works again after the call ended (revived or woken by an IRC message or hub chat, or still running after a cancel); the row returns to its recorded status when that run ends ([#18724](https://github.com/can1357/oh-my-pi/pull/18724) by [@matteoantoci](https://github.com/matteoantoci))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
