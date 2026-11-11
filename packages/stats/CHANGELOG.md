@@ -4,7 +4,7 @@
 
 ### Added
 
-- The Spotlight dashboard's Overhead card breaks failed results down by cause (not signed in, timeout, rate limited, HTTP status, …) and, when results failed for lack of a Stencil sign-in, says how to sign in
+- The Spotlight dashboard's Overhead card breaks failed results down by cause (not signed in, timeout, rate limited, HTTP status, …) and, when results failed for lack of a Stencil sign-in, says how to sign in ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.18.4] - 2026-11-09
 
