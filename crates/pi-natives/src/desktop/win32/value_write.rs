@@ -170,10 +170,18 @@ pub(super) fn set_combo(
 			if unsafe { GetComboBoxInfo(hwnd, &mut info) } == 0 || info.hwndItem.is_null() {
 				return Err(failed());
 			}
+			// Typed text that matches no item leaves the combo with no list
+			// selection; without this the app reads the previously selected item
+			// next to the new text. Clearing the selection also empties the edit,
+			// which WM_SETTEXT then fills.
+			send(hwnd, CB_SETCURSEL, usize::MAX, 0)?;
 			if send(info.hwndItem, WM_SETTEXT, 0, wide.as_ptr() as isize)? == 0 {
 				return Err(failed());
 			}
 			send(parent, WM_COMMAND, (id | (CBN_EDITCHANGE << 16)) as usize, hwnd as isize)?;
+			if send(hwnd, CB_GETCURSEL, 0, 0)? != -1 {
+				return Err(failed());
+			}
 			Ok(())
 		},
 	}
@@ -230,5 +238,62 @@ mod tests {
 		let actual =
 			find_exact(&expected, 2, |_| Ok(Some((0, "ABC".encode_utf16().collect())))).unwrap();
 		assert_eq!(actual, None);
+	}
+
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn editing_an_unlisted_value_clears_the_previous_selection() {
+		use windows_sys::Win32::UI::WindowsAndMessaging::{
+			CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWN, CBS_HASSTRINGS, CreateWindowExW,
+			DestroyWindow, GetWindowTextW, SendMessageW, WS_CHILD, WS_OVERLAPPED,
+		};
+		let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+		let (frame, combo, empty) = (wide("STATIC"), wide("COMBOBOX"), wide(""));
+		// SAFETY: the class and title strings are NUL-terminated and outlive the
+		// calls; both are system classes, and messages to a window this thread
+		// created run synchronously.
+		unsafe {
+			let parent = CreateWindowExW(
+				0,
+				frame.as_ptr(),
+				empty.as_ptr(),
+				WS_OVERLAPPED,
+				0,
+				0,
+				200,
+				200,
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null(),
+			);
+			let hwnd = CreateWindowExW(
+				0,
+				combo.as_ptr(),
+				empty.as_ptr(),
+				WS_CHILD | (CBS_DROPDOWN | CBS_HASSTRINGS) as u32,
+				0,
+				0,
+				100,
+				200,
+				parent,
+				7 as _,
+				std::ptr::null_mut(),
+				std::ptr::null(),
+			);
+			assert!(!parent.is_null() && !hwnd.is_null());
+			for item in ["red", "green"] {
+				SendMessageW(hwnd, CB_ADDSTRING, 0, wide(item).as_ptr() as isize);
+			}
+			SendMessageW(hwnd, CB_SETCURSEL, 1, 0);
+
+			set_combo(hwnd, "purple", true).unwrap();
+
+			assert_eq!(SendMessageW(hwnd, CB_GETCURSEL, 0, 0), -1);
+			let mut buffer = [0_u16; 32];
+			let length = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
+			assert_eq!(String::from_utf16_lossy(&buffer[..length as usize]), "purple");
+			DestroyWindow(parent);
+		}
 	}
 }
