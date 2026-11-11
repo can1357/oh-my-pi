@@ -58,7 +58,7 @@ import { writeDeviceDispatch } from "../../tools/resolve";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
-import { type RunStatus, setRunStatus } from "../../utils/run-status";
+import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
 import { setTerminalTitleState } from "../../utils/title-generator";
 import {
 	assistantMessageLinkTargets,
@@ -219,10 +219,6 @@ export class EventController {
 	 * the call's `tool_execution_end` carries its `running` start result.
 	 */
 	#settledBeforeReturn = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
-	/** The waits for the user the session reports open while a prompt runs (user_wait_start until its
-	 *  user_wait_end), each with the `blocked` status it reports: the newest as it opens, the oldest left as one
-	 *  settles. */
-	#userWaits = new Map<number, RunStatus>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
@@ -487,18 +483,10 @@ export class EventController {
 			queue_update: async () => {
 				this.ctx.updatePendingMessagesDisplay();
 			},
-			user_wait_start: async event => {
-				const blocked: RunStatus = { state: "blocked", kind: event.kind, msg: event.msg };
-				this.#userWaits.set(event.id, blocked);
-				setRunStatus(blocked);
-			},
-			// Back to `working` only when the LAST wait settles: with queued prompts (parallel approvals, a hook's
-			// dialog inside a tool call), the first to settle must not clear the signal while another still waits.
-			user_wait_end: async event => {
-				if (this.#userWaits.delete(event.id)) {
-					setRunStatus(this.#userWaits.values().next().value ?? { state: "working" });
-				}
-			},
+			// InteractiveMode reports the root session's waits whichever session is viewed; a viewed subagent
+			// has no UI to wait on the user with.
+			user_wait_start: async () => {},
+			user_wait_end: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -1094,7 +1082,6 @@ export class EventController {
 		this.#toolReplyBlocks.clear();
 		this.#backgroundCallIds.clear();
 		this.#settledBeforeReturn.clear();
-		this.#userWaits.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -2595,7 +2582,7 @@ export class EventController {
 	 * retry leaves the user at the prompt). Reads the turn's own `agent_end`
 	 * messages for the reason `sendErrorNotification` does.
 	 */
-	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunStatus {
+	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunFlowStatus {
 		if (this.#retryPending) return { state: "idle" };
 		const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
 		if (last?.stopReason === "error") return { state: "error", msg: last.errorMessage };
@@ -2624,8 +2611,6 @@ export class EventController {
 		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
-		// A wait still open at the end is the end's to report; its late user_wait_end must not report `working`.
-		this.#userWaits.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);

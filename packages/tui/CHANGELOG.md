@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `TUI.setInputScope()` runs every input dispatch through a caller-supplied scope, so an app can mark what the user's keypresses start ([#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
+
 ### Fixed
 
 - Agent Hub status scopes (All, Running, Done, Parked) show icons in Tern instead of empty squares ([#18880](https://github.com/can1357/oh-my-pi/pull/18880) by [@a-glapinski](https://github.com/a-glapinski))

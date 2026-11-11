@@ -1,7 +1,6 @@
 /**
  * The run status `EventController` publishes (title separator + OSC 7501
- * record): what a settled turn leaves behind, and how the session's waits for
- * the user move the run between `blocked` and `working`.
+ * record): what a settled turn leaves behind.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -44,10 +43,6 @@ function assistant(stopReason: "stop" | "error" | "aborted", errorMessage?: stri
 
 function agentEnd(messages: AssistantMessage[]): Extract<AgentSessionEvent, { type: "agent_end" }> {
 	return { type: "agent_end", messages } as Extract<AgentSessionEvent, { type: "agent_end" }>;
-}
-
-function toolStart(toolCallId: string, toolName: string, args: Record<string, unknown>): AgentSessionEvent {
-	return { type: "tool_execution_start", toolCallId, toolName, args } as unknown as AgentSessionEvent;
 }
 
 describe("EventController run status at turn end", () => {
@@ -120,55 +115,5 @@ describe("EventController settle with a queued compaction", () => {
 
 		expect(runYieldCompaction).not.toHaveBeenCalled();
 		expect(restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe("EventController run status while the session waits on the user", () => {
-	const waitStart = (id: number, msg: string): AgentSessionEvent => ({
-		type: "user_wait_start",
-		id,
-		kind: "question",
-		msg,
-	});
-
-	it("reports the wait still open when another settles, and working once none is left", async () => {
-		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
-		const controller = new EventController(createInteractiveModeContext());
-
-		await controller.handleEvent(AGENT_START);
-		await controller.handleEvent(waitStart(1, "Use Postgres?"));
-		await controller.handleEvent(waitStart(2, "Deploy now?"));
-		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: "Deploy now?" });
-
-		await controller.handleEvent({ type: "user_wait_end", id: 2 });
-		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: "Use Postgres?" });
-
-		await controller.handleEvent({ type: "user_wait_end", id: 1 });
-		expect(report).toHaveBeenLastCalledWith({ state: "working" });
-	});
-
-	it("reports working as soon as an approval is answered, while its tool still runs", async () => {
-		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
-		const controller = new EventController(createInteractiveModeContext());
-
-		await controller.handleEvent(AGENT_START);
-		await controller.handleEvent(toolStart("bash-1", "bash", { command: "gh pr merge" }));
-		await controller.handleEvent({ type: "user_wait_start", id: 1, kind: "permission", msg: "Allow gh pr merge?" });
-		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow gh pr merge?" });
-
-		await controller.handleEvent({ type: "user_wait_end", id: 1 });
-		expect(report).toHaveBeenLastCalledWith({ state: "working" });
-	});
-
-	it("keeps a run's end result when a wait it left open settles afterwards", async () => {
-		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
-		const controller = new EventController(createInteractiveModeContext());
-
-		await controller.handleEvent(AGENT_START);
-		await controller.handleEvent(waitStart(1, "Deploy now?"));
-		await controller.handleEvent(agentEnd([assistant("stop")]));
-		await controller.handleEvent({ type: "user_wait_end", id: 1 });
-
-		expect(report).toHaveBeenLastCalledWith({ state: "done" });
 	});
 });

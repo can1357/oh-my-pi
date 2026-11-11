@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import {
+	closeUserWait,
 	disposeProgramStatus,
 	initProgramStatus,
+	openUserWait,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	setRunStatus,
@@ -56,7 +58,8 @@ describe("run status OSC 7501 reporting", () => {
 	it("writes each transition as a whole root record, once, with kind only when blocked and msg as one clean line", () => {
 		setRunStatus({ state: "working" });
 		setRunStatus({ state: "working" });
-		setRunStatus({ state: "blocked", kind: "question", msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?" });
+		openUserWait(1, { state: "blocked", kind: "question", msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?" });
+		closeUserWait(1);
 		setRunStatus({ state: "done" });
 		setRunStatus({ state: "error", msg: "boom" });
 		setRunStatus({ state: "error", msg: " \n " });
@@ -66,6 +69,7 @@ describe("run status OSC 7501 reporting", () => {
 			report(
 				`state=blocked:kind=question:app=omp:msg=${Buffer.from("Which branch? main or dev?").toString("base64")}`,
 			),
+			report("state=working:app=omp"),
 			report("state=done:app=omp"),
 			report(`state=error:app=omp:msg=${Buffer.from("boom").toString("base64")}`),
 			report("state=error:app=omp"),
@@ -102,7 +106,7 @@ describe("run status OSC 7501 reporting", () => {
 		writes.length = 0;
 
 		setProgramStatusEnabled(false);
-		setRunStatus({ state: "blocked", kind: "permission" });
+		openUserWait(1, { state: "blocked", kind: "permission" });
 		setProgramStatusEnabled(true);
 
 		expect(writes).toEqual([CLEAR, report("state=blocked:kind=permission:app=omp")]);
@@ -111,8 +115,9 @@ describe("run status OSC 7501 reporting", () => {
 	it("re-sends prompt-invalidated working and blocked records but never repeats a done result", () => {
 		setRunStatus({ state: "working" });
 		resendProgramStatus();
-		setRunStatus({ state: "blocked", kind: "permission", msg: "Approve the command?" });
+		openUserWait(1, { state: "blocked", kind: "permission", msg: "Approve the command?" });
 		resendProgramStatus();
+		closeUserWait(1);
 		setRunStatus({ state: "done" });
 		resendProgramStatus();
 
@@ -121,6 +126,27 @@ describe("run status OSC 7501 reporting", () => {
 			report("state=working:app=omp"),
 			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve the command?").toString("base64")}`),
 			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve the command?").toString("base64")}`),
+			report("state=working:app=omp"),
+			report("state=done:app=omp"),
+		]);
+	});
+
+	it("reports the newest open wait over the run's own transitions, then the run's current status", () => {
+		const blocked = (msg: string) =>
+			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from(msg).toString("base64")}`);
+		setRunStatus({ state: "working" });
+		openUserWait(1, { state: "blocked", kind: "question", msg: "Use Postgres?" });
+		// The run ends under the open wait: the user is still being asked.
+		setRunStatus({ state: "done" });
+		openUserWait(2, { state: "blocked", kind: "question", msg: "Deploy now?" });
+		closeUserWait(2);
+		closeUserWait(1);
+
+		expect(writes).toEqual([
+			report("state=working:app=omp"),
+			blocked("Use Postgres?"),
+			blocked("Deploy now?"),
+			blocked("Use Postgres?"),
 			report("state=done:app=omp"),
 		]);
 	});

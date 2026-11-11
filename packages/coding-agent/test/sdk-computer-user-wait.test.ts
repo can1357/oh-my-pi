@@ -13,7 +13,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
+import { runUserAction, trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -171,16 +171,28 @@ describe("SDK session dialogs and the computer display hold", () => {
 		expect(waits).toEqual([start, { type: "user_wait_end", id: start.id }]);
 	});
 
-	it("reports a dialog a running prompt waits on, but not one the user opens while idle", async () => {
+	it("reports a dialog a running prompt or the session itself opens, but not one the user opened while idle", async () => {
 		const target = await createSession({}, [call("ask", { html: GO_ON_FORM }), { content: ["done"] }]);
 		const waits = userWaits(target);
+		const ui = target.extensionRunner!.getUIContext();
 
-		// An extension command's own prompt, opened at the idle editor.
-		const picked = target.extensionRunner!.getUIContext().select("Pick a branch", []);
+		// An extension command's own picker, opened by the user at the idle editor.
+		const picked = runUserAction(() => ui.select("Pick a branch", []));
 		(await dialog.promise).answer("main");
 		await picked;
 		expect(waits).toEqual([]);
 
+		// The same dialog from an extension's own trigger (a timer, a watcher) waits on the user.
+		dialog = Promise.withResolvers();
+		const unprompted = ui.select("Deploy the nightly build?", []);
+		(await dialog.promise).answer("yes");
+		await unprompted;
+		expect(waits).toEqual([
+			{ type: "user_wait_start", id: expect.any(Number), kind: "question", msg: "Deploy the nightly build?" },
+			{ type: "user_wait_end", id: expect.any(Number) },
+		]);
+
+		waits.length = 0;
 		dialog = Promise.withResolvers();
 		const running = target.prompt("go");
 		const open = await dialog.promise;

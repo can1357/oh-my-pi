@@ -254,9 +254,12 @@ import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
+import { runUserAction } from "../extensibility/extensions/user-wait";
 import {
+	closeUserWait,
 	disposeProgramStatus,
 	initProgramStatus,
+	openUserWait,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	settleStartupRun,
@@ -2727,6 +2730,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
+		// What a keypress starts is the user's own doing: a dialog it opens while no prompt runs needs no alert.
+		this.ui.setInputScope(dispatch => runUserAction(dispatch));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
 		// Only a frame that actually writes the mark needs a replacement; diff
 		// paints that keep the user bubble must not resend on every update.
@@ -2940,6 +2945,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				// A turn the TUI did not submit (an extension message, a background job) leaves
 				// getUserInput pending, so arm the loop's next iteration here instead.
 				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
+				// The root session's waits for the user, whichever session the view shows (subagents have no UI).
+				if (event.type === "user_wait_start") {
+					openUserWait(event.id, { state: "blocked", kind: event.kind, msg: event.msg });
+				} else if (event.type === "user_wait_end") {
+					closeUserWait(event.id);
+				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -7988,7 +7999,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			() => requestDelivered.resolve(),
 			() => requestDelivered.resolve(),
 		);
-		const choice = await choicePromise;
+		// The plan waits on the user's approval after the turn that proposed it has ended.
+		const choice = await this.session.waitForUser(
+			() => choicePromise,
+			() => ({ kind: "permission", msg: `Review plan: ${details.title}` }),
+		);
 		if (this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
 		const remote = pending.remote;
 		const closePlanReview = (): void => {
