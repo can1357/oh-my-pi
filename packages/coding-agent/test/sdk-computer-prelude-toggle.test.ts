@@ -84,9 +84,18 @@ describe("AgentSession eval preludes", () => {
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.agent.state.systemPrompt.join("\n\n")).not.toContain("# Computer Use");
 
+		const browserReconciled = Promise.withResolvers<void>();
+		const refresh = session.refreshBaseSystemPrompt.bind(session);
+		const refreshSpy = vi.spyOn(session, "refreshBaseSystemPrompt").mockImplementation(async (...args) => {
+			await refresh(...args);
+			browserReconciled.resolve();
+		});
 		cfgBrowserEnabled.override(session.settings, true);
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
 		expect(session.getAllToolNames()).not.toContain("browser");
+		// The prefix assertion below depends on browser.enabled finishing its asynchronous MCP-filter reconcile.
+		await browserReconciled.promise;
+		refreshSpy.mockRestore();
 
 		const mock = createMockModel({ handler: { content: ["ok"] } });
 		session.agent.streamFn = mock.stream;
