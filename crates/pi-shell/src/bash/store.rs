@@ -46,6 +46,20 @@ use crate::bash::{
 	zshopt::{ZshOpt, ZshOpts},
 };
 
+mod key_wire;
+
+/// One complete-record or blob mutation in a restore's atomic commit.
+/// The backend validates the entire ordered batch before publishing any of it.
+#[derive(Debug)]
+pub enum RestoreWrite {
+	/// Replace a record, with the same shape and scope rules as [`Change::Put`].
+	Put(KeyBuf, Record),
+	/// Delete a record, with the same scope truncation rules as [`Change::Del`].
+	Delete(KeyBuf),
+	/// Delete an execution-image blob.
+	DeleteBlob(BlobSlot),
+}
+
 /// Persistent shell state, record by record.
 ///
 /// Implemented by `MemStore` (the reference, `mem-store` feature) and any
@@ -98,6 +112,16 @@ pub trait StateStore {
 	/// [`StoreError::Shape`] when a variant's precondition does not hold,
 	/// [`StoreError::Backend`] when the backend fails.
 	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError>;
+	/// Commit all restore mutations atomically, in order. On error every record,
+	/// blob and the epoch must be unchanged; on success all mutations are
+	/// visible. Validation, storage and durability failures must precede the
+	/// commit point. This is mandatory: a backend without an atomic commit
+	/// must return [`StoreError::Backend`], never apply an unsafe
+	/// write-through fallback.
+	///
+	/// # Errors
+	/// [`StoreError`] when validation or the atomic backend commit is refused.
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError>;
 	/// Store a blob (frames, IR units).
 	///
 	/// # Errors
@@ -234,6 +258,10 @@ pub enum Key<'a> {
 		/// Alias name or suffix.
 		name:   &'a BStr,
 	},
+	/// A historical Misc key this reader cannot interpret. Preserved on
+	/// write-back. New persisted state uses the snapshot vocabulary, not this
+	/// legacy space.
+	UnknownMisc(u32),
 }
 
 impl Key<'_> {
@@ -254,6 +282,7 @@ impl Key<'_> {
 			Self::Local { .. } => Table::Local,
 			Self::ZshOpt(_) => Table::ZshOpt,
 			Self::ZshAlias { .. } => Table::ZshAlias,
+			Self::UnknownMisc(_) => Table::Misc,
 		}
 	}
 
@@ -274,6 +303,7 @@ impl Key<'_> {
 			Self::Local { depth, name } => KeyBuf::Local { depth, name: name.into() },
 			Self::ZshOpt(o) => KeyBuf::ZshOpt(o),
 			Self::ZshAlias { suffix, name } => KeyBuf::ZshAlias { suffix, name: name.into() },
+			Self::UnknownMisc(id) => KeyBuf::UnknownMisc(id),
 		}
 	}
 }
@@ -289,7 +319,7 @@ impl hashbrown::Equivalent<KeyBuf> for Key<'_> {
 }
 
 /// Record key (owned), ordered by table first.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum KeyBuf {
 	/// See [`Key::Var`].
 	Var(BString),
@@ -329,6 +359,8 @@ pub enum KeyBuf {
 		/// Alias name or suffix.
 		name:   BString,
 	},
+	/// See [`Key::UnknownMisc`].
+	UnknownMisc(u32),
 }
 
 impl KeyBuf {
@@ -351,6 +383,7 @@ impl KeyBuf {
 			Self::ZshAlias { suffix, name } => {
 				Key::ZshAlias { suffix: *suffix, name: BStr::new(name) }
 			},
+			Self::UnknownMisc(id) => Key::UnknownMisc(*id),
 		}
 	}
 }
@@ -409,8 +442,8 @@ pub enum Record {
 	},
 	/// A job of the root shell's job table.
 	Job(Job),
-	/// A child vproc of the shell (subshell, pipeline stage, background job,
-	/// substitution), from its start until its exit status is collected.
+	/// A legacy process record without an ownership tag. Restore treats it
+	/// as owned and atomically rewrites it as [`Record::OwnedProc`].
 	Proc {
 		/// The vproc that started it.
 		parent: Option<Vpid>,
@@ -431,6 +464,20 @@ pub enum Record {
 	/// A list-valued [`MiscKey`] value (positional parameters, `enable`
 	/// lists, history, …).
 	Words(Vec<BString>),
+	/// A running child explicitly released by `disown` or job deletion.
+	/// No parent id encodes this state. Exit removes this record instead of
+	/// publishing a status. Appended so all existing record tags stay stable;
+	/// readers without this variant refuse images containing it.
+	DisownedProc,
+	/// An owned child vproc, from its start until its status is collected.
+	/// The explicit tag preserves a legacy record's resolved ownership when
+	/// saved again. Readers without this variant refuse such images.
+	OwnedProc {
+		/// The vproc that started it; an identity, never an ownership flag.
+		parent: Option<Vpid>,
+		/// Exit status once it finished; `None` while it runs.
+		status: Option<i32>,
+	},
 }
 
 /// zsh sticky emulation (zsh `struct emulation_options`): the emulation
@@ -1069,6 +1116,7 @@ pub enum TrapKey {
 	Deserialize,
 	strum::VariantNames,
 	strum::EnumString,
+	strum::FromRepr,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum MiscKey {
@@ -1309,6 +1357,18 @@ pub enum MiscKey {
 	/// (`Record::Misc`); absent for a user's shell. Nested shells see the
 	/// root's record.
 	Profile,
+	/// Statuses of jobs that left the root table (bash `bgpids`;
+	/// `Record::Words`, one `vpid:ospid:status` each, `ospid` empty when
+	/// none); absent when there are none.
+	BgPids,
+	/// [`crate::bash::vm::proc::JobTable::bang_seen`] of the root shell
+	/// (decimal); absent when zero.
+	BangSeen,
+	/// Optional postcard-encoded job/wait execution state accompanying the
+	/// `Frames` blob (`Record::Misc`), consumed with it. Absent in images
+	/// from engines without retained child statuses. Root retained statuses
+	/// remain in `BgPids` and `BangSeen`, even without frames.
+	JobFrames,
 }
 
 crate::bash::packed_names::packed_names!(MiscKey);

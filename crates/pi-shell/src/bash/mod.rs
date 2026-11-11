@@ -87,7 +87,7 @@ pub use crate::bash::{
 	},
 	mem_store::MemStore,
 	signal::{SigSet, SigTarget, Signal},
-	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},
+	snapshot::{ExternalizeReport, FrameAbandonment, Lost, RestoreOpts, RestoreReport},
 	socket::{Accepted, IpFamily, ListenError, ListenStage, SockAddr, Sockets},
 	store::{Attrs, StateStore, StoreError, VarValue},
 	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Terminal, Termios},

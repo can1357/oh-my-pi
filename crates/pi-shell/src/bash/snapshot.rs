@@ -17,6 +17,42 @@
 //! background job's table entry is live in the store; its execution
 //! position needs `externalize` at a safepoint.
 //!
+//! # Process ownership compatibility
+//!
+//! [`Record::OwnedProc`](crate::bash::store::Record::OwnedProc) and
+//! [`Record::DisownedProc`](crate::bash::store::Record::DisownedProc) give
+//! process ownership its own tags; parent ids are identities, not flags.
+//! These records persist independently of the optional `Frames` blob.
+//! Older readers reject images containing either new tag during store
+//! decoding. This downgrade barrier covers ordinary owned-process images,
+//! not only sessions that disowned a process. An image with no process
+//! record has neither new tag and does not acquire this barrier.
+//! The store image has no ownership format version, and saving can carry
+//! unchanged legacy records forward, so file-level version inference
+//! cannot preserve each record's resolved ownership.
+//!
+//! Legacy `Proc` records have no ownership tag. They restore as owned,
+//! including a self-parent relationship: such a relationship can belong to
+//! a real owned child after a frameless restore changes `vpid_base`.
+//! Restore queues `Diag::AmbiguousProcOwnership` on stderr and emits its
+//! diagnostic event for a self-parent; the comparison selects only the
+//! warning, not ownership. A genuinely disowned legacy child therefore
+//! retains its real completion instead of deleting it. Normal plain Bash
+//! `disown PID` keeps status 0, so its first `wait PID` still returns 0.
+//! The divergence covers genuinely disowned legacy children with no retained
+//! status, not just one disown spelling. Measured examples include Bash
+//! `disown -a`, `disown -r`, `disown -ar` and zsh-mode `disown %1`: when the
+//! child exits 7, restoring it as owned exposes `wait PID` status 7 where the
+//! older reader gives 127 (also Bash's result for the three Bash forms).
+//! This accepts a wrong status for that ambiguous legacy class instead of a
+//! potentially unbounded wait for a real owned child.
+//!
+//! A successful restore atomically replaces every legacy `Proc` with an
+//! explicit `OwnedProc`, after selecting diagnostics. Subsequent saves
+//! preserve that decision, and reloading them does not diagnose ownership
+//! again. Untouched historical images remain ambiguous indefinitely;
+//! replacing one saved image does not rewrite other archived copies.
+//!
 //! # When `externalize` is complete
 //!
 //! [`Shell::externalize`](crate::bash::Shell::externalize) may be called
@@ -51,21 +87,42 @@
 use serde::{Deserialize, Serialize};
 
 use crate::bash::{
+	error::Incompatibility,
 	fs::FileKind,
 	ids::{NativeRef, RunId, Vpid},
 };
 
+/// Shared, versioned snapshot entries outside the frozen execution core.
+pub mod vocabulary;
+
 /// Options of [`Shell::restore`](crate::bash::Shell::restore).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RestoreOpts {
-	/// Ignore the frames blob: keep root state, abandon the scripts that were
-	/// running (each reports `Done` with status 255). The fallback after
-	/// [`RestoreError::Incompatible`](crate::bash::RestoreError::Incompatible).
+	/// Abandon execution and keep root state. Every old script reports `Done`
+	/// with status 255; no old execution is resumed. Unlike ordinary refusal,
+	/// which leaves persisted bytes unchanged, this consumes the Frames blob.
+	/// The report distinguishes incompatibility from requested abandonment;
+	/// root-store integrity is still checked.
 	pub drop_frames:   bool,
 	/// Seed `$RANDOM` from the host instead of continuing the snapshot's
 	/// sequence, as bash reseeds a forked subshell: shells restored from one
 	/// image next to each other would otherwise draw the same numbers.
 	pub reseed_random: bool,
+}
+
+/// Why execution was deliberately discarded by [`RestoreOpts::drop_frames`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FrameAbandonment {
+	/// Header and vocabulary passed preflight; the caller requested abandonment.
+	/// The discarded execution core was not decoded or validated.
+	Requested,
+	/// Ordinary restore would refuse this image as incompatible.
+	Incompatible {
+		/// The same incompatibility ordinary restore reports.
+		why: Incompatibility,
+	},
+	/// The vocabulary metadata could not be decoded or validated.
+	Unreadable,
 }
 
 /// Result of [`Shell::externalize`](crate::bash::Shell::externalize).
@@ -87,18 +144,20 @@ pub struct ExternalizeReport {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreReport {
 	/// Virtual processes rebuilt.
-	pub vprocs:        u32,
+	pub vprocs:           u32,
 	/// Scripts resumed.
-	pub runs:          u32,
+	pub runs:             u32,
 	/// Idempotent fs operations and unfinished external spawns that will be
 	/// re-issued.
-	pub reissued_fs:   u32,
+	pub reissued_fs:      u32,
 	/// Tasks resumed from checkpoints.
-	pub tasks_resumed: u32,
+	pub tasks_resumed:    u32,
 	/// What could not be brought back.
-	pub lost:          Vec<Lost>,
+	pub lost:             Vec<Lost>,
 	/// Scripts abandoned by [`RestoreOpts::drop_frames`] (status 255).
-	pub abandoned:     Vec<RunId>,
+	pub abandoned:        Vec<RunId>,
+	/// Reason execution was discarded, or `None` if no Frames blob was dropped.
+	pub frames_abandoned: Option<FrameAbandonment>,
 }
 
 /// Something a snapshot cannot carry.
@@ -144,5 +203,19 @@ pub enum Lost {
 		/// What the host object was (file, pipe, socket, terminal, device),
 		/// so a consumer can tell which open OS handle was dropped.
 		kind: FileKind,
+	},
+	/// A historical Misc record this reader preserves but cannot interpret.
+	Record {
+		/// Original numeric Misc-key identifier.
+		id: u32,
+	},
+	/// An optional vocabulary entry preserved without applying its payload.
+	Vocabulary {
+		/// Permanent entry identifier.
+		id:       u32,
+		/// Unrecognized payload revision.
+		revision: u32,
+		/// Owning virtual process, or shell-wide state.
+		vpid:     Option<Vpid>,
 	},
 }

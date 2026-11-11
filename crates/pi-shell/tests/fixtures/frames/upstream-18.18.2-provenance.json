@@ -1,0 +1,26 @@
+{
+  "writer": "cb4801a7d6db666946a1b65fce5cdf50d2947b96",
+  "crate_version": "18.18.2",
+  "ir_version": 17,
+  "frames_version": 30,
+  "source": "../format-vocabulary/18.18.2-ir17/core_fixture_writer.rs",
+  "foreign_patch": "../format-vocabulary/18.18.2-ir17/foreign-writer.patch",
+  "files": {
+    "foreign-v30-18.18.2-no-wait.image": {
+      "sha256": "07cfe22b891feed4a9f5537e11cfc81c00e792041f8e54442aad9a4dc08dd5b6",
+      "size": 1981
+    },
+    "foreign-v30-18.18.2-parent-wait.image": {
+      "sha256": "7ba5a239bbc0db877f5c105f016deff48d34574f38d7ebed2bc7bfb7035278ee",
+      "size": 2577
+    },
+    "upstream-v30-18.18.2-no-wait.image": {
+      "sha256": "b996f11511aeab875444c6c19b1366298fce5b83a3139e0139e608ee7a0c28c3",
+      "size": 1981
+    },
+    "upstream-v30-18.18.2-parent-wait.image": {
+      "sha256": "d7929edbef5d90d0cf785dc7e044009fc49c2bd2cbaa8ff790068884635cc962",
+      "size": 2577
+    }
+  }
+}

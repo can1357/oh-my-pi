@@ -176,3 +176,60 @@ fn a_process_substitution_sets_the_last_background_pid() {
 	let (out, ..) = run("read x < <(exit 123); wait $!; echo $?");
 	assert_eq!(out, "123\n");
 }
+
+// Failure mode: a disowned job that ran to its end left its proc record in
+// the store for good (no `wait` can collect a disowned job's status): 200
+// `f & disown` left 200 records. The root's script ends before the jobs it
+// disowned have run, so the shell is stepped to idle before the count.
+#[test]
+fn disowned_jobs_leave_no_proc_records_behind() {
+	use crate::bash::{Budget, Cx, Script, StateStore, Step, store::Table};
+	let mut r = crate::testkit::Rig::new(FakeHost::new(), crate::testkit::fault::skeleton_init(&[]));
+	for script in [
+		"f() { :; }; i=0; while [ $i -lt 100 ]; do f & disown; i=$((i + 1)); done",
+		"f() { :; }; i=0; while [ $i -lt 100 ]; do f & i=$((i + 1)); done; disown -a",
+	] {
+		r.run(Script::command(script.as_bytes()), Fault::None);
+	}
+	let (shell, host, store) = r.parts();
+	let mut settled = false;
+	for _ in 0..10_000 {
+		match shell.step(&mut Cx { host: &mut *host, store: &mut *store }, Budget::default()) {
+			Step::Idle | Step::Blocked => {
+				settled = true;
+				break;
+			},
+			Step::Done { .. } | Step::Yield => {},
+			other => panic!("{other:?} while the disowned jobs ran"),
+		}
+	}
+	assert!(settled, "the disowned jobs were still running after 10,000 steps");
+	let mut procs = 0;
+	let mut shown = Vec::new();
+	store
+		.scan(Table::Proc, &mut |key, rec| {
+			procs += 1;
+			if shown.len() < 5 {
+				shown.push(format!("{key:?} {rec:?}"));
+			}
+		})
+		.unwrap();
+	assert!(procs < 5, "{procs} proc records left behind: {shown:?}");
+}
+
+// Failure mode: after `jobs` deletes a waited job, a snapshot of the root
+// shell drops `$!`, though `wait "$p"` still has its status.
+#[test]
+fn bang_survives_a_snapshot_after_its_job_is_deleted() {
+	use crate::bash::Script;
+	let mut r = crate::testkit::Rig::new(FakeHost::new(), crate::testkit::fault::skeleton_init(&[]));
+	r.run(Script::command(&b"f() { return 6; }; f & p=$!; wait \"$p\"; jobs"[..]), Fault::None);
+	r.snapshot();
+	r.run(
+		Script::command(
+			&b"[ \"$!\" = \"$p\" ] && echo same || echo lost; wait \"$p\"; echo status=$?"[..],
+		),
+		Fault::None,
+	);
+	assert_eq!(r.host.stdout.bytes(), b"same\nstatus=6\n");
+}

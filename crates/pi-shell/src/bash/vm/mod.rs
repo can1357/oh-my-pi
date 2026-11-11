@@ -40,6 +40,8 @@ use std::{
 };
 
 use bstr::{BStr, BString};
+#[cfg(all(test, debug_assertions))]
+pub(crate) use frames::vocabulary_tests::CODEC as TEST_VOCABULARY_CODEC;
 use serde::{Deserialize, Serialize};
 
 /// zsh/newuser's startup check, for the process shell's startup files.
@@ -70,7 +72,9 @@ use crate::bash::{
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
-	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
+	store::{
+		Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table, VarValue,
+	},
 };
 
 /// Ops a vproc runs per scheduler turn.
@@ -395,6 +399,8 @@ pub struct Shell {
 	/// Orphaned job trees still watched for in-engine work (see the
 	/// `orphans` module); empty unless [`Self::gone`] ever had entries.
 	orphans: Vec<Vpid>,
+	/// Unknown optional vocabulary entries retained across snapshots.
+	entries: Vec<crate::bash::snapshot::vocabulary::Entry>,
 }
 
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
@@ -441,7 +447,7 @@ pub struct Kernel {
 	/// Idempotent fs ops dropped by the last suspend (re-issued on resume).
 	pub dropped_fs:         u32,
 	/// Child vprocs created during a turn, adopted by the scheduler after it.
-	/// Every child vproc has a `Record::Proc` from its adoption until its
+	/// Every owned child vproc has a `Record::OwnedProc` from adoption until its
 	/// exit status is collected ([`Kernel::proc_exited`],
 	/// [`Kernel::proc_collect`]). Boxed as `Shell::procs` holds them:
 	/// adoption moves pointers, and the capacity a burst leaves behind is 8
@@ -788,8 +794,16 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		// Upstream drops the exiting job's `$!` pid mapping here; it has to run
+		// on the disowned path too, or a disowned child that exits leaves a row
+		// that `pid_owner` can hand back for a recycled OS pid.
 		self.pid_owners.retain(|&(.., job)| job != vpid);
-		let rec = Record::Proc { parent, status: Some(status) };
+		// A disowned child's status is collected by no one.
+		if self.root.disowned(store, vpid) {
+			self.root.write(store, Change::Del(Key::Proc(vpid)));
+			return;
+		}
+		let rec = Record::OwnedProc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
 
@@ -798,9 +812,10 @@ impl Kernel {
 	/// next turn).
 	pub fn proc_state(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<ProcState> {
 		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { status, .. })) => {
+			Ok(Some(Record::OwnedProc { status, .. } | Record::Proc { status, .. })) => {
 				Some(status.map_or(ProcState::Running, ProcState::Exited))
 			},
+			Ok(Some(Record::DisownedProc)) => Some(ProcState::Running),
 			Ok(_) => None,
 			Err(err) => {
 				self.root.fail(err);
@@ -813,7 +828,9 @@ impl Kernel {
 	/// parent): a subshell copies `$!`, not its parent's children.
 	pub fn started(&mut self, store: &mut dyn StateStore, vp: Vpid, vpid: Vpid) -> bool {
 		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { parent, .. })) => *parent == Some(vp),
+			Ok(Some(Record::OwnedProc { parent, .. } | Record::Proc { parent, .. })) => {
+				*parent == Some(vp)
+			},
 			Ok(_) => false,
 			Err(err) => {
 				self.root.fail(err);
@@ -828,6 +845,106 @@ impl Kernel {
 		let status = self.proc_state(store, vpid)?.exited()?;
 		self.root.write(store, Change::Del(Key::Proc(vpid)));
 		Some(status)
+	}
+
+	/// Bash `wait_for_background_pids` runs `cleanup_dead_jobs` (including
+	/// `procsub_prune`) before `bgp_clear`: completed non-job statuses are
+	/// forgotten even when no explicit wait moved them to the kept table.
+	/// An enclosing foreground pipeline / substitution still owns its
+	/// children, so an inline `lastpipe` stage must not collect those.
+	pub fn forget_completed_nonjobs(&mut self, store: &mut dyn StateStore, vp: &Vproc) {
+		let mut ended = Vec::new();
+		let result = store.scan(Table::Proc, &mut |key, rec| {
+			if let (
+				Key::Proc(v),
+				Record::OwnedProc { parent: Some(parent), status: Some(_) }
+				| Record::Proc { parent: Some(parent), status: Some(_) },
+			) = (key, rec)
+				&& *parent == vp.vpid
+				&& vp.jobs.by_vpid(v).is_none()
+				&& !vp.frames.iter().any(|f| {
+					f.scratch.as_ref().is_some_and(|sc| {
+						sc.children.iter().any(|(child, _)| *child == v)
+							|| matches!(sc.sub, Some(proc::PendingSub::Fork { vpid, .. }) if vpid == v)
+							|| sc.exec.as_ref().is_some_and(|e| e.wait_for.contains(&v))
+					})
+				}) {
+				ended.push(v);
+			}
+		});
+		if let Err(err) = result {
+			self.root.fail(err);
+			return;
+		}
+		for v in ended {
+			self.root.write(store, Change::Del(Key::Proc(v)));
+		}
+	}
+
+	/// Delete job `number` of `vp` (bash `delete_job`): `keep` keeps its
+	/// status for `wait PID` ([`proc::JobTable::delete`]); its finished
+	/// vproc's record goes, a running one's is disowned, so
+	/// `wait` no longer reaches it through `$!` or its pid.
+	pub fn delete_job(
+		&mut self,
+		store: &mut dyn StateStore,
+		vp: &mut Vproc,
+		number: u32,
+		keep: bool,
+	) -> Option<proc::Job> {
+		let job = vp.jobs.delete(number, keep)?;
+		self.forget_job_proc(store, &job);
+		Some(job)
+	}
+
+	/// Release a deleted job's proc record, explicitly marking it disowned
+	/// while it runs. The caller applies its dialect's job-table deletion rules.
+	pub fn forget_job_proc(&mut self, store: &mut dyn StateStore, job: &proc::Job) {
+		if !job.inherited && self.proc_collect(store, job.vpid).is_none() {
+			let running = match store.get(Key::Proc(job.vpid)) {
+				Ok(Some(Record::OwnedProc { status, .. } | Record::Proc { status, .. })) => {
+					status.is_none()
+				},
+				Ok(_) => !matches!(job.state, proc::JobState::Done(_)),
+				Err(_) => false,
+			};
+			if running {
+				let rec = Record::DisownedProc;
+				self
+					.root
+					.write(store, Change::Put(Key::Proc(job.vpid), rec));
+			}
+		}
+	}
+
+	/// Delete `vp`'s finished jobs whose state was reported or waited for,
+	/// keeping their statuses (bash `cleanup_dead_jobs`: `jobs`, and every
+	/// fork of the shell). zsh deletes a job when it reports it instead.
+	pub fn cleanup_dead_jobs(&mut self, store: &mut dyn StateStore, vp: &mut Vproc) {
+		let dead: Vec<u32> = vp
+			.jobs
+			.iter()
+			.filter(|j| j.notified && matches!(j.state, proc::JobState::Done(_)))
+			.map(|j| j.number)
+			.collect();
+		for number in dead {
+			self.delete_job(store, vp, number, true);
+		}
+		// bash `compact_jobs_list` once the table is full: finished jobs
+		// nothing reported go too, oldest first, all but `$!`'s, their
+		// statuses kept.
+		while vp.jobs.len() > proc::JOBS_MAX {
+			let last = vp.last_bg;
+			let Some(number) = vp
+				.jobs
+				.iter()
+				.find(|j| matches!(j.state, proc::JobState::Done(_)) && !last.is(j.vpid))
+				.map(|j| j.number)
+			else {
+				break;
+			};
+			self.delete_job(store, vp, number, true);
+		}
 	}
 
 	/// The clock for an event now: the last reading while it is still
@@ -1007,13 +1124,18 @@ impl Kernel {
 	/// spawned process prints for a redirection it applies itself
 	/// ([`crate::bash::ChildRedir`]).
 	pub fn render_quiet(&mut self, cx: &mut Cx<'_>, vp: &Vproc, line: u32, diag: &Diag) -> Vec<u8> {
+		// A diagnostic's locale is best effort, like its name and options:
+		// failing to read it must not abandon otherwise restored execution.
 		if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 			let (mut prefix, mut zline) = self.zsh_site(cx, vp, line);
 			if self.zsh_shinstdin(cx, vp) {
 				prefix.clear();
 				zline = 0;
 			}
-			let utf8 = zsh::params::mb_in(self, cx.store, vp).unwrap_or(false);
+			let opt = crate::bash::zshopt::ZshOpt::Multibyte;
+			let utf8 = state::zsh_option(&mut self.root, cx.store, vp, opt).unwrap_or(false)
+				&& locale::charset_root(&mut self.root, cx.store, vp)
+					.is_ok_and(|cs| cs == locale::Charset::Utf8);
 			return crate::bash::diag::render_zsh(diag, crate::bash::diag::ZshSite {
 				prefix: &prefix,
 				line: zline,
@@ -1026,7 +1148,8 @@ impl Kernel {
 			.front()
 			.and_then(|r| r.chain.links.first())
 			.map_or(&COMMAND, |l| &l.origin);
-		let utf8 = locale::is_utf8(self, cx.store, vp);
+		let utf8 = locale::charset_root(&mut self.root, cx.store, vp)
+			.is_ok_and(|cs| cs == locale::Charset::Utf8);
 		// An in-engine nested shell names itself (its `$0`).
 		let shell_name = match vp
 			.overlay
@@ -1715,6 +1838,7 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			entries: Vec::new(),
 		})
 	}
 
@@ -1744,8 +1868,8 @@ impl Shell {
 	/// [`Self::submit`] for the vproc at `parent` (`ShellApi::run_subshell`
 	/// passes its store: the new subshell sees the caller's function
 	/// scopes). A new subshell vproc gets `lineage`, or else the parent's.
-	/// The new vproc is adopted, and its `Record::Proc` written, at the next
-	/// scheduler turn.
+	/// The new vproc is adopted, and its `Record::OwnedProc` written, at the
+	/// next scheduler turn.
 	fn submit_from(
 		&mut self,
 		parent: usize,
@@ -1984,7 +2108,11 @@ impl Shell {
 	/// subshell vprocs that finished.
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
 		for p in &self.k.spawned {
-			let rec = Record::Proc { parent: p.parent, status: None };
+			// A job disowned before its first turn keeps its disowned record.
+			if self.k.root.disowned(cx.store, p.vpid) {
+				continue;
+			}
+			let rec = Record::OwnedProc { parent: p.parent, status: None };
 			self
 				.k
 				.root
@@ -2027,6 +2155,11 @@ impl Shell {
 				if let Some(entry) = p.jobs.by_vpid_mut(job) {
 					entry.os_pid = Some(pid);
 				}
+				// A kept status under that OS pid named an earlier child
+				// (bash `bgp_delete` in `make_child`); the job's own, kept
+				// when it was disowned before it settled, takes the pid.
+				p.jobs.retain_kept(|k| k.vpid == job || !k.named_by(pid));
+				p.jobs.settle_kept(job, pid);
 			}
 		}
 	}
@@ -2067,7 +2200,16 @@ impl Shell {
 		let Some(i) = parent.and_then(|v| self.procs.iter().position(|p| p.vpid == v)) else {
 			return;
 		};
-		let job = self.procs[i].jobs.by_vpid_mut(vpid);
+		let p = &mut self.procs[i];
+		if p.last_bg.is(vpid)
+			&& p
+				.blocked
+				.as_ref()
+				.is_some_and(|b| b.key != crate::bash::event::WaitKey::Proc(vpid))
+		{
+			p.jobs.see_bang(vpid);
+		}
+		let job = p.jobs.by_vpid_mut(vpid);
 		let background = job.is_some();
 		if let Some(job) = job {
 			job.state = proc::JobState::Done(status);
@@ -2699,10 +2841,16 @@ fn interrupt_wait(p: &mut Vproc, status: i32) {
 		};
 		let waiting = matches!(
 			e.waiting,
-			Some(proc::Awaited::Jobs { .. } | proc::Awaited::AllJobs | proc::Awaited::AnyJob)
+			Some(
+				proc::Awaited::Jobs { .. }
+					| proc::Awaited::WaitOperand { .. }
+					| proc::Awaited::AllJobs { .. }
+					| proc::Awaited::AnyJob { .. }
+			)
 		);
 		if waiting && e.target == Some(proc::Target::Intrinsic(crate::bash::ids::IntrinsicId::Wait)) {
-			e.waiting = Some(proc::Awaited::Jobs { force: true });
+			e.waiting =
+				Some(proc::Awaited::Jobs { force: true, foreground: false, kept: None });
 			e.wait_for.clear();
 			e.wait_into = None;
 			e.status = status;

@@ -1,0 +1,35 @@
+{
+  "generated_at": "2026-11-08T20:26:29.585016+00:00",
+  "writer": "78e4ac8b1f65035a47fa509723eeb99c3296391c",
+  "crate_version": "18.18.2",
+  "frames_version": 30,
+  "ir_version": 17,
+  "source": "producer.rs",
+  "transformation": "Retarget only Misc ordinal 74 to still-unknown 127. Preserve every record payload and original Frames bytes. Retain all original generations.",
+  "files": {
+    "unknown-root-kept.image": {
+      "input": "../18.18.2-ir17/unknown-root-kept.image",
+      "input_sha256": "267434137221601ee0a3975ed1d66ec56bcde8c5b77953b152a9750d00f6b857",
+      "sha256": "f9b8137b197fdfd499063910a00490727f9c301056f25f17016970a085388c4d",
+      "size": 2208
+    },
+    "unknown-root-kept.record": {
+      "input": "../18.18.2-ir17/unknown-root-kept.record",
+      "input_sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+      "sha256": "1043d7bb075e61dbf52364096931eb5463efc5db1d2a668add540ab039c08e94",
+      "size": 7
+    },
+    "unknown-subshell-kept.image": {
+      "input": "../18.18.2-ir17/unknown-subshell-kept.image",
+      "input_sha256": "7a838f92550d1b90390fea525948a42321dc05b1f4cd7fad7835f590868b51bd",
+      "sha256": "ce3d160d1d3033a19004939e93499661c7c9eedfc88b1b9c16df6d1d90ff15c3",
+      "size": 2429
+    },
+    "unknown-subshell-kept.record": {
+      "input": "../18.18.2-ir17/unknown-subshell-kept.record",
+      "input_sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+      "sha256": "1043d7bb075e61dbf52364096931eb5463efc5db1d2a668add540ab039c08e94",
+      "size": 7
+    }
+  }
+}

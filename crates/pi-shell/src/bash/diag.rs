@@ -476,6 +476,16 @@ pub enum Diag {
 		/// Command.
 		name: BString,
 	},
+	/// A stored parent relationship cannot identify historical disown state.
+	#[error(
+		"warning: process {vpid}: stored self-parent has no ownership tag; restoring as owned to \
+		 preserve completion and prevent a hanging wait"
+	)]
+	AmbiguousProcOwnership {
+		/// Process whose ownership is resolved as owned, independent of its
+		/// parent id.
+		vpid: u32,
+	},
 }
 
 impl Diag {

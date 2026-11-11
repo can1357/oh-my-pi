@@ -20,7 +20,8 @@ use hashbrown::{HashMap, hash_map::EntryRef};
 use serde::{Deserialize, Serialize};
 
 use crate::bash::store::{
-	Attrs, BlobSlot, Change, Elem, Key, KeyBuf, Record, StateStore, StoreError, Table, Var, VarValue,
+	Attrs, BlobSlot, Change, Elem, Key, KeyBuf, Record, RestoreWrite, StateStore, StoreError, Table,
+	Var, VarValue,
 };
 
 /// One root scope: its [`Record::Scope`] and its locals by name.
@@ -227,8 +228,9 @@ impl MemStore {
 		}
 	}
 
-	/// Insert or replace `record` at `key` ([`Change::Put`]).
-	fn put(&mut self, key: Key<'_>, record: Record) -> Result<(), StoreError> {
+	/// Validate without touching records or deferred values; return scope count
+	/// after the write, so an entire ordered batch can be checked first.
+	fn validate_put(key: Key<'_>, record: &Record, scopes: usize) -> Result<usize, StoreError> {
 		let fits = match key {
 			Key::Var(_) => matches!(record, Record::Var(_)),
 			Key::Local { .. } => matches!(record, Record::Var(_) | Record::Unset),
@@ -241,6 +243,22 @@ impl MemStore {
 		if !fits {
 			return Err(shape(key));
 		}
+		match key {
+			Key::Scope(depth) if depth as usize > scopes => Err(shape(key)),
+			Key::Scope(depth) => Ok(scopes.max(depth as usize + 1)),
+			Key::Local { depth, .. } if depth as usize >= scopes => Err(shape(key)),
+			_ => Ok(scopes),
+		}
+	}
+
+	/// Insert or replace a complete record after validating all preconditions.
+	fn put(&mut self, key: Key<'_>, record: Record) -> Result<(), StoreError> {
+		Self::validate_put(key, &record, self.scopes.len())?;
+		self.put_validated(key, record);
+		Ok(())
+	}
+
+	fn put_validated(&mut self, key: Key<'_>, record: Record) {
 		match key {
 			Key::Var(name) => {
 				let name: &[u8] = name;
@@ -258,16 +276,12 @@ impl MemStore {
 					self.scopes.push((record, HashMap::new()));
 					let outer = self.local_bloom.last().copied().unwrap_or_default();
 					self.local_bloom.push(outer);
-				} else if let Some((scope, _)) = self.scopes.get_mut(depth) {
-					*scope = record;
 				} else {
-					return Err(shape(key));
+					self.scopes[depth].0 = record;
 				}
 			},
 			Key::Local { depth, name } => {
-				let Some((_, vars)) = self.scopes.get_mut(depth as usize) else {
-					return Err(shape(key));
-				};
+				let (_, vars) = &mut self.scopes[depth as usize];
 				if let Some(slot) = vars.get_mut(bytes(name)) {
 					*slot = record;
 				} else {
@@ -287,7 +301,6 @@ impl MemStore {
 				},
 			},
 		}
-		Ok(())
 	}
 
 	/// Delete the record at `key` ([`Change::Del`]).
@@ -426,6 +439,32 @@ impl StateStore for MemStore {
 					f(k.as_key(), r);
 				}
 			},
+		}
+		Ok(())
+	}
+
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+		let mut scopes = self.scopes.len();
+		for write in &writes {
+			match write {
+				RestoreWrite::Put(key, record) => {
+					scopes = Self::validate_put(key.as_key(), record, scopes)?;
+				},
+				RestoreWrite::Delete(KeyBuf::Scope(depth)) => scopes = scopes.min(*depth as usize),
+				RestoreWrite::Delete(_) | RestoreWrite::DeleteBlob(_) => {},
+			}
+		}
+		// Commit point: all shape/scope failures precede these infallible
+		// updates. Records move from the journal; the store and its blobs
+		// are not cloned.
+		for write in writes {
+			match write {
+				RestoreWrite::Put(key, record) => self.put_validated(key.as_key(), record),
+				RestoreWrite::Delete(key) => self.del(key.as_key()),
+				RestoreWrite::DeleteBlob(slot) => {
+					self.blobs.remove(&slot);
+				},
+			}
 		}
 		Ok(())
 	}

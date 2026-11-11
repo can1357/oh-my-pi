@@ -1,0 +1,72 @@
+diff --git a/crates/pi-shell/src/bash/vm/frames.rs b/crates/pi-shell/src/bash/vm/frames.rs
+index baa85f3e06..d0a2d5f52c 100644
+--- a/crates/pi-shell/src/bash/vm/frames.rs
++++ b/crates/pi-shell/src/bash/vm/frames.rs
+@@ -56,7 +56,7 @@ use crate::bash::{
+ /// Version of the [`Image`] layout; part of the header and the build id.
+ /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
+ /// variant: an exec target holds it by index.
+-pub const FRAMES_VERSION: u32 = 30;
++pub const FRAMES_VERSION: u32 = u32::MAX;
+ 
+ const MAGIC: [u8; 4] = *b"OBF1";
+ 
+diff --git a/crates/pi-shell/src/bash/vm/proc.rs b/crates/pi-shell/src/bash/vm/proc.rs
+index 22f1d99fe0..a2461dce11 100644
+--- a/crates/pi-shell/src/bash/vm/proc.rs
++++ b/crates/pi-shell/src/bash/vm/proc.rs
+@@ -1622,6 +1622,7 @@ pub struct PathSearch {
+ 
+ /// What an `Exec` waits for in `Stage::Await`.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(from = "FutureAwaited", into = "FutureAwaited")]
+ pub enum Awaited {
+ 	Call(CallId),
+ 	Task(NativeRef),
+@@ -1642,6 +1643,46 @@ pub enum Awaited {
+ 	AnyJob,
+ }
+ 
++#[derive(Clone, Copy, Serialize, Deserialize)]
++enum FutureAwaited {
++	Call(CallId),
++	Task(NativeRef),
++	Ext { pid: u32 },
++	Frame,
++	Jobs { force: bool },
++	AllJobs,
++	AnyJob,
++	NextCall(CallId),
++}
++
++impl From<Awaited> for FutureAwaited {
++	fn from(value: Awaited) -> Self {
++		match value {
++			Awaited::Call(id) => Self::NextCall(id),
++			Awaited::Task(id) => Self::Task(id),
++			Awaited::Ext { pid } => Self::Ext { pid },
++			Awaited::Frame => Self::Frame,
++			Awaited::Jobs { force } => Self::Jobs { force },
++			Awaited::AllJobs => Self::AllJobs,
++			Awaited::AnyJob => Self::AnyJob,
++		}
++	}
++}
++
++impl From<FutureAwaited> for Awaited {
++	fn from(value: FutureAwaited) -> Self {
++		match value {
++			FutureAwaited::Call(id) | FutureAwaited::NextCall(id) => Self::Call(id),
++			FutureAwaited::Task(id) => Self::Task(id),
++			FutureAwaited::Ext { pid } => Self::Ext { pid },
++			FutureAwaited::Frame => Self::Frame,
++			FutureAwaited::Jobs { force } => Self::Jobs { force },
++			FutureAwaited::AllJobs => Self::AllJobs,
++			FutureAwaited::AnyJob => Self::AnyJob,
++		}
++	}
++}
++
+ /// Transient handles; never serialized.
+ #[derive(Default)]
+ pub enum Live {

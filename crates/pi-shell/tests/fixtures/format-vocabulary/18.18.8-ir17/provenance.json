@@ -1,0 +1,74 @@
+{
+  "generated_at": "2026-11-11T04:11:22Z",
+  "crate_version": "18.18.8",
+  "ir_version": 17,
+  "frames_version": 30,
+  "reader_policy": "Exact IR, frames version and engine identity are required. Current-identity OBF1 controls are regenerated for every crate version; foreign and future controls are independently serialized.",
+  "writers": {
+    "current_core": {
+      "product": "679691a78141de0dd6ba1b7a5d5c1b1d7d967a63",
+      "product_changes": [],
+      "source": "core_fixture_writer.rs",
+      "purpose": "Fresh OBF1 cores with genuine pending calls, parent wait/no-wait, and root/subshell retained-job cases."
+    },
+    "records_and_entries": {
+      "product": "297cd67a543573b198b9c95de5336e0435625f8a",
+      "product_changes": ["entry-product-version.patch"],
+      "source": "entry_fixture_writer.rs",
+      "purpose": "Wrap fresh current upstream execution cores with exact independent-writer vocabulary entries. Preserve the old record payload while re-keying Misc ordinal 74, which is known at this product, to still-unknown ordinal 127; no existing image header is relabelled.",
+      "codec": {
+        "id": 65537,
+        "revision": 7,
+        "required": true,
+        "vpid": 1,
+        "payload": [0, 255, 128, 2, 0, 0, 9]
+      },
+      "reserved_entry": {
+        "id": 1,
+        "revision": 7,
+        "required": false,
+        "vpid": 1,
+        "payload": [0, 255, 128, 2, 0, 0, 9]
+      }
+    },
+    "foreign": {
+      "product": "679691a78141de0dd6ba1b7a5d5c1b1d7d967a63",
+      "product_changes": ["foreign-writer.patch"],
+      "source": "core_fixture_writer.rs",
+      "crate_version": "18.18.8-foreign-fixture",
+      "purpose": "Coherently serialize a foreign engine identity with the same IR17/core30; exact Build refusal is required."
+    },
+    "future": {
+      "product": "679691a78141de0dd6ba1b7a5d5c1b1d7d967a63",
+      "product_changes": ["future-writer.patch"],
+      "source": "core_fixture_writer.rs",
+      "frames_version": 4294967295,
+      "purpose": "Really serialize FRAMES_VERSION=u32::MAX and a newly appended awaited-call variant. Both header and body are produced by this writer; exact FramesVersion refusal is required."
+    }
+  },
+  "identities": {
+    "current": [238, 228, 183, 209, 130, 14, 216, 46, 52, 172, 56, 204, 224, 234, 70, 92, 187, 187, 241, 48, 45, 187, 215, 197, 135, 101, 45, 250, 81, 28, 116, 88],
+    "foreign": [77, 145, 177, 87, 94, 2, 185, 41, 240, 103, 67, 175, 211, 198, 117, 27, 180, 211, 32, 154, 24, 78, 252, 12, 18, 249, 22, 169, 84, 245, 96, 140],
+    "future": [94, 74, 139, 125, 242, 149, 144, 26, 62, 193, 69, 180, 176, 131, 235, 116, 54, 167, 14, 198, 76, 117, 145, 2, 216, 84, 179, 213, 12, 183, 22, 16]
+  },
+  "files": {
+    "base-parent-wait.image": {"sha256": "1d3f600918302c6a2f5d8159f697adfe642fc9c0331637602ede456d5f67f23d", "size": 2577},
+    "core_fixture_writer.rs": {"sha256": "60eb5069536ee9a5dafb7ac899bdc8488f6aa5731af3f452a722d722ab3910d5", "size": 2771},
+    "entry_fixture_writer.rs": {"sha256": "3df8060f8702d9ae15ad740cd9b838314323670bb06f83616f1b9d9a3857654a", "size": 4374},
+    "entry-product-version.patch": {"sha256": "bc09e2826132baf721eb135fbe1c9f2be06f9705ca181ea6c2f96ed13cad9043", "size": 241},
+    "foreign-parent-wait.image": {"sha256": "e36a1416b0d14ada3de296ee2276b4c811a46666a68f7c0ad5ebed607eaef147", "size": 2577},
+    "foreign-writer.patch": {"sha256": "867f7cec6f97c3c727a99f4d746f073cf5ef1ec25c466bdc9740c847534b3298", "size": 293},
+    "future-writer.patch": {"sha256": "7ca5de2be9d7cfc8f80e3c69f94bfceddfffba80c4f4fae6589579c241d56231", "size": 2272},
+    "newer-parent-wait.image": {"sha256": "e5514b05d4a1b3fbc9e6c203d7ebec53eadeb056321028cd58713d9c64358672", "size": 2581},
+    "owned-optional.image": {"sha256": "4132ccf326bfe9eaba78871b272605e25d17c85ca96b0560e627e522b26ea708", "size": 2595},
+    "owned-optional.image.entries.json": {"sha256": "b630ffdae561e3077015133083914134adde9d28567d12775f414fe239f6570e", "size": 174},
+    "owned-required.image": {"sha256": "234bfc235cccdf648351879da4487a57d178e28e9ef4958b5275413ac9d0424d", "size": 2595},
+    "owned-required.image.entries.json": {"sha256": "c4339e9652cb49445cddc627b920748183c649b09063c5601badd2959f8444f5", "size": 173},
+    "reserved-required.image": {"sha256": "78931038b328d7c12535896369be9f3a607257dd06b2125c3a95e10e39c7e5c0", "size": 2593},
+    "reserved-required.image.entries.json": {"sha256": "917e6bf25e9956a2e07f79362809bfea31acdb02e327e64924766372fd0f82e9", "size": 170},
+    "unknown-root-kept.image": {"sha256": "eeb86a03bd7aa5d1abc19dcc4e3fb8cc0668cd02d90882b2e57b968ae4380c03", "size": 2208},
+    "unknown-root-kept.record": {"sha256": "1043d7bb075e61dbf52364096931eb5463efc5db1d2a668add540ab039c08e94", "size": 7},
+    "unknown-subshell-kept.image": {"sha256": "1e43e06575e7117fd38a28cead45bf894c54dabd7027710a8762afe28d6dd3e8", "size": 2429},
+    "unknown-subshell-kept.record": {"sha256": "1043d7bb075e61dbf52364096931eb5463efc5db1d2a668add540ab039c08e94", "size": 7}
+  }
+}

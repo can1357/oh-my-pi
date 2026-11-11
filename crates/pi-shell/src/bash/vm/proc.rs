@@ -366,6 +366,51 @@ pub struct JobTable {
 	/// it without job control and with an empty job table. A command
 	/// substitution keeps both (it lists its parent's jobs).
 	pub subshell: bool,
+	/// What the shell keeps about children that ended (bash's `bgpids`).
+	/// Boxed: a vproc that starts no job keeps nothing (idle vproc ≤ 2 KiB).
+	/// Stored separately from the job-table wire layout.
+	#[serde(skip)]
+	pub ended:    Option<Box<Ended>>,
+}
+
+/// What a shell keeps about its children that ended ([`JobTable::ended`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ended {
+	/// Statuses of jobs that left the table (bash's `bgpids`): `wait PID`
+	/// still reports them, oldest first, at most [`KEPT_MAX`].
+	pub kept:      Vec<KeptStatus>,
+	/// The virtual pid of the child `$!` named when the shell noticed it had
+	/// finished (it parked meanwhile, as bash's `SIGCHLD` handler notices a
+	/// child's end while the shell waits for anything); 0 when none. `wait`
+	/// without operands keeps that child's status.
+	pub bang_seen: u32,
+}
+
+/// How many jobs a shell's table holds before it deletes finished ones
+/// nothing reported (bash `MAX_JOBS_IN_ARRAY`).
+pub const JOBS_MAX: usize = 4096;
+
+/// How many statuses of jobs that left the table a shell keeps (bash's
+/// `js.c_childmax` ceiling, `MAX_CHILD_MAX`); the oldest goes first.
+pub const KEPT_MAX: usize = 32_768;
+
+/// The status of a job that left the table (bash `struct pidstat`), by the
+/// pids it was known by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptStatus {
+	/// Its vproc's virtual pid.
+	pub vpid:   Vpid,
+	/// Its program's OS pid, if it had one.
+	pub os_pid: Option<u32>,
+	/// Its exit status (0 for a job deleted while it ran, as bash keeps).
+	pub status: i32,
+}
+
+impl KeptStatus {
+	/// `pid` names this status: its virtual pid or its program's OS pid.
+	pub const fn named_by(&self, pid: u32) -> bool {
+		self.vpid.0 == pid || matches!(self.os_pid, Some(os) if os == pid)
+	}
 }
 
 /// What a job spec names (bash `get_job_spec`), without its `%`.
@@ -469,6 +514,91 @@ impl JobTable {
 		}
 	}
 
+	/// Delete job `number` (bash `delete_job`); `keep` puts its status in
+	/// [`Self::kept`] (bash adds every asynchronous job it deletes unless
+	/// `DEL_NOBGPID`; a running job keeps 0). Returns the job.
+	pub fn delete(&mut self, number: u32, keep: bool) -> Option<Job> {
+		let job = self.remove(number)?;
+		if keep && !job.inherited {
+			let status = match job.state {
+				JobState::Done(s) => s,
+				_ => 0,
+			};
+			self.keep(KeptStatus { vpid: job.vpid, os_pid: job.os_pid, status });
+		}
+		Some(job)
+	}
+
+	/// Keep `entry`, replacing an older one for the same child (bash
+	/// `bgp_add`).
+	pub fn keep(&mut self, entry: KeptStatus) {
+		let kept = &mut self.ended.get_or_insert_with(Box::default).kept;
+		kept.retain(|k| k.vpid != entry.vpid);
+		if kept.len() >= KEPT_MAX {
+			kept.remove(0);
+		}
+		kept.push(entry);
+	}
+
+	/// The kept status `pid` names (bash `bgp_search`).
+	pub fn kept_status(&self, pid: u32) -> Option<i32> {
+		self
+			.ended
+			.as_ref()?
+			.kept
+			.iter()
+			.rev()
+			.find(|k| k.named_by(pid))
+			.map(|k| k.status)
+	}
+
+	/// Forget every kept status but those `keep` selects (bash
+	/// `bgp_clear`, `bgp_delete`).
+	pub fn retain_kept(&mut self, mut keep: impl FnMut(&KeptStatus) -> bool) {
+		if let Some(ended) = &mut self.ended {
+			ended.kept.retain(|k| keep(k));
+			if ended.kept.is_empty() && ended.bang_seen == 0 {
+				self.ended = None;
+			}
+		}
+	}
+
+	/// The vproc of the job that left the table under `pid` (its virtual
+	/// or OS pid): `kill` of a disowned job's OS pid still reaches it.
+	pub fn kept_vpid(&self, pid: u32) -> Option<Vpid> {
+		self
+			.ended
+			.as_ref()?
+			.kept
+			.iter()
+			.rev()
+			.find(|k| k.named_by(pid))
+			.map(|k| k.vpid)
+	}
+
+	/// Job `job`, which left the table, runs the program with OS pid `pid`.
+	pub fn settle_kept(&mut self, job: Vpid, pid: u32) {
+		if let Some(entry) = self
+			.ended
+			.as_mut()
+			.and_then(|e| e.kept.iter_mut().find(|k| k.vpid == job))
+		{
+			entry.os_pid = Some(pid);
+		}
+	}
+
+	/// [`Ended::bang_seen`].
+	pub fn bang_seen(&self) -> u32 {
+		self.ended.as_ref().map_or(0, |e| e.bang_seen)
+	}
+
+	/// The shell noticed that child `v`, which `$!` names, finished.
+	pub fn see_bang(&mut self, v: Vpid) {
+		if self.bang_seen() != v.0 {
+			self.ended.get_or_insert_with(Box::default).bang_seen = v.0;
+		}
+	}
+
 	fn state(&self, number: Option<u32>) -> Option<JobState> {
 		number.and_then(|n| self.get(n)).map(|j| j.state)
 	}
@@ -505,6 +635,19 @@ impl JobTable {
 		if self.current != Some(job) {
 			self.previous = self.current;
 			self.current = Some(job);
+			// An in-process child may already be done before the parent has
+			// observed its completion. Keep the old current job as previous
+			// until that observation, as for Bash's pending SIGCHLD status.
+			if self
+				.previous
+				.and_then(|n| self.get(n))
+				.is_some_and(|previous| {
+					matches!(previous.state, JobState::Done(_))
+						&& !previous.notified
+						&& self.bang_seen() != previous.vpid.0
+				}) {
+				return;
+			}
 		}
 		if self.previous != self.current && self.is_stopped(self.previous) {
 			return;
@@ -701,7 +844,11 @@ impl Vproc {
 	pub fn vpid_of(&self, pid: u32) -> Vpid {
 		match self.jobs.by_pid(pid) {
 			Some(job) => job.vpid,
-			None => self.last_bg.named_by(pid).unwrap_or(Vpid(pid)),
+			None => self
+				.last_bg
+				.named_by(pid)
+				.or_else(|| self.jobs.kept_vpid(pid))
+				.unwrap_or(Vpid(pid)),
 		}
 	}
 
@@ -1675,14 +1822,42 @@ pub enum Awaited {
 	Frame,
 	/// Background children (`wait id …`); the status is the last one's.
 	/// Without `force` (`wait -f`) a job that stops ends the wait (status
-	/// 128 + the stop signal), as in bash with job control.
+	/// 128 + the stop signal), as in bash with job control. A waited job
+	/// stays in the table, reported, until bash's `cleanup_dead_jobs`;
+	/// `fg` (`foreground`) deletes it at once. `kept`: a final operand
+	/// which named a kept status (pid 0 for an invalid operand).
 	Jobs {
-		force: bool,
+		force:      bool,
+		#[serde(skip)]
+		foreground: bool,
+		#[serde(skip)]
+		kept:       Option<(u32, i32)>,
 	},
 	/// Every background child (`wait` without operands); the status is 0.
-	AllJobs,
-	/// The first of the children to finish (`wait -n`); its status.
-	AnyJob,
+	/// Then every status is forgotten except `keep`'s: the pid `$!` names
+	/// when that child had finished before the `wait`.
+	AllJobs {
+		#[serde(skip)]
+		keep: Option<u32>,
+	},
+	/// The first of the children to finish (`wait -n`); its status. `kept`:
+	/// an operand naming a kept status answers at once. `woke`: it waited
+	/// for a child to change, so a finished job that was already reported
+	/// counts too (bash `wait_for_any_job` after `wait_for (ANY_PID)`).
+	AnyJob {
+		#[serde(skip)]
+		kept: Option<(u32, i32)>,
+		#[serde(skip)]
+		woke: bool,
+	},
+	/// One ordinary `wait` operand, then resolution at the next argv index.
+	/// The upstream `Jobs`/`AllJobs`/`AnyJob` wire forms stay unchanged;
+	/// their skipped state lives in the optional `JobFrames` store record.
+	WaitOperand {
+		force:    bool,
+		kept_pid: u32,
+		next:     usize,
+	},
 }
 
 /// Transient handles; never serialized.
@@ -1753,9 +1928,11 @@ impl Live {
 // Host lineage (`Vproc::lineage`, 8 B: a `u32` label and a flag) added at
 // most 8 B to that, still under 2,048. The resumable `mapfile -C` counter
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
-// vproc with both. The line editor's boxed state (`Vproc::zle`, 8 B) brings
-// that to at most 1,840 B.
-const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
+// vproc with both.
+// Kept statuses of jobs that left the table (`JobTable::ended`, bash
+// `bgpids`) and the line editor's state (`Vproc::zle`) each add one boxed
+// pointer (8 B), bringing the combined `Vproc` bound to 680 B.
+const _: () = assert!(size_of::<Vproc>() <= 680, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");
@@ -1777,4 +1954,34 @@ pub const fn vproc_layout() -> [(&'static str, usize); 5] {
 		("ScratchIo", size_of::<ScratchIo>()),
 		("ExecState", size_of::<ExecState>()),
 	]
+}
+
+#[test]
+fn kept_statuses_evict_only_the_oldest_after_32768_children() {
+	// Seed the boundary without the quadratic cost of 32,767 insertions.
+	let mut jobs = JobTable {
+		ended: Some(Box::new(Ended {
+			kept: (1..=32_767)
+				.map(|pid| KeptStatus { vpid: Vpid(pid), os_pid: None, status: 7 })
+				.collect(),
+			..Default::default()
+		})),
+		..Default::default()
+	};
+	jobs.keep(KeptStatus { vpid: Vpid(32_768), os_pid: None, status: 8 });
+	assert_eq!(jobs.kept_status(1), Some(7), "no eviction below the 32,768-status ceiling");
+	assert_eq!(jobs.ended.as_ref().unwrap().kept.len(), 32_768);
+
+	jobs.keep(KeptStatus { vpid: Vpid(32_769), os_pid: None, status: 9 });
+	assert_eq!(jobs.kept_status(1), None, "the oldest status must be evicted at capacity");
+	assert_eq!(jobs.kept_status(2), Some(7));
+	assert_eq!(jobs.kept_status(32_768), Some(8));
+	assert_eq!(jobs.kept_status(32_769), Some(9));
+	assert_eq!(jobs.ended.as_ref().unwrap().kept.len(), 32_768);
+
+	jobs.keep(KeptStatus { vpid: Vpid(2), os_pid: Some(90_002), status: 23 });
+	assert_eq!(jobs.kept_status(2), Some(23));
+	assert_eq!(jobs.kept_status(90_002), Some(23));
+	assert_eq!(jobs.kept_status(3), Some(7), "replacement must not evict another child");
+	assert_eq!(jobs.ended.as_ref().unwrap().kept.len(), 32_768);
 }
