@@ -932,77 +932,6 @@ function evalCellBox(cell: EvalCellRun, index: number, total: number): NativeNod
 	);
 }
 
-function createCollapsedEvalOutputComponent(
-	readOutput: () => string,
-	options: RenderResultOptions & { renderContext?: EvalRenderContext },
-	statusLines: readonly string[],
-	timeoutLine: string | undefined,
-	noticeLine: string | undefined,
-	asyncLine: string | undefined,
-	warningLine: string | undefined,
-	uiTheme: Theme,
-): Component {
-	let cachedWidth: number | undefined;
-	let cachedPreviewLines: number | undefined;
-	let cachedOutputLines: readonly string[] | undefined;
-	const dropCache = () => {
-		cachedWidth = undefined;
-		cachedPreviewLines = undefined;
-		cachedOutputLines = undefined;
-	};
-
-	return {
-		render: (width: number): readonly string[] => {
-			const previewLines = Math.min(
-				options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
-				previewWindowRows(),
-			);
-			if (cachedOutputLines !== undefined && cachedWidth === width && cachedPreviewLines === previewLines) {
-				return cachedOutputLines;
-			}
-			const styledOutput = readOutput()
-				.split("\n")
-				.map(line => uiTheme.fg("toolOutput", line))
-				.join("\n");
-			const result = truncateToVisualLines(`\n${styledOutput}`, previewLines, width);
-			const outputLines: string[] = [];
-			if (result.skippedCount > 0) {
-				outputLines.push("");
-				const skippedLine = uiTheme.fg(
-					"dim",
-					`… (${result.skippedCount} earlier lines, showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}) (${expandKeyHint()} to expand)`,
-				);
-				outputLines.push(truncateToWidth(skippedLine, width));
-			}
-			outputLines.push(...result.visualLines);
-			if (statusLines.length > 0) {
-				outputLines.push(truncateToWidth(uiTheme.fg("dim", "Status"), width));
-				for (const statusLine of statusLines) {
-					outputLines.push(truncateToWidth(statusLine, width));
-				}
-			}
-			if (timeoutLine) {
-				outputLines.push(truncateToWidth(timeoutLine, width));
-			}
-			if (noticeLine) {
-				outputLines.push(truncateToWidth(noticeLine, width));
-			}
-			if (asyncLine) {
-				outputLines.push(truncateToWidth(asyncLine, width));
-			}
-			if (warningLine) {
-				outputLines.push(truncateToWidth(warningLine, width));
-			}
-			cachedWidth = width;
-			cachedPreviewLines = previewLines;
-			cachedOutputLines = outputLines;
-			return outputLines;
-		},
-		invalidate: dropCache,
-		releaseRenderCaches: dropCache,
-	};
-}
-
 /** Render eval code cells, structured display output, and progress events. */
 export const evalToolRenderer = {
 	animatedPendingPreview: true,
@@ -1285,16 +1214,67 @@ export const evalToolRenderer = {
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
-		return createCollapsedEvalOutputComponent(
-			readOutput,
-			options,
-			statusLines,
-			timeoutLine,
-			noticeLine,
-			asyncLine,
-			warningLine,
-			uiTheme,
-		);
+		let cachedWidth: number | undefined;
+		let cachedPreviewLines: number | undefined;
+		let cachedRows: readonly string[] | undefined;
+		const dropCache = () => {
+			cachedWidth = undefined;
+			cachedPreviewLines = undefined;
+			cachedRows = undefined;
+		};
+
+		return {
+			render: (width: number): readonly string[] => {
+				const previewLines = Math.min(
+					options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
+					previewWindowRows(),
+				);
+				if (cachedRows !== undefined && cachedWidth === width && cachedPreviewLines === previewLines) {
+					return cachedRows;
+				}
+				// Styled from the result on each miss, never captured, so a retired
+				// card's released caches hold no copy of the output.
+				const styledOutput = readOutput()
+					.split("\n")
+					.map(line => uiTheme.fg("toolOutput", line))
+					.join("\n");
+				const result = truncateToVisualLines(`\n${styledOutput}`, previewLines, width);
+				const outputLines: string[] = [];
+				if (result.skippedCount > 0) {
+					outputLines.push("");
+					const skippedLine = uiTheme.fg(
+						"dim",
+						`… (${result.skippedCount} earlier lines, showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}) (${expandKeyHint()} to expand)`,
+					);
+					outputLines.push(truncateToWidth(skippedLine, width));
+				}
+				outputLines.push(...result.visualLines);
+				if (statusLines.length > 0) {
+					outputLines.push(truncateToWidth(uiTheme.fg("dim", "Status"), width));
+					for (const statusLine of statusLines) {
+						outputLines.push(truncateToWidth(statusLine, width));
+					}
+				}
+				if (timeoutLine) {
+					outputLines.push(truncateToWidth(timeoutLine, width));
+				}
+				if (noticeLine) {
+					outputLines.push(truncateToWidth(noticeLine, width));
+				}
+				if (asyncLine) {
+					outputLines.push(truncateToWidth(asyncLine, width));
+				}
+				if (warningLine) {
+					outputLines.push(truncateToWidth(warningLine, width));
+				}
+				cachedWidth = width;
+				cachedPreviewLines = previewLines;
+				cachedRows = outputLines;
+				return outputLines;
+			},
+			invalidate: dropCache,
+			releaseRenderCaches: dropCache,
+		};
 	},
 
 	describeCall(args: EvalRenderArgs, options: RenderResultOptions): NativeToolView {
