@@ -28,10 +28,17 @@ function loadSandboxCheck(): SandboxCheck | null {
 /** Only the child executes syscall 444: a seccomp SIGSYS cannot terminate omp. */
 const LANDLOCK_QUERY_SCRIPT = `
 const { dlopen, FFIType, read } = require("bun:ffi");
-const libc = dlopen("libc.so.6", {
-	syscall: { args: [FFIType.i64, FFIType.ptr, FFIType.u64, FFIType.u32], returns: FFIType.i64 },
-	__errno_location: { args: [], returns: FFIType.ptr },
-});
+let libc;
+// glibc first, then the generic soname for musl.
+for (const soname of ["libc.so.6", "libc.so"]) {
+	try {
+		libc = dlopen(soname, {
+			syscall: { args: [FFIType.i64, FFIType.ptr, FFIType.u64, FFIType.u32], returns: FFIType.i64 },
+			__errno_location: { args: [], returns: FFIType.ptr },
+		});
+		break;
+	} catch {}
+}
 const ret = Number(libc.symbols.syscall(444, null, 0, 1));
 const errno = ret > 0 ? 0 : read.i32(libc.symbols.__errno_location());
 process.stdout.write(JSON.stringify({ ret, errno }));
@@ -77,6 +84,8 @@ async function queryLandlockAbi(): Promise<SandboxLandlock> {
 		return { state: "unknown" };
 	try {
 		const child = Bun.spawn([process.execPath, "--no-env-file", "-e", LANDLOCK_QUERY_SCRIPT], {
+			// Bun runs the `preload` of a bunfig.toml in its working directory; only root can put one in `/`.
+			cwd: "/",
 			env: { ...process.env, BUN_BE_BUN: "1" },
 			timeout: 2000,
 			killSignal: "SIGKILL",

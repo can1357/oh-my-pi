@@ -848,9 +848,18 @@ export class SessionTools {
 		return this.#toolRegistry.has("edit");
 	}
 
-	/** The approval mode tool calls resolve: `tools.approvalMode`, or `yolo` when the session was started auto-approved. */
+	/**
+	 * The approval mode tool calls resolve: `tools.approvalMode`, or `yolo` when the session was started
+	 * auto-approved. Behind an ACP client's permission gate, a yolo nobody chose is `always-ask`.
+	 */
 	get approvalMode(): ApprovalMode {
-		return resolveApprovalFromContext({ autoApprove: this.#autoApprove, settings: this.#host.settings }).approvalMode;
+		const { approvalMode } = resolveApprovalFromContext({
+			autoApprove: this.#autoApprove,
+			settings: this.#host.settings,
+		});
+		const bridge = this.#host.clientBridge();
+		const gated = bridge?.capabilities.requestPermission && bridge.requestPermission;
+		return gated ? this.#acpGateMode(approvalMode) : approvalMode;
 	}
 
 	/**
@@ -1198,12 +1207,11 @@ export class SessionTools {
 					// A restricted call is approved per call: a remembered ACP answer never covers it.
 					let cacheable = restrictedFolderReason(target, args, restrictions) === undefined;
 					if (target.name === "bash") {
-						const explicitAutoApprove = this.#isExplicitAutoApproveMode();
 						const { approvalMode, userPolicies } = resolveApprovalFromContext({
 							autoApprove: this.#autoApprove,
 							settings: this.#host.settings,
 						});
-						const mode = approvalMode === "yolo" && !explicitAutoApprove ? "always-ask" : approvalMode;
+						const mode = this.#acpGateMode(approvalMode);
 						const resolved = resolveApproval(
 							target,
 							args,
@@ -1414,6 +1422,11 @@ export class SessionTools {
 			(cfgToolsApprovalMode.isConfigured(this.#host.settings) &&
 				cfgToolsApprovalMode.get(this.#host.settings) === "yolo")
 		);
+	}
+
+	/** `mode` as the ACP permission gate applies it: the schema's implicit yolo still asks. */
+	#acpGateMode(mode: ApprovalMode): ApprovalMode {
+		return mode === "yolo" && !this.#isExplicitAutoApproveMode() ? "always-ask" : mode;
 	}
 
 	/** Applies an enabled tool set and reconciles its `xd://` partition. */
