@@ -2812,19 +2812,16 @@ mod tests {
 		use crate::desktop::error::ErrorCode;
 
 		let front = std::cell::Cell::new(Some(9));
-		let sent = std::cell::Cell::new(false);
 		let result = checked_ref_read(
 			|| front.get(),
 			|| {
 				front.set(Some(7));
 				Ok((7, None))
 			},
-		)
-		.map(|_| sent.set(true));
+		);
 		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
-		assert!(!sent.get());
-		// A target already in front, or one that stays behind, still takes
-		// its ordinary action even when its fingerprint was unanswered.
+		// A target already in front, or one that stays behind, still passes
+		// the check even when its fingerprint was unanswered.
 		assert!(checked_ref_read(|| Some(7), || Ok((7, None))).is_ok());
 		assert!(checked_ref_read(|| Some(9), || Ok((7, None))).is_ok());
 	}
