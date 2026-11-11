@@ -14,7 +14,6 @@ import {
 	EXTENSION_RELOAD_PROTOCOL_VERSION,
 	type ExtToRelayMessage,
 	type FoundDownload,
-	PRINT_PREVIEW_PROTOCOL_VERSION,
 	type RelayToExtMessage,
 	type TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
@@ -227,7 +226,6 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
 		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
 		downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
-		printPreviewProtocol: PRINT_PREVIEW_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -287,11 +285,6 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 			if (item && item.state !== "in_progress") downloads.forget(msg.guid);
 			const found: FoundDownload = item ? { filename: item.filename, state: item.state } : null;
 			return found;
-		}
-		case "printPreviewOpen": {
-			// Chrome lists an open print preview as a `chrome://print/` page; it is no tab, so `chrome.tabs` never shows it.
-			const targets = await chrome.debugger.getTargets();
-			return targets.some(target => target.url?.startsWith("chrome://print") === true);
 		}
 	}
 }

@@ -7,7 +7,6 @@ import type {
 	RelayToExtMessage,
 	TabSnapshot,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
-import { PRINT_PREVIEW_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import type { CDPSession } from "puppeteer-core";
 
 /** Same derivation as the bridge: target ids embed this per-instance code. */
@@ -3255,52 +3254,5 @@ describe("RelayBridge download paths", () => {
 		expect(cdp.messages.find(m => m.id === id)).toMatchObject({
 			error: { message: expect.stringContaining("run `omp browser-relay install`") },
 		});
-	});
-});
-
-describe("RelayBridge print previews", () => {
-	it("asks an extension that reports print previews, and answers for one that cannot without asking it", async () => {
-		for (const printPreviewProtocol of [PRINT_PREVIEW_PROTOCOL_VERSION, undefined]) {
-			const bridge = new RelayBridge({});
-			const ext = new FakeExtSocket();
-			bridge.extConnected(ext);
-			bridge.extMessage(
-				ext,
-				JSON.stringify({
-					t: "hello",
-					userAgent: "test",
-					browserVersion: "Chrome/151.0.0.0",
-					discardedTabsProtocol: 1,
-					printPreviewProtocol,
-					tabs: [tab({ tabId: 1 })],
-					attachedTabIds: [],
-				}),
-			);
-			const cdp = new FakeCdpSocket();
-			const connId = bridge.cdpConnected(cdp);
-			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
-			const ask = async (): Promise<number> => {
-				const id = ++msgSeq;
-				bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method: "OMP.printPreviewOpen" }));
-				await flush();
-				return id;
-			};
-			if (printPreviewProtocol === undefined) {
-				const id = await ask();
-				expect(ext.rpcs("printPreviewOpen")).toEqual([]);
-				expect(cdp.messages.find(m => m.id === id)).toMatchObject({
-					error: { message: "the omp relay extension in this browser cannot report print previews" },
-				});
-				continue;
-			}
-			const open = await ask();
-			ack(bridge, ext, "printPreviewOpen", true);
-			await flush();
-			expect(cdp.messages.find(m => m.id === open)).toMatchObject({ result: { open: true } });
-			const failed = await ask();
-			nack(bridge, ext, "printPreviewOpen", "No tab with id: 2");
-			await flush();
-			expect(cdp.messages.find(m => m.id === failed)).toMatchObject({ error: { message: "No tab with id: 2" } });
-		}
 	});
 });

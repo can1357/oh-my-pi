@@ -234,7 +234,6 @@ import {
 	waitForMainFrameDocument,
 } from "./navigation";
 
-import { PRINT_PREVIEW_CHECK_MS, PRINT_PREVIEW_OPEN_MESSAGE, printPreviewHolds } from "./print-preview";
 import { cloneSafe, RunOutput } from "./run-output";
 import { type UploadRoute, UploadStaging } from "./upload-files";
 import {
@@ -1598,10 +1597,6 @@ export class WorkerCore {
 	#crashed = false;
 	/** The user drives this browser (connected, relay); only there can Chrome detach omp under a run. */
 	#userDriven = false;
-	/** The browser is the omp relay, whose extension says whether a print preview is open. */
-	#relay = false;
-	/** The browser can open a print preview over the page; see `printPreview` in the init payload. */
-	#printPreview = false;
 	/** Buttons and keys `tab.mouseDown` / `tab.keyDown` pressed and nothing released yet; a run that is cut off releases them. */
 	readonly #heldButtons = new Set<MouseButton>();
 	readonly #heldKeys = new Set<KeyInput>();
@@ -1832,11 +1827,9 @@ export class WorkerCore {
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
-			this.#relay = payload.mode === "attach" && payload.relay === true;
-			this.#printPreview = payload.mode === "attach" && payload.printPreview === true;
 			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
 				perTab: !this.#userDriven,
-				pageEvents: this.#relay,
+				pageEvents: payload.mode === "attach" && payload.relay === true,
 			});
 			await this.#downloads.start(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
@@ -2035,8 +2028,7 @@ export class WorkerCore {
 		const timeoutSignal = AbortSignal.timeout(msg.timeoutMs);
 		const ac = new AbortController();
 		const runAc = new AbortController();
-		const printAc = new AbortController();
-		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal, printAc.signal]);
+		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
 		const output = new RunOutput();
 		const screenshots: ScreenshotResult[] = [];
 		const runErrorStartSeq = this.#consoleCapture.nextSequence;
@@ -2062,10 +2054,7 @@ export class WorkerCore {
 		let failure: { error: unknown } | undefined;
 		let recoverTab = false;
 		let runPage: RunPageScope | undefined;
-		let stopPrintCheck: (() => void) | undefined;
 		try {
-			// Started before the emulation reapply, which stalls too while a print preview holds the page.
-			stopPrintCheck = this.#checkForPrintPreview(printAc);
 			throwIfAborted(signal);
 			await untilAborted(signal, () => this.#emulation?.reapply() ?? Promise.resolve());
 			runPage = createRunPageScope(this.#requirePage(), () => this.#requireNetwork().restoreInterception());
@@ -2118,16 +2107,13 @@ export class WorkerCore {
 							`Browser code execution timed out after ${msg.timeoutMs}ms${stalled ? ` (stalled on ${stalled})` : ""}${dialogNote}${pageErrorNote}`,
 						),
 					);
-				} else if (printAc.signal.aborted) {
-					rejectCancel(printAc.signal.reason);
 				} else {
 					rejectCancel(abortError);
 				}
 				// Cancel in-flight tool calls so user code's awaited proxies reject promptly.
-				const toolAbort =
-					timeoutSignal.aborted || printAc.signal.aborted
-						? postmortem.markExpectedCleanupError(new ToolAbortError(undefined, { cause: signal.reason }))
-						: abortError;
+				const toolAbort = timeoutSignal.aborted
+					? postmortem.markExpectedCleanupError(new ToolAbortError(undefined, { cause: timeoutSignal.reason }))
+					: abortError;
 				for (const pending of active.pendingTools.values()) {
 					pending.reject(toolAbort);
 				}
@@ -2158,22 +2144,13 @@ export class WorkerCore {
 		} catch (error) {
 			failure = { error };
 		} finally {
-			stopPrintCheck?.();
-			// A preview can open after the last poll; the supervisor reserves time for this bounded final probe.
-			if (timeoutSignal.aborted && !ac.signal.aborted && this.#printPreview && this.#page) {
-				const held = await printPreviewHolds(this.#page, this.#relay);
-				if (held) {
-					printAc.abort(new ToolError(PRINT_PREVIEW_OPEN_MESSAGE));
-					failure = { error: printAc.signal.reason };
-				}
-			}
 			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
 			await Bun.sleep(0);
 			// Detach first: the stop below fails the cancelled requests, and run handlers that see
 			// those events would touch the aborted run's facade.
 			runPage?.detach();
 			// A cancelled or timed-out run leaves no button or key pressed for the user's next move.
-			if (ac.signal.aborted || timeoutSignal.aborted || printAc.signal.aborted) this.#releaseHeldInput();
+			if (ac.signal.aborted || timeoutSignal.aborted) this.#releaseHeldInput();
 			// A cancelled run abandons its main-frame navigation: left loading, it still replaces the
 			// page later and holds up any interception restore below. Stopping is gated on
 			// that navigation because Page.stopLoading also cancels every fetch and subresource
@@ -2232,30 +2209,6 @@ export class WorkerCore {
 				},
 			});
 		}
-	}
-
-	/**
-	 * Fail the run with {@link PRINT_PREVIEW_OPEN_MESSAGE} once a print preview holds its page, instead of letting it
-	 * stall to its timeout, after which the tab's recovery stalls too and the tab is killed. Nothing here closes the
-	 * preview: the page keeps its state until the user cancels the preview or a navigation replaces it (Chrome closes
-	 * the preview as the navigation starts). Returns the stop.
-	 */
-	#checkForPrintPreview(printAc: AbortController): () => void {
-		const page = this.#page;
-		if (!this.#printPreview || !page) return () => {};
-		let stopped = false;
-		let timer: NodeJS.Timeout | undefined;
-		const check = async (): Promise<void> => {
-			const held = await printPreviewHolds(page, this.#relay);
-			if (stopped) return;
-			if (held) printAc.abort(new ToolError(PRINT_PREVIEW_OPEN_MESSAGE));
-			else timer = setTimeout(check, PRINT_PREVIEW_CHECK_MS);
-		};
-		timer = setTimeout(check, PRINT_PREVIEW_CHECK_MS);
-		return () => {
-			stopped = true;
-			clearTimeout(timer);
-		};
 	}
 
 	/**

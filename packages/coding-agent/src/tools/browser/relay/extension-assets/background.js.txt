@@ -2,7 +2,6 @@
 var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 var FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
 var DOWNLOADS_PROTOCOL_VERSION = 1;
-var PRINT_PREVIEW_PROTOCOL_VERSION = 1;
 
 // packages/browser-relay/extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
@@ -294,7 +293,6 @@ async function buildHello() {
     ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
     reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
     downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
-    printPreviewProtocol: PRINT_PREVIEW_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };
@@ -349,10 +347,6 @@ async function runRpc(msg, origin) {
         downloads.forget(msg.guid);
       const found = item ? { filename: item.filename, state: item.state } : null;
       return found;
-    }
-    case "printPreviewOpen": {
-      const targets = await chrome.debugger.getTargets();
-      return targets.some((target) => target.url?.startsWith("chrome://print") === true);
     }
   }
 }

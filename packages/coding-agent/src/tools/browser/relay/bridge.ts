@@ -31,7 +31,6 @@ import {
 	FOREIGN_FRAME_REFUSAL,
 	isOlderOmpVersion,
 	isOmpVersion,
-	PRINT_PREVIEW_PROTOCOL_VERSION,
 } from "./protocol";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
@@ -152,7 +151,6 @@ interface ExtInstance {
 		ompVersion?: string;
 		reloadProtocol?: number;
 		downloadsProtocol?: number;
-		printPreviewProtocol?: number;
 	} | null;
 	/** Chrome extension id from the socket's `Origin`; null when the upgrade carried none. */
 	extensionId: string | null;
@@ -704,7 +702,6 @@ export class RelayBridge {
 			ompVersion: typeof msg.ompVersion === "string" ? msg.ompVersion : undefined,
 			reloadProtocol: msg.reloadProtocol,
 			downloadsProtocol: msg.downloadsProtocol,
-			printPreviewProtocol: msg.printPreviewProtocol,
 		};
 		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
@@ -1203,8 +1200,6 @@ export class RelayBridge {
 		// Relay-private: where Chrome saved a download the page reported. A page session's download events carry no
 		// path, and Chrome refuses an extension's `setDownloadBehavior`, so the extension looks the file up.
 		if (msg.method === "OMP.downloadPath") return await this.#replyDownloadPath(conn, msg, inst);
-		// Relay-private: whether Chrome has a print preview open. It is not a tab, so only the extension can see it.
-		if (msg.method === "OMP.printPreviewOpen") return await this.#replyPrintPreviewOpen(conn, msg, inst);
 		// Sent raw, createTarget honors `newWindow` and answers with Chrome's id, which no relay command
 		// resolves; close and activate are refused ("Not allowed"). Run them in this tab's browser, where a
 		// new tab lands like every relay-created tab: in that browser's current window.
@@ -2226,21 +2221,6 @@ export class RelayBridge {
 		const inst = this.#instances.get(tab.instanceId);
 		if (!inst) throw new Error("relay extension is not connected");
 		return inst;
-	}
-
-	/** Answer `OMP.printPreviewOpen` with whether the extension's browser has a print preview open. */
-	async #replyPrintPreviewOpen(conn: CdpConnection, msg: CdpCommand, inst: ExtInstance): Promise<boolean> {
-		if (inst.info?.printPreviewProtocol !== PRINT_PREVIEW_PROTOCOL_VERSION) {
-			this.#replyError(conn, msg, "the omp relay extension in this browser cannot report print previews");
-			return false;
-		}
-		try {
-			this.#reply(conn, msg, { open: (await this.#rpc({ op: "printPreviewOpen" }, inst)) === true });
-			return true;
-		} catch (err) {
-			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
-			return false;
-		}
 	}
 
 	/** Answer `OMP.downloadPath` with the file Chrome saved for the completed download the page reported as `params.guid`. */
