@@ -333,7 +333,7 @@ export class CredentialSelector {
 			modelId: options?.modelId,
 		};
 		const blockScope = strategy.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
@@ -417,7 +417,7 @@ export class CredentialSelector {
 		const planGate = strategy?.planGate?.(rankingContext);
 		if (!this.#oauthUsagePolicy(provider, credentials, strategy, planGate !== undefined).checkUsage) return;
 		const blockScope = strategy?.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const providerKey = providerTypeKey(provider, "oauth");
 		await raceSignal(
 			Promise.all(
@@ -607,7 +607,7 @@ export class CredentialSelector {
 		};
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		// Reads honour every scope that applies; the scalar above is for args that persist.
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const planGate = strategy?.planGate?.(rankingContext);
 		const hasPlanRequirement = planGate !== undefined;
 		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;

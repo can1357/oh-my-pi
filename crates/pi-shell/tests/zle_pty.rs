@@ -161,6 +161,19 @@ fn vared_edits_a_parameter() {
 	});
 }
 
+/// `vared` in a `zpty` command edits on the pty, not on the shell's
+/// terminal (zsh-autosuggestions' completion strategy fetches every
+/// suggestion this way while the shell's own editor is active), and its
+/// terminal mode changes do not wait for the shell to read the pty: the
+/// shell sleeps meanwhile.
+#[test]
+fn vared_in_a_zpty_command_edits_on_the_pty() {
+	let rc = "zmodload zsh/zpty\ncap() { zpty v 'vared -c x; print -r -- \"got:$x:end\"'; zpty -w \
+	          v $'typed\\r'; sleep 0.5; zpty -r -m v out '*:end*'; print -r -- st=$? \
+	          ${${out##*got:}%%:end*}; zpty -d v }\n";
+	same(rc, |pty| keys(pty, "cap\r"));
+}
+
 /// A byte read past a key sequence (`^X` bound, `^Xe` not) is pushed back
 /// and starts the next line (zsh's `kungetbuf` outlives the line).
 #[test]

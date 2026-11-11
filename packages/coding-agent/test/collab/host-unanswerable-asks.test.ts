@@ -21,10 +21,13 @@ import {
 	waitFor,
 } from "./helpers/throttled-host";
 
-const cleanups: (() => void)[] = [];
-afterEach(() => {
-	for (const cleanup of cleanups.splice(0).reverse()) cleanup();
-	uninstallInMemoryRelay();
+const cleanups: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+	try {
+		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	} finally {
+		uninstallInMemoryRelay();
+	}
 });
 
 it("settles a guest ask the queue refused instead of awaiting an answer", async () => {
@@ -32,7 +35,7 @@ it("settles a guest ask the queue refused instead of awaiting an answer", async 
 	const probe = instrumentRelay(relay, { throttle: true });
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
@@ -74,7 +77,7 @@ it("re-poses a shed guest's asks when it rejoins instead of settling them", asyn
 	const probe = instrumentRelay(relay, { throttle: true });
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
@@ -134,7 +137,7 @@ it("ignores an answer from a writer the ask was never delivered to", async () =>
 	instrumentRelay(relay, { throttle: false });
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);

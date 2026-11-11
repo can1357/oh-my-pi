@@ -377,6 +377,20 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data instanceof type.errors) {
 		throw new AIError.ValidationError(`anthropic-messages: ${data.summary}`);
 	}
+	// Structured output has no pi-ai option to land on. Accepting it would
+	// return unconstrained text as a 200; reject so clients fall back to a
+	// prompt-side schema (#18842).
+	const formatField =
+		data.output_config?.format != null
+			? "output_config.format"
+			: data.output_format != null
+				? "output_format"
+				: undefined;
+	if (formatField) {
+		throw new AIError.ValidationError(
+			`anthropic-messages: ${formatField} (structured output) is unsupported by this auth-gateway route; put the schema in the prompt or force a tool call instead`,
+		);
+	}
 
 	const now = Date.now();
 	const messages: Message[] = [];

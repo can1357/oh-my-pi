@@ -113,6 +113,8 @@ rust_library(
         "//crates/pi-iso",
         "//crates/pi-vfs",
         "//crates/vendor/jaq-core",
+        "//crates/vendor/jaq-json",
+        "//crates/vendor/jaq-std",
         "//crates/vendor/grep-searcher",
     ],
 )

@@ -425,12 +425,12 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
 		// Some builtins are registered under the familiar command name but
 		// keep their implementation's own help text, exactly as the
-		// standalone versions did: `rg` is ripgrep, `jq` is jaq, `sg`
-		// is ast-grep (whose help names itself only through its usage
-		// line, here `sg`).
+		// standalone versions did: `rg` is ripgrep, `sg` is ast-grep
+		// (whose help names itself only through its usage line, here
+		// `sg`), and `jq` prints jq 1.8.2's help.
 		let expected = match name {
 			"rg" => "ripgrep",
-			"jq" => "jaq",
+			"jq" => "jq - commandline JSON processor [version 1.8.2]",
 			"sg" => "using AST pattern",
 			other => other,
 		};

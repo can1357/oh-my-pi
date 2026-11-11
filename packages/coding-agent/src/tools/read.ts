@@ -29,6 +29,7 @@ import {
 	parseImageMetadata,
 	prompt,
 	readImageMetadata,
+	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import {
@@ -1093,6 +1094,17 @@ async function assessLocalReadSpeculation(
 	};
 }
 
+/** Whether `readPath` is one web URL, whose fetch reads nothing an earlier call could have changed. */
+function isSingleWebUrl(readPath: string): boolean {
+	if (readPath.includes(";")) return false;
+	try {
+		return parseReadUrlTarget(readPath) !== null;
+	} catch {
+		// A malformed URL selector: the read reports it.
+		return false;
+	}
+}
+
 /**
  * Read tool implementation.
  *
@@ -1863,6 +1875,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		// Running beside an earlier call that may write (a `bash` before this read
+		// in the same message), the read could finish before that write lands. The
+		// model sees the batch's results only after every call ends, so waiting for
+		// those calls costs no turn latency. A single web fetch reads nothing on disk.
+		const earlierEffects = isSingleWebUrl(params.path) ? undefined : toolContext?.toolCall?.earlierEffectsSettled;
+		if (earlierEffects) await untilAborted(signal, earlierEffects);
 		const inner = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
 		const innerDetails: ReadDetailsWithWindow | undefined = inner.details;
 		const result = await shapeToolResult(

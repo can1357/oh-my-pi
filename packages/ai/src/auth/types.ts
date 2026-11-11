@@ -790,6 +790,8 @@ export type MarkUsageLimitOptions = {
 export type RotateCredentialOptions = {
 	error?: unknown;
 	modelId?: string;
+	/** Provider base URL for usage-report probes during a usage-limit block. */
+	baseUrl?: string;
 	apiKey?: string;
 	credentialId?: number;
 	signal?: AbortSignal;

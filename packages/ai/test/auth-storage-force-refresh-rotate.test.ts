@@ -764,6 +764,105 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		).toBe("daybreak-denied");
 	});
 
+	test.each([
+		["claude-mythos-5-2", "claude-opus-5-5"],
+		["CLAUDE-MYTHOS-5-2", "claude-mythos-5-2"],
+	])(
+		"Anthropic model 404 for %s blocks only that exact model and rotates to a sibling",
+		async (modelId, availableModelId) => {
+			if (!store?.listCredentialBlocks) throw new Error("test setup lacks persisted credential blocks");
+			const previousApiKey = process.env.ANTHROPIC_API_KEY;
+			const previousOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+			delete process.env.ANTHROPIC_API_KEY;
+			delete process.env.ANTHROPIC_OAUTH_TOKEN;
+			const networkRequests: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				Object.assign(
+					async (input: string | URL | Request) => {
+						networkRequests.push(input instanceof Request ? input.url : String(input));
+						throw new Error("OAuth refresh or network request must not run for a model 404");
+					},
+					{ preconnect: fetch.preconnect },
+				),
+			);
+			try {
+				const anthropicStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+				const sessionId = "anthropic-model-policy";
+				await anthropicStorage.credentials.set(
+					"anthropic",
+					["denied", "sibling"].map(suffix => ({
+						type: "oauth" as const,
+						access: `sk-ant-oat01-${suffix}`,
+						refresh: `test-refresh-${suffix}`,
+						expires: farExpiry(),
+						accountId: `account-${suffix}`,
+						orgId: `org-${suffix}`,
+						email: `${suffix}@example.test`,
+					})),
+				);
+				const first = await anthropicStorage.keys.get("anthropic", sessionId, { modelId });
+				expect(first).toBe("sk-ant-oat01-denied");
+				const denial = new ProviderHttpError(
+					`404 ${JSON.stringify({
+						type: "error",
+						error: { type: "not_found_error", message: `model: ${modelId}` },
+					})}`,
+					404,
+					{ code: "not_found_error" },
+				);
+				const rows = store.listAuthCredentials("anthropic");
+				const rowIds = rows.map(row => row.id);
+				const sticky = store.getCache(`session:sticky:anthropic:${sessionId}`);
+				expect(
+					await anthropicStorage.limits.rotate("anthropic", sessionId, { error: denial, apiKey: first }),
+				).toEqual({ switched: false });
+				expect(
+					await anthropicStorage.limits.rotate("anthropic", sessionId, {
+						error: denial,
+						modelId: "claude-opus-5-5",
+						apiKey: first,
+					}),
+				).toEqual({ switched: false });
+				expect(store.listCredentialBlocks(rowIds)).toEqual([]);
+				expect(store.getCache(`session:sticky:anthropic:${sessionId}`)).toBe(sticky);
+				expect(await anthropicStorage.keys.get("anthropic", sessionId, { modelId })).toBe(first);
+
+				const rotated = await anthropicStorage.limits.rotate("anthropic", sessionId, {
+					error: denial,
+					modelId,
+					apiKey: first,
+				});
+				expect(rotated.switched).toBe(true);
+				expect(await anthropicStorage.keys.get("anthropic", sessionId, { modelId })).toBe("sk-ant-oat01-sibling");
+				expect(
+					store.listCredentialBlocks(rowIds).map(block => ({
+						credentialId: block.credentialId,
+						providerKey: block.providerKey,
+						blockScope: block.blockScope,
+					})),
+				).toEqual([
+					{
+						credentialId: rows[0]!.id,
+						providerKey: "anthropic:oauth",
+						blockScope: `model-policy:${modelId}`,
+					},
+				]);
+				const otherModelStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+				await otherModelStorage.credentials.reload();
+				expect(
+					await otherModelStorage.keys.get("anthropic", "other-anthropic-model", { modelId: availableModelId }),
+				).toBe(first);
+				expect(await anthropicStorage.credentials.listDisabled("anthropic")).toEqual([]);
+				expect(networkRequests).toEqual([]);
+			} finally {
+				if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+				else process.env.ANTHROPIC_API_KEY = previousApiKey;
+				if (previousOAuthToken === undefined) delete process.env.ANTHROPIC_OAUTH_TOKEN;
+				else process.env.ANTHROPIC_OAUTH_TOKEN = previousOAuthToken;
+			}
+		},
+	);
+
 	test("Cursor plan denial blocks only that model and rotates to a sibling", async () => {
 		if (!store) throw new Error("test setup failed");
 		const cursorStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
