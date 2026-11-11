@@ -118,6 +118,18 @@ async function callOnWorker(
 	}
 }
 
+function canonicalizeWorkerFields<T extends { task: string; assignment?: string }>(
+	record: T,
+	canonicalTask: string,
+	canonicalAssignment: string | undefined,
+): T {
+	if (record.task === canonicalTask) record.task = canonicalTask;
+	if (canonicalAssignment !== undefined && record.assignment === canonicalAssignment) {
+		record.assignment = canonicalAssignment;
+	}
+	return record;
+}
+
 /**
  * Main thread: run the subagent of `options` where `pool` places it (see
  * {@link SubagentWorkerPool.place}): in a worker, or through `runHere` on this thread, its
@@ -132,7 +144,16 @@ export async function runSubprocessPlaced(
 	const placed = pool.place();
 	let request: SubagentRunRequest | undefined;
 	try {
-		request = placed.worker ? subagentRunRequest(bridgeIntegrationOptions(options)) : undefined;
+		if (placed.worker) {
+			const bridged = bridgeIntegrationOptions(options);
+			const onProgress = bridged.onProgress;
+			if (onProgress) {
+				bridged.onProgress = progress => {
+					onProgress(canonicalizeWorkerFields(progress, options.task, options.assignment));
+				};
+			}
+			request = subagentRunRequest(bridged);
+		}
 	} catch (error) {
 		placed.release();
 		throw error;
@@ -142,11 +163,12 @@ export async function runSubprocessPlaced(
 	try {
 		const worker = placement.worker;
 		if (!worker || !request) return await runHere(options);
-		return await callOnWorker(
+		const result = await callOnWorker(
 			worker,
 			() => worker.link.call("runSubprocess", request),
 			error => lostRunResult(options, error, startTime),
 		);
+		return canonicalizeWorkerFields(result, options.task, options.assignment);
 	} finally {
 		placement.release();
 	}

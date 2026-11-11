@@ -573,6 +573,7 @@ interface SyncSpawnRef {
 	index: number;
 	run?: SpawnRun;
 	preAllocatedId?: string;
+	renderedTask?: string;
 }
 
 /** Merged view of a sync spawn set's payloads: joined text plus flattened results/usage/paths. */
@@ -701,6 +702,36 @@ export function composeSpawnAdvisory(args: {
 			.filter(Boolean)
 			.join("\n\n") || undefined
 	);
+}
+
+/** Per-spawn mutable progress row plus its cached immutable HUD snapshot; every write to `progress` must set `dirty = true` (or call `markProgressDirty()`) so `snapshotSpawnProgress` rebuilds that slot's snapshot. */
+interface SpawnProgressState {
+	progress: AgentProgress;
+	snapshot: AgentProgress | undefined;
+	dirty: boolean;
+}
+
+function snapshotSpawnProgress(state: SpawnProgressState): AgentProgress {
+	if (state.dirty || state.snapshot === undefined) {
+		state.snapshot = { ...state.progress };
+		state.dirty = false;
+	}
+	return state.snapshot;
+}
+
+interface PromptFieldCanonicalizer {
+	readonly assignment: string;
+	canonicalTask: string | undefined;
+}
+
+function canonicalizePromptFields(
+	record: { task: string; assignment?: string },
+	state: PromptFieldCanonicalizer,
+): { task: string; assignment?: string } {
+	const nextAssignment = record.assignment === state.assignment ? state.assignment : record.assignment;
+	const canonicalTask = (state.canonicalTask ??= record.task);
+	const nextTask = record.task === canonicalTask ? canonicalTask : record.task;
+	return nextAssignment !== undefined ? { task: nextTask, assignment: nextAssignment } : { task: nextTask };
 }
 
 /** Sentinel for async jobs whose subagent finished with a failing result; progress is already updated. */
@@ -1073,6 +1104,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number;
 		agentId?: string;
 		detached: boolean;
+		renderedTask?: string;
 	}): SpawnRun {
 		return new SpawnRun(
 			this.#permit,
@@ -1088,6 +1120,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
 					run.tools,
+					spawn.renderedTask,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
@@ -1355,14 +1388,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		};
 		const outputManager = this.#outputManager();
 		const callStartedAt = Date.now();
-		const spawns: Array<{
-			agentId: string;
-			item: ResolvedTaskItem;
-			index: number;
-			blocking: boolean;
-			run: SpawnRun | undefined;
-			progress: AgentProgress;
-		}> = [];
+		const spawns: Array<
+			SpawnProgressState & {
+				agentId: string;
+				item: ResolvedTaskItem;
+				index: number;
+				blocking: boolean;
+				run: SpawnRun | undefined;
+			}
+		> = [];
 		for (const [index, item] of spawnItems.entries()) {
 			const agentType = resolvedAgents[index]!;
 			const policy = policies[index]!;
@@ -1371,12 +1405,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const agentId =
 				run?.identity.agentId ?? (await outputManager.allocate(item.name?.trim() || generateTaskName()));
 			const assignment = (item.task ?? "").trim();
+			const renderedTask = renderSubagentUserPrompt(assignment);
 			spawns.push({
 				agentId,
 				item,
 				index,
 				blocking: itemBlocking[index],
 				run,
+				snapshot: undefined,
+				dirty: true,
 				progress: {
 					index,
 					id: agentId,
@@ -1384,7 +1421,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agentSource,
 					modelRole: policy.modelRole,
 					status: "pending",
-					task: renderSubagentUserPrompt(assignment),
+					task: renderedTask,
 					assignment,
 					...(item.taskFile !== undefined ? { taskFile: item.taskFile, taskFileSha256: item.taskFileSha256 } : {}),
 					recentTools: [],
@@ -1421,7 +1458,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			totalDurationMs: Date.now() - callStartedAt,
 			usage: syncUsage,
 			outputPaths: syncOutputPaths,
-			progress: spawns.map(spawn => ({ ...spawn.progress })),
+			progress: spawns.map(snapshotSpawnProgress),
 			async: {
 				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
 				jobId: primaryJobId,
@@ -1436,10 +1473,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const jobId = this.#registerSpawnJob({
 					manager,
 					toolCallId,
-					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
+					spawnParams: { ...normalizedSpawnParams[spawn.index]!, task: spawn.progress.assignment },
 					agentId: spawn.agentId,
 					run: spawn.run,
 					progress: spawn.progress,
+					markProgressDirty: () => {
+						spawn.dirty = true;
+					},
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
 					onUpdate,
@@ -1456,6 +1496,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				spawn.run?.discard(`background job registration failed: ${message}`);
 				failedSchedules.push(`${spawn.agentId}: ${message}`);
 				spawn.progress.status = "failed";
+				spawn.dirty = true;
 				settledCount += 1;
 				failedCount += 1;
 			}
@@ -1544,15 +1585,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			defaultAgent,
 			signal,
 			spawns: syncSpawns.map(spawn => ({
-				item: spawn.item,
+				item: { ...spawn.item, task: spawn.progress.assignment },
 				index: spawn.index,
 				preAllocatedId: spawn.agentId,
 				run: spawn.run,
+				renderedTask: spawn.progress.task,
 			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
-						const spawn = spawns.find(candidate => candidate.index === index);
-						if (spawn) spawn.progress = { ...progress, index };
+						const spawn =
+							spawns[index]?.index === index
+								? spawns[index]
+								: spawns.find(candidate => candidate.index === index);
+						if (spawn) {
+							spawn.progress = { ...progress, index };
+							spawn.dirty = true;
+						}
 						onUpdate({
 							content: [{ type: "text", text: `Running ${syncLabel} inline...` }],
 							details: buildAsyncDetails(),
@@ -1583,6 +1631,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			} else {
 				spawn.progress.status = payloads[position] ? "failed" : "aborted";
 			}
+			spawn.dirty = true;
 		}
 
 		const spawnedSummary = started.length > 0 ? renderSpawnFeedback(true) : scheduleFailureSummary.trim();
@@ -1610,6 +1659,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		/** Run already started while the call streamed; the job adopts it instead of launching. */
 		run?: SpawnRun;
 		progress: AgentProgress;
+		markProgressDirty: () => void;
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
@@ -1622,6 +1672,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agentId,
 			run,
 			progress,
+			markProgressDirty,
 			ircEnabled,
 			buildDetails,
 			onUpdate,
@@ -1688,6 +1739,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.recentOutput = nextProgress.recentOutput.slice();
 						progress.retryState = nextProgress.retryState;
 						progress.retryFailure = nextProgress.retryFailure;
+						markProgressDirty();
 					}
 					const updateText =
 						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
@@ -1699,6 +1751,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: progress.index,
 					agentId,
 					detached: true,
+					renderedTask: progress.task,
 				}));
 				activeRun.attach({
 					signal: runSignal,
@@ -1726,12 +1779,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				);
 				if (!permitHeld || runSignal.aborted) {
 					progress.status = "aborted";
+					markProgressDirty();
 					onSettled?.(true);
 					throw new Error("Aborted before execution");
 				}
 				try {
 					markRunning();
 					progress.status = "running";
+					markProgressDirty();
 					await reportProgress(
 						`Running background task ${agentId}...`,
 						buildDetails() as unknown as Record<string, unknown>,
@@ -1776,6 +1831,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						delete progress.resolvedThinkingLevel;
 						delete progress.resolvedModelIsFallback;
 					}
+					markProgressDirty();
 					onSettled?.(resultFailed);
 					const statusText = resultFailed
 						? `Background task ${agentId} failed.`
@@ -1794,6 +1850,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					}
 					progress.status = "failed";
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
+					markProgressDirty();
 					onSettled?.(true);
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
@@ -1815,7 +1872,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					intent: this.session.getToolCallIntent?.(toolCallId),
 				}),
 				onProgress: text => {
-					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
+					if (!onUpdate) return;
+					onUpdate({ content: [{ type: "text", text }], details: buildDetails() });
 				},
 			},
 		);
@@ -1846,23 +1904,29 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: spawn.index,
 					agentId: spawn.preAllocatedId,
 					detached: false,
+					renderedTask: spawn.renderedTask,
 				});
 			run.attach({ signal, onUpdate });
 			return await run.result;
 		}
 
 		const startTime = Date.now();
+		const orderedIndices = spawns.map(spawn => spawn.index).sort((a, b) => a - b);
 		const latestProgress = new Map<number, AgentProgress>();
 		const emitCombined = () => {
-			onUpdate?.({
+			if (!onUpdate) return;
+			const progress: AgentProgress[] = [];
+			for (const index of orderedIndices) {
+				const snapshot = latestProgress.get(index);
+				if (snapshot) progress.push(snapshot);
+			}
+			onUpdate({
 				content: [{ type: "text", text: `Running ${spawns.length} agents...` }],
 				details: {
 					projectAgentsDir: null,
 					results: [],
 					totalDurationMs: Date.now() - startTime,
-					progress: Array.from(latestProgress.entries())
-						.sort((a, b) => a[0] - b[0])
-						.map(([, progress]) => progress),
+					progress,
 				},
 			});
 		};
@@ -1924,6 +1988,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						index: spawn.index,
 						agentId: spawn.preAllocatedId,
 						detached: false,
+						renderedTask: spawn.renderedTask,
 					});
 				run.attach({
 					signal: workerSignal,
@@ -1977,9 +2042,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
 		tools?: TextTap,
+		renderedTask?: string,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
+		const promptFields: PromptFieldCanonicalizer = {
+			assignment,
+			canonicalTask: renderedTask,
+		};
 		const taskFileMetadata =
 			params.taskFile !== undefined ? { taskFile: params.taskFile, taskFileSha256: params.taskFileSha256 } : {};
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
@@ -1989,6 +2059,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				session: this.session,
 				invocationKind: "task",
 				assignment,
+				...(renderedTask !== undefined ? { renderedTask } : {}),
 				context,
 				agent: params.agent,
 				sourceSession: params.sourceSession,
@@ -2027,7 +2098,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				...(tools ? { onToolResult: (result: SubagentToolResult) => appendToolResult(tools, result) } : {}),
 				onProgress: progress => {
-					latestProgress = { ...progress, ...taskFileMetadata, recentTools: progress.recentTools.slice() };
+					latestProgress = {
+						...progress,
+						...canonicalizePromptFields(progress, promptFields),
+						...taskFileMetadata,
+						recentTools: progress.recentTools.slice(),
+					};
 					onUpdate?.({
 						content: [{ type: "text", text: `Running agent ${progress.id}...` }],
 						details: {
@@ -2040,7 +2116,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				},
 			});
 			return this.#buildResultPayload(
-				{ ...execution.result, ...taskFileMetadata },
+				{
+					...execution.result,
+					...canonicalizePromptFields(execution.result, promptFields),
+					...taskFileMetadata,
+				},
 				execution.policy.discovery.projectAgentsDir,
 				Date.now() - startTime,
 				execution.mergeSummary,
@@ -2055,6 +2135,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const salvaged = settled
 				? {
 						...settled,
+						...canonicalizePromptFields(settled, promptFields),
 						...taskFileMetadata,
 						error: settled.error ?? (cause instanceof Error ? cause.message : message),
 					}

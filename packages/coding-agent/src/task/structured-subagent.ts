@@ -129,6 +129,8 @@ export interface StructuredSubagentRequest {
 	session: ToolSession;
 	invocationKind: "task" | "eval";
 	assignment: string;
+	/** Pre-rendered user prompt for `assignment`, when the caller already built one for progress rows. */
+	renderedTask?: string;
 	context?: string;
 	agent?: string;
 	/** Saved source session selected for the bundled seance agent. */
@@ -783,6 +785,7 @@ function buildExecutorOptions(
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const restrictToolNames = preparedSession !== undefined || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const assignment = request.assignment.trim();
 	return {
 		cwd: session.cwd,
 		costGate: session.costGate,
@@ -790,8 +793,8 @@ function buildExecutorOptions(
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
-		task: renderSubagentUserPrompt(request.assignment),
-		assignment: request.assignment.trim(),
+		task: request.renderedTask ?? renderSubagentUserPrompt(assignment),
+		assignment,
 		preparedSession,
 		context: request.context?.trim() || undefined,
 		planReference: undefined,
@@ -908,6 +911,7 @@ function buildFailureResult(
 	id: string,
 	startedAt: number,
 ) {
+	const assignment = request.assignment.trim();
 	return (error: unknown): SingleResult => {
 		const message = error instanceof Error ? error.message : String(error);
 		return {
@@ -915,8 +919,8 @@ function buildFailureResult(
 			id,
 			agent: policy.agent.name,
 			agentSource: policy.agent.source,
-			task: renderSubagentUserPrompt(request.assignment),
-			assignment: request.assignment.trim(),
+			task: request.renderedTask ?? renderSubagentUserPrompt(assignment),
+			assignment,
 			description: request.invocationKind === "eval" ? trimToUndefined(request.identity?.label) : undefined,
 			exitCode: 1,
 			output: "",

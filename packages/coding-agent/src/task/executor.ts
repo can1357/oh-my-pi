@@ -1416,12 +1416,15 @@ function isAsyncResultInjection(message: AgentMessage | undefined): boolean {
 	return message?.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE;
 }
 
+function deduplicateTaskString(task: string, assignment: string | undefined): string {
+	return assignment !== undefined && task === assignment ? assignment : task;
+}
+
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const {
 		index,
 		id,
 		agent,
-		task,
 		assignment,
 		signal,
 		onProgress,
@@ -1430,6 +1433,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		maxRuntimeMs,
 		completionProbe,
 	} = args;
+	const task = deduplicateTaskString(args.task, assignment);
 	const startTime = Date.now();
 
 	const progress: AgentProgress = {
@@ -2922,7 +2926,8 @@ interface FinalizeRunArgs {
  * event.
  */
 async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
-	const { monitor, done, index, id, agent, task, assignment, signal, modelOverride, modelRole } = args;
+	const { monitor, done, index, id, agent, assignment, signal, modelOverride, modelRole } = args;
+	const task = deduplicateTaskString(args.task, assignment);
 	const progress = monitor.progress;
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
@@ -4456,7 +4461,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const {
 		cwd,
 		agent,
-		task,
 		assignment,
 		index,
 		id,
@@ -4469,6 +4473,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		signal,
 		onProgress,
 	} = options;
+	const task = deduplicateTaskString(options.task, assignment);
 	const preparedSession = options.preparedSession;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = options.structured !== false;
