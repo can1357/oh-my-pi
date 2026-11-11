@@ -47,7 +47,7 @@ describe("JSON selector target admission", () => {
 		const file = path.join(dir, "invalid.json.bak");
 		await Bun.write(file, "not JSON");
 		await expect(tool.execute("invalid-backup", { path: `${file}?q=.` })).rejects.toThrow(
-			/Failed to execute JSON query:.*failed to parse/i,
+			/Failed to execute JSON query: jq: parse error:/,
 		);
 	});
 
