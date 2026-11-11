@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import {
 	Agent,
@@ -51,6 +51,8 @@ describe("advisor tool-call loop guard", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
+	// What the primary's tool context store hands the advisor.
+	let primaryToolContext = (toolCall?: ToolCallContext) => ({ toolCall }) as AgentToolContext;
 
 	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-tool-call-loop-guard-");
@@ -61,6 +63,7 @@ describe("advisor tool-call loop guard", () => {
 	afterEach(async () => {
 		await session?.dispose();
 		session = undefined;
+		primaryToolContext = toolCall => ({ toolCall }) as AgentToolContext;
 	});
 
 	afterAll(async () => {
@@ -183,7 +186,7 @@ describe("advisor tool-call loop guard", () => {
 			modelRegistry,
 			advisorTools: [failingReadTool],
 			advisorStreamFn,
-			advisorGetToolContext: toolCall => ({ toolCall }) as AgentToolContext,
+			advisorGetToolContext: toolCall => primaryToolContext(toolCall),
 			advisorConfigs:
 				advisorConfig === undefined ? undefined : Array.isArray(advisorConfig) ? advisorConfig : [advisorConfig],
 		});
@@ -249,6 +252,47 @@ describe("advisor tool-call loop guard", () => {
 			(message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "reader",
 		);
 		expect(read?.content).toEqual([{ type: "text", text: "new" }]);
+	});
+
+	it("scopes an advisor tool's abort and tool list to the advisor, not the primary", async () => {
+		let primaryAborts = 0;
+		primaryToolContext = toolCall =>
+			({
+				toolCall,
+				abort: () => {
+					primaryAborts++;
+				},
+				toolNames: ["read", "bash"],
+			}) as AgentToolContext;
+		const { advisor } = createAdvisor({}, 0);
+		const advisorAborts = spyOn(advisor, "abort");
+		let seenToolNames: string[] | undefined;
+		const mock = createMockModel({
+			provider: "anthropic",
+			responses: [
+				{ content: [{ type: "toolCall", id: "cancel", name: "ask", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		advisor.streamFn = mock.stream;
+		advisor.setTools([
+			{
+				name: "ask",
+				label: "Ask",
+				description: "Stands in for a dialog the user cancels",
+				parameters: type({}),
+				approval: "read",
+				async execute(_id, _args, _signal, _update, context) {
+					seenToolNames = context?.toolNames;
+					context?.abort();
+					return { content: [{ type: "text", text: "cancelled" }] };
+				},
+			},
+		]);
+		await advisor.prompt("ask the user");
+		expect(primaryAborts).toBe(0);
+		expect(advisorAborts).toHaveBeenCalled();
+		expect(seenToolNames).toEqual(["ask"]);
 	});
 
 	it("redirects the advisor's own repeated tool call and reaches its next request", async () => {

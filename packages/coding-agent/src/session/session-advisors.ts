@@ -1483,7 +1483,18 @@ export class SessionAdvisors {
 				providerSessionState: this.#host.providerSessionState,
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
-				getToolContext: this.#advisorGetToolContext,
+				// The primary's context, scoped to this advisor: a tool that cancels
+				// (`ask`) stops the advisor, and `bash` judges commands against the
+				// tools the advisor has, not the primary's.
+				getToolContext: toolCall => {
+					const context = this.#advisorGetToolContext?.(toolCall);
+					if (!context) return undefined;
+					return {
+						...context,
+						abort: () => advisorAgent.abort(),
+						toolNames: advisorAgent.state.tools.map(tool => tool.name),
+					};
+				},
 				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
