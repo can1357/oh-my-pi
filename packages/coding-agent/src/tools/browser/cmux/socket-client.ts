@@ -129,6 +129,13 @@ export class CmuxSocketClient {
 		const onAbort = () => {
 			const index = this.#queue.indexOf(job);
 			if (index >= 0) this.#queue.splice(index, 1);
+			if (this.#activeJob === job && this.#connected) {
+				// A late reply cannot be matched to a subsequent request on this serial socket.
+				this.#destroySocketForDesync();
+				for (const waiter of this.#lineWaiters.splice(0)) {
+					waiter.reject(opts?.signal?.reason);
+				}
+			}
 			reject(opts?.signal?.reason);
 		};
 		opts?.signal?.addEventListener("abort", onAbort, { once: true });
@@ -161,9 +168,15 @@ export class CmuxSocketClient {
 		this.#socket = socket;
 		this.#buffer = "";
 		socket.setEncoding("utf8");
-		socket.on("data", chunk => this.#onData(String(chunk)));
-		socket.on("error", err => this.#handleSocketFailure(err));
-		socket.on("close", () => this.#handleSocketClose());
+		socket.on("data", chunk => {
+			if (this.#socket === socket) this.#onData(String(chunk));
+		});
+		socket.on("error", err => {
+			if (this.#socket === socket) this.#handleSocketFailure(err);
+		});
+		socket.on("close", () => {
+			if (this.#socket === socket) this.#handleSocketClose();
+		});
 
 		try {
 			await this.#waitForConnect(socket);

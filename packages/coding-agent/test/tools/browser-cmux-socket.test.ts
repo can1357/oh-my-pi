@@ -95,6 +95,37 @@ afterEach(() => {
 });
 
 describe("CmuxSocketClient", () => {
+	it("unblocks queued requests on a fresh socket when an active long request aborts", async () => {
+		const received = Promise.withResolvers<net.Socket>();
+		let activeSocket: net.Socket | undefined;
+		const methods: unknown[] = [];
+		await withSocketServer(
+			(line, socket) => {
+				const request = JSON.parse(line) as RequestLine;
+				methods.push(request.method);
+				if (request.method === "blocking") received.resolve(socket);
+				else socket.write(`${JSON.stringify({ ok: true, result: { fresh: socket !== activeSocket } })}\n`);
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const controller = new AbortController();
+				try {
+					const cancelled = client
+						.request("blocking", {}, { timeoutMs: 300_000, signal: controller.signal })
+						.catch(error => error);
+					activeSocket = await received.promise;
+					const sentinel = client.request("sentinel", {}, { signal: AbortSignal.timeout(1_000) });
+					controller.abort(new Error("run aborted"));
+					expect(String(await cancelled)).toContain("run aborted");
+					expect(await sentinel).toEqual({ fresh: true });
+					expect(methods).toEqual(["blocking", "sentinel"]);
+				} finally {
+					client.close();
+				}
+			},
+		);
+	});
+
 	it("drops a mutating helper queued behind another request when its run aborts", async () => {
 		const received = Promise.withResolvers<net.Socket>();
 		const methods: unknown[] = [];
