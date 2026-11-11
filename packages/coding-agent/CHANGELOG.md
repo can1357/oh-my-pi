@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Judgments skip a judge candidate for five minutes after it answers 404 for its model, as they already do after a 401/402/403, instead of re-sending the failing request on every judgment of a `find` call ([#18854](https://github.com/can1357/oh-my-pi/issues/18854))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
