@@ -216,6 +216,10 @@ fn inputs_held(conn: &RustConnection) -> CoreResult<bool> {
 	if keys.keys.iter().any(|byte| *byte != 0) {
 		return Ok(true);
 	}
+	buttons_held(conn)
+}
+
+pub(super) fn buttons_held(conn: &RustConnection) -> CoreResult<bool> {
 	let root = conn.setup().roots[0].root;
 	let pointer = conn
 		.xinput_xi_get_client_pointer(x11rb::NONE)

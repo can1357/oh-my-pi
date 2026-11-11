@@ -17,7 +17,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use x11rb::protocol::{Event, xinput::KeyEventFlags};
+use x11rb::protocol::Event;
 
 use super::listener::{Listener, Source, source_of};
 use crate::desktop::{
@@ -236,8 +236,6 @@ impl Sources {
 		if let std::collections::hash_map::Entry::Vacant(entry) = self.devices.entry(source) {
 			entry.insert(read(source)?);
 		}
-		let repeat = matches!(event, Event::XinputRawKeyPress(event)
-			if event.flags.contains(KeyEventFlags::KEY_REPEAT));
 		Ok(match self.devices[&source] {
 			Source::User => true,
 			Source::Other => false,
@@ -245,9 +243,7 @@ impl Sources {
 			// while some of its own are unseen is one of them.
 			Source::Xtest if self.own < sent => {
 				self.own += 1;
-				// A duplicate remote press and our key's repeat are
-				// indistinguishable, even with an outstanding own press.
-				repeat
+				false
 			},
 			Source::Xtest => true,
 		})
@@ -256,12 +252,32 @@ impl Sources {
 
 #[cfg(test)]
 mod tests {
-	use x11rb::protocol::xinput::{HierarchyEvent, RawButtonPressEvent, RawKeyPressEvent};
+	use x11rb::protocol::xinput::{
+		HierarchyEvent, KeyEventFlags, RawButtonPressEvent, RawKeyPressEvent,
+	};
 
 	use super::*;
 
 	fn key(sourceid: u16) -> Event {
 		Event::XinputRawKeyPress(RawKeyPressEvent { sourceid, ..Default::default() })
+	}
+
+	#[test]
+	fn named_change_raw_flags_do_not_change_own_press_accounting() {
+		let mut sources = Sources::default();
+		// Raw presses do not carry KEY_REPEAT. Even an otherwise flagged
+		// raw event must consume the outstanding own press, not invent one.
+		let event = Event::XinputRawKeyPress(RawKeyPressEvent {
+			sourceid: 2,
+			flags: KeyEventFlags::KEY_REPEAT,
+			..Default::default()
+		});
+		assert!(!sources.step(&event, 1, |_| Ok(Source::Xtest)).unwrap());
+		assert!(
+			sources
+				.step(&key(2), 1, |_| unreachable!("cached"))
+				.unwrap()
+		);
 	}
 
 	#[test]
@@ -365,14 +381,7 @@ mod tests {
 		// another client's press there does not make later own ones count.
 		assert!(!sources.step(&key(2), 1, kinds).unwrap());
 		assert!(!sources.step(&key(2), 2, kinds).unwrap());
-		let repeat = Event::XinputRawKeyPress(RawKeyPressEvent {
-			sourceid: 2,
-			flags: KeyEventFlags::KEY_REPEAT,
-			..Default::default()
-		});
-		assert!(sources.step(&repeat, 2, kinds).unwrap(), "an overlapping remote press is ambiguous");
 		assert!(sources.step(&key(2), 2, kinds).unwrap());
-		assert!(sources.step(&repeat, 2, kinds).unwrap(), "a remote user's held key repeats");
 		assert!(!sources.step(&key(2), 3, kinds).unwrap());
 		// A new hierarchy may give a removed device's id to another device.
 		assert!(

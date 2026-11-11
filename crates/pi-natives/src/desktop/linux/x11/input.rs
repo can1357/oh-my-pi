@@ -265,6 +265,7 @@ impl X11Input {
 		};
 		let steps = keys.plan(&self.keymap)?;
 		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+			this.check_user()?;
 			prepare()?;
 			this.xtest_steps(&steps, keys.duration())
 		})
@@ -286,7 +287,7 @@ impl X11Input {
 			mpx.release_focus(window)?;
 		}
 		let wm = self.wm();
-		wm.request_activation(window, wm.active_window())
+		wm.request_activation(window, wm.active_window(), || Ok(()))
 	}
 
 	/// Starts watching the user's presses, so the session's first takeover
@@ -464,6 +465,8 @@ impl X11Input {
 		}
 		self.takeover_target = Some(window);
 		self.takeover_pointer.set(None);
+		#[cfg(test)]
+		named_change_tests::before_body();
 		let result = body(self);
 		self.takeover_target = None;
 		let pointer_after = self.takeover_pointer.take();
@@ -476,6 +479,8 @@ impl X11Input {
 				if let Some(pointer) = pointer
 					&& pointer_after.is_some()
 					&& this.core_pointer() == pointer_after
+					&& this.check_user().is_ok()
+					&& super::listener::buttons_held(&this.conn).is_ok_and(|held| !held)
 				{
 					this.restore_core_pointer(pointer);
 				}
@@ -510,7 +515,7 @@ impl X11Input {
 		if wm.is_focused(window, ewmh) {
 			return Ok(());
 		}
-		wm.request_activation(window, previous_active)?;
+		wm.request_activation(window, previous_active, || self.check_user())?;
 		let start = Instant::now();
 		let retry_at = start + budget.mul_f32(0.4);
 		let mut retried = false;
@@ -526,7 +531,7 @@ impl X11Input {
 			}
 			if !retried && now >= retry_at {
 				retried = true;
-				let _ = wm.request_activation(window, wm.active_window());
+				let _ = wm.request_activation(window, wm.active_window(), || self.check_user());
 			}
 			control::wait(FOREGROUND_POLL)?;
 		}
@@ -555,13 +560,12 @@ impl X11Input {
 		{
 			return;
 		}
-		if ewmh
-			&& let Some(previous) = previous_active.filter(|&previous| previous != window)
-			&& wm.active_window() == Some(window)
-		{
+		if ewmh && let Some(previous) = previous_active.filter(|&previous| previous != window) {
 			let _ = wm.restore_activation(previous, window);
 			let deadline = Instant::now() + FOREGROUND_RESTORE_BUDGET;
-			while Instant::now() < deadline && wm.active_window() == Some(window) {
+			while Instant::now() < deadline
+				&& (wm.active_window() == Some(window) || wm.is_focused(window, false))
+			{
 				let _ = control::wait(FOREGROUND_POLL);
 			}
 		}
@@ -1692,3 +1696,6 @@ mod tests {
 		assert_eq!(keys_received(), 0);
 	}
 }
+
+#[cfg(test)]
+pub(super) mod named_change_tests;

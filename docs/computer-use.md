@@ -263,11 +263,11 @@ On X11 a takeover of a window or element (`takeover: true`, the fallback's rerun
 
 X11 takeover requires a working XI2.2 listener, which observes raw presses even while another client grabs the keyboard or pointer. If observation cannot start or fails later, takeover refuses or stops before sending further input; screenshots remain available. Emergency Escape and takeover activity share the listener and device classification: physical devices count for both; core XTEST counts for takeover activity after subtracting this session's presses, but not for physical-only emergency Escape.
 
-A listener started by the takeover itself observes the first 5 s quiet interval before activation; no previous presses being recorded is not proof of idleness. Intervention tracking remains active through the final settle and focus hand-back, and queued events are drained before success. Core-XTEST repeats are ambiguous with a remote user's duplicate press of a key held by this session, so they conservatively count as user activity; a long repeating key hold can therefore stop with `UserIntervened`.
+A listener started by the takeover itself observes the first 5 s quiet interval before activation; no previous presses being recorded is not proof of idleness. Intervention tracking remains active through the final settle and focus hand-back, and queued events are drained before success.
 
 Admission also checks the server's current core keyboard and pointer-button state, including holds that predate the listener. Every key and button must be released before a takeover starts; a quiet non-repeating modifier or a long drag is not idle.
 
-An activation failure also hands keyboard focus back before returning. Core focus, not a possibly lagging active-window property, determines whether the takeover still owns the keyboard; a newer core-focus switch away from the target is left alone.
+An activation failure also hands keyboard focus back before returning. Core focus, not a possibly lagging active-window property, determines whether the takeover still owns the keyboard; the window manager is always asked to restore the user's window, and a newer core-focus switch away from the target is left alone. The pointer is not warped back after the user presses or while a button is held.
 
 - Prefer direct inspection helpers, and use `read_only: true` for `computer.run` whenever no mutation is required.
 - Prefer AX actions because they target a semantic element and do not depend on a stale screenshot.

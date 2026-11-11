@@ -340,21 +340,30 @@ impl Wm<'_> {
 		&self,
 		window: Window,
 		current: Option<Window>,
+		check_user: impl Fn() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		self.activate(window, current, false)
+		self.activate(window, current, false, check_user)
 	}
 
 	pub(super) fn restore_activation(&self, window: Window, current: Window) -> CoreResult<()> {
-		self.activate(window, Some(current), true)
+		self.activate(window, Some(current), true, || Ok(()))
 	}
 
-	fn activate(&self, window: Window, current: Option<Window>, restoring: bool) -> CoreResult<()> {
+	fn activate(
+		&self,
+		window: Window,
+		current: Option<Window>,
+		restoring: bool,
+		check_user: impl Fn() -> CoreResult<()>,
+	) -> CoreResult<()> {
 		control::check()?;
 		let time = self.server_time();
+		#[cfg(test)]
+		super::input::named_change_tests::after_server_time();
 		control::check()?;
 		// Timestamp acquisition can yield to physical input. Re-check the
 		// guard immediately before requesting a restore, not just before it.
-		if restoring && !current.is_some_and(|current| self.is_focused(current, true)) {
+		if restoring && !current.is_some_and(|current| self.is_focused(current, false)) {
 			return Ok(());
 		}
 		let event = ClientMessageEvent::new(32, window, self.atoms.net_active_window, [
@@ -364,6 +373,7 @@ impl Wm<'_> {
 			0,
 			0,
 		]);
+		check_user()?;
 		self
 			.conn
 			.send_event(
@@ -378,12 +388,13 @@ impl Wm<'_> {
 		control::check()?;
 		// Never override a newer focus switch while the WM handles the request.
 		if restoring
-			&& !self.is_focused(window, true)
-			&& !current.is_some_and(|current| self.is_focused(current, true))
+			&& !self.is_focused(window, false)
+			&& !current.is_some_and(|current| self.is_focused(current, false))
 		{
 			return Ok(());
 		}
 		// BadMatch on a not-yet-viewable window is expected; callers confirm.
+		check_user()?;
 		if let Ok(cookie) = self.conn.set_input_focus(InputFocus::PARENT, window, time) {
 			let _ = cookie.check();
 		}
