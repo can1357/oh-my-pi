@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 - Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed Claude account selection routing every request to an exhausted account when a healthy one with no open 5-hour session kept a stale usage-limit block
+- Fixed Claude account selection routing every request to an exhausted account when a healthy one with no open 5-hour session kept a stale usage-limit block ([#18804](https://github.com/can1357/oh-my-pi/pull/18804) by [@pedropaulovc](https://github.com/pedropaulovc))
 
 ## [18.18.7] - 2026-11-10
 
