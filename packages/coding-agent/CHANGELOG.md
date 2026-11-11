@@ -11,6 +11,10 @@
 - Edit responses mark skipped lines between separate hunks with `…` instead of a blank line ([#19091](https://github.com/can1357/oh-my-pi/issues/19091))
 - After a file changes outside the edit tool (formatter, build step, another writer), lines an earlier read displayed that kept their number and content can still be edited after a partial re-read, instead of being rejected as never displayed ([#19092](https://github.com/can1357/oh-my-pi/issues/19092))
 
+### Fixed
+
+- In Chromium browser tabs, a click on an element inside a frame the page removes while the mouse button is down fails as unconfirmed instead of reporting a click the element never got
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
