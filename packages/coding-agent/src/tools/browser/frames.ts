@@ -6,6 +6,7 @@ import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ElementHandle, ElementScreenshotOptions, Frame, Page } from "puppeteer-core";
 import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
+import { markHandled } from "../run-scope";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	type AriaSnapshotOptions,
@@ -191,8 +192,12 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 		selector,
 		zeroMatchAfterMs: hooks.zeroMatchAfterMs,
 	});
-	const waitForSelector = async (selector: string, options?: FrameWaitOptions): Promise<boolean> => {
-		options = selectorWaitOptions(options);
+	const waitForSelector = (selector: string, options?: FrameWaitOptions): Promise<boolean> => {
+		try {
+			options = selectorWaitOptions(options);
+		} catch (error) {
+			return markHandled(Promise.reject(error));
+		}
 		const deadline = hooks.waitMs(options?.timeout);
 		return hooks.op(
 			`frame.waitForSelector(${JSON.stringify(selector)})`,

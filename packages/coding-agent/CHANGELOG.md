@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Selector waits on Chromium-backed browser tabs and their frames now accept `state: "attached" | "detached" | "visible" | "hidden"` alongside Puppeteer's `visible`/`hidden` forms, including live snapshot refs and waits that span a navigation, and reject unknown options, invalid values or conflicting visibility flags instead of silently ignoring them. Frame wait timeouts remain catchable later in the same run; Tern and cmux tabs are unchanged ([#18924](https://github.com/can1357/oh-my-pi/pull/18924) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
@@ -38,11 +42,6 @@
 - Fixed session saving on Windows to avoid UI stalls caused by repeated session-file access.
 - Fixed automatic chart selection so generated charts use compatible data and chart types.
 - Fixed `bash` previews for `env -i` commands so they display the requested command rather than generated shell setup code.
-
-## [18.18.9] - 2026-11-11
-### Fixed
-
-- Selector waits on Chromium-backed browser tabs and their frames now accept `state: "attached" | "detached" | "visible" | "hidden"` alongside Puppeteer's `visible`/`hidden` forms, including live snapshot refs and waits that span a navigation, and reject unknown options, invalid values or conflicting visibility flags instead of silently ignoring them; Tern and cmux tabs are unchanged ([#18924](https://github.com/can1357/oh-my-pi/pull/18924) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.9] - 2026-11-11
 

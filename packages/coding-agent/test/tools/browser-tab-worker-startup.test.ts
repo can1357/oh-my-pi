@@ -148,6 +148,37 @@ describe("browser tab worker startup", () => {
 });
 
 describe("OMP-owned browser evaluation", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)("keeps delayed-caught frame selector timeouts inside the run", async () => {
+		const name = `frame-delayed-catch-${process.pid}`;
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+		} as unknown as ToolSession;
+		try {
+			await acquireTab(name, headless(), {
+				url: 'data:text/html,<iframe name="child" srcdoc="<button>frame</button>"></iframe>',
+				timeoutMs: 30_000,
+			});
+			const result = await runInTab(name, {
+				code: `
+					const frame = await tab.frame("child");
+					const pending = frame.waitForSelector("#missing", {timeout:50});
+					// This integration case requires the real Chromium timeout before attaching its catch.
+					await wait(150);
+					try { await pending; } catch (error) { return error.message.includes("timed out"); }
+					return false;
+				`,
+				timeoutMs: 10_000,
+				session,
+			});
+			expect(result.returnValue).toBe(true);
+		} finally {
+			await releaseTab(name, { kill: true });
+		}
+	}, 45_000);
+
 	it.skipIf(!CHROMIUM_AVAILABLE)("completes public detached waits when navigation removes the element", async () => {
 		const name = `selector-navigation-${process.pid}`;
 		const session = {
