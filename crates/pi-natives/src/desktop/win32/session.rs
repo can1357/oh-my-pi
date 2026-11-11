@@ -1,26 +1,32 @@
+//! Windows session and input-desktop availability.
+
+#[cfg(target_os = "windows")]
+use super::super::types::{DisplaySelector, ScreenState};
+
 #[derive(Clone, Copy)]
 struct SessionState {
 	active: bool,
 	locked: bool,
 }
 
+/// Unavailable desktops count as locked, including access-denied and
+/// non-interactive sessions. A failed WTS query defers to the input-desktop
+/// probe.
 fn screen_locked(session: Option<SessionState>, desktop_name: Option<&[u16]>) -> bool {
 	if session.is_some_and(|state| !state.active || state.locked) {
 		return true;
 	}
 	desktop_name.is_none_or(|name| {
-		!name
-			.iter()
-			.copied()
-			.map(|ch| if (65..=90).contains(&ch) { ch + 32 } else { ch })
-			.eq("default".encode_utf16())
+		!(name.len() == 7
+			&& name
+				.iter()
+				.zip(b"default")
+				.all(|(&ch, byte)| u8::try_from(ch).is_ok_and(|ch| ch.eq_ignore_ascii_case(byte))))
 	})
 }
 
 #[cfg(target_os = "windows")]
-pub(in super::super) fn screen_state(
-	_: &super::super::types::DisplaySelector,
-) -> super::super::types::ScreenState {
+pub(in super::super) fn screen_state(_: &DisplaySelector) -> ScreenState {
 	use windows_sys::Win32::System::StationsAndDesktops::{
 		CloseDesktop, DESKTOP_READOBJECTS, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
 	};
@@ -51,10 +57,7 @@ pub(in super::super) fn screen_state(
 			name.iter().position(|ch| *ch == 0).map(|end| &name[..end])
 		}
 	};
-	super::super::types::ScreenState {
-		locked:         screen_locked(session, desktop_name),
-		display_asleep: false,
-	}
+	ScreenState { locked: screen_locked(session, desktop_name), display_asleep: false }
 }
 
 #[cfg(target_os = "windows")]

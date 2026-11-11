@@ -39,7 +39,8 @@ use super::frame::FrameGeometry;
 use super::keys::KeyName;
 #[cfg(target_os = "windows")]
 use super::types::{
-	CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+	CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, ScreenState,
+	Target,
 };
 
 #[cfg(target_os = "windows")]
@@ -94,7 +95,7 @@ impl Backend for Win32Backend {
 		}
 	}
 
-	fn screen_state(&mut self, _: Option<&DisplaySelector>) -> super::types::ScreenState {
+	fn screen_state(&mut self, _: Option<&DisplaySelector>) -> ScreenState {
 		session::screen_state(&self.display)
 	}
 
