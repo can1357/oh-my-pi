@@ -58,16 +58,19 @@ pub(super) fn set_combo(hwnd: windows_sys::Win32::Foundation::HWND, text: &str) 
 	if text.contains('\0') {
 		return Err(failed());
 	}
+	// SAFETY: the native combo handle is queried without dereferencing it.
 	let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
 	if style & 0x30 != 0 && style & 0x200 == 0 {
 		return Err(failed());
 	}
 	let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
 	let index = send(hwnd, CB_FINDSTRINGEXACT, usize::MAX, wide.as_ptr() as isize)?;
+	// SAFETY: GetParent accepts the native combo handle.
 	let parent = unsafe { GetParent(hwnd) };
 	if parent.is_null() {
 		return Err(failed());
 	}
+	// SAFETY: GetDlgCtrlID reads the native control's identifier.
 	let id = unsafe { GetDlgCtrlID(hwnd) } as u32 & 0xffff;
 	if index < 0 {
 		if style & 3 == 3 {
@@ -77,6 +80,7 @@ pub(super) fn set_combo(hwnd: windows_sys::Win32::Foundation::HWND, text: &str) 
 		}
 		let mut info =
 			COMBOBOXINFO { cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32, ..Default::default() };
+		// SAFETY: info is writable and its cbSize matches COMBOBOXINFO.
 		if unsafe { GetComboBoxInfo(hwnd, &mut info) } == 0 || info.hwndItem.is_null() {
 			return Err(failed());
 		}

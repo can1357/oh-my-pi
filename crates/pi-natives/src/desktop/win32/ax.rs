@@ -482,7 +482,7 @@ impl AxBackend for Win32Ax {
 		let element = Self::element(handle)?;
 		let secure = element.is_password().unwrap_or(true);
 		let hwnd = native_window(element);
-		let class = hwnd.map(window::class_name).unwrap_or_default();
+		let class = hwnd.map_or_default(window::class_name);
 		let combo = element.get_control_type().map_err(ax_error)? == ControlType::ComboBox;
 		match super::value_write::route(&class, combo) {
 			super::value_write::ValueRoute::Combo => {
