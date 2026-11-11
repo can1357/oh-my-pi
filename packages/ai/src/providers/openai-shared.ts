@@ -729,17 +729,58 @@ export interface OpenAIGatewayRoutingCompat {
 	vercelGatewayRouting?: VercelGatewayRouting;
 }
 
+let openRouterOrderSessionAffinityWarned = false;
+
+/**
+ * Warn once per process that a manual `provider.order` disables OpenRouter's
+ * session-affinity endpoint prioritization (openrouter-web
+ * `prioritize-endpoints-by-session` skips reordering when manual order is set),
+ * degrading prompt-cache hit rate.
+ */
+function warnOpenRouterOrderSkipsSessionAffinity(): void {
+	if (openRouterOrderSessionAffinityWarned) return;
+	openRouterOrderSessionAffinityWarned = true;
+	logger.warn(
+		"OpenRouter: provider.order is set — upstream skips session-affinity endpoint prioritization while " +
+			"a manual order is active, so prompt-cache hit rate degrades across endpoints. Rely on session " +
+			"affinity for sticky routing, or accept cold caches on failover.",
+	);
+}
+
+/**
+ * Test-only seam: reset the once-per-process order/session-affinity warning
+ * flag so suites can assert the warning deterministically.
+ */
+export function resetOpenRouterOrderSessionAffinityWarned(): void {
+	openRouterOrderSessionAffinityWarned = false;
+}
+
 /**
  * Apply gateway routing preferences to the request body. OpenRouter routes via
  * the top-level `provider` field; the Vercel AI Gateway routes Chat
  * Completions through `providerOptions.gateway`.
+ *
+ * When an OpenRouter model carries a non-empty `provider.order`, upstream skips
+ * its session-affinity endpoint prioritization step. Warn once per process —
+ * but only when session affinity is actually active for this request
+ * (`sessionAffinity` yields a session id with caching not opted out), so
+ * non-sticky requests can't consume the latch and mute the warning for later
+ * sticky ones.
  */
 export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
 	cacheEnabled = true,
+	sessionAffinity?: Pick<OpenAICacheOptions, "cacheRetention" | "sessionId">,
 ): void {
 	if (compat.isOpenRouterHost && compat.openRouterRouting) {
+		if (
+			compat.openRouterRouting.order &&
+			compat.openRouterRouting.order.length > 0 &&
+			getOpenRouterResponsesSessionId(sessionAffinity)
+		) {
+			warnOpenRouterOrderSkipsSessionAffinity();
+		}
 		params.provider = compat.openRouterRouting;
 	}
 	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
@@ -885,6 +926,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
+	session_id?: string;
 	provider?: OpenAICompat["openRouterRouting"];
 	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
 };

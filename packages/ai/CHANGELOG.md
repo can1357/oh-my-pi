@@ -1390,6 +1390,10 @@
 - Improved HTTP 413 error classification to accurately distinguish between payload/media size limits and token context window overflows, preventing inappropriate token compaction attempts and routing to correct recovery/fallback strategies ([#9235](https://github.com/can1357/oh-my-pi/issues/9235)).
 - Fixed Cursor conversation rotation after aborts or mid-turn restarts to properly replay the last user message on a fresh conversation.
 
+### Added
+
+- OpenRouter sticky sessions now work over Chat Completions: requests send the same normalized `session_id` as the Responses transport, and a manual `provider.order` logs a one-time warning on requests with an active session id that upstream skips session-affinity endpoint prioritization (prompt-cache hit rate degrades) while the order is active.
+
 ## [18.0.3] - 2026-08-23
 
 ### Fixed
