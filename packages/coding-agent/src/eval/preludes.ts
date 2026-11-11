@@ -104,6 +104,23 @@ export function findEnabledEvalPrelude(session: ToolSession, name: string): Eval
 	return definition?.enabled?.() === false ? undefined : definition;
 }
 
+const STRINGS_AND_COMMENTS = /("""|''')[\s\S]*?\1|(["'`])(?:\\.|(?!\2)[^\\])*\2|\/\/.*|\/\*[\s\S]*?\*\/|#.*/g;
+
+/**
+ * Notes each guide-bearing prelude whose global a cell's code names outside strings, comments, other objects'
+ * members and object keys. A first cell often only probes the global (`browser.list?.()`, `Object.keys(browser)`):
+ * no host call, so no guide would follow.
+ */
+export function noteEvalPreludesNamed(code: string, session: ToolSession): void {
+	if (!session.noteEvalPreludeCall) return;
+	const bare = code.replace(STRINGS_AND_COMMENTS, '""');
+	for (const definition of getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])) {
+		if (!definition.firstCallDocumentation?.trim()) continue;
+		const named = new RegExp(`(?<![\\w$./-])${definition.name}(?![\\w$/-]|\\s*:)`).test(bare);
+		if (named) session.noteEvalPreludeCall(definition.name);
+	}
+}
+
 async function approvePreludeInvocation(
 	definition: EvalPreludeDefinition,
 	parameters: unknown,
