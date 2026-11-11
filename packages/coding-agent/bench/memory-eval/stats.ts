@@ -1,5 +1,5 @@
 /** Paired cluster bootstrap over per-question scores and the helps/hurts/neutral decision rule. */
-import { mulberry32 } from "@oh-my-pi/pi-utils";
+import { mean, mulberry32 } from "@oh-my-pi/pi-utils";
 
 export interface BootstrapResult {
 	meanDiff: number;
@@ -28,7 +28,7 @@ export function pairedBootstrap(
 	const { resamples = 10000, seed = 1 } = options;
 	const diffs = a.map((x, i) => b[i] - x);
 	const counts = {
-		meanDiff: diffs.length === 0 ? 0 : diffs.reduce((s, d) => s + d, 0) / diffs.length,
+		meanDiff: mean(diffs),
 		wins: diffs.filter(d => d > 0).length,
 		ties: diffs.filter(d => d === 0).length,
 		losses: diffs.filter(d => d < 0).length,

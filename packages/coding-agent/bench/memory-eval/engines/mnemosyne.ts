@@ -1,8 +1,6 @@
 /** Mnemosyne adapter: upstream Mnemosyne 4.0.0b4 in a Python child process, driven over JSON lines. */
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { normalizeEnvKey, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { normalizeEnvKey, TempDir } from "@oh-my-pi/pi-utils";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { DroppedRow, EngineAdapter, ProtocolName, RecallHit } from "../engine";
 import { PythonProcess } from "./python-process";
@@ -56,7 +54,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 	const script = options.script ?? DEFAULT_SCRIPT;
 	let proc: PythonProcess | undefined;
 	let served: ProtocolName | undefined;
-	let dataDir: string | undefined;
+	let dataDir: TempDir | undefined;
 	let isOpen = false;
 	let lastDropped: DroppedRow[] = [];
 	let lastFetchK = 0;
@@ -67,13 +65,13 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			if (protocol !== served) throw new Error(`mnemosyne engine process serves "${served}", not "${protocol}"`);
 			return proc;
 		}
-		dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemosyne-data-"));
+		dataDir = await TempDir.create("@mnemosyne-data-");
 		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings;
 		// PythonProcess drops PYTHON* import overrides itself.
 		const inherited = Object.entries(Bun.env).filter(([key]) => !normalizeEnvKey(key).startsWith("MNEMOSYNE_"));
 		proc = new PythonProcess("mnemosyne engine", python, script, {
 			...Object.fromEntries(inherited),
-			MNEMOSYNE_DATA_DIR: dataDir,
+			MNEMOSYNE_DATA_DIR: dataDir.path(),
 			MNEMOSYNE_FASTEMBED_CACHE_DIR: path.join(cacheRoot, "fastembed"),
 			MNEMOSYNE_EMBEDDING_MODEL: EMBEDDING_MODEL,
 			MNEMOSYNE_LLM_ENABLED: "false",
@@ -151,8 +149,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			}
 			isOpen = false;
 			// A leftover store costs disk space; failing here would discard the completed run.
-			if (dataDir)
-				await removeWithRetries(dataDir).catch(err => console.warn(`could not remove ${dataDir}: ${err}`));
+			if (dataDir) await dataDir.remove().catch(err => console.warn(`could not remove ${dataDir}: ${err}`));
 			dataDir = undefined;
 		},
 		// The spawn is part of warmup: its time covers interpreter start, imports and model load.

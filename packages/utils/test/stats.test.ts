@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { nearestRank } from "../src/stats";
+import { mean, nearestRank } from "../src/stats";
 
 describe("nearestRank", () => {
 	const ten = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -21,5 +21,12 @@ describe("nearestRank", () => {
 
 	it("gives 0 for an empty sample", () => {
 		expect(nearestRank([], 0.5)).toBe(0);
+	});
+});
+
+describe("mean", () => {
+	it("averages the sample, and gives 0 for an empty one", () => {
+		expect(mean([1, 2, 6])).toBe(3);
+		expect(mean([])).toBe(0);
 	});
 });

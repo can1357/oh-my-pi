@@ -1,8 +1,5 @@
 /** Run B of the upstream calibration: replays upstream Mnemosyne's `benchmark_mnemosyne` through the engine adapter. */
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { sliceCodePoints } from "../../src/commit/conventional/text";
 import type { EngineAdapter, RememberItem } from "./engine";
 import type { UpstreamCompatOps } from "./engines/mnemosyne";
@@ -41,7 +38,8 @@ export async function runUpstreamCompat(
 	engine: EngineAdapter & UpstreamCompatOps,
 	conversations: readonly UpstreamCompatConversation[],
 ): Promise<QuestionResult[]> {
-	const storeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-compat-"));
+	const tmp = await TempDir.create("@memory-eval-compat-");
+	const storeRoot = tmp.path();
 	try {
 		await engine.open(
 			{ caseId: "upstream-compat", dataset: "beam-100k", messages: [], questions: [] },
@@ -117,7 +115,7 @@ export async function runUpstreamCompat(
 		await engine.close();
 		return results;
 	} finally {
-		await removeWithRetries(storeRoot).catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
+		await tmp.remove().catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
 	}
 }
 
