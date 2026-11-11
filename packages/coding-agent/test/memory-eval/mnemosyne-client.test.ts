@@ -6,14 +6,9 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { mnemosyneEngine } from "../../bench/memory-eval/engines/mnemosyne";
 import { runCases } from "../../bench/memory-eval/runner";
 import type { EvalCase } from "../../bench/memory-eval/types";
-import { pythonPath } from "./python";
+import { python, pythonPath } from "./python";
 
 const REAL_SCRIPT = path.join(import.meta.dir, "../../bench/memory-eval/py/mnemosyne_engine.py");
-
-function python(): string {
-	if (!pythonPath) throw new Error("Python is required for this test");
-	return pythonPath;
-}
 
 const twoMessageCase: EvalCase = {
 	caseId: "c/1",
