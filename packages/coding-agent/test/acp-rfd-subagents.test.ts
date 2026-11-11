@@ -94,22 +94,19 @@ describe("rfd subagent tracker", () => {
 
 	test("concurrent settle serializes after announce and running", async () => {
 		const { sent, send } = sentNotifications();
-		let releaseAnnounce!: () => void;
-		const gate = new Promise<void>(resolve => {
-			releaseAnnounce = resolve;
-		});
+		const gate = Promise.withResolvers<void>();
 		let calls = 0;
 		const tracker = new RfdSubagentTracker({
 			parentSessionId: "p",
 			send: async notification => {
 				calls++;
-				if (calls === 1) await gate;
+				if (calls === 1) await gate.promise;
 				return send(notification);
 			},
 		});
 		const started = tracker.handleLifecycle(lifecycle("started", { id: "w" }));
 		const settled = tracker.handleLifecycle(lifecycle("completed", { id: "w" }));
-		releaseAnnounce();
+		gate.resolve();
 		await Promise.all([started, settled]);
 		expect(sent.map(entry => entry.update)).toEqual([
 			{
@@ -145,6 +142,30 @@ describe("rfd subagent tracker", () => {
 				capabilities: { cancel: {} },
 			},
 		]);
+	});
+
+	test("nested children associate under their spawning child", async () => {
+		const { sent, send } = sentNotifications();
+		const tracker = new RfdSubagentTracker({
+			parentSessionId: "root",
+			send,
+			resolveSpawner: id => (id === "grandchild" ? "child" : undefined),
+		});
+		await tracker.handleLifecycle(lifecycle("started", { id: "child" }));
+		await tracker.handleLifecycle(lifecycle("started", { id: "grandchild" }));
+		const outerIds = sent.map(entry => entry.sessionId);
+		expect(outerIds).toEqual(["root", "root", "child", "child"]);
+		expect(sent[2]?.update).toMatchObject({ sessionUpdate: "subagent_update", sessionId: "grandchild" });
+		await tracker.handleLifecycle(lifecycle("completed", { id: "grandchild" }));
+		expect(sent.at(-1)).toMatchObject({
+			sessionId: "child",
+			update: {
+				sessionUpdate: "subagent_update",
+				sessionId: "grandchild",
+				state: { state: "idle", stopReason: "end_turn" },
+				capabilities: { cancel: null },
+			},
+		});
 	});
 
 	test("client gate requires a subagents object", () => {

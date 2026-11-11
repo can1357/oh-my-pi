@@ -46,6 +46,12 @@ interface RfdChild {
 	lastState: "running" | "idle" | null;
 	/** Whether a terminal patch already revoked the cancel capability. Revival restores it. */
 	settled: boolean;
+	/**
+	 * Outer session id for this child's association patches: the immediate
+	 * parent's child session when the spawner is itself a tracked child,
+	 * else the root ACP session. Grandchildren associate under their spawner.
+	 */
+	parentSessionId: string;
 }
 
 /**
@@ -56,14 +62,20 @@ export class RfdSubagentTracker {
 	readonly #children = new Map<string, RfdChild>();
 	readonly #parentSessionId: string;
 	readonly #send: RfdUpdateSender;
+	readonly #resolveSpawner: ((id: string) => string | undefined) | undefined;
 	#unsubscribers: Array<() => void> = [];
 	#disposed = false;
 	/** Per-child send chains: every frame for one child applies in arrival order. */
 	readonly #queues = new Map<string, Promise<void>>();
 
-	constructor(options: { parentSessionId: string; send: RfdUpdateSender }) {
+	constructor(options: {
+		parentSessionId: string;
+		send: RfdUpdateSender;
+		resolveSpawner?: (id: string) => string | undefined;
+	}) {
 		this.#parentSessionId = options.parentSessionId;
 		this.#send = options.send;
+		this.#resolveSpawner = options.resolveSpawner;
 	}
 
 	/** Run `work` after the child's pending sends; concurrent frames serialize per child. */
@@ -82,6 +94,17 @@ export class RfdSubagentTracker {
 	/** Tracked child entries (announced, live or settled). */
 	get children(): ReadonlyMap<string, RfdChild> {
 		return this.#children;
+	}
+
+	/**
+	 * Outer session for a child's association patches: the spawner's own
+	 * child session when the spawner is tracked, else the root session.
+	 * Read live so a parent announced after its child still nests correctly.
+	 */
+	#resolveParentSession(id: string): string {
+		const spawner = this.#resolveSpawner?.(id);
+		if (spawner !== undefined && this.#children.has(spawner)) return spawner;
+		return this.#parentSessionId;
 	}
 
 	/** Subscribe to the session tree's subagent bus. */
@@ -115,13 +138,19 @@ export class RfdSubagentTracker {
 		if (payload.status === "started") {
 			let child = this.#children.get(payload.id);
 			if (!child) {
-				child = { id: payload.id, announced: false, lastState: null, settled: false };
+				child = {
+					id: payload.id,
+					announced: false,
+					lastState: null,
+					settled: false,
+					parentSessionId: this.#resolveParentSession(payload.id),
+				};
 				this.#children.set(payload.id, child);
 			}
 			if (child.announced) return;
 			child.announced = true;
 			await this.#send({
-				sessionId: this.#parentSessionId,
+				sessionId: child.parentSessionId,
 				update: {
 					sessionUpdate: "subagent_update",
 					sessionId: child.id,
@@ -132,7 +161,7 @@ export class RfdSubagentTracker {
 			});
 			child.lastState = "running";
 			await this.#send({
-				sessionId: this.#parentSessionId,
+				sessionId: child.parentSessionId,
 				update: {
 					sessionUpdate: "subagent_update",
 					sessionId: child.id,
@@ -148,7 +177,7 @@ export class RfdSubagentTracker {
 		child.lastState = "idle";
 		child.settled = true;
 		await this.#send({
-			sessionId: this.#parentSessionId,
+			sessionId: child.parentSessionId,
 			update: {
 				sessionUpdate: "subagent_update",
 				sessionId: child.id,
@@ -169,7 +198,7 @@ export class RfdSubagentTracker {
 		if (ref.status === "parked" && child.lastState !== null) {
 			child.lastState = null;
 			void this.#send({
-				sessionId: this.#parentSessionId,
+				sessionId: child.parentSessionId,
 				update: { sessionUpdate: "subagent_update", sessionId: child.id, state: null },
 			});
 		} else if (ref.status === "running" && child.lastState !== "running") {
@@ -179,7 +208,7 @@ export class RfdSubagentTracker {
 			const capabilities = child.settled ? { cancel: {} } : undefined;
 			child.settled = false;
 			void this.#send({
-				sessionId: this.#parentSessionId,
+				sessionId: child.parentSessionId,
 				update: {
 					sessionUpdate: "subagent_update",
 					sessionId: child.id,

@@ -440,6 +440,13 @@ type ManagedSessionRecord = {
 		string,
 		{ messageId: string | undefined; progress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined }
 	>;
+	/**
+	 * Per-child tool args for transcript forwarding. `tool_execution_end`
+	 * carries no args, so start/update frames are cached here per child (the
+	 * parent path uses `toolArgsById` the same way). Needed to keep
+	 * coordination-scoped writes off the external stream.
+	 */
+	childToolArgs: Map<string, Map<string, unknown>>;
 	/** Child-event forwarding subscription for the AIR tracker; released with the record. */
 	airChildEventUnsubscribe: (() => void) | undefined;
 	/** Child-event forwarding subscription for the RFD tracker; released with the record. */
@@ -2117,10 +2124,16 @@ export class AcpAgent implements Agent {
 		const tracker = record.subagentTracker;
 		if (!tracker || !tracker.children.has(payload.id)) return;
 		this.#prepareChildMessage(record, payload.id, payload.event);
+		if (payload.event.type !== "tool_execution_end") this.#trackChildToolArgs(record, payload.id, payload.event);
 		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, record.protocolSessionId, {
 			getMessageId: message => this.#getChildMessageId(record, payload.id, message),
 			getMessageProgress: message => this.#getChildMessageProgress(record, payload.id, message),
+			getToolArgs: toolCallId => {
+				const hit = record.childToolArgs.get(payload.id)?.get(toolCallId);
+				return hit;
+			},
 			cwd: this.#childCwd(payload.id, record),
+			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
 		})) {
 			const tagged = {
 				...notification,
@@ -2128,7 +2141,29 @@ export class AcpAgent implements Agent {
 			};
 			await this.#connection.sessionUpdate(tagged);
 		}
+		this.#trackChildToolArgs(record, payload.id, payload.event);
 		this.#clearChildMessageAfterEvent(record, payload.id, payload.event);
+	}
+
+	/**
+	 * Cache a child tool call's args from its start/update frame (the end
+	 * frame carries none), and drop the entry when the call settles — the
+	 * same lifecycle as the parent turn's `toolArgsById`.
+	 */
+	#trackChildToolArgs(record: ManagedSessionRecord, childId: string, event: AgentSessionEvent): void {
+		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+			if (!("args" in event)) return;
+			let byCall = record.childToolArgs.get(childId);
+			if (!byCall) {
+				byCall = new Map();
+				record.childToolArgs.set(childId, byCall);
+			}
+			byCall.set(event.toolCallId, event.args);
+		} else if (event.type === "tool_execution_end") {
+			const byCall = record.childToolArgs.get(childId);
+			byCall?.delete(event.toolCallId);
+			if (byCall && byCall.size === 0) record.childToolArgs.delete(childId);
+		}
 	}
 
 	/** Resolve the emitting child's workspace for tool locations, falling back to the parent cwd. */
@@ -2193,6 +2228,7 @@ export class AcpAgent implements Agent {
 		const tracker = new RfdSubagentTracker({
 			parentSessionId: record.protocolSessionId,
 			send: notification => this.#connection.sessionUpdate(notification),
+			resolveSpawner: id => AgentRegistry.global().get(id)?.parentId,
 		});
 		tracker.subscribe(subagentEventBus);
 		record.rfdChildEventUnsubscribe = subagentEventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
@@ -2214,13 +2250,22 @@ export class AcpAgent implements Agent {
 		const tracker = record.rfdSubagentTracker;
 		if (!tracker || !tracker.children.has(payload.id)) return;
 		this.#prepareChildMessage(record, payload.id, payload.event);
+		// Cache start/update args before mapping; the end frame carries none
+		// and its cleanup must run after mapping consumed them.
+		if (payload.event.type !== "tool_execution_end") this.#trackChildToolArgs(record, payload.id, payload.event);
 		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, payload.id, {
 			getMessageId: message => this.#getChildMessageId(record, payload.id, message),
 			getMessageProgress: message => this.#getChildMessageProgress(record, payload.id, message),
+			getToolArgs: toolCallId => {
+				const hit = record.childToolArgs.get(payload.id)?.get(toolCallId);
+				return hit;
+			},
 			cwd: this.#childCwd(payload.id, record),
+			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
 		})) {
 			await this.#connection.sessionUpdate(notification);
 		}
+		this.#trackChildToolArgs(record, payload.id, payload.event);
 		this.#clearChildMessageAfterEvent(record, payload.id, payload.event);
 	}
 
@@ -2300,6 +2345,7 @@ export class AcpAgent implements Agent {
 			rfdSubagentTracker: undefined,
 			rfdRegistryUnsubscribe: undefined,
 			childMessageState: new Map(),
+			childToolArgs: new Map(),
 			airChildEventUnsubscribe: undefined,
 			rfdChildEventUnsubscribe: undefined,
 		};
@@ -3809,6 +3855,8 @@ export class AcpAgent implements Agent {
 		record.rfdSubagentTracker = undefined;
 		record.rfdRegistryUnsubscribe?.();
 		record.rfdRegistryUnsubscribe = undefined;
+		record.childMessageState.clear();
+		record.childToolArgs.clear();
 		record.childMessageState.clear();
 		record.airChildEventUnsubscribe?.();
 		record.airChildEventUnsubscribe = undefined;

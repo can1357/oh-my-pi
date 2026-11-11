@@ -1534,6 +1534,47 @@ describe("ACP agent", () => {
 		await harness.agent.dispose();
 	});
 
+	it("suppresses child coordination writes from the external stream", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const before = harness.updates.length;
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "tc-internal",
+				toolName: "write",
+				args: { path: "agent://peer/notes", content: "hi" },
+			},
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-1",
+			event: {
+				type: "tool_execution_end",
+				toolCallId: "tc-internal",
+				toolName: "write",
+				result: { path: "agent://peer/notes", wrote: true },
+			},
+		});
+		await flushBusDelivery();
+		// No frame at all: the internal write must not leak on any session id.
+		expect(harness.updates.slice(before)).toEqual([]);
+		await harness.agent.dispose();
+	});
+
 	it("delivers the thinking config update before resolving the command", async () => {
 		const blocked = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
