@@ -300,7 +300,7 @@
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 ### Fixed
 
-- `task`/`agent()`/`workpool()` called from a running eval cell while naming kernel-defined `tools` now fails fast instead of deadlocking: the cell's kernel is blocked waiting for the spawn call, so it cannot answer the tool lookup. Issue the spawn from the host instead, or drop `tools` there ([#18644](https://github.com/can1357/oh-my-pi/issues/18644))
+- `task`/`agent()`/`workpool()` called from a running eval cell while naming kernel-defined `tools` now fails fast instead of deadlocking: the cell's kernel is blocked waiting for the spawn call, so it cannot answer the tool lookup. Issue the spawn from the host instead, or drop `tools` there ([#18644](https://github.com/can1357/oh-my-pi/issues/18644), [#18882](https://github.com/can1357/oh-my-pi/pull/18882) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.8] - 2026-11-11
 
