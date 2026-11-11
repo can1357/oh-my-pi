@@ -15,6 +15,11 @@ export interface AuthProbe {
 	accountId(provider: string, sessionId: string): Promise<string | undefined>;
 	restrict(provider: string, sessionId: string, identityKeys: string[]): Promise<number>;
 	unrestrict(provider: string, sessionId: string, handle: number): Promise<void>;
+	pinStrict(provider: string, sessionId: string, credentialId: number): Promise<boolean>;
+	/** Copies only explicit pins, so the filter crosses as an `InheritTable`. */
+	inheritExplicit(sourceSessionId: string, targetSessionId: string): Promise<number>;
+	automatic(provider: string, sessionId: string): Promise<boolean>;
+	mode(provider: string, sessionId: string): Promise<string>;
 	sameStorage(storage: AuthStorage): Promise<boolean>;
 	watchGenerations(): Promise<void>;
 	generations(): Promise<number[]>;
@@ -72,6 +77,12 @@ function buildProbe(storage: AuthStorage): AuthProbe {
 			if (lease === undefined) throw new Error(`no lease ${handle}`);
 			storage.sessions.unrestrict(provider, sessionId, lease);
 		},
+		pinStrict: async (provider, sessionId, credentialId) =>
+			storage.sessions.pin(provider, sessionId, credentialId, { strict: true }),
+		inheritExplicit: async (sourceSessionId, targetSessionId) =>
+			storage.sessions.inherit(sourceSessionId, targetSessionId, (_provider, explicit) => explicit),
+		automatic: async (provider, sessionId) => storage.sessions.automatic(provider, sessionId),
+		mode: async (provider, sessionId) => storage.sessions.mode(provider, sessionId),
 		sameStorage: async other => other === storage,
 		watchGenerations: async () => {
 			unwatch = storage.credentials.onGeneration(generation => {

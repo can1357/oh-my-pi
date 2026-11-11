@@ -17,6 +17,7 @@ import type {
 	Model,
 	OAuthAccountSummary,
 	ServiceTierByFamily,
+	SessionRoutingMode,
 	SimpleStreamOptions,
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
@@ -631,6 +632,16 @@ export interface SessionStats {
 export interface SessionOAuthAccountList {
 	provider: string;
 	accounts: OAuthAccountSummary[];
+	mode: SessionRoutingMode;
+}
+
+/** A successful account pin for the current provider. */
+export interface AccountPinResult {
+	/**
+	 * False when the account has no email or account id to save: the pin holds for
+	 * this process (including `/fresh`) but is not restored on resume.
+	 */
+	persisted: boolean;
 }
 
 /** IDs for a newly created session and the session it replaced. */

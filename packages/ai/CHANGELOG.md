@@ -13,6 +13,7 @@
 - Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed Claude account-wide usage blocks outliving recovery when the account has no running 5-hour window: `/usage` answers `five_hour: null` with no `session` row, and healing and saved-reset clearing treated that as an incomplete report, so a stale block idled a healthy account until its weekly reset and could leave a turn with no account to switch to after a real 429 ([#18801](https://github.com/can1357/oh-my-pi/pull/18801) by [@baekjosh](https://github.com/baekjosh))
 - A usage-limited request now moves to another account whose old block live usage shows has lifted, instead of ending the turn because every other account looked blocked ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
+- Strict account locks stop rate-limit recovery before probing blocked sibling accounts; automatic routing still checks siblings whose live usage may have recovered.
 
 ### Fixed
 
@@ -48,6 +49,17 @@
 
 - Exclusive tools (`edit`, `write`, `eval`, …) called as Cursor MCP tools now keep their place in the tool batch, so a shell or read sent with an edit no longer runs against the old file or starts before an earlier call finishes ([#18502](https://github.com/can1357/oh-my-pi/pull/18502) by [@eggpeat](https://github.com/eggpeat))
 
+### Added
+
+- Exported `SessionRoutingMode`, the return type of `SessionsApi.mode()`
+- Added strict per-session OAuth account pins: `SessionsApi.pin({ strict: true })` prevents all credential fallback (sibling OAuth accounts, login keys, env vars) when the pinned account is blocked or unavailable; strict pins survive credential deletion, `/fresh`, and subagent inheritance. Added `SessionsApi.mode()` and `SessionsApi.automatic()` for routing-mode introspection and explicit opt-out.
+
+### Fixed
+
+- Preserved filtered deletion of broker session-affinity caches with bounded-cache accounting, so clearing ordinary affinity keeps strict pins and releases the deleted rows' capacity.
+- Strict account locks now survive gateway authentication invalidation and broker cache pressure; ordinary broker cache rows remain bounded while strict locks expire or are explicitly cleared.
+- `sessions.release()` no longer switches an ordinary session to automatic routing: usage-aware re-ranking clears only the sticky account and keeps the session's routing mode, so subagents still inherit the re-ranked account.
+- Replacing the credential store (an `auth.broker.url` or token change) keeps live strict locks, re-resolved by account identity because row ids differ between stores, and automatic-routing opt-outs; a locked account missing from the new store stays locked and unavailable. Added `SessionAffinity.adoptExplicitRouting()`.
 ## [18.18.2] - 2026-11-08
 
 ### Added

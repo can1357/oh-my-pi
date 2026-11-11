@@ -181,6 +181,35 @@
 - Models without a delegation rule (Claude, Gemini, …) no longer get pushed to delegate: the "map unknown code via task" rule and the "Task + scout" nudges in search tool descriptions are replaced by a light suggestion to explore unfamiliar subsystems with a scout
 - In Tern, clicking an `ask` answer and then Note now annotates the answer highlighted on the question shown instead of the one just clicked ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
 
+### Added
+
+- In Tern, right-clicking an `ask` answer offers Note, which annotates that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+- `task.eager` (`preferred`/`always`) now shapes only the main agent's system prompt; subagents fall back to their model's own delegation policy instead of being pushed to spawn further subagents
+- Added `/account` for inspecting and strictly selecting a session's OAuth account, plus `auth.defaultAccounts` for strict per-provider defaults that persist across resume and subagents without sibling-account fallback.
+- Added `/account auto` to return the current provider to automatic account routing for this session; the choice is journaled, so resume and `/fresh` keep it and `auth.defaultAccounts` does not re-lock the session.
+- Added per-handler deadlines through `pi.on(event, handler, { timeoutMs })`, including zero for cancellable waits without a deadline. Input and assistant-message handlers can exceed 30 seconds without changing unrelated defaults, the 2-second shutdown cap, or fail-closed input/tool-call behavior.
+- Added `omp.registerAssistantTextDisplay()` for display-only assistant text projections in the existing native and classic transcript component, while preserving source messages and withholding pending prose from immutable history.
+- Exposed `ctx.abortSignal` so extension handlers can cancel external work when their handler times out or the main turn is cancelled.
+- Added an opt-in bidirectional translator extension: Chinese editor prose is translated to English before the main model, English response history stays English, and Chinese is projected only in the original assistant display.
+- Added `/translator input` for input-only Chinese-to-English translation, leaving assistant replies in their original English without output-translation requests; `/translator both` restores bidirectional translation.
+
+### Fixed
+
+- Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
+- Standalone CLI builds reuse the committed, published export viewer manifest instead of regenerating an unpublished hosted asset that breaks exported sessions.
+- Subagents hosted on worker threads keep a strict `/account` lock: the worker auth proxy now carries strict pins, `sessions.mode()` and `sessions.automatic()`, and a revived subagent copies its live parent's lock (including a worker-hosted parent)
+- An `auth.defaultAccounts` selector that matches no stored account, or several, now shows a config warning (without the selector) instead of silently leaving the session on automatic routing.
+- `/fresh` and in-place context resets keep a strict `/account` lock (even on an account removed since) and an `/account auto` choice on the new provider session id, and an `/account`, `/account auto` or `/session pin` choice made after them survives resume instead of reverting to the earlier lock or the `auth.defaultAccounts` account; if the new id cannot be routed safely, the session stays on the old id instead of continuing unlocked
+- `/session pin` (and the account selector) now saves its choice immediately, so a resume before the next reply no longer restores a strict lock the pin replaced
+- `/account` on an OAuth account with no email or account id says the lock lasts until omp exits instead of reporting a lock that resume cannot restore
+- Translator failures now write structured warning records with direction, selected model, elapsed time, source size, timeout/cancellation state, and the underlying error without logging translated content.
+- Input hooks can now reject a submission with `reject`, restoring the original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
+### Added
+
+- `ask` forms can show pictures: `<img src>` from an http(s) URL, a `data:` URI or a local file (relative to the session's working directory), and inline `<svg>` diagrams, drawn in the terminal form and natively in Tern
+- `ask` forms give every radio and checkbox group a free-text "Other" answer: its text is the radio's value or is appended to the checkbox group's array (field-by-field fallback, collab guests and ACP elicitation included)
+- Extension UI gains optional `ui.formDialog(html, options)`, which renders an HTML `<form>` and resolves to `{ data, timedOut? }` (undefined when cancelled). The interactive TUI renders it as a form dialog, ACP clients with form elicitation get one elicitation with a property per field, and hosts without it (RPC) answer the `ask` tool field by field through `select`/`input`/`editor`.
+- Eval cells can run shell commands with `sh`: `sh("git status")` in Python, `` await sh`ls ${dir}` `` or `await sh("make", { cwd })` in JavaScript. Commands run on the embedded bash engine to completion (never auto-backgrounded), return their output, and raise `ShellError` with the exit code on failure.
 ### Fixed
 
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))

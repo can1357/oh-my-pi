@@ -63,6 +63,7 @@ import type {
 	ResolvedApiKey,
 	RotateCredentialOptions,
 	SessionRestrictionLease,
+	SessionRoutingMode,
 	SessionsApi,
 	StoredAuthCredential,
 	StoredCredentialBlock,
@@ -425,7 +426,12 @@ class RemoteSessions implements SessionsApi {
 		this.#availability = availability;
 	}
 
-	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean {
+	pin(
+		provider: string,
+		sessionId: string,
+		credentialId: number,
+		options?: { restoredAtMs?: number; strict?: boolean },
+	): boolean {
 		return this.#remote.callSync("sessions.pin", provider, sessionId, credentialId, options);
 	}
 	inherit(
@@ -461,6 +467,12 @@ class RemoteSessions implements SessionsApi {
 	}
 	release(provider: string, sessionId: string): boolean {
 		return this.#remote.callSync("sessions.release", provider, sessionId);
+	}
+	automatic(provider: string, sessionId: string): boolean {
+		return this.#remote.callSync("sessions.automatic", provider, sessionId);
+	}
+	mode(provider: string, sessionId: string): SessionRoutingMode {
+		return this.#remote.callSync("sessions.mode", provider, sessionId);
 	}
 }
 

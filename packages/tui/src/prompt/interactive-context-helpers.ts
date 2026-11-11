@@ -3,7 +3,11 @@ import type { AssistantMessage, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { getMarkdownLinkUrls } from "../index";
 import { EMPTY_LINK_TARGETS } from "../render/render-utils";
 import type { ImageBudget } from "../components/image";
-import type { AssistantTextRenderer, AssistantThinkingRenderer } from "../chat/extension-types";
+import type {
+	AssistantTextDisplayRenderer,
+	AssistantTextRenderer,
+	AssistantThinkingRenderer,
+} from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
 import { ReplyWriteComponent } from "../chat/reply-write";
 /** Session display capabilities supplied unchanged by the interactive host. */
@@ -11,6 +15,7 @@ export interface AssistantMessageSession {
 	readonly model?: Model;
 	readonly extensionRunner?: {
 		getAssistantThinkingRenderers(): readonly AssistantThinkingRenderer[];
+		getAssistantTextDisplayRenderers?(): readonly AssistantTextDisplayRenderer[];
 		/** Empty while the setting that enables them is off; hosts predating it may omit it. */
 		getAssistantTextRenderers?(): readonly AssistantTextRenderer[];
 	};
@@ -132,6 +137,7 @@ export function createAssistantMessageComponent(
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
 		linkTargets,
+		ctx.viewSession.extensionRunner?.getAssistantTextDisplayRenderers?.(),
 		ctx.expandThinkingBlocks,
 		{ renderers: ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [], contentOffset },
 	);

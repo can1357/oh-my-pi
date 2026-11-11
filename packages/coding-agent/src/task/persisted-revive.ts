@@ -22,7 +22,7 @@ import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycl
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
-import type { AgentSessionHandle } from "../session/agent-session-handle";
+import { isAgentViewSession, type AgentSessionHandle } from "../session/agent-session-handle";
 import type { ArtifactManagerApi } from "../session/artifacts";
 import type { CostGateApi } from "../session/cost-gate";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
@@ -109,6 +109,11 @@ export interface PersistedReviveSpec {
 	readonly modelRegistry: ModelRegistry;
 	readonly settings: Settings;
 	readonly enableLsp: boolean;
+	/**
+	 * Provider session id of the live direct parent, read per revive; the child copies
+	 * its account policy (a strict lock included) from it.
+	 */
+	readonly credentialSourceSessionId: string | undefined;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
 }
@@ -214,6 +219,7 @@ export function createPersistedSubagentReviverFactory(
 			parentId = registry.get(parentId)?.parentId;
 		}
 		return async expectedRef => {
+			const liveParent = ref.parentId ? registry.get(ref.parentId)?.session : undefined;
 			// Live root state is read per revive, so a later `/new` or cwd move is followed.
 			const spec: PersistedReviveSpec = {
 				id: ref.id,
@@ -234,6 +240,12 @@ export function createPersistedSubagentReviverFactory(
 				enableLsp: ctx.enableLsp,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
+				// Copy live direct-parent policy; SDK preserves the child's recorded
+				// automatic affinity unless the parent explicitly pinned an account.
+				// A worker-homed parent's view mirrors its provider session id.
+				credentialSourceSessionId:
+					(liveParent && isAgentViewSession(liveParent) ? liveParent.sessionId : undefined) ??
+					(ref.parentId === MAIN_AGENT_ID ? ctx.session.sessionId : undefined),
 			};
 			// Worker mode: a revival is placed like a fresh spawn (main thread or a worker).
 			const pool = subagentWorkerPool(ctx.settings);
@@ -437,6 +449,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			cwd: restoredSeance?.cwd ?? spec.root.sessionManager.getCwd(),
 			costGate: spec.costGate,
 			authStorage: spec.authStorage,
+			credentialSourceSessionId: spec.credentialSourceSessionId,
 			// Revived agents join the root session tree, so their observability
 			// frames ride the same bus the RPC/collab surfaces subscribed to.
 			subagentEventBus: spec.subagentEventBus,

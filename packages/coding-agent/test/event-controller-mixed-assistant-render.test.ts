@@ -4,6 +4,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import type { AssistantTextDisplayRenderer } from "@oh-my-pi/pi-tui/chat/extension-types";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
@@ -125,6 +126,85 @@ describe("EventController mixed assistant text/tool rendering", () => {
 
 		expect(chatContainer.children).not.toContain(orphan);
 		expect(orphan.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("keeps pending pre-tool and closed post-tool prose mutable until canonical translation or failure", async () => {
+		let complete = false;
+		const translated: Record<string, string> = {
+			[INTRO_MARKER]: "中文工具前说明",
+			[FINAL_MARKER]: "中文最终回答",
+		};
+		const renderer: AssistantTextDisplayRenderer = (source, context) => {
+			if (!complete && context.transient) return { text: "等待中文显示", pending: true };
+			return { text: translated[source] ?? "中文显示失败" };
+		};
+		const ctx = createInteractiveModeContext({
+			session: {
+				extensionRunner: {
+					getAssistantThinkingRenderers: () => [],
+					getAssistantTextDisplayRenderers: () => [renderer],
+					setToolApprovalPreviewWaiter: () => () => {},
+				},
+			},
+			lastAssistantUsage: zeroUsage(),
+		});
+		const controller = new EventController(ctx);
+		const toolCallA: ToolCall = { type: "toolCall", id: TOOL_CALL_A_ID, name: "probe_a", arguments: { value: "a" } };
+		const toolCallB: ToolCall = { type: "toolCall", id: TOOL_CALL_B_ID, name: "probe_b", arguments: { value: "b" } };
+		const source = assistantMessage([
+			{ type: "text", text: INTRO_MARKER },
+			toolCallA,
+			{ type: "text", text: MIDDLE_MARKER },
+			toolCallB,
+			{ type: "text", text: FINAL_MARKER },
+		]);
+		const snapshot = JSON.stringify(source);
+		try {
+			await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
+				AgentSessionEvent,
+				{ type: "message_start" }
+			>);
+			await controller.handleEvent({
+				type: "message_update",
+				message: source,
+				assistantMessageEvent: { type: "toolcall_end", contentIndex: 3, toolCall: toolCallB, partial: source },
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+			const assistants = ctx.chatContainer.children.filter(
+				(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
+			);
+			expect(assistants).toHaveLength(3);
+			for (const component of assistants) {
+				expect(component.hasPendingTextDisplay()).toBe(true);
+				expect(component.isTranscriptBlockFinalized()).toBe(false);
+			}
+			const live = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(live).toContain("等待中文显示");
+			expect(live).not.toContain(INTRO_MARKER);
+			expect(live).not.toContain(MIDDLE_MARKER);
+			expect(live).not.toContain(FINAL_MARKER);
+
+			complete = true;
+			await controller.handleEvent({ type: "message_end", message: source } as Extract<
+				AgentSessionEvent,
+				{ type: "message_end" }
+			>);
+			for (const component of assistants) {
+				expect(component.hasPendingTextDisplay()).toBe(false);
+				expect(component.isTranscriptBlockFinalized()).toBe(true);
+			}
+			const settled = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(settled).toContain("中文工具前说明");
+			expect(settled).toContain("中文显示失败");
+			expect(settled).toContain("中文最终回答");
+			expect(settled).not.toContain("等待中文显示");
+			expect(settled).not.toContain(INTRO_MARKER);
+			expect(settled).not.toContain(MIDDLE_MARKER);
+			expect(settled).not.toContain(FINAL_MARKER);
+			expect(JSON.stringify(source)).toBe(snapshot);
+		} finally {
+			controller.dispose();
+			ctx.chatContainer.disposeChildren();
+		}
 	});
 
 	it("renders assistant text segments in order around two tool results from one mixed message", async () => {

@@ -147,6 +147,26 @@ describe("auth thread service", () => {
 		expect(outcome.message).toContain(`No API key for provider: ${PROVIDER}`);
 	});
 
+	it("keeps a worker's strict account lock, and its inherited copy, from falling back", async () => {
+		const { a } = await storeAccounts();
+		expect(await probe.pinStrict(PROVIDER, "parent", a)).toBe(true);
+		expect(storage.sessions.mode(PROVIDER, "parent")).toBe("strict");
+		expect(await probe.inheritExplicit("parent", "child")).toBe(1);
+		expect(await probe.mode(PROVIDER, "child")).toBe("strict");
+		expect(await probe.key(PROVIDER, "child")).toBe("access-a");
+
+		// A removed locked account must not hand the session to its sibling.
+		await storage.credentials.removeById(PROVIDER, a);
+		expect(await probe.key(PROVIDER, "child")).toBeUndefined();
+		expect(await probe.mode(PROVIDER, "child")).toBe("strict");
+
+		// Only an explicit switch to automatic routing releases the lock.
+		expect(await probe.automatic(PROVIDER, "child")).toBe(true);
+		expect(storage.sessions.mode(PROVIDER, "child")).toBe("automatic");
+		expect(await probe.key(PROVIDER, "child")).toBe("access-b");
+		expect(storage.sessions.mode(PROVIDER, "parent")).toBe("strict");
+	});
+
 	it("releases every lease a worker holds when it exits", async () => {
 		const { a } = await storeAccounts();
 		await probe.restrict(PROVIDER, "orphan", ["account:acc-b"]);
