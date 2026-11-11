@@ -373,7 +373,16 @@ async function priorityChatTurn(
 withOfficialAnthropicEndpoint();
 
 describe("auth-gateway provider session state", () => {
-	it("serves a model 404 on a sibling without invalidating the denied OAuth credential", async () => {
+	it.each([
+		{
+			name: "serves a model 404 on a sibling without invalidating the denied OAuth credential",
+			retryAfterMs: undefined,
+		},
+		{
+			name: "retries a model 404 on a previously tried sibling after its short usage block expires",
+			retryAfterMs: 1_000,
+		},
+	])("$name", async ({ retryAfterMs }) => {
 		const previousApiKey = process.env.ANTHROPIC_API_KEY;
 		const previousOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
 		delete process.env.ANTHROPIC_API_KEY;
@@ -387,6 +396,7 @@ describe("auth-gateway provider session state", () => {
 		const suspect = spyOn(store, "markCredentialSuspect");
 		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
 		const invalidate = spyOn(storage.limits, "invalidateMatching");
+		const usageLimit = spyOn(storage.limits, "markReached");
 		await storage.credentials.set(
 			"anthropic",
 			["A", "B"].map(suffix => ({
@@ -399,6 +409,7 @@ describe("auth-gateway provider session state", () => {
 				email: `${suffix}@example.test`,
 			})),
 		);
+		const rows = store.listAuthCredentials("anthropic");
 		const model = buildModel({
 			id: "claude-mythos-5-2",
 			name: "claude-mythos-5-2",
@@ -412,6 +423,7 @@ describe("auth-gateway provider session state", () => {
 			maxTokens: 64,
 		});
 		const captured: CapturedRequest[] = [];
+		let usageLimitedAt = 0;
 		const success = captureFetch(captured, anthropicChunks("ok"));
 		const realFetch = globalThis.fetch;
 		const unexpectedRequests: string[] = [];
@@ -435,7 +447,35 @@ describe("auth-gateway provider session state", () => {
 			resolveModel: () => model,
 			fetch: async (input, init) => {
 				const response = await success(input, init);
-				if (captured.length !== 1) return response;
+				if (retryAfterMs !== undefined && captured.length === 1) {
+					usageLimitedAt = Date.now();
+					return new Response(
+						JSON.stringify({
+							type: "error",
+							error: {
+								type: "rate_limit_error",
+								message:
+									"This request would exceed your account's monthly spend limit. Please try again later.",
+							},
+						}),
+						{
+							status: 429,
+							headers: { "Content-Type": "application/json", "retry-after-ms": String(retryAfterMs) },
+						},
+					);
+				}
+				if (captured.length !== (retryAfterMs === undefined ? 1 : 2)) return response;
+				if (retryAfterMs !== undefined) {
+					const blocks = storage.blocks.list([rows[0]!.id]);
+					expect(blocks).toEqual([
+						expect.objectContaining({
+							providerKey: "anthropic:oauth",
+							blockScope: "tier:mythos",
+						}),
+					]);
+					expect(blocks[0]!.blockedUntilMs).toBeGreaterThanOrEqual(usageLimitedAt + retryAfterMs);
+					expect(blocks[0]!.blockedUntilMs).toBeLessThanOrEqual(Date.now() + retryAfterMs);
+				}
 				return new Response(
 					JSON.stringify({
 						type: "error",
@@ -461,20 +501,34 @@ describe("auth-gateway provider session state", () => {
 			const body = await response.json();
 			expect(response.status).toBe(200);
 			expect(body).toMatchObject({ content: [{ type: "text", text: "ok" }] });
-			expect(captured.map(request => [request.headers.authorization, request.body.model])).toEqual([
-				["Bearer sk-ant-oat01-gateway-A", model.id],
-				["Bearer sk-ant-oat01-gateway-B", model.id],
-			]);
-			const rows = store.listAuthCredentials("anthropic");
+			expect(captured.map(request => [request.headers.authorization, request.body.model])).toEqual(
+				(retryAfterMs === undefined ? ["A", "B"] : ["A", "B", "A"]).map(suffix => [
+					`Bearer sk-ant-oat01-gateway-${suffix}`,
+					model.id,
+				]),
+			);
+			if (retryAfterMs !== undefined) {
+				expect(usageLimit).toHaveBeenCalledTimes(1);
+				expect(usageLimit.mock.calls[0]?.[2]).toMatchObject({
+					retryAfterMs,
+					providerTimed: true,
+					modelId: model.id,
+					apiKey: "sk-ant-oat01-gateway-A",
+				});
+			} else {
+				expect(usageLimit).not.toHaveBeenCalled();
+			}
+			const deniedRow = rows[retryAfterMs === undefined ? 0 : 1]!;
+			const checkedRows = retryAfterMs === undefined ? rows : [deniedRow];
 			expect(
-				store.listCredentialBlocks(rows.map(row => row.id)).map(block => ({
+				store.listCredentialBlocks(checkedRows.map(row => row.id)).map(block => ({
 					credentialId: block.credentialId,
 					providerKey: block.providerKey,
 					blockScope: block.blockScope,
 				})),
 			).toEqual([
 				{
-					credentialId: rows[0]!.id,
+					credentialId: deniedRow.id,
 					providerKey: "anthropic:oauth",
 					blockScope: `model-policy:${model.id}`,
 				},
@@ -487,6 +541,7 @@ describe("auth-gateway provider session state", () => {
 			network.mockRestore();
 			suspect.mockRestore();
 			invalidate.mockRestore();
+			usageLimit.mockRestore();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
 			if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;

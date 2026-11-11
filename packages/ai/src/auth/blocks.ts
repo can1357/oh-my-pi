@@ -29,19 +29,23 @@ export const ACCOUNT_POLICY_BLOCK_SCOPE = "account-policy";
 const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE] as const;
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
-const MODEL_ACCOUNT_POLICY_PROVIDERS: Readonly<Record<string, true>> = {
-	"openai-codex": true,
-	cursor: true,
-	anthropic: true,
+const MODEL_ACCOUNT_POLICY_PROVIDERS: Readonly<Record<string, "normalized" | "exact">> = {
+	"openai-codex": "normalized",
+	cursor: "normalized",
+	// Anthropic model-not-found denials match the requested id exactly.
+	anthropic: "exact",
 };
 
 /** Scope key for one model-specific account-policy block, shared by selectors and rate limits. */
 export function modelAccountPolicyBlockScope(provider: string, modelId: string | undefined): string | undefined {
 	if (!Object.hasOwn(MODEL_ACCOUNT_POLICY_PROVIDERS, provider) || typeof modelId !== "string") return undefined;
-	const separator = modelId.lastIndexOf("/");
-	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).trim().toLowerCase();
-	if (!bareModelId || bareModelId.includes("\0")) return undefined;
-	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${bareModelId}`;
+	let scopeModelId = modelId;
+	if (MODEL_ACCOUNT_POLICY_PROVIDERS[provider] === "normalized") {
+		const separator = modelId.lastIndexOf("/");
+		scopeModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).trim().toLowerCase();
+	}
+	if (!scopeModelId || scopeModelId.includes("\0")) return undefined;
+	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${scopeModelId}`;
 }
 
 /** Scope keys that a request must check, including model-policy constraints. */

@@ -8,7 +8,13 @@
  * broker-backed rotation policy and the same usage ledger.
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import { type ApiKeyResolver, createOAuthProvenance, NO_AUTH_SENTINEL, type ResolvedApiKey } from "../auth-retry";
+import {
+	type ApiKeyResolver,
+	createOAuthProvenance,
+	markAfterSiblingWait,
+	NO_AUTH_SENTINEL,
+	type ResolvedApiKey,
+} from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
@@ -184,19 +190,21 @@ async function refreshGatewayApiKeyAfterAuthError(
 	peer: string,
 ): Promise<ResolvedApiKey | undefined> {
 	if (AIError.isAnthropicModelNotFoundError(error, provider, model.id)) {
-		const { switched } = await storage.limits.rotate(provider, sessionId, {
+		const rotation = await storage.limits.rotate(provider, sessionId, {
 			error,
 			modelId: model.id,
 			apiKey: oldKey,
 			signal,
 		});
 		logger.debug(
-			switched
+			rotation.switched
 				? "auth-gateway retrying provider request after model-policy block"
 				: "auth-gateway model-policy block, returning the error without retry",
-			{ format, provider, peer, modelId: model.id, switched },
+			{ format, provider, peer, modelId: model.id, switched: rotation.switched },
 		);
-		return switched ? storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal)) : undefined;
+		if (!rotation.switched) return undefined;
+		const resolved = await storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+		return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 	}
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);

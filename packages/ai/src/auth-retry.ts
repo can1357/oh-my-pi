@@ -73,6 +73,8 @@ export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undef
  * retry driver may resend a bearer it already tried. Used by the rotating
  * resolvers (`KeyCascade.resolver`, coding-agent `createApiKeyResolver`).
  */
+export function markAfterSiblingWait(resolved: ResolvedApiKey | undefined): ResolvedApiKey | undefined;
+export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResolution;
 export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResolution {
 	const apiKey = resolvedApiKeyBearer(resolved);
 	if (apiKey === undefined) return resolved;

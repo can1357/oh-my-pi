@@ -14,6 +14,7 @@ import {
 	isOpaqueStatusBody,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
+	parseJsonBody,
 	parseRateLimitReason,
 } from "./rate-limit";
 
@@ -924,27 +925,19 @@ export function anthropicModelNotFoundId(error: unknown, depth = 0): string | un
 				? error.message
 				: undefined;
 	if (status(error) === 404 && message !== undefined) {
-		const start = message.indexOf("{");
-		const end = message.lastIndexOf("}");
-		if (start !== -1 && end > start) {
-			try {
-				const body: unknown = JSON.parse(message.slice(start, end + 1));
-				if (body && typeof body === "object" && "type" in body && body.type === "error" && "error" in body) {
-					const detail = body.error;
-					if (
-						detail &&
-						typeof detail === "object" &&
-						"type" in detail &&
-						detail.type === "not_found_error" &&
-						"message" in detail &&
-						typeof detail.message === "string" &&
-						detail.message.startsWith("model: ")
-					) {
-						return detail.message.slice("model: ".length);
-					}
-				}
-			} catch {
-				// Non-JSON 404 responses are not model-specific denials.
+		const body = parseJsonBody(message);
+		if (body?.type === "error") {
+			const detail = body.error;
+			if (
+				detail &&
+				typeof detail === "object" &&
+				"type" in detail &&
+				detail.type === "not_found_error" &&
+				"message" in detail &&
+				typeof detail.message === "string" &&
+				detail.message.startsWith("model: ")
+			) {
+				return detail.message.slice("model: ".length);
 			}
 		}
 	}
