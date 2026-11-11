@@ -198,10 +198,11 @@ pub struct ShellRunResult {
 	pub timed_out:     bool,
 	pub minimized:     Option<MinimizerResult>,
 	pub working_dir:   Option<String>,
-	/// The run ended through `exit` or `set -e` rather than by running off
-	/// the end of its input: whatever followed the abort did not run. The
-	/// session itself stays usable, with its state (including armed options)
-	/// intact.
+	/// The run was cut short by `exit` or an armed `set -e` with commands
+	/// still left to run: whatever followed the abort did not run. A
+	/// trailing `exit` at the end of the input — which ends the run where
+	/// the input's end would have — is not reported. The session stays
+	/// usable, with its state (including armed options) intact.
 	pub ended_by_exit: bool,
 }
 
@@ -1211,7 +1212,9 @@ async fn run_shell_command_single(
 	let status = command_run.outcome.status;
 	// `exit`/`set -e` cutting the script short is reported so callers can
 	// distinguish "the last statement failed" from "the rest never ran".
-	let ended_by_exit = command_run.outcome.exited;
+	// A trailing `exit` at the end of the input ends the command exactly
+	// where its end would have; it is not a cut-short run.
+	let ended_by_exit = command_run.outcome.exited && command_run.outcome.cut_short;
 
 	let mut minimized_out = None;
 	if let Some(buffered) = command_run.buffered
@@ -1368,14 +1371,16 @@ async fn run_shell_command_segmented_chain(
 		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
 		last_status = Some(exit);
 		if !keep_running {
-			// The abort hid statements only when a later segment would still
-			// have run: an `exit` on the last segment that would run ends the
-			// command exactly where it would have ended anyway.
+			// The abort hid statements only when input remained: commands
+			// after the abort in its own segment, or a later segment that
+			// would still have run. An `exit` on the last input that would
+			// run ends the command exactly where it would have ended anyway.
 			ended_by_exit = command_run.outcome.exited
 				&& !scope.cancel.is_cancelled()
-				&& segments
-					.by_ref()
-					.any(|segment| !segment.run_if_previous_succeeded || previous_succeeded);
+				&& (command_run.outcome.cut_short
+					|| segments
+						.by_ref()
+						.any(|segment| !segment.run_if_previous_succeeded || previous_succeeded));
 			break;
 		}
 	}

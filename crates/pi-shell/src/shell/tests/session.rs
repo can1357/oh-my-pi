@@ -953,14 +953,18 @@ async fn exit_and_errexit_report_ended_by_exit() {
 	assert_eq!(aborted.exit_code, Some(1));
 	assert!(aborted.ended_by_exit, "errexit hid the statements after the failing one");
 	assert!(!run("echo $PI_ARMED").await.ended_by_exit);
-	assert!(run("exit 3").await.ended_by_exit);
+	assert!(!run("exit 3").await.ended_by_exit, "a trailing exit ends nothing early");
 	assert!(
 		run("exit 0; echo never").await.ended_by_exit,
 		"statements after an explicit exit never ran"
 	);
 	assert!(
-		run("true; exit 0").await.ended_by_exit,
-		"the unsegmented path cannot tell a trailing exit from a cutting one"
+		!run("true; exit 0").await.ended_by_exit,
+		"a trailing exit is not reported as cutting the run short"
+	);
+	assert!(
+		!run("set -e; false").await.ended_by_exit,
+		"errexit on the last statement hides nothing"
 	);
 }
 

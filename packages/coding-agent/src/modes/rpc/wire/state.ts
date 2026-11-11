@@ -180,7 +180,7 @@ export const stateDefs = {
 		"workingDir?": "string",
 		"endedByExit?": doc(
 			"boolean",
-			"Whether `exit` or an armed `set -e` ended the run before its input was exhausted: whatever followed the abort did not run.",
+			"Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported.",
 		),
 		"images?": "ImageContent[]",
 		"trace?": doc(

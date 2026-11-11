@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ShellRunResult` carries `endedByExit`: true when `exit` or an armed `set -e` cut the run short with commands still left to run (whatever followed the abort did not run); a trailing `exit` at the end of the input, which ends the run where the input's end would have, is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

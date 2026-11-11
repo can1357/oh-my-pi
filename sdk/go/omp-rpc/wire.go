@@ -2643,7 +2643,7 @@ type BashResult struct {
 	ArtifactError map[string]json.RawMessage `json:"artifactError,omitempty"`
 	Minimized     map[string]json.RawMessage `json:"minimized,omitempty"`
 	WorkingDir    *string                    `json:"workingDir,omitempty"`
-	// Whether `exit` or an armed `set -e` ended the run before its input was exhausted: whatever followed the abort did not run.
+	// Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported.
 	EndedByExit *bool          `json:"endedByExit,omitempty"`
 	Images      []ImageContent `json:"images,omitempty"`
 	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.

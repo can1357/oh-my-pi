@@ -413,7 +413,10 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 						unwind(&mut k.root, cx.store, vp, i);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
-					exit_shell(k, vp, cx, status);
+					{
+						let unrun = top_frame(vp).pc + 1;
+						exit_shell(k, vp, cx, status, unrun);
+					}
 				} else {
 					let line = line_of(vp, op.node);
 					let diag =
@@ -428,7 +431,10 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			},
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
 			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
-			Flow::Exit(status) => exit_shell(k, vp, cx, status),
+			Flow::Exit(status) => {
+				let unrun = top_frame(vp).pc + 1;
+				exit_shell(k, vp, cx, status, unrun);
+			},
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
 			},
@@ -470,7 +476,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			}
 		} else if errexit {
 			let status = vp.status;
-			exit_shell(k, vp, cx, status);
+			// `pc` advanced past the failed op already: its continuation is here.
+			{
+				let unrun = top_frame(vp).pc;
+				exit_shell(k, vp, cx, status, unrun);
+			}
 		} else if errreturn_failed && unit.mode.dialect() == Dialect::Zsh && zsh_errreturn(k, cx, vp)
 		{
 			// zsh `ERR_RETURN`: a failed command returns from the function
@@ -510,7 +520,10 @@ fn zsh_return_flow(
 			set_trap_line(vp, line_of(vp, op.node));
 			mark_trap_exit(vp);
 		} else {
-			exit_shell(k, vp, cx, status);
+			{
+				let unrun = top_frame(vp).pc + 1;
+				exit_shell(k, vp, cx, status, unrun);
+			}
 		}
 	} else if run_always(k, vp, cx, target.unwrap_or(0), TryEnd::Return(status)) {
 		// The always-list runs first; it resumes the return.
@@ -542,7 +555,10 @@ fn zsh_return_flow(
 	} else {
 		// zsh `bin_break`: `return` outside a function or `.` file leaves
 		// a non-interactive shell (`zexit`).
-		exit_shell(k, vp, cx, status);
+		{
+			let unrun = top_frame(vp).pc + 1;
+			exit_shell(k, vp, cx, status, unrun);
+		}
 	}
 }
 
@@ -600,6 +616,33 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 	}
 }
 
+/// Whether `exit`/`set -e` fired with commands still left to run: any frame
+/// (its own continuation first, then whatever resumes below it) has a
+/// command-starting op still ahead of it. `top_from` is the op index of the
+/// top frame's first unrun op: callers whose `pc` still sits on the op that
+/// triggered the exit pass `pc + 1`; callers running after the dispatch loop
+/// advanced `pc` (the errexit check) pass `pc`. Lower frames resume after
+/// the call op that led here, so their scan starts at `pc + 1`. A trailing
+/// `exit` at the end of the script's input has nothing ahead and ended the
+/// run exactly where the script's end would have; loops stay in their frame,
+/// so a loop whose body holds the `exit` reports unrun input only when a
+/// command follows the loop (the loop-back jump is not a command start).
+fn exit_cut_short(vp: &Vproc, top_from: u32) -> bool {
+	vp.frames.iter().rev().enumerate().any(|(i, frame)| {
+		frame.unit.as_ref().is_some_and(|unit| {
+			let from = if i == 0 {
+				top_from as usize
+			} else {
+				frame.pc as usize + 1
+			};
+			unit
+				.ops
+				.get(from..)
+				.is_some_and(|rest| rest.iter().any(|op| starts_command(unit, *op)))
+		})
+	})
+}
+
 /// Whether `vp` runs in a function scope (a store failure reads as no and
 /// is kept).
 fn in_function_scope(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
@@ -624,7 +667,11 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// a subshell runs its EXIT trap here, the root at the run boundary. An
 /// `exit` inside a function runs the root's trap first, above the
 /// function's frames: bash's trap sees its `FUNCNAME` and locals.
-fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+/// `top_unrun` is the top frame's first op that the exit makes unrun:
+/// `pc + 1` while `pc` still sits on the op that triggered it, `pc` where
+/// the dispatch loop already advanced (the errexit check); it feeds
+/// [`exit_cut_short`].
+fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32, top_unrun: u32) {
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
 	// new one.
 	if vp.zsh.is_some()
@@ -642,6 +689,7 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		&& let Some(run) = vp.runs.front()
 	{
 		k.exited = Some(run.id);
+		k.exited_cut_short = exit_cut_short(vp, top_unrun);
 	}
 	if !in_exit_trap
 		&& vp
@@ -1130,7 +1178,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		} else if let Some(status) = status
 			&& exit
 		{
-			exit_shell(k, vp, cx, status);
+			// The trap frame that ran `exit` is popped; the interrupted
+			// frame's `pc` is its first unrun op.
+			exit_shell(k, vp, cx, status, vp.frames.last().map_or(0, |f| f.pc));
 		} else if func_trap && trap_status != 0 && vp.mode.dialect() == Dialect::Zsh {
 			// zsh `dotrapargs`: a function trap returning non-zero forces
 			// a return from the interrupted code, with the error flag set.
@@ -5164,7 +5214,10 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 	if let Some(i) = target {
 		zsh_leave(k, vp, cx, i);
 	} else {
-		exit_shell(k, vp, cx, status);
+		{
+			let unrun = top_frame(vp).pc + 1;
+			exit_shell(k, vp, cx, status, unrun);
+		}
 	}
 }
 
@@ -5336,7 +5389,10 @@ fn zsh_exit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		{
 			z.exit_from_function = true;
 		}
-		exit_shell(k, vp, cx, status);
+		{
+			let unrun = top_frame(vp).pc + 1;
+			exit_shell(k, vp, cx, status, unrun);
+		}
 		return;
 	}
 	let level = vp
@@ -5428,7 +5484,8 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		vp.status = status;
 	} else {
 		unwind(&mut k.root, cx.store, vp, 0);
-		exit_shell(k, vp, cx, status);
+		// Every frame is gone: nothing is left to scan.
+		exit_shell(k, vp, cx, status, 0);
 	}
 }
 

@@ -711,7 +711,7 @@ class BashResult:
     minimized: JsonObject | None = None
     working_dir: str | None = None
     ended_by_exit: bool | None = None
-    """Whether `exit` or an armed `set -e` ended the run before its input was exhausted: whatever followed the abort did not run."""
+    """Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported."""
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""

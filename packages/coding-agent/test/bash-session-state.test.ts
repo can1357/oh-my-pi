@@ -12,7 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AsyncJobManager } from "../src/async";
 import { Settings } from "../src/config/settings";
-import { executeBash, releaseShellSessions } from "../src/exec/bash-executor";
+import { executeBash, releaseShellSessions, __test } from "../src/exec/bash-executor";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
 
@@ -152,15 +152,84 @@ it.skipIf(process.platform === "win32")(
 	10_000,
 );
 
-// `endedByExit` arrives with the native addon built from this PR's Rust, and
-// pull-request CI runs these tests against main's native addon — so the
-// assertions below only execute where the addon carries the flag (post-merge
-// main and source-built local runs). The flag itself is pinned in
-// `crates/pi-shell` (`exit_and_errexit_report_ended_by_exit`).
+// The notice assertions below inject their native result through the
+// `__test.run` seam, so they run the same on every addon version
+// (pull-request CI tests against main's prebuilt addon, which predates the
+// flag). The flag itself is pinned in `crates/pi-shell`
+// (`exit_and_errexit_report_ended_by_exit`); a source-built addon is
+// additionally checked end-to-end by the native-backed test below.
+
+function nativeResult(overrides: Record<string, unknown> = {}) {
+	return {
+		exitCode: 0,
+		cancelled: false,
+		timedOut: false,
+		minimized: undefined,
+		workingDir: undefined,
+		endedByExit: false,
+		...overrides,
+	};
+}
+
+it("says so when exit or an armed set -e ends the call before its remaining statements run", async () => {
+	__test.run = async (_shell, request) => {
+		expect(request.command).toBeString();
+		if (request.command.includes("echo never-ran")) return nativeResult({ endedByExit: true });
+		if (request.command === "false") return nativeResult({ exitCode: 1 });
+		return nativeResult();
+	};
+	try {
+		const tool = bashTool();
+		const aborted = await run(tool, "false; echo never-ran");
+		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
+		expect(aborted.text).toContain("the rest of this call did not run");
+		// Options armed by an earlier call keep applying; the notice says so.
+		expect(aborted.text).toContain("stay set in this session");
+
+		const failed = await run(tool, "false");
+		expect(failed.text).toContain("Command exited with code 1");
+		expect(failed.text).not.toContain("Stopped by `exit`");
+	} finally {
+		__test.run = undefined;
+	}
+});
+
+it("does not promise options persist when the aborted call ran in a forked session shell", async () => {
+	let firstRunStarted!: () => void;
+	let finishFirst!: (result: ReturnType<typeof nativeResult>) => void;
+	__test.run = (_shell, request) => {
+		if (request.command.includes("BLOCK-FIRST-CALL")) {
+			return new Promise(resolve => {
+				finishFirst = resolve;
+				firstRunStarted();
+			});
+		}
+		return Promise.resolve(nativeResult({ endedByExit: true }));
+	};
+	try {
+		const tool = bashTool();
+		const first = run(tool, "echo BLOCK-FIRST-CALL");
+		await new Promise<void>(resolve => {
+			firstRunStarted = resolve;
+		});
+		// The first call owns the persistent session; this one overlaps it
+		// and runs in a fork, so its options die with it.
+		const aborted = await run(tool, "set -e; false; echo never-ran");
+		expect(aborted.text).toContain("Ran in a copy of the busy session shell");
+		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
+		expect(aborted.text).toContain("the rest of this call did not run");
+		expect(aborted.text).not.toContain("stay set in this session");
+		finishFirst(nativeResult());
+		await first;
+	} finally {
+		__test.run = undefined;
+	}
+});
+
 it.skipIf(process.platform === "win32")(
-	"says so when exit or an armed set -e ends the call before its remaining statements run",
+	"reports a cut-short exit end-to-end when the loaded addon carries the flag",
 	async () => {
-		const probe = await executeBash("exit 3", { minimize: false });
+		const probe = await executeBash("exit 3; echo never", { minimize: false });
 		if (probe.endedByExit !== true) return; // addon predates the flag
 
 		const tool = bashTool();
@@ -173,6 +242,10 @@ it.skipIf(process.platform === "win32")(
 
 		const exited = await run(tool, "exit 3; echo never-ran");
 		expect(exited.text).toContain("Stopped by `exit` or an armed `set -e`");
+
+		// A trailing exit ends the call exactly where its input ends: no notice.
+		const trailing = await run(tool, "exit 0");
+		expect(trailing.text).not.toContain("Stopped by `exit`");
 
 		await run(tool, "set +e");
 		const failed = await run(tool, "false");
