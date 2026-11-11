@@ -914,9 +914,12 @@ mod foreground {
 	use super::{
 		CoreResult, DesktopError, KeyName, Modifiers, MouseButton, PointerEvent, background, control,
 	};
-	use crate::desktop::win32::{
-		delivery::{TextUnit, text_units},
-		window,
+	use crate::desktop::{
+		types::DesktopFocusReturn,
+		win32::{
+			delivery::{TextUnit, text_units},
+			window,
+		},
 	};
 
 	/// Time the target keeps the foreground after pointer input, so
@@ -984,7 +987,22 @@ mod foreground {
 			// Preserve the target's consumption window after any delivery, even
 			// a partial one; a cancel during it leaves sent input reported sent.
 			control::settle(self.settle);
-			super::completed(result, self.restore())
+			let restored = self.restore();
+			self.report(restored.is_ok());
+			super::completed(result, restored)
+		}
+
+		/// Records for the host where the takeover left the foreground, read
+		/// after restoration. Focus was handed back only when the target had
+		/// to be activated and the user's window is in front again.
+		fn report(&self, restored: bool) {
+			// SAFETY: GetForegroundWindow has no preconditions.
+			let front = unsafe { GetForegroundWindow() };
+			control::report_focus_return(DesktopFocusReturn {
+				handed_back:  restored && self.previous != self.target && front == self.previous,
+				previous_pid: window::process_id(self.previous),
+				front_pid:    window::process_id(front),
+			});
 		}
 
 		fn restore(&mut self) -> CoreResult<()> {

@@ -252,7 +252,10 @@ mod tests {
 	};
 
 	use super::*;
-	use crate::desktop::control::{self, CancellationSource};
+	use crate::desktop::{
+		control::{self, CancellationSource},
+		types::DesktopFocusReturn,
+	};
 
 	fn wide(text: &str) -> Vec<u16> {
 		text.encode_utf16().chain(Some(0)).collect()
@@ -431,6 +434,13 @@ mod tests {
 				.unwrap();
 			// SAFETY: no preconditions.
 			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
+			// Both windows belong to this process.
+			let pid = Some(std::process::id());
+			assert_eq!(
+				control::take_focus_return(),
+				Some(DesktopFocusReturn { handed_back: true, previous_pid: pid, front_pid: pid }),
+				"after {input:?}"
+			);
 		}
 		// Whether focusing an edit selects its text is the control's business;
 		// the keys reached the target and nothing reached the user's window.
