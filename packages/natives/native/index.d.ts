@@ -3601,10 +3601,12 @@ export interface SandboxPolicy {
    */
   listVolumeRoots?: boolean
   /**
-   * Windows, `deny` network: let contained processes connect to loopback
-   * (`127.0.0.0/8`, `::1`), their own listeners and every host service on it.
-   * Ignored where the native tier cannot grant host loopback, and under a
-   * proxy, whose policy form confines loopback to the proxy endpoint.
+   * Windows, `deny` and `proxy` networks: let contained processes connect to
+   * loopback (`127.0.0.0/8`, `::1`), their own listeners and every host
+   * service on it; all other egress stays denied. Under a proxy the native
+   * proxy form is replaced by that loopback-only form, with `HTTP(S)_PROXY`
+   * pointed at `proxyUrl`. Ignored where the native tier cannot grant host
+   * loopback.
    */
   loopback?: boolean
 }

@@ -1160,22 +1160,25 @@ async function retainedSandboxCurrent(session: JsSession, cwd: string): Promise<
 /**
  * Windows: Bun queues a child's IPC sends until its event loop runs, so a cell spinning in
  * synchronous code loses the output it printed last when `terminate()` kills it. Pipe writes land
- * in the kernel at once, so there the evaluator speaks the stdio-framed transport, as it does
- * inside the sandbox.
+ * in the kernel at once, so the evaluator sends its frames on stdout, as it does inside the
+ * sandbox. Messages to it still travel over IPC: its stdin stays closed, so cell code and the
+ * children it spawns never read (and swallow) protocol traffic.
  */
 function spawnStdioJsProcess(): JsEvalWorkerHandle {
 	const { cmd, cwd } = resolveWorkerSpawnCmd(JS_EVAL_STDIO_WORKER_ARG);
-	return wrapStdioJsProcess(
-		Bun.spawn({
-			cmd,
-			cwd,
-			env: workerEnvFromParent(),
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-		}),
-	);
+	const child = Bun.spawn({
+		cmd,
+		cwd,
+		env: workerEnvFromParent(),
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		serialization: "advanced",
+		windowsHide: true,
+		// Inbound only: the evaluator answers on stdout. Bun opens the channel only with a handler.
+		ipc() {},
+	});
+	return wrapStdioJsProcess(child, message => safeSendIpc(child, message, "js-eval"));
 }
 
 /**
@@ -1198,15 +1201,26 @@ async function spawnContainedJsProcess(
 		extraWrite: options.extraWrite,
 		network: options.network,
 	});
-	return wrapStdioJsProcess(child);
+	return wrapStdioJsProcess(child, message => {
+		try {
+			child.stdin.write(encodeStdioFrame(message));
+		} catch (error) {
+			logger.debug("js-eval: send to subprocess failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	});
 }
 
 /**
- * The worker handle over an evaluator speaking stdio frames. Mirrors {@link spawnJsProcess}:
- * every exit not caused by `terminate()` (clean exits included) faults the session with the
- * stderr tail.
+ * The worker handle over an evaluator answering in stdio frames; `send` delivers messages to it.
+ * Mirrors {@link spawnJsProcess}: every exit not caused by `terminate()` (clean exits included)
+ * faults the session with the stderr tail.
  */
-function wrapStdioJsProcess(child: SandboxChild): JsEvalWorkerHandle {
+function wrapStdioJsProcess(
+	child: Omit<SandboxChild, "stdin">,
+	send: (message: WorkerInbound) => void,
+): JsEvalWorkerHandle {
 	const handlers = new Set<(msg: WorkerOutbound) => void>();
 	const errors = new Set<(error: Error) => void>();
 	const fail = (error: Error): void => {
@@ -1245,15 +1259,7 @@ function wrapStdioJsProcess(child: SandboxChild): JsEvalWorkerHandle {
 		fail(new Error(`JS eval worker exited with code ${exitCode}${stderrTail.suffix()}`));
 	});
 	const base = {
-		send(message: WorkerInbound): void {
-			try {
-				child.stdin.write(encodeStdioFrame(message));
-			} catch (error) {
-				logger.debug("js-eval: send to subprocess failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		},
+		send,
 		onMessage(handler: (msg: WorkerOutbound) => void): () => void {
 			handlers.add(handler);
 			return () => handlers.delete(handler);

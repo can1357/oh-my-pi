@@ -1,5 +1,6 @@
 /**
- * Stdio-framed transport for the JS eval subprocess when it runs inside the OS sandbox.
+ * Stdio-framed transport for the JS eval subprocess inside the OS sandbox, and for its outbound
+ * direction on Windows hosts (see `runStdioSubprocessWorker`).
  *
  * Bun's subprocess `ipc` channel is an extra inherited descriptor, which a sandboxed process does
  * not receive: only stdin/stdout/stderr cross the container boundary. The contained evaluator
@@ -62,10 +63,13 @@ export class StdioFrameDecoder {
 }
 
 /**
- * Child side: serve `start`'s transport over stdin/stdout frames until stdin closes (the parent
- * ended the pipe or died), then hard-exit like the IPC worker runner. A non-cloneable outbound
- * message throws to the sender so that cell fails instead of the whole evaluator; a broken stdout
- * means the parent is gone and shuts down.
+ * Child side: answer `start`'s transport in stdout frames and take messages from the parent's IPC
+ * channel when it opened one (the unsandboxed Windows evaluator, whose stdin stays closed so cell
+ * code cannot consume protocol traffic), else from stdin frames (inside the sandbox, where IPC
+ * cannot cross). Serves until that inbound channel closes (the parent ended it or died), then
+ * hard-exits like the IPC worker runner. A non-cloneable outbound message throws to the sender so
+ * that cell fails instead of the whole evaluator; a broken stdout means the parent is gone and
+ * shuts down.
  *
  * Frames go through a dedicated `Bun.stdout` writer, not `process.stdout`: the evaluator captures
  * `process.stdout`/`console` output as cell text, which would feed every frame back into itself.
@@ -99,14 +103,25 @@ export async function runStdioSubprocessWorker<In, Out>(
 			};
 		},
 	});
-	const decoder = new StdioFrameDecoder(
-		message => {
-			for (const handler of handlers) handler(message as In);
-		},
-		() => {},
-	);
+	const deliver = (message: unknown): void => {
+		for (const handler of handlers) handler(message as In);
+	};
 	// Like the IPC runner: never outlive the parent, even while a cell pins the main thread.
 	if (process.ppid > 0) startParentWatchdog(process.ppid);
+	if (typeof process.send === "function") {
+		const disconnected = Promise.withResolvers<void>();
+		process.on("message", deliver);
+		process.on("disconnect", disconnected.resolve);
+		const keepalive = setInterval(() => {}, 2 ** 30);
+		try {
+			await disconnected.promise;
+		} finally {
+			clearInterval(keepalive);
+			shutdown();
+		}
+		return;
+	}
+	const decoder = new StdioFrameDecoder(deliver, () => {});
 	try {
 		for await (const chunk of Bun.stdin.stream()) decoder.push(chunk);
 	} finally {

@@ -286,9 +286,9 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === JS_EVAL_STDIO_WORKER_ARG) {
-		// Sandboxed JS evaluator: Bun IPC cannot cross the container boundary, so the same
-		// evaluator speaks structured-clone frames over stdin/stdout. Same synchronous bootstrap
-		// as the IPC selector above.
+		// Sandboxed (and unsandboxed Windows) JS evaluator: answers in structured-clone frames on
+		// stdout; reads frames on stdin, or IPC when the parent opened it. Same synchronous
+		// bootstrap as the IPC selector above.
 		const { startJsEvalProcess }: typeof JsProcessEntry = require("./eval/js/process-entry");
 		const { interceptUnhandledRejections }: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
 		const { runStdioSubprocessWorker }: typeof JsStdioTransport = require("./eval/js/stdio-transport");

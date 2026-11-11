@@ -11,6 +11,6 @@ export const TEST_PYTHON: string | undefined =
 	Bun.env.PYTHON ??
 	[...$whichAll("python"), ...$whichAll("python3")].find(
 		candidate =>
-			Bun.spawnSync([candidate, "-c", "pass"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
-				.exitCode === 0,
+			Bun.spawnSync([candidate, "-c", "pass"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exitCode ===
+			0,
 	);
