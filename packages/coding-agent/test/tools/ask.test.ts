@@ -461,11 +461,13 @@ describe("AskTool without a form surface", () => {
 			"call-other",
 			{
 				html: `<form>
+  <p>Replica policy: retain one database in each region.</p>
   <fieldset><legend>Database</legend>
     <label><input type="radio" name="db" value="postgres" checked> Postgres</label>
     <label><input type="radio" name="db" value="sqlite"> SQLite</label>
   </fieldset>
   <fieldset><legend>Tools</legend>
+    <p>Automation rules must be audited.</p>
     <label><input type="checkbox" name="tools" value="ci"> CI</label>
     <label><input type="checkbox" name="tools" value="lint"> Lint</label>
   </fieldset>
@@ -476,7 +478,11 @@ describe("AskTool without a form surface", () => {
 			createContext({ select, input }),
 		);
 
-		expect(input.mock.calls.map(call => call[0])).toEqual(["Database", "Database", "Tools"]);
+		expect(input.mock.calls.map(call => call[0])).toEqual([
+			"Replica policy: retain one database in each region.\n\nDatabase",
+			"Replica policy: retain one database in each region.\n\nDatabase",
+			"Tools\n\nAutomation rules must be audited.",
+		]);
 		expect(selects.at(-1)?.checked).toEqual([0, 2]);
 		expect(JSON.parse(text(result)?.replace("User answers:\n", "") ?? "")).toEqual({
 			db: "MySQL 8",

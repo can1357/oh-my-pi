@@ -207,7 +207,7 @@ async function askChoice(
 			);
 			if (otherRow !== undefined && outcome.value === otherRow) {
 				const typed = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
-					ui.input(question, undefined, dialogOptions),
+					ui.input(promptTitle(text, question), undefined, dialogOptions),
 				);
 				if (typed.timedOut) return { value: undefined, timedOut: true };
 				initialIndex = labels.length;
@@ -256,7 +256,7 @@ async function askChoice(
 				continue;
 			}
 			const typed = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
-				ui.input(question, undefined, dialogOptions),
+				ui.input(promptTitle(text, question), undefined, dialogOptions),
 			);
 			if (typed.timedOut) return { value: { checked }, timedOut: true };
 			// A blank or cancelled answer leaves Other unchecked.
