@@ -1,15 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `getDocsCacheDir()`, the materialized `omp://` documentation cache directory (`~/.omp/cache/docs`), honoring `OMP_DOCS_CACHE_DIR` ([#18647](https://github.com/can1357/oh-my-pi/pull/18647) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ## [18.18.8] - 2026-11-11
 
 ### Removed
 
 - Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
-### Added
-
-- Added `getDocsCacheDir()`, the materialized `omp://` documentation cache directory (`~/.omp/cache/docs`), honoring `OMP_DOCS_CACHE_DIR` ([#18647](https://github.com/can1357/oh-my-pi/pull/18647) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.2] - 2026-11-08
 
