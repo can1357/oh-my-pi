@@ -55,7 +55,7 @@ import {
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
-	SCREEN_LOCKED_CAPTURE_NOTE,
+	screenLockedCaptureNotice,
 	screenStateNotice,
 	type ToolReply,
 } from "./protocol";
@@ -681,7 +681,7 @@ async function emitScreenshot(
 			: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`;
 		context.output.push({
 			type: "text",
-			text: frame.screenLocked ? `${captured}\n${SCREEN_LOCKED_CAPTURE_NOTE}` : captured,
+			text: frame.screenLocked ? `${captured}\n${screenLockedCaptureNotice()}` : captured,
 		});
 		context.output.push({
 			type: "image",

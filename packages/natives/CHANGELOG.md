@@ -12,6 +12,8 @@
 ### Fixed
 
 - Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
+- Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success
+- Windows computer use now reports a locked, disconnected or secure desktop instead of leaving failed captures and undelivered input unexplained.
 
 ## [18.18.9] - 2026-11-11
 
@@ -39,7 +41,6 @@
 
 ### Fixed
 
-- Windows computer use now reports a locked, disconnected or secure desktop instead of leaving failed captures and undelivered input unexplained.
 - Fixed a crash when parsing Markdown with very deeply nested lists or block quotes, such as a line of several hundred `- ` markers, which made editing such files kill the process ([#18707](https://github.com/can1357/oh-my-pi/issues/18707))
 - Fixed the shell's `git` builtin on Windows with `bash.gitGuard` (or smart git) on failing every allowed command with exit 127 (`…\Git\cmd\git: No such file or directory`); it now runs `git.exe` ([#18722](https://github.com/can1357/oh-my-pi/issues/18722))
 - Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles ([#18745](https://github.com/can1357/oh-my-pi/pull/18745) by [@will-bogusz](https://github.com/will-bogusz))

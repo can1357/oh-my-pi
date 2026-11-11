@@ -84,7 +84,7 @@ The same surface is reachable as `computer.*` directly and as `desktop.*` inside
 - `desktop.window(id | { id?, app?, title?, wait? })` returns one persistent window facade. An id may be a string or a number (`74` is the id `"74"`, never matched against app or title). A filter's optional `wait` polls every 100 ms for a window to appear; it accepts finite milliseconds from 0 to 10000 and is cancellable, including in read-only runs. Without `wait`, lookup lists windows once. Python keyword filters support the same option: `await computer.window(app="Preview", title="report.pdf", wait=3000)`. Zero matches throw with the open windows grouped by app as `id "title"`: apps matching the filter's `app` first (up to 10 windows each, titled before untitled), then the focused window's app, then the rest (up to 3 each), at most 12 apps, with overflow and unlisted windows counted, plus a line when no app matches. Multiple matches throw with the candidates.
 - `desktop.focusedWindow()` returns a window facade or `null`.
 - `desktop.displays()` returns `DesktopDisplay[]`.
-- `desktop.capabilities()` returns capture/input/AX availability, `backgroundWindowInput` and `takeover` support, permission states, display server, backend, display count, and on macOS `screenLocked`/`displayAsleep`.
+- `desktop.capabilities()` returns capture/input/AX availability, `backgroundWindowInput` and `takeover` support, permission states, display server, backend, display count, `screenLocked` on macOS and Windows, and `displayAsleep` on macOS.
 
 A window facade exposes immutable `id`, `app`, `title`, optional `pid`, `bounds`, and `focused` fields.
 
@@ -176,6 +176,8 @@ Direct helpers and `computer.run(...)` return the worker's structured value dire
 Result details contain the resolved `code`, `readOnly`, `screenshots`, optional structured `value`, and capability metadata (`backend`, `capturePermission`, `inputPermission`, `axPermission`). Each screenshot detail contains `path`, `width`, `height`, `coordinateWidth`, `coordinateHeight`, optional `sourceWidth`/`sourceHeight`, `region` and `screenLocked`, and `target`. Provider delivery uses ordinary text/image content with image detail `original`; it does not use provider Files or native `computer_call_output` metadata.
 
 On macOS a screenshot taken behind the lock screen sets `screenLocked: true` and adds a note to its status text; a native error raised while the screen is locked or the display asleep ends with that state in parentheses; and a run that ends locked or asleep returns a leading `Note:` text block. None of these refuse input. While it is in use, the native session keeps the display awake with a `PreventUserIdleDisplaySleep` assertion held from an agent turn's first desktop call until the turn ends or a prompt waits for the user's answer (outside an agent turn or in a subagent, until five minutes after the last desktop call) or on close; see [macOS display sleep and the lock screen](../computer-use.md#macos-display-sleep-and-the-lock-screen).
+
+On Windows, `screenLocked` also covers a disconnected session or an unavailable input desktop such as UAC's secure desktop. It uses the same screenshot tag, native error suffix and run note; captures and input do not confirm your app's state until the session is unlocked or reconnected, or the secure desktop is dismissed. Windows leaves `displayAsleep` false.
 
 ## Flow and lifecycle
 

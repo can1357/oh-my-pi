@@ -83,20 +83,25 @@ export const ESCAPE_AFTER_CALL_MESSAGE = prompt.render(escapeAfterCallMessage);
 /** Refusal of every later computer call until the user's next message acknowledges their Escape stop. */
 export const ESCAPE_REFUSED_MESSAGE = prompt.render(escapeRefusedMessage);
 
-/** Appended to a screenshot taken while the macOS lock screen is up. */
-export const SCREEN_LOCKED_CAPTURE_NOTE = prompt.render(screenLockedCaptureNote);
+/** Appended to a screenshot taken while the session's desktop is unavailable. */
+export function screenLockedCaptureNotice(platform: NodeJS.Platform = process.platform): string {
+	return prompt.render(screenLockedCaptureNote, { windows: platform === "win32" });
+}
 
 /**
  * Tells the model a run ended with the screen locked or the session's
  * display asleep, so lock-screen pixels and failed captures are not taken
  * for the app's state. Input is never refused because of it.
  */
-export function screenStateNotice(state: DesktopScreenState | undefined): string | undefined {
+export function screenStateNotice(
+	state: DesktopScreenState | undefined,
+	platform: NodeJS.Platform = process.platform,
+): string | undefined {
 	if (!state?.screenLocked && !state?.displayAsleep) return undefined;
 	return prompt.render(screenStateTemplate, {
 		screenLocked: state.screenLocked,
 		displayAsleep: state.displayAsleep,
-		windows: process.platform === "win32",
+		windows: platform === "win32" && state.screenLocked,
 	});
 }
 
@@ -111,7 +116,7 @@ export interface ComputerScreenshot {
 	sourceWidth?: number;
 	sourceHeight?: number;
 	target: string;
-	/** The macOS lock screen was up: a display capture shows it, a window capture shows the window's last frame. */
+	/** The session was locked, disconnected or on a secure desktop when captured. */
 	screenLocked?: true;
 }
 

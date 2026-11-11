@@ -18,7 +18,8 @@ import {
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
-	SCREEN_LOCKED_CAPTURE_NOTE,
+	screenLockedCaptureNotice,
+	screenStateNotice,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
 	beginComputerTurnForOwner,
@@ -1516,6 +1517,23 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	it("reports Windows unavailable desktops without claiming macOS lock-screen contents", () => {
+		const state = { screenLocked: true, displayAsleep: false };
+		for (const notice of [screenLockedCaptureNotice("win32"), screenStateNotice(state, "win32")]) {
+			expect(notice).toContain("Windows reports a locked or disconnected session");
+			expect(notice).not.toContain("macOS");
+			expect(notice).not.toContain("unlocks the Mac");
+		}
+		expect(screenStateNotice({ screenLocked: false, displayAsleep: false }, "win32")).toBeUndefined();
+	});
+
+	it("keeps the macOS capture and display-sleep explanations", () => {
+		expect(screenLockedCaptureNotice("darwin")).toContain("macOS is showing its lock screen");
+		expect(screenStateNotice({ screenLocked: false, displayAsleep: true }, "darwin")).toContain(
+			"Nothing on that display can be captured or clicked until it wakes.",
+		);
+	});
+
 	it("marks a screenshot taken behind the lock screen, and only then", async () => {
 		for (const locked of [true, false]) {
 			const transport = new MemoryTransport();
@@ -1530,7 +1548,7 @@ describe("computer worker round trips", () => {
 			const lines = caption?.type === "text" ? caption.text.split("\n") : [];
 			if (locked) {
 				expect(lines).toHaveLength(2);
-				expect(lines[1]).toBe(SCREEN_LOCKED_CAPTURE_NOTE);
+				expect(lines[1]).toBe(screenLockedCaptureNotice());
 				expect(result.payload.screenshots[0]?.screenLocked).toBe(true);
 				expect(result.payload.returnValue).toMatchObject({ screenLocked: true });
 			} else {
