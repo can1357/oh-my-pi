@@ -21,6 +21,10 @@
 
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
+### Fixed
+
+- When Chrome detaches omp from a relay tab omp opened and omp cannot reattach, the error now says omp closed that tab and to open a new one, instead of saying the tab may still be open and to navigate it in Chrome
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
@@ -33,7 +37,6 @@
 
 ### Fixed
 
-- When Chrome detaches omp from a relay tab omp opened and omp cannot reattach, the error now says omp closed that tab and to open a new one, instead of saying the tab was released and may still be open, which sent agents looking through the user's Chrome for a tab already gone
 - Claude auto-redeem now spends a full saved reset on an account blocked by its weekly limit when the reset also clears the Fable cap; such resets were treated as Fable-only and skipped while Fable usage had room ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
 - Fixed agents showing as idle in the Agent Hub while still running after a failed streaming edit preview (`edit.streamingAbort`) auto-recovered the turn ([#18790](https://github.com/can1357/oh-my-pi/pull/18790) by [@H4vC](https://github.com/H4vC))
 - A browser call on a tab that is not open now says to open it with `await browser.open({ name })` (Python: `await browser.open(name=…)`) and the url and app it was opened with, instead of pointing at the removed `action:"open"` ([#18739](https://github.com/can1357/oh-my-pi/pull/18739) by [@will-bogusz](https://github.com/will-bogusz))
