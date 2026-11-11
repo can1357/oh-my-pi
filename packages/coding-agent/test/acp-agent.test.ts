@@ -31,8 +31,9 @@ import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-a
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -210,6 +211,10 @@ class FakeAgentSession {
 
 	get sessionName(): string {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
+	}
+
+	getAgentId(): string | undefined {
+		return `acp-test:${this.sessionId}`;
 	}
 
 	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
@@ -513,6 +518,7 @@ interface AgentHarness {
 	cwdA: string;
 	cwdB: string;
 	findSession(sessionId: string): FakeAgentSession | undefined;
+	subagentEventBus: EventBus | undefined;
 }
 
 function getChunkMessageId(notification: SessionNotification): string | undefined {
@@ -558,6 +564,11 @@ async function createHarness(
 		extensionRunners?: boolean;
 		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
 		authStorage?: AuthStorage;
+		/**
+		 * Attaches a subagentEventBus to each factory result. `true` creates one
+		 * shared bus; pass an EventBus to use it. Off by default.
+		 */
+		subagentEventBus?: boolean | EventBus;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -577,12 +588,17 @@ async function createHarness(
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
 	const sessionFactoryOptions: Array<{ interactivePrompts?: boolean } | undefined> = [];
+	let sharedSubagentEventBus: EventBus | undefined;
+	if (options.subagentEventBus === true) sharedSubagentEventBus = new EventBus();
 	const connection = {
 		sessionUpdate: async (notification: SessionNotification) => {
 			// Only await when a hook is configured: `await undefined` would insert a
 			// microtask before the push and perturb ordering-sensitive tests.
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
+		},
+		notify: async (method: string, params: unknown) => {
+			if (method === "session/update") updates.push(params as SessionNotification);
 		},
 		extNotification: async (method: string, params: Record<string, unknown>) => {
 			extNotifications.push({ method, params });
@@ -616,7 +632,13 @@ async function createHarness(
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
 		sessionFactoryOptions.push(factoryOptions);
-		return { session: session as unknown as AgentSession, setToolUIContext };
+		const subagentEventBus =
+			options.subagentEventBus === true
+				? (sharedSubagentEventBus ??= new EventBus())
+				: typeof options.subagentEventBus === "object"
+					? options.subagentEventBus
+					: undefined;
+		return { session: session as unknown as AgentSession, setToolUIContext, subagentEventBus };
 	};
 
 	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
@@ -640,6 +662,7 @@ async function createHarness(
 		cwdA,
 		cwdB,
 		findSession: (sessionId: string) => sessions.find(session => session.sessionId === sessionId),
+		subagentEventBus: sharedSubagentEventBus,
 	};
 }
 
@@ -1216,6 +1239,127 @@ describe("ACP agent", () => {
 		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("announces RFD children only when the client advertises subagents", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const announces = harness.updates.filter(
+			update => update.sessionId === created.sessionId && update.update.sessionUpdate === "subagent_update",
+		);
+		expect(announces.map(entry => entry.update)).toEqual([
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "worker-1",
+				title: "task",
+				description: "Do the thing",
+				capabilities: { cancel: {} },
+			},
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "worker-1",
+				state: { state: "running" },
+			},
+		]);
+		await harness.agent.dispose();
+
+		const plain = await createHarness({ subagentEventBus: true });
+		const plainSession = await plain.agent.newSession({ cwd: plain.cwdA, mcpServers: [] });
+		plain.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		expect(
+			plain.updates.filter(
+				update => update.sessionId === plainSession.sessionId && update.update.sessionUpdate === "subagent_update",
+			),
+		).toHaveLength(0);
+		await plain.agent.dispose();
+	});
+
+	it("forwards child session events with the child outer id and settles to idle", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-1",
+			event: { type: "tool_execution_start", toolCallId: "tc-1", toolName: "read", args: { path: "a.ts" } },
+		});
+		await flushBusDelivery();
+		const childUpdates = harness.updates.filter(update => update.sessionId === "worker-1");
+		expect(childUpdates.length).toBeGreaterThan(0);
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "completed",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const terminals = harness.updates.filter(
+			update =>
+				update.sessionId === created.sessionId &&
+				update.update.sessionUpdate === "subagent_update" &&
+				(update.update as { sessionId?: string }).sessionId === "worker-1" &&
+				(update.update as { state?: unknown }).state !== undefined &&
+				(update.update as { state?: { state?: string } }).state?.state !== "running",
+		);
+		expect(terminals.map(entry => entry.update)).toEqual([
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "worker-1",
+				state: { state: "idle", stopReason: "end_turn" },
+				capabilities: { cancel: null },
+			},
+		]);
+		await harness.agent.dispose();
+	});
+
+	it("routes session/cancel on a child id to the child kill path", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		// Unknown to the parent turn; must resolve via the child path, not throw.
+		await harness.agent.cancel({ sessionId: "worker-1" });
+		await harness.agent.dispose();
 	});
 
 	it("delivers the thinking config update before resolving the command", async () => {
