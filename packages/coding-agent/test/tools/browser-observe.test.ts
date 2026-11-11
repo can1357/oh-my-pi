@@ -1,5 +1,6 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { BrowserNetworkManager } from "@oh-my-pi/pi-coding-agent/tools/browser/network";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
@@ -277,6 +278,42 @@ describe("browser observe after an action", () => {
 				);
 				expect(result).toEqual([["Save", "Hang", "Saved"], "early"]);
 			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"excludes an earlier request in the same clock tick but waits for the action's request",
+		async () => {
+			const pages = saveServer();
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+			const page = await browser.browser.newPage();
+			const network = new BrowserNetworkManager(page);
+			try {
+				await page.goto(pages.url);
+				await network.start();
+				// Both requests and the action boundary share one clock tick.
+				const clock = spyOn(Date, "now").mockReturnValue(1_000);
+				try {
+					const earlier = page.waitForRequest(request => request.url().endsWith("/hold"));
+					await page.evaluate(() => document.querySelector<HTMLButtonElement>("#hang")!.click());
+					await earlier;
+					const since = network.nextRequestSeq;
+					expect(network.hasPendingRequests(since)).toBe(false);
+					const started = page.waitForRequest(request => request.url().endsWith("/hold"));
+					await page.evaluate(() => document.querySelector<HTMLButtonElement>("#hang")!.click());
+					await started;
+					expect(network.hasPendingRequests(since)).toBe(true);
+				} finally {
+					clock.mockRestore();
+				}
+			} finally {
+				await network.close();
+				await page.close();
+				await releaseBrowser(browser, { kill: true });
 				pages.stop();
 			}
 		},

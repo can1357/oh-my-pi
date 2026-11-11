@@ -1912,8 +1912,8 @@ export class WorkerCore {
 	#webmcp?: WebMcpController;
 	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
-	/** Start of the earliest input action or navigation since the last look; the next look settles it. */
-	#actionStartedAt?: number;
+	/** Request boundary of the earliest action since the last look; the next look settles it. */
+	#actionRequestSeq?: number;
 	/** The settle a look started, which looks arriving while it runs wait for too. */
 	#settling?: Promise<void>;
 	readonly #recording = new RecordingController();
@@ -2870,7 +2870,7 @@ export class WorkerCore {
 				label,
 				perOpMs,
 				sig => {
-					this.#actionStartedAt ??= Date.now();
+					this.#actionRequestSeq ??= this.#requireNetwork().nextRequestSeq;
 					return fn(sig);
 				},
 				selectorOpts,
@@ -3601,9 +3601,9 @@ export class WorkerCore {
 	 * look arriving while another one settles waits for that settle.
 	 */
 	async #settleAfterAction(signal: AbortSignal, perOpMs: number): Promise<void> {
-		const since = this.#actionStartedAt;
+		const since = this.#actionRequestSeq;
 		if (since !== undefined) {
-			this.#actionStartedAt = undefined;
+			this.#actionRequestSeq = undefined;
 			const settling = this.#settle(since, Math.min(SETTLE_TIMEOUT_MS, perOpMs / 2)).finally(() => {
 				if (this.#settling === settling) this.#settling = undefined;
 			});
@@ -3613,7 +3613,7 @@ export class WorkerCore {
 		if (settling) await untilAborted(signal, () => settling);
 	}
 
-	/** Wait out {@link #settleAfterAction}'s conditions for the requests started at or after `since`. */
+	/** Wait out {@link #settleAfterAction}'s conditions for requests at or after sequence `since`. */
 	async #settle(since: number, boundMs: number): Promise<void> {
 		const page = this.#requirePage();
 		const network = this.#requireNetwork();
