@@ -374,9 +374,10 @@ export class AgentRegistry implements AgentRegistryApi {
 		const ref = this.#refs.get(id);
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		// The result came from a run that ended before the current one started (its driver
-		// awaited while a wake began): it does not settle the run in flight.
+		// awaited while a wake began): it does not settle the run in flight. A run yields only
+		// after its start and a model response, so a start in the yield's millisecond is a later run.
 		const runStartedAt = ref.status === "running" ? ref.lifecycle?.runStartedAt : undefined;
-		if (responseAt !== undefined && runStartedAt !== undefined && runStartedAt > responseAt) return false;
+		if (responseAt !== undefined && runStartedAt !== undefined && runStartedAt >= responseAt) return false;
 		const now = Date.now();
 		ref.lifecycle = {
 			...ref.lifecycle,

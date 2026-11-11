@@ -149,4 +149,13 @@ describe("AgentRegistry final-result acceptance", () => {
 		// The wake run's own result still settles it.
 		expect(registry.markResultAccepted("PolicyCommand", ref, 4_000)).toBe(true);
 	});
+
+	it("does not stamp a wake run that started in the millisecond of the previous run's yield", () => {
+		const { ref, startRun } = syncedSession("PolicyCommand");
+		startRun(1_000);
+		startRun(2_000);
+
+		expect(registry.markResultAccepted("PolicyCommand", ref, 2_000)).toBe(false);
+		expect(registry.get("PolicyCommand")?.lifecycle?.acceptedAt).toBeUndefined();
+	});
 });
