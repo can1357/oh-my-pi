@@ -381,6 +381,48 @@ describe("AskTool without a form surface", () => {
 		});
 	});
 
+	it("titles each prompt with the form text around its field", async () => {
+		const select = vi.fn<Select>(async () => "Share it");
+		const input = vi.fn<Input>(async () => "4");
+		await new AskTool(createSession()).execute(
+			"call-context",
+			{
+				html: `<form>
+  <p>Both jobs read the same base image.</p>
+  <ul><li>build: needs the toolchain</li><li>test: only the runtime</li></ul>
+  <pre>FROM debian:12</pre>
+  <table><tr><th>Job</th><th>Time</th></tr><tr><td>build</td><td>4m</td></tr></table>
+  <p>How should these two jobs use the image?</p>
+  <label><input type="radio" name="mode" value="share" checked> Share it</label>
+  <label><input type="radio" name="mode" value="split"> Split it</label>
+  <fieldset><legend>Caching</legend>
+    <p>Layers are cached per runner.</p>
+    <label>Cache size (GB) <input type="number" name="cache"></label>
+  </fieldset>
+  <p>Both answers can change later.</p>
+</form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ select, input }),
+		);
+
+		// The paragraph right before the group is its question, so it shows once, last.
+		expect(select.mock.calls[0]?.[0]).toBe(
+			[
+				"Both jobs read the same base image.",
+				"- build: needs the toolchain\n- test: only the runtime",
+				"FROM debian:12",
+				"Job | Time\nbuild | 4m",
+				"How should these two jobs use the image?",
+			].join("\n\n"),
+		);
+		// A later field shows only the text since the previous one, plus what follows the last field.
+		expect(input.mock.calls[0]?.[0]).toBe(
+			["Caching", "Layers are cached per runner.", "Both answers can change later.", "Cache size (GB)"].join("\n\n"),
+		);
+	});
+
 	it("takes a radio's typed Other text as its value and appends a checkbox group's", async () => {
 		const selects: { title: string; checked?: readonly number[] }[] = [];
 		const picks = ["Other (type your own)", "Other (type your own)", "CI", "Other (type your own)"];

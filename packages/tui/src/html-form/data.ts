@@ -8,7 +8,7 @@
  * const data = defaultFormData(form);   // { db: "sqlite", notes: "" }
  * formAnswers(form, data);              // [{ name: "db", question: "Database", answer: "SQLite" }, …]
  */
-import { type ChoiceField, type FormField, type HtmlForm, spansText, type TextField } from "./parse";
+import { type ChoiceField, type FormBlock, type FormField, type HtmlForm, spansText, type TextField } from "./parse";
 
 /** Submitted value of one control: text, a number for `number`/`range` inputs, or a group's checked values. */
 export type HtmlFormValue = string | number | string[];
@@ -154,6 +154,71 @@ export function fieldQuestions(form: HtmlForm): Map<FormField, string> {
 		}
 	}
 	return questions;
+}
+
+/**
+ * Plain text of a context block (paragraph or heading, list, preformatted
+ * text, table) for hosts that cannot draw the form; undefined for fields and
+ * pictures.
+ */
+export function blockText(block: FormBlock): string | undefined {
+	switch (block.kind) {
+		case "text":
+			return spansText(block.spans);
+		case "pre":
+			return block.text;
+		case "list":
+			return block.items
+				.map((item, index) => `${block.ordered ? `${index + 1}.` : "-"} ${spansText(item)}`)
+				.join("\n");
+		case "table":
+			return block.rows.map(cells => cells.map(cell => spansText(cell)).join(" | ")).join("\n");
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * The form text each named field's prompt carries when a host asks the form
+ * one field at a time: section titles and context blocks since the previous
+ * named field, text between the field's own options, and, for the last field,
+ * the text after it. Text that already is the field's question
+ * ({@link fieldQuestions}) is left out. Parts are separated by blank lines;
+ * a field without context maps to `""`.
+ */
+export function fieldContexts(form: HtmlForm): Map<FormField, string> {
+	const questions = fieldQuestions(form);
+	const parts = new Map<FormField, string[]>();
+	let pending: string[] = [];
+	let last: string[] | undefined;
+	for (const section of form.sections) {
+		const title = spansText(section.title).trim();
+		if (title) pending.push(title);
+		// A radio/checkbox group with text between its options keeps that text until `ownerEnd`.
+		let owner: string[] | undefined;
+		let ownerEnd = 0;
+		for (const [index, block] of section.blocks.entries()) {
+			if (block.kind === "field") {
+				if (!block.field.name) continue;
+				const question = questions.get(block.field);
+				const own = pending.filter(part => oneLine(part) !== question);
+				parts.set(block.field, own);
+				pending = [];
+				last = own;
+				owner = own;
+				ownerEnd = block.optionsEnd ?? 0;
+				continue;
+			}
+			const text = blockText(block);
+			if (!text?.trim()) continue;
+			if (owner && index < ownerEnd) owner.push(text);
+			else pending.push(text);
+		}
+	}
+	last?.push(...pending);
+	const contexts = new Map<FormField, string>();
+	for (const [field, own] of parts) contexts.set(field, own.join("\n\n"));
+	return contexts;
 }
 
 /** Answers of every named field, in form order, with option values shown as their labels. */

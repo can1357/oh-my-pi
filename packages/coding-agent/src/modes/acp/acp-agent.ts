@@ -76,6 +76,7 @@ import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import {
+	blockText,
 	choiceValue,
 	defaultFormData,
 	fieldQuestions,
@@ -641,17 +642,8 @@ function formElicitationMessage(form: HtmlForm): string {
 		const title = spansText(section.title).trim();
 		if (title) parts.push(title);
 		for (const block of section.blocks) {
-			if (block.kind === "text") parts.push(spansText(block.spans));
-			else if (block.kind === "pre") parts.push(block.text);
-			else if (block.kind === "list") {
-				parts.push(
-					block.items
-						.map((item, index) => `${block.ordered ? `${index + 1}.` : "-"} ${spansText(item)}`)
-						.join("\n"),
-				);
-			} else if (block.kind === "table") {
-				parts.push(block.rows.map(cells => cells.map(cell => spansText(cell)).join(" | ")).join("\n"));
-			}
+			const text = blockText(block);
+			if (text) parts.push(text);
 		}
 	}
 	return parts.filter(part => part.trim()).join("\n\n") || "Fill in the form";
