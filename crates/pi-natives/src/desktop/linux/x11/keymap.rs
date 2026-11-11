@@ -241,6 +241,13 @@ impl Keymap {
 			.filter(|&&(candidate, _)| candidate == keycode)
 			.fold(0, |mask, &(_, bit)| mask | bit)
 	}
+
+	/// Core state bits Num Lock's key sets, 0 when the map has no Num Lock.
+	pub(super) fn num_lock_mask(&self) -> u16 {
+		self
+			.lookup(Keysym::Num_Lock.raw())
+			.map_or(0, |(keycode, _)| self.modifier_mask(keycode))
+	}
 }
 
 /// Emits `steps` in order. When one fails, the keys this run still holds are
