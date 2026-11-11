@@ -1102,6 +1102,7 @@ fn release_pair(
 	if !wait_unplugged(conn, slaves) {
 		// A timed-out teardown must never be reclaimed, even after its holder
 		// dies.
+		unfocus(conn, master_keyboard);
 		let _ = write_holder(conn, holder, master_pointer, b"unplug-timeout");
 		return;
 	}
@@ -1455,7 +1456,17 @@ mod tests {
 			.find(|info| info.type_ == DeviceType::SLAVE_POINTER && info.attachment == pair.0)
 			.unwrap()
 			.deviceid;
+		conn
+			.xinput_xi_set_focus(root, CURRENT_TIME, pair.1)
+			.unwrap()
+			.check()
+			.unwrap();
 		release_pair(&conn, holder, root, park, pair.0, pair.1, &[slave]);
+		assert_eq!(
+			conn.xinput_xi_get_focus(pair.1).unwrap().reply().unwrap().focus,
+			NONE,
+			"a retired pair must not retain its target's virtual focus"
+		);
 		let value = read_holder(&conn, holder, pair.0).unwrap();
 		assert!(
 			!is_claimable(
