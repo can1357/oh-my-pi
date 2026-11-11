@@ -1041,7 +1041,7 @@ export class SessionManager {
 	#atomicEntryBatch: AtomicEntryBatch | undefined;
 	/** Client message IDs carried by journal entries; see {@link #indexedClientMessageIds}. */
 	#clientMessageIdIndex:
-		| { entries: SessionEntry[]; indexed: number; submitted: Set<string>; resolved: Set<string> }
+		| { entries: WeakRef<SessionEntry[]>; indexed: number; submitted: Set<string>; resolved: Set<string> }
 		| undefined;
 
 	#artifactManager: ArtifactManager | null = null;
@@ -3096,8 +3096,6 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
-		// The cache holds the journal array itself; dropping it lets the released transcript be collected.
-		this.#clientMessageIdIndex = undefined;
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
@@ -3801,12 +3799,14 @@ export class SessionManager {
 	 */
 	#indexedClientMessageIds(): { submitted: Set<string>; resolved: Set<string> } {
 		let index = this.#clientMessageIdIndex;
-		if (index?.entries !== this.#entries) {
-			index = { entries: this.#entries, indexed: 0, submitted: new Set(), resolved: new Set() };
+		const entries = this.#entries;
+		// Weak anchor: a replaced journal (release, switch, new session, rewrite) stays collectable until the next lookup.
+		if (index?.entries.deref() !== entries) {
+			index = { entries: new WeakRef(entries), indexed: 0, submitted: new Set(), resolved: new Set() };
 			this.#clientMessageIdIndex = index;
 		}
-		for (; index.indexed < index.entries.length; index.indexed++) {
-			const entry = index.entries[index.indexed]!;
+		for (; index.indexed < entries.length; index.indexed++) {
+			const entry = entries[index.indexed]!;
 			if ((entry.type === "message" || entry.type === "custom_message") && entry.clientMessageId !== undefined) {
 				index.submitted.add(entry.clientMessageId);
 			} else if (

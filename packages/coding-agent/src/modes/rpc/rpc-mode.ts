@@ -2052,39 +2052,43 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					command.clientMessageId === undefined
 						? undefined
 						: session.beginLocalClientMessage(command.clientMessageId);
-				const builtinResult = await executeAcpBuiltinSlashCommand(text, {
-					session,
-					sessionManager: session.sessionManager,
-					settings: session.settings,
-					cwd: session.sessionManager.getCwd(),
-					output: commandOutput => output({ type: "command_output", text: commandOutput }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
-					mcpManager: options.mcpManager,
-					reconnectMcpServer: options.mcpManager
-						? async (mcpName, selected) => {
-								const manager = options.mcpManager!;
-								const state = await reconnectMcpManagerServer(manager, mcpName, selected);
-								if (state) {
-									// RPC mode wires no tools-changed callback; refresh the
-									// session binding so later prompts see the recovered tools.
-									await session.refreshMCPTools(manager.getTools());
+				const runBuiltin = () =>
+					executeAcpBuiltinSlashCommand(text, {
+						session,
+						sessionManager: session.sessionManager,
+						settings: session.settings,
+						cwd: session.sessionManager.getCwd(),
+						output: commandOutput => output({ type: "command_output", text: commandOutput }),
+						refreshCommands: emitAvailableCommandsUpdate,
+						reloadPlugins: reloadPluginState,
+						mcpManager: options.mcpManager,
+						reconnectMcpServer: options.mcpManager
+							? async (mcpName, selected) => {
+									const manager = options.mcpManager!;
+									const state = await reconnectMcpManagerServer(manager, mcpName, selected);
+									if (state) {
+										// RPC mode wires no tools-changed callback; refresh the
+										// session binding so later prompts see the recovered tools.
+										await session.refreshMCPTools(manager.getTools());
+									}
+									return state;
 								}
-								return state;
-							}
-						: undefined,
-					signal: builtinAbort.signal,
-					runCommandInBackground: task => {
-						backgroundedBuiltin = true;
-						shutdownCoordinator.track(task().finally(() => builtinCommandAborts.delete(builtinAbort)));
-					},
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-					},
-				}).catch((builtinError: unknown) => {
+							: undefined,
+						signal: builtinAbort.signal,
+						runCommandInBackground: task => {
+							backgroundedBuiltin = true;
+							shutdownCoordinator.track(task().finally(() => builtinCommandAborts.delete(builtinAbort)));
+						},
+						notifyTitleChanged: async () => {
+							output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+						},
+						notifyConfigChanged: async () => {
+							output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+						},
+					});
+				const builtinResult = await (
+					registration ? session.withLocalClientMessage(registration, runBuiltin) : runBuiltin()
+				).catch((builtinError: unknown) => {
 					if (registration) session.finishLocalClientMessage(registration, false);
 					throw builtinError;
 				});

@@ -1283,8 +1283,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#clientMessageIds = new WeakMap<AgentMessage, string>();
 	#clientMessageAdmissions?: { sessionId: string; ids: Set<string> };
-	/** Correlated inputs a local command is handling; each registration is its own token, see {@link beginLocalClientMessage}. */
-	#localClientMessages = new Set<LocalClientMessageRegistration>();
+	/**
+	 * Correlated inputs a local command is handling, each registration its own token (see
+	 * {@link beginLocalClientMessage}); the value records that local consumption is already established.
+	 */
+	#localClientMessages = new Map<LocalClientMessageRegistration, boolean>();
+	/** The local command whose async work is running; a transition it starts is its own. */
+	#localClientMessageScope = new AsyncLocalStorage<LocalClientMessageRegistration>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -8862,7 +8867,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					clientMessageId === undefined ? undefined : this.beginLocalClientMessage(clientMessageId);
 				let consumed = false;
 				try {
-					const command = await this.#tryExecuteExtensionCommand(text, options?.onPromptAdmitted);
+					// Transitions the command starts are attributed to it; a routed extension command has consumed the input.
+					const scoped = <T>(run: () => Promise<T>): Promise<T> =>
+						registration ? this.withLocalClientMessage(registration, run) : run();
+					const command = await scoped(() =>
+						this.#tryExecuteExtensionCommand(text, () => {
+							if (registration && this.#localClientMessages.has(registration)) {
+								this.#localClientMessages.set(registration, true);
+							}
+							options?.onPromptAdmitted?.();
+						}),
+					);
 					if (command) {
 						// Queued only now, so whatever the command sent runs before them. A failed
 						// command hands them back with itself instead of letting them run without it.
@@ -8873,7 +8888,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}
 
 					// Try custom commands (TypeScript slash commands)
-					const customResult = await this.#tryExecuteCustomCommand(text);
+					const customResult = await scoped(() => this.#tryExecuteCustomCommand(text));
 					if (customResult !== null) {
 						if (customResult === "") {
 							followUps?.release();
@@ -11313,6 +11328,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			throw new Error(`clientMessageId already submitted: ${id}`);
 		}
 		if (this.sessionManager.hasClientMessageEntry(id)) throw new Error(`clientMessageId already submitted: ${id}`);
+		// Queued input not yet journaled survives a journal change (`branch`), so its ID stays taken.
+		const pending = [
+			this.agent.peekLiveSteeredMessages(),
+			this.agent.peekSteeringQueue(),
+			this.agent.peekFollowUpQueue(),
+			this.agent.peekUndeliveredQueuedMessages(),
+			this.#heldQueuedMessages,
+		];
+		for (const messages of pending) {
+			for (const message of messages) {
+				if (this.#clientMessageIds.get(message) === id) throw new Error(`clientMessageId already submitted: ${id}`);
+			}
+		}
 		if (this.sessionManager.isClientMessageResolved(id)) throw new Error(`clientMessageId already resolved: ${id}`);
 	}
 
@@ -11364,8 +11392,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	beginLocalClientMessage(id: string): LocalClientMessageRegistration {
 		const registration: LocalClientMessageRegistration = { id, journalId: this.sessionManager.getSessionId() };
-		this.#localClientMessages.add(registration);
+		this.#localClientMessages.set(registration, false);
 		return registration;
+	}
+
+	/** Run the command handling `registration`; a session transition started from it resolves its input first. */
+	withLocalClientMessage<T>(registration: LocalClientMessageRegistration, run: () => Promise<T>): Promise<T> {
+		return this.#localClientMessageScope.run(registration, run);
 	}
 
 	/**
@@ -11379,12 +11412,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/**
+	 * Resolve, in the journal being left, the inputs whose local consumption is established or whose
+	 * command started this transition. A command still deciding (a custom command expanding into a
+	 * model prompt) keeps its registration through an unrelated transition.
+	 */
 	#resolveLocalClientMessagesBeforeTransition(): void {
 		if (this.#localClientMessages.size === 0) return;
 		const journalId = this.sessionManager.getSessionId();
+		const responsible = this.#localClientMessageScope.getStore();
 		const ids: string[] = [];
-		for (const registration of this.#localClientMessages) {
-			if (registration.journalId !== journalId) continue;
+		for (const [registration, consumed] of this.#localClientMessages) {
+			if (registration.journalId !== journalId || !(consumed || registration === responsible)) continue;
 			ids.push(registration.id);
 			this.#localClientMessages.delete(registration);
 		}

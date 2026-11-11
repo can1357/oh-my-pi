@@ -299,7 +299,71 @@ describe("AgentSession client intent identity", () => {
 		expect(found.persistedClientMessageIds).toEqual(["intent-reused"]);
 	});
 
-	test("lets a released journal be collected after its client message IDs were indexed", async () => {
+	test("an unrelated transition leaves a custom command that is still expanding unresolved", async () => {
+		const expanding = Promise.withResolvers<void>();
+		const finishExpand = Promise.withResolvers<void>();
+		const expand: LoadedCustomCommand = {
+			path: "expand",
+			resolvedPath: "expand",
+			source: "user",
+			command: {
+				name: "expand",
+				description: "Expands into a prompt after a delay",
+				execute: async () => {
+					expanding.resolve();
+					await finishExpand.promise;
+					return "expanded request";
+				},
+			},
+		};
+		const { session } = setup({ config: { customCommands: [expand] } });
+		const expanded = session.prompt("/expand", intent("intent-expanding"));
+		await withTimeout(expanding.promise, 5_000, "The custom command never started");
+		// Starts a transition, then refuses: it is not the command's, so it must not consume the input.
+		await expect(session.branch("missing-entry")).rejects.toThrow("Invalid entry ID for branching");
+		finishExpand.resolve();
+		await expanded;
+		await session.settleInFlightMessagePersistence();
+		const found = await status(session, ["intent-expanding"]);
+		expect(found.resolvedClientMessageIds).toEqual([]);
+		expect(found.persistedClientMessageIds).toEqual(["intent-expanding"]);
+	});
+
+	test("a queued follow-up keeps its ID taken after a branch changes the journal", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { session, manager } = setup({
+			responses: [
+				async () => ({ content: ["first done"] }),
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return { content: ["done"] };
+				},
+			],
+		});
+		cleanup.push(async () => release.resolve());
+		await session.prompt("first");
+		const firstUser = manager.getEntries().find(entry => entry.type === "message" && entry.message.role === "user");
+		if (!firstUser) throw new Error("Expected a journaled first prompt");
+		const running = session.prompt("second");
+		await withTimeout(entered.promise, 5_000, "Provider did not reach the held response");
+		await session.followUp("queued", undefined, intent("intent-queued"));
+		const journal = manager.getSessionId();
+		expect((await session.branch(firstUser.id)).cancelled).toBe(false);
+		expect(manager.getSessionId()).not.toBe(journal);
+		expect(session.getQueuedMessages().clientMessageIds?.followUp).toEqual(["intent-queued"]);
+		await expect(session.followUp("duplicate", undefined, intent("intent-queued"))).rejects.toThrow(
+			"clientMessageId already submitted: intent-queued",
+		);
+		release.resolve();
+		await running.catch(() => {});
+	});
+
+	test.each([
+		["released", (manager: SessionManager) => manager.releaseRetainedEntries()],
+		["replaced by a new session", (manager: SessionManager) => manager.newSession()],
+	])("lets a journal %s be collected after its client message IDs were indexed", async (_, leave) => {
 		const manager = SessionManager.inMemory("/cwd");
 		const entry = (() => {
 			manager.appendMessage(
@@ -309,7 +373,7 @@ describe("AgentSession client intent identity", () => {
 			expect(manager.hasClientMessageEntry("intent-released")).toBe(true);
 			return new WeakRef(manager.getEntries()[0]!);
 		})();
-		manager.releaseRetainedEntries();
+		await leave(manager);
 		// Not a timing guess: a WeakRef target stays alive until the current task ends, so yield one task.
 		await Bun.sleep(0);
 		Bun.gc(true);
