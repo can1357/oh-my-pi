@@ -44,6 +44,8 @@ interface RfdChild {
 	announced: boolean;
 	/** Last state patch sent (`running` / `idle` / cleared). Guards duplicate running patches. */
 	lastState: "running" | "idle" | null;
+	/** Whether a terminal patch already revoked the cancel capability. Revival restores it. */
+	settled: boolean;
 }
 
 /**
@@ -56,10 +58,25 @@ export class RfdSubagentTracker {
 	readonly #send: RfdUpdateSender;
 	#unsubscribers: Array<() => void> = [];
 	#disposed = false;
+	/** Per-child send chains: every frame for one child applies in arrival order. */
+	readonly #queues = new Map<string, Promise<void>>();
 
 	constructor(options: { parentSessionId: string; send: RfdUpdateSender }) {
 		this.#parentSessionId = options.parentSessionId;
 		this.#send = options.send;
+	}
+
+	/** Run `work` after the child's pending sends; concurrent frames serialize per child. */
+	#serialize(id: string, work: () => Promise<void>): Promise<void> {
+		const tail = this.#queues.get(id) ?? Promise.resolve();
+		const next = tail.then(work, work);
+		this.#queues.set(id, next);
+		void next
+			.catch(() => {})
+			.finally(() => {
+				if (this.#queues.get(id) === next) this.#queues.delete(id);
+			});
+		return next;
 	}
 
 	/** Tracked child entries (announced, live or settled). */
@@ -86,10 +103,19 @@ export class RfdSubagentTracker {
 
 	async handleLifecycle(payload: SubagentLifecyclePayload): Promise<void> {
 		if (!payload || typeof payload.id !== "string" || payload.id.length === 0) return;
+		return this.#serialize(payload.id, () => this.#applyLifecycle(payload));
+	}
+
+	/**
+	 * Apply one lifecycle frame for a child. Runs inside the per-child send
+	 * chain, so announce always precedes running, and a terminal settle always
+	 * precedes any later revival frame.
+	 */
+	async #applyLifecycle(payload: SubagentLifecyclePayload): Promise<void> {
 		if (payload.status === "started") {
 			let child = this.#children.get(payload.id);
 			if (!child) {
-				child = { id: payload.id, announced: false, lastState: null };
+				child = { id: payload.id, announced: false, lastState: null, settled: false };
 				this.#children.set(payload.id, child);
 			}
 			if (child.announced) return;
@@ -118,7 +144,9 @@ export class RfdSubagentTracker {
 		if (payload.status !== "completed" && payload.status !== "failed" && payload.status !== "aborted") return;
 		const child = this.#children.get(payload.id);
 		if (!child) return;
+		if (child.lastState === "idle") return;
 		child.lastState = "idle";
+		child.settled = true;
 		await this.#send({
 			sessionId: this.#parentSessionId,
 			update: {
@@ -146,12 +174,17 @@ export class RfdSubagentTracker {
 			});
 		} else if (ref.status === "running" && child.lastState !== "running") {
 			child.lastState = "running";
+			// A revival after settle must also restore the cancel capability
+			// the terminal patch revoked; the announce path already carries it.
+			const capabilities = child.settled ? { cancel: {} } : undefined;
+			child.settled = false;
 			void this.#send({
 				sessionId: this.#parentSessionId,
 				update: {
 					sessionUpdate: "subagent_update",
 					sessionId: child.id,
 					state: { state: "running" },
+					...(capabilities !== undefined ? { capabilities } : {}),
 				},
 			});
 		}

@@ -431,6 +431,10 @@ type ManagedSessionRecord = {
 	rfdSubagentTracker: RfdSubagentTracker | undefined;
 	/** Registry status feed for the RFD tracker; released with the record. */
 	rfdRegistryUnsubscribe: (() => void) | undefined;
+	/** Child-event forwarding subscription for the AIR tracker; released with the record. */
+	airChildEventUnsubscribe: (() => void) | undefined;
+	/** Child-event forwarding subscription for the RFD tracker; released with the record. */
+	rfdChildEventUnsubscribe: (() => void) | undefined;
 };
 type ReplayableMessage = {
 	role: string;
@@ -1654,7 +1658,11 @@ export class AcpAgent implements Agent {
 				}
 				await AgentLifecycleManager.global().release(sessionId, ref, { tombstone: true });
 			} catch (error) {
-				logger.warn("ACP child cancel failed", { sessionId, error });
+				// A failed kill must reject the ACP cancel request: returning true
+				// would tell the client the child stopped while it is still running.
+				throw new Error(
+					`Failed to cancel child session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 			return true;
 		}
@@ -2063,7 +2071,31 @@ export class AcpAgent implements Agent {
 			send: params => this.#connection.notify("session/update", params),
 		});
 		tracker.subscribe(subagentEventBus);
+		record.airChildEventUnsubscribe = subagentEventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+			void this.#forwardAirChildEvent(record, data as SubagentEventPayload).catch(() => {});
+		});
 		record.subagentTracker = tracker;
+	}
+
+	/**
+	 * Re-emit a child's session event on the parent session tagged with the
+	 * child's routing key. AIR's `routeNativeSubagentEvents` reads
+	 * `_meta.jetbrains.air.subagentSessionId` and attributes the update to
+	 * the child transcript. Only for announced children; unannounced frames
+	 * stay silent so a client never routes traffic for an unknown child.
+	 */
+	async #forwardAirChildEvent(record: ManagedSessionRecord, payload: SubagentEventPayload): Promise<void> {
+		const tracker = record.subagentTracker;
+		if (!tracker || !tracker.children.has(payload.id)) return;
+		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, record.protocolSessionId, {
+			cwd: record.session.sessionManager.getCwd(),
+		})) {
+			const tagged = {
+				...notification,
+				update: withSubagentMeta(notification.update, payload.id),
+			};
+			await this.#connection.sessionUpdate(tagged);
+		}
 	}
 
 	/**
@@ -2079,7 +2111,7 @@ export class AcpAgent implements Agent {
 			send: notification => this.#connection.sessionUpdate(notification),
 		});
 		tracker.subscribe(subagentEventBus);
-		subagentEventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+		record.rfdChildEventUnsubscribe = subagentEventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
 			void this.#forwardChildEvent(record, data as SubagentEventPayload).catch(() => {});
 		});
 		record.rfdSubagentTracker = tracker;
@@ -2179,6 +2211,8 @@ export class AcpAgent implements Agent {
 			subagentTracker: undefined,
 			rfdSubagentTracker: undefined,
 			rfdRegistryUnsubscribe: undefined,
+			airChildEventUnsubscribe: undefined,
+			rfdChildEventUnsubscribe: undefined,
 		};
 	}
 
@@ -3686,6 +3720,10 @@ export class AcpAgent implements Agent {
 		record.rfdSubagentTracker = undefined;
 		record.rfdRegistryUnsubscribe?.();
 		record.rfdRegistryUnsubscribe = undefined;
+		record.airChildEventUnsubscribe?.();
+		record.airChildEventUnsubscribe = undefined;
+		record.rfdChildEventUnsubscribe?.();
+		record.rfdChildEventUnsubscribe = undefined;
 		record.pendingCompactionNotifications = undefined;
 		if (record.mcpManager) {
 			try {

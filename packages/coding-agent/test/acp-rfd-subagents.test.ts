@@ -92,6 +92,61 @@ describe("rfd subagent tracker", () => {
 		]);
 	});
 
+	test("concurrent settle serializes after announce and running", async () => {
+		const { sent, send } = sentNotifications();
+		let releaseAnnounce!: () => void;
+		const gate = new Promise<void>(resolve => {
+			releaseAnnounce = resolve;
+		});
+		let calls = 0;
+		const tracker = new RfdSubagentTracker({
+			parentSessionId: "p",
+			send: async notification => {
+				calls++;
+				if (calls === 1) await gate;
+				return send(notification);
+			},
+		});
+		const started = tracker.handleLifecycle(lifecycle("started", { id: "w" }));
+		const settled = tracker.handleLifecycle(lifecycle("completed", { id: "w" }));
+		releaseAnnounce();
+		await Promise.all([started, settled]);
+		expect(sent.map(entry => entry.update)).toEqual([
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "w",
+				title: "task",
+				description: "Do the thing",
+				capabilities: { cancel: {} },
+			},
+			{ sessionUpdate: "subagent_update", sessionId: "w", state: { state: "running" } },
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "w",
+				state: { state: "idle", stopReason: "end_turn" },
+				capabilities: { cancel: null },
+			},
+		]);
+	});
+
+	test("revival after settle restores the cancel capability", async () => {
+		const { sent, send } = sentNotifications();
+		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send });
+		await tracker.handleLifecycle(lifecycle("started"));
+		await tracker.handleLifecycle(lifecycle("completed"));
+		tracker.handleRegistryStatus({ id: "worker-1", status: "parked" });
+		tracker.handleRegistryStatus({ id: "worker-1", status: "running" });
+		expect(sent.slice(-2).map(entry => entry.update)).toEqual([
+			{ sessionUpdate: "subagent_update", sessionId: "worker-1", state: null },
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "worker-1",
+				state: { state: "running" },
+				capabilities: { cancel: {} },
+			},
+		]);
+	});
+
 	test("client gate requires a subagents object", () => {
 		expect(isStandardSubagentClient(undefined)).toBe(false);
 		expect(isStandardSubagentClient({})).toBe(false);
