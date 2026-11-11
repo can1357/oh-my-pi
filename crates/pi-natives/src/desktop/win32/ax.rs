@@ -510,8 +510,14 @@ impl AxBackend for Win32Ax {
 					.map_err(ax_error)
 			})?,
 		}
-		let pattern = pattern_value(element);
-		let legacy = if pattern.is_none() {
+		// Password providers cannot supply evidence, so do not query hidden
+		// or protected representations just to discard them.
+		let pattern = if password == Some(true) {
+			None
+		} else {
+			pattern_value(element)
+		};
+		let legacy = if password != Some(true) && pattern.is_none() {
 			legacy_value(element)
 		} else {
 			None
