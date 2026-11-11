@@ -150,10 +150,11 @@ const LOCAL_ANSWER_MAX_TOKENS = 16;
 const LOCAL_REASONING_MAX_TOKENS = 1024;
 
 /**
- * How long a candidate stays skipped after its account rejected a judgment
- * outright (401/403 credential, 402 billing cap). Every judgment rebuilds the
- * chain, so without this each call re-pays the rejected request plus a
- * credential-rotation round trip before reaching the next candidate.
+ * How long a candidate stays skipped after a rejection that persists until
+ * something changes out of band: 401/403 credential, 402 billing cap, or 404
+ * for a model the route no longer serves. Every judgment rebuilds the chain,
+ * so without this each call re-pays the rejected request (plus a
+ * credential-rotation round trip) before reaching the next candidate.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
 /** A transient hang should not consume the next judgment's budget in the same session. */
@@ -166,13 +167,13 @@ const CANDIDATE_TIMEOUT_COOLDOWN_MS = 30_000;
  * per-call consumers (auto-thinking, subagent starts) resolve a fresh judge.
  */
 const CANDIDATE_TTL_MS = 1_000;
-/** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
+/** Skip-until timestamps and reasons keyed by routed model identity, carried by the registry that produced the rejection. */
 const kRejections = Symbol("judgment.rejections");
 const kTimeouts = Symbol("judgment.timeouts");
 /** Last resolved judge role chain, carried by the registry it was drawn from. */
 const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
-	[kRejections]?: Map<string, number>;
+	[kRejections]?: Map<string, CandidateRejection>;
 	[kTimeouts]?: Map<string, number>;
 	[kRoleChain]?: {
 		settings: Settings;
@@ -464,10 +465,10 @@ export class ChainJudge implements Judge {
 			if (timedOutBefore && !candidate.explicit) continue;
 			const configuredFallbackRemains = index < lastExplicitIndex;
 			const identity = formatModelStringWithRouting(candidate.model);
-			const skippedUntil = rejections.get(identity);
-			if (skippedUntil !== undefined) {
-				if (skippedUntil > Date.now()) {
-					lastUnavailable = `${identity} rejected the account recently`;
+			const rejection = rejections.get(identity);
+			if (rejection !== undefined) {
+				if (rejection.until > Date.now()) {
+					lastUnavailable = `${identity} ${rejection.reason} recently`;
 					continue;
 				}
 				rejections.delete(identity);
@@ -506,8 +507,10 @@ export class ChainJudge implements Judge {
 				const timedOut =
 					timeout !== undefined && (timeout.aborted || (error instanceof Error && error.name === "TimeoutError"));
 				if (!timedOut && isAbortOrTimeout(error)) throw error;
-				const rejected = isAccountRejection(error);
-				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
+				const rejected = rejectionReason(error);
+				if (rejected) {
+					rejections.set(identity, { until: Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS, reason: rejected });
+				}
 				if (timedOut) {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
@@ -560,7 +563,7 @@ export class ChainJudge implements Judge {
 		}).catch(error => logger.warn("judgment telemetry failed", { error: String(error) }));
 	}
 
-	#rejections(): Map<string, number> {
+	#rejections(): Map<string, CandidateRejection> {
 		const registry: RegistryWithRejections = this.#deps.registry;
 		return (registry[kRejections] ??= new Map());
 	}
@@ -784,10 +787,27 @@ function nativeJudge(
 	};
 }
 
-/** Credential or billing rejection: the account cannot serve this candidate until something changes out of band. */
-function isAccountRejection(error: unknown): boolean {
-	const status = AIError.status(error);
-	return status === 401 || status === 402 || status === 403;
+/** Why a candidate is skipped until {@link CandidateRejection.until}; rendered as `<identity> <reason> recently`. */
+interface CandidateRejection {
+	until: number;
+	reason: string;
+}
+
+/**
+ * Reason for a rejection the route keeps answering until something changes out of band — a credential or
+ * billing rejection of the account, or a 404 for a model the route does not serve — else `undefined`.
+ */
+function rejectionReason(error: unknown): string | undefined {
+	switch (AIError.status(error)) {
+		case 401:
+		case 402:
+		case 403:
+			return "rejected the account";
+		case 404:
+			return "did not serve the model";
+		default:
+			return undefined;
+	}
 }
 
 function isAbortOrTimeout(error: unknown): boolean {

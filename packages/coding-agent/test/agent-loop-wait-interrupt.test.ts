@@ -68,14 +68,14 @@ describe("agent-loop wait wake delivery", () => {
 		const registry = AgentRegistry.global();
 		const inbox: IrcMessage[] = [];
 		// The host owns the inbox and boundary injection; the real WaitTool
-		// drains this same inbox before it registers a future bus waiter.
+		// hands every message it takes off the bus to this same inbox.
 		registry.register({
 			id: "Main",
 			displayName: "Main",
 			kind: "main",
 			status: "running",
 			session: {
-				drainPendingIrcInboxMessages: () => inbox.splice(0),
+				hasIrcInterrupts: () => inbox.length > 0,
 				deliverIrcMessage: async (message: IrcMessage) => {
 					inbox.push(message);
 					return "queued";
@@ -311,17 +311,18 @@ describe("agent-loop wait wake delivery", () => {
 				expect(result.isError).toBe(false);
 				expect(execute).toHaveBeenCalledTimes(1);
 				expect(result.result.details).not.toHaveProperty("__synthetic");
-				expect(messages.filter(message => messageText(message).includes(payload))).toHaveLength(1);
+				const carriers = messages.filter(message => messageText(message).includes(payload));
+				expect(carriers).toHaveLength(1);
 				if (stage === "queued at admission" || stage === "queued before execute") {
 					expect(execute.mock.calls[0][2]?.reason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 				}
 				if (source === "background") {
 					expect(manager.isJobResultConsumed(jobId)).toBe(true);
 					expect(consumed.mock.calls.filter(([ids]) => ids.includes(jobId))).toHaveLength(1);
-				} else if (source === "parent") {
-					expect(result.result.details).toMatchObject({ interrupted: true });
 				} else {
-					expect(result.result.details).toMatchObject({ waited: [{ from: "Peer", body: payload }] });
+					// A message never rides in the wait's result: it arrives as a user turn after it.
+					expect(result.result.details).toMatchObject({ interrupted: true });
+					expect(carriers[0]?.role).toBe("user");
 				}
 			});
 		}

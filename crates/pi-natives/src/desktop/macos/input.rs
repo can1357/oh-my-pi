@@ -1,6 +1,6 @@
 use std::{
 	ptr,
-	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+	time::{Duration, Instant},
 };
 
 use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag};
@@ -1479,8 +1479,6 @@ const FIELD_WINDOW_NUMBER: u32 = 51;
 const FIELD_WINDOW_CONTEXT: u32 = 52;
 /// Subtype of an `AppKit`-defined event.
 const FIELD_APPKIT_SUBTYPE: u32 = 83;
-/// Shared id that makes `WindowServer` coalesce one gesture's events.
-const FIELD_CLICK_GROUP: u32 = 58;
 const FIELD_WINDOW_UNDER_POINTER: u32 = 91;
 const FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE: u32 = 92;
 /// `NSEventSubtypeTouch`.
@@ -2343,7 +2341,7 @@ fn background_gesture(
 		},
 		PointerEvent::Move { x, y } => {
 			before_post()?;
-			post_hover(source, to, to_wid, window, x, y, click_group_id())
+			post_hover(source, to, to_wid, window, x, y)
 		},
 		PointerEvent::Scroll { x, y, dx, dy } => {
 			before_post()?;
@@ -2708,11 +2706,10 @@ fn background_drag(
 ) -> CoreResult<()> {
 	let (cg_button, down, up, dragged, number) = button_types(button);
 	let flags = held_flags(keys);
-	let group = click_group_id();
 	let sessions = drag_pasteboard_count();
 	let mut picked_up = false;
 	let pointer = |event: &CGEvent, at: CGPoint, click_state, button_number| {
-		route_window_pointer(pid, wid, window, event, at.x, at.y, click_state, button_number, group)?;
+		route_window_pointer(pid, wid, window, event, at.x, at.y, click_state, button_number)?;
 		post(Posted::Pointer, pid, event)
 	};
 	with_held_keys(
@@ -2843,9 +2840,8 @@ fn background_hold(
 ) -> CoreResult<()> {
 	let (cg_button, down, up, _, number) = button_types(button);
 	let flags = held_flags(keys);
-	let group = click_group_id();
 	let pointer = |event: &CGEvent, click_state, button_number| {
-		route_window_pointer(pid, wid, window, event, at.x, at.y, click_state, button_number, group)?;
+		route_window_pointer(pid, wid, window, event, at.x, at.y, click_state, button_number)?;
 		post(Posted::Pointer, pid, event)
 	};
 	with_held_keys(
@@ -2869,7 +2865,8 @@ fn background_hold(
 /// the target, a press/release off-screen that satisfies Chromium's
 /// user-activation gate without hitting any element, then the real presses,
 /// each posted through `post` once `before_press` passes; a release always
-/// follows a posted press.
+/// follows a posted press. Every event carries the current time
+/// ([`stamp_now`]).
 ///
 /// Quartz event locations are global; the separate window-location field is
 /// relative to the window's top-left, including its title bar. Chromium uses
@@ -2884,7 +2881,6 @@ fn background_left_click(
 	before_press: impl Fn() -> CoreResult<()>,
 	post_event: impl Fn(libc::pid_t, &CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let group = click_group_id();
 	let target = CGPoint::new(x, y);
 	let local = window_local(window, x, y);
 	let offscreen = CGPoint::new(-1.0, -1.0);
@@ -2904,11 +2900,11 @@ fn background_left_click(
 			(FIELD_SUBTYPE, SUBTYPE_TOUCH),
 			(FIELD_TARGET_PID, i64::from(pid)),
 			(FIELD_WINDOW_NUMBER, i64::from(wid)),
-			(FIELD_CLICK_GROUP, group),
 			(FIELD_WINDOW_UNDER_POINTER, i64::from(wid)),
 			(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
 		])?;
 		skylight::set_window_location(&event, window_location)?;
+		stamp_now(&event);
 		post_event(pid, &event)
 	};
 	let unmodified = CGEventFlags::empty();
@@ -2950,15 +2946,14 @@ fn background_button_click(
 	flags: CGEventFlags,
 	before_press: impl Fn() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let group = click_group_id();
 	let (cg_button, down, up, _, number) = button_types(button);
-	post_hover(source, pid, wid, window, x, y, group)?;
+	post_hover(source, pid, wid, window, x, y)?;
 	control::wait(Duration::from_millis(12))?;
 	button_presses(count, before_press, |pressed, click_state| {
 		let event =
 			mouse_event(source, if pressed { down } else { up }, CGPoint::new(x, y), cg_button)?;
 		CGEvent::set_flags(Some(&event), flags);
-		post_window_pointer(pid, wid, window, &event, x, y, click_state, number, group)
+		post_window_pointer(pid, wid, window, &event, x, y, click_state, number)
 	})
 }
 
@@ -2993,11 +2988,10 @@ fn post_hover(
 	window: &DesktopWindow,
 	x: f64,
 	y: f64,
-	group: i64,
 ) -> CoreResult<()> {
 	let event =
 		mouse_event(source, CGEventType::MouseMoved, CGPoint::new(x, y), CGMouseButton::Left)?;
-	post_window_pointer(pid, wid, window, &event, x, y, 0, 0, group)
+	post_window_pointer(pid, wid, window, &event, x, y, 0, 0)
 }
 
 /// Stamps the window-routing fields on a background pointer event and posts it
@@ -3011,9 +3005,8 @@ fn post_window_pointer(
 	y: f64,
 	click_state: i64,
 	button_number: i64,
-	group: i64,
 ) -> CoreResult<()> {
-	route_window_pointer(pid, wid, window, event, x, y, click_state, button_number, group)?;
+	route_window_pointer(pid, wid, window, event, x, y, click_state, button_number)?;
 	skylight::post_dual(pid, event)
 }
 
@@ -3028,7 +3021,6 @@ fn route_window_pointer(
 	y: f64,
 	click_state: i64,
 	button_number: i64,
-	group: i64,
 ) -> CoreResult<()> {
 	skylight::set_fields(event, &[
 		(FIELD_CLICK_STATE, click_state),
@@ -3036,13 +3028,10 @@ fn route_window_pointer(
 		(FIELD_SUBTYPE, SUBTYPE_TOUCH),
 		(FIELD_TARGET_PID, i64::from(pid)),
 		(FIELD_WINDOW_NUMBER, i64::from(wid)),
-		(FIELD_CLICK_GROUP, group),
 		(FIELD_WINDOW_UNDER_POINTER, i64::from(wid)),
 		(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
 	])?;
 	skylight::set_window_location(event, window_local(window, x, y))?;
-	// Only window-routed events carry a time; the activation press, the
-	// left-click route and wheel events keep 0, which their targets accept.
 	stamp_now(event);
 	Ok(())
 }
@@ -3050,7 +3039,10 @@ fn route_window_pointer(
 /// Stamps `event` with the current time. A Quartz-created event carries
 /// timestamp 0, and a background target that times a gesture from its events'
 /// timestamps, as a web page's `event.timeStamp` does, would see a held press
-/// released the instant it went down.
+/// released the instant it went down. The timestamp is integer field 58, so
+/// nothing else may be written there: a click Chromium dates before its page
+/// loaded kills the renderer when the click starts a same-document
+/// navigation (`history.pushState`).
 fn stamp_now(event: &CGEvent) {
 	// SAFETY: `event` is a live CGEvent. Quartz event timestamps count
 	// nanoseconds of system uptime.
@@ -3073,7 +3065,7 @@ fn background_scroll(
 	let wheel_y = finite_i32(dy, "vertical scroll delta")?;
 	// A stale hover location makes a nested scroller miss the wheel even though
 	// the event reaches the process.
-	post_hover(source, pid, wid, window, x, y, click_group_id())?;
+	post_hover(source, pid, wid, window, x, y)?;
 	control::wait(Duration::from_millis(12))?;
 	let event = CGEvent::new_scroll_wheel_event2(
 		Some(source),
@@ -3093,6 +3085,7 @@ fn background_scroll(
 		(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
 	])?;
 	skylight::set_window_location(&event, window_local(window, x, y))?;
+	// Not stamped: the wheel event keeps Quartz's timestamp 0.
 	skylight::post_dual(pid, &event)
 }
 
@@ -3213,14 +3206,6 @@ fn mouse_event(
 
 fn window_local(window: &DesktopWindow, x: f64, y: f64) -> CGPoint {
 	CGPoint::new(x - f64::from(window.x), y - f64::from(window.y))
-}
-
-fn click_group_id() -> i64 {
-	SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.unwrap_or_default()
-		.subsec_nanos()
-		.into()
 }
 
 fn post_takeover_key(pid: libc::pid_t, wid: u32, event: &CGEvent) -> CoreResult<()> {
@@ -7097,12 +7082,47 @@ mod tests {
 		)
 		.expect("press");
 		let before = control::uptime_ns();
-		route_window_pointer(7, 42, &window, &event, 10.0, 10.0, 1, 0, 1).expect("route");
+		route_window_pointer(7, 42, &window, &event, 10.0, 10.0, 1, 0).expect("route");
 		// SAFETY: `event` is a live CGEvent.
 		let stamped =
 			unsafe { get_event_timestamp(std::ptr::from_ref::<CGEvent>(&event).cast_mut()) };
 		let after = control::uptime_ns();
 		assert!((before..=after).contains(&stamped), "{before} <= {stamped} <= {after}");
+	}
+
+	#[test]
+	fn background_left_clicks_carry_the_time_they_are_posted() {
+		// A Chromium page whose click handler calls `history.pushState` lost its
+		// renderer to a click dated in the first second after boot.
+		let source = source().expect("event source");
+		let window = background_window("Electron");
+		let stamps = std::cell::RefCell::new(Vec::new());
+		let before = control::uptime_ns();
+		background_left_click(
+			&source,
+			7,
+			42,
+			&window,
+			(10.0, 10.0, 2),
+			CGEventFlags::empty(),
+			|| Ok(()),
+			|_, event: &CGEvent| {
+				// SAFETY: `event` is a live CGEvent.
+				let stamp =
+					unsafe { get_event_timestamp(std::ptr::from_ref::<CGEvent>(event).cast_mut()) };
+				stamps.borrow_mut().push(stamp);
+				Ok(())
+			},
+		)
+		.expect("click");
+		let after = control::uptime_ns();
+		let stamps = stamps.into_inner();
+		// The hover, the off-screen press and release, and two presses.
+		assert_eq!(stamps.len(), 7);
+		assert!(stamps.is_sorted(), "{stamps:?}");
+		for stamp in stamps {
+			assert!((before..=after).contains(&stamp), "{before} <= {stamp} <= {after}");
+		}
 	}
 
 	#[test]

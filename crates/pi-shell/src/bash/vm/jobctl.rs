@@ -1351,7 +1351,7 @@ pub fn open_key_terminal(k: &Kernel, vp: &Vproc) -> Option<FdRef> {
 }
 
 /// A `zpty` command's terminal ([`super::proc::VprocZsh::ctty`]).
-fn session_terminal(vp: &Vproc) -> Option<FdRef> {
+pub fn session_terminal(vp: &Vproc) -> Option<FdRef> {
 	vp.zsh.as_deref().and_then(|z| z.ctty.0.clone())
 }
 
