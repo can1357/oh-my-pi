@@ -1109,8 +1109,8 @@ function isRetryableUpstreamError(
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
-	// `cyber_policy` are likewise rotatable. The exact ChatGPT-account model
-	// denial is rotatable only when its provider and requested model match.
+	// `cyber_policy` are likewise rotatable. Exact model denials from Codex or
+	// Anthropic are rotatable only when the provider and requested model match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
@@ -1121,7 +1121,11 @@ function isRetryableUpstreamError(
 	// credential block. Transient 429s ("Too many requests", per-minute caps)
 	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
 	// provider's own backoff layer instead of burning siblings.
-	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
+	if (
+		AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id) ||
+		AIError.isAnthropicModelAccountPolicyError(error, model.provider, model.id)
+	)
+		return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
 	return isUsageLimitOutcome(status, message);
 }
@@ -1140,7 +1144,10 @@ function contextualizeAuthRetryError(model: Model<Api>, error: unknown): unknown
 	if (
 		!error ||
 		typeof error !== "object" ||
-		!AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)
+		!(
+			AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id) ||
+			AIError.isAnthropicModelAccountPolicyError(error, model.provider, model.id)
+		)
 	) {
 		return error;
 	}

@@ -1387,8 +1387,8 @@ export interface LimitsApi {
 	 * - usage-limit / account-rate-limit error → {@link AuthStorage.limits.markReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
-	 * - exact model-entitlement denial (Codex ChatGPT account or Cursor plan) →
-	 *   temporarily block only that requested model, then rotate.
+	 * - exact model-entitlement denial (Codex ChatGPT, Cursor, or Anthropic
+	 *   model 404) → temporarily block only that requested model, then rotate.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or

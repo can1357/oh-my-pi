@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
+### Fixed
+
+- Anthropic sessions retry a model-specific 404 on another eligible OAuth account before falling back to a different model ([#18799](https://github.com/can1357/oh-my-pi/issues/18799)).
 - Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.7] - 2026-11-10

@@ -901,6 +901,42 @@ describe("streamSimple resolver auth retry", () => {
 		}
 	});
 
+	it("retries an Anthropic model 404 on a sibling before surfacing the error", async () => {
+		const keys: unknown[] = [];
+		const retryContexts: ApiKeyResolveContext[] = [];
+		const deniedModel = { ...model(), provider: "anthropic", id: "claude-fable-5-2" };
+		const denial = '404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-fable-5-2"}}';
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (options?.apiKey === "sibling") {
+						ok(stream);
+						return;
+					}
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({ type: "error", reason: "error", error: assistantError(denial, 404) });
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(deniedModel, context, {
+			apiKey: ctx => {
+				if (ctx.error !== undefined) retryContexts.push(ctx);
+				return ctx.error === undefined ? "denied" : ctx.lastChance ? "sibling" : "refreshed";
+			},
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(["denied", "sibling"]);
+		expect(retryContexts.map(ctx => ctx.lastChance)).toEqual([true]);
+	});
+
 	it("does not rotate or refresh on informative transient 429 bodies", async () => {
 		const transient429Bodies = [
 			"Cloud Code Assist API error (429): Too many requests",

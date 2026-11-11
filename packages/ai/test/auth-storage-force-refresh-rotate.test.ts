@@ -829,6 +829,58 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(otherModelSelections.has("cursor-plan-denied")).toBe(true);
 	});
 
+	test("Anthropic model 404 blocks only the denied model and leaves healthy siblings eligible", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials.anthropic;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await storage.credentials.set("anthropic", [
+			{ type: "oauth", access: "fable-denied", refresh: "ref-A", expires: farExpiry(), accountId: "account-A" },
+			{ type: "oauth", access: "fable-sibling", refresh: "ref-B", expires: farExpiry(), accountId: "account-B" },
+		]);
+		const modelId = "claude-fable-5-2";
+		const sessionId = "anthropic-fable";
+		const first = await storage.keys.get("anthropic", sessionId, { modelId });
+		expect(first).toBe("fable-denied");
+		const denial = new ProviderHttpError(
+			'404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-fable-5-2"}}',
+			404,
+			{ code: "not_found_error" },
+		);
+		expect(
+			await storage.limits.rotate("anthropic", sessionId, {
+				error: denial,
+				modelId: "claude-other-5-2",
+				apiKey: first,
+			}),
+		).toEqual({ switched: false });
+		const rotated = await storage.limits.rotate("anthropic", sessionId, {
+			error: denial,
+			modelId,
+			apiKey: first,
+		});
+		expect(rotated.switched).toBe(true);
+		expect(await storage.keys.get("anthropic", sessionId, { modelId })).toBe("fable-sibling");
+
+		const deniedRow = store
+			.listAuthCredentials("anthropic")
+			.find(row => row.credential.type === "oauth" && row.credential.access === first);
+		if (!deniedRow) throw new Error("denied credential row missing");
+		expect(
+			store.getCredentialBlock?.(deniedRow.id, "anthropic:oauth", "model-policy:claude-fable-5-2"),
+		).toBeDefined();
+		expect(store.getCredentialBlock?.(deniedRow.id, "anthropic:oauth", "auth")).toBeUndefined();
+		const freshStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await freshStorage.credentials.reload();
+		expect(await freshStorage.keys.get("anthropic", "next-fable-session", { modelId })).toBe("fable-sibling");
+		expect(await freshStorage.keys.get("anthropic", "other-model-session", { modelId: "claude-other-5-2" })).toBe(
+			"fable-denied",
+		);
+	});
+
 	test("rotateSessionCredential treats structured usage codes as quota blocks despite generic messages", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		registerProvider();

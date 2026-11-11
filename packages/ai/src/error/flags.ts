@@ -264,7 +264,7 @@ export function isImmutableLatestThinkingText(text: string): boolean {
 
 const CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_PATTERN =
 	/\bThe ['"]([^'"\r\n]+)['"] model is not supported when using Codex with a ChatGPT account\./i;
-const CODEX_CHATGPT_ACCOUNT_MODEL_MAX_LENGTH = 256;
+const ACCOUNT_POLICY_MODEL_MAX_LENGTH = 256;
 const CURSOR_PLAN_POLICY_MARKER_PATTERN = /\bERROR_RATE_LIMITED_CHANGEABLE\b/i;
 const CURSOR_PLAN_POLICY_PATTERN = /\bNamed models unavailable\b|\bModel unavailable on\b|\bFree plans can only use\b/i;
 
@@ -272,11 +272,11 @@ function isCursorPlanPolicyText(text: string): boolean {
 	return CURSOR_PLAN_POLICY_MARKER_PATTERN.test(text) && CURSOR_PLAN_POLICY_PATTERN.test(text);
 }
 
-function normalizeCodexChatGPTAccountPolicyModel(modelId: string | undefined): string | undefined {
+function normalizeAccountPolicyModelId(modelId: string | undefined): string | undefined {
 	if (typeof modelId !== "string") return undefined;
 	const separator = modelId.lastIndexOf("/");
 	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).trim().toLowerCase();
-	if (!bareModelId || bareModelId.length > CODEX_CHATGPT_ACCOUNT_MODEL_MAX_LENGTH || bareModelId.includes("\0")) {
+	if (!bareModelId || bareModelId.length > ACCOUNT_POLICY_MODEL_MAX_LENGTH || bareModelId.includes("\0")) {
 		return undefined;
 	}
 	return bareModelId;
@@ -284,7 +284,7 @@ function normalizeCodexChatGPTAccountPolicyModel(modelId: string | undefined): s
 
 function codexChatGPTAccountPolicyModelFromText(text: string): string | undefined {
 	const modelId = CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_PATTERN.exec(text)?.[1]?.trim();
-	return normalizeCodexChatGPTAccountPolicyModel(modelId) === undefined ? undefined : modelId;
+	return normalizeAccountPolicyModelId(modelId) === undefined ? undefined : modelId;
 }
 
 function isCodexChatGPTAccountPolicyText(
@@ -294,8 +294,8 @@ function isCodexChatGPTAccountPolicyText(
 ): boolean {
 	if (provider !== "openai-codex") return false;
 	const deniedModel = codexChatGPTAccountPolicyModelFromText(text);
-	const deniedIdentity = normalizeCodexChatGPTAccountPolicyModel(deniedModel);
-	const requestedIdentity = normalizeCodexChatGPTAccountPolicyModel(modelId);
+	const deniedIdentity = normalizeAccountPolicyModelId(deniedModel);
+	const requestedIdentity = normalizeAccountPolicyModelId(modelId);
 	return deniedIdentity !== undefined && deniedIdentity === requestedIdentity;
 }
 const STALE_RESPONSE_ITEM_PATTERNS = [/\bItem with id ['"][^'"]+['"] not found\.?/i, /previous[ _]?response/i] as const;
@@ -909,9 +909,40 @@ export function isCodexChatGPTAccountPolicyError(
 	modelId: string | undefined,
 ): boolean {
 	const deniedModel = codexChatGPTAccountPolicyModel(error);
-	const deniedIdentity = normalizeCodexChatGPTAccountPolicyModel(deniedModel);
-	const requestedIdentity = normalizeCodexChatGPTAccountPolicyModel(modelId);
+	const deniedIdentity = normalizeAccountPolicyModelId(deniedModel);
+	const requestedIdentity = normalizeAccountPolicyModelId(modelId);
 	return provider === "openai-codex" && deniedIdentity !== undefined && deniedIdentity === requestedIdentity;
+}
+
+/** Anthropic's model-specific 404 may be account-scoped; rotate only for the requested model. */
+export function isAnthropicModelAccountPolicyError(
+	error: unknown,
+	provider: string,
+	modelId: string | undefined,
+): boolean {
+	if (provider !== "anthropic" || status(error) !== 404 || !error || typeof error !== "object") return false;
+	const requestedModel = normalizeAccountPolicyModelId(modelId);
+	if (!requestedModel) return false;
+	const message =
+		"errorMessage" in error && typeof error.errorMessage === "string"
+			? error.errorMessage
+			: "message" in error && typeof error.message === "string"
+				? error.message
+				: undefined;
+	const jsonStart = message?.indexOf("{") ?? -1;
+	if (jsonStart < 0 || message === undefined) return false;
+	let body: unknown;
+	try {
+		body = JSON.parse(message.slice(jsonStart));
+	} catch {
+		return false;
+	}
+	if (!body || typeof body !== "object" || !("error" in body)) return false;
+	const detail = body.error;
+	if (!detail || typeof detail !== "object" || !("type" in detail) || !("message" in detail)) return false;
+	if (detail.type !== "not_found_error" || typeof detail.message !== "string") return false;
+	const deniedModel = detail.message.startsWith("model: ") ? detail.message.slice("model: ".length) : undefined;
+	return normalizeAccountPolicyModelId(deniedModel) === requestedModel;
 }
 
 /** Whether Cursor returned a non-retryable plan entitlement denial for this account. */

@@ -30,6 +30,7 @@ const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE] as
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
 const MODEL_ACCOUNT_POLICY_PROVIDERS: Readonly<Record<string, true>> = {
+	anthropic: true,
 	"openai-codex": true,
 	cursor: true,
 };
