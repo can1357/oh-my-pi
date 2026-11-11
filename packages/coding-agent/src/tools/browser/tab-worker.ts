@@ -59,6 +59,7 @@ import {
 import {
 	applyStealthPatches,
 	applyViewport,
+	BROWSER_PAGE_PROTOCOL_TIMEOUT_MS,
 	BROWSER_PROTOCOL_TIMEOUT_MS,
 	browserConnection,
 	connectPuppeteer,
@@ -1759,7 +1760,7 @@ export class WorkerCore {
 			this.#browser = await connectPuppeteer(puppeteer, {
 				browserWSEndpoint: payload.browserWSEndpoint,
 				defaultViewport: null,
-				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+				protocolTimeout: BROWSER_PAGE_PROTOCOL_TIMEOUT_MS,
 			});
 			// Terminated while it connected: nothing will drop this connection later.
 			if (this.#stopped) {

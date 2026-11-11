@@ -48,11 +48,14 @@ import { findUserDataDirInArgs, gracefulKillTreeOnce, probeCdpResponse } from ".
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
+/** Short handshake budget for launch and registry connections. */
+export const BROWSER_PROTOCOL_TIMEOUT_MS = 60_000;
+
 /**
  * Keep CDP requests alive through the largest browser call budget; the
  * supervisor owns the execution deadline and recovers a stalled worker.
  */
-export const BROWSER_PROTOCOL_TIMEOUT_MS = TOOL_TIMEOUTS.browser.max * 1000 + 1_000;
+export const BROWSER_PAGE_PROTOCOL_TIMEOUT_MS = TOOL_TIMEOUTS.browser.max * 1000 + 1_000;
 const ENABLE_AUTOMATION_FLAG = "--enable-automation";
 // Automation-tell launch flags that puppeteer-core adds by default. We suppress
 // them via `ignoreDefaultArgs` (the supported escape hatch) to mirror xxxx's
