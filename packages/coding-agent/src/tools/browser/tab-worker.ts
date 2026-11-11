@@ -50,7 +50,6 @@ import {
 import {
 	resolveOpTimeouts,
 	resolveWaitTimeout,
-	untilAbortedOrReleased,
 	ZERO_MATCH_FAIL_FAST_MS,
 	ZERO_MATCH_POLL_MS,
 } from "./op-timeouts";
@@ -79,7 +78,7 @@ import {
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
 import { assertTabPressArgs } from "./tab-arguments";
-import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached } from "./selector-wait";
+import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
 import {
 	type BrowserCookie,
 	type ClearCookiesOptions,
@@ -2700,34 +2699,14 @@ export class WorkerCore {
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
-						if (opts?.state === "detached") {
-							const ref = parseAriaRefSelector(selector);
-							const normalized = normalizeSelector(selector);
-							return await waitForDetached(
-								() => (ref !== null ? resolveAriaRefHandle(page, ref) : page.$(normalized)),
-								sig,
-							);
-						}
 						const ref = parseAriaRefSelector(selector);
 						if (ref !== null) {
-							while (true) {
-								const handle = await untilAbortedOrReleased(sig, resolveAriaRefHandle(page, ref), async late =>
-									late?.dispose(),
-								);
-								if (!handle && opts.hidden) return null;
-								if (handle) {
-									let keep = false;
-									try {
-										keep =
-											(!opts.visible && !opts.hidden) ||
-											(await untilAborted(sig, () => (opts.hidden ? handle.isHidden() : handle.isVisible())));
-										if (keep) return enrich(handle);
-									} finally {
-										if (!keep) await handle.dispose();
-									}
-								}
-								await untilAborted(sig, () => Bun.sleep(100));
-							}
+							const handle = await waitForSelectorHandle(() => resolveAriaRefHandle(page, ref), opts, sig);
+							return handle ? enrich(handle) : null;
+						}
+						if (opts.state === "detached") {
+							const normalized = normalizeSelector(selector);
+							return await waitForDetached(() => page.$(normalized), sig);
 						}
 						const handle = (await untilAborted(sig, () =>
 							page.waitForSelector(normalizeSelector(selector), {

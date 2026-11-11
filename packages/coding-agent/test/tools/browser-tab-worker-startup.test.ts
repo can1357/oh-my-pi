@@ -177,6 +177,21 @@ describe("OMP-owned browser evaluation", () => {
 					const frameHidden = await frame.waitForSelector("#removed", {state:"hidden"});
 					const frameDetached = await frame.waitForSelector("#removed", {state:"detached"});
 					const frameAttached = await frame.waitForSelector("#hidden", {state:"attached", timeout:Infinity});
+					const frameSnapshot = await frame.ariaSnapshot("#visible");
+					const frameRef = frameSnapshot.match(/ref=(e[0-9]+)/)?.[1];
+					if (!frameRef) throw new Error("Expected a frame element ref");
+					let frameRefAttached = "";
+					try { await frame.waitForSelector(frameRef, {state:"detached", timeout:50}); }
+					catch (e) { frameRefAttached = e.message; }
+					const frameRefVisible = await frame.waitForSelector(frameRef, {state:"visible"});
+					await frame.evaluate("document.querySelector('#visible').style.display = 'none'");
+					const frameRefHidden = await frame.waitForSelector(frameRef, {state:"hidden"});
+					let frameRefNotVisible = "";
+					try { await frame.waitForSelector(frameRef, {state:"visible", timeout:50}); }
+					catch (e) { frameRefNotVisible = e.message; }
+					await frame.evaluate("document.querySelector('#visible').remove()");
+					const frameRefDetached = await frame.waitForSelector(frameRef, {state:"detached"});
+					const frameRefRemovedHidden = await frame.waitForSelector(frameRef, {state:"hidden"});
 					let stillAttached = "";
 					try { await tab.waitForSelector("#hidden", {state:"detached", timeout:50}); }
 					catch (e) { stillAttached = e.message; }
@@ -205,7 +220,8 @@ describe("OMP-owned browser evaluation", () => {
 					await Promise.all([attached.dispose(), invisible.dispose(), visible.dispose(), legacyVisible.dispose()]);
 					return { hidden, detached, invisible:!!invisible, attached:!!attached, visible:!!visible, legacyHidden,
 						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached, attachedRef, detachedRef,
-						visibleRefNotHidden, hiddenRefNotVisible, hiddenRef:!!hiddenRef, visibleRef:!!visibleRef, removedHiddenRef };
+						visibleRefNotHidden, hiddenRefNotVisible, hiddenRef:!!hiddenRef, visibleRef:!!visibleRef, removedHiddenRef,
+						frameRefAttached, frameRefVisible, frameRefHidden, frameRefNotVisible, frameRefDetached, frameRefRemovedHidden };
 				`,
 					timeoutMs: 10_000,
 					session,
@@ -229,6 +245,12 @@ describe("OMP-owned browser evaluation", () => {
 					hiddenRef: true,
 					visibleRef: true,
 					removedHiddenRef: null,
+					frameRefAttached: expect.stringContaining("timed out"),
+					frameRefVisible: true,
+					frameRefHidden: true,
+					frameRefNotVisible: expect.stringContaining("timed out"),
+					frameRefDetached: true,
+					frameRefRemovedHidden: true,
 				});
 			} finally {
 				await releaseTab(name, { kill: true });

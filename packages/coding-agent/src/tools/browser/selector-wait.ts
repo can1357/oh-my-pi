@@ -51,3 +51,28 @@ export async function waitForDetached(query: () => Promise<ElementHandle | null>
 		await untilAborted(signal, () => Bun.sleep(100));
 	}
 }
+
+/** Poll a live ref with Puppeteer's own visibility checks, in its owning tab or frame realm. */
+export async function waitForSelectorHandle(
+	query: () => Promise<ElementHandle | null>,
+	options: SelectorWaitOptions,
+	signal: AbortSignal,
+): Promise<ElementHandle | null> {
+	while (true) {
+		const handle = await untilAbortedOrReleased(signal, query(), async late => late?.dispose());
+		if (!handle && (options.hidden || options.state === "detached")) return null;
+		if (handle) {
+			let keep = false;
+			try {
+				keep =
+					options.state !== "detached" &&
+					((!options.visible && !options.hidden) ||
+						(await untilAborted(signal, () => (options.hidden ? handle.isHidden() : handle.isVisible()))));
+				if (keep) return handle;
+			} finally {
+				if (!keep) await handle.dispose();
+			}
+		}
+		await untilAborted(signal, () => Bun.sleep(100));
+	}
+}

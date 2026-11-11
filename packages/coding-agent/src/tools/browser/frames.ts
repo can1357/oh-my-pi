@@ -7,12 +7,17 @@ import type { ElementHandle, ElementScreenshotOptions, Frame, Page } from "puppe
 import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
+import {
+	type AriaSnapshotOptions,
+	captureAriaSnapshot,
+	parseAriaRefSelector,
+	resolveAriaRefHandle,
+} from "./aria/aria-snapshot";
 import { clickElement, fillViaHandle, pressKey, typeIntoElement, withLiveElement } from "./interactions";
 import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
 import { whileDrawing } from "./screenshot";
-import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached } from "./selector-wait";
+import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** JSON-safe metadata for one document frame. */
@@ -193,6 +198,12 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			`frame.waitForSelector(${JSON.stringify(selector)})`,
 			deadline,
 			async signal => {
+				const ref = parseAriaRefSelector(selector);
+				if (ref !== null) {
+					const handle = await waitForSelectorHandle(() => resolveAriaRefHandle(frame, ref), options, signal);
+					await handle?.dispose().catch(() => undefined);
+					return true;
+				}
 				if (options?.state === "detached") {
 					const normalized = hooks.normalizeSelector(selector);
 					await waitForDetached(() => frame.$(normalized), signal);
@@ -358,9 +369,13 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			}),
 		ariaSnapshot: (selector, options) =>
 			hooks.op("frame.ariaSnapshot()", hooks.quickOpMs, async signal => {
-				return (await untilAborted(signal, () =>
-					frame.evaluate(buildAriaSnapshotScript(selector, options)),
-				)) as string;
+				const root = selector ? await untilAborted(signal, () => frame.$(hooks.normalizeSelector(selector))) : null;
+				try {
+					if (selector && !root) throw new ToolError(`frame.ariaSnapshot: selector ${selector} matched no element`);
+					return await untilAborted(signal, () => captureAriaSnapshot(frame, root, options));
+				} finally {
+					await root?.dispose().catch(() => undefined);
+				}
 			}),
 		evaluate: ((fn: string | ((...args: unknown[]) => unknown), ...args: unknown[]) =>
 			hooks.op("frame.evaluate()", Number.POSITIVE_INFINITY, signal =>
