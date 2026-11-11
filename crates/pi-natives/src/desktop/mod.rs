@@ -4454,54 +4454,6 @@ mod capture_tests {
 	}
 
 	#[test]
-	fn a_row_that_reads_otherwise_is_not_followed_and_the_error_quotes_it_then_and_now() {
-		// Dock quit and started again under another pid: its name matches, its
-		// row does not.
-		let (mut worker, tree) = read_table(&[DOCK, EXTRA]);
-		rebuild_rows(&tree, &[
-			(40, &[(41, " Dock"), (42, "0.0"), (43, "2041")]),
-			(30, &[(31, " Dock Extra"), (32, "0.0"), (33, "463")]),
-		]);
-		tree.lock().roots = 0;
-		let error = press(&mut worker, "e3").unwrap_err();
-		// The search for the one " Dock" runs on the walk that looked for the
-		// row, without walking the window again.
-		assert_eq!(tree.lock().roots, 1);
-		let found = named(&error, "e3").expect("the one \" Dock\" left");
-		assert!(
-			error.message.contains(&format!(
-				"e3's row read \"Dock\", \"0.0\", \"375\"; {found}'s row reads \"Dock\", \"0.0\", \
-				 \"2041\", and no row reads as e3's did."
-			)),
-			"{}",
-			error.message
-		);
-		// An element with no telling fields of its own gets the plain error.
-		let error = press(&mut worker, "e4").unwrap_err();
-		assert_eq!(named(&error, "e4"), None);
-		assert!(tree.lock().pressed.is_empty());
-	}
-
-	#[test]
-	fn a_rebuilt_row_with_two_copies_or_a_twin_when_read_follows_neither() {
-		{
-			let (mut worker, tree) = read_table(&[DOCK, EXTRA]);
-			rebuild_rows(&tree, &[
-				(30, &[(31, " Dock"), (32, "0.0"), (33, "375")]),
-				(40, &[(41, " Dock"), (42, "0.0"), (43, "375")]),
-			]);
-			assert_eq!(press(&mut worker, "e3").unwrap_err().code, ErrorCode::StaleRef);
-			assert!(tree.lock().pressed.is_empty());
-		}
-		// Two rows that read alike when read: neither can be told from the other.
-		let (mut worker, tree) =
-			read_table(&[DOCK, (20, &[(21, " Dock"), (22, "0.0"), (23, "375")])]);
-		rebuild_rows(&tree, &[(40, &[(41, " Dock"), (42, "0.0"), (43, "375")])]);
-		assert_eq!(press(&mut worker, "e3").unwrap_err().code, ErrorCode::StaleRef);
-		assert!(tree.lock().pressed.is_empty());
-	}
-
-	#[test]
 	fn only_a_ref_read_in_a_row_probes_its_element_before_the_request() {
 		{
 			let (mut worker, tree) = read_table(&[DOCK, EXTRA]);

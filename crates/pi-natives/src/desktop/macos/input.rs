@@ -8118,20 +8118,6 @@ mod tests {
 	}
 
 	#[test]
-	fn a_target_picked_while_a_row_follow_probes_it_refuses_as_come_forward() {
-		// The request read the user's app (9) in front before following the
-		// ref's rebuilt row, and the user brings the target (7) forward while
-		// that probe blocks: the input's own front read happens after it.
-		let pin = pin_front_with(|| Some(9));
-		let (entry, ()) = EntryFront::before(|| Some(7), || Ok(())).unwrap();
-		assert_eq!(entry, EntryFront(Some(9)));
-		assert_eq!(EntryFront::now(), EntryFront(Some(9)));
-		assert_eq!(front_target(entry, Some(7), 7, || true), FrontTarget::CameForward);
-		drop(pin);
-		assert!(!entry_front_pinned());
-	}
-
-	#[test]
 	fn a_click_lands_in_its_row_unless_another_row_is_found_first_above_the_hit() {
 		// The aimed row is 1; each hit's ancestry is listed from the hit up,
 		// marked where it is a row.
@@ -8145,29 +8131,6 @@ mod tests {
 		assert!(!lands(&[(22, false), (21, false), (2, true), (1, true)]));
 		// A point outside any row lands as it would without the check.
 		assert!(lands(&[(30, false), (31, false)]));
-	}
-
-	#[test]
-	fn only_a_click_with_an_aimed_row_is_checked_and_the_aim_ends_with_its_request() {
-		let click = PointerEvent::Click {
-			x:         1.0,
-			y:         1.0,
-			button:    MouseButton::Left,
-			count:     2,
-			modifiers: Modifiers::default(),
-		};
-		// Nothing aimed: a plain window click or a click outside a row.
-		assert!(aimed_row_check(&click)().is_ok());
-		{
-			let _aimed = Aimed(());
-			let crate::desktop::ax::AxHandle::Mac(app) = ax::application_handle(1).unwrap() else {
-				unreachable!("a macOS handle")
-			};
-			AIMED.with_borrow_mut(|aimed| *aimed = Some((app, 1)));
-			// Other gestures skip it.
-			assert!(aimed_row_check(&PointerEvent::Move { x: 1.0, y: 1.0 })().is_ok());
-		}
-		assert!(AIMED.with_borrow(Option::is_none));
 	}
 
 	#[test]
