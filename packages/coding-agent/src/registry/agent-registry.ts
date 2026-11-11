@@ -148,8 +148,8 @@ export interface AgentRegistryApi {
 	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean;
 	/** Transition `id` to `status` when it still matches `expected`. */
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
-	/** Enter a new run on `id`, `running` already or not, when it still matches `expected`. */
-	startRun(id: string, expected?: AgentRefExpectation): boolean;
+	/** Enter a new run on `id` that started at `startedAt`, `running` already or not, when it still matches `expected`. */
+	startRun(id: string, expected?: AgentRefExpectation, startedAt?: number): boolean;
 	/** Record that the current run handed over its final result. */
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
 	/** Accepted-but-running refs whose run already finished. */
@@ -339,14 +339,16 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * Enter a new run on `id`. A session can start a wake or follow-up run
 	 * before the previous run's `idle` arrives, so the ref is still `running`
 	 * and {@link setStatus} keeps its lifecycle. This also rotates the
-	 * run-scoped milestones in that case, and stamps `runStartedAt`.
+	 * run-scoped milestones in that case, and stamps `runStartedAt`. A caller
+	 * on another thread passes `startedAt` from where the run started, since
+	 * the call reaches this registry later.
 	 */
-	startRun(id: string, expected?: AgentRefExpectation): boolean {
+	startRun(id: string, expected?: AgentRefExpectation, startedAt = Date.now()): boolean {
 		const wasRunning = this.#refs.get(id)?.status === "running";
 		if (!this.setStatus(id, "running", expected)) return false;
 		const ref = this.#refs.get(id);
 		if (!ref) return false;
-		ref.lifecycle = { runStartedAt: Date.now() };
+		ref.lifecycle = { runStartedAt: startedAt };
 		if (wasRunning) this.#emit({ type: "metadata_changed", ref });
 		return true;
 	}
