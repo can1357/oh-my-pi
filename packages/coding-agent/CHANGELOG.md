@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A provider error that only reads like a context overflow, such as oMLX's prefill memory guard, now switches to the next `retry.fallbackChains` model when the context fits, instead of failing the turn ([#18889](https://github.com/can1357/oh-my-pi/pull/18889) by [@dagurval](https://github.com/dagurval))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
