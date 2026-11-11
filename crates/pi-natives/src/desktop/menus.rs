@@ -114,7 +114,10 @@ pub(crate) fn match_offered(items: &[DesktopMenuItem], label: &str) -> CoreResul
 }
 
 pub(crate) fn format_menu_item(title: &str, enabled: bool, has_submenu: bool) -> String {
-	let mut part = format!("\"{title}\"");
+	let mut part = String::new();
+	// The caller owns the title's budget; reuse AX escaping without imposing
+	// another truncation limit on open-menu listings.
+	super::ax::push_quoted_chars(&mut part, title, usize::MAX);
 	if !enabled {
 		part.push_str(" (disabled)");
 	}
@@ -202,6 +205,14 @@ mod tests {
 		let cut = format!("\"{}…\"", "界".repeat(MAX_OFFERED_CHARS - 1));
 		assert!(error.message.contains(&cut), "{}", error.message);
 		assert!(error.message.ends_with(", \"Show All History\""), "{}", error.message);
+		// App-controlled page titles must remain one label, not forge states
+		// or extra diagnostic lines. Decode the quoted label semantically.
+		let title = "A\" (disabled), \"B\n\r\t\u{001b}\\";
+		let rendered = format_menu_item(title, false, true);
+		let mut labels = serde_json::Deserializer::from_str(&rendered).into_iter::<String>();
+		assert_eq!(labels.next().unwrap().unwrap(), title);
+		assert!(!rendered.chars().any(char::is_control));
+		assert!(rendered.ends_with(" (disabled) ▸"));
 	}
 
 	#[test]

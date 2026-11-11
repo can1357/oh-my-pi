@@ -646,7 +646,7 @@ pub(super) fn push_quoted_label(line: &mut String, text: &str) {
 	}
 }
 
-fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
+pub(super) fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
 	line.push('"');
 	for ch in text.chars().take(shown) {
 		match ch {
