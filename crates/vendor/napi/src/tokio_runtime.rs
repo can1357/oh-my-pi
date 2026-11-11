@@ -1,11 +1,10 @@
 #[cfg(all(
   not(feature = "noop"),
-  any(
-    all(feature = "async-runtime", feature = "tokio_rt"),
-    target_family = "wasm"
-  )
+  any(feature = "tokio_rt", target_family = "wasm")
 ))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
+use std::sync::atomic::AtomicU64;
 #[cfg(not(feature = "noop"))]
 use std::sync::OnceLock;
 #[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
@@ -1268,51 +1267,67 @@ fn create_runtime() -> Runtime {
   #[cfg(not(target_family = "wasm"))]
   crate::bindgen_runtime::retain_current_module_for_unload_safety();
 
-  // Check if we're supposed to use a user-defined runtime
-  if IS_USER_DEFINED_RT.get().copied().unwrap_or(false) {
-    // Try to take the user-defined runtime if it's still available
-    if let Some(user_defined_rt) = USER_DEFINED_RT
-      .get()
-      .and_then(|rt| rt.write().ok().and_then(|mut rt| rt.take()))
-    {
-      return user_defined_rt;
+  let rt = 'build: {
+    // Check if we're supposed to use a user-defined runtime
+    if IS_USER_DEFINED_RT.get().copied().unwrap_or(false) {
+      // Try to take the user-defined runtime if it's still available
+      if let Some(user_defined_rt) = USER_DEFINED_RT
+        .get()
+        .and_then(|rt| rt.write().ok().and_then(|mut rt| rt.take()))
+      {
+        break 'build user_defined_rt;
+      }
+      // If the user-defined runtime was already taken, fall back to the custom factory or default runtime
+      // This handles the case where the runtime was shutdown and needs to be restarted
     }
-    // If the user-defined runtime was already taken, fall back to creating a default runtime
-    // This handles the case where the runtime was shutdown and needs to be restarted
-  }
 
-  #[cfg(any(
-    all(target_family = "wasm", tokio_unstable),
-    not(target_family = "wasm")
-  ))]
-  {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.enable_all();
-    // A Tokio worker polls tasks other threads spawned or woke and may hold a stale memory size.
-    #[cfg(all(tokio_unstable, napi_wasi_threads, not(napi_wasi_no_heap_sync)))]
-    builder.on_before_task_poll(|_| crate::on_thread_handoff());
-    builder.build().expect("Create tokio runtime failed")
-  }
-  #[cfg(all(target_family = "wasm", not(tokio_unstable)))]
-  {
-    tokio::runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .expect("Create tokio runtime failed")
-  }
+    if let Some(factory) = CUSTOM_RT_FACTORY.get() {
+      if let Some(custom_rt) = factory() {
+        break 'build custom_rt;
+      }
+    }
+
+    #[cfg(any(
+      all(target_family = "wasm", tokio_unstable),
+      not(target_family = "wasm")
+    ))]
+    {
+      let mut builder = tokio::runtime::Builder::new_multi_thread();
+      builder.enable_all();
+      // A Tokio worker polls tasks other threads spawned or woke and may hold a stale memory size.
+      #[cfg(all(tokio_unstable, napi_wasi_threads, not(napi_wasi_no_heap_sync)))]
+      builder.on_before_task_poll(|_| crate::on_thread_handoff());
+      builder.build().expect("Create tokio runtime failed")
+    }
+    #[cfg(all(target_family = "wasm", not(tokio_unstable)))]
+    {
+      tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Create tokio runtime failed")
+    }
+  };
+
+  RT_GENERATION.fetch_add(1, Ordering::SeqCst);
+  rt
 }
 
 /// Whether `RT`'s construction has been observed (set at the top of its initializer, so a
 /// `true` here means dereferencing `RT` either finds the runtime or blocks on an in-flight
-/// construction — it can never trigger a fresh one). Lets the combined-build shutdown path
-/// drain a lazily-created runtime without forcing `RT`'s construction. (`LazyLock::get` would
-/// express this directly, but it is stable only since Rust 1.89 and MSRV is 1.88.)
-#[cfg(all(feature = "async-runtime", feature = "tokio_rt", not(feature = "noop")))]
+/// construction — it can never trigger a fresh one). Lets shutdown and handle queries inspect
+/// `RT` without forcing its construction. (`LazyLock::get` would express this directly, but it
+/// is stable only since Rust 1.89 and MSRV is 1.88.)
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
 static RT_CONSTRUCTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
+static RT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
+static CUSTOM_RT_FACTORY: OnceLock<fn() -> Option<Runtime>> = OnceLock::new();
+
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
 static RT: LazyLock<RwLock<Option<Runtime>>> = LazyLock::new(|| {
-  #[cfg(feature = "async-runtime")]
   RT_CONSTRUCTED.store(true, Ordering::SeqCst);
   RwLock::new(Some(create_runtime()))
 });
@@ -1359,12 +1374,47 @@ pub fn create_custom_tokio_runtime(rt: Runtime) {
   #[cfg(not(target_family = "wasm"))]
   crate::bindgen_runtime::retain_current_module_for_unload_safety();
 
-  USER_DEFINED_RT.get_or_init(move || RwLock::new(Some(rt)));
+  let slot = USER_DEFINED_RT.get_or_init(|| RwLock::new(None));
+  if let Ok(mut guard) = slot.write() {
+    if guard.is_none() {
+      *guard = Some(rt);
+    }
+  }
   IS_USER_DEFINED_RT.get_or_init(|| true);
 }
 
 #[cfg(all(feature = "tokio_rt", feature = "noop"))]
 pub fn create_custom_tokio_runtime(_: Runtime) {}
+
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
+/// Register a factory invoked by `create_runtime` whenever N-API starts or restarts its Tokio
+/// runtime (initial environment registration and re-registration after the last environment
+/// tore down). Only the first registration takes effect; returning `None` falls back to
+/// napi-rs's default runtime builder.
+pub fn set_custom_tokio_runtime_factory(factory: fn() -> Option<Runtime>) {
+  let _ = CUSTOM_RT_FACTORY.set(factory);
+}
+
+#[cfg(all(feature = "tokio_rt", feature = "noop"))]
+pub fn set_custom_tokio_runtime_factory(_: fn() -> Option<Runtime>) {}
+
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
+/// Return the non-zero generation and handle of the currently live N-API Tokio runtime, or
+/// `None` before the runtime is first started or after `shutdown_async_runtime` drains it.
+pub fn current_tokio_runtime_handle() -> Option<(u64, tokio::runtime::Handle)> {
+  if !RT_CONSTRUCTED.load(Ordering::SeqCst) {
+    return None;
+  }
+  RT.read().ok().and_then(|rt| {
+    rt.as_ref()
+      .map(|rt| (RT_GENERATION.load(Ordering::SeqCst), rt.handle().clone()))
+  })
+}
+
+#[cfg(all(feature = "tokio_rt", feature = "noop"))]
+pub fn current_tokio_runtime_handle() -> Option<(u64, tokio::runtime::Handle)> {
+  None
+}
 
 #[cfg(not(feature = "noop"))]
 /// Start the async runtime.

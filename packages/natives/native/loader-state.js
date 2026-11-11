@@ -858,12 +858,14 @@ export function reportStaleWorkspaceAddon(ctx, addon, deps = {}) {
 }
 
 /**
- * Install the addon's bounded Tokio runtime now that `dlopen` has returned and
- * the dynamic-loader lock is released. The Rust `#[module_init]` deliberately
- * does NOT build the runtime — spawning worker threads under the loader lock
- * deadlocks on some hosts — so it exposes `__ompInstallTokioRuntime` for the
- * loader to call once, before any async native runs. Best-effort: older addons
- * predating this export simply fall back to napi-rs's default runtime.
+ * Ensure the addon's bounded Tokio runtime and Rayon pool are installed after
+ * `dlopen` has released the OS dynamic-loader lock. Current addons already run
+ * `omp_install_tokio_runtime` inside `napi_register_module_v1` via
+ * `register_module_export_hook` (`on_napi_module_register`) — after `dlopen`
+ * returns and before napi-rs's `start_async_runtime()` materializes `RT` — so
+ * this call is an idempotent follow-up that also covers pre-hook workspace
+ * addons exposing `__ompInstallTokioRuntime`. Older addons predating the export
+ * fall back to napi-rs's default runtime.
  */
 function installNativeTokioRuntime(bindings) {
 	const install = bindings.__ompInstallTokioRuntime;

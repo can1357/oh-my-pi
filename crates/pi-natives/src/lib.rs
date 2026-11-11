@@ -82,55 +82,101 @@ pub mod vectors;
 pub mod workspace;
 
 #[cfg(target_os = "windows")]
-use std::sync::{
-	Arc,
-	atomic::{AtomicBool, Ordering},
+use std::sync::Arc;
+use std::{
+	sync::{
+		OnceLock,
+		atomic::{AtomicBool, Ordering},
+	},
+	time::Duration,
 };
 
-#[cfg(target_os = "windows")]
-use napi::bindgen_prelude::create_custom_tokio_runtime;
+use napi::bindgen_prelude::{
+	current_tokio_runtime_handle, register_module_export_hook, set_custom_tokio_runtime_factory,
+	start_async_runtime,
+};
 use napi_derive::{module_init, napi};
 
-/// Upper bound on Windows Tokio *scheduler* workers. These only drive async I/O
-/// futures (shell/process/PTY/ISO) and light glue tasks; all CPU-heavy and
-/// blocking native work runs elsewhere — libuv tasks (`task::blocking`), Rayon,
-/// or Tokio's separate blocking pool via `spawn_blocking` — so a handful of
-/// async workers is plenty regardless of core count.
-#[cfg(target_os = "windows")]
+/// Upper bound on Tokio *scheduler* workers. These only drive async I/O futures
+/// (shell/process/PTY/ISO/D-Bus) and light glue tasks; all CPU-heavy and
+/// blocking native work runs elsewhere — libuv tasks (`task::blocking`),
+/// `FS_RUNTIME`, Rayon, or Tokio's separate blocking pool via `spawn_blocking`
+/// — so a handful of async workers is plenty regardless of core count.
+///
+/// Tokio's `max_blocking_threads` is intentionally left at its default (512):
+/// blocking threads are spawned lazily on demand and reaped after
+/// [`NAPI_TOKIO_BLOCKING_KEEP_ALIVE`], whereas capping the blocking pool to a
+/// small count starves multi-stage `pi-builtins` pipelines whose stages hold
+/// `spawn_blocking` workers while waiting on upstream/downstream pipes.
 const NAPI_TOKIO_MAX_WORKER_THREADS: usize = 4;
-/// Cap on Tokio's lazily-grown blocking pool (used by `spawn_blocking` offloads
-/// such as `iso_start`/`iso_stop`/`pty.start`/`walk_diff`). Threads here are
-/// created on demand, not at load, so this only bounds peak fan-out.
-#[cfg(target_os = "windows")]
-const NAPI_TOKIO_MAX_BLOCKING_THREADS: usize = 8;
+const NAPI_TOKIO_BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
+/// Fallback worker count if synchronous Rust code calls
+/// [`active_tokio_runtime`] outside N-API module registration (for example
+/// under unit tests or after the last N-API environment tore down).
+#[cfg_attr(
+	not(any(target_os = "linux", test)),
+	allow(dead_code, reason = "used by Linux D-Bus helpers and unit tests")
+)]
+const FALLBACK_TOKIO_WORKER_THREADS: usize = 2;
+#[cfg_attr(
+	not(any(target_os = "linux", test)),
+	allow(dead_code, reason = "used by Linux D-Bus helpers and unit tests")
+)]
+const FALLBACK_RUNTIME_GENERATION: u64 = 0;
 
-/// Upper bound on Rayon's global pool on Windows. Rayon is used for CPU-bound
-/// helpers (`count_tokens`, vendored `sort`), but the global pool cannot
-/// recover if its first lazy initialization fails after Windows refuses worker
-/// threads.
-#[cfg(any(target_os = "windows", test))]
+/// Upper bound on Rayon's global pool. Rayon is used for CPU-bound helpers
+/// (`count_tokens`, vendored `sort`), and its default one-thread-per-core pool
+/// otherwise spawns one permanent OS thread per logical CPU in every session.
 const RAYON_MAX_THREADS: usize = 8;
 #[cfg(any(target_os = "windows", test))]
 const RAYON_RESERVED_NON_RAYON_THREADS: usize = 1;
 
-/// Windows worker count we'd *like*, before checking what the OS will actually
-/// grant: the Tokio default (one per core) clamped to
-/// [`NAPI_TOKIO_MAX_WORKER_THREADS`].
-#[cfg(target_os = "windows")]
+#[cfg(test)]
+pub(crate) static RUNTIME_LIFECYCLE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+fn parse_positive_threads(raw: Option<&str>) -> Option<usize> {
+	raw?
+		.trim()
+		.parse::<usize>()
+		.ok()
+		.filter(|&threads| threads > 0)
+}
+
+fn clamped_tokio_worker_threads(threads: usize) -> usize {
+	threads.clamp(1, NAPI_TOKIO_MAX_WORKER_THREADS)
+}
+
+fn resolve_tokio_worker_threads(
+	omp_override: Option<&str>,
+	tokio_override: Option<&str>,
+	parallelism: usize,
+) -> usize {
+	parse_positive_threads(omp_override)
+		.or_else(|| parse_positive_threads(tokio_override))
+		.unwrap_or_else(|| clamped_tokio_worker_threads(parallelism))
+}
+
+/// Tokio scheduler worker count, honoring explicit environment overrides before
+/// clamping `available_parallelism()` to [`NAPI_TOKIO_MAX_WORKER_THREADS`].
 fn desired_worker_threads() -> usize {
-	std::thread::available_parallelism()
-		.map_or(1, |threads| threads.get())
-		.clamp(1, NAPI_TOKIO_MAX_WORKER_THREADS)
+	let omp_override = std::env::var("OMP_TOKIO_WORKER_THREADS").ok();
+	let tokio_override = std::env::var("TOKIO_WORKER_THREADS").ok();
+	let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+	resolve_tokio_worker_threads(omp_override.as_deref(), tokio_override.as_deref(), parallelism)
 }
 
-#[cfg(target_os = "windows")]
-fn desired_rayon_threads() -> usize {
-	clamped_rayon_threads(std::thread::available_parallelism().map_or(1, |threads| threads.get()))
-}
-
-#[cfg(any(target_os = "windows", test))]
 fn clamped_rayon_threads(threads: usize) -> usize {
 	threads.clamp(1, RAYON_MAX_THREADS)
+}
+
+fn resolve_rayon_threads(rayon_override: Option<&str>, parallelism: usize) -> usize {
+	parse_positive_threads(rayon_override).unwrap_or_else(|| clamped_rayon_threads(parallelism))
+}
+
+fn desired_rayon_threads() -> usize {
+	let rayon_override = std::env::var("RAYON_NUM_THREADS").ok();
+	let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+	resolve_rayon_threads(rayon_override.as_deref(), parallelism)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,9 +215,9 @@ fn rayon_pool_plan(desired: usize, spawnable: usize) -> RayonPoolPlan {
 /// count. Probe threads use the std default stack, exactly like Tokio's workers
 /// (it leaves `thread_stack_size` unset), so the probe is representative.
 ///
-/// Keep this Windows-only. On Linux, spawning probe threads from `module_init`
-/// can deadlock while Bun is loading the `.node`; napi-rs's default runtime
-/// loads cleanly there and avoids any custom loader-time thread probe.
+/// Keep this Windows-only. On Linux, source builds can deadlock if a loader
+/// hook spawns and synchronously joins probe threads, and non-Windows hosts do
+/// not hit the Windows pagefile commit-limit abort this probe guards against.
 #[cfg(target_os = "windows")]
 fn probe_spawnable_workers(target: usize) -> usize {
 	let keep_running = Arc::new(AtomicBool::new(true));
@@ -219,15 +265,32 @@ fn configure_rayon_pool() {
 	let result = match plan {
 		RayonPoolPlan::WorkerThreads(threads) => rayon::ThreadPoolBuilder::new()
 			.num_threads(threads)
+			.thread_name(|i| format!("pi-rayon-{i}"))
 			.build_global(),
 		RayonPoolPlan::SkipGlobalPool => {
 			pi_shell::set_rayon_global_pool_available(false);
 			return;
 		},
 	};
-	if result.is_ok() {
-		pi_shell::set_rayon_global_pool_available(true);
-	}
+	let available = match result {
+		Ok(()) => true,
+		Err(err) => std::error::Error::source(&err).is_none(),
+	};
+	pi_shell::set_rayon_global_pool_available(available);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_rayon_pool() {
+	let threads = desired_rayon_threads();
+	let available = match rayon::ThreadPoolBuilder::new()
+		.num_threads(threads)
+		.thread_name(|i| format!("pi-rayon-{i}"))
+		.build_global()
+	{
+		Ok(()) => true,
+		Err(err) => std::error::Error::source(&err).is_none(),
+	};
+	pi_shell::set_rayon_global_pool_available(available);
 }
 
 /// Build the custom Tokio runtime napi-rs uses on Windows, sized to what the
@@ -244,7 +307,8 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
 		.then(|| {
 			tokio::runtime::Builder::new_multi_thread()
 				.worker_threads(workers)
-				.max_blocking_threads(NAPI_TOKIO_MAX_BLOCKING_THREADS)
+				.thread_keep_alive(NAPI_TOKIO_BLOCKING_KEEP_ALIVE)
+				.thread_name("pi-tokio-worker")
 				.enable_all()
 				.build()
 				.ok()
@@ -252,10 +316,71 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
 		.flatten();
 	multi_thread.or_else(|| {
 		tokio::runtime::Builder::new_current_thread()
+			.thread_keep_alive(NAPI_TOKIO_BLOCKING_KEEP_ALIVE)
 			.enable_all()
 			.build()
 			.ok()
 	})
+}
+
+/// Build the bounded Tokio runtime napi-rs uses on Unix hosts without running a
+/// spawn+join probe.
+#[cfg(not(target_os = "windows"))]
+fn create_unix_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
+	tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(desired_worker_threads())
+		.thread_keep_alive(NAPI_TOKIO_BLOCKING_KEEP_ALIVE)
+		.thread_name("pi-tokio-worker")
+		.enable_all()
+		.build()
+		.ok()
+}
+
+fn create_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
+	#[cfg(target_os = "windows")]
+	{
+		create_windows_napi_tokio_runtime()
+	}
+	#[cfg(not(target_os = "windows"))]
+	{
+		create_unix_napi_tokio_runtime()
+	}
+}
+
+/// Active Tokio runtime generation and handle for synchronous native helpers
+/// (such as Linux D-Bus power assertions) invoked on the JavaScript thread.
+///
+/// Returns the currently live N-API Tokio runtime (non-zero generation) while
+/// at least one N-API environment holds it open, or falls back to a small
+/// process-lifetime 2-worker runtime (generation `0`) for standalone unit tests
+/// and calls that run after N-API environment teardown.
+#[cfg_attr(
+	not(any(target_os = "linux", test)),
+	allow(dead_code, reason = "used by Linux D-Bus helpers and unit tests")
+)]
+pub(crate) fn active_tokio_runtime() -> (u64, tokio::runtime::Handle) {
+	if let Some(active) = current_tokio_runtime_handle() {
+		return active;
+	}
+	static FALLBACK_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+	let handle = FALLBACK_RUNTIME
+		.get_or_init(|| {
+			tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(FALLBACK_TOKIO_WORKER_THREADS)
+				.thread_keep_alive(NAPI_TOKIO_BLOCKING_KEEP_ALIVE)
+				.thread_name("pi-tokio-fallback")
+				.enable_all()
+				.build()
+				.expect("fallback tokio runtime")
+		})
+		.handle()
+		.clone();
+	(FALLBACK_RUNTIME_GENERATION, handle)
+}
+
+#[cfg(test)]
+pub(crate) fn tokio_runtime_handle() -> tokio::runtime::Handle {
+	active_tokio_runtime().1
 }
 
 /// Size of the post-link version stamp slot, including magic and NUL padding.
@@ -309,77 +434,220 @@ pub fn pi_natives_build_version() -> Option<String> {
 	String::from_utf8(payload).ok()
 }
 
+/// Run bounded Tokio/Rayon pool installation inside `napi_register_module_v1`,
+/// after `dlopen` has returned and released the OS dynamic-loader lock, and
+/// right before napi-rs calls `start_async_runtime()` (which would otherwise
+/// materialize a 1-worker-per-CPU default runtime before JS sees `exports`).
+#[allow(
+	clippy::unnecessary_wraps,
+	reason = "ExportRegisterHookCallback signature requires napi::Result"
+)]
+unsafe fn on_napi_module_register(
+	_env: napi::sys::napi_env,
+	exports: napi::sys::napi_value,
+) -> napi::Result<napi::sys::napi_value> {
+	omp_install_tokio_runtime();
+	Ok(exports)
+}
+
 /// Native module entry point: install crash diagnostics before any tool can
-/// invoke a panicking or allocating native call. This runs during `.node`
-/// load, while the dynamic-loader lock is held, so it MUST NOT spawn threads —
-/// the Tokio runtime is installed afterwards on Windows by
-/// [`omp_install_tokio_runtime`], which the JS loader calls once `dlopen` has
-/// returned.
+/// invoke a panicking or allocating native call, and register the post-`dlopen`
+/// N-API hook that installs bounded Tokio and Rayon pools before napi-rs starts
+/// its async runtime.
 ///
-/// On Windows, the custom Tokio runtime is host-sized to prevent aborts under
-/// memory limits (see [`create_windows_napi_tokio_runtime`]). Non-Windows
-/// builds intentionally use napi-rs's default path. Linux source builds can
-/// deadlock if this module initializer or post-load setup performs its own
-/// thread probe, so we keep the probe and custom runtime Windows-only.
+/// This runs during `.node` load while the dynamic-loader lock is held, so it
+/// MUST NOT spawn threads directly; `register_module_export_hook` only records
+/// a function pointer that `napi_register_module_v1` invokes once `dlopen` has
+/// returned.
 #[module_init]
 fn install_native_crash_handler() {
 	crash_handler::install();
+	set_custom_tokio_runtime_factory(create_napi_tokio_runtime);
+	register_module_export_hook(on_napi_module_register);
 }
 
-/// Guards [`omp_install_tokio_runtime`] so the runtime is built at most once
-/// per process even if the loader invokes it more than once.
-#[cfg(target_os = "windows")]
-static TOKIO_RUNTIME_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Guards [`configure_rayon_pool`] so Rayon's process-wide global pool is built
+/// at most once across N-API environment registrations and explicit JS calls.
+static RAYON_POOL_CONFIGURED: AtomicBool = AtomicBool::new(false);
 
 /// Install the bounded Tokio runtime napi-rs adopts for async exports and the
 /// bounded Rayon global pool used by native parallel iterators.
 ///
-/// The JS loader calls this exactly once, synchronously, right *after* `dlopen`
-/// returns and *before* any async native or parallel iterator runs — never from
-/// `#[module_init]`. Building a multi-thread runtime eagerly spawns worker
-/// threads, and doing that during module init (while the dynamic-loader lock is
-/// held) deadlocks on some hosts: a fresh worker blocks acquiring the loader
-/// lock that the init thread still owns. napi-rs only materializes its runtime
-/// on the first async call (`RT` is a `LazyLock`) and
-/// `create_custom_tokio_runtime` merely records the runtime in a `OnceLock`, so
-/// installing it post-load is still honored.
+/// Invoked automatically from [`on_napi_module_register`] during
+/// `napi_register_module_v1` — after `dlopen` has released the OS loader lock
+/// and before napi-rs's `start_async_runtime()` materializes `RT` — and kept as
+/// an idempotent export for the JS loader.
 ///
 /// Without the Tokio override napi builds its own default (one worker per CPU,
-/// spawned eagerly), which aborts the process (`os error 1455`) on a
-/// memory-constrained Windows host before any JS error can surface;
-/// [`create_windows_napi_tokio_runtime`] pre-flights the spawn instead. Rayon
-/// has the same one-thread-per-core lazy default, so [`configure_rayon_pool`]
-/// installs a probed global pool before `count_tokens` or vendored `sort` can
-/// trigger it across a N-API nounwind boundary. If no worker thread is
-/// spawnable, patched Rayon callsites stay sequential rather than registering a
-/// current-thread-only global pool that cannot steal work from later native
-/// calls. Idempotent.
+/// spawned eagerly), spawning dozens of idle threads on high-core-count hosts
+/// and aborting (`os error 1455`) under Windows commit-limit pressure. Rayon
+/// has the same one-thread-per-core default, so [`configure_rayon_pool`]
+/// installs a bounded global pool before `count_tokens` or vendored `sort` can
+/// trigger it. Idempotent.
 #[napi(js_name = "__ompInstallTokioRuntime")]
 #[allow(clippy::missing_const_for_fn, reason = "napi macro is incompatible with const fn")]
 pub fn omp_install_tokio_runtime() {
-	#[cfg(target_os = "windows")]
-	if TOKIO_RUNTIME_INSTALLED.swap(true, Ordering::SeqCst) {
-		return;
+	set_custom_tokio_runtime_factory(create_napi_tokio_runtime);
+	start_async_runtime();
+	if !RAYON_POOL_CONFIGURED.swap(true, Ordering::SeqCst) {
+		configure_rayon_pool();
 	}
-	#[cfg(target_os = "windows")]
-	if let Some(runtime) = create_windows_napi_tokio_runtime() {
-		create_custom_tokio_runtime(runtime);
-	}
-	#[cfg(target_os = "windows")]
-	configure_rayon_pool();
 }
 
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
+	use napi::bindgen_prelude::{current_tokio_runtime_handle, shutdown_async_runtime};
+	use pi_shell::{ShellExecuteOptions, cancel::CancelToken, execute_shell};
+
 	use super::{
-		RAYON_MAX_THREADS, RayonPoolPlan, clamped_rayon_threads, rayon_pool_plan, rayon_probe_target,
+		FALLBACK_RUNTIME_GENERATION, NAPI_TOKIO_MAX_WORKER_THREADS, RAYON_MAX_THREADS,
+		RUNTIME_LIFECYCLE_TEST_LOCK, RayonPoolPlan, active_tokio_runtime, clamped_rayon_threads,
+		clamped_tokio_worker_threads, create_napi_tokio_runtime, omp_install_tokio_runtime,
+		rayon_pool_plan, rayon_probe_target, resolve_rayon_threads, resolve_tokio_worker_threads,
+		tokio_runtime_handle,
 	};
 
 	#[test]
-	fn rayon_threads_are_capped_for_windows_commit_pressure() {
+	fn tokio_worker_threads_clamp_high_core_counts_and_honor_env_overrides() {
+		assert_eq!(clamped_tokio_worker_threads(0), 1);
+		assert_eq!(clamped_tokio_worker_threads(2), 2);
+		assert_eq!(clamped_tokio_worker_threads(20), NAPI_TOKIO_MAX_WORKER_THREADS);
+
+		assert_eq!(resolve_tokio_worker_threads(None, None, 20), NAPI_TOKIO_MAX_WORKER_THREADS);
+		assert_eq!(resolve_tokio_worker_threads(Some("6"), Some("2"), 20), 6);
+		assert_eq!(resolve_tokio_worker_threads(None, Some(" 3 "), 20), 3);
+		assert_eq!(
+			resolve_tokio_worker_threads(Some("0"), Some("invalid"), 20),
+			NAPI_TOKIO_MAX_WORKER_THREADS
+		);
+	}
+
+	#[test]
+	fn rayon_threads_are_capped_and_honor_env_override() {
 		assert_eq!(clamped_rayon_threads(0), 1);
 		assert_eq!(clamped_rayon_threads(1), 1);
 		assert_eq!(clamped_rayon_threads(RAYON_MAX_THREADS + 1), RAYON_MAX_THREADS);
+
+		assert_eq!(resolve_rayon_threads(None, 20), RAYON_MAX_THREADS);
+		assert_eq!(resolve_rayon_threads(Some(" 12 "), 20), 12);
+		assert_eq!(resolve_rayon_threads(Some("0"), 20), RAYON_MAX_THREADS);
+		assert_eq!(resolve_rayon_threads(Some("nope"), 4), 4);
+	}
+
+	#[test]
+	fn shared_tokio_runtime_handle_drives_async_work_outside_napi_registration() {
+		let _guard = RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		shutdown_async_runtime();
+		let handle = tokio_runtime_handle();
+		let value = handle
+			.block_on(async {
+				handle
+					.spawn(async {
+						tokio::time::sleep(Duration::from_millis(5)).await;
+						42_usize
+					})
+					.await
+			})
+			.expect("fallback runtime must schedule spawned task and drive timer reactor");
+		assert_eq!(value, 42);
+	}
+
+	#[test]
+	fn napi_runtime_teardown_and_reregistration_rebuilds_bounded_runtime_and_refreshes_handle() {
+		let _guard = RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		shutdown_async_runtime();
+
+		omp_install_tokio_runtime();
+		let (gen1, handle1) = active_tokio_runtime();
+		assert!(gen1 >= 1, "installed N-API runtime must have non-zero generation");
+		let worker_name_1 = handle1
+			.block_on(async {
+				tokio::spawn(async { std::thread::current().name().map(str::to_owned) }).await
+			})
+			.expect("spawned task on initial runtime");
+		assert_eq!(worker_name_1.as_deref(), Some("pi-tokio-worker"));
+
+		// Simulate last N-API environment cleanup (`thread_cleanup` ->
+		// `shutdown_async_runtime`).
+		shutdown_async_runtime();
+		assert!(current_tokio_runtime_handle().is_none());
+		let (fallback_gen, fallback_handle) = active_tokio_runtime();
+		assert_eq!(fallback_gen, FALLBACK_RUNTIME_GENERATION);
+		let fallback_value = fallback_handle
+			.block_on(async {
+				fallback_handle
+					.spawn(async {
+						tokio::time::sleep(Duration::from_millis(5)).await;
+						99_usize
+					})
+					.await
+			})
+			.expect("fallback runtime must schedule spawned task after N-API teardown");
+		assert_eq!(fallback_value, 99);
+
+		// Simulate subsequent Worker / Electron reload re-registering the addon.
+		omp_install_tokio_runtime();
+		let (gen2, handle2) = active_tokio_runtime();
+		assert!(gen2 > gen1, "restarted N-API runtime must advance generation ({gen1} -> {gen2})");
+		let worker_name_2 = handle2
+			.block_on(async {
+				tokio::spawn(async { std::thread::current().name().map(str::to_owned) }).await
+			})
+			.expect("spawned task on restarted runtime");
+		assert_eq!(
+			worker_name_2.as_deref(),
+			Some("pi-tokio-worker"),
+			"re-registration must rebuild the bounded custom runtime instead of napi's per-CPU \
+			 default"
+		);
+
+		shutdown_async_runtime();
+	}
+
+	#[test]
+	fn ten_stage_cat_pipeline_completes_on_napi_tokio_runtime_without_blocking_pool_starvation() {
+		const PAYLOAD_BYTES: usize = 256 * 1024;
+		let temp_dir = std::env::temp_dir().join(format!(
+			"pi-natives-pipeline-{}-{}",
+			std::process::id(),
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_nanos()
+		));
+		std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+		let input_path = temp_dir.join("payload.txt");
+		let payload = "a".repeat(PAYLOAD_BYTES);
+		std::fs::write(&input_path, payload.as_bytes()).expect("write payload");
+
+		let cwd = temp_dir.to_string_lossy().into_owned();
+		let (done_tx, done_rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let runtime = create_napi_tokio_runtime().expect("create napi tokio runtime");
+			let (chunk_tx, chunk_rx) = flume::unbounded::<String>();
+			let result = runtime.block_on(execute_shell(
+				ShellExecuteOptions {
+					command: "cat payload.txt | cat | cat | cat | cat | cat | cat | cat | cat | cat"
+						.to_owned(),
+					cwd: Some(cwd),
+					..Default::default()
+				},
+				Some(chunk_tx),
+				CancelToken::default(),
+			));
+			let output: String = chunk_rx.drain().collect();
+			let _ = done_tx.send((result, output));
+		});
+
+		let outcome = done_rx.recv_timeout(Duration::from_secs(5));
+		let _ = std::fs::remove_dir_all(&temp_dir);
+		let (result, output) = outcome
+			.expect("10-stage cat pipeline timed out (blocking pool starved by dependent stages)");
+		let result = result.expect("execute_shell succeeded");
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(output.len(), PAYLOAD_BYTES);
 	}
 
 	#[test]

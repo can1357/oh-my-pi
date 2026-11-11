@@ -13,8 +13,6 @@ use std::{
 
 use napi::{JsString, Result};
 use napi_derive::napi;
-use pi_shell::rayon_global_pool_available;
-use rayon::prelude::*;
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 
 use crate::{
@@ -613,9 +611,9 @@ pub fn warm_highlighter() -> task::Promise<()> {
 	task::blocking("highlight.warm", (), move |_| {
 		let ss = &*SYNTAX_SET;
 		LazyLock::force(&SCOPE_MATCHERS);
-		let warm = |&(lang, code): &(&str, &str)| {
+		for &(lang, code) in WARM_SNIPPETS {
 			let Some(syntax) = find_syntax(ss, lang) else {
-				return;
+				continue;
 			};
 			let mut parse_state = ParseState::new(syntax);
 			for line in syntect::util::LinesWithEndings::from(code) {
@@ -623,11 +621,6 @@ pub fn warm_highlighter() -> task::Promise<()> {
 					break;
 				}
 			}
-		};
-		if rayon_global_pool_available() {
-			WARM_SNIPPETS.par_iter().for_each(warm);
-		} else {
-			WARM_SNIPPETS.iter().for_each(warm);
 		}
 		Ok(())
 	})

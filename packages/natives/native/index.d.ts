@@ -969,26 +969,17 @@ export declare class VcsRepo {
  * Install the bounded Tokio runtime napi-rs adopts for async exports and the
  * bounded Rayon global pool used by native parallel iterators.
  *
- * The JS loader calls this exactly once, synchronously, right *after* `dlopen`
- * returns and *before* any async native or parallel iterator runs — never from
- * `#[module_init]`. Building a multi-thread runtime eagerly spawns worker
- * threads, and doing that during module init (while the dynamic-loader lock is
- * held) deadlocks on some hosts: a fresh worker blocks acquiring the loader
- * lock that the init thread still owns. napi-rs only materializes its runtime
- * on the first async call (`RT` is a `LazyLock`) and
- * `create_custom_tokio_runtime` merely records the runtime in a `OnceLock`, so
- * installing it post-load is still honored.
+ * Invoked automatically from [`on_napi_module_register`] during
+ * `napi_register_module_v1` — after `dlopen` has released the OS loader lock
+ * and before napi-rs's `start_async_runtime()` materializes `RT` — and kept as
+ * an idempotent export for the JS loader.
  *
  * Without the Tokio override napi builds its own default (one worker per CPU,
- * spawned eagerly), which aborts the process (`os error 1455`) on a
- * memory-constrained Windows host before any JS error can surface;
- * [`create_windows_napi_tokio_runtime`] pre-flights the spawn instead. Rayon
- * has the same one-thread-per-core lazy default, so [`configure_rayon_pool`]
- * installs a probed global pool before `count_tokens` or vendored `sort` can
- * trigger it across a N-API nounwind boundary. If no worker thread is
- * spawnable, patched Rayon callsites stay sequential rather than registering a
- * current-thread-only global pool that cannot steal work from later native
- * calls. Idempotent.
+ * spawned eagerly), spawning dozens of idle threads on high-core-count hosts
+ * and aborting (`os error 1455`) under Windows commit-limit pressure. Rayon
+ * has the same one-thread-per-core default, so [`configure_rayon_pool`]
+ * installs a bounded global pool before `count_tokens` or vendored `sort` can
+ * trigger it. Idempotent.
  */
 export declare function __ompInstallTokioRuntime(): void
 

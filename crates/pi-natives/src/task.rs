@@ -483,6 +483,13 @@ where
 	Ok(PromiseRaw::new(env.raw(), promise.raw()))
 }
 
+const FS_TOKIO_MAX_WORKER_THREADS: usize = 8;
+const FS_TOKIO_MAX_BLOCKING_THREADS: usize = 8;
+
+fn fs_runtime_worker_threads(parallelism: usize) -> usize {
+	parallelism.clamp(1, FS_TOKIO_MAX_WORKER_THREADS)
+}
+
 /// The runtime every filesystem walk runs on.
 ///
 /// Separate from the addon's scheduler pool on purpose, and the separation has
@@ -497,7 +504,12 @@ where
 /// Never dropped: dropping a runtime from inside another one panics, and this
 /// lives as long as the addon.
 static FS_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+	let workers = fs_runtime_worker_threads(
+		std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+	);
 	tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(workers)
+		.max_blocking_threads(FS_TOKIO_MAX_BLOCKING_THREADS)
 		// A distinct name so these threads are tellable apart from the
 		// scheduler's in `/proc/<pid>/task/*/comm` when a stall is diagnosed.
 		.thread_name("pi-fs-worker")
@@ -1047,5 +1059,12 @@ mod tests {
 		assert_eq!(task.compute().unwrap().into_inner(), 1);
 		let err = task.compute().unwrap_err();
 		assert!(err.reason.contains("work already consumed"), "reason = {}", err.reason);
+	}
+
+	#[test]
+	fn fs_runtime_worker_threads_are_bounded_on_many_core_hosts() {
+		assert_eq!(fs_runtime_worker_threads(0), 1);
+		assert_eq!(fs_runtime_worker_threads(4), 4);
+		assert_eq!(fs_runtime_worker_threads(20), FS_TOKIO_MAX_WORKER_THREADS);
 	}
 }

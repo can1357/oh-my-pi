@@ -189,10 +189,15 @@ pub(crate) mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
+	use std::{
+		future::Future,
+		sync::atomic::{AtomicU64, Ordering},
+	};
+
 	use log::debug;
 	use napi::{Error, Result};
 	use parking_lot::Mutex;
-	use zbus::{blocking::Connection, zvariant::OwnedFd};
+	use zbus::{Connection, zvariant::OwnedFd};
 
 	/// Message prefix marking "no platform backend present". Mirrored by
 	/// `POWER_BACKEND_UNAVAILABLE_CODE` in `packages/coding-agent`.
@@ -209,26 +214,162 @@ mod platform {
 	// The connections own their D-Bus transports, while each assertion owns
 	// only its login1 inhibitor fd and ScreenSaver cookie. Reuse healthy
 	// transports so a new assertion does not synchronously reconnect from the
-	// JavaScript thread. The system bus is dropped after a login1 call failure
-	// (login1 inhibitors are fd-backed, so reconnecting never orphans them);
-	// the shared session bus is never dropped on a ScreenSaver call error,
-	// because doing so would release every other session's still-valid cookie.
-	static SYSTEM_BUS: Mutex<Option<Connection>> = Mutex::new(None);
-	static SESSION_BUS: Mutex<Option<Connection>> = Mutex::new(None);
+	// JavaScript thread, tie each cached transport to the N-API Tokio runtime
+	// generation whose reactor drives its internal zbus tasks so a
+	// worker/Electron realm restart after runtime teardown reconnects cleanly,
+	// and tag each connected instance with a monotonic `cache_revision` so a
+	// late error from a superseded transport never evicts a newly reconnected
+	// bus. The system bus is dropped after a login1 call failure (login1
+	// inhibitors are fd-backed, so reconnecting never orphans them); the shared
+	// session bus is kept across non-I/O ScreenSaver method errors so other
+	// sessions' cookies stay valid.
+	pub(super) struct CachedBus {
+		runtime_generation: u64,
+		cache_revision:     u64,
+		connection:         Connection,
+	}
 
-	/// Holds login1's inhibitor descriptor and the desktop `ScreenSaver` cookie.
-	/// Closing the descriptor and releasing the cookie removes both inhibits.
+	static NEXT_BUS_CACHE_REVISION: AtomicU64 = AtomicU64::new(1);
+	static SYSTEM_BUS: Mutex<Option<CachedBus>> = Mutex::new(None);
+	static SESSION_BUS: Mutex<Option<CachedBus>> = Mutex::new(None);
+
+	pub(super) fn block_on_dbus_with<F>(handle: &tokio::runtime::Handle, future: F) -> F::Output
+	where
+		F: Future + Send,
+		F::Output: Send,
+	{
+		match tokio::runtime::Handle::try_current() {
+			Err(_) => handle.block_on(future),
+			Ok(current) if current.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+				tokio::task::block_in_place(|| handle.block_on(future))
+			},
+			Ok(_) => std::thread::scope(|scope| {
+				scope
+					.spawn(|| handle.block_on(future))
+					.join()
+					.expect("power assertion runtime helper panicked")
+			}),
+		}
+	}
+
+	/// Drive an async `zbus` call on the addon's bounded Tokio runtime instead
+	/// of `zbus::blocking`, which otherwise lazily constructs a private
+	/// one-worker-per-CPU Tokio runtime when `zbus/tokio` is unified into the
+	/// crate graph.
+	#[cfg(test)]
+	pub(super) fn block_on_dbus<F>(future: F) -> F::Output
+	where
+		F: Future + Send,
+		F::Output: Send,
+	{
+		let (_, handle) = crate::active_tokio_runtime();
+		block_on_dbus_with(&handle, future)
+	}
+
+	pub(super) fn ensure_cached_bus<C>(
+		slot: &Mutex<Option<CachedBus>>,
+		runtime_generation: u64,
+		handle: &tokio::runtime::Handle,
+		connect: C,
+	) -> zbus::Result<(u64, Connection)>
+	where
+		C: Future<Output = zbus::Result<Connection>> + Send,
+	{
+		let mut guard = slot.lock();
+		if guard
+			.as_ref()
+			.is_some_and(|cached| cached.runtime_generation != runtime_generation)
+		{
+			*guard = None;
+		}
+		if let Some(cached) = &*guard {
+			Ok((cached.cache_revision, cached.connection.clone()))
+		} else {
+			let connection = block_on_dbus_with(handle, connect)?;
+			let cache_revision = NEXT_BUS_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
+			*guard =
+				Some(CachedBus { runtime_generation, cache_revision, connection: connection.clone() });
+			Ok((cache_revision, connection))
+		}
+	}
+
+	fn evict_cached_bus(
+		slot: &Mutex<Option<CachedBus>>,
+		runtime_generation: u64,
+		cache_revision: u64,
+	) {
+		let mut guard = slot.lock();
+		if guard.as_ref().is_some_and(|cached| {
+			cached.runtime_generation == runtime_generation && cached.cache_revision == cache_revision
+		}) {
+			*guard = None;
+		}
+	}
+
+	fn system_bus_connect_error(error: &zbus::Error) -> Error {
+		// An absent bus socket means this host has no D-Bus at all
+		// (headless container). Tag it with a stable code so callers
+		// can tell "no backend" apart from a bus that exists but
+		// refuses or rejects us, which stays a plain failure.
+		let absent = matches!(
+			error,
+			zbus::Error::Connection(source, _) | zbus::Error::InputOutput(source)
+				if source.kind() == std::io::ErrorKind::NotFound
+		);
+		let code = if absent {
+			format!("{POWER_BACKEND_UNAVAILABLE_CODE}: ")
+		} else {
+			String::new()
+		};
+		Error::from_reason(format!("{code}Unable to connect to the system bus: {error}"))
+	}
+
+	#[derive(Clone, Copy, Debug)]
+	pub(super) struct ScreenSaverInhibit {
+		cookie:         u32,
+		cache_revision: u64,
+	}
+
+	/// Holds login1's inhibitor descriptor and the desktop `ScreenSaver` cookie
+	/// paired with the session-bus revision that issued it. Closing the
+	/// descriptor and releasing the cookie removes both inhibits.
 	pub struct AssertionInner {
-		login1_inhibitor:   Option<OwnedFd>,
-		screensaver_cookie: Option<u32>,
+		login1_inhibitor:    Option<OwnedFd>,
+		screensaver_inhibit: Option<ScreenSaverInhibit>,
 	}
 
 	impl AssertionInner {
 		pub fn start(what: Option<&str>, display: bool, reason: &str) -> Result<Self> {
+			Self::start_with_buses(
+				what,
+				display,
+				reason,
+				&SYSTEM_BUS,
+				&SESSION_BUS,
+				Connection::system,
+				Connection::session,
+			)
+		}
+
+		pub(super) fn start_with_buses<SysFn, SysFut, SessFn, SessFut>(
+			what: Option<&str>,
+			display: bool,
+			reason: &str,
+			system_bus: &Mutex<Option<CachedBus>>,
+			session_bus: &Mutex<Option<CachedBus>>,
+			connect_system: SysFn,
+			connect_session: SessFn,
+		) -> Result<Self>
+		where
+			SysFn: FnOnce() -> SysFut,
+			SysFut: Future<Output = zbus::Result<Connection>> + Send,
+			SessFn: FnOnce() -> SessFut,
+			SessFut: Future<Output = zbus::Result<Connection>> + Send,
+		{
 			// The login1 inhibitor is the only real sleep prevention here, so
 			// acquire it first and propagate any failure.
 			let login1_inhibitor = match what {
-				Some(what) => Some(Self::start_login1(what, reason)?),
+				Some(what) => Some(Self::start_login1_with(system_bus, connect_system, what, reason)?),
 				None => None,
 			};
 			// The desktop ScreenSaver inhibit is a best-effort supplement (it
@@ -236,9 +377,9 @@ mod platform {
 			// is unavailable, and propagating that failure would drop the login1
 			// inhibitor acquired above during unwinding — leaving the caller
 			// with no sleep prevention at all. Degrade to login1-only.
-			let screensaver_cookie = if display {
-				match Self::start_screensaver(reason) {
-					Ok(cookie) => Some(cookie),
+			let screensaver_inhibit = if display {
+				match Self::start_screensaver_with(session_bus, connect_session, reason) {
+					Ok(inhibit) => Some(inhibit),
 					Err(error) => {
 						debug!("Unable to acquire ScreenSaver display inhibitor: {error}");
 						None
@@ -247,43 +388,36 @@ mod platform {
 			} else {
 				None
 			};
-			Ok(Self { login1_inhibitor, screensaver_cookie })
+			Ok(Self { login1_inhibitor, screensaver_inhibit })
 		}
 
-		fn start_login1(what: &str, reason: &str) -> Result<OwnedFd> {
-			let mut system_bus = SYSTEM_BUS.lock();
-			// Connect only when the cache is empty: `get_or_insert` would open and
-			// drop a fresh connection on every acquisition.
-			let connection = match &mut *system_bus {
-				Some(connection) => connection,
-				slot => slot.insert(Connection::system().map_err(|error| {
-					// An absent bus socket means this host has no D-Bus at all
-					// (headless container). Tag it with a stable code so callers
-					// can tell "no backend" apart from a bus that exists but
-					// refuses or rejects us, which stays a plain failure.
-					let absent = matches!(
-						&error,
-						zbus::Error::Connection(source, _) | zbus::Error::InputOutput(source)
-							if source.kind() == std::io::ErrorKind::NotFound
-					);
-					let code = if absent {
-						format!("{POWER_BACKEND_UNAVAILABLE_CODE}: ")
-					} else {
-						String::new()
-					};
-					Error::from_reason(format!("{code}Unable to connect to the system bus: {error}"))
-				})?),
-			};
-			let reply = match connection.call_method(
-				Some(LOGIN1_DESTINATION),
-				LOGIN1_PATH,
-				Some(LOGIN1_MANAGER),
-				"Inhibit",
-				&(what, INHIBIT_WHO, reason, INHIBIT_MODE),
+		fn start_login1_with<C, Fut>(
+			system_bus: &Mutex<Option<CachedBus>>,
+			connect: C,
+			what: &str,
+			reason: &str,
+		) -> Result<OwnedFd>
+		where
+			C: FnOnce() -> Fut,
+			Fut: Future<Output = zbus::Result<Connection>> + Send,
+		{
+			let (runtime_generation, handle) = crate::active_tokio_runtime();
+			let (cache_revision, connection) =
+				ensure_cached_bus(system_bus, runtime_generation, &handle, connect())
+					.map_err(|error| system_bus_connect_error(&error))?;
+			let reply = match block_on_dbus_with(
+				&handle,
+				connection.call_method(
+					Some(LOGIN1_DESTINATION),
+					LOGIN1_PATH,
+					Some(LOGIN1_MANAGER),
+					"Inhibit",
+					&(what, INHIBIT_WHO, reason, INHIBIT_MODE),
+				),
 			) {
 				Ok(reply) => reply,
 				Err(error) => {
-					*system_bus = None;
+					evict_cached_bus(system_bus, runtime_generation, cache_revision);
 					return Err(Error::from_reason(format!("login1 Inhibit failed: {error}")));
 				},
 			};
@@ -292,55 +426,117 @@ mod platform {
 			})
 		}
 
-		fn start_screensaver(reason: &str) -> Result<u32> {
-			let mut session_bus = SESSION_BUS.lock();
-			let connection = match &mut *session_bus {
-				Some(connection) => connection,
-				slot => slot.insert(Connection::session().map_err(|error| {
-					Error::from_reason(format!("Unable to connect to the session bus: {error}"))
-				})?),
-			};
-			let reply = match connection.call_method(
-				Some(SCREENSAVER_DESTINATION),
-				SCREENSAVER_PATH,
-				Some(SCREENSAVER_INTERFACE),
-				"Inhibit",
-				&(INHIBIT_WHO, reason),
+		fn start_screensaver_with<C, Fut>(
+			session_bus: &Mutex<Option<CachedBus>>,
+			connect: C,
+			reason: &str,
+		) -> Result<ScreenSaverInhibit>
+		where
+			C: FnOnce() -> Fut,
+			Fut: Future<Output = zbus::Result<Connection>> + Send,
+		{
+			let (runtime_generation, handle) = crate::active_tokio_runtime();
+			let (cache_revision, connection) =
+				ensure_cached_bus(session_bus, runtime_generation, &handle, connect()).map_err(
+					|error| Error::from_reason(format!("Unable to connect to the session bus: {error}")),
+				)?;
+			Self::inhibit_screensaver_connection(
+				session_bus,
+				runtime_generation,
+				cache_revision,
+				&handle,
+				&connection,
+				reason,
+			)
+		}
+
+		pub(super) fn inhibit_screensaver_connection(
+			session_bus: &Mutex<Option<CachedBus>>,
+			runtime_generation: u64,
+			cache_revision: u64,
+			handle: &tokio::runtime::Handle,
+			connection: &Connection,
+			reason: &str,
+		) -> Result<ScreenSaverInhibit> {
+			let reply = match block_on_dbus_with(
+				handle,
+				connection.call_method(
+					Some(SCREENSAVER_DESTINATION),
+					SCREENSAVER_PATH,
+					Some(SCREENSAVER_INTERFACE),
+					"Inhibit",
+					&(INHIBIT_WHO, reason),
+				),
 			) {
 				Ok(reply) => reply,
 				Err(error) => {
-					// A method error does not invalidate the shared transport,
-					// and dropping it here would orphan every other session's
-					// ScreenSaver cookie (the service releases inhibitors when
-					// the connection closes). Leave the connection in place;
-					// only the connection-acquisition failure above leaves it
-					// unset for the next acquisition to reconnect.
+					// A service-level method error (e.g. ScreenSaver absent on
+					// a headless session) does not invalidate the shared
+					// transport, and dropping it would release other sessions'
+					// cookies. Only evict the cache if the underlying socket
+					// failed, in which case the bus already lost those cookies.
+					if matches!(error, zbus::Error::InputOutput(_)) {
+						evict_cached_bus(session_bus, runtime_generation, cache_revision);
+					}
 					return Err(Error::from_reason(format!("ScreenSaver Inhibit failed: {error}")));
 				},
 			};
-			reply.body().deserialize::<u32>().map_err(|error| {
+			let cookie = reply.body().deserialize::<u32>().map_err(|error| {
 				Error::from_reason(format!("Invalid ScreenSaver inhibitor response: {error}"))
-			})
+			})?;
+			Ok(ScreenSaverInhibit { cookie, cache_revision })
 		}
 
 		pub fn stop(&mut self) {
+			self.stop_with_session_bus(&SESSION_BUS);
+		}
+
+		pub(super) fn stop_with_session_bus(&mut self, session_bus: &Mutex<Option<CachedBus>>) {
 			self.login1_inhibitor.take();
-			let Some(cookie) = self.screensaver_cookie.take() else {
+			let Some(inhibit) = self.screensaver_inhibit.take() else {
 				return;
 			};
-			let mut session_bus = SESSION_BUS.lock();
-			let Some(connection) = session_bus.as_mut() else {
-				return;
+			let (runtime_generation, handle) = crate::active_tokio_runtime();
+			let connection = {
+				let mut guard = session_bus.lock();
+				match guard.as_ref() {
+					Some(cached) if cached.runtime_generation != runtime_generation => {
+						// The Tokio runtime driving this connection's zbus tasks
+						// has already shut down; dropping the stale connection
+						// closes the socket so the bus releases its cookies
+						// without awaiting a dead reactor.
+						*guard = None;
+						return;
+					},
+					Some(cached) if cached.cache_revision == inhibit.cache_revision => {
+						cached.connection.clone()
+					},
+					// The issuing session-bus transport was already evicted
+					// (and possibly replaced by a newer revision whose
+					// ScreenSaver service may reuse cookie numbers); its socket
+					// closed when evicted, so `inhibit.cookie` is already gone.
+					Some(_) | None => return,
+				}
 			};
-			// Best-effort release: ignore errors so a failed UnInhibit never
-			// drops the shared transport out from under other sessions' cookies.
-			let _ = connection.call_method(
-				Some(SCREENSAVER_DESTINATION),
-				SCREENSAVER_PATH,
-				Some(SCREENSAVER_INTERFACE),
-				"UnInhibit",
-				&(cookie,),
-			);
+			// Drive UnInhibit synchronously to completion (including inside
+			// multi-thread or current-thread Tokio runtimes) so the cookie is
+			// released before `stop()` returns, evicting only on socket I/O
+			// failures so method errors never drop the shared transport out from
+			// under other sessions' cookies.
+			let result = block_on_dbus_with(&handle, async move {
+				connection
+					.call_method(
+						Some(SCREENSAVER_DESTINATION),
+						SCREENSAVER_PATH,
+						Some(SCREENSAVER_INTERFACE),
+						"UnInhibit",
+						&(inhibit.cookie,),
+					)
+					.await
+			});
+			if matches!(result, Err(zbus::Error::InputOutput(_))) {
+				evict_cached_bus(session_bus, runtime_generation, inhibit.cache_revision);
+			}
 		}
 	}
 
@@ -538,5 +734,567 @@ impl PowerAssertion {
 			inner.stop();
 		}
 		Ok(())
+	}
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+	use std::{
+		io,
+		os::unix::{
+			fs::PermissionsExt,
+			net::{UnixListener, UnixStream},
+		},
+		sync::{
+			Arc,
+			atomic::{AtomicU32, Ordering},
+		},
+		time::{Duration, SystemTime, UNIX_EPOCH},
+	};
+
+	use napi::bindgen_prelude::shutdown_async_runtime;
+	use parking_lot::Mutex;
+	use zbus::{Connection, Guid, connection, interface, zvariant::OwnedFd};
+
+	use super::platform::{AssertionInner, CachedBus, block_on_dbus, ensure_cached_bus};
+
+	#[derive(Clone)]
+	struct TestScreenSaver {
+		next_cookie:   Arc<AtomicU32>,
+		released:      Arc<Mutex<Vec<u32>>>,
+		release_delay: Duration,
+	}
+
+	#[interface(name = "org.freedesktop.ScreenSaver")]
+	impl TestScreenSaver {
+		#[zbus(name = "Inhibit")]
+		fn inhibit(&self, application_name: &str, reason_for_inhibit: &str) -> u32 {
+			let _ = (application_name, reason_for_inhibit);
+			self.next_cookie.fetch_add(1, Ordering::SeqCst)
+		}
+
+		#[zbus(name = "UnInhibit")]
+		async fn un_inhibit(&self, cookie: u32) {
+			if !self.release_delay.is_zero() {
+				tokio::time::sleep(self.release_delay).await;
+			}
+			self.released.lock().push(cookie);
+		}
+	}
+
+	#[derive(Clone)]
+	struct TestLogin1Manager {
+		inhibit_calls: Arc<AtomicU32>,
+	}
+
+	#[interface(name = "org.freedesktop.login1.Manager")]
+	impl TestLogin1Manager {
+		#[zbus(name = "Inhibit")]
+		fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> OwnedFd {
+			let _ = (what, who, why, mode);
+			self.inhibit_calls.fetch_add(1, Ordering::SeqCst);
+			let (reader, _writer) = io::pipe().expect("create test inhibitor pipe");
+			OwnedFd::from(std::os::fd::OwnedFd::from(reader))
+		}
+	}
+
+	async fn connect_p2p_screensaver(
+		service: TestScreenSaver,
+	) -> zbus::Result<(Connection, Connection)> {
+		let (client_stream, server_stream) = tokio::net::UnixStream::pair()?;
+		let guid = Guid::generate();
+		let server_fut = async move {
+			connection::Builder::unix_stream(server_stream)
+				.server(guid)?
+				.p2p()
+				.serve_at("/org/freedesktop/ScreenSaver", service)?
+				.build()
+				.await
+		};
+		let client_fut = connection::Builder::unix_stream(client_stream)
+			.p2p()
+			.build();
+		tokio::try_join!(client_fut, server_fut)
+	}
+
+	async fn connect_p2p_login1(
+		service: TestLogin1Manager,
+	) -> zbus::Result<(Connection, Connection)> {
+		let (client_stream, server_stream) = tokio::net::UnixStream::pair()?;
+		let guid = Guid::generate();
+		let server_fut = async move {
+			connection::Builder::unix_stream(server_stream)
+				.server(guid)?
+				.p2p()
+				.serve_at("/org/freedesktop/login1", service)?
+				.build()
+				.await
+		};
+		let client_fut = connection::Builder::unix_stream(client_stream)
+			.p2p()
+			.build();
+		tokio::try_join!(client_fut, server_fut)
+	}
+
+	#[test]
+	fn block_on_dbus_completes_outside_and_inside_tokio_runtimes() {
+		let _guard = crate::RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		let outside = block_on_dbus(async {
+			tokio::spawn(async {
+				tokio::time::sleep(Duration::from_millis(2)).await;
+				7_u32
+			})
+			.await
+			.expect("spawned task outside runtime")
+		});
+		assert_eq!(outside, 7);
+
+		let multi = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		let from_multi = multi.block_on(async {
+			block_on_dbus(async {
+				tokio::spawn(async {
+					tokio::time::sleep(Duration::from_millis(2)).await;
+					11_u32
+				})
+				.await
+				.expect("spawned task inside multi-thread runtime")
+			})
+		});
+		assert_eq!(from_multi, 11);
+
+		let current = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		let from_current = current.block_on(async {
+			block_on_dbus(async {
+				tokio::spawn(async {
+					tokio::time::sleep(Duration::from_millis(2)).await;
+					13_u32
+				})
+				.await
+				.expect("spawned task inside current-thread runtime")
+			})
+		});
+		assert_eq!(from_current, 13);
+	}
+
+	#[test]
+	fn stop_completes_screensaver_uninhibit_synchronously_across_calling_contexts() {
+		let _guard = crate::RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		let released = Arc::new(Mutex::new(Vec::new()));
+		let service = TestScreenSaver {
+			next_cookie:   Arc::new(AtomicU32::new(10)),
+			released:      Arc::clone(&released),
+			release_delay: Duration::from_millis(25),
+		};
+		let servers = Arc::new(Mutex::new(Vec::<Connection>::new()));
+		let system_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+		let session_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+
+		let acquire_display = || {
+			let service = service.clone();
+			let servers = Arc::clone(&servers);
+			AssertionInner::start_with_buses(
+				None,
+				true,
+				"sync-stop-test",
+				&system_bus,
+				&session_bus,
+				|| async { unreachable!("login1 disabled when what is None") },
+				move || async move {
+					let (client, server) = connect_p2p_screensaver(service).await?;
+					servers.lock().push(server);
+					Ok(client)
+				},
+			)
+			.expect("start display assertion")
+		};
+
+		let mut outside = acquire_display();
+		outside.stop_with_session_bus(&session_bus);
+		assert_eq!(*released.lock(), vec![10], "outside-runtime stop must await UnInhibit");
+
+		let multi = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		multi.block_on(async {
+			let mut in_multi = acquire_display();
+			in_multi.stop_with_session_bus(&session_bus);
+			assert_eq!(
+				*released.lock(),
+				vec![10, 11],
+				"multi-thread Tokio caller must observe synchronous UnInhibit completion"
+			);
+		});
+
+		let current = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		current.block_on(async {
+			let mut in_current = acquire_display();
+			in_current.stop_with_session_bus(&session_bus);
+			assert_eq!(
+				*released.lock(),
+				vec![10, 11, 12],
+				"current-thread Tokio caller must observe synchronous UnInhibit completion"
+			);
+		});
+	}
+
+	#[test]
+	fn cached_dbus_transports_reconnect_cleanly_after_napi_runtime_teardown_and_restart() {
+		let _guard = crate::RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		shutdown_async_runtime();
+
+		let released = Arc::new(Mutex::new(Vec::new()));
+		let screensaver_connects = Arc::new(AtomicU32::new(0));
+		let login1_connects = Arc::new(AtomicU32::new(0));
+		let login1_inhibit_calls = Arc::new(AtomicU32::new(0));
+		let servers = Arc::new(Mutex::new(Vec::<Connection>::new()));
+		let system_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+		let session_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+
+		let run_worker_cycle = |reason: &str| {
+			let screensaver = TestScreenSaver {
+				next_cookie:   Arc::new(AtomicU32::new(100)),
+				released:      Arc::clone(&released),
+				release_delay: Duration::from_millis(5),
+			};
+			let login1 = TestLogin1Manager { inhibit_calls: Arc::clone(&login1_inhibit_calls) };
+			let sys_servers = Arc::clone(&servers);
+			let sess_servers = Arc::clone(&servers);
+			let sys_connects = Arc::clone(&login1_connects);
+			let sess_connects = Arc::clone(&screensaver_connects);
+
+			let mut assertion = AssertionInner::start_with_buses(
+				Some("sleep:idle"),
+				true,
+				reason,
+				&system_bus,
+				&session_bus,
+				move || async move {
+					sys_connects.fetch_add(1, Ordering::SeqCst);
+					let (client, server) = connect_p2p_login1(login1).await?;
+					sys_servers.lock().push(server);
+					Ok(client)
+				},
+				move || async move {
+					sess_connects.fetch_add(1, Ordering::SeqCst);
+					let (client, server) = connect_p2p_screensaver(screensaver).await?;
+					sess_servers.lock().push(server);
+					Ok(client)
+				},
+			)
+			.expect("PowerAssertion start must succeed");
+			assertion.stop_with_session_bus(&session_bus);
+		};
+
+		// Worker 1 registers and acquires + stops two assertions (second reuses
+		// cached buses).
+		crate::omp_install_tokio_runtime();
+		run_worker_cycle("worker-1a");
+		run_worker_cycle("worker-1b");
+		assert_eq!(login1_connects.load(Ordering::SeqCst), 1);
+		assert_eq!(screensaver_connects.load(Ordering::SeqCst), 1);
+		assert_eq!(login1_inhibit_calls.load(Ordering::SeqCst), 2);
+		assert_eq!(released.lock().len(), 2);
+
+		// Worker 1 exits: napi shuts down runtime #1, invalidating its zbus
+		// tasks.
+		servers.lock().clear();
+		shutdown_async_runtime();
+
+		// Worker 2 registers: bounded runtime #2 starts and buses reconnect on
+		// the new generation.
+		crate::omp_install_tokio_runtime();
+		run_worker_cycle("worker-2");
+		assert_eq!(login1_connects.load(Ordering::SeqCst), 2);
+		assert_eq!(screensaver_connects.load(Ordering::SeqCst), 2);
+		assert_eq!(login1_inhibit_calls.load(Ordering::SeqCst), 3);
+		assert_eq!(released.lock().len(), 3);
+
+		servers.lock().clear();
+		shutdown_async_runtime();
+	}
+
+	#[test]
+	fn stale_failed_screensaver_attempt_does_not_evict_reconnected_session_bus() {
+		let _guard = crate::RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		let system_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+		let session_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+
+		let released_1 = Arc::new(Mutex::new(Vec::new()));
+		let service_1 = TestScreenSaver {
+			next_cookie:   Arc::new(AtomicU32::new(100)),
+			released:      Arc::clone(&released_1),
+			release_delay: Duration::ZERO,
+		};
+		let server_1_holder = Arc::new(Mutex::new(None::<Connection>));
+		let server_1_slot = Arc::clone(&server_1_holder);
+		let mut initial = AssertionInner::start_with_buses(
+			None,
+			true,
+			"seed-session-bus",
+			&system_bus,
+			&session_bus,
+			|| async { unreachable!("login1 disabled") },
+			move || async move {
+				let (client, server) = connect_p2p_screensaver(service_1).await?;
+				*server_1_slot.lock() = Some(server);
+				Ok(client)
+			},
+		)
+		.expect("seed initial ScreenSaver assertion");
+		initial.stop_with_session_bus(&session_bus);
+		assert_eq!(*released_1.lock(), vec![100]);
+
+		// Concurrent caller B clones the cached connection (`rev1`) before the
+		// transport breaks.
+		let (runtime_generation, handle) = crate::active_tokio_runtime();
+		let (stale_revision, stale_connection) =
+			ensure_cached_bus(&session_bus, runtime_generation, &handle, async {
+				unreachable!("session_bus must already hold rev1")
+			})
+			.expect("clone cached rev1 connection");
+
+		// Server #1 closes its socket, breaking `rev1`.
+		server_1_holder.lock().take();
+
+		// Caller A hits the broken `rev1` socket and evicts `rev1`.
+		let caller_a = AssertionInner::start_with_buses(
+			None,
+			true,
+			"evict-broken-rev1",
+			&system_bus,
+			&session_bus,
+			|| async { unreachable!("login1 disabled") },
+			|| async { unreachable!("caller A must attempt cached rev1") },
+		)
+		.expect("ScreenSaver failure degrades without failing assertion start");
+		drop(caller_a);
+
+		// Caller C reconnects to healthy server #2 (`rev2`) and holds cookie 200.
+		let released_2 = Arc::new(Mutex::new(Vec::new()));
+		let service_2 = TestScreenSaver {
+			next_cookie:   Arc::new(AtomicU32::new(200)),
+			released:      Arc::clone(&released_2),
+			release_delay: Duration::ZERO,
+		};
+		let server_2_holder = Arc::new(Mutex::new(None::<Connection>));
+		let server_2_slot = Arc::clone(&server_2_holder);
+		let mut reconnected = AssertionInner::start_with_buses(
+			None,
+			true,
+			"healthy-rev2",
+			&system_bus,
+			&session_bus,
+			|| async { unreachable!("login1 disabled") },
+			move || async move {
+				let (client, server) = connect_p2p_screensaver(service_2).await?;
+				*server_2_slot.lock() = Some(server);
+				Ok(client)
+			},
+		)
+		.expect("reconnect ScreenSaver assertion on rev2");
+
+		// Now caller B's late I/O failure on `rev1` runs eviction; it must NOT
+		// evict `rev2` from `session_bus` or close caller C's transport.
+		let stale_err = AssertionInner::inhibit_screensaver_connection(
+			&session_bus,
+			runtime_generation,
+			stale_revision,
+			&handle,
+			&stale_connection,
+			"late-stale-caller",
+		)
+		.expect_err("broken rev1 connection must fail Inhibit");
+		assert!(stale_err.reason.contains("ScreenSaver Inhibit failed:"));
+		drop(stale_connection);
+
+		reconnected.stop_with_session_bus(&session_bus);
+		assert_eq!(
+			*released_2.lock(),
+			vec![200],
+			"late failure from superseded revision must leave reconnected session bus intact"
+		);
+	}
+
+	#[test]
+	fn stopping_superseded_assertion_does_not_release_reused_cookie_on_reconnected_session_bus() {
+		let _guard = crate::RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		let system_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+		let session_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+
+		// Assertion A acquires cookie 7 on revision R1.
+		let released_1 = Arc::new(Mutex::new(Vec::new()));
+		let service_1 = TestScreenSaver {
+			next_cookie:   Arc::new(AtomicU32::new(7)),
+			released:      Arc::clone(&released_1),
+			release_delay: Duration::ZERO,
+		};
+		let server_1_holder = Arc::new(Mutex::new(None::<Connection>));
+		let server_1_slot = Arc::clone(&server_1_holder);
+		let mut assertion_a = AssertionInner::start_with_buses(
+			None,
+			true,
+			"assertion-a-r1",
+			&system_bus,
+			&session_bus,
+			|| async { unreachable!("login1 disabled") },
+			move || async move {
+				let (client, server) = connect_p2p_screensaver(service_1).await?;
+				*server_1_slot.lock() = Some(server);
+				Ok(client)
+			},
+		)
+		.expect("start assertion A on R1");
+
+		// ScreenSaver service #1 dies and an I/O failure evicts R1 from
+		// `session_bus`.
+		server_1_holder.lock().take();
+		let evictor = AssertionInner::start_with_buses(
+			None,
+			true,
+			"evict-r1",
+			&system_bus,
+			&session_bus,
+			|| async { unreachable!("login1 disabled") },
+			|| async { unreachable!("evictor must attempt cached R1") },
+		)
+		.expect("ScreenSaver failure degrades without failing assertion start");
+		drop(evictor);
+
+		// Restarted ScreenSaver service #2 reconnects as revision R2 and reuses
+		// cookie 7 for assertion B.
+		let released_2 = Arc::new(Mutex::new(Vec::new()));
+		let service_2 = TestScreenSaver {
+			next_cookie:   Arc::new(AtomicU32::new(7)),
+			released:      Arc::clone(&released_2),
+			release_delay: Duration::ZERO,
+		};
+		let server_2_holder = Arc::new(Mutex::new(None::<Connection>));
+		let server_2_slot = Arc::clone(&server_2_holder);
+		let mut assertion_b = AssertionInner::start_with_buses(
+			None,
+			true,
+			"assertion-b-r2",
+			&system_bus,
+			&session_bus,
+			|| async { unreachable!("login1 disabled") },
+			move || async move {
+				let (client, server) = connect_p2p_screensaver(service_2).await?;
+				*server_2_slot.lock() = Some(server);
+				Ok(client)
+			},
+		)
+		.expect("start assertion B on R2");
+
+		// Stopping/dropping assertion A (from R1) must NOT send UnInhibit(7) over
+		// R2 and release assertion B's live inhibitor.
+		assertion_a.stop_with_session_bus(&session_bus);
+		drop(assertion_a);
+		assert!(
+			released_2.lock().is_empty(),
+			"stopping superseded R1 assertion must not release reused cookie 7 on R2"
+		);
+
+		// Stopping assertion B (from R2) releases its cookie 7 over R2.
+		assertion_b.stop_with_session_bus(&session_bus);
+		assert_eq!(*released_2.lock(), vec![7]);
+	}
+
+	#[test]
+	fn start_assertion_distinguishes_absent_system_bus_socket_from_permission_denied() {
+		let _guard = crate::RUNTIME_LIFECYCLE_TEST_LOCK.lock();
+		let temp_dir = std::env::temp_dir().join(format!(
+			"pi-natives-dbus-err-{}-{}",
+			std::process::id(),
+			SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_nanos()
+		));
+		std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+		let system_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+		let session_bus: Mutex<Option<CachedBus>> = Mutex::new(None);
+
+		let missing_addr = format!("unix:path={}", temp_dir.join("missing.sock").display());
+		let Err(missing_err) = AssertionInner::start_with_buses(
+			Some("sleep:idle"),
+			false,
+			"missing-bus-test",
+			&system_bus,
+			&session_bus,
+			move || async move {
+				connection::Builder::address(missing_addr.as_str())?
+					.build()
+					.await
+			},
+			|| async { unreachable!("display inhibit disabled") },
+		) else {
+			panic!("missing system bus socket must fail");
+		};
+		assert!(
+			missing_err
+				.reason
+				.starts_with("PowerBackendUnavailable: Unable to connect to the system bus:"),
+			"missing system bus socket must propagate PowerBackendUnavailable marker: {}",
+			missing_err.reason
+		);
+
+		let denied_sock = temp_dir.join("denied.sock");
+		let _listener = UnixListener::bind(&denied_sock).expect("bind denied Unix socket");
+		std::fs::set_permissions(&denied_sock, std::fs::Permissions::from_mode(0o000))
+			.expect("chmod 0000 denied Unix socket");
+
+		// Root with CAP_DAC_OVERRIDE bypasses 0o000 socket permissions; run the
+		// permission-denied contract assertion whenever the kernel enforces
+		// EACCES.
+		let enforces_eacces = matches!(
+			UnixStream::connect(&denied_sock),
+			Err(ref err) if err.kind() == io::ErrorKind::PermissionDenied
+		);
+		if enforces_eacces {
+			let denied_addr = format!("unix:path={}", denied_sock.display());
+			let Err(denied_err) = AssertionInner::start_with_buses(
+				Some("sleep:idle"),
+				false,
+				"denied-bus-test",
+				&system_bus,
+				&session_bus,
+				move || async move {
+					connection::Builder::address(denied_addr.as_str())?
+						.build()
+						.await
+				},
+				|| async { unreachable!("display inhibit disabled") },
+			) else {
+				panic!("permission-denied system bus socket must fail");
+			};
+			assert!(
+				!denied_err.reason.starts_with("PowerBackendUnavailable:"),
+				"permission failures must not report an absent backend: {}",
+				denied_err.reason
+			);
+			assert!(
+				denied_err
+					.reason
+					.starts_with("Unable to connect to the system bus:"),
+				"unexpected error reason: {}",
+				denied_err.reason
+			);
+		}
+
+		let _ = std::fs::set_permissions(&denied_sock, std::fs::Permissions::from_mode(0o600));
+		let _ = std::fs::remove_dir_all(&temp_dir);
 	}
 }
