@@ -23,7 +23,7 @@
 
 ### Fixed
 
-- A relay `app.target` that matches no tab now says to omit `target` to open omp's own tab, instead of "omit it to use the active tab", which relay opens stopped doing when they began opening their own tab
+- A relay `app.target` that matches no tab now says to omit `target` to open omp's own tab, instead of "omit it to use the active tab", which relay opens stopped doing when they began opening their own tab ([#18833](https://github.com/can1357/oh-my-pi/pull/18833) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
