@@ -28,6 +28,13 @@ def model_dir_digest(model_dir: str | Path) -> str:
 	return outer.hexdigest()
 
 
+def loaded_model_digest(embeddings) -> str | None:
+	"""The files Mnemosyne's `embeddings` module has loaded; None before a model is loaded (or in fts-only mode)."""
+	# `_embedding_model` is upstream's private lazy-load slot, so read it without assuming it exists.
+	loaded = getattr(getattr(getattr(embeddings, "_embedding_model", None), "model", None), "_model_dir", None)
+	return model_dir_digest(loaded) if loaded else None
+
+
 def corpus_digest(conversations: list[list[str]]) -> str:
 	"""SHA-256 over each conversation's message count, then each message as `<utf-8 byte length>\\n<bytes>`, in order."""
 	outer = hashlib.sha256()

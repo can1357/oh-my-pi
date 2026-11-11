@@ -108,7 +108,7 @@ The verdict is `helps` when the overall interval lies above 0 and no category's 
 
 Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` and `embed-parity.ts` refuse to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.
 
-Never run real engines under `bun test`: with `NODE_ENV=test` Mnemopi's local embeddings are disabled. The tests use fakes and stub engine scripts. Python-backed tests probe for a working Python 3 (`PYTHON`, then `python3`/`python` on `PATH`) and skip if none is available, including nonworking Windows Store aliases. FTS-only and isolated CLI tests still run without Python; their explicit cache roots do not touch the user's benchmark cache.
+Never run real engines under `bun test`: with `NODE_ENV=test` Mnemopi's local embeddings are disabled. The tests use fakes and stub engine scripts. Python-backed tests probe for a working Python 3.10+ (`PYTHON`, then `python3`/`python` on `PATH`) and skip if none is available, including nonworking Windows Store aliases. FTS-only and isolated CLI tests still run without Python; their explicit cache roots do not touch the user's benchmark cache.
 
 ## LongMemEval check against the official evaluator (Layer 0 check 4)
 

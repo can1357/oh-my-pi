@@ -7,20 +7,11 @@ Mnemopi's JS fastembed stack embeds about 20-40x slower than Python fastembed wi
 makes full benchmark runs impractical. This serves the same model so Mnemopi's retrieval code runs unchanged.
 """
 
-import importlib.metadata
-import json
-import logging
 import os
-import sys
-import traceback
 
-# Only protocol lines may reach the real stdout: keep a private copy of fd 1, then point fd 1 and sys.stdout at stderr
-# so library prints, logging and native writes cannot corrupt the stream.
-PROTOCOL_OUT = os.fdopen(os.dup(1), "w", encoding="utf-8")
-os.dup2(2, 1)
-sys.stdout = sys.stderr
-logging.basicConfig(stream=sys.stderr)
-sys.stdin.reconfigure(encoding="utf-8")
+from engine_io import isolate_stdout, runtime_versions, serve
+
+PROTOCOL_OUT = isolate_stdout()
 
 from fastembed import TextEmbedding  # noqa: E402
 
@@ -38,8 +29,7 @@ def op_embed(params):
 
 
 def op_versions(_params):
-	"""The numerical runtime behind the vectors: other versions can reorder near-ties."""
-	return {name: importlib.metadata.version(name) for name in ("fastembed", "onnxruntime")}
+	return runtime_versions()
 
 
 def op_model_digest(_params):
@@ -51,21 +41,7 @@ OPS = {"embed": op_embed, "versions": op_versions, "model_digest": op_model_dige
 
 
 def main():
-	for line in sys.stdin:
-		if not line.strip():
-			continue
-		request = json.loads(line)
-		try:
-			handler = OPS.get(request["op"])
-			if handler is None:
-				raise ValueError(f"unknown op {request['op']!r}")
-			response = {"id": request["id"], "result": handler(request.get("params") or {})}
-		except Exception:
-			detail = traceback.format_exc().rstrip()
-			print(detail, file=sys.stderr)
-			response = {"id": request["id"], "error": detail}
-		PROTOCOL_OUT.write(json.dumps(response) + "\n")
-		PROTOCOL_OUT.flush()
+	serve(PROTOCOL_OUT, OPS.get)
 
 
 if __name__ == "__main__":
