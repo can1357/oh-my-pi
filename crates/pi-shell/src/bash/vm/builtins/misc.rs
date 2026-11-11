@@ -509,7 +509,7 @@ fn limit_one(
 		b"unlimited" => None,
 		[d, ..] if d.is_ascii_digit() && (arg.len() == 1 || arg[1].is_ascii_digit()) => {
 			if !arg.iter().all(u8::is_ascii_digit) {
-				ctx.usage(invalid_number(arg));
+				ctx.err(invalid_number(arg));
 				return false;
 			}
 			let value = std::str::from_utf8(arg)
@@ -523,7 +523,7 @@ fn limit_one(
 			Some(value)
 		},
 		_ => {
-			ctx.usage(invalid_number(arg));
+			ctx.err(invalid_number(arg));
 			return false;
 		},
 	};

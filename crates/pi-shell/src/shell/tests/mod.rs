@@ -12,6 +12,7 @@ use crate::proctree;
 
 mod builtins;
 mod env_cwd;
+mod printf;
 mod process_control;
 mod redirections;
 mod session;

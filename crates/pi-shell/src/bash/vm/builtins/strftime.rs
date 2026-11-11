@@ -122,6 +122,14 @@ pub fn format(fmt: &[u8], secs: i64, offset: i32, abbr: &[u8]) -> Vec<u8> {
 	out
 }
 
+/// Whether `localtime` can break `secs` down in a zone `offset` seconds
+/// east of UTC: glibc fails when the year less 1900 is past an `int`.
+pub fn year_fits(secs: i64, offset: i32) -> bool {
+	let local = secs.saturating_add(i64::from(offset));
+	let (year, ..) = civil_from_days(local.div_euclid(86_400));
+	i32::try_from(year - 1900).is_ok()
+}
+
 /// How a conversion pads by default.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pad {
@@ -190,7 +198,11 @@ impl Field {
 		let pad = self.pad.unwrap_or(default);
 		let text = v.unsigned_abs().to_string();
 		let sign = if v < 0 { "-" } else { "" };
-		let width = self.width.unwrap_or(digits);
+		// `-` drops the conversion's own padding, not a width written.
+		let (pad, width) = match (pad, self.width) {
+			(Pad::None, Some(w)) => (Pad::Space, w),
+			(_, w) => (pad, w.unwrap_or(digits)),
+		};
 		let fill = width.saturating_sub(text.len() + sign.len());
 		match pad {
 			Pad::Zero => {
@@ -221,9 +233,7 @@ impl Field {
 		} else {
 			b' '
 		};
-		if self.pad != Some(Pad::None) {
-			out.resize(out.len() + fill, c);
-		}
+		out.resize(out.len() + fill, c);
 		out.extend_from_slice(&s);
 	}
 
@@ -250,13 +260,14 @@ fn conversion(conv: u8, tm: &Tm<'_>, f: Field, out: &mut Vec<u8>) -> bool {
 		b'b' | b'h' => f.text(out, &MONTHS[month].as_bytes()[..3], false),
 		b'B' => f.text(out, MONTHS[month].as_bytes(), false),
 		b'c' => f.sub(out, b"%a %b %e %H:%M:%S %Y", tm),
-		b'C' => f.num(out, tm.year.div_euclid(100), 2, Pad::Zero),
+		// glibc writes the century unpadded: year 5 is `0`, not `00`.
+		b'C' => f.num(out, c_year(tm.year).div_euclid(100), 1, Pad::Zero),
 		b'd' => f.num(out, i64::from(tm.day), 2, Pad::Zero),
 		b'D' | b'x' => f.sub(out, b"%m/%d/%y", tm),
 		b'e' => f.num(out, i64::from(tm.day), 2, Pad::Space),
 		b'F' => f.sub(out, b"%Y-%m-%d", tm),
-		b'g' => f.num(out, tm.iso_week().0.rem_euclid(100), 2, Pad::Zero),
-		b'G' => f.num(out, tm.iso_week().0, 1, Pad::Zero),
+		b'g' => f.num(out, c_year(tm.iso_week().0).rem_euclid(100), 2, Pad::Zero),
+		b'G' => f.num(out, c_year(tm.iso_week().0), 1, Pad::Zero),
 		b'H' => f.num(out, i64::from(tm.hour), 2, Pad::Zero),
 		b'I' => f.num(out, i64::from(hour12), 2, Pad::Zero),
 		b'j' => f.num(out, i64::from(tm.yday) + 1, 3, Pad::Zero),
@@ -279,7 +290,7 @@ fn conversion(conv: u8, tm: &Tm<'_>, f: Field, out: &mut Vec<u8>) -> bool {
 		b'w' => f.num(out, i64::from(tm.wday), 1, Pad::Zero),
 		b'W' => f.num(out, i64::from((tm.yday + 7 - (tm.wday + 6) % 7) / 7), 2, Pad::Zero),
 		b'y' => f.num(out, tm.year.rem_euclid(100), 2, Pad::Zero),
-		b'Y' => f.num(out, tm.year, 1, Pad::Zero),
+		b'Y' => f.num(out, c_year(tm.year), 1, Pad::Zero),
 		b'z' => {
 			let a = tm.offset.unsigned_abs();
 			let s =
@@ -291,6 +302,12 @@ fn conversion(conv: u8, tm: &Tm<'_>, f: Field, out: &mut Vec<u8>) -> bool {
 		_ => return false,
 	}
 	true
+}
+
+/// A year as glibc computes it from `tm_year`, in an `int`: past
+/// `INT_MAX` it wraps (`%y` alone is taken from `tm_year`, which fits).
+const fn c_year(year: i64) -> i64 {
+	year as i32 as i64
 }
 
 #[cfg(test)]
