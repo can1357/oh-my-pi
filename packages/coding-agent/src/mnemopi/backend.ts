@@ -490,6 +490,12 @@ async function loadMnemopiConfigWithProviders(
 	usageLedger: Partial<JudgmentUsageLedger>,
 ): Promise<MnemopiBackendConfig> {
 	const config = loadMnemopiConfig(settings, agentDir);
+	const { createReranker } = await loadMnemopi();
+	const rerank = config.rerank;
+	const apiUrl = rerank?.apiUrl ?? process.env.MNEMOPI_RERANK_API_URL;
+	const apiKey =
+		rerank?.apiKey ?? (apiUrl ? await openrouterKeyResolver(modelRegistry, sessionId, apiUrl) : undefined);
+	config.reranker = createReranker({ ...rerank, apiUrl, apiKey });
 	config.providerOptions = await resolveMnemopiProviderOptions(
 		config,
 		settings,
@@ -533,14 +539,6 @@ async function resolveMnemopiProviderOptions(
 		embeddingApiKey:
 			config.providerOptions.embeddingApiKey ??
 			(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)),
-		rerankModel: config.providerOptions.rerankModel,
-		rerankApiUrl: config.providerOptions.rerankApiUrl,
-		rerankApiKey:
-			config.providerOptions.rerankApiKey ??
-			(config.providerOptions.rerankApiUrl
-				? await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.rerankApiUrl)
-				: undefined),
-		rerankScoreMode: config.providerOptions.rerankScoreMode,
 		llm: false,
 	};
 

@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { QueryCache } from "../query-cache";
 import type { ApiKey } from "@oh-my-pi/pi-ai";
-import type { RerankFunction } from "../rerank";
+import type { Reranker, RerankFunction } from "../rerank";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -69,12 +69,7 @@ export interface BeamConfig {
 	polyphonicRecall?: boolean;
 	/** Per-instance enhanced recall (query cache) gate; `undefined` defers to the process-wide default. */
 	enhancedRecall?: boolean;
-	rerankApiUrl?: string;
-	rerankModel?: string;
-	rerankApiKey?: ApiKey;
-	rerankCandidates?: number;
-	rerankScoreMode?: "auto" | "logit" | "probability";
-	rerankFn?: RerankFunction;
+	reranker?: Reranker;
 }
 
 export interface BeamMemoryOptions {
@@ -89,6 +84,7 @@ export interface BeamMemoryOptions {
 	polyphonicRecall?: boolean;
 	/** Cache `recallEnhanced` results per query and options. `MNEMOPI_ENHANCED_RECALL` wins when set. */
 	enhancedRecall?: boolean;
+	reranker?: Reranker;
 	rerankApiUrl?: string;
 	rerankModel?: string;
 	rerankApiKey?: ApiKey;
@@ -218,7 +214,8 @@ export interface RecallEnhancedOptions extends RecallOptions {
 	/** Set `false` to bypass the enhanced-recall result cache for this call. */
 	useCache?: boolean;
 	includeFacts?: boolean;
-	skipRerank?: boolean;
+	/** Suppress recall-count updates when a caller will select results across banks. */
+	updateRecallCounts?: boolean;
 }
 
 export interface MemoryRow {

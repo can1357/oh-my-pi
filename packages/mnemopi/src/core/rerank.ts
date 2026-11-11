@@ -3,6 +3,61 @@ import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { fetchWithRetry, logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { combineSignals } from "@oh-my-pi/pi-utils/ptree";
+import { rerankApiKey, rerankApiUrl, rerankCandidates, rerankModel, rerankScoreMode } from "../config";
+
+export interface Reranker {
+	readonly candidates: number;
+	score(query: string, documents: readonly string[], signal?: AbortSignal): Promise<RerankCandidateScore[] | null>;
+}
+
+export interface RerankerConfig {
+	apiUrl?: string;
+	model?: string;
+	apiKey?: ApiKey;
+	scoreMode?: "auto" | "logit" | "probability";
+	candidates?: number;
+	fn?: RerankFunction;
+}
+
+/** Resolve endpoint credentials and validate a complete score set in one place. */
+export function createReranker(config: RerankerConfig = {}): Reranker | undefined {
+	const apiUrl = config.apiUrl ?? rerankApiUrl();
+	const fn = config.fn;
+	if (!apiUrl && !fn) return undefined;
+	const apiKey = config.apiKey ?? rerankApiKey(apiUrl);
+	const model = config.model ?? rerankModel();
+	const scoreMode = config.scoreMode ?? rerankScoreMode();
+	const candidates = Math.max(1, Math.floor(config.candidates ?? rerankCandidates()));
+	return {
+		candidates,
+		async score(query, documents, signal) {
+			try {
+				const scores = fn
+					? await fn(query, documents)
+					: await executeRerank(query, documents, { apiUrl: apiUrl!, apiKey, model, scoreMode, signal });
+				if (!scores || scores.length !== documents.length) return null;
+				const seen = new Set<number>();
+				for (const item of scores) {
+					if (
+						!Number.isInteger(item.index) ||
+						item.index < 0 ||
+						item.index >= documents.length ||
+						!Number.isFinite(item.relevanceScore) ||
+						seen.has(item.index)
+					)
+						return null;
+					seen.add(item.index);
+				}
+				return scores;
+			} catch (error) {
+				logger.warn("mnemopi: cross-encoder rerank invocation failed; using first-stage order", {
+					error: String(error),
+				});
+				return null;
+			}
+		},
+	};
+}
 
 export interface RerankCandidateScore {
 	readonly index: number;
@@ -108,24 +163,6 @@ export async function executeRerank(
 		return withLoopPhase("mnemopi.rerank", () => {
 			const list = Array.isArray(data) ? data : Array.isArray(data.results) ? data.results : [];
 			if (list.length === 0) return null;
-			const valid = list.filter(item => {
-				const idx = Number(item.index);
-				const score = Number(item.relevance_score ?? item.score);
-				return Number.isInteger(idx) && idx >= 0 && idx < documents.length && Number.isFinite(score);
-			});
-			// Reject duplicate or incomplete indices to avoid mixing incompatible scoring scales.
-			const uniqueIndices = new Set(valid.map(item => Number(item.index)));
-			if (valid.length !== documents.length || uniqueIndices.size !== documents.length) {
-				logger.warn(
-					"mnemopi: reranker returned incomplete or duplicate scores; falling back to first-stage order",
-					{
-						expected: documents.length,
-						received: valid.length,
-						unique: uniqueIndices.size,
-					},
-				);
-				return null;
-			}
 
 			// Use an explicit consistent scoring mode: models known to emit raw unbounded
 			// logits (e.g. BGE, BCE) or configured as such always map through logistic sigmoid,
@@ -133,9 +170,9 @@ export async function executeRerank(
 			const useSigmoid =
 				options.scoreMode === "logit" || (options.scoreMode !== "probability" && isLogitRerankModel(options.model));
 
-			return valid.map(item => {
+			return list.map(item => {
 				const rawScore = Number(item.relevance_score ?? item.score);
-				const relevanceScore = useSigmoid ? 1 / (1 + Math.exp(-rawScore)) : rawScore;
+				const relevanceScore = useSigmoid && Number.isFinite(rawScore) ? 1 / (1 + Math.exp(-rawScore)) : rawScore;
 				return {
 					index: Number(item.index),
 					relevanceScore,

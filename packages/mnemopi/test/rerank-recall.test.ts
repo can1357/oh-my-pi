@@ -1,11 +1,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
+import { clipRecallContent, recall, recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import type { BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam/types";
-import { executeRerank } from "@oh-my-pi/pi-mnemopi/core/rerank";
+import { createReranker, executeRerank, type RerankFunction } from "@oh-my-pi/pi-mnemopi/core/rerank";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { rerankApiKey } from "@oh-my-pi/pi-mnemopi/config";
+import { mmrRerank } from "@oh-my-pi/pi-mnemopi/core/mmr";
+import { orchestrateRecall } from "@oh-my-pi/pi-mnemopi/core/orchestrator";
+import { POLYPHONIC_MAX_COMBINED_SCORE } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 
 type TestBeam = BeamMemoryState & { close(): void };
 const openBeams: TestBeam[] = [];
@@ -16,8 +19,9 @@ afterEach(() => {
 	}
 });
 
-function makeTestBeam(config: Partial<BeamMemoryState["config"]> = {}): TestBeam {
+function makeTestBeam(config: Partial<BeamMemoryState["config"]> & { rerankFn?: RerankFunction } = {}): TestBeam {
 	const db = new Database(":memory:");
+	const { rerankFn, ...beamConfig } = config;
 	initBeam(db);
 	const beam: TestBeam = {
 		db,
@@ -42,7 +46,8 @@ function makeTestBeam(config: Partial<BeamMemoryState["config"]> = {}): TestBeam
 			useCloud: false,
 			localLlmEnabled: false,
 			maxEpisodeChars: 100_000,
-			...config,
+			...beamConfig,
+			reranker: beamConfig.reranker ?? (rerankFn ? createReranker({ fn: rerankFn }) : undefined),
 		},
 		close() {
 			db.close();
@@ -70,6 +75,51 @@ function insertWorking(
 		],
 	);
 }
+
+describe("recall without a reranker", () => {
+	for (const polyphonic of [false, true]) {
+		it(`preserves the pre-reranker ${polyphonic ? "polyphonic" : "linear"} single-bank selection`, async () => {
+			const beam = makeTestBeam({ polyphonicRecall: polyphonic });
+			insertWorking(beam, "a", `deployment shared notes ${"x".repeat(600)}`, { importance: 0.9 });
+			insertWorking(beam, "b", "deployment shared checklist", { importance: 0.8 });
+			insertWorking(beam, "c", "deployment database backup", { importance: 0.7 });
+			const options = { queryEmbedding: null, useCache: false, updateRecallCounts: false };
+			const topK = 2;
+			const baselineLimit = polyphonic ? topK * 2 : topK;
+			const baseline = await recall(beam, "deployment", baselineLimit * 2, {
+				...options,
+				useSynonyms: true,
+				useIntent: true,
+				useMmr: true,
+			});
+			baseline.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+			const selected = mmrRerank(baseline, 0.7, baselineLimit);
+			let expected = selected;
+			if (polyphonic) {
+				const fused = await orchestrateRecall(beam, "deployment", baselineLimit, {
+					...options,
+					baseline: selected,
+					forcePolyphonic: true,
+					contextBudget: Number.POSITIVE_INFINITY,
+				});
+				expected = fused.slice(0, topK).map(result => {
+					const mapped = {
+						...result,
+						score: Math.round(((result.combined_score ?? 0) / POLYPHONIC_MAX_COMBINED_SCORE) * 10000) / 10000,
+					};
+					if (typeof mapped.truncated !== "boolean") {
+						const preview = clipRecallContent(mapped.content);
+						mapped.content = preview.content;
+						mapped.truncated = preview.truncated;
+						mapped.full_length = preview.fullLength;
+					}
+					return mapped;
+				});
+			}
+			expect(await recallEnhanced(beam, "deployment", topK, options)).toEqual(expected);
+		});
+	}
+});
 
 describe("Cross-encoder rerank in Mnemopi recall", () => {
 	it("reorders candidates by rerank relevance score", async () => {
@@ -342,6 +392,24 @@ describe("Cross-encoder rerank in Mnemopi recall", () => {
 		expect(results.length).toBe(1);
 		expect(rerankCalled).toBe(true);
 		expect(results[0]?.score).toBe(0.99);
+	});
+
+	it("caches first-stage candidates but reranks on each recall", async () => {
+		let calls = 0;
+		const beam = makeTestBeam({
+			enhancedRecall: true,
+			rerankFn: async (_query, documents) => {
+				calls++;
+				return documents.map((_, index) => ({ index, relevanceScore: index === calls - 1 ? 0.99 : 0.1 }));
+			},
+		});
+		insertWorking(beam, "cache-a", "deployment notes one");
+		insertWorking(beam, "cache-b", "deployment notes two");
+		const first = await recallEnhanced(beam, "deployment", 1);
+		const second = await recallEnhanced(beam, "deployment", 1);
+		expect(calls).toBe(2);
+		expect(first[0]?.id).not.toBe(second[0]?.id);
+		expect(beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 1 });
 	});
 
 	it("resolves cohere fallback api key against effective url", () => {
