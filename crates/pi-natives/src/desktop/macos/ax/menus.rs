@@ -16,7 +16,7 @@ use super::{
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
-	menus::{DesktopMenuItem, match_index, require_command, require_enabled, validate_path},
+	menus::{DesktopMenuItem, match_offered, require_command, require_enabled, validate_path},
 	types::DesktopWindow,
 };
 
@@ -63,7 +63,7 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 	with_window_menu(window, MenuAccess::Dispatch, |app, pid, context_holds, _| {
 		let (menu, actual_path) = resolve_menu(app, &path[..path.len() - 1], pid)?;
 		let (elements, items) = children(&menu, &actual_path, pid)?;
-		let index = match_index(&items, &path[path.len() - 1])?;
+		let index = match_offered(&items, &path[path.len() - 1])?;
 		let element = &elements[index];
 		let reread = || {
 			describe(element, &actual_path, pid)?.ok_or_else(|| {
@@ -282,7 +282,7 @@ fn resolve_menu(
 	for label in path {
 		control::check()?;
 		let (elements, items) = children(&menu, &actual_path, pid)?;
-		let index = match_index(&items, label)?;
+		let index = match_offered(&items, label)?;
 		require_enabled(&items[index])?;
 		menu = submenu(&elements[index])?.ok_or_else(|| {
 			DesktopError::ax_failed(format!(

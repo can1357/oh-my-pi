@@ -17,6 +17,10 @@
 - Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- `menu.select()` and `menu.items()` on macOS, Linux and Windows now name the items a menu offers when a label in the path is not found, instead of only saying it was not found
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
