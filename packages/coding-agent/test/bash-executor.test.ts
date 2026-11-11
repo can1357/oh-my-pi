@@ -881,7 +881,7 @@ exit 64
 			return;
 		}
 
-		const nativeResult = Promise.withResolvers<{ exitCode: undefined; cancelled: true; timedOut: false }>();
+		const nativeResult = Promise.withResolvers<ShellRunResult>();
 		const dispatched = Promise.withResolvers<void>();
 		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
 			onChunk?.(null, "started\n");
@@ -901,7 +901,7 @@ exit 64
 		controller.abort();
 		await promise;
 
-		nativeResult.resolve({ exitCode: undefined, cancelled: true, timedOut: false });
+		nativeResult.resolve({ exitCode: undefined, exited: false, cancelled: true, timedOut: false });
 		await Bun.sleep(0);
 		vi.restoreAllMocks();
 
@@ -1113,8 +1113,8 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 
-		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true });
-		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
+		isolatedResult.resolve({ exitCode: undefined, exited: false, cancelled: true, timedOut: true });
+		ownerResult.resolve({ exitCode: 0, exited: false, cancelled: false, timedOut: false });
 		await owner;
 	});
 
@@ -1587,7 +1587,7 @@ exit 64
 			const nativeResult = Promise.withResolvers<piNatives.ShellRunResult>();
 			realSetTimeout(() => {
 				onChunk?.(null, "flushed-during-timeout\n");
-				nativeResult.resolve({ exitCode: undefined, cancelled: false, timedOut: true });
+				nativeResult.resolve({ exitCode: undefined, exited: false, cancelled: false, timedOut: true });
 			}, 20);
 			return nativeResult.promise;
 		});

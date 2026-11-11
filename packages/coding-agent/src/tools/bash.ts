@@ -837,7 +837,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (wallTimeNoticeEmitted) {
 			notices.push(formatWallTimeNotice(wallTimeMs));
 		}
-		if ("exited" in result && result.exited) notices.push(SHELL_EXIT_NOTICE);
 		if (options.notices) {
 			for (const notice of options.notices) {
 				if (notice) notices.push(notice);
@@ -1139,6 +1138,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							pids = probe;
 						},
 						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
+						onShellExited: () => notices.push(SHELL_EXIT_NOTICE),
 					}).finally(() => {
 						pids = NO_PIDS;
 						liveTrace = undefined;
@@ -1925,6 +1925,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
+					onShellExited: () => pendingNotices.push(SHELL_EXIT_NOTICE),
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {

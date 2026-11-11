@@ -221,6 +221,7 @@ describe("BashTool execution results", () => {
 			onChunk?.(null, rawOutput);
 			return Promise.resolve({
 				exitCode: 1,
+				exited: false,
 				cancelled: false,
 				timedOut: false,
 				workingDir: process.cwd(),
@@ -251,6 +252,7 @@ describe("BashTool execution results", () => {
 			onChunk?.(null, rawOutput);
 			return Promise.resolve({
 				exitCode: 1,
+				exited: false,
 				cancelled: false,
 				timedOut: false,
 				workingDir: process.cwd(),
