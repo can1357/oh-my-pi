@@ -218,7 +218,7 @@ fn inputs_held(conn: &RustConnection) -> CoreResult<bool> {
 	}
 	let root = conn.setup().roots[0].root;
 	let pointer = conn
-		.xinput_xi_get_client_pointer(root)
+		.xinput_xi_get_client_pointer(x11rb::NONE)
 		.map_err(failed)?
 		.reply()
 		.map_err(failed)?;
