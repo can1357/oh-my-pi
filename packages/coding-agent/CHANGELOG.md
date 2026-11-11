@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- With `includeWorkspaceTree` enabled, the workspace tree and nested `AGENTS.md` list in the system prompt now reflect the current directory after `/move` and the files on disk after `/clear`, `/new`, or switching to another session, instead of the scan taken at startup
+- With `includeWorkspaceTree` enabled, the workspace tree and nested `AGENTS.md` list in the system prompt now reflect the current directory after `/move` and the files on disk after `/clear`, `/new`, or switching to another session, instead of the scan taken at startup ([#18866](https://github.com/can1357/oh-my-pi/pull/18866) by [@bigHippoZz](https://github.com/bigHippoZz))
 
 ## [18.18.8] - 2026-11-11
 
