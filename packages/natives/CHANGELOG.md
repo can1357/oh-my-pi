@@ -5,6 +5,10 @@
 ### Fixed
 
 - Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the Linux `computer` tool hanging for the rest of the session, and freezing the app, once a `press()` or `menu.select()` opened a modal dialog in a GTK 3 app such as Audacity: reads of an app that does not answer now fail with `Timeout` after 5 s while screenshots and input keep working ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed responsive Linux AT-SPI windows disappearing when enumeration takes longer than 5 s in total: the timeout now applies to each application reply, not the whole window scan ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed responsive Linux AT-SPI focus, window-ownership and hit-test scans timing out in aggregate; traversal replies are now bounded individually while single-element reads and mutations retain their operation budgets ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Wayland desktop accessibility reads selecting a shell surface when the focused application did not answer: shell-only candidates now require confirmed keyboard focus before bypassing the skipped application's timeout ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
@@ -25,12 +29,6 @@
 ### Fixed
 
 - Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
-
-### Fixed
-
-- Fixed the Linux `computer` tool hanging for the rest of the session, and freezing the app, once a `press()` or `menu.select()` opened a modal dialog in a GTK 3 app such as Audacity: reads of an app that does not answer now fail with `Timeout` after 5 s while screenshots and input keep working ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed responsive Linux AT-SPI windows disappearing when enumeration takes longer than 5 s in total: the timeout now applies to each application reply, not the whole window scan ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed responsive Linux AT-SPI focus, window-ownership and hit-test scans timing out in aggregate; traversal replies are now bounded individually while single-element reads and mutations retain their operation budgets ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.9] - 2026-11-11
 
@@ -60,7 +58,6 @@
 - Fixed Linux `press()` refusing with "AT-SPI action 'press' is unavailable" on Chromium and Electron menu items, list options and tabs, and on page elements whose only action is `doDefault`: a press now takes their `select` or `doDefault` action, as it already took `click` and `activate` ([#18921](https://github.com/can1357/oh-my-pi/pull/18921) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS input from a second omp process no longer refuses with `UserIntervened` after the first process takes over a click in the same app; hardware clicks still pause input in that app ([#18896](https://github.com/can1357/oh-my-pi/pull/18896) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp worktree add` — and the bash tool's `git worktree add` rewrite — exiting 1 with `git: 'hook' is not a git command` on Git older than 2.36 (such as Git 2.34 on Ubuntu 22.04) after the worktree had already been created ([#18935](https://github.com/can1357/oh-my-pi/pull/18935) by [@Bensonluo](https://github.com/Bensonluo))
-- Fixed the Linux `computer` tool hanging for the rest of the session, and freezing the app, once a `press()` or `menu.select()` opened a modal dialog in a GTK 3 app such as Audacity: reads of an app that does not answer now fail with `Timeout` after 5 s while screenshots and input keep working
 
 ## [18.18.8] - 2026-11-11
 
