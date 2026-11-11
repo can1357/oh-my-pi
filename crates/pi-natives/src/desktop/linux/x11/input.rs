@@ -24,8 +24,8 @@ use x11rb::{
 		xinput::ConnectionExt as _,
 		xproto::{
 			AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ButtonPressEvent, ConnectionExt as _,
-			EventMask, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, KeyButMask, KeyPressEvent,
-			MOTION_NOTIFY_EVENT, Motion, MotionNotifyEvent, Window,
+			EventMask, GrabMode, GrabStatus, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+			KeyButMask, KeyPressEvent, MOTION_NOTIFY_EVENT, Motion, MotionNotifyEvent, Window,
 		},
 		xtest::ConnectionExt as _,
 	},
@@ -62,6 +62,9 @@ const FOREGROUND_POLL: Duration = Duration::from_millis(15);
 const FOREGROUND_RESTORE_SETTLE: Duration = Duration::from_millis(150);
 /// Bound on re-activating the user's window after a foreground action.
 const FOREGROUND_RESTORE_BUDGET: Duration = Duration::from_millis(400);
+/// How long `XTest` keys wait for another client's keyboard grab to end, such
+/// as a window manager's switcher, before refusing.
+const KEYBOARD_GRAB_WAIT: Duration = Duration::from_millis(500);
 /// Why background keys, typed or held, cannot reach a Qt window.
 const QT_CORE_KEYBOARD: &str =
 	"its Qt toolkit reads core keyboard events, which the XI2-MPX virtual keyboard does not send";
@@ -282,6 +285,7 @@ impl X11Input {
 		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
 			this.check_user()?;
 			prepare()?;
+			this.check_keyboard_grab(window)?;
 			this.xtest_steps(&steps, keys.duration())
 		})
 	}
@@ -391,6 +395,7 @@ impl X11Input {
 				let window = parse_window(id)?;
 				let steps = keys.plan(&self.keymap)?;
 				self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+					this.check_keyboard_grab(window)?;
 					this.xtest_steps(&steps, keys.duration())
 				})
 			},
@@ -854,6 +859,62 @@ impl X11Input {
 			self.xtest_key(step.keycode, step.press)
 		})?;
 		self.conn.flush().map_err(input_failed)
+	}
+
+	/// Fails, with nothing sent, while a keyboard grab that is not `target`'s
+	/// own is active: an open menu or a screen locker's password prompt of
+	/// another application would get the keys instead of `target`. Waits
+	/// [`KEYBOARD_GRAB_WAIT`] for a short grab to end. Probes with a grab of
+	/// its own on the focus window, released in the same flush: a grab where
+	/// the focus already is sends no focus events. X does not name a grab's
+	/// owner, so a viewable popup of `target`'s process stands for its own
+	/// grab (an open menu of the target), which the keys are meant for; that
+	/// heuristic only withholds this refusal, it authorises nothing.
+	fn check_keyboard_grab(&self, target: Window) -> CoreResult<()> {
+		let deadline = Instant::now() + KEYBOARD_GRAB_WAIT;
+		loop {
+			control::check()?;
+			let wm = self.wm();
+			let window = wm
+				.input_focus()
+				.map_or(self.root, |(focus, _)| if focus > 1 { focus } else { self.root });
+			let grab = self
+				.conn
+				.grab_keyboard(false, window, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
+				.map_err(input_failed)?;
+			// Sent with the grab, so the user's own keys go to omp for one
+			// round trip at most; it does nothing when the grab failed.
+			let ungrab = self
+				.conn
+				.ungrab_keyboard(CURRENT_TIME)
+				.map_err(input_failed)?;
+			let status = grab.reply().map(|reply| reply.status);
+			ungrab.check().map_err(input_failed)?;
+			match status {
+				Ok(GrabStatus::SUCCESS) => return Ok(()),
+				Ok(GrabStatus::ALREADY_GRABBED | GrabStatus::FROZEN) => {
+					if wm
+						.owning_pid(target)
+						.and_then(|pid| wm.grab_popup_of(pid))
+						.is_some()
+					{
+						return Ok(());
+					}
+					if Instant::now() >= deadline {
+						return Err(DesktopError::input_failed(
+							"a keyboard grab is active (an open menu or a screen locker of another \
+							 application), so the keys would not reach the target; no input was sent",
+						));
+					}
+				},
+				// The focus window went away or was unmapped between the
+				// requests: what grabs the keyboard is unknown, so past the
+				// wait the keys go out as they would without this check.
+				_ if Instant::now() >= deadline => return Ok(()),
+				_ => {},
+			}
+			control::wait(FOREGROUND_POLL)?;
+		}
 	}
 
 	/// Synthetic key events carrying the core modifier state each transition
@@ -1888,6 +1949,141 @@ mod tests {
 		input
 			.pointer(&target, PointerEvent::Move { x: 150.0, y: 150.0 }, DeliveryMode::Background)
 			.expect("a plain move");
+	}
+
+	/// Takeover keys refuse while a menu of another application grabs the
+	/// keyboard, which then gets none of them; they go to a grabbing popup of
+	/// the target's own process, as desktop keys go to any grab, and to the
+	/// focused window once the grab ends. Starts its own `Xvfb`: `cargo test
+	/// -p pi-natives -- --ignored keyboard_grab`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn xtest_keys_refuse_another_clients_keyboard_grab() {
+		use std::{
+			io::{BufRead, BufReader},
+			process::{Child, Command, Stdio},
+		};
+
+		use x11rb::{
+			protocol::{
+				Event,
+				xproto::{CreateWindowAux, PropMode, WindowClass},
+			},
+			wrapper::ConnectionExt as _,
+		};
+
+		struct Reaped(Child);
+		impl Drop for Reaped {
+			fn drop(&mut self) {
+				let _ = self.0.kill();
+				let _ = self.0.wait();
+			}
+		}
+		let mut server = Reaped(
+			Command::new("Xvfb")
+				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("Xvfb starts"),
+		);
+		let mut number = String::new();
+		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
+			.read_line(&mut number)
+			.expect("Xvfb reports its display");
+		let display = format!(":{}", number.trim());
+		// The target and, from its own connection, a menu that grabs the
+		// keyboard.
+		let window = |conn: &RustConnection, root: Window, menu: bool| {
+			let window = conn.generate_id().unwrap();
+			conn
+				.create_window(
+					0,
+					window,
+					root,
+					0,
+					0,
+					100,
+					100,
+					0,
+					WindowClass::INPUT_OUTPUT,
+					0,
+					&CreateWindowAux::new()
+						.event_mask(EventMask::KEY_PRESS)
+						.override_redirect(u32::from(menu)),
+				)
+				.unwrap()
+				.check()
+				.unwrap();
+			conn.map_window(window).unwrap().check().unwrap();
+			window
+		};
+		let presses = |conn: &RustConnection| {
+			conn.get_input_focus().unwrap().reply().unwrap();
+			let mut count = 0;
+			while let Some(event) = conn.poll_for_event().unwrap() {
+				count += usize::from(matches!(event, Event::KeyPress(_)));
+			}
+			count
+		};
+		let (target, screen) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let root = target.setup().roots[screen].root;
+		let target_window = window(&target, root, false);
+		// Both windows are this process's; `_NET_WM_PID` decides whose they look.
+		let net_wm_pid = target
+			.intern_atom(false, b"_NET_WM_PID")
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let set_pid = |window: Window, pid: u32| {
+			target
+				.change_property32(PropMode::REPLACE, window, net_wm_pid, AtomEnum::CARDINAL, &[pid])
+				.unwrap()
+				.check()
+				.unwrap();
+		};
+		set_pid(target_window, std::process::id());
+		target
+			.set_input_focus(InputFocus::PARENT, target_window, CURRENT_TIME)
+			.unwrap()
+			.check()
+			.unwrap();
+		let (menu, _) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let menu_window = window(&menu, root, true);
+		set_pid(menu_window, std::process::id().wrapping_add(1));
+		let grab = menu
+			.grab_keyboard(true, menu_window, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
+			.unwrap()
+			.reply()
+			.unwrap();
+		assert_eq!(grab.status, GrabStatus::SUCCESS);
+
+		let (input_conn, _) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let mut input = X11Input::new(Arc::new(input_conn), root, Some(display)).unwrap();
+		let takeover = Target::Window(target_window.to_string());
+		let error = input
+			.type_text(&takeover, "x", DeliveryMode::Foreground)
+			.expect_err("takeover keys under another application's grab");
+		assert!(error.message.contains("keyboard grab is active"), "{}", error.message);
+		assert_eq!(presses(&menu), 0, "the other application's menu got keys");
+
+		input
+			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground)
+			.unwrap();
+		assert_eq!(presses(&menu), 1, "desktop keys go wherever the keyboard is grabbed");
+
+		set_pid(menu_window, std::process::id());
+		input
+			.type_text(&takeover, "x", DeliveryMode::Foreground)
+			.unwrap();
+		assert_eq!(presses(&menu), 1, "the target's own menu gets the key");
+
+		menu.ungrab_keyboard(CURRENT_TIME).unwrap().check().unwrap();
+		input
+			.type_text(&takeover, "x", DeliveryMode::Foreground)
+			.unwrap();
+		assert_eq!(presses(&target), 1, "the focused window gets the key once the grab ends");
 	}
 }
 
