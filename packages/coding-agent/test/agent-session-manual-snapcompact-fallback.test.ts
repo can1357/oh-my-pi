@@ -8,6 +8,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -146,6 +147,8 @@ describe.each([
 
 	it("still fails locally for explicit /compact snapcompact on a text-only model (no-LLM contract)", async () => {
 		const harness = await createHarness();
+		// Handoff can run through the preference order, but is not an explicit /compact mode.
+		cfgCompactionMethodOrder.set(harness.session.settings, ["handoff", "soft"]);
 
 		const compactSpy = vi.spyOn(compactionModule, "compact");
 
