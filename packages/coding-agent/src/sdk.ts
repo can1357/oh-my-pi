@@ -2772,7 +2772,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
 			getContextMessages: () => convertToLlm(session?.messages ?? []),
-			getContextRevision: () => session?.agent.messagesRevision ?? 0,
+			noteEvalPreludeCall: name => session?.noteEvalPreludeCall(name),
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
@@ -5185,6 +5185,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// their own configured tool slate, so a selected write is always full.
 			deviceOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
+			// An advisor is a conversation of its own with no hidden-message channel: its preludes stay read-first.
+			noteEvalPreludeCall: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},

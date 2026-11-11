@@ -34,6 +34,7 @@ import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memo
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
+import evalPreludeGuidePrompt from "../prompts/tools/eval-prelude-first-call.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
 import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
@@ -295,6 +296,7 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
+const EVAL_PRELUDE_GUIDE_MESSAGE_TYPE = "eval-prelude-guide";
 const SKILL_NOTICE_MESSAGE_TYPE = "skill-notice";
 
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
@@ -346,6 +348,11 @@ interface XdevMountNoticeDetails {
 interface EvalPreludeNoticeDetails {
 	added: string[];
 	removed: string[];
+}
+
+/** Preludes whose first-call guide one hidden {@link EVAL_PRELUDE_GUIDE_MESSAGE_TYPE} message carries. */
+interface EvalPreludeGuideDetails {
+	names: string[];
 }
 
 /** Skills one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message announced or withdrew. */
@@ -2089,6 +2096,52 @@ export class SessionTools {
 				]),
 			}),
 			details: { added: added.map(definition => definition.name), removed },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	/** Preludes with a first-call guide that this conversation has called; cleared when the conversation changes. */
+	#evalPreludesCalled = new Set<string>();
+
+	noteEvalPreludeCall(name: string): void {
+		this.#evalPreludesCalled.add(name);
+	}
+
+	clearEvalPreludeCalls(): void {
+		this.#evalPreludesCalled.clear();
+	}
+
+	/**
+	 * Builds the hidden message carrying the first-call guide of each prelude
+	 * this conversation has called, unless a guide message still in context
+	 * holds that guide whole. Like {@link takeEvalPreludeNotice}, what was sent
+	 * is read from the transcript's own typed messages, never from tool output
+	 * or a delivery flag: a message the loop discarded, or a compaction, rewind
+	 * or shake that dropped or shortened a guide, sends it again at the next
+	 * delivery point, and a resumed session does not repeat it.
+	 */
+	takeEvalPreludeGuide(): CustomMessage<EvalPreludeGuideDetails> | undefined {
+		const called = this.#evalPreludesCalled;
+		if (called.size === 0) return undefined;
+		const sent = this.#host.agent.state.messages.flatMap(message =>
+			message.role === "custom" &&
+			message.customType === EVAL_PRELUDE_GUIDE_MESSAGE_TYPE &&
+			typeof message.content === "string"
+				? [message.content]
+				: [],
+		);
+		const guides = this.#host.evalPreludes().flatMap(definition => {
+			const guide = called.has(definition.name) ? definition.firstCallDocumentation?.trim() : undefined;
+			return guide && !sent.some(content => content.includes(guide)) ? [{ name: definition.name, guide }] : [];
+		});
+		if (guides.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: EVAL_PRELUDE_GUIDE_MESSAGE_TYPE,
+			content: prompt.render(evalPreludeGuidePrompt, { guides }),
+			details: { names: guides.map(guide => guide.name) },
 			attribution: "agent",
 			display: false,
 			timestamp: Date.now(),

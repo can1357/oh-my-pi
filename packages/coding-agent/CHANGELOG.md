@@ -17,6 +17,10 @@
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
 
+### Changed
+
+- Browser tasks start without reading `xd://eval/browser`: a short guide follows the first browser call as a hidden session message, outside cell output limits and shaping. Compaction or a rewind that drops or shortens it sends it again. Advisors keep reading the full guide first; real-session, borrowed-tab and page-integrity safety rules arrive before the first call ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
@@ -188,9 +192,6 @@
 - Agent-to-agent messages now always reach the recipient as user turns: one that ends a `wait` arrives right after it instead of inside the `wait` tool result, and none is sent with developer or system authority
 - Launch services now persist for non‑interactive sessions
 - The shell's built-in `jq` now behaves like jq 1.8.2 instead of jaq: the same output (number formatting, colors, `-S`, `--indent`, `--seq`, `--stream`), error messages and exit statuses, jq's full option set (`--version` reports `jq-1.8.2`), and its grammar and builtins (`?//`, `$__loc__`, modules, `getpath`/`setpath` creating missing paths, `|=` deletions, Oniguruma regexes, dates); it passes jq 1.8.2's own test suite
-- A failed JavaScript Eval cell prints the error's message and the cell's own frames, with one line counting the hidden frames from omp's runtime, its dependencies and the engine, instead of the full host stack; project-local dependency frames stay visible, cached stacks whose headers no longer match the error stay intact, floating rejections retain their current message and missing-await hint even with a cached stack, and `print(e.stack)` in a `catch` still shows every frame ([#18775](https://github.com/can1357/oh-my-pi/pull/18775) by [@will-bogusz](https://github.com/will-bogusz))
-- Browser tasks start without reading `xd://eval/browser`: the first browser call of a conversation returns a short browser guide (helpers with their signatures, selector forms, the re-observe rule) with its output, and `xd://eval/browser` still holds the full guide ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
-- Browser tasks start without reading `xd://eval/browser`: the first browser call of a conversation returns a short browser guide (helpers with their signatures, selector forms, the re-observe rule) with its output, preserved through artifact spilling and output shaping, and `xd://eval/browser` still holds the full guide. Real-session and borrowed-tab safety rules arrive before the first call in every browser mode ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

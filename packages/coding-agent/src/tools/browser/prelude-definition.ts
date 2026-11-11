@@ -55,7 +55,7 @@ export function createBrowserPreludeDefinition(
 						cmux: fallback.kind === "cmux",
 					})
 				: undefined;
-			return [userSessionGuidance.trim(), relay, browserX11Guidance(session.settings)].filter(Boolean).join("\n\n");
+			return prompt.render(userSessionGuidance, { relay, x11: browserX11Guidance(session.settings) }).trim();
 		},
 		javascript: browserJavascript,
 		python: browserPython,

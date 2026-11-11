@@ -21,7 +21,7 @@ import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
-import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes, preserveEvalGuides } from "../eval/preludes";
+import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes } from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
@@ -71,7 +71,7 @@ import {
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
-import { shapeToolResult, shapesOutput } from "../spotlight";
+import { shapeToolResult } from "../spotlight";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -197,6 +197,8 @@ export interface EvalToolDescriptionOptions {
 		EvalPreludeDefinition,
 		"name" | "documentation" | "inlineDocumentation" | "firstCallDocumentation"
 	>[];
+	/** The session can send first-call guides; without it such a prelude is listed as read-first. */
+	firstCallGuides?: boolean;
 	/**
 	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
 	 * when the session cannot `read` (the only transport for topic docs).
@@ -263,7 +265,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		const summary = evalPreludeSummary(prelude);
 		if (!summary) continue;
 		// Without `read` every topic is inlined in full, so a first-call guide changes nothing there.
-		if (prelude.firstCallDocumentation?.trim() && !options.inlineTopics) {
+		if (prelude.firstCallDocumentation?.trim() && options.firstCallGuides && !options.inlineTopics) {
 			firstCallPreludes.push({ name: prelude.name, summary });
 		} else {
 			preludes.push({ name: prelude.name, summary });
@@ -414,6 +416,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			waitTool: hasWaitTool(session),
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: !docTopicsReadable(session),
+			firstCallGuides: session.noteEvalPreludeCall !== undefined,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
 			perCallModel,
 			perCallModelAdvertisement,
@@ -512,17 +515,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
 		const result = await this.#execute(toolCallId, params, signal, onUpdate, ctx);
-		const session = this.session;
-		if (!session || !shapesOutput(session, "eval")) return result;
-		return preserveEvalGuides(result, output =>
-			shapeToolResult(
-				session,
-				toolCallId,
-				{ tool: "eval", command: params.code, source: params.code, exitCode: result.isError ? 1 : 0 },
-				output,
-				signal,
-				{ dropTruncation: true },
-			),
+		if (!this.session) return result;
+		// Output shaped by the session's Spotlight experiment no longer matches the sink's line ranges.
+		return shapeToolResult(
+			this.session,
+			toolCallId,
+			{ tool: "eval", command: params.code, source: params.code, exitCode: result.isError ? 1 : 0 },
+			result,
+			signal,
+			{ dropTruncation: true },
 		);
 	}
 

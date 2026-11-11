@@ -513,7 +513,6 @@ export interface SessionAdvisorsHost {
 	modelRegistry: ModelRegistry;
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
-	evalPreludeGuidance?(): string[];
 	providerSessionState: Map<string, ProviderSessionState>;
 	/** Per-model WebSocket preference from the live transport settings (Codex and standard Responses). */
 	preferWebsockets(model: Model): boolean | undefined;
@@ -1499,7 +1498,6 @@ export class SessionAdvisors {
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);
 			};
-			const transformProviderContext = this.#createTransformProviderContext?.();
 			const advisorAgent = new Agent({
 				initialState: {
 					systemPrompt,
@@ -1535,15 +1533,7 @@ export class SessionAdvisors {
 				onSseEvent: this.#host.onSseEvent,
 				// Built per advisor: the transform keeps per-conversation state (the
 				// date/cwd reminder), and each advisor is a conversation of its own.
-				transformProviderContext: names.has("eval")
-					? async (context, model) => {
-							const transformed = (await transformProviderContext?.(context, model)) ?? context;
-							const guidance = this.#host.evalPreludeGuidance?.() ?? [];
-							return guidance.length > 0
-								? { ...transformed, systemPrompt: [...(transformed.systemPrompt ?? []), ...guidance] }
-								: transformed;
-						}
-					: transformProviderContext,
+				transformProviderContext: this.#createTransformProviderContext?.(),
 				intentTracing: false,
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(

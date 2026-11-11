@@ -72,7 +72,7 @@ More globals; `read` the linked docs before first use:
 - `{{name}}`: {{summary}} → xd://eval/{{name}}
 {{/each}}
 {{#if firstCallPreludes}}
-No `read` needed before first use; the first call's output carries the guide (full reference linked):
+No `read` needed before first use; the guide follows the first call's result (full reference linked):
 {{#each firstCallPreludes}}
 - `{{name}}`: {{summary}} → `xd://eval/{{name}}`
 {{/each}}

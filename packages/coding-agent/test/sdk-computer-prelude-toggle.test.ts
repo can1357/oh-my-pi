@@ -13,7 +13,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
-import { cfgBrowserEnabled, cfgBrowserRelayUrl } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Guards the SDK/session boundary: browser and computer stay outside the tool
@@ -93,94 +93,6 @@ describe("AgentSession eval preludes", () => {
 		await session.setModel(gemini);
 		expect(session.model).toBe(gemini);
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
-	});
-
-	it("delivers browser guides to each advisor's own Eval conversation", async () => {
-		const settings = Settings.isolated({
-			"browser.enabled": true,
-			"browser.headless": true,
-			"browser.relay": false,
-			"browser.tern": false,
-			"browser.cmux": false,
-			"archive.enabled": false,
-			"async.enabled": false,
-		});
-		settings.setModelRole("advisor", "openai/gpt-4o-mini");
-		const { session } = await createAgentSession({
-			cwd: registryDir,
-			agentDir: registryDir,
-			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-		});
-		sessions.push(session);
-		session.agent.appendMessage({
-			role: "toolResult",
-			toolCallId: "primary-guide",
-			toolName: "eval",
-			content: [{ type: "text", text: '<eval-guide name="browser">\nPrimary guide.\n</eval-guide>' }],
-			isError: false,
-			timestamp: 0,
-		});
-		session.setAdvisorEnabled(true);
-		const roster = [
-			{ name: "First", tools: ["read", "eval"] },
-			{ name: "Second", tools: ["read", "eval"] },
-		];
-		session.applyAdvisorConfigs(roster, undefined);
-		const first = session.getAdvisorAgent();
-		const firstEval = first?.state.tools.find(tool => tool.name === "eval");
-		if (!firstEval) throw new Error("Expected first advisor Eval");
-		const firstResult = await firstEval.execute("first-browser", { language: "js", code: "await browser.tabs()" });
-		expect(firstResult.content).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
-			]),
-		);
-		session.applyAdvisorConfigs([...roster].reverse(), undefined);
-		const second = session.getAdvisorAgent();
-		const secondEval = second?.state.tools.find(tool => tool.name === "eval");
-		if (!secondEval) throw new Error("Expected second advisor Eval");
-		expect(secondEval).not.toBe(firstEval);
-		const secondResult = await secondEval.execute("second-browser", { language: "js", code: "await browser.tabs()" });
-		expect(secondResult.content).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
-			]),
-		);
-		if (!second) throw new Error("Expected second advisor");
-		const before = (await second.buildSideRequestContext([])).systemPrompt?.join("\n") ?? "";
-		if (process.platform !== "linux") expect(before).not.toContain("On Linux under X11");
-		cfgBrowserRelayUrl.set(settings, "http://10.0.0.5:9224");
-		await Promise.resolve();
-		await session.runToolRegistryMutation(async () => undefined);
-		expect(session.agent.state.systemPrompt.join("\n")).toContain("On Linux under X11");
-		expect((await second.buildSideRequestContext([])).systemPrompt?.join("\n")).toContain("On Linux under X11");
-		cfgBrowserRelayUrl.set(settings, "");
-		await Promise.resolve();
-		await session.runToolRegistryMutation(async () => undefined);
-		if (process.platform !== "linux") {
-			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("On Linux under X11");
-			expect((await second.buildSideRequestContext([])).systemPrompt?.join("\n")).not.toContain(
-				"On Linux under X11",
-			);
-		}
-		const movedCwd = path.join(registryDir, "moved");
-		fs.mkdirSync(movedCwd, { recursive: true });
-		await session.moveSession(movedCwd, path.join(registryDir, "moved-sessions"));
-		const moved = await secondEval.execute("advisor-after-move", { language: "js", code: 'print(await sh("pwd"))' });
-		expect(moved.content).toEqual(
-			expect.arrayContaining([expect.objectContaining({ type: "text", text: expect.stringContaining(movedCwd) })]),
-		);
 	});
 
 	// `/computer on` mid-session used to rebuild the system prompt and eval
