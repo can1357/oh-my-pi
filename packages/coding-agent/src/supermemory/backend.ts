@@ -86,6 +86,9 @@ export const supermemoryBackend: MemoryBackend = {
 		const state = session?.getSupermemorySessionState();
 		if (state) {
 			await state.flush();
+			// Queued `retain`/`learn` writes (including a subagent's, which land in this outbox) are
+			// delivered by the queue's own drain, which `flush` does not track; wait for it too.
+			if (!state.aliasOf) await state.drainOutbox();
 			state.clearRecall();
 		}
 		logger.warn(

@@ -329,6 +329,30 @@ describe("supermemoryBackend", () => {
 		expect(session.getSupermemorySessionState()?.lastRecallSnippet).toBeUndefined();
 	});
 
+	it("/memory clear waits for a queued retain that is still uploading", async () => {
+		const reply = Promise.withResolvers<{ id: string; status: string }>();
+		const sent = Promise.withResolvers<void>();
+		vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+			sent.resolve();
+			return reply.promise;
+		});
+		const session = makeSession();
+		await start(session);
+		// The queue starts its own delivery after enqueue, as a subagent's retain does.
+		await session.getSupermemorySessionState()?.enqueueRetain("call-1", [{ content: "queued fact", source: "t" }]);
+		await sent.promise;
+		let cleared = false;
+		const clearing = supermemoryBackend.clear("/tmp", "/tmp", session as never).then(() => {
+			cleared = true;
+		});
+		// One macrotask turn lets an unblocked `clear` settle while the upload above is still pending.
+		await Bun.sleep(0);
+		expect(cleared).toBe(false);
+		reply.resolve({ id: "d", status: "queued" });
+		await clearing;
+		expect(cleared).toBe(true);
+	});
+
 	it("re-upserts the last window when a manual continuation adds an answer without a new user turn", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "createDocument")
