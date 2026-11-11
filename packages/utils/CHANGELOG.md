@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.9] - 2026-11-11
+
 ### Added
 
 - Added unstable RFD child-session protocol types (`SubagentCapabilities`, `SubagentSessionCapabilities`, `SubagentUpdate`, `StateUpdate`) and the `subagent_update` session update, gated on client `subagents` advertisement ([#18936](https://github.com/can1357/oh-my-pi/pull/18936) by [@nvandamme](https://github.com/nvandamme))

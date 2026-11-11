@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.9] - 2026-11-11
+
 ### Added
 
 - `OMP_APPLEFM_DISABLE=1` builds without the Apple Foundation Models bridge and never probes Xcode or the Command Line Tools; it cannot be combined with `OMP_APPLEFM_SWIFTC` ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
