@@ -749,8 +749,8 @@ mod background {
 		posted_modifiers_dropped(keys).map_or(Ok(()), |reason| {
 			let class = window::class_name(hwnd);
 			Err(DesktopError::background_unavailable(format!(
-				"window {} ({class}) drops background input that holds a modifier: {reason}; no \
-				 input was sent",
+				"window {} ({class}) drops background input that holds a modifier: {reason}; no input \
+				 was sent",
 				hwnd as usize,
 			)))
 		})
