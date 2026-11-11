@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
 
 ### Fixed
 
@@ -45,6 +46,8 @@
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
 
+
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed
@@ -61,6 +64,8 @@
 
 - Fixed newly discovered Anthropic Fable/Mythos models showing as text-only, non-reasoning, and mispriced before models.dev catalogs them
 - Fixed Claude Mythos 5.1 not using thinking prefix-binding controls, which it needs on every account
+
+
 
 ## [18.18.4] - 2026-11-09
 
@@ -86,6 +91,8 @@
 
 - Fixed model catalog pricing and output-limit metadata for Mistral alias IDs, including the Mistral Vibe CLI default model, by applying the metadata of their aliased models.
 - Updated xAI Grok 4.20 beta and multi-agent aliases to use the current Grok 4.20-0309 pricing, including the higher rates for prompts exceeding 200K tokens.
+### Added
+
 
 ## [18.18.1] - 2026-11-08
 
