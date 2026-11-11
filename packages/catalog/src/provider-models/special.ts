@@ -10,6 +10,7 @@ import {
 	fetchFactoryDroidModels,
 } from "../discovery/factory-droid";
 import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
+import { fetchZedHostedModels } from "../discovery/zed-hosted";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -460,4 +461,34 @@ export function zaiModelManagerOptions(
 	_config: ZaiModelManagerConfig = {},
 ): ModelManagerOptions<"anthropic-messages" | "openai-completions"> {
 	return { providerId: "zai" };
+}
+
+// ---------------------------------------------------------------------------
+// Zed Hosted
+// ---------------------------------------------------------------------------
+
+export interface ZedHostedModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function zedHostedModelManagerOptions(
+	config: ZedHostedModelManagerConfig = {},
+): ModelManagerOptions<"zed-hosted"> {
+	const { apiKey, baseUrl, fetch } = config;
+	const staticModels = seedModels<"zed-hosted">("zed-hosted");
+	return {
+		providerId: "zed-hosted",
+		cacheProviderId: resolveModelCacheProviderId("zed-hosted", { apiKey, baseUrl }),
+		staticModels,
+		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
+		...(apiKey
+			? {
+					fetchDynamicModels: async () => {
+						return fetchZedHostedModels({ apiKey, baseUrl, fetch });
+					},
+				}
+			: undefined),
+	};
 }

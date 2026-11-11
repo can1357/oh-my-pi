@@ -35,6 +35,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	otari: true,
 	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
 	litellm: true,
+	"zed-hosted": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -63,6 +64,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "zed-hosted":
+			return "https://cloud.zed.dev";
 		default:
 			return undefined;
 	}
@@ -245,6 +248,30 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
 			// 200K window on every model.
 			return "devin:models-v3";
+		case "zed-hosted": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			let scopeKey = options.apiKey ?? "";
+			if (scopeKey.trim().startsWith("{")) {
+				try {
+					const parsed: unknown = JSON.parse(scopeKey);
+					if (
+						typeof parsed === "object" &&
+						parsed !== null &&
+						"accountId" in parsed &&
+						typeof (parsed as { accountId?: unknown }).accountId === "string"
+					) {
+						const acct = (parsed as { accountId: string }).accountId;
+						const org =
+							"orgId" in parsed && typeof (parsed as { orgId?: unknown }).orgId === "string"
+								? `:${(parsed as { orgId: string }).orgId}`
+								: "";
+						scopeKey = `account:${acct}${org}`;
+					}
+				} catch {}
+			}
+			const scope = `${scopeKey}\u0000${baseUrl}`;
+			return `zed-hosted:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		default:
 			return providerId;
 	}

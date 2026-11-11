@@ -46,6 +46,7 @@ import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
+import { streamZedHosted, type ZedHostedOptions } from "./providers/zed-hosted";
 import {
 	streamAnthropic,
 	streamAppleFoundationModels,
@@ -1019,6 +1020,13 @@ function streamDispatch<TApi extends Api>(
 				providerModel as Model<"apple-foundation-models">,
 				context,
 				providerOptions as AppleFoundationModelsOptions,
+			);
+
+		case "zed-hosted":
+			return streamZedHosted(
+				providerModel as Model<"zed-hosted">,
+				context,
+				providerOptions as ZedHostedOptions,
 			);
 
 		default:
@@ -2399,6 +2407,11 @@ function mapOptionsForApi<TApi extends Api>(
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
+		case "zed-hosted":
+			return castApi<"zed-hosted">({
+				...base,
+				toolChoice: options?.toolChoice,
+			});
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);
 	}

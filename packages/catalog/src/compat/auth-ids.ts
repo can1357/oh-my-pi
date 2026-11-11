@@ -103,6 +103,7 @@ export type AuthProviderId =
 	| "yolo-auto"
 	| "zai"
 	| "zai-coding-plan"
+	| "zed-hosted"
 	| "zenmux"
 	| "zhipu-coding-plan";
 
@@ -197,5 +198,6 @@ export type LoginProviderId =
 	| "yolo-auto"
 	| "zai"
 	| "zai-coding-plan"
+	| "zed-hosted"
 	| "zenmux"
 	| "zhipu-coding-plan";

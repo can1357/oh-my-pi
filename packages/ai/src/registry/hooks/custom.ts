@@ -3,6 +3,7 @@
  * whose flow is not expressible in the declarative grammar.
  */
 import { loginMistralVibeSignIn } from "../oauth/mistral-vibe";
+import { loginZedHostedHook } from "../oauth/zed-hosted";
 import type { Lazy, LoginHook, RefreshHook } from "./types";
 
 export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
@@ -13,6 +14,7 @@ export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"mistral-vibe-sign-in": async () => loginMistralVibeSignIn,
 	"devin-cli": () => import("../oauth/devin-cli").then(module => module.loginDevinCliHook),
 	"devin-windsurf": () => import("../oauth/devin-windsurf").then(module => module.loginDevinWindsurfHook),
+	"zed-hosted": async () => loginZedHostedHook,
 };
 export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.refreshGitHubCopilotHook),

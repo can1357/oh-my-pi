@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Zed Hosted Models provider catalog rules, dynamic model discovery, and published rate cards ([#18487](https://github.com/can1357/oh-my-pi/pull/18487) by [@bilkis0987](https://github.com/bilkis0987))
+
 ### Fixed
 
 - Fixed Gemini 4 Argon and Carbon on Command Code showing no reasoning levels; both now offer low, medium, and high
