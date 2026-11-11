@@ -1,7 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-- Assistant messages on `openai-codex-responses` and `openai-responses` carry `effort`, the reasoning effort the request actually sent on the wire after the model's effort ladder clamped the selector, so JSON/RPC and session consumers can read it the way Anthropic routes read `requestControls.effort` ([#18721](https://github.com/can1357/oh-my-pi/pull/18721) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+- Assistant messages on `openai-codex-responses` and `openai-responses` now carry the `effort` the request sent on the wire ([#14942](https://github.com/can1357/oh-my-pi/issues/14942), [#18721](https://github.com/can1357/oh-my-pi/pull/18721) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
