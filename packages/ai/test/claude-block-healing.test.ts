@@ -396,6 +396,36 @@ describe("claude usage-block healing", () => {
 		expect(await storage.keys.get("anthropic", "s-rotate", { modelId: "claude-sonnet-5-5" })).toBe("access-1");
 	});
 
+	it("reports no rotation when the sibling probe leaves the sibling blocked", async () => {
+		// A probe that merely ran is not recovery: the sibling's live report still
+		// shows the shared weekly wall spent, so rotation must keep reporting no
+		// switch and the sibling's own deadline instead of routing the turn onto an
+		// account whose next request would answer with another 429.
+		const { storage, blocks, probeCount } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 1), tierLimit("fable", 0)]),
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+		const siblingBlockedUntil = blocks.get("1:tier:fable");
+		if (siblingBlockedUntil === undefined) throw new Error("expected the sibling to start blocked");
+		storage.sessions.pin("anthropic", "s-still-blocked", 2);
+
+		const mark = await storage.limits.markReached("anthropic", "s-still-blocked", {
+			modelId: "claude-fable-5-1",
+			retryAfterMs: 38 * 60 * 60_000,
+			providerTimed: true,
+		});
+
+		expect(probeCount()).toBe(1);
+		expect(mark.switched).toBe(false);
+		expect(mark.retryAtMs).toBe(siblingBlockedUntil);
+		// Still blocked, so the session keeps its own (also blocked) pin for the
+		// last-resort pass instead of being moved onto the probed sibling.
+		expect(await storage.keys.get("anthropic", "s-still-blocked", { modelId: "claude-fable-5-1" })).toBe(
+			"access-2",
+		);
+	});
+
 	describe("an account with no running 5-hour window", () => {
 		it("heals a stale account-wide block", async () => {
 			const { storage, blocks } = makeHarness(parsedReport(noSessionPayload(55)), "");
