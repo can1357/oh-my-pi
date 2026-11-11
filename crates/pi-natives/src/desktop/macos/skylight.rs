@@ -1911,6 +1911,39 @@ fn rearm(browser: pid_t, user: pid_t, now: Instant) -> Rearm {
 	Rearm::Replace(arm_reroute(user, browser))
 }
 
+#[cfg(test)]
+pub(super) fn with_reused_reroute_for_test<T>(
+	reroute: KeyReroute,
+	deliver: impl FnOnce() -> T,
+) -> T {
+	struct RestoreLog(Option<PickLog>);
+	impl Drop for RestoreLog {
+		fn drop(&mut self) {
+			*PICK_LOG.lock() = self.0.take().unwrap();
+		}
+	}
+	let now = Instant::now();
+	let log = PickLog {
+		watch_from:  Some(now),
+		watch_until: Some(now + PICK_WATCH),
+		sampled_at:  Some(now),
+		sampling:    true,
+		chord:       None,
+		option:      None,
+		panels:      [None; 2],
+		reroute:     Some((now, reroute)),
+	};
+	let _restore = RestoreLog(Some(mem::replace(&mut *PICK_LOG.lock(), log)));
+	// An operation owns focus during this read: a discarded candidate
+	// cannot be hidden by successfully installing a replacement tap.
+	let _owner = control::own_focus().unwrap();
+	let candidate = rearm(200, 100, now);
+	PICK_LOG
+		.lock()
+		.watch_read(Picks { flags: 0, front: None, key_focus: None }, now, candidate);
+	deliver()
+}
+
 /// Whether a reroute stays given what the log `seen` since it was set up. A
 /// ⌘/⌃ or a launcher's or Spotlight's panel seen since would make it take
 /// the browser coming forward for the user's choice for good, so a new one

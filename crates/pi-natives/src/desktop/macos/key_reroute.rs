@@ -1561,26 +1561,33 @@ mod tests {
 	}
 
 	#[test]
-	fn a_reroute_serves_its_apps_until_a_newer_action_and_stands_in_for_a_new_one_until_a_click() {
-		let armed = Armed {
-			user:       USER,
-			target:     TARGET,
-			generation: 7,
-			buttons:    BUTTONS,
-			secure:     false,
-		};
-		assert!(armed.covers(armed));
-		// The user clicked since: an action under way keeps it, but it would
-		// take the click for their choice where a new one would not.
-		let clicked = Armed { buttons: CLICKED, ..armed };
-		assert!(armed.serves(clicked) && !armed.covers(clicked));
-		let secure = Armed { secure: true, ..armed };
-		assert!(armed.serves(secure) && !armed.covers(secure));
-		for other in [Armed { generation: 8, ..armed }, Armed { user: SPOTLIGHT, ..armed }, Armed {
-			target: SPOTLIGHT,
-			..armed
-		}] {
-			assert!(!armed.serves(other) && !armed.covers(other), "{other:?}");
+	fn reusing_an_armed_reroute_keeps_delivering_the_users_keys() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		struct RestoreRegistry(Option<Registry>);
+		impl Drop for RestoreRegistry {
+			fn drop(&mut self) {
+				*REGISTRY.lock() = self.0.take().unwrap();
+			}
 		}
+		let mut rig = Rig::new();
+		let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+		rig.theft.generation = generation;
+		register(&mut rig.theft, &mut rig.registry);
+		rig.steal();
+		let _restore = RestoreRegistry(Some(std::mem::replace(&mut *REGISTRY.lock(), rig.registry)));
+		let (mut reroute, _) = KeyReroute::unwatched_for_test(generation);
+		reroute.armed.buttons = mouse_buttons();
+		// The same caller that rearms browser reads must keep the armed tap.
+		// Exercise delivery after publication, not the snapshot predicates.
+		skylight::with_reused_reroute_for_test(reroute, || {
+			for stroke in [Stroke::Press, Stroke::Repeat, Stroke::Release] {
+				assert_eq!(
+					rig.theft
+						.route(&mut REGISTRY.lock(), user_key(Q, stroke), false, BUTTONS),
+					MOVED,
+					"{stroke:?} after reusing the armed reroute",
+				);
+			}
+		});
 	}
 }
