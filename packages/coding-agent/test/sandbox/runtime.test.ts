@@ -102,7 +102,9 @@ function linkedWorktree(): { commonDir: string; gitDir: string; worktree: string
 beforeEach(() => {
 	state = beginSettingsTest();
 	restoreEnvValue("PI_SANDBOX", undefined);
-	scratch = TempDir.createSync("@omp-sandbox-runtime-");
+	// Not under the OS temp dir: on Linux the sandbox hides the host's /tmp, so `outside` would be
+	// invisible to contained commands rather than read-only.
+	scratch = TempDir.createSync(path.join(os.homedir(), ".omp-sandbox-runtime-"));
 	const root = fs.realpathSync(scratch.path());
 	workspace = path.join(root, "workspace");
 	outside = path.join(root, "outside");

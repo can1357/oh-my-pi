@@ -127,7 +127,9 @@ function headlessUi(): Pick<NonNullable<AgentToolContext["ui"]>, "custom"> {
 beforeEach(async () => {
 	state = beginSettingsTest();
 	restoreEnvValue("PI_SANDBOX", undefined);
-	scratch = TempDir.createSync("@omp-bash-sandbox-");
+	// Not under the OS temp dir: on Linux the sandbox hides the host's /tmp, so `outside` would be
+	// invisible to contained commands rather than read-only.
+	scratch = TempDir.createSync(path.join(os.homedir(), ".omp-bash-sandbox-"));
 	const root = fs.realpathSync(scratch.path());
 	workspace = path.join(root, "workspace");
 	outside = path.join(root, "outside");
@@ -414,7 +416,8 @@ describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("agent bash in the sandbox
 		cfgSandboxNetworkMode.set(settings, "allowlist");
 		const contained = (await bash('echo "$HTTPS_PROXY"')).output;
 		expect(contained).not.toContain("parent-proxy.invalid");
-		expect(contained).toMatch(/^http:\/\/(?:127\.0\.0\.1|localhost):\d+/);
+		// bubblewrap reaches the host-side proxy through slirp4netns' host alias, not loopback.
+		expect(contained).toMatch(/^http:\/\/(?:127\.0\.0\.1|localhost|10\.0\.2\.2):\d+/);
 	});
 
 	it("releases the session's eval `sh()` shells and hosts with the session", async () => {

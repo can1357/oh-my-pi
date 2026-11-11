@@ -74,7 +74,9 @@ function request(kind: "write" | "read" | "host", target: string) {
 beforeEach(() => {
 	state = beginSettingsTest();
 	restoreEnvValue("PI_SANDBOX", undefined);
-	scratch = TempDir.createSync("@omp-sandbox-access-");
+	// Not under the OS temp dir: on Linux the sandbox hides the host's /tmp, so `outside` would be
+	// invisible to contained commands rather than read-only.
+	scratch = TempDir.createSync(path.join(os.homedir(), ".omp-sandbox-access-"));
 	const root = fs.realpathSync(scratch.path());
 	agentDir = path.join(root, "agent");
 	workspace = path.join(root, "workspace");
@@ -628,13 +630,19 @@ describe.skipIf(!backend.supported || process.platform === "win32")("access gran
 		expect(fs.existsSync(path.join(granted, "c"))).toBe(false);
 	});
 
-	it("keeps a session write grant whose directory a contained command deleted, and recreates it", async () => {
+	it("keeps a session write grant whose directory was deleted, and recreates it", async () => {
 		const granted = path.join(outside, "build");
 		const instance = await runtime();
 		instance.grantPath("write", granted, "session");
-		const remove = await instance.spawn({ argv: ["/bin/rm", "-rf", granted], cwd: workspace, env: {} });
-		remove.stdin.end();
-		expect(await remove.exited).toBe(0);
+		if (backend.backend === "bubblewrap") {
+			// The grant is a bind mount there: a contained `rm -rf` empties it but cannot remove the
+			// mount point itself (EROFS), so the directory can only vanish from the host side.
+			fs.rmSync(granted, { recursive: true });
+		} else {
+			const remove = await instance.spawn({ argv: ["/bin/rm", "-rf", granted], cwd: workspace, env: {} });
+			remove.stdin.end();
+			expect(await remove.exited).toBe(0);
+		}
 		expect(fs.existsSync(granted)).toBe(false);
 		expect(instance.effectivePolicy().readwritePaths).toContain(granted);
 		expect(instance.sessionPaths().write).toEqual([granted]);

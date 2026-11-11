@@ -259,7 +259,7 @@ Agent writes to `cfg://sandbox.*` settings always ask while the sandbox is enabl
 | Requires | macOS 15 or newer | A working `bwrap` (MXC requires 0.5.0 or newer) and usable unprivileged user namespaces, checked by actually starting a probe sandbox (Ubuntu 24.04's AppArmor restriction or a container's seccomp profile can block them) | The native processcontainer tier: Windows 11 24H2, build 26100.9278 / 26200.9278 or newer. Older builds report the sandbox as unavailable; omp does not use MXC's AppContainer fallback, which would rewrite ACLs of host directories |
 | `allowlist` | Proxy, kernel-confined | Needs the host networking tools MXC uses for proxy confinement (`slirp4netns`, `unshare`, `nsenter`, `ip`, `iptables`/`iptables-restore`); without them network is **denied** | Proxy, confined to loopback by the OS when the backend tier supports an identity-less loopback proxy; otherwise network is **denied** |
 | `allow` | Unrestricted | Needs the same networking tools, otherwise **denied**; never reaches the host's loopback (private network namespace) | Unrestricted |
-| Verification | Exercised on this platform | Compile-checked; covered by the `--smoke-test` probe in CI | Exercised on Windows 11 build 26100 (smoke probe, contained bash, JS eval, Node, git) |
+| Verification | Exercised on this platform | Exercised on Ubuntu 24.04 under WSL2 (bwrap 0.9.0, slirp4netns 1.2.1, iptables 1.8.10): smoke probe, contained bash, JS/Python eval, MCP, access grants, `allowlist` through the proxy | Exercised on Windows 11 build 26100 (smoke probe, contained bash, JS eval, Node, git) |
 
 When a configured network mode cannot be enforced, the sandbox runs with `deny` (stricter), and `/sandbox status` and the panel show a warning. The requirement rows come from MXC's documentation; omp reports MXC's own reason string when a backend is missing.
 
@@ -341,12 +341,13 @@ MXC can emit telemetry, on Windows only, as ETW events. omp turns it off at both
 - **Exported secrets still reach contained processes.** Only variables from omp's own `.env` files are withheld. An API key exported by your shell or its rc files is in the contained environment, and with allowlisted hosts that remains a way to send it out. A variable from omp's `.env` can also reach contained bash when a function in your shell rc references it, unless its name looks like a secret (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`, `*SESSION_KEY*`).
 - **Linux: the environment is visible on the host.** bubblewrap receives the environment as arguments of the host-side `bwrap` process, so other local users can read it (API keys included) from `/proc/<pid>/cmdline` while a contained process runs.
 - **Linux: no host loopback.** Contained processes cannot reach services on the host's `127.0.0.1`, even in `allow` mode.
+- **Linux: a contained command cannot remove a granted directory itself.** Write grants are bind mounts, so `rm -rf` of one empties it but fails on the directory with `Read-only file system`.
 - **Contained JS eval and stdin.** Child processes a JS eval cell starts inherit the evaluator's protocol stdin; a child that reads stdin can stall the cell.
 - **Windows: the Python eval kernel needs loopback**: in `deny` and `allowlist` modes it refuses to start unless `sandbox.network.windowsLoopback` is on, which also exposes this machine's loopback services; see [Windows](#windows).
 - **Windows: programs that cannot run under Mandatory ASLR fail to start**, Git Bash, MSYS2/Cygwin tools and git hooks included; see [Windows](#windows).
 - **The `sandboxed` badge of an eval cell appears when it finishes**, not while it runs.
 - **PTY on macOS:** a contained PTY works, but `tty` prints `not a tty`; programs that only check `isatty()` are unaffected.
-- **Linux** is compile-checked and exercised only by the CI smoke probe. Windows was exercised on Windows 11 build 26100 (smoke probe, contained `bash`, JS eval and git); the rest of the runtime behaviour described here was exercised on macOS.
+- **Linux** was exercised on Ubuntu 24.04 under WSL2 (smoke probe and the sandbox, eval and MCP test suites) and is covered by the CI smoke probe. Windows was exercised on Windows 11 build 26100 (smoke probe, contained `bash`, JS eval and git); the rest of the runtime behaviour described here was exercised on macOS.
 
 ## Implementation files
 

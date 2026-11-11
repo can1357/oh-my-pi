@@ -632,6 +632,25 @@ fn validate_proxy_url(url: &str) -> std::result::Result<(), String> {
 	}
 }
 
+/// MXC's bubblewrap backend runs every command as `bwrap … -- sh -c <line>`,
+/// and bwrap resolves that bare `sh` through the contained `PATH`: a caller
+/// `PATH` without `/usr/bin` and `/bin` (an MCP server config's `PATH: bin`)
+/// fails every spawn with `bwrap: execvp sh`. Append the missing ones, after
+/// the caller's entries so their precedence holds.
+fn ensure_shell_dirs(path: &mut String) {
+	for dir in ["/usr/bin", "/bin"] {
+		if !path
+			.split(':')
+			.any(|entry| entry.trim_end_matches('/') == dir)
+		{
+			if !path.is_empty() {
+				path.push(':');
+			}
+			path.push_str(dir);
+		}
+	}
+}
+
 fn build_request(
 	options: SandboxSpawnOptions,
 	backend: Backend,
@@ -668,6 +687,11 @@ fn build_request(
 		});
 		env.insert("HTTP_PROXY".to_owned(), url.to_owned());
 		env.insert("HTTPS_PROXY".to_owned(), url.to_owned());
+	}
+	if backend == Backend::Bubblewrap
+		&& let Some(path) = env.get_mut("PATH")
+	{
+		ensure_shell_dirs(path);
 	}
 	let containment = if windows && enumerate_paths && policy.list_volume_roots == Some(true) {
 		volume_root_enumeration(&policy, cwd.as_deref())
@@ -1321,6 +1345,42 @@ mod tests {
 		assert_eq!(fs.readwrite_paths, args(&["/work"]));
 		assert_eq!(fs.readonly_paths, args(&["/usr"]));
 		assert_eq!(fs.denied_paths, args(&["/home/u/.ssh"]));
+	}
+
+	#[test]
+	fn bubblewrap_path_always_resolves_the_wrapping_shell() {
+		let request = |backend: Backend, path: &str| {
+			let options = SandboxSpawnOptions {
+				argv:   args(&["tool"]),
+				cwd:    None,
+				env:    HashMap::from([("PATH".to_owned(), path.to_owned())]),
+				policy: SandboxPolicy {
+					readwrite_paths:   Vec::new(),
+					readonly_paths:    Vec::new(),
+					denied_paths:      Vec::new(),
+					network:           "deny".to_owned(),
+					proxy_url:         None,
+					list_volume_roots: None,
+					loopback:          None,
+				},
+			};
+			let env = build_request(options, backend, false, false, false)
+				.unwrap()
+				.environment;
+			env.unwrap()
+				.into_iter()
+				.find(|(key, _)| key == "PATH")
+				.unwrap()
+				.1
+		};
+		// The caller's entries keep precedence; only the missing shell dirs
+		// follow.
+		assert_eq!(request(Backend::Bubblewrap, "/work/bin"), "/work/bin:/usr/bin:/bin");
+		assert_eq!(request(Backend::Bubblewrap, "/bin/:/opt/x"), "/bin/:/opt/x:/usr/bin");
+		assert_eq!(request(Backend::Bubblewrap, "/usr/bin:/bin"), "/usr/bin:/bin");
+		// Other backends do not wrap in `sh`; their PATH passes through
+		// untouched.
+		assert_eq!(request(Backend::Seatbelt, "/work/bin"), "/work/bin");
 	}
 
 	#[test]
