@@ -2072,6 +2072,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// prompt reflects the tree on disk (e.g. after a branch checkout). Every
 	// other rebuild, including resuming a session in the same directory, reuses
 	// it so an existing conversation's cached prompt prefix stays byte-stable.
+	// A tree the caller supplied is theirs: it is never replaced by a scan.
 	let workspaceTreeRoot = path.resolve(cwd);
 	let workspaceTreeEpoch = 0;
 	// Tree from a mid-session scan; supersedes the startup value handed to subagents.
@@ -4378,7 +4379,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(cfgToolsFormat.get(settings), agent?.state.model ?? model) === undefined;
 			const includeWorkspaceTree = cfgIncludeWorkspaceTree.get(settings);
-			if (includeWorkspaceTree) {
+			if (includeWorkspaceTree && !options.workspaceTree) {
 				const treeRoot = path.resolve(promptCwd);
 				const treeEpoch = hasSession ? session.transcriptEpoch : 0;
 				if (!workspaceTreePromise || treeRoot !== workspaceTreeRoot || treeEpoch !== workspaceTreeEpoch) {

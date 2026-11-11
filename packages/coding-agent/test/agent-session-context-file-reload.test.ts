@@ -11,6 +11,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as repoContext from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
+import type { WorkspaceTree } from "@oh-my-pi/pi-coding-agent/workspace-tree";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function buildLocalModel(api: string): Model<Api> {
@@ -33,12 +34,17 @@ interface ReloadSession {
 	close(): Promise<void>;
 }
 
+interface ReloadSessionOptions {
+	settings?: Readonly<Record<string, unknown>>;
+	sessionManager?: SessionManager;
+	workspaceTree?: WorkspaceTree;
+}
+
 /** Session whose prompt inputs are discovered from `cwd` on disk. */
 async function openReloadSession(
 	tempDir: TempDir,
 	cwd: string,
-	settings: Parameters<typeof Settings.isolated>[0] = {},
-	sessionManager: SessionManager = SessionManager.inMemory(cwd),
+	options: ReloadSessionOptions = {},
 ): Promise<ReloadSession> {
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 	authStorage.keys.setRuntime("managed-primary", "test-key");
@@ -46,10 +52,11 @@ async function openReloadSession(
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir: tempDir.path(),
-		sessionManager,
+		sessionManager: options.sessionManager ?? SessionManager.inMemory(cwd),
 		authStorage,
 		modelRegistry,
-		settings: Settings.isolated({ "compaction.enabled": false, ...settings }),
+		settings: Settings.isolated({ "compaction.enabled": false, ...options.settings }),
+		workspaceTree: options.workspaceTree,
 		model: buildLocalModel(`context-reload-${Bun.nanoseconds().toString(36)}`),
 		disableExtensionDiscovery: true,
 		skills: [],
@@ -95,20 +102,19 @@ async function expectContextReload(reset: (session: AgentSession) => Promise<unk
 
 async function withTreeSession(
 	run: (session: AgentSession, tempDir: TempDir) => Promise<void>,
-	options: { persisted?: boolean } = {},
+	options: { persisted?: boolean; workspaceTree?: WorkspaceTree; expectInitial?: string } = {},
 ): Promise<void> {
 	using tempDir = TempDir.createSync("@pi-workspace-tree-");
 	await fs.mkdir(tempDir.join("project"));
 	await Bun.write(tempDir.join("project", "original_entry.txt"), "x");
 	const cwd = tempDir.join("project");
-	const { session, close } = await openReloadSession(
-		tempDir,
-		cwd,
-		{ includeWorkspaceTree: true },
-		options.persisted ? SessionManager.create(cwd, tempDir.join("sessions")) : undefined,
-	);
+	const { session, close } = await openReloadSession(tempDir, cwd, {
+		settings: { includeWorkspaceTree: true },
+		sessionManager: options.persisted ? SessionManager.create(cwd, tempDir.join("sessions")) : undefined,
+		workspaceTree: options.workspaceTree,
+	});
 	try {
-		expect(session.systemPrompt.join("\n")).toContain("original_entry.txt");
+		expect(session.systemPrompt.join("\n")).toContain(options.expectInitial ?? "original_entry.txt");
 		await run(session, tempDir);
 	} finally {
 		await close();
@@ -251,5 +257,28 @@ describe("workspace tree in the system prompt", () => {
 			expect(prompt).not.toContain("original_entry.txt");
 			expect(prompt).not.toContain("old_pkg/AGENTS.md");
 		});
+	});
+
+	it("never replaces a caller-supplied tree with a scan", async () => {
+		const supplied: WorkspaceTree = {
+			rootPath: "/synthetic",
+			rendered: ".\n  - supplied_entry.txt",
+			truncated: false,
+			totalLines: 2,
+			agentsMdFiles: [],
+		};
+		await withTreeSession(
+			async (session, tempDir) => {
+				expect(await session.resetSessionContext()).toBeTruthy();
+				await fs.mkdir(tempDir.join("moved"));
+				session.sessionManager.setCwdWithoutRelocation(tempDir.join("moved"));
+				await session.refreshBaseSystemPrompt();
+
+				const prompt = session.systemPrompt.join("\n");
+				expect(prompt).toContain("supplied_entry.txt");
+				expect(prompt).not.toContain("original_entry.txt");
+			},
+			{ workspaceTree: supplied, expectInitial: "supplied_entry.txt" },
+		);
 	});
 });
