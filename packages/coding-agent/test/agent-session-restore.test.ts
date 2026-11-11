@@ -7,12 +7,15 @@ import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EVAL_STATE_CONTEXT_TYPE } from "@oh-my-pi/pi-coding-agent/eval/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
+	hasRestorableTurn,
 	INTERRUPTED_TURN_ERROR,
+	SESSION_EXIT_CUSTOM_TYPE,
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -354,5 +357,153 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 			await session.dispose();
 		}
 		session = undefined;
+	});
+
+	it("leaves a finished turn as it is when an idle compaction's eval snapshot or an older release's abort follows it", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const signalExit = { reason: "sighup", kind: "signal", recordedAt: new Date().toISOString() };
+		// What a session daemon restart finds after an idle compaction: the rebuild
+		// persisted an eval snapshot after the finished turn, then omp got SIGHUP.
+		const idleCompacted = () => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+			sessionManager.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+			sessionManager.appendMessage({
+				role: "custom",
+				customType: EVAL_STATE_CONTEXT_TYPE,
+				content: "<system-reminder>eval runtime state</system-reminder>",
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+			sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+			return sessionManager;
+		};
+		// An older release's resume read that snapshot as an unfinished tail and closed it; then another restart.
+		const closedByOlderRelease = idleCompacted();
+		closedByOlderRelease.appendMessage(
+			assistant(model, { stopReason: "aborted", errorMessage: INTERRUPTED_TURN_ERROR }),
+		);
+		closedByOlderRelease.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+
+		for (const sessionManager of [idleCompacted(), closedByOlderRelease]) {
+			const { session, mock } = open(model, sessionManager, [], []);
+			await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
+			expect(mock.calls.length).toBe(0);
+			await session.dispose();
+		}
+		session = undefined;
+	});
+
+	it("still goes on with a genuine shutdown abort that follows an eval snapshot, a request, or an extension prompt", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const signalExit = { reason: "sighup", kind: "signal", recordedAt: new Date().toISOString() };
+		const abort = () => assistant(model, { stopReason: "aborted", errorMessage: INTERRUPTED_TURN_ERROR });
+		const snapshot = {
+			role: "custom" as const,
+			customType: EVAL_STATE_CONTEXT_TYPE,
+			content: "<system-reminder>eval runtime state</system-reminder>",
+			display: false,
+			attribution: "agent" as const,
+			timestamp: Date.now(),
+		};
+
+		// A compaction mid-turn: the prompt was never answered, then the snapshot, then a shutdown cut it off.
+		const midTurn = SessionManager.inMemory();
+		midTurn.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		midTurn.appendMessage(snapshot);
+		midTurn.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		midTurn.appendMessage(abort());
+
+		// A restored request a second shutdown cut off: the first abort stays on disk before the second.
+		const twice = SessionManager.inMemory();
+		twice.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		twice.appendMessage(abort());
+		twice.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		twice.appendMessage(abort());
+
+		// The same, with the eval snapshot the reopen persisted between the two aborts.
+		const reopened = SessionManager.inMemory();
+		reopened.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		reopened.appendMessage(abort());
+		reopened.appendCustomMessageEntry(EVAL_STATE_CONTEXT_TYPE, "<system-reminder>eval</system-reminder>", false);
+		reopened.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		reopened.appendMessage(abort());
+
+		// A `/retry` after a clean quit and reopen, cut off by SIGHUP: a live abort (it has
+		// `completedAt`) after the reopen's eval snapshot, with a normal exit before it.
+		const retried = SessionManager.inMemory();
+		retried.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		retried.appendMessage(assistant(model, { stopReason: "aborted", errorMessage: "Interrupted by user" }));
+		retried.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, { ...signalExit, reason: "quit", kind: "normal" });
+		retried.appendCustomMessageEntry(EVAL_STATE_CONTEXT_TYPE, "<system-reminder>eval</system-reminder>", false);
+		retried.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		retried.appendMessage({ ...abort(), completedAt: Date.now() });
+
+		// An extension's triggered prompt after a finished answer, cut off by a shutdown.
+		const extension = SessionManager.inMemory();
+		extension.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		extension.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		extension.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		extension.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		extension.appendMessage(abort());
+
+		// The same prompt hit a context overflow; recovery compacted, wrote an eval snapshot,
+		// and a hard kill (no exit recorded) cut off the retried request.
+		const overflowKilled = SessionManager.inMemory();
+		overflowKilled.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		overflowKilled.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		overflowKilled.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		overflowKilled.appendMessage(snapshot);
+
+		for (const sessionManager of [midTurn, twice, reopened, retried, extension, overflowKilled]) {
+			expect(hasRestorableTurn(sessionManager.getBranch())).toBe(true);
+		}
+
+		// Killed again after `--restore` closed that turn with its recovery abort.
+		const recoveryAbort = createInterruptedTurnAbortMessage(overflowKilled.getBranch(), undefined, {
+			assumeExit: true,
+		});
+		if (!recoveryAbort) throw new Error("Expected the unanswered custom prompt to count as unfinished");
+		overflowKilled.appendMessage(recoveryAbort);
+		expect(hasRestorableTurn(overflowKilled.getBranch())).toBe(true);
+
+		// Esc, then `/retry`; that request overflowed, recovery compacted and wrote an eval
+		// snapshot after the old user abort, and a hard kill cut off the retried request.
+		const retryOverflowKilled = SessionManager.inMemory();
+		retryOverflowKilled.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		retryOverflowKilled.appendMessage(
+			assistant(model, { stopReason: "aborted", errorMessage: "Interrupted by user", completedAt: Date.now() }),
+		);
+		retryOverflowKilled.appendMessage(snapshot);
+		expect(hasRestorableTurn(retryOverflowKilled.getBranch())).toBe(true);
+
+		// A clean quit and reopen before the extension prompt that overflowed and was hard-killed.
+		const reopenedOverflow = SessionManager.inMemory();
+		reopenedOverflow.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		reopenedOverflow.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		reopenedOverflow.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, { ...signalExit, reason: "quit", kind: "normal" });
+		reopenedOverflow.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		reopenedOverflow.appendMessage(snapshot);
+		expect(hasRestorableTurn(reopenedOverflow.getBranch())).toBe(true);
+	});
+
+	it("leaves an older release's abort after an eval snapshot stored as a custom message entry", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const signalExit = { reason: "sighup", kind: "signal", recordedAt: new Date().toISOString() };
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		sessionManager.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		sessionManager.appendCustomMessageEntry(
+			EVAL_STATE_CONTEXT_TYPE,
+			"<system-reminder>eval</system-reminder>",
+			false,
+		);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		sessionManager.appendMessage(assistant(model, { stopReason: "aborted", errorMessage: INTERRUPTED_TURN_ERROR }));
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
 	});
 });
