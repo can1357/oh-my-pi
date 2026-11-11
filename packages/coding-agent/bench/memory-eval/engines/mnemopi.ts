@@ -53,6 +53,13 @@ export function assertMnemopiEnvClean(): void {
 	}
 }
 
+/** The versions that were found; one that could not be found is left out, so a finished run still writes its result. */
+function definedVersions(versions: Record<string, string | undefined>): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(versions).filter((entry): entry is [string, string] => entry[1] !== undefined),
+	);
+}
+
 function tierOf(label: string | undefined, summaryOf: string | undefined): RecallHit["tier"] {
 	const tier = label ?? (summaryOf ? "episodic" : "working");
 	if (tier !== "working" && tier !== "episodic" && tier !== "fact") {
@@ -155,7 +162,7 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 				? {}
 				: embedder === "python"
 					? ((await startEmbedder().call("versions")) as Record<string, string>)
-					: await loadedFastembedVersions();
+					: definedVersions(await loadedFastembedVersions());
 			const runtime = Object.fromEntries(
 				Object.entries(versions).map(([name, version]) => [`${name}_version`, version]),
 			);
