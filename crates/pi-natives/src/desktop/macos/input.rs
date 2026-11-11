@@ -8077,7 +8077,7 @@ mod tests {
 		use crate::desktop::error::ErrorCode;
 		// The window lookup blocks while the user picks the target. The
 		// front process must be sampled after that lookup, not before it.
-		let front = Cell::new(Some(9));
+		let front = std::cell::Cell::new(Some(9));
 		let error = EntryFront(Some(9))
 			.require_behind(
 				|| front.get(),
