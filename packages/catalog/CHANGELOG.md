@@ -15,6 +15,7 @@
 - Devin requests now identify as Devin CLI 3000.12.43, the current stable release, instead of 3000.11.205 ([#18766](https://github.com/can1357/oh-my-pi/pull/18766) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Gemini 4 Argon and Carbon on Command Code showing no reasoning levels; both now offer low, medium, and high
 - Fixed OpenCode Zen Gemini 4 Carbon requests going to the chat-completions endpoint instead of the native Gemini endpoint Zen serves it on
+- Fixed GitLab Duo's Claude models (`duo-chat-opus-*`, `duo-chat-sonnet-*`, `duo-chat-haiku-*`) not being treated as Claude when quoting earlier reasoning: compaction summaries and interrupted-turn notes now leave it out for them, and a `reasoning_extraction` refusal is retried without it, as for Claude elsewhere ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

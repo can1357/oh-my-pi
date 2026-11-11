@@ -89,6 +89,9 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"openrouterVariant",
 	"loopGuard",
 	"acceptEmptyResponse",
+	// A session that learned to leave other models' reasoning out of Claude
+	// requests must keep doing so through the gateway.
+	"omitDemotedReasoning",
 	// Anthropic on-demand compaction request: the gateway constructs the
 	// top-level `compaction` parameter, so the option must survive the hop.
 	"anthropicCompaction",
