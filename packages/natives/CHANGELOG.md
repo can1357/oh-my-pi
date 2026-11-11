@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `macOSFrontApp()` now returns a Promise and reads the front app on a worker thread, so a stalled macOS event-source read no longer blocks the JavaScript event loop
+- `macOSFrontApp()` now returns a Promise and reads the front app on a worker thread, so a stalled macOS event-source read no longer blocks the JavaScript event loop ([#18912](https://github.com/can1357/oh-my-pi/pull/18912) by [@aciDrums7](https://github.com/aciDrums7))
 
 ## [18.18.8] - 2026-11-11
 

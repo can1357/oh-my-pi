@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Browser relay reads macOS front-app state asynchronously with a bounded wait, keeping CDP responsive when macOS focus reads stall
+- Browser relay reads macOS front-app state asynchronously with a bounded wait, keeping CDP responsive when macOS focus reads stall ([#18912](https://github.com/can1357/oh-my-pi/pull/18912) by [@aciDrums7](https://github.com/aciDrums7))
 - The shell's built-in `jq` no longer slows down quadratically on repeated updates such as `reduce range(n) as $i ([]; . + [$i])`
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
