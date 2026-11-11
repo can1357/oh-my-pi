@@ -160,7 +160,11 @@ impl Keymap {
 
 	/// The non-keypad key whose Command layer gives `character`.
 	pub(super) fn command_key(&self, character: char) -> Option<u16> {
-		self.command.get(&character).copied().filter(|&code| !is_keypad(code))
+		self
+			.command
+			.get(&character)
+			.copied()
+			.filter(|&code| !is_keypad(code))
 	}
 }
 
