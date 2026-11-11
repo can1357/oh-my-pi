@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `supermemory` memory backend: first-turn recall, periodic retention (retried after resume), `recall`/`retain`/`learn`/`memory_edit`, writes that survive outages, and subagents that share the parent's memory ([#18755](https://github.com/can1357/oh-my-pi/pull/18755) by [@panosAthDBX](https://github.com/panosAthDBX))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
@@ -37,7 +41,6 @@
 
 ### Added
 
-- Added the `supermemory` memory backend: first-turn recall, periodic retention (retried after resume), `recall`/`retain`/`learn`/`memory_edit`, writes that survive outages, and subagents that share the parent's memory ([#18755](https://github.com/can1357/oh-my-pi/pull/18755) by [@panosAthDBX](https://github.com/panosAthDBX))
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and every models.yml provider with `discovery.type: litellm`, unless listed in `disabledProviders` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 
