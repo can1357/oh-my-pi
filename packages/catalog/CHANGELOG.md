@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Respan gateway provider: `/login respan` with `RESPAN_API_KEY`, requests over OpenAI Chat Completions at `https://gateway.respan.ai/v1`; the public global roster is bundled and refreshed keylessly, with live token pricing
+
 ## [18.18.8] - 2026-11-11
 
 ### Added

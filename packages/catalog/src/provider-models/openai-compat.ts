@@ -8299,6 +8299,78 @@ export function scalewayModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Respan
+// ---------------------------------------------------------------------------
+
+export interface RespanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Rates from Respan's `/models` `pricing` block: USD per 1M, but only for
+ * token-priced legs. Image/second/minute/character units have no token-cost
+ * meaning, so those legs keep `fallback`; cache rates are not published and
+ * stay at the zeroed default.
+ */
+function respanPricingCost(pricing: unknown, fallback: TokenCost): TokenCost {
+	if (!isRecord(pricing)) return fallback;
+	return {
+		input: pricing.input_price_unit === "token" ? (toNumber(pricing.input_cost) ?? fallback.input) : fallback.input,
+		output:
+			pricing.output_price_unit === "token" ? (toNumber(pricing.output_cost) ?? fallback.output) : fallback.output,
+		cacheRead: 0,
+		cacheWrite: 0,
+	};
+}
+
+/**
+ * Respan model manager: one OpenAI Chat Completions gateway serving every
+ * catalog model. Rows come from the public, keyless `api.respan.ai/api/v1/models`
+ * roster (the whole catalog, identical for every caller, so the default
+ * keyless cache namespace is correct); requests go to the gateway at
+ * `gateway.respan.ai/v1`. A `baseUrl` override points both at a deployment's
+ * own API root (enterprise/self-hosted). The key never scopes the roster —
+ * project entitlement is enforced by the gateway at request time. Live
+ * `context_length` and token pricing are authoritative; bundled references
+ * fill name, reasoning, modalities and compat for same-id rows.
+ */
+export function respanModelManagerOptions(
+	config?: RespanModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = config?.baseUrl ?? "https://gateway.respan.ai/v1";
+	const modelsBaseUrl = config?.baseUrl ?? "https://api.respan.ai/api/v1";
+	const references = createBundledReferenceMap<"openai-completions">("respan");
+	return {
+		providerId: "respan",
+		dynamicModelsAuthoritative: true,
+		dynamicCostAuthoritative: true,
+		fetchDynamicModels: async () => {
+			const models = await applyPublishedEffortLadders(
+				await fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "respan",
+					baseUrl: modelsBaseUrl,
+					// The public roster is the whole catalog; the key would narrow it
+					// to one project and credential-scope the shared cache namespace.
+					filterModel: (_entry, model) => !isExcludedModel("respan", model.id),
+					mapModel: (entry, defaults) => {
+						const model = mapWithBundledReference(entry, defaults, references.get(defaults.id));
+						return { ...model, cost: respanPricingCost(entry.pricing, model.cost) };
+					},
+					fetch: config?.fetch,
+				}),
+				"respan",
+				config?.fetch,
+			);
+			// The fetch host is the catalog API; chat requests go to the gateway.
+			return models?.map(model => ({ ...model, baseUrl }));
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Otari
 // ---------------------------------------------------------------------------
 

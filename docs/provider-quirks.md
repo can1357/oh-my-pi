@@ -1851,6 +1851,25 @@ Otari is an AI gateway and control plane that routes requests to upstream model 
 - Self-hosted deployments set `OTARI_BASE_URL` to the deployment's API root (`https://host.example.com/api/v1`). It redirects `/login otari` validation (`base-url-env`), discovery, and requests, so a self-hosted key is never sent to the hosted gateway. A `models.yml` provider `baseUrl` override also redirects discovery and requests, but login validation only reads `OTARI_BASE_URL`.
 - **Cache scope**: the model cache namespace hashes the API key and base URL (`resolveModelCacheProviderId`, `otari` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), so a second workspace or deployment never reads another's cached roster.
 
+## Respan (`respan`)
+
+Respan is an AI gateway that routes requests to upstream model providers on the workspace's behalf over OpenAI-compatible Chat Completions at `https://gateway.respan.ai/v1`; the gateway translates each request to the upstream's native dialect and maps `reasoning_effort` across providers.
+
+### Special casings
+
+- **Public global roster**: `GET https://api.respan.ai/api/v1/models` lists every public model keylessly (a key narrows it to a project's entitlement). The roster is identical for every caller, so catalog generation bundles it (2,000+ rows after exclusions) and runtime discovery refreshes it without sending the key — `respanModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) never attaches `Authorization` to the discovery fetch, keeping the cache namespace keyless.
+- **Split hosts**: discovery reads `api.respan.ai/api/v1`; chat requests go to `gateway.respan.ai/v1`. Rows carry the gateway base URL so requests never hit the catalog host. A `models.yml` provider `baseUrl` override points both at the deployment's own API root (enterprise/self-hosted).
+- **Capability-less rows**: `/models` rows are OpenAI-style ids with only `context_length` and a per-1M USD `pricing` block — no names, reasoning flags, or modality lists. Bundled same-id references (models.dev) fill name, reasoning, modalities, and compat; ids no reference knows map as text-only and non-reasoning.
+- **Dot-spelled Anthropic ids**: Respan spells `claude-opus-4.7`, `claude-sonnet-4.5-20250929` with dots, so dash-spelled bundled references never match by id and reference fills can't supply reasoning. `class "anthropic"` opens the `minimal`–`high` effort ladder instead (`thinking-upgrade-neutral`, matching the gateway's documented `reasoning_effort` mapping).
+- **Unknown-class ladder**: ids no reference or taxonomy knows are offered the `minimal`–`xhigh` effort ladder as `ThinkingConfig.unverified` (`class "unknown" { thinking-unverified }` in `providers/respan.kdl`), off until the user picks an effort.
+- **Pricing units vary**: the `pricing` block's unit per leg can be `token`, `image`, `second`, `minute`, `hour`, or `character`. Only `token`-unit legs are token prices; other-unit legs and missing pricing map to $0, and cache rates are not published.
+- **Non-chat rows**: the flat roster mixes embedding, transcription, TTS, realtime, image, and video models. `exclude-models provider="respan"` in `runtime/behavior.kdl` drops them by id token; Gemini's `-image` rows stay in because the gateway serves them as chat.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/respan.kdl`. Environment key: `RESPAN_API_KEY`. Validation uses `models-endpoint` against `https://api.respan.ai/api/v1/models`, which answers 200 without a key and 401 with a rejected one (verified 2026-11-11), so the probe validates the pasted key and bills nothing.
+- The gateway reads the key from `Authorization: Bearer`, `x-api-key`, or `x-goog-api-key`, so every SDK's own header works (https://www.respan.ai/docs/ai-gateway/requests/endpoints).
+
 ## Qwen Portal (`qwen-portal`)
 
 Qwen Portal provides access to Qwen hosted models via an OpenAI-compatible endpoint at `https://portal.qwen.ai/v1`. It uses the OpenAI Chat Completions transport for model execution and tool calling.

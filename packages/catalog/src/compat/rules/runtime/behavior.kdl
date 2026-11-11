@@ -198,6 +198,18 @@ behavior {
 	exclude-models provider="otari" substring="embed" substring="rerank" substring="-tts" substring="transcribe" \
 		substring="realtime" substring="minilm" substring="mpnet" substring="/bge-" substring="/e5-" substring="/flux-" \
 		prefix="openai/gpt-image-" prefix="alibaba/qwen-image"
+	// Respan's flat public roster mixes every modality by id token. The
+	// substrings catch the embedding/transcription/TTS/realtime families and
+	// the image/video vendors whose generation APIs are not the chat endpoint;
+	// Gemini's `-image` rows stay in, because the gateway serves them as chat
+	// (live hosted roster, 2026-11-11).
+	exclude-models provider="respan" substring="embed" substring="whisper" substring="tts" substring="speech" \
+		substring="transcri" substring="asr" substring="realtime" substring="voice" substring="gpt-image" \
+		substring="chatgpt-image" substring="flux" substring="recraft" substring="stable-" substring="eleven" \
+		substring="veo" substring="kling" substring="hunyuan" substring="grok-imagine" substring="qwen-image" \
+		substring="ming-image" substring="mai-image" substring="hy-image" substring="moss-image" \
+		substring="muse-image" substring="seedream" substring="seedance" substring="pixverse" substring="sd3" \
+		substring="wan-" substring="wan2-"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \

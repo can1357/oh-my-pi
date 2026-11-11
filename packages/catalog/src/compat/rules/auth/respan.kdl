@@ -1,0 +1,12 @@
+auth "respan" {
+	name "Respan"
+	login "api-key" {
+		auth-url "https://platform.respan.ai/platform/gateway/api-keys"
+		instructions "Create a Respan Gateway API key (platform.respan.ai → Gateway → API keys) and paste it here"
+		prompt "Paste your Respan API key"
+		// `https://api.respan.ai/api/v1/models` answers 200 without a key and
+		// 401 with a rejected one (verified 2026-11-11), so the probe validates
+		// the pasted key against the live roster and bills nothing.
+		validate "models-endpoint" label="Respan" url="https://api.respan.ai/api/v1/models"
+	}
+}
