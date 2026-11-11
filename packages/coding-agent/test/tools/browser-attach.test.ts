@@ -1045,6 +1045,9 @@ describe("pickElectronTarget relay path", () => {
 		expect(message).toContain('No page target matched "PAGE_MISSING"');
 		expect(message).toContain("PAGE10  Docs  https://docs.example.com");
 		expect(message).toContain("PAGE11  Whole Foods Market Shopping Cart  https://www.amazon.com/cart/localmarket");
+		// Since relay opens without a target get their own tab, omitting it no longer adopts the active one.
+		expect(message).toContain("omit target to open omp's own background tab");
+		expect(message).not.toContain("active tab");
 	});
 
 	it("waits for Puppeteer to see a tab that /json already lists", async () => {
