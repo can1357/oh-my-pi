@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…”.
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
