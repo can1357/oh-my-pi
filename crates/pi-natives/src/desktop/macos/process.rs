@@ -639,7 +639,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn peer_ports_only_match_when_both_socket_addresses_are_loopback() {
+	fn a_peer_matches_only_its_exact_local_and_foreign_loopback_endpoints() {
 		// SAFETY: An all-zero bit pattern is valid for this plain C struct.
 		let mut info: SocketFdInfo = unsafe { mem::zeroed() };
 		info.kind = SOCKINFO_TCP;

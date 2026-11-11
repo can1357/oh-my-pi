@@ -1264,16 +1264,23 @@ export class RelayBridge {
 			return false;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
-			// Chrome can activate for a window this input opens before the relay hears of it: the browser's keyboard is
-			// watched from the input on.
+			// A popup can activate Chrome before its event reaches us. Reuse a fresh pre-activation snapshot rather
+			// than reading Chrome on the rest of the input burst, and extend that same app's native watch.
+			const now = Date.now();
 			const held = this.#keepingFront;
-			tab.frontAtInput =
-				held && Date.now() < held.until
-					? this.#readFrontAtInput(() => {
-							held.app.watchInput(POPUP_AFTER_INPUT_MS);
-							return held.app;
-						}, browserPid)
-					: this.#readFrontAtInput(this.#readFrontApp, browserPid);
+			const previous = tab.frontAtInput;
+			const app =
+				held && now < held.until
+					? held.app
+					: previous && now - previous.at <= POPUP_AFTER_INPUT_MS
+						? previous.app
+						: null;
+			tab.frontAtInput = app
+				? this.#readFrontAtInput(() => {
+						app.watchInput(POPUP_AFTER_INPUT_MS);
+						return app;
+					}, browserPid)
+				: this.#readFrontAtInput(this.#readFrontApp, browserPid);
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);

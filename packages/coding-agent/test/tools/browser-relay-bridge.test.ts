@@ -2657,13 +2657,13 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		windowOpen(bridge, ext, 1);
 		windowOpen(bridge, ext, 9);
 		await flush();
-		expect(holds).toEqual([{ app: 2, ms: 500 }]);
+		expect(holds).toEqual([{ app: 1, ms: 500 }]);
 		// A frame of omp's other tab opens one, reported on the frame's own session.
 		windowOpen(bridge, ext, 2, "CHILD1");
 		await flush();
 		expect(holds).toEqual([
+			{ app: 1, ms: 500 },
 			{ app: 2, ms: 500 },
-			{ app: 4, ms: 500 },
 		]);
 		// Once that hold is over, a later window does not bring back the app read for the same input.
 		windowOpen(bridge, ext, 1);
@@ -2950,8 +2950,8 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		await sendInput(bridge, restarted, connId, page);
 		windowOpen(bridge, restarted, 1);
 		await flush();
-		expect(readBrowsers).toEqual([222, 222]);
-		expect(holds).toEqual([{ app: 2, ms: 500 }]);
+		expect(readBrowsers).toEqual([222]);
+		expect(holds).toEqual([{ app: 1, ms: 500 }]);
 	});
 
 	it.each([
@@ -3029,6 +3029,49 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(reads).toBe(1);
 	});
 
+	it.each([
+		{
+			input: "mouse press/release",
+			method: "Input.dispatchMouseEvent",
+			first: { type: "mousePressed", x: 5, y: 5, button: "left" },
+			next: { type: "mouseReleased", x: 5, y: 5, button: "left" },
+		},
+		{
+			input: "touch start/end",
+			method: "Input.dispatchTouchEvent",
+			first: { type: "touchStart", touchPoints: [{ x: 5, y: 5 }] },
+			next: { type: "touchEnd", touchPoints: [] },
+		},
+	])("keeps the pre-activation app through $input before the popup event arrives", async ({ method, first, next }) => {
+		let frontmost = "editor";
+		const holds: string[] = [];
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(() => {
+			const app = frontmost;
+			return {
+				watchInput: () => undefined,
+				keepInFront: async () => {
+					holds.push(app);
+					return 1;
+				},
+			};
+		});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		for (const params of [first, next]) {
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method, params }));
+			ack(bridge, ext, "send");
+			await flush();
+			frontmost = "chrome";
+		}
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(holds).toEqual(["editor"]);
+	});
+
 	it("extends the original app's watch for input during a hold and handles its popup after that hold ends", async () => {
 		jest.useFakeTimers();
 		try {
@@ -3054,7 +3097,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			await sendInput(bridge, ext, connId, sessionId);
 			windowOpen(bridge, ext, 1);
 			await flush();
-			expect(holds).toEqual([2]);
+			expect(holds).toEqual([1]);
 			jest.advanceTimersByTime(400);
 			// Chrome may be temporarily frontmost: extend the captured app's
 			// watch instead of reading Chrome as the user's new app.
@@ -3063,11 +3106,12 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			jest.advanceTimersByTime(700);
 			windowOpen(bridge, ext, 1);
 			await flush();
-			expect(reads).toBe(2);
-			expect(holds).toEqual([2, 2]);
+			expect(reads).toBe(1);
+			expect(holds).toEqual([1, 1]);
 			expect(watches).toEqual([
-				{ app: 2, ms: 1000 },
-				{ app: 2, ms: 1000 },
+				{ app: 1, ms: 1000 },
+				{ app: 1, ms: 1000 },
+				{ app: 1, ms: 1000 },
 			]);
 		} finally {
 			jest.useRealTimers();
@@ -3104,7 +3148,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			await sendInput(bridge, ext, connId, sessionId);
 			windowOpen(bridge, ext, 1);
 			await flush();
-			expect(holds).toEqual([2, 4]);
+			expect(holds).toEqual([1, 2]);
 		} finally {
 			jest.useRealTimers();
 		}
@@ -3137,13 +3181,13 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			await sendInput(bridge, ext, connId, sessionId);
 			windowOpen(bridge, ext, 1);
 			await flush();
-			expect(reads).toBe(2);
-			expect(holds).toEqual([2]);
+			expect(reads).toBe(1);
+			expect(holds).toEqual([1]);
 			jest.advanceTimersByTime(500);
 			await sendInput(bridge, ext, connId, sessionId);
 			windowOpen(bridge, ext, 1);
 			await flush();
-			expect(holds).toEqual([2, 4]);
+			expect(holds).toEqual([1, 2]);
 		} finally {
 			jest.useRealTimers();
 		}
