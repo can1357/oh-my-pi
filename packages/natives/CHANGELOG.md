@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
+- Fixed X11 window screenshots showing whatever was on screen over the window: under a compositing manager they come from the window's own pixels with its own menus and tooltips, cut to their shapes, and otherwise a covered window is reported covered instead of returning the window on top ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
@@ -55,13 +56,6 @@
 - Fixed Linux `press()` refusing with "AT-SPI action 'press' is unavailable" on Chromium and Electron menu items, list options and tabs, and on page elements whose only action is `doDefault`: a press now takes their `select` or `doDefault` action, as it already took `click` and `activate` ([#18921](https://github.com/can1357/oh-my-pi/pull/18921) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS input from a second omp process no longer refuses with `UserIntervened` after the first process takes over a click in the same app; hardware clicks still pause input in that app ([#18896](https://github.com/can1357/oh-my-pi/pull/18896) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp worktree add` — and the bash tool's `git worktree add` rewrite — exiting 1 with `git: 'hook' is not a git command` on Git older than 2.36 (such as Git 2.34 on Ubuntu 22.04) after the worktree had already been created ([#18935](https://github.com/can1357/oh-my-pi/pull/18935) by [@Bensonluo](https://github.com/Bensonluo))
-
-### Fixed
-
-- Fixed X11 window screenshots of a covered window returning the pixels of the window on top, including inside virtual roots: under a compositing manager the capture now reads the window's own pixels with Render-defined alpha and tolerates closing popups, and without one it fails `CaptureFailed` saying the window is covered; unsupported colormap-based visuals fail clearly instead of returning incorrect colors, and stacking checks pipeline coordinate requests ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed covered X11 window screenshots showing another window: captures now return the target's own pixels when available, or explain why they cannot ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed covered X11 window screenshots showing another window: captures now return the target's own pixels, including its popups and their borders, when available, or explain why they cannot ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed X11 window screenshots showing whatever was on screen over the window: under a compositing manager they come from the window's own pixels with its own menus and tooltips, cut to their shapes, and otherwise a covered window is reported covered instead of returning the window on top ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
