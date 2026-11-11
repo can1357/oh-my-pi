@@ -3212,6 +3212,9 @@ pub struct BashResult {
 	/// Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported.
 	#[serde(rename = "endedByExit", default, skip_serializing_if = "Option::is_none")]
 	pub ended_by_exit: Option<bool>,
+	/// Whether the run did not own the session's persistent shell (an overlapping call's fork, or a fresh shell after the persistent one was quarantined): its state changes do not persist to later calls.
+	#[serde(rename = "ephemeralShell", default, skip_serializing_if = "Option::is_none")]
+	pub ephemeral_shell: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.

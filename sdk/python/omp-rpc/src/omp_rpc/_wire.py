@@ -712,6 +712,8 @@ class BashResult:
     working_dir: str | None = None
     ended_by_exit: bool | None = None
     """Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported."""
+    ephemeral_shell: bool | None = None
+    """Whether the run did not own the session's persistent shell (an overlapping call's fork, or a fresh shell after the persistent one was quarantined): its state changes do not persist to later calls."""
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
@@ -2089,6 +2091,7 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
         ended_by_exit=optional(payload, "endedByExit", decode_bool, path),
+        ephemeral_shell=optional(payload, "ephemeralShell", decode_bool, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
     )
