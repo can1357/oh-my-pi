@@ -525,6 +525,7 @@
 		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run format-prompts",
 		"format-prompts": "bun scripts/format-prompts.ts",
 		"gen:export-viewer": "bun --cwd=../collab-web run gen:export-viewer",
+		"eval:async-progress": "bun scripts/eval-async-progress.ts",
 		"gen:bundle": "bun scripts/bundle-dist.ts",
 		"gen:rpc": "bun scripts/gen-rpc/index.ts",
 		"prepack": "bun run gen:export-viewer && bun run gen:bundle",
