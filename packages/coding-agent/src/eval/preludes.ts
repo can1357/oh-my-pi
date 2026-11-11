@@ -183,6 +183,26 @@ export async function invokeEvalPrelude(
 	return { ...result, content: [...result.content, { type: "text", text: `${lead}${guide}\n` }] };
 }
 
+/** Keep first-call control text outside transforms that shorten ordinary cell output. */
+export async function preserveEvalGuides<T extends AgentToolResult>(
+	result: T,
+	process: (result: T) => Promise<T>,
+): Promise<T> {
+	const guides: string[] = [];
+	const content = result.content.map(part => {
+		if (part.type !== "text") return part;
+		const text = part.text.replace(/(?:^|\n)<eval-guide name="[^"]+">[\s\S]*?<\/eval-guide>(?:\n|$)/g, guide => {
+			guides.push(guide.trim());
+			return "\n";
+		});
+		return text === part.text ? part : { ...part, text };
+	});
+	const processed = await process(guides.length > 0 ? { ...result, content } : result);
+	return guides.length > 0
+		? { ...processed, content: [...processed.content, { type: "text", text: guides.join("\n\n") }] }
+		: processed;
+}
+
 /** Prelude names whose first-call guide each tool session has delivered, for its current conversation and context. */
 const firstCallDeliveries = new WeakMap<
 	ToolSession,

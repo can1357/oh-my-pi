@@ -15,6 +15,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
+import { preserveEvalGuides } from "../eval/preludes";
 
 import {
 	type OutputSummary,
@@ -579,6 +580,17 @@ export function resolveOutputSinkArtifactMaxBytes(s: Settings | undefined): numb
  * saved its own artifact (e.g. bash/python via OutputSink).
  */
 async function spillLargeResultToArtifact(
+	result: AgentToolResult,
+	toolName: string,
+	context: AgentToolContext | undefined,
+): Promise<AgentToolResult> {
+	if (toolName === "eval") {
+		return preserveEvalGuides(result, output => spillResultToArtifact(output, toolName, context));
+	}
+	return spillResultToArtifact(result, toolName, context);
+}
+
+async function spillResultToArtifact(
 	result: AgentToolResult,
 	toolName: string,
 	context: AgentToolContext | undefined,
