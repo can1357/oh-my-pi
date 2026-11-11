@@ -932,6 +932,77 @@ function evalCellBox(cell: EvalCellRun, index: number, total: number): NativeNod
 	);
 }
 
+function createCollapsedEvalOutputComponent(
+	readOutput: () => string,
+	options: RenderResultOptions & { renderContext?: EvalRenderContext },
+	statusLines: readonly string[],
+	timeoutLine: string | undefined,
+	noticeLine: string | undefined,
+	asyncLine: string | undefined,
+	warningLine: string | undefined,
+	uiTheme: Theme,
+): Component {
+	let cachedWidth: number | undefined;
+	let cachedPreviewLines: number | undefined;
+	let cachedOutputLines: readonly string[] | undefined;
+	const dropCache = () => {
+		cachedWidth = undefined;
+		cachedPreviewLines = undefined;
+		cachedOutputLines = undefined;
+	};
+
+	return {
+		render: (width: number): readonly string[] => {
+			const previewLines = Math.min(
+				options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
+				previewWindowRows(),
+			);
+			if (cachedOutputLines !== undefined && cachedWidth === width && cachedPreviewLines === previewLines) {
+				return cachedOutputLines;
+			}
+			const styledOutput = readOutput()
+				.split("\n")
+				.map(line => uiTheme.fg("toolOutput", line))
+				.join("\n");
+			const result = truncateToVisualLines(`\n${styledOutput}`, previewLines, width);
+			const outputLines: string[] = [];
+			if (result.skippedCount > 0) {
+				outputLines.push("");
+				const skippedLine = uiTheme.fg(
+					"dim",
+					`… (${result.skippedCount} earlier lines, showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}) (${expandKeyHint()} to expand)`,
+				);
+				outputLines.push(truncateToWidth(skippedLine, width));
+			}
+			outputLines.push(...result.visualLines);
+			if (statusLines.length > 0) {
+				outputLines.push(truncateToWidth(uiTheme.fg("dim", "Status"), width));
+				for (const statusLine of statusLines) {
+					outputLines.push(truncateToWidth(statusLine, width));
+				}
+			}
+			if (timeoutLine) {
+				outputLines.push(truncateToWidth(timeoutLine, width));
+			}
+			if (noticeLine) {
+				outputLines.push(truncateToWidth(noticeLine, width));
+			}
+			if (asyncLine) {
+				outputLines.push(truncateToWidth(asyncLine, width));
+			}
+			if (warningLine) {
+				outputLines.push(truncateToWidth(warningLine, width));
+			}
+			cachedWidth = width;
+			cachedPreviewLines = previewLines;
+			cachedOutputLines = outputLines;
+			return outputLines;
+		},
+		invalidate: dropCache,
+		releaseRenderCaches: dropCache,
+	};
+}
+
 /** Render eval code cells, structured display output, and progress events. */
 export const evalToolRenderer = {
 	animatedPendingPreview: true,
@@ -1000,6 +1071,10 @@ export const evalToolRenderer = {
 				bodies = undefined;
 				cached = undefined;
 			},
+			releaseRenderCaches: () => {
+				bodies = undefined;
+				cached = undefined;
+			},
 		});
 	},
 
@@ -1010,12 +1085,6 @@ export const evalToolRenderer = {
 		_args?: EvalRenderArgs,
 	): Component {
 		const details = result.details;
-
-		const rawOutput =
-			options.renderContext?.output ?? (result.content?.find(c => c.type === "text")?.text ?? "").trimEnd();
-		// Strip the LLM-facing notice (appended by wrappedExecute) before display;
-		// the styled `warningLine` below carries the same text in ⟨…⟩ form.
-		const output = stripOutputNotice(rawOutput, details?.meta).trimEnd();
 
 		const timeoutSeconds = options.renderContext?.timeout;
 		const timeoutLine =
@@ -1159,8 +1228,21 @@ export const evalToolRenderer = {
 					bodies = undefined;
 					cached = undefined;
 				},
+				releaseRenderCaches: () => {
+					bodies = undefined;
+					cached = undefined;
+				},
 			});
 		}
+
+		// Strip the LLM-facing notice (appended by wrappedExecute) before display;
+		// the styled `warningLine` below carries the same text in ⟨…⟩ form.
+		const readOutput = (): string => {
+			const rawOutput =
+				options.renderContext?.output ?? (result.content?.find(c => c.type === "text")?.text ?? "").trimEnd();
+			return stripOutputNotice(rawOutput, details?.meta).trimEnd();
+		};
+		const output = readOutput();
 
 		const statusEvents = details?.statusEvents ?? [];
 		const statusLines = renderStatusEvents(
@@ -1203,67 +1285,16 @@ export const evalToolRenderer = {
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
-		const styledOutput = output
-			.split("\n")
-			.map(line => uiTheme.fg("toolOutput", line))
-			.join("\n");
-		const textContent = `\n${styledOutput}`;
-
-		let cachedWidth: number | undefined;
-		let cachedLines: readonly string[] | undefined;
-		let cachedSkipped: number | undefined;
-		let cachedPreviewLines: number | undefined;
-
-		return {
-			render: (width: number): readonly string[] => {
-				const previewLines = Math.min(
-					options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
-					previewWindowRows(),
-				);
-				if (cachedLines === undefined || cachedWidth !== width || cachedPreviewLines !== previewLines) {
-					const result = truncateToVisualLines(textContent, previewLines, width);
-					cachedLines = result.visualLines;
-					cachedSkipped = result.skippedCount;
-					cachedWidth = width;
-					cachedPreviewLines = previewLines;
-				}
-				const outputLines: string[] = [];
-				if (cachedSkipped && cachedSkipped > 0) {
-					outputLines.push("");
-					const skippedLine = uiTheme.fg(
-						"dim",
-						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (${expandKeyHint()} to expand)`,
-					);
-					outputLines.push(truncateToWidth(skippedLine, width));
-				}
-				outputLines.push(...cachedLines);
-				if (statusLines.length > 0) {
-					outputLines.push(truncateToWidth(uiTheme.fg("dim", "Status"), width));
-					for (const statusLine of statusLines) {
-						outputLines.push(truncateToWidth(statusLine, width));
-					}
-				}
-				if (timeoutLine) {
-					outputLines.push(truncateToWidth(timeoutLine, width));
-				}
-				if (noticeLine) {
-					outputLines.push(truncateToWidth(noticeLine, width));
-				}
-				if (asyncLine) {
-					outputLines.push(truncateToWidth(asyncLine, width));
-				}
-				if (warningLine) {
-					outputLines.push(truncateToWidth(warningLine, width));
-				}
-				return outputLines;
-			},
-			invalidate: () => {
-				cachedWidth = undefined;
-				cachedLines = undefined;
-				cachedSkipped = undefined;
-				cachedPreviewLines = undefined;
-			},
-		};
+		return createCollapsedEvalOutputComponent(
+			readOutput,
+			options,
+			statusLines,
+			timeoutLine,
+			noticeLine,
+			asyncLine,
+			warningLine,
+			uiTheme,
+		);
 	},
 
 	describeCall(args: EvalRenderArgs, options: RenderResultOptions): NativeToolView {

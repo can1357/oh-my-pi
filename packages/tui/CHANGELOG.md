@@ -7,6 +7,10 @@
 - The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
+### Changed
+
+- Retired tool cards release their cached sanitized output strings, shell presentations, and width-formatted card rows on transcript commit while regenerating them on demand during resize replay ([#18820](https://github.com/can1357/oh-my-pi/pull/18820) by [@iliaal](https://github.com/iliaal))
+
 ### Fixed
 
 - In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it ([#18660](https://github.com/can1357/oh-my-pi/pull/18660) by [@DocksDocks](https://github.com/DocksDocks))
