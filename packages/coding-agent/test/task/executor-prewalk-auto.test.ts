@@ -3,7 +3,7 @@
  * hands off at its first edit. The judge is the real TypeSafe client against a stubbed
  * `fetch`; the child is a real session on mock models.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +16,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, setInteractiveHost } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -65,6 +66,11 @@ function stubJudge(choice: Route, probabilities: Record<Route, number>): Array<R
 		}),
 	);
 	return states;
+}
+
+/** Ledger rows the auto-prewalk judgment billed, whichever outcome it chose. */
+function autoPrewalkBills(ledger: Mock<SessionManager["appendModelUsage"]>): number {
+	return ledger.mock.calls.filter(([usage]) => usage.purpose === "auto-prewalk").length;
 }
 
 /** Spawn the `task` agent on the planner and record which model served each child turn. */
@@ -188,19 +194,24 @@ describe("runSubprocess auto-prewalk through a real child session", () => {
 
 	it("hands off to the target after the first write when the judge picks prewalk", async () => {
 		const judged = stubJudge("prewalk", { prewalk: 0.9, primary: 0.07, direct: 0.03 });
+		const ledger = vi.spyOn(SessionManager.prototype, "appendModelUsage");
 		const { exitCode, requests } = await spawn();
 		expect(exitCode).toBe(0);
 		expect(requests).toEqual([PLANNER, PLANNER, TARGET]);
 		expect(judged).toHaveLength(1);
 		expect(judged[0]!.request).toContain(ASSIGNMENT);
+		expect(autoPrewalkBills(ledger)).toBe(1);
 	}, 30_000);
 
 	it("stays on the planning model when the judge picks primary", async () => {
 		const judged = stubJudge("primary", { prewalk: 0.1, primary: 0.8, direct: 0.1 });
+		const ledger = vi.spyOn(SessionManager.prototype, "appendModelUsage");
 		const { exitCode, requests } = await spawn();
 		expect(exitCode).toBe(0);
 		expect(judged).toHaveLength(1);
 		expect(requests.length).toBeGreaterThan(0);
 		expect(requests.every(model => model === PLANNER)).toBe(true);
+		// An unarmed judgment is still a billed judgment.
+		expect(autoPrewalkBills(ledger)).toBe(1);
 	}, 30_000);
 });

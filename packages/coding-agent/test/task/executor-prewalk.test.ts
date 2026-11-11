@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { PrewalkRoute } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
+import { AUTO_PREWALK_TIMEOUT_MS, type PrewalkRoute } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -509,6 +509,8 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 		tools?: string[];
 		/** Spawn as a restricted-tool run (plan mode), which is never judged. */
 		restrictToolNames?: boolean;
+		/** Task and assignment text (default `ASSIGNMENT`). */
+		assignment?: string;
 	}
 
 	function createFixture(options: FixtureOptions = {}) {
@@ -531,13 +533,14 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 		});
 		const session = yieldEmittingSession(options.tools ?? ["read", "yield"]);
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const assignment = options.assignment ?? ASSIGNMENT;
 		const spawn = async () => {
 			// `description` suppresses the tiny-model label pass, which would issue
 			// a request this stub refuses.
 			const result = await runSubprocess({
 				cwd: tempDir.path(),
-				task: ASSIGNMENT,
-				assignment: ASSIGNMENT,
+				task: assignment,
+				assignment,
 				description: "test",
 				index: 0,
 				id: "subagent-auto-prewalk",
@@ -695,5 +698,55 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 		expect(result.exitCode).toBe(0);
 		expect(forwarded?.prewalk?.target.id).toBe(target.id);
 		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("never asks the judge about a low-signal assignment", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({
+			auto: { task: "on" },
+			autoTarget: `${target.provider}/${target.id}`,
+			assignment: "ok",
+		});
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("fails open when the judge never answers before the timeout fires", async () => {
+		// The judgment deadline fires once the request is out, so the spawn gives up
+		// without waiting the real AUTO_PREWALK_TIMEOUT_MS.
+		const deadline = new AbortController();
+		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+			ms === AUTO_PREWALK_TIMEOUT_MS ? deadline.signal : realTimeout(ms),
+		);
+		const calls: JudgeCall[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (input, init) => {
+				if (!String(input).endsWith("/v1/systemone")) throw new Error(`unexpected request: ${String(input)}`);
+				const body = JSON.parse(String(init?.body)) as {
+					state: Record<string, string>;
+					questions: Record<string, unknown>;
+				};
+				calls.push({ questions: Object.keys(body.questions), state: body.state });
+				const signal = init?.signal;
+				if (!signal) throw new Error("judge request carries no abort signal");
+				const stalled = Promise.withResolvers<Response>();
+				signal.addEventListener("abort", () => stalled.reject(signal.reason), { once: true });
+				if (signal.aborted) stalled.reject(signal.reason);
+				else deadline.abort(new DOMException("timed out", "TimeoutError"));
+				return stalled.promise;
+			}),
+		);
+		const f = createFixture({ auto: { task: "on" }, autoTarget: `${target.provider}/${target.id}` });
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(1);
 	});
 });
