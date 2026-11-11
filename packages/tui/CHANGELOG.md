@@ -1,16 +1,20 @@
 # Changelog
 
 ## [Unreleased]
+
+## [18.18.8] - 2026-11-11
+
 - The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#18705](https://github.com/can1357/oh-my-pi/pull/18705) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
-- `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Ask forms support notes on options: `n` on radio/checkbox rows and `Alt+n` on select menus (`app.ask.note`), with selected notes shown alongside submitted answers and notes on unchosen options marked as drafts ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
 
 ### Fixed
 
 - Ask form textareas edited from Tern now restart the inactivity timeout instead of submitting mid-edit
+- Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
+- Fixed terminal Device Attributes replies (such as `^[[?64;1;2;4;6;17;18;21;22c`) leaking into the shell prompt on exit ([#18662](https://github.com/can1357/oh-my-pi/pull/18662) by [@asuffield](https://github.com/asuffield))
 
 ## [18.18.7] - 2026-11-10
 
@@ -21,9 +25,6 @@
 ### Fixed
 
 - Saved-reset messages name the Claude Fable weekly limit as "Claude Fable weekly" instead of its raw id ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
-### Fixed
-
-- Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 
 ## [18.18.6] - 2026-11-09
 
@@ -126,7 +127,6 @@
 
 ### Fixed
 
-- Fixed terminal Device Attributes replies (such as `^[[?64;1;2;4;6;17;18;21;22c`) leaking into the shell prompt on exit ([#18662](https://github.com/can1357/oh-my-pi/pull/18662) by [@asuffield](https://github.com/asuffield))
 - Ctrl+J from a win32-input-mode record with `VK_J` and `Uc=LF` now decodes as `ctrl+j`, so Windows Terminal / mini-term insert a newline instead of submitting ([#18253](https://github.com/can1357/oh-my-pi/pull/18253) by [@Clannad47](https://github.com/Clannad47))
 - The BTW history page (`f` on a side answer) scrolls its reader and history list with the mouse wheel, matching the other scrolling sheets ([#18303](https://github.com/can1357/oh-my-pi/pull/18303) by [@ImAlexBlock](https://github.com/ImAlexBlock))
 - The BTW history list shows the date for questions asked before today (and the year for ones from an earlier year), instead of a bare time that read as today's; a follow-up asked on a later day than its topic shows its date too ([#18210](https://github.com/can1357/oh-my-pi/pull/18210) by [@a-glapinski](https://github.com/a-glapinski))
