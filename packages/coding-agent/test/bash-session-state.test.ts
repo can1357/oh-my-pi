@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { AsyncJobManager } from "../src/async";
 import { Settings } from "../src/config/settings";
 import { executeBash, releaseShellSessions, __test } from "../src/exec/bash-executor";
+import type { ShellRunResult } from "@oh-my-pi/pi-natives";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
 
@@ -195,23 +196,21 @@ it("says so when exit or an armed set -e ends the call before its remaining stat
 });
 
 it("does not promise options persist when the aborted call ran in a forked session shell", async () => {
-	let firstRunStarted!: () => void;
-	let finishFirst!: (result: ReturnType<typeof nativeResult>) => void;
+	const firstRunStarted = Promise.withResolvers<void>();
+	let finishFirst!: (result: ShellRunResult) => void;
 	__test.run = (_shell, request) => {
 		if (request.command.includes("BLOCK-FIRST-CALL")) {
-			return new Promise(resolve => {
-				finishFirst = resolve;
-				firstRunStarted();
-			});
+			const first = Promise.withResolvers<ShellRunResult>();
+			finishFirst = first.resolve;
+			firstRunStarted.resolve();
+			return first.promise;
 		}
 		return Promise.resolve(nativeResult({ endedByExit: true }));
 	};
 	try {
 		const tool = bashTool();
 		const first = run(tool, "echo BLOCK-FIRST-CALL");
-		await new Promise<void>(resolve => {
-			firstRunStarted = resolve;
-		});
+		await firstRunStarted.promise;
 		// The first call owns the persistent session; this one overlaps it
 		// and runs in a fork, so its options die with it.
 		const aborted = await run(tool, "set -e; false; echo never-ran");
@@ -221,6 +220,23 @@ it("does not promise options persist when the aborted call ran in a forked sessi
 		expect(aborted.text).not.toContain("stay set in this session");
 		finishFirst(nativeResult());
 		await first;
+	} finally {
+		__test.run = undefined;
+	}
+});
+
+it("classifies a per-job `:async:` shell as ephemeral", async () => {
+	__test.run = () => Promise.resolve(nativeResult({ endedByExit: true }));
+	try {
+		// A background job runs in a per-job shell the executor drops when
+		// the call settles, so its options cannot reach a later call: the
+		// result must not claim a persistent session.
+		const result = await executeBash("set -e; false; echo never-ran", {
+			minimize: false,
+			sessionKey: "probe-session:async:job-1",
+		});
+		expect(result.endedByExit).toBe(true);
+		expect(result.ephemeralShell).toBe(true);
 	} finally {
 		__test.run = undefined;
 	}

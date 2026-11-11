@@ -616,15 +616,82 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 	}
 }
 
+/// Whether the unparsed remainder of a script frame's source holds any more
+/// command: whitespace and comment-only tails do not count.
+fn script_has_command(src: &[u8], from: usize) -> bool {
+	let mut i = from.min(src.len());
+	while i < src.len() {
+		match src[i] {
+			b'#' => {
+				while i < src.len() && src[i] != b'\n' {
+					i += 1;
+				}
+			},
+			b if b.is_ascii_whitespace() => i += 1,
+			_ => return true,
+		}
+	}
+	false
+}
+
+/// Whether a command-starting op (or a function definition, which also runs)
+/// is reachable from op `from` without running another op first: follows
+/// jump targets instead of trusting the linear op order, so an `else` arm
+/// the taken branch jumps around does not count as unrun input.
+fn reachable_runs_input(unit: &Unit, from: usize) -> bool {
+	let ops = &unit.ops;
+	let mut visited = vec![false; ops.len()];
+	let mut stack = vec![from as u32];
+	while let Some(index) = stack.pop() {
+		let i = index as usize;
+		if i >= ops.len() || visited[i] {
+			continue;
+		}
+		visited[i] = true;
+		let op = ops[i];
+		if starts_command(unit, op) || op.code == Opcode::FuncDef {
+			return true;
+		}
+		// (jump target when the op can leave the linear flow, whether the
+		// next op also runs). Unconditional jumps lose the fall-through;
+		// terminators have neither.
+		let (target, falls_through) = match op.code {
+			Opcode::Jmp => (Some(op.a), false),
+			// The loop-back is iteration machinery, not unrun input: the
+			// next iteration's head would have run, not been skipped, and
+			// the loop's exit landing follows it in program order.
+			Opcode::LoopBack => (None, true),
+			Opcode::BrOk | Opcode::BrFail | Opcode::ForNext => (Some(op.a), true),
+			Opcode::CaseArm | Opcode::Redir => (Some(op.b), true),
+			Opcode::TryEnter => (Some(op.b), true),
+			Opcode::End | Opcode::SubExit | Opcode::Abort => (None, false),
+			_ => (None, true),
+		};
+		if let Some(target) = target {
+			stack.push(target);
+		}
+		if op.code == Opcode::TryEnter {
+			// An early end of the try-list runs the always-list first.
+			stack.push(op.a);
+		}
+		if falls_through {
+			stack.push(index + 1);
+		}
+	}
+	false
+}
+
 /// Whether `exit`/`set -e` fired with commands still left to run: any frame
 /// (its own continuation first, then whatever resumes below it) has a
-/// command-starting op still ahead of it. `top_from` is the op index of the
-/// top frame's first unrun op: callers whose `pc` still sits on the op that
-/// triggered the exit pass `pc + 1`; callers running after the dispatch loop
-/// advanced `pc` (the errexit check) pass `pc`. Lower frames resume after
-/// the call op that led here, so their scan starts at `pc + 1`. A trailing
-/// `exit` at the end of the script's input has nothing ahead and ended the
-/// run exactly where the script's end would have; loops stay in their frame,
+/// command-starting op still ahead of it, or — for a script frame, which
+/// parses its source one command at a time — unparsed source that holds
+/// another command. `top_from` is the op index of the top frame's first
+/// unrun op: callers whose `pc` still sits on the op that triggered the
+/// exit pass `pc + 1`; callers running after the dispatch loop advanced `pc`
+/// (the errexit check) pass `pc`. Lower frames resume after the call op
+/// that led here, so their scan starts at `pc + 1`. A trailing `exit` at
+/// the end of the script's input has nothing ahead and ended the run
+/// exactly where the script's end would have; loops stay in their frame,
 /// so a loop whose body holds the `exit` reports unrun input only when a
 /// command follows the loop (the loop-back jump is not a command start).
 fn exit_cut_short(vp: &Vproc, top_from: u32) -> bool {
@@ -635,11 +702,9 @@ fn exit_cut_short(vp: &Vproc, top_from: u32) -> bool {
 			} else {
 				frame.pc as usize + 1
 			};
-			unit
-				.ops
-				.get(from..)
-				.is_some_and(|rest| rest.iter().any(|op| starts_command(unit, *op)))
-		})
+			reachable_runs_input(unit, from)
+		}) || matches!(&frame.kind, FrameKind::Script { src, pos, .. }
+				if script_has_command(src.as_ref(), pos.0 as usize))
 	})
 }
 

@@ -1036,13 +1036,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 
-		// Normal completion
+		// Normal completion. A per-job `:async:` shell is dropped when the
+		// call settles, so its options never reach a later call either:
+		// report it as the ephemeral shell it is (the notice then makes no
+		// persistence claim).
+		const ephemeralShell = !ownsPersistentSession || options?.sessionKey?.includes(":async:") === true;
 		return {
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
 			endedByExit: winner.result.endedByExit === true,
-			ephemeralShell: !ownsPersistentSession,
+			ephemeralShell,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await dump()),

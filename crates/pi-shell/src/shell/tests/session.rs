@@ -968,6 +968,57 @@ async fn exit_and_errexit_report_ended_by_exit() {
 	);
 }
 
+/// The cut-short signal survives the incremental script path (newline-
+/// separated commands each parse as their own unit), follows reachable
+/// control flow only (an `else` arm the taken branch jumps around never
+/// counted as unrun input), and counts a pending function definition.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_cut_short_multiline_reachability_and_definitions() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	let multiline = run("set -e\nfalse\necho never").await;
+	assert_eq!(multiline.exit_code, Some(1));
+	assert!(multiline.ended_by_exit, "errexit hid the rest of the script");
+	assert!(run("exit 0\necho never").await.ended_by_exit, "an exit hid the rest of the script");
+	assert!(
+		!run("echo hi\nexit 0").await.ended_by_exit,
+		"a trailing exit on its own line ends nothing early"
+	);
+	assert!(
+		!run("if true; then exit 0; else echo unreachable; fi")
+			.await
+			.ended_by_exit,
+		"the else arm the taken branch jumps around never ran either way"
+	);
+	assert!(
+		run("if true; then exit 0; fi; echo after")
+			.await
+			.ended_by_exit,
+		"the command after the whole if really was hidden"
+	);
+	assert!(
+		run("while true; do exit 0; done; echo after")
+			.await
+			.ended_by_exit,
+		"the command after the whole loop really was hidden"
+	);
+	assert!(
+		run("exit 0; f() { :; }").await.ended_by_exit,
+		"a pending function definition never ran"
+	);
+}
+
 /// In a segmented chain, `exit` on the last segment that would run ends the
 /// command where it would have ended anyway, so only an abort that hides
 /// later segments is reported.
@@ -2253,6 +2304,24 @@ async fn execute_shell_streams_separates_stdout_and_stderr() {
 	}
 	assert_eq!(stdout, b"out\n");
 	assert_eq!(stderr, b"err\n");
+}
+
+/// A trailing `exit` ends the run exactly where its end would have, on the
+/// raw-stream path too: only an abort with input left reports
+/// `ended_by_exit`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_shell_streams_trailing_exit_is_not_cut_short() {
+	let (stdout_tx, stdout_rx) = flume::unbounded::<Bytes>();
+	let options = ShellExecuteOptions { command: "exit 3".to_string(), ..Default::default() };
+	let streams = StreamSinks { stdout: Some(stdout_tx), stderr: None };
+	let result = execute_shell_streams(options, streams, CancelToken::default())
+		.await
+		.expect("execute should succeed");
+	assert_eq!(result.exit_code, Some(3));
+	assert!(!result.cancelled);
+	assert!(!result.ended_by_exit, "a trailing exit ends nothing early on the streams path");
+	drop(stdout_rx);
 }
 
 #[cfg(unix)]

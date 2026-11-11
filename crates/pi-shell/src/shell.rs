@@ -1705,7 +1705,7 @@ async fn run_shell_command_streams_in_filesystem(
 		status:        outcome.status,
 		minimized:     None,
 		working_dir:   session.cwd.to_str_lossy().into_owned(),
-		ended_by_exit: outcome.exited,
+		ended_by_exit: outcome.exited && outcome.cut_short,
 	})
 }
 
