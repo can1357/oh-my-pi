@@ -73,26 +73,55 @@ describe.skipIf(process.platform === "win32")("matching", () => {
 		expect(mappedLinkUri("/mnt/projects/a")).toBe("file:///Z:/a");
 	});
 
+	it("normalises a key once: .. resolves and a trailing slash is dropped", () => {
+		applyLinkMapSetting({ "/mnt/projects/../shared/": "file:///S:/" });
+		expect(mappedLinkUri("/mnt/shared")).toBe("file:///S:/");
+		expect(mappedLinkUri("/mnt/shared/a.md")).toBe("file:///S:/a.md");
+		expect(mappedLinkUri("/mnt/projects/a")).toBeUndefined();
+	});
+
+	it("ignores a later key for the same prefix with one warning", () => {
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		applyLinkMapSetting({ "/dir": "file:///D:/", "/dir/": "file:///U:/" });
+		expect(mappedLinkUri("/dir")).toBe("file:///D:/");
+		expect(mappedLinkUri("/dir/a.md")).toBe("file:///D:/a.md");
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn).toHaveBeenCalledWith("Ignoring duplicate tui.linkMap entry", { key: "/dir/", sameAs: "/dir" });
+	});
+
+	it("a setting change clears the match cache", () => {
+		applyLinkMapSetting({ "/mnt": "file:///M:/" });
+		expect(mappedLinkUri("/mnt/a")).toBe("file:///M:/a");
+		applyLinkMapSetting({ "/mnt": "file:///N:/" });
+		expect(mappedLinkUri("/mnt/a")).toBe("file:///N:/a");
+	});
+
 	it("resolves a relative path against the working directory", () => {
 		applyLinkMapSetting({ [process.cwd()]: "file:///W:/" });
 		expect(mappedLinkUri("src/a.ts")).toBe("file:///W:/src/a.ts");
 	});
 
-	it("expands ~ and <user>, and leaves <user> keys unmatched without a passwd entry", () => {
+	it("expands ~ and {user}, and leaves {user} keys unmatched without a passwd entry", () => {
 		applyLinkMapSetting({
 			"~/notes": "file:///N:/",
-			"/nfs/home/<user>": "file:///Y:/",
-			"~/work/<user>": "file:///W:/",
+			"/nfs/home/{user}": "file:///Y:/",
+			"~/work/{user}": "file:///W:/",
 		});
 		expect(matchLinkEntry("/home/alice/notes/todo.md")).toEqual({ key: "~/notes", uri: "file:///N:/todo.md" });
 		expect(mappedLinkUri("/nfs/home/alice/a")).toBe("file:///Y:/a");
 		expect(mappedLinkUri("/nfs/home/bob/a")).toBeUndefined();
 		expect(mappedLinkUri("/home/alice/work/alice/a")).toBe("file:///W:/a");
 
+		// Two keys for one prefix: links use the first.
+		applyLinkMapSetting({ "~/src": "file:///S:/", "/home/alice/src": "file:///T:/" });
+		expect(mappedLinkUri("/home/alice/src/a")).toBe("file:///S:/a");
+		applyLinkMapSetting({ "/home/alice/src": "file:///T:/", "~/src": "file:///S:/" });
+		expect(mappedLinkUri("/home/alice/src/a")).toBe("file:///T:/a");
+
 		userInfo.mockImplementation(() => {
 			throw new Error("no passwd entry");
 		});
-		applyLinkMapSetting({ "/nfs/home/<user>": "file:///Y:/" });
+		applyLinkMapSetting({ "/nfs/home/{user}": "file:///Y:/" });
 		expect(mappedLinkUri("/nfs/home/alice/a")).toBeUndefined();
 	});
 

@@ -1,10 +1,12 @@
 /**
  * `tui.linkMap`: where file links under a path prefix point.
  *
- * Each entry maps a path prefix (an absolute path, `~` or `~/...`) to a URI prefix in any scheme. A path below
- * the prefix is appended to the URI prefix one percent-encoded segment at a time, and the longest matching
- * prefix wins. `~` covers both the home directory and its realpath; `<user>` in a key stands for the login
- * name. The map is not applied when omp itself runs on Windows.
+ * Each entry replaces a path prefix with a URI prefix in any scheme: the rest of the path is appended to the URI
+ * prefix one percent-encoded segment at a time. Keys are cleaned up once, when the map is pushed: a leading `~`
+ * becomes the home directory, and also its real path when the home is a symlink; `{user}` becomes the login name;
+ * the result is normalised with `path.posix.normalize` and loses a trailing slash. Keys that come out as the same
+ * prefix are one entry, and the later one is ignored with a warning. The longest prefix wins, by whole segments.
+ * The map is not applied when omp itself runs on Windows.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -17,21 +19,19 @@ export const LINK_SCHEME = /^[a-z][a-z0-9+.-]*$/;
 interface LinkMapEntry {
 	/** The key as written in the setting. */
 	key: string;
+	/** What the key stands for, from {@link linkMapPrefixes}. */
+	prefix: string;
+	/** `prefix` ending in `/`: what a path under the directory starts with. */
+	dir: string;
 	/** URI prefix ending in `/`. */
 	target: string;
 }
 
-interface CompiledPrefix extends LinkMapEntry {
-	segments: readonly string[];
-}
-
-/** Valid entries of the pushed map, in setting order. */
+/** Valid entries of the pushed map, most specific first. */
 let entries: readonly LinkMapEntry[] = [];
-/**
- * Entry prefixes as path segments for one home directory; the home's realpath and the login name follow it.
- * Compiled when the map is pushed.
- */
-let compiled: { home: string; prefixes: readonly CompiledPrefix[] } | undefined;
+
+const MATCH_CACHE_LIMIT = 512;
+const matchCache = new Map<string, { key: string; uri: string } | null>();
 
 /**
  * Parse a map value into a URI prefix ending in `/`. Any scheme of two or more characters is accepted (a
@@ -61,75 +61,87 @@ export function parseLinkTarget(value: unknown): string | undefined {
 	return href.endsWith("/") ? href : `${href}/`;
 }
 
-/** An absolute path, `~` or `~/...`, with no `.` or `..` segment: a key is compared as written, never resolved. */
+/** An absolute path, `~` or `~/...`. */
 export function isLinkMapKey(key: string): boolean {
-	if (key !== "~" && !key.startsWith("~/") && !key.startsWith("/")) return false;
-	return !key.split("/").some(segment => segment === "." || segment === "..");
+	return key === "~" || key.startsWith("~/") || key.startsWith("/");
+}
+
+/**
+ * The normalised prefixes a key stands for, including a symlinked home's real path; none for an invalid key or
+ * unknown login name.
+ */
+export function linkMapPrefixes(key: string): string[] {
+	if (!isLinkMapKey(key)) return [];
+	let text = key;
+	if (key.includes("{user}")) {
+		let user: string;
+		try {
+			user = os.userInfo().username;
+		} catch {
+			// No passwd entry for this uid.
+			return [];
+		}
+		if (!user) return [];
+		text = key.replaceAll("{user}", user);
+	}
+	const candidates: string[] = [];
+	if (key.startsWith("~")) {
+		const home = os.homedir();
+		candidates.push(home + text.slice(1));
+		try {
+			const real = fs.realpathSync(home);
+			if (real !== home) candidates.push(real + text.slice(1));
+		} catch {
+			// The home directory's real path is optional.
+		}
+	} else {
+		candidates.push(text);
+	}
+	const prefixes: string[] = [];
+	for (const candidate of candidates) {
+		const normalised = path.posix.normalize(candidate);
+		const prefix = normalised === "/" ? normalised : normalised.replace(/\/$/, "");
+		if (!prefixes.includes(prefix)) prefixes.push(prefix);
+	}
+	return prefixes;
 }
 
 /**
  * Push `tui.linkMap`, such as `{ "/mnt/projects": "file:///Z:/", "/srv/handbook":
  * "https://git.contoso.example/handbook/blob/main" }`. Entries whose key fails {@link isLinkMapKey} or whose value
- * fails {@link parseLinkTarget} are ignored with a warning; an empty value is ignored silently. Anything but a
- * plain object clears the map.
+ * fails {@link parseLinkTarget} are ignored with a warning, as is an entry whose key stands for the prefix of an
+ * earlier one; an empty value is ignored silently. Anything but a plain object clears the map.
  */
 export function applyLinkMapSetting(value?: unknown): void {
-	const next: LinkMapEntry[] = [];
+	// Keys are evaluated here, when the setting changes, so drawing a link does not touch the user database.
+	const next = new Map<string, LinkMapEntry>();
 	if (typeof value === "object" && value !== null && !Array.isArray(value)) {
 		for (const [key, raw] of Object.entries(value)) {
 			if (raw === "") continue;
 			const target = parseLinkTarget(raw);
-			if (target && isLinkMapKey(key)) next.push({ key, target });
-			else logger.warn("Ignoring invalid tui.linkMap entry", { key, target: raw });
+			if (!target || !isLinkMapKey(key)) {
+				logger.warn("Ignoring invalid tui.linkMap entry", { key, target: raw });
+				continue;
+			}
+			const prefixes = linkMapPrefixes(key);
+			// `{user}` without a login name: the key stays unmatched.
+			if (prefixes.length === 0) continue;
+			let first: LinkMapEntry | undefined;
+			for (const prefix of prefixes) {
+				first = next.get(prefix);
+				if (first) break;
+			}
+			if (first) {
+				logger.warn("Ignoring duplicate tui.linkMap entry", { key, sameAs: first.key });
+				continue;
+			}
+			for (const prefix of prefixes) {
+				next.set(prefix, { key, prefix, dir: prefix === "/" ? "/" : `${prefix}/`, target });
+			}
 		}
 	}
-	entries = next;
-	// Resolve the home realpath and the login name here, when the setting changes, so drawing a link does not
-	// touch the filesystem or the user database. `matchLinkEntry` recompiles only if the home directory moves.
-	compiled = next.length > 0 ? compileFor(os.homedir()) : undefined;
-}
-
-function compileFor(home: string): { home: string; prefixes: readonly CompiledPrefix[] } {
-	return { home, prefixes: compilePrefixes(home) };
-}
-
-function compilePrefixes(home: string): readonly CompiledPrefix[] {
-	const split = (p: string) => p.split("/").filter(Boolean);
-	let realHome: string | undefined;
-	if (entries.some(entry => entry.key === "~" || entry.key.startsWith("~/"))) {
-		try {
-			realHome = fs.realpathSync(home);
-		} catch {
-			realHome = undefined;
-		}
-	}
-	let user: string | undefined;
-	if (entries.some(entry => entry.key.includes("<user>"))) {
-		try {
-			user = os.userInfo().username || undefined;
-		} catch {
-			// No passwd entry for this uid: `<user>` keys stay unmatched.
-		}
-	}
-	const prefixes: CompiledPrefix[] = [];
-	for (const entry of entries) {
-		let { key } = entry;
-		if (key.includes("<user>")) {
-			if (!user) continue;
-			key = key.replaceAll("<user>", user);
-		}
-		if (key === "~" || key.startsWith("~/")) {
-			const homes = realHome && realHome !== home ? [home, realHome] : [home];
-			for (const base of homes) prefixes.push({ ...entry, segments: split(base + key.slice(1)) });
-		} else {
-			prefixes.push({ ...entry, segments: split(key) });
-		}
-	}
-	return prefixes;
-}
-
-function startsWithSegments(segments: readonly string[], prefix: readonly string[]): boolean {
-	return prefix.length <= segments.length && prefix.every((segment, i) => segment === segments[i]);
+	entries = [...next.values()].sort((a, b) => b.prefix.length - a.prefix.length);
+	matchCache.clear();
 }
 
 /**
@@ -141,16 +153,18 @@ function startsWithSegments(segments: readonly string[], prefix: readonly string
  */
 export function matchLinkEntry(filePath: string): { key: string; uri: string } | undefined {
 	if (entries.length === 0 || process.platform === "win32") return undefined;
-	const home = os.homedir();
-	if (compiled?.home !== home) compiled = compileFor(home);
-	const segments = path.resolve(filePath).split("/").filter(Boolean);
-	let best: CompiledPrefix | undefined;
-	for (const prefix of compiled.prefixes) {
-		if (best && prefix.segments.length <= best.segments.length) continue;
-		if (startsWithSegments(segments, prefix.segments)) best = prefix;
+	const resolved = path.resolve(filePath);
+	const cached = matchCache.get(resolved);
+	if (cached !== undefined) return cached ?? undefined;
+	const entry = entries.find(({ prefix, dir }) => resolved === prefix || resolved.startsWith(dir));
+	let match: { key: string; uri: string } | null = null;
+	if (entry) {
+		const rest = resolved.slice(entry.dir.length).split("/");
+		match = { key: entry.key, uri: entry.target + rest.map(encodeURIComponent).join("/") };
 	}
-	if (!best) return undefined;
-	return { key: best.key, uri: best.target + segments.slice(best.segments.length).map(encodeURIComponent).join("/") };
+	if (matchCache.size >= MATCH_CACHE_LIMIT) matchCache.clear();
+	matchCache.set(resolved, match);
+	return match ?? undefined;
 }
 
 /**

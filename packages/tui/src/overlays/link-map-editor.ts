@@ -14,13 +14,18 @@ import { SelectFormField, TextFormField } from "../components/form";
 import { Text } from "../components/text";
 import { Container, type SelectItem, type SgrMouseEvent } from "../index";
 import { resolveFileLink } from "../render/hyperlink";
-import { isLinkMapKey, matchLinkEntry, parseLinkTarget } from "../render/link-map";
+import { isLinkMapKey, linkMapPrefixes, matchLinkEntry, parseLinkTarget } from "../render/link-map";
 import { TERMINAL } from "../terminal-capabilities";
 import { getSelectListTheme } from "../theme/theme";
 import { sanitizeDisplayLine } from "./extensions/display-text";
 import type { SettingsHost } from "./settings-defs";
 
 const LINK_MAP_PATH = "tui.linkMap";
+
+function sharesLinkMapPrefix(a: string, b: string): boolean {
+	const prefixes = linkMapPrefixes(a);
+	return linkMapPrefixes(b).some(prefix => prefixes.includes(prefix));
+}
 
 function linkMapEntries(value: unknown): Record<string, string> {
 	const entries: Record<string, string> = {};
@@ -81,14 +86,23 @@ export class LinkMapSubmenu extends Container {
 	}
 
 	/**
-	 * Why an entry for `key` cannot be saved, if so: a layer above the global config supplies that entry, so the
-	 * saved one would not reach links. Asked again at each save, since a layer can change while a form is open.
+	 * Why an entry for `key` cannot be saved, if so: a layer above the global config supplies that entry, under
+	 * this key or another one that stands for the same prefix, so the saved one would not reach links. Asked again
+	 * at each save, since a layer can change while a form is open.
 	 */
 	#refusal(key: string): string | undefined {
-		const layer = this.#settings.shadowingLayer(LINK_MAP_PATH, key);
-		return layer === undefined
+		const layerOf = (set: string): string | undefined => this.#settings.shadowingLayer(LINK_MAP_PATH, set);
+		const same = Object.keys(this.#entries()).filter(listed => sharesLinkMapPrefix(key, listed));
+		const set = [key, ...same].find(layerOf);
+		return set === undefined
 			? undefined
-			: sanitizeDisplayLine(`The ${layer} sets ${key}, so an entry saved here would not take effect.`);
+			: sanitizeDisplayLine(`The ${layerOf(set)} sets ${set}, so an entry saved here would not take effect.`);
+	}
+
+	/** Why `key` cannot be added, if so: a listed entry already stands for the same prefix, and links use only the first. */
+	#duplicate(key: string): string | undefined {
+		const same = Object.keys(this.#entries()).find(listed => sharesLinkMapPrefix(key, listed));
+		return same ? sanitizeDisplayLine(`${same} is already the entry for that prefix.`) : undefined;
 	}
 
 	/** Saves one entry to the global config (`undefined` removes it) and reports the map as it now reads. */
@@ -108,6 +122,20 @@ export class LinkMapSubmenu extends Container {
 			const layer = this.#settings.shadowingLayer(LINK_MAP_PATH, key);
 			if (layer !== undefined) layers.set(key, layer);
 		}
+		// The key links use for each prefix: the first valid one in the map's own order, the order entries load in.
+		const owner = new Map<string, string>();
+		const sameAs = new Map<string, string>();
+		for (const key of Object.keys(entries)) {
+			if (parseLinkTarget(entries[key]) === undefined) continue;
+			const prefixes = linkMapPrefixes(key);
+			const first = prefixes.find(prefix => owner.has(prefix));
+			if (first !== undefined) {
+				const earlier = owner.get(first);
+				if (earlier !== undefined) sameAs.set(key, earlier);
+			} else {
+				for (const prefix of prefixes) owner.set(prefix, key);
+			}
+		}
 		const items: SelectItem[] = keys.map(key => {
 			const valid = isLinkMapKey(key) && parseLinkTarget(entries[key]) !== undefined;
 			const layer = layers.get(key);
@@ -115,7 +143,7 @@ export class LinkMapSubmenu extends Container {
 				value: `entry:${key}`,
 				label: sanitizeDisplayLine(key),
 				description: sanitizeDisplayLine(
-					`→ ${entries[key]}${valid ? "" : " (ignored: not a valid entry)"}${layer === undefined ? "" : ` (${layer}, read-only)`}`,
+					`→ ${entries[key]}${valid ? "" : " (ignored: not a valid entry)"}${sameAs.has(key) ? ` (ignored: same prefix as ${sameAs.get(key)})` : ""}${layer === undefined ? "" : ` (${layer}, read-only)`}`,
 				),
 			};
 		});
@@ -165,8 +193,12 @@ export class LinkMapSubmenu extends Container {
 				} else if (value.startsWith("entry:")) {
 					const key = value.slice("entry:".length);
 					const layer = layers.get(key);
-					if (layer === undefined) this.#showTarget(key);
-					else this.#backToList(`${key} comes from the ${layer} and cannot be changed here.`);
+					const refusal =
+						layer === undefined
+							? this.#refusal(key)
+							: `${key} comes from the ${layer} and cannot be changed here.`;
+					if (refusal === undefined) this.#showTarget(key);
+					else this.#backToList(refusal);
 				}
 				this.#requestRender?.();
 			},
@@ -225,12 +257,12 @@ export class LinkMapSubmenu extends Container {
 			new TextFormField({
 				theme: formTheme,
 				label: "Path prefix",
-				description: "An absolute path, ~ or ~/... for your home; <user> stands for your login name.",
+				description: "An absolute path, ~ or ~/... for your home; {user} stands for your login name.",
 				hint: `  ${editorKey("tui.input.submit")} to continue · ${editorKey("tui.select.cancel")} to cancel`,
 				validate: value =>
 					isLinkMapKey(value.trim())
-						? this.#refusal(value.trim())
-						: "Start with / or ~ and use no . or .. segment, for example /mnt/projects or ~/src",
+						? (this.#refusal(value.trim()) ?? this.#duplicate(value.trim()))
+						: "Start with / or ~, for example /mnt/projects or ~/src",
 				onSubmit: value => {
 					this.#showTarget(value.trim());
 					this.#requestRender?.();
