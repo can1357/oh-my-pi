@@ -230,6 +230,7 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
+- A resumed session keeps the memory block its prompt was built from instead of rebuilding it from disk, so a lesson learned or a consolidation in another session no longer rewrites the whole prompt cache on the next turn ([#15704](https://github.com/can1357/oh-my-pi/issues/15704), [#16465](https://github.com/can1357/oh-my-pi/pull/16465) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
