@@ -47,6 +47,7 @@ import {
 	type TernBrowserHandle,
 	type WebKitBrowserHandle,
 } from "./registry";
+import { isLoopbackRelayUrl } from "./relay/daemon";
 import { FOREIGN_FRAME_REFUSAL, type HiddenFrame } from "./relay/protocol";
 import {
 	type AttachPage,
@@ -2231,6 +2232,7 @@ function sweepClosedTabUploads(): void {
 
 /** Whether the browser draws its windows on the user's screen; a headless one keeps that through a tab's recycle. */
 export function browserShowsWindows(kind: PuppeteerBrowserKind): boolean {
+	if (kind.kind === "relay") return isLoopbackRelayUrl(kind.cdpUrl);
 	// A connected endpoint may be remote or headless; its geometry cannot identify a local window.
 	return kind.kind !== "connected" && (kind.kind !== "headless" || !kind.headless);
 }

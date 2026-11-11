@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "bun:test";
 import type { DesktopRosterWindow } from "@oh-my-pi/pi-natives";
 import { NativeWindowWatch, readTabFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
+import * as nativeWindows from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
@@ -60,6 +61,8 @@ describe("browsers that show windows", () => {
 		expect(browserShowsWindows({ kind: "headless", headless: false })).toBe(true);
 		expect(browserShowsWindows({ kind: "connected", cdpUrl: "http://127.0.0.1:9222" })).toBe(false);
 		expect(browserShowsWindows({ kind: "connected", cdpUrl: "https://remote.example" })).toBe(false);
+		expect(browserShowsWindows({ kind: "relay", cdpUrl: "http://127.0.0.1:9224" })).toBe(true);
+		expect(browserShowsWindows({ kind: "relay", cdpUrl: "https://remote.example" })).toBe(false);
 		expect(browserShowsWindows({ kind: "spawned", path: "/Applications/App.app" })).toBe(true);
 	});
 });
@@ -81,6 +84,42 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("native-window frame isolation", () => {
 					Object.defineProperty(document, "visibilityState", { value: "hidden" });
 				});
 			expect(await readTabFrame(page)).toEqual(frame);
+		} finally {
+			await closeLaunchedBrowser(browser);
+			if (userDataDir) await removeUserDataDir(userDataDir);
+		}
+	});
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("page-backed native-window candidates", () => {
+	test("does not report a browser popup as an unreachable native dialog", async () => {
+		const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true });
+		try {
+			const page = await browser.newPage();
+			const opened = browser.waitForTarget(target => target.opener() === page.target());
+			await page
+				.mainFrame()
+				.mainRealm()
+				.evaluate('window.open("about:blank", "popup", "width=400,height=300,left=100,top=100")');
+			const popup = await (await opened).page();
+			if (!popup) throw new Error("Expected a page-backed popup");
+			const frame = await readTabFrame(popup);
+			if (!frame) throw new Error("Expected the popup frame");
+			const candidate = win(32, frame);
+			const parent = win(10, {
+				x: frame.x - 100,
+				y: frame.y - 100,
+				width: frame.width * 2,
+				height: frame.height * 2,
+			});
+			const rosters = [[parent], [candidate, parent]];
+			const watch = new NativeWindowWatch(
+				async () => ({ ...parent, visible: true }),
+				() => rosters.shift(),
+				BROWSER,
+				() => nativeWindows.readBrowserPageFrames(browser),
+			);
+			expect(await call(watch)).toEqual([]);
 		} finally {
 			await closeLaunchedBrowser(browser);
 			if (userDataDir) await removeUserDataDir(userDataDir);
