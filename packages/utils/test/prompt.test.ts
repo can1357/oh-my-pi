@@ -126,9 +126,13 @@ describe("renderWithSlots", () => {
 		expect(result.text).toBe("<list>\n```\nopen\n</list>\n|x|y|");
 	});
 
-	it("formats a slot inside a line with its surroundings and leaves it untracked", () => {
-		const slots = [new prompt.PromptSlot("inline   ")];
-		const result = prompt.renderWithSlots("before {{slot}}after\n\n\nend", { slot: slots[0] }, slots);
-		expect(result).toEqual({ text: "before inline   after\nend", ranges: [[]] });
+	it("leaves a slot untracked inside a line or a helper block, rendered as render would", () => {
+		const slots = [new prompt.PromptSlot("inline   "), new prompt.PromptSlot("listed   ")];
+		const template = 'before {{inline}}after\n\n\n{{#list items join="\\n"}}\n{{this}}\n{{/list}}';
+		const result = prompt.renderWithSlots(template, { inline: slots[0], items: [slots[1]] }, slots);
+		expect(result).toEqual({
+			text: prompt.render(template, { inline: "inline   ", items: ["listed   "] }),
+			ranges: [[], []],
+		});
 	});
 });

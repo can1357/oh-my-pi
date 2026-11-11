@@ -189,16 +189,28 @@ function replaceCommonAsciiSymbolsOutsideHtmlComments(line: string, state: HtmlC
 	return result;
 }
 
+/** Pre-formatted text that {@link formatLines} keeps as one opaque line; it never counts as blank. */
+interface AtomicLine {
+	readonly text: string;
+}
+
 export function format(content: string, options: PromptFormatOptions = {}): string {
+	return formatLines(content.split("\n"), options).join("\n");
+}
+
+/** {@link format} over lines; atomic lines pass through unchanged and keep their identity. */
+function formatLines<A extends AtomicLine = never>(
+	lines: readonly (string | A)[],
+	options: PromptFormatOptions,
+): (string | A)[] {
 	const {
 		renderPhase = "post-render",
 		replaceAsciiSymbols = false,
 		normalizeRfc2119: shouldNormalizeRfc2119 = false,
 	} = options;
 	const isPreRender = renderPhase === "pre-render";
-	const lines = content.split("\n");
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-	const result: string[] = new Array(lines.length);
+	const result: (string | A)[] = new Array(lines.length);
 	let n = 0; // logical length of `result` (pops are n--)
 	let inCodeBlock = false;
 
@@ -207,6 +219,10 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
 
 	for (let i = 0; i < lines.length; i++) {
 		const raw = lines[i];
+		if (typeof raw !== "string") {
+			result[n++] = raw;
+			continue;
+		}
 		// charCode fast paths: only pay for trimEnd when the last char might be
 		// whitespace (<= 0x20 ASCII ws/controls, >= 0x80 unicode ws). Untouched
 		// lines are pushed as the original string — no allocation.
@@ -281,30 +297,30 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
 			// Blank line (`line` carries no trailing whitespace, so it is "").
 			const next = lines[i + 1];
 			// Strip any run of 2+ consecutive blank lines entirely; preserve a single blank.
-			if (next === undefined || next.length === 0 || !NON_BLANK.test(next)) {
-				while (n > 0 && result[n - 1].length === 0) n--;
+			if (next === undefined || (typeof next === "string" && !NON_BLANK.test(next))) {
+				while (n > 0 && result[n - 1] === "") n--;
 				let j = i + 1;
-				while (j < lines.length && (lines[j].length === 0 || !NON_BLANK.test(lines[j]))) j++;
+				for (let line = lines[j]; typeof line === "string" && !NON_BLANK.test(line); line = lines[++j]);
 				i = j - 1;
 				continue;
 			}
-			if (n === 0 || result[n - 1].length === 0) {
+			if (n === 0 || result[n - 1] === "") {
 				continue;
 			}
 		}
 
 		// CLOSING_HBS (`/^\{\{\//`) ⇔ startsWith("{{/") at the indent offset.
 		if (isClosingLine || (isPreRender && first === 123 /* { */ && line.startsWith("{{/", s))) {
-			while (n > 0 && result[n - 1].length === 0) n--;
+			while (n > 0 && result[n - 1] === "") n--;
 		}
 
 		result[n++] = line;
 	}
 
-	while (n > 0 && result[n - 1].length === 0) n--;
+	while (n > 0 && result[n - 1] === "") n--;
 	result.length = n;
 
-	return result.join("\n");
+	return result;
 }
 
 export interface TemplateContext extends Record<string, unknown> {
@@ -547,26 +563,22 @@ export function render(template: string, context: TemplateContext = {}): string 
 	return format(rendered, { renderPhase: "post-render" });
 }
 
-let nextSlotId = 0;
-const SLOT_MARKER = /\uE000[0-9a-z]+\uE001/g;
-
 /**
- * Text inserted into a template by {@link renderWithSlots}, which reports where it lands. A slot that
- * fills a whole template line is formatted on its own (a code fence it leaves open never reaches the
- * surrounding prompt); a slot anywhere else is formatted with its surroundings and not tracked.
+ * Text a template interpolates through {@link renderWithSlots}, which reports where it lands. A slot the
+ * template interpolates alone on its own lines, outside any helper block or partial, is formatted on its
+ * own, so a code fence it leaves open never reaches the text after it. Anywhere else it is plain text,
+ * formatted with its surroundings and not tracked.
  */
 export class PromptSlot {
-	readonly #marker = `\uE000${(nextSlotId++).toString(36)}\uE001`;
-	/** Post-render form of {@link text}, as a whole-line slot appears in the output. */
+	/** Post-render form of {@link text}, as a tracked slot appears in the output. */
 	readonly formatted: string;
 
 	constructor(readonly text: string) {
 		this.formatted = format(text, { renderPhase: "post-render" });
 	}
 
-	/** Placeholder the template interpolates; only {@link renderWithSlots} resolves it. */
 	toString(): string {
-		return this.#marker;
+		return this.text;
 	}
 }
 
@@ -578,54 +590,55 @@ export interface SlotRange {
 
 export interface SlottedRender {
 	readonly text: string;
-	/** Occurrences of `slots[i]`, in output order; empty when the template never emits it on its own line. */
+	/** Tracked occurrences of `slots[i]`, in output order. */
 	readonly ranges: readonly (readonly SlotRange[])[];
 }
 
+interface SlotLine extends AtomicLine {
+	readonly slot: number;
+}
+
+const compiledMarkedCache = new LRUCache<string, Handlebars.MarkedTemplateDelegate<TemplateContext>>({ max: 256 });
+
 /**
- * {@link render} that composes `slots` into the formatted template instead of formatting them with it,
- * so each whole-line slot's range is known by construction. Every slot interpolated by the template
- * must be listed in `slots`.
+ * {@link render} that formats each tracked {@link PromptSlot} on its own and composes it into the
+ * formatted template as one opaque line, so its range in the output is known by construction.
  */
 export function renderWithSlots(
 	template: string,
 	context: TemplateContext,
 	slots: readonly PromptSlot[],
 ): SlottedRender {
-	const byMarker = new Map(slots.map((slot, index) => [String(slot), index]));
-	const slotAt = (marker: string): number => {
-		const index = byMarker.get(marker);
-		if (index === undefined) throw new Error("renderWithSlots: template emitted an unlisted slot");
-		return index;
-	};
-	// A whole-line slot stays one opaque line while the template text is formatted; any other slot
-	// is inlined first so it formats with its surroundings, as `render` would.
-	const skeleton = compile(template)(context ?? {})
-		.split("\n")
-		.map(line =>
-			byMarker.has(line) && slots[slotAt(line)]!.formatted
-				? line
-				: line.replace(SLOT_MARKER, marker => slots[slotAt(marker)]!.text),
-		)
-		.join("\n");
+	let compiled = compiledMarkedCache.get(template);
+	if (!compiled) {
+		compiled = handlebars.compileMarked<TemplateContext>(template, { noEscape: true, strict: false });
+		compiledMarkedCache.set(template, compiled);
+	}
+	const slotIndex = new Map<unknown, number>(slots.map((slot, index) => [slot, index]));
+	const { text: raw, marks } = compiled(context ?? {}, new Set(slots));
+	// Each slot interpolated alone on its lines becomes one atomic line between the template's lines.
+	const lines: (string | SlotLine)[] = [];
+	let cursor = 0;
+	for (const { value, start, end } of marks) {
+		const slot = slotIndex.get(value)!;
+		const { formatted } = slots[slot]!;
+		const ownLines = (start === 0 || raw[start - 1] === "\n") && (end === raw.length || raw[end] === "\n");
+		if (!ownLines || !formatted) continue;
+		if (start > cursor) for (const line of raw.slice(cursor, start - 1).split("\n")) lines.push(line);
+		lines.push({ text: formatted, slot });
+		cursor = end + 1;
+	}
+	if (cursor <= raw.length) for (const line of raw.slice(cursor).split("\n")) lines.push(line);
 	const ranges: SlotRange[][] = slots.map(() => []);
-	const parts: string[] = [];
-	let length = 0;
-	for (const line of format(skeleton, { renderPhase: "post-render" }).split("\n")) {
-		if (parts.length > 0) {
-			parts.push("\n");
-			length += 1;
-		}
-		const index = byMarker.get(line);
-		if (index === undefined) {
-			parts.push(line);
-			length += line.length;
+	let text = "";
+	for (const [index, line] of formatLines(lines, { renderPhase: "post-render" }).entries()) {
+		if (index > 0) text += "\n";
+		if (typeof line === "string") {
+			text += line;
 			continue;
 		}
-		const { formatted } = slots[index]!;
-		ranges[index]!.push({ start: length, end: length + formatted.length });
-		parts.push(formatted);
-		length += formatted.length;
+		ranges[line.slot]!.push({ start: text.length, end: text.length + line.text.length });
+		text += line.text;
 	}
-	return { text: parts.join(""), ranges };
+	return { text, ranges };
 }
