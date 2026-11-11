@@ -16,7 +16,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use x11rb::protocol::{Event, xinput::KeyEventFlags};
 
 use super::listener::{Listener, Source, source_of};
@@ -33,10 +33,8 @@ const READ_AGAIN: &str =
 
 #[derive(Default)]
 struct Presses {
-	count:    AtomicU64,
-	last:     Mutex<Option<Instant>>,
-	/// Signalled at each press, for callers waiting to see one.
-	recorded: Condvar,
+	count: AtomicU64,
+	last:  Mutex<Option<Instant>>,
 }
 
 impl Presses {
@@ -44,7 +42,6 @@ impl Presses {
 		let mut last = self.last.lock();
 		*last = Some(at);
 		self.count.fetch_add(1, Ordering::AcqRel);
-		self.recorded.notify_all();
 	}
 }
 
@@ -109,7 +106,7 @@ impl UserActivity {
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
 	) -> CoreResult<u64> {
 		loop {
-			self.healthy()?;
+			self.sync()?;
 			let count = self.presses.count.load(Ordering::Acquire);
 			let last = self.presses.last.lock().unwrap_or(self.started);
 			match admission(last, now(), limit) {
@@ -128,20 +125,13 @@ impl UserActivity {
 
 	/// Refuses once the user has pressed a key or button since `baseline`.
 	pub(super) fn check(&self, baseline: u64) -> CoreResult<()> {
-		self.healthy()?;
+		self.sync()?;
 		check_presses(baseline, self.presses.count.load(Ordering::Acquire))
 	}
 
 	pub(super) fn sync(&self) -> CoreResult<()> {
 		if let Some(listener) = &self.listener {
 			listener.sync()?;
-		}
-		Ok(())
-	}
-
-	fn healthy(&self) -> CoreResult<()> {
-		if let Some(listener) = &self.listener {
-			listener.check()?;
 		}
 		Ok(())
 	}
@@ -154,16 +144,6 @@ impl UserActivity {
 	#[cfg(test)]
 	pub(super) fn disconnect(&mut self, conn: &x11rb::rust_connection::RustConnection) {
 		self.listener.as_mut().expect("listening").disconnect(conn);
-	}
-
-	/// Waits until the listener has recorded `count` presses.
-	#[cfg(test)]
-	pub(super) fn wait_for_presses(&self, count: u64) {
-		let mut last = self.presses.last.lock();
-		self
-			.presses
-			.recorded
-			.wait_while(&mut last, |_| self.presses() < count);
 	}
 }
 

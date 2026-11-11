@@ -491,11 +491,7 @@ impl X11Input {
 		hand_back: impl FnOnce(&Self),
 	) -> CoreResult<T> {
 		hand_back(self);
-		let intervened = self
-			.activity
-			.as_ref()
-			.map_or(Ok(()), UserActivity::sync)
-			.and_then(|()| self.check_user());
+		let intervened = self.check_user();
 		self.takeover_presses = None;
 		result.and_then(|value| intervened.map(|()| value))
 	}
@@ -1534,11 +1530,6 @@ mod tests {
 						.expect("type");
 				}
 				user.sync().expect("sync");
-				input
-					.activity
-					.as_ref()
-					.expect("watching")
-					.wait_for_presses(1);
 				user
 					.ungrab_keyboard(CURRENT_TIME)
 					.expect("ungrab")
