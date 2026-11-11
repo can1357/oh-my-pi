@@ -223,7 +223,7 @@ import {
 	whileDrawing,
 } from "./screenshot";
 import { type DialogPolicy, type DialogState, dialogBlocksPageError, RuntimeDialogController } from "./dialogs";
-import { NativeWindowWatch, readTabFrame } from "./native-windows";
+import { NativeWindowWatch, readBrowserPageFrames, readTabFrame } from "./native-windows";
 import {
 	type BrowserFrameApi,
 	type BrowserFrameInfo,
@@ -2117,7 +2117,12 @@ export class WorkerCore {
 			// Only a browser that draws its windows on the user's screen raises native ones.
 			if (payload.showsWindows && process.platform === "darwin") {
 				const page = this.#page;
-				this.#nativeWindows = new NativeWindowWatch(() => readTabFrame(page), undefined, payload.browserPid);
+				this.#nativeWindows = new NativeWindowWatch(
+					() => readTabFrame(page),
+					undefined,
+					payload.browserPid,
+					() => readBrowserPageFrames(page.browser()),
+				);
 			}
 			await installVitalsObservers(this.#page);
 			await installCancelledReleaseGuard(this.#page);

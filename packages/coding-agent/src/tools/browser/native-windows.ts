@@ -1,6 +1,6 @@
 import type { DesktopRosterWindow } from "@oh-my-pi/pi-natives";
 import { desktopWindowRoster } from "@oh-my-pi/pi-natives/desktop";
-import type { Page } from "puppeteer-core";
+import type { Browser, Page } from "puppeteer-core";
 
 /** Longest a call waits to read where the tab's window is on screen. */
 const FRAME_TIMEOUT_MS = 300;
@@ -53,6 +53,18 @@ export async function readTabFrame(page: Pick<Page, "mainFrame">): Promise<TabVi
 	return await Promise.race([read, Bun.sleep(FRAME_TIMEOUT_MS).then(() => undefined)]);
 }
 
+/** Page-backed browser windows are not native dialogs; an unreadable target leaves their identity uncertain. */
+export async function readBrowserPageFrames(browser: Pick<Browser, "pages">): Promise<Frame[] | undefined> {
+	const read = browser
+		.pages()
+		.then(pages => Promise.all(pages.map(readTabFrame)))
+		.then(frames =>
+			frames.some(frame => frame === undefined) ? undefined : frames.filter(frame => frame !== undefined),
+		)
+		.catch(() => undefined);
+	return await Promise.race([read, Bun.sleep(FRAME_TIMEOUT_MS).then(() => undefined)]);
+}
+
 /**
  * Reports the native windows a browser call raised over its tab that no page or CDP call can see or answer: the
  * browser's own popup menus and pickers, panels, and the sheets and bubbles over the tab (permission, passkey,
@@ -67,6 +79,7 @@ export class NativeWindowWatch {
 	readonly #readFrame: () => Promise<TabView | undefined>;
 	readonly #readRoster: () => DesktopRosterWindow[] | undefined;
 	readonly #browserPid: number | undefined;
+	readonly #readPageFrames: () => Promise<Frame[] | undefined>;
 	/** The tab's own window, once its frame named exactly one while the page showed. */
 	#tab: DesktopRosterWindow | undefined;
 	/** Whether the page showed in its window at the last read; a dialog-stopped page keeps the previous answer. */
@@ -85,9 +98,11 @@ export class NativeWindowWatch {
 		readFrame: () => Promise<TabView | undefined>,
 		roster: () => DesktopRosterWindow[] | undefined = readRoster,
 		browserPid?: number,
+		readPageFrames: () => Promise<Frame[] | undefined> = async () => [],
 	) {
 		this.#readFrame = readFrame;
 		this.#readRoster = roster;
+		this.#readPageFrames = readPageFrames;
 		this.#browserPid = browserPid;
 	}
 
@@ -128,7 +143,7 @@ export class NativeWindowWatch {
 				lines.push(this.#line(window, "after the previous browser call returned"));
 			}
 		}
-		for (const window of this.#raised(after)) {
+		for (const window of await this.#raised(after)) {
 			if (!(pageDialog && window.layer === 0)) lines.push(this.#line(window, "during this call"));
 		}
 		this.#remember(after);
@@ -148,7 +163,7 @@ export class NativeWindowWatch {
 		const frame = stopped ? undefined : await this.#readFrame();
 		if (!stopped) this.#visible = frame?.visible ?? false;
 		this.#findTab(roster, frame);
-		this.#late.push(...this.#raised(roster));
+		this.#late.push(...(await this.#raised(roster)));
 		this.#remember(roster);
 	}
 
@@ -172,20 +187,17 @@ export class NativeWindowWatch {
 			window =>
 				window.layer === 0 &&
 				(this.#browserPid === undefined || window.pid === this.#browserPid) &&
-				Math.abs(window.x - frame.x) <= 2 &&
-				Math.abs(window.y - frame.y) <= 2 &&
-				Math.abs(window.width - frame.width) <= 2 &&
-				Math.abs(window.height - frame.height) <= 2,
+				sameFrame(window, frame),
 		);
 		this.#tab = matches.length === 1 ? matches[0] : undefined;
 	}
 
 	/** The windows in `roster` never seen before that the tab's browser raised over the tab while the page showed. */
-	#raised(roster: DesktopRosterWindow[]): DesktopRosterWindow[] {
+	async #raised(roster: DesktopRosterWindow[]): Promise<DesktopRosterWindow[]> {
 		const tab = this.#tab;
 		if (!tab || !this.#visible) return [];
 		const current = roster.find(window => window.id === tab.id) ?? tab;
-		return roster.filter(
+		const raised = roster.filter(
 			window =>
 				!this.#seen.has(window.id) &&
 				window.pid === tab.pid &&
@@ -206,6 +218,11 @@ export class NativeWindowWatch {
 						intersects(window, other),
 				),
 		);
+		if (!raised.some(window => window.layer === 0)) return raised;
+		const pages = await this.#readPageFrames();
+		return raised.filter(
+			window => window.layer !== 0 || (pages !== undefined && !pages.some(frame => sameFrame(window, frame))),
+		);
 	}
 
 	#line(window: DesktopRosterWindow, when: string): string {
@@ -217,6 +234,15 @@ export class NativeWindowWatch {
 					: "a dialog over the tab (print, save, sign-in, passkey or permission)";
 		return `The browser opened ${what} ${when}. ${handle(window)}`;
 	}
+}
+
+function sameFrame(window: Frame, frame: Frame): boolean {
+	return (
+		Math.abs(window.x - frame.x) <= 2 &&
+		Math.abs(window.y - frame.y) <= 2 &&
+		Math.abs(window.width - frame.width) <= 2 &&
+		Math.abs(window.height - frame.height) <= 2
+	);
 }
 
 /** The on-screen windows, or undefined when the roster cannot be read (off macOS it is empty). */
