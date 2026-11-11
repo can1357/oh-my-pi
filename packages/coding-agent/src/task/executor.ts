@@ -72,7 +72,6 @@ import type { MCPManagerApi, MCPToolScope } from "../mcp/manager";
 import type { MnemopiSessionStateApi } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
-import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -135,9 +134,11 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { buildSubagentSystemPrompt } from "./system-prompt";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
+	type SystemPromptPreset,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -178,7 +179,9 @@ import {
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
+	cfgInlineToolDescriptors,
 } from "../session/settings";
+import { cfgToolsXdev } from "../tools/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 import {
@@ -1189,6 +1192,7 @@ function inheritedSubagentServiceTiers(
  * root values, not an ancestor's override.
  */
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
+const kMinimalTaskParentSettings = Symbol("task.minimalTaskParentSettings");
 
 /** Root compaction thresholds a subagent chain pins (see {@link kRootCompactionThresholds}). */
 export interface RootCompactionThresholds extends CompactionThresholdPair {
@@ -1198,6 +1202,29 @@ export interface RootCompactionThresholds extends CompactionThresholdPair {
 /** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
 interface SubagentChainSettings extends Settings {
 	[kRootCompactionThresholds]?: RootCompactionThresholds;
+	[kMinimalTaskParentSettings]?: Settings;
+}
+
+/** Restore prompt preferences below a minimal parent without pinning the child's own writes. */
+function restorePromptPreferences(parent: Settings, source: Settings): Settings {
+	const restored = parent.overlay(
+		{
+			inlineToolDescriptors: cfgInlineToolDescriptors.get(source),
+			"tools.xdev": cfgToolsXdev.get(source),
+		},
+		{ derived: true },
+	);
+	const ref = new WeakRef(restored);
+	const stop = source.onEffectiveChange([cfgInlineToolDescriptors, cfgToolsXdev], () => {
+		const target = ref.deref();
+		if (!target) {
+			stop();
+			return;
+		}
+		cfgInlineToolDescriptors.override(target, cfgInlineToolDescriptors.get(source));
+		cfgToolsXdev.override(target, cfgToolsXdev.get(source));
+	});
+	return restored;
 }
 
 /**
@@ -1221,6 +1248,7 @@ export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
 	inheritedServiceTier?: ServiceTierByFamily | null,
+	systemPreset?: SystemPromptPreset,
 ): Settings {
 	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
 	// match the parent's live tiers when a live session supplied them, else the
@@ -1236,8 +1264,15 @@ export function createSubagentSettings(
 		thresholdTokens: cfgCompactionThresholdTokens.get(baseSettings),
 		modelThresholdsEnabled: cfgCompactionModelThresholdsEnabled.get(baseSettings),
 	};
+	// Minimal-task prompt workarounds belong to this session, not ordinary descendants.
+	const promptParentSettings = baseSettings[kMinimalTaskParentSettings] ?? baseSettings;
+	const inheritedPromptSettings = baseSettings[kMinimalTaskParentSettings];
+	const parentSettings =
+		inheritedPromptSettings && systemPreset !== "minimal-task"
+			? restorePromptPreferences(baseSettings, inheritedPromptSettings)
+			: baseSettings;
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
-	const subagentSettings: SubagentChainSettings = baseSettings.overlay(
+	const subagentSettings: SubagentChainSettings = parentSettings.overlay(
 		{
 			...(inheritedRootThresholds && {
 				"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
@@ -1273,9 +1308,11 @@ export function createSubagentSettings(
 			// rejected the context (#13211). A per-spawn override still wins.
 			"compaction.midTurnEnabled": true,
 			...overrides,
+			...(systemPreset === "minimal-task" ? { inlineToolDescriptors: "off", "tools.xdev": false } : undefined),
 		},
 		{ derived: true },
 	);
+	if (systemPreset === "minimal-task") subagentSettings[kMinimalTaskParentSettings] = promptParentSettings;
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
 	return subagentSettings;
 }
@@ -4072,6 +4109,7 @@ interface SubagentPromptInputs {
 	ircEnabled: boolean;
 	/** Root resolved by the latest roster ensure; peer rows render scoped to it, so a session switch hides stale parked trees. */
 	ircRoot: { sessionFile?: string };
+	systemPreset?: AgentDefinition["systemPreset"];
 	/** Peer roster each prompt block the live session rendered shows, keyed by that block. */
 	ircRenders: Map<string, IrcPeerRosterData>;
 	/** Peer roster of the prompt the parked session held; a warm revive renders it again. */
@@ -4136,7 +4174,8 @@ function buildSubagentSessionOptions(
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
 		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
 		awaitingAssignment: launch !== undefined,
-		systemPrompt: defaultPrompt => {
+		systemPrompt: (defaultPrompt, runtimeInstructions) => {
+			const promptPrefix = inputs.systemPreset === "minimal-task" ? (runtimeInstructions ?? []) : defaultPrompt;
 			// A revive shows the roster the parked session's prompt held, and a rebuild that leaves the
 			// rest of the prompt unchanged keeps the roster the prompt it replaces showed: peer rows carry
 			// each peer's live activity, so a re-collected roster changed the prompt's bytes on every such
@@ -4146,33 +4185,38 @@ function buildSubagentSessionOptions(
 				? undefined
 				: inputs.reviving && inputs.ircRoster
 					? inputs.ircRoster
-					: (heldIrcRoster(inputs, defaultPrompt) ??
+					: (heldIrcRoster(inputs, promptPrefix) ??
 						collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile));
-			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-				agent: inputs.agentSystemPrompt,
-				context: inputs.context,
-				planReference: inputs.planReference,
-				planReferencePath: inputs.planReferencePath,
-				worktree: inputs.worktree,
-				structured: inputs.structured,
-				outputSchema: inputs.outputSchema,
-				outputSchemaOverridesAgent: inputs.outputSchemaOverridesAgent,
-				// Read the live item set through the registry instead of capturing the session, which
-				// would pin its whole graph past park. A revive builds while the registry session is
-				// null, so it renders the cleared set rather than the launch-time pooled instructions.
-				workPoolYieldItems:
-					ownAttachedSession(inputs.id)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
-				ircPeers: ircRoster?.peers ?? [],
-				ircParkedCount: ircRoster?.parkedCount ?? 0,
-				ircOmittedCount: ircRoster?.omittedCount ?? 0,
-				ircSelfId: inputs.ircEnabled ? inputs.id : "",
-			});
-			if (ircRoster) recordIrcRender(inputs, subagentPrompt, ircRoster);
+			const subagentPrompt = buildSubagentSystemPrompt(
+				defaultPrompt,
+				inputs.systemPreset,
+				{
+					agent: inputs.agentSystemPrompt,
+					context: inputs.context,
+					planReference: inputs.planReference,
+					planReferencePath: inputs.planReferencePath,
+					worktree: inputs.worktree,
+					structured: inputs.structured,
+					outputSchema: inputs.outputSchema,
+					outputSchemaOverridesAgent: inputs.outputSchemaOverridesAgent,
+					// Read the live item set through the registry instead of capturing the session, which
+					// would pin its whole graph past park. A revive builds while the registry session is
+					// null, so it renders the cleared set rather than the launch-time pooled instructions.
+					workPoolYieldItems:
+						ownAttachedSession(inputs.id)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
+					ircPeers: ircRoster?.peers ?? [],
+					ircParkedCount: ircRoster?.parkedCount ?? 0,
+					ircOmittedCount: ircRoster?.omittedCount ?? 0,
+					ircSelfId: inputs.ircEnabled ? inputs.id : "",
+				},
+				runtimeInstructions,
+			);
+			if (ircRoster) recordIrcRender(inputs, subagentPrompt.at(-1)!, ircRoster);
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
 			// `<project-context>` block so spawns of the same agent share the static
 			// prompt prefix as a cache hit.
 			const seancePrompt = spec.preparedSession?.promptSuffix(inputs.model);
-			return [...defaultPrompt, subagentPrompt, ...(seancePrompt ? [seancePrompt] : [])];
+			return [...subagentPrompt, ...(seancePrompt ? [seancePrompt] : [])];
 		},
 	};
 }
@@ -4236,15 +4280,22 @@ interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
 	rootThresholds: RootCompactionThresholds | undefined;
+	minimalTaskParentSettings: Settings | undefined;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
-	return { parent, layers: settings.overlayLayers(), rootThresholds: settings[kRootCompactionThresholds] };
+	return {
+		parent: settings.overlayParent() ?? parent,
+		layers: settings.overlayLayers(),
+		rootThresholds: settings[kRootCompactionThresholds],
+		minimalTaskParentSettings: settings[kMinimalTaskParentSettings],
+	};
 }
 
 function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
 	settings[kRootCompactionThresholds] = recipe.rootThresholds;
+	settings[kMinimalTaskParentSettings] = recipe.minimalTaskParentSettings;
 	return settings;
 }
 
@@ -4433,18 +4484,24 @@ export interface SubagentRunRequest {
 	readonly options: ExecutorOptions;
 	/** Root compaction thresholds tagged on `options.settings` (a symbol property, which never crosses). */
 	readonly rootThresholds: RootCompactionThresholds | undefined;
+	readonly minimalTaskParentSettings: Settings | undefined;
 }
 
 /** Package `options` for a worker, carrying what the settings' symbol tag holds explicitly. */
 export function subagentRunRequest(options: ExecutorOptions): SubagentRunRequest {
 	const settings: SubagentChainSettings | undefined = options.settings;
-	return { options, rootThresholds: settings?.[kRootCompactionThresholds] };
+	return {
+		options,
+		rootThresholds: settings?.[kRootCompactionThresholds],
+		minimalTaskParentSettings: settings?.[kMinimalTaskParentSettings],
+	};
 }
 
 /** Worker entry of a routed run: re-tag the settings mirror, then run here. */
 export function runSubagentRunRequest(request: SubagentRunRequest): Promise<SingleResult> {
 	const settings: SubagentChainSettings | undefined = request.options.settings;
 	if (settings && request.rootThresholds) settings[kRootCompactionThresholds] = request.rootThresholds;
+	if (settings) settings[kMinimalTaskParentSettings] = request.minimalTaskParentSettings;
 	return runSubprocessOnThisThread(request.options);
 }
 
@@ -4472,6 +4529,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const preparedSession = options.preparedSession;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = options.structured !== false;
+	const isMinimalTask = agent.systemPreset === "minimal-task";
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
@@ -4539,6 +4597,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				: undefined),
 		},
 		options.parentServiceTier,
+		agent.systemPreset,
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
@@ -4990,14 +5049,14 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames,
 					requireYieldTool: structured,
-					contextFiles: options.contextFiles,
+					contextFiles: isMinimalTask ? [] : options.contextFiles,
 					noContextFiles: options.noContextFiles,
 					// Subagents never receive AGENTS.md, including from additional workspace roots they rediscover.
 					excludeAgentsMd: true,
-					skills: options.skills,
+					skills: isMinimalTask ? [] : options.skills,
 					promptTemplates: options.promptTemplates,
 					workspaceTree: options.workspaceTree,
-					rules: options.rules,
+					rules: isMinimalTask ? [] : options.rules,
 					extensionRoots: options.extensionRoots,
 					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
@@ -5035,6 +5094,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					id,
 					model: progress.resolvedModel,
 					agentSystemPrompt: agent.systemPrompt,
+					systemPreset: agent.systemPreset,
 					context: options.context?.trim() ?? "",
 					planReference: options.planReference?.content ?? "",
 					planReferencePath: options.planReference?.path ?? "",
@@ -5208,6 +5268,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
+				systemPreset: agent.systemPreset,
 				mountedTools: session.getMountedXdevToolNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
@@ -5274,7 +5335,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 
 			checkAbort();
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
-			if (options.autoloadSkills?.length) {
+			if (!isMinimalTask && options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {
 					const { message, details } = await buildSkillPromptMessage(skill, { args: "" }, "autoload", session);
 					await session.sendCustomMessage(

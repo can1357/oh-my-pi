@@ -288,6 +288,7 @@
 
 ### Added
 
+- Added the opt-in `systemPreset: minimal-task` agent frontmatter setting for focused subagents, including faithful native and in-band tool guidance, MCP server instructions, opaque secret-token guidance, and cold-revival behavior ([#6548](https://github.com/can1357/oh-my-pi/pull/6548) by [@dexhunter](https://github.com/dexhunter)).
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed

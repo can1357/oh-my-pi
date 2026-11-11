@@ -25,7 +25,13 @@ import type { AuthStorage } from "../../src/session/auth-storage";
 import { CostGate } from "../../src/session/cost-gate";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
-import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
+import {
+	createSubagentSettings,
+	type ExecutorOptions,
+	runSubagentFollowUpTurn,
+	runSubprocess,
+} from "../../src/task/executor";
+import { cfgInlineToolDescriptors } from "../../src/session/settings";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
 import { type AgentDefinition, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../src/task/types";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
@@ -99,6 +105,7 @@ function chunks(reply: Reply): string {
  * (the job's completion notice, side requests) → `pong`.
  */
 class FakeModelServer {
+	readonly requests: unknown[] = [];
 	readonly #server: Bun.Server<undefined>;
 	readonly #hangs: Array<() => void> = [];
 	#hungRequest = Promise.withResolvers<void>();
@@ -153,6 +160,7 @@ class FakeModelServer {
 		}
 		if (!url.pathname.endsWith("/chat/completions")) return new Response("not found", { status: 404 });
 		const body: unknown = await request.json();
+		this.requests.push(body);
 		const rawMessages: unknown =
 			typeof body === "object" && body !== null ? Reflect.get(body, "messages") : undefined;
 		const messages = Array.isArray(rawMessages) ? rawMessages.filter(isChatMessage) : [];
@@ -341,6 +349,43 @@ function rootSession(): AgentSession {
 }
 
 describe("subagent runs routed into pooled workers", () => {
+	it(
+		"keeps ordinary-child descriptor preferences across worker routing",
+		async () => {
+			cfgInlineToolDescriptors.set(settings, "on");
+			const minimal = createSubagentSettings(settings, undefined, undefined, "minimal-task");
+			const result = await runSubprocess(runOptions("Ordinary", "ping", { settings: minimal }));
+			expect(result.exitCode).toBe(0);
+			expect(server.requests.at(-1)).toMatchObject({
+				tools: expect.arrayContaining([
+					expect.objectContaining({ function: expect.objectContaining({ name: "read", description: "" }) }),
+				]),
+			});
+			cfgInlineToolDescriptors.set(settings, "off");
+			// Settings mirrors send their coalesced updates at the next microtask.
+			await Promise.resolve();
+			// The SDK applies the current descriptor preference when it rebuilds the tool prompt.
+			await mirrorOf(AgentRegistry.global().get("Ordinary")?.session).setWorkPoolYieldItems([
+				{ id: "next", index: 0 },
+			]);
+			const followUp = await runSubagentFollowUpTurn({
+				id: "Ordinary",
+				agent: AGENT,
+				message: "again",
+				structured: false,
+			});
+			expect(followUp.error).toBeUndefined();
+			expect(server.requests.at(-1)).toMatchObject({
+				tools: expect.arrayContaining([
+					expect.objectContaining({
+						function: expect.objectContaining({ name: "read", description: expect.stringMatching(/\S/) }),
+					}),
+				]),
+			});
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	it(
 		"warms a worker with a throwaway session sealed off from main, then runs subagents there",
 		async () => {
