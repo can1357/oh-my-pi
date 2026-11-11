@@ -1077,12 +1077,12 @@ async fn write_text(
 		if !old.as_deref().is_none_or(|old| masks(old, value)) {
 			return Ok(());
 		}
-		// Keep this outside the request future: cancelling the clear or rewrite
-		// can leave the field empty even when no reply arrives.
-		*emptied = true;
 		if replace("").await?.as_deref() != Some("") {
 			return text_readback(value, value, None, true);
 		}
+		// Keep the confirmed clear outside the request future so dropping the
+		// rewrite on timeout or cancellation does not lose the warning.
+		*emptied = true;
 		let rewritten = replace(value).await?;
 		if rewritten
 			.as_deref()
@@ -1434,8 +1434,15 @@ impl AxBackend for AtSpiAx {
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI interfaces: {err}")))?;
 				if interfaces.contains(atspi::Interface::EditableText) {
-					return write_text(&self.connection, &accessible, &name, &object, value, &mut emptied)
-						.await;
+					return write_text(
+						&self.connection,
+						&accessible,
+						&name,
+						&object,
+						value,
+						&mut emptied,
+					)
+					.await;
 				}
 				if !interfaces.contains(atspi::Interface::Value) {
 					return Err(DesktopError::ax_failed(
@@ -1460,8 +1467,8 @@ impl AxBackend for AtSpiAx {
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))
 			})
-			.map_err(|error| text_write_error(error, emptied))
 			.map_err(unconfirmed)
+			.map_err(|error| text_write_error(error, emptied))
 	}
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
@@ -1950,7 +1957,9 @@ mod tests {
 				(Verdict::Ok, Ok(())) => {},
 				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
 				(Verdict::Hidden, Err(err))
-					if !err.message.contains("new") && !err.message.contains(r#""old""#) => {},
+					if !err.message.contains("new")
+						&& !err.message.contains(r#""old""#)
+						&& !err.message.contains("emptied") => {},
 				(Verdict::Emptied, Err(err))
 					if err.message.contains("emptied") && !err.message.contains("new") => {},
 				(_, result) => panic!("{path}: {result:?}"),
@@ -2938,10 +2947,10 @@ mod tests {
 			}
 
 			struct Editable {
-				text: Arc<Mutex<String>>,
-				count: Mutex<usize>,
+				text:    Arc<Mutex<String>>,
+				count:   Mutex<usize>,
 				stop_at: usize,
-				cancel: Option<control::CancellationSource>,
+				cancel:  Option<control::CancellationSource>,
 			}
 			#[interface(name = "org.a11y.atspi.EditableText")]
 			impl Editable {
@@ -2989,11 +2998,15 @@ mod tests {
 					.unwrap_err();
 					assert_eq!(
 						error.code,
-						if cancelled { ErrorCode::Cancelled } else { ErrorCode::Timeout }
+						if cancelled {
+							ErrorCode::Cancelled
+						} else {
+							ErrorCode::Timeout
+						}
 					);
 					assert_eq!(
 						error.message.contains("may now be empty"),
-						stop_at >= 2,
+						stop_at == 3,
 						"stop_at={stop_at}, cancelled={cancelled}: {error:?}"
 					);
 					assert!(!error.message.contains("old secret"));
