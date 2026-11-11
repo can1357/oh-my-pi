@@ -456,11 +456,11 @@ impl X11Input {
 		let pointer = self.core_pointer();
 		self.takeover_presses = Some(presses);
 		if let Err(error) = self.activate_confirmed(window, ewmh, previous_active, budget) {
-			self.takeover_presses = None;
-			control::cleanup(|| {
-				self.restore_activation(window, ewmh, previous_active, previous_focus);
+			return self.finish_takeover(Err(error), |this| {
+				control::cleanup(|| {
+					this.restore_activation(window, ewmh, previous_active, previous_focus);
+				});
 			});
-			return Err(error);
 		}
 		self.takeover_target = Some(window);
 		self.takeover_pointer.set(None);
@@ -537,8 +537,8 @@ impl X11Input {
 		)))
 	}
 
-	/// Re-activates the window that was active before a foreground action
-	/// (or restores the core focus when no EWMH WM tracks activation).
+	/// Restores the previous WM activation and core focus while the target
+	/// still holds the keyboard; EWMH activation can lag the actual focus.
 	fn restore_activation(
 		&self,
 		window: Window,
@@ -547,24 +547,23 @@ impl X11Input {
 		previous_focus: Option<(Window, InputFocus)>,
 	) {
 		let wm = self.wm();
-		if ewmh {
-			let Some(previous) = previous_active.filter(|&previous| previous != window) else {
-				return;
-			};
-			// Never overwrite a deliberate switch to a third window.
-			if wm.active_window() != Some(window)
-				|| !wm
-					.input_focus()
-					.is_some_and(|(focus, _)| wm.is_within(focus, window))
-			{
-				return;
-			}
+		// Core focus says where keys land. A newer switch away from the
+		// target belongs to the user, regardless of the WM's property.
+		if !wm
+			.input_focus()
+			.is_some_and(|(focus, _)| wm.is_within(focus, window))
+		{
+			return;
+		}
+		if ewmh
+			&& let Some(previous) = previous_active.filter(|&previous| previous != window)
+			&& wm.active_window() == Some(window)
+		{
 			let _ = wm.restore_activation(previous, window);
 			let deadline = Instant::now() + FOREGROUND_RESTORE_BUDGET;
 			while Instant::now() < deadline && wm.active_window() == Some(window) {
 				let _ = control::wait(FOREGROUND_POLL);
 			}
-			return;
 		}
 		if let Some((focus, revert)) = previous_focus
 			&& focus > 1
@@ -1650,6 +1649,9 @@ mod tests {
 			})
 			.collect();
 		assert_eq!(recipients, [previous], "the user's key must not reach the takeover target");
+		// A newer core-focus switch away from the target is not ours to undo.
+		input.restore_activation(target, true, Some(root), Some((root, InputFocus::PARENT)));
+		assert_eq!(input.wm().input_focus(), Some((previous, InputFocus::PARENT)));
 		app.delete_property(root, input.atoms.net_active_window)
 			.expect("stop tracking activation");
 		app.sync().expect("property removed");

@@ -267,6 +267,8 @@ A listener started by the takeover itself observes the first 5 s quiet interval 
 
 Admission also checks the server's current core keyboard and pointer-button state, including holds that predate the listener. Every key and button must be released before a takeover starts; a quiet non-repeating modifier or a long drag is not idle.
 
+An activation failure also hands keyboard focus back before returning. Core focus, not a possibly lagging active-window property, determines whether the takeover still owns the keyboard; a newer core-focus switch away from the target is left alone.
+
 - Prefer direct inspection helpers, and use `read_only: true` for `computer.run` whenever no mutation is required.
 - Prefer AX actions because they target a semantic element and do not depend on a stale screenshot.
 - Confirm the exact destination and payload before send, publish, purchase, delete, permission, security, or other consequential actions unless the user's direct request already authorized that exact action.
