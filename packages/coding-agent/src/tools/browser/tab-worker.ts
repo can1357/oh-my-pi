@@ -916,6 +916,9 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 				if (typeof polling === "string" && polling !== "raf" && polling !== "mutation") {
 					throw new Error(`Unknown polling option: ${polling}`);
 				}
+				if (typeof polling === "number" && polling < 0) {
+					throw new Error("Cannot poll with non-positive interval");
+				}
 				const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
 				const waitSignal = options.signal ? AbortSignal.any([signal, options.signal]) : signal;
 				const timedOut = () => puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
