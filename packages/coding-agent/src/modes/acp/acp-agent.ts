@@ -542,6 +542,11 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
  * the caller's promise resolves to the stub fallback. Late SDK responses that
  * arrive after abort/timeout — both rejections and successful `accept`s —
  * are dropped silently (no `logger.warn`) to keep operator logs clean.
+ *
+ * A client rejection that lands before abort/timeout instead rejects with the
+ * RPC error (e.g. a client that cannot render the schema answering -32602),
+ * so callers can tell a transport/rendering failure apart from an explicit
+ * user cancel (`{ action: "cancel" }`, which still resolves `undefined`).
  */
 async function elicitFormFromAcpClient(
 	connection: AgentSideConnection,
@@ -556,7 +561,7 @@ async function elicitFormFromAcpClient(
 	if (signal?.aborted) {
 		return undefined;
 	}
-	const { promise, resolve } = Promise.withResolvers<CreateElicitationResponse | undefined>();
+	const { promise, resolve, reject } = Promise.withResolvers<CreateElicitationResponse | undefined>();
 	let settled = false;
 	let timeoutId: NodeJS.Timeout | undefined;
 	const finish = (value: CreateElicitationResponse | undefined) => {
@@ -565,6 +570,13 @@ async function elicitFormFromAcpClient(
 		clearTimeout(timeoutId);
 		signal?.removeEventListener("abort", onAbort);
 		resolve(value);
+	};
+	const fail = (error: unknown) => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timeoutId);
+		signal?.removeEventListener("abort", onAbort);
+		reject(error);
 	};
 	const onAbort = () => finish(undefined);
 	signal?.addEventListener("abort", onAbort, { once: true });
@@ -601,7 +613,7 @@ async function elicitFormFromAcpClient(
 			// Caller may already have moved on via abort/timeout; suppress noise.
 			if (settled) return;
 			logger.warn("ACP elicitation failed", { acpSessionId: sessionId, method, error });
-			finish(undefined);
+			fail(error);
 		});
 	const response = await promise;
 	if (!isAcceptedElicitation(response) || !response.content) {
@@ -2706,10 +2718,12 @@ export class AcpAgent implements Agent {
 	 * Ask the ACP client to confirm plan approval. Returns `true` only on an
 	 * explicit `APPROVE_OPTION` selection. Refine, dismissal (`undefined`), or
 	 * any unrecognized value falls through to refine semantics — the caller
-	 * keeps plan mode active and surfaces guidance text to the agent. Clients
-	 * without `elicitation.form` support auto-approve because there is no
-	 * confirmation surface available; without that, plan mode would strand
-	 * the agent (the bug this method exists to fix).
+	 * keeps plan mode active and surfaces guidance text to the agent. A client
+	 * transport/rendering failure rejects instead, so it surfaces as a tool
+	 * error rather than a silent refine. Clients without `elicitation.form`
+	 * support auto-approve because there is no confirmation surface available;
+	 * without that, plan mode would strand the agent (the bug this method
+	 * exists to fix).
 	 */
 	async #requestAcpPlanApprovalChoice(sessionId: string, title: string, planContent: string): Promise<boolean> {
 		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;

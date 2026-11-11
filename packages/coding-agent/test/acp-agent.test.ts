@@ -4016,6 +4016,20 @@ describe("ACP agent", () => {
 			expect(await ctx.formDialog!(DEPLOY_FORM)).toBeUndefined();
 		});
 
+		it("rejects when the client rejects the elicitation RPC instead of reporting cancel", async () => {
+			const failure = RequestError.invalidParams(
+				{ method: "elicitation/create" },
+				"Unsupported ACP elicitation form",
+			);
+			const { connection } = createElicitConnection(async () => {
+				throw failure;
+			});
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-rpc-error", FORM_CAPABILITIES);
+
+			await expect(ctx.formDialog!(DEPLOY_FORM)).rejects.toBe(failure);
+			expect(failure.code).toBe(-32602);
+		});
+
 		it("submits the form's defaults when a form elicitation times out", async () => {
 			vi.useFakeTimers();
 			try {
@@ -4199,15 +4213,15 @@ describe("ACP agent", () => {
 			expect(calls).toHaveLength(0);
 		});
 
-		it("treats transport-level elicitation failures as undecided input", async () => {
+		it("rejects transport-level elicitation failures instead of reporting undecided input", async () => {
 			const { connection, calls } = createElicitConnection(async () => {
 				throw new Error("connection closed");
 			});
 			const ctx = createAcpExtensionUiContext(connection, () => "session-throw", FORM_CAPABILITIES);
 
-			expect(await ctx.select("X", ["a"])).toBeUndefined();
-			expect(await ctx.confirm("X", "Y")).toBe(false);
-			expect(await ctx.input("X")).toBeUndefined();
+			await expect(ctx.select("X", ["a"])).rejects.toThrow("connection closed");
+			await expect(ctx.confirm("X", "Y")).rejects.toThrow("connection closed");
+			await expect(ctx.input("X")).rejects.toThrow("connection closed");
 			expect(calls).toHaveLength(3);
 		});
 

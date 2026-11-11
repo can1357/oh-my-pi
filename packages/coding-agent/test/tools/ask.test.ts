@@ -12,9 +12,12 @@ import type {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, recoverAskHtml } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { createAcpExtensionUiContext } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { AgentSideConnection } from "@oh-my-pi/pi-utils/acp";
+import { RequestError } from "@oh-my-pi/pi-utils/acp";
 
 const DB_FORM = `<form>
   <p>Sessions live in memory.</p>
@@ -204,6 +207,30 @@ describe("AskTool form dialog", () => {
 
 		await expect(outcome).rejects.toThrow(new ToolAbortError("Ask tool was cancelled by the user"));
 		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("surfaces an elicitation RPC failure as a tool error without aborting the turn", async () => {
+		const failure = RequestError.invalidParams({ method: "elicitation/create" }, "Unsupported ACP elicitation form");
+		expect(failure.code).toBe(-32602);
+		const connection = {
+			unstable_createElicitation: async () => {
+				throw failure;
+			},
+		} as unknown as AgentSideConnection;
+		const ui = createAcpExtensionUiContext(connection, () => "session-elicitation-error", {
+			elicitation: { form: {} },
+		});
+		const abort = vi.fn();
+		const outcome = new AskTool(createSession()).execute(
+			"call-elicitation-error",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			createContext({ formDialog: ui.formDialog!.bind(ui), abort }),
+		);
+
+		await expect(outcome).rejects.toBe(failure);
+		expect(abort).not.toHaveBeenCalled();
 	});
 
 	it("tells the model a form without named controls needs one, without showing it", async () => {
