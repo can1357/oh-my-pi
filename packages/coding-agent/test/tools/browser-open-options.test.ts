@@ -175,15 +175,29 @@ describe("browser open options CDP helpers", () => {
 		expect(await Bun.file(path.join(directory, "report.txt")).exists()).toBe(false);
 	});
 
-	it("leaves a directory named by a UUID GUID in place", async () => {
+	it("leaves a directory named by a UUID GUID in place and fails the wait, since no file was saved", async () => {
 		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
 		const folder = path.join(elsewhere, guid);
 		await Bun.write(path.join(folder, "notes.txt"), "notes");
 
-		expect(await complete(guid, folder)).toBe(folder);
+		const error = await rejectionOf(complete(guid, folder));
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain(`no file is at ${folder} on this machine`);
 		expect(await Bun.file(path.join(folder, "notes.txt")).text()).toBe("notes");
 		expect(await Bun.file(path.join(directory, "report.txt")).exists()).toBe(false);
+	});
+
+	// The wait gives Chromium's rename into place about a second before it fails.
+	it("fails the wait on a completed download whose file is not on this machine, as a remote browser's is", async () => {
+		const { directory, elsewhere, downloads, complete } = await fakeDownloads(async () => undefined, false);
+		const remote = path.join(elsewhere, "report.txt");
+
+		const error = await rejectionOf(complete(crypto.randomUUID(), remote));
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain(`no file is at ${remote} on this machine`);
+		expect(downloads.list()).toEqual([]);
+		expect(await fs.readdir(directory)).toEqual([]);
 	});
 
 	it("keeps a directory named like the download when the rename takes the Windows replacement path", async () => {
