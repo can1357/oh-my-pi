@@ -65,9 +65,7 @@ describe("native-window frame timeout cleanup", () => {
 		const clear = vi.spyOn(globalThis, "clearTimeout");
 		try {
 			const result =
-				probe === "tab"
-					? readTabFrame(page)
-					: nativeWindows.readBrowserPageFrames({ pages: async () => [] });
+				probe === "tab" ? readTabFrame(page) : nativeWindows.readBrowserPageFrames({ pages: async () => [] });
 			pending.resolve(FRAME);
 			expect(await result).toEqual(probe === "tab" ? FRAME : []);
 			expect(timer).toHaveBeenCalledWith(expect.any(Function), 300);
