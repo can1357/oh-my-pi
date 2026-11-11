@@ -1205,6 +1205,9 @@ impl Worker {
 				.map(|found| (found, "in the window with the role, labels and value"))
 		};
 		let Ok((Some(found), fields)) = candidate else {
+			if !relabelled {
+				return error;
+			}
 			message.push_str(" Re-run ax()/find()");
 			return DesktopError::stale_ref(message);
 		};

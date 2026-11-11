@@ -1151,12 +1151,18 @@ impl AxBackend for MacAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
+		let entry_front = input::EntryFront::now();
 		let pid = element_pid(element)?;
 		// Arm the front-app guard before any synchronous AX probe, including
 		// the ref fingerprint: the user can pick this app while it blocks.
-		let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
+		let started_in_background = entry_front.known_behind(pid);
 		skylight::with_background_guard(pid, || {
 			require_read_as(|| read_as(element))?;
+			let wid = element_window(element)
+				.as_deref()
+				.and_then(window_id)
+				.unwrap_or_default();
+			entry_front.require_behind(skylight::front_pid(), pid, wid)?;
 			// A popup's value is chosen from its menu, not written. This runs
 			// before the text-target refusals: nothing is typed or written, and
 			// the verdict is the popup's own read-back after a real menu press.
@@ -1165,11 +1171,7 @@ impl AxBackend for MacAx {
 			if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
 				// Choosing opens the popup's menu, so the release helper starts
 				// up front.
-				return release_guard::scope(Presses::Process, || {
-					skylight::with_background_guard(element_pid(element)?, || {
-						popup::choose(element, value)
-					})
-				});
+				return release_guard::scope(Presses::Process, || popup::choose(element, value));
 			}
 			// Web AXValue can echo a write without the renderer accepting it. The
 			// API has no "unverified" outcome, so refuse before mutating that
