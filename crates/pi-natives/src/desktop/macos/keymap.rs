@@ -27,6 +27,9 @@ pub(super) struct Keystroke {
 
 pub(super) struct Keymap {
 	strokes: HashMap<char, Keystroke>,
+	/// The key whose Command layer gives each character: what an app reads
+	/// from a Command shortcut. Non-Latin layouts put Latin letters there.
+	command: HashMap<char, u16>,
 }
 
 /// Virtual key codes of Return and Tab, which are the same on every layout;
@@ -38,6 +41,7 @@ const MAX_KEY_CODE: u16 = 127;
 /// `UCKeyTranslate` modifier bits (`EventModifiers` shifted right by 8).
 const SHIFT_STATE: u32 = 0x02;
 const OPTION_STATE: u32 = 0x08;
+const COMMAND_STATE: u32 = 0x01;
 const KEY_ACTION_DOWN: u16 = 0;
 
 /// Writes the current layout's keyboard type and `uchr` data to a file.
@@ -115,7 +119,8 @@ impl Keymap {
 
 	/// Keeps, per character, the first key that types it, trying no
 	/// modifiers, then Shift, Option and Shift-Option, and main keys before
-	/// the keypad, whose digits and operators repeat the main row.
+	/// the keypad, whose digits and operators repeat the main row; and,
+	/// apart, the first key whose Command layer gives it.
 	fn build(translate: impl Fn(u16, u32) -> Option<char>) -> Self {
 		let codes = (0..=MAX_KEY_CODE)
 			.filter(|&code| !is_keypad(code))
@@ -131,14 +136,25 @@ impl Keymap {
 				}
 			}
 		}
+		let mut command = HashMap::new();
+		for code in codes {
+			if let Some(character) = translate(code, COMMAND_STATE) {
+				command.entry(character).or_insert(code);
+			}
+		}
 		for (character, code) in [('\r', RETURN), ('\n', RETURN), ('\t', TAB)] {
 			strokes.insert(character, Keystroke { code, shift: false, option: false });
 		}
-		Self { strokes }
+		Self { strokes, command }
 	}
 
 	pub(super) fn stroke(&self, character: char) -> Option<Keystroke> {
 		self.strokes.get(&character).copied()
+	}
+
+	/// The key whose Command layer gives `character`.
+	pub(super) fn command_key(&self, character: char) -> Option<u16> {
+		self.command.get(&character).copied()
 	}
 }
 
@@ -235,15 +251,18 @@ mod tests {
 
 	/// Key 0 types `q`/`Q`/`@`, key 1 types `é` only with Shift-Option, keypad
 	/// 83 and main 18 both type `1`, and Return yields a control character.
+	/// Key 2 types `ф`, and `a` under Command, as a Russian layout's does.
 	fn translate(code: u16, state: u32) -> Option<char> {
 		match (code, state) {
-			(0, 0) => Some('q'),
+			(0, 0 | COMMAND_STATE) => Some('q'),
 			(0, SHIFT_STATE) => Some('Q'),
 			(0, OPTION_STATE) => Some('@'),
 			(1, 0) => Some('e'),
 			(1, 0x0a) => Some('é'),
 			(18 | 83, 0) => Some('1'),
 			(83, SHIFT_STATE) => Some('+'),
+			(2, 0) => Some('ф'),
+			(2, COMMAND_STATE) => Some('a'),
 			(RETURN, _) => single_char(&[0x0d]),
 			_ => None,
 		}
@@ -266,6 +285,16 @@ mod tests {
 		assert_eq!(keymap.stroke('\r'), stroke(RETURN, false, false));
 		assert_eq!(keymap.stroke('\t'), stroke(TAB, false, false));
 		assert_eq!(keymap.stroke('😀'), None);
+	}
+
+	#[test]
+	fn command_shortcuts_map_to_the_key_of_the_layouts_command_layer() {
+		let keymap = Keymap::build(translate);
+		assert_eq!(keymap.command_key('q'), Some(0));
+		assert_eq!(keymap.command_key('a'), Some(2));
+		assert_eq!(keymap.stroke('a'), None);
+		assert_eq!(keymap.command_key('ф'), None);
+		assert_eq!(keymap.command_key('1'), None);
 	}
 
 	#[test]

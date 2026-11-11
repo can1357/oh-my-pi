@@ -260,7 +260,7 @@ impl MacInput {
 		}
 		// The whole text is mapped before anything is posted, so a character a
 		// remote screen cannot receive refuses cleanly.
-		let keys = keys_for(window, text, remote, layout_strokes)?;
+		let keys = keys_for(window, text, remote, || layout_strokes(KeyLayer::Typing))?;
 		let gap = key_gap(remote);
 		match mode {
 			DeliveryMode::Background => {
@@ -317,8 +317,8 @@ impl MacInput {
 	}
 
 	/// Presses `keys` in `window`; with an `element`, once that element holds
-	/// keyboard focus ([`element_keys`]). On a remote screen the keys are the
-	/// user's keyboard layout's ([`chord_keys`]).
+	/// keyboard focus ([`element_keys`]). The keys are the user's keyboard
+	/// layout's ([`chord_keys`]).
 	fn window_chord(
 		&self,
 		window: &DesktopWindow,
@@ -399,9 +399,13 @@ impl MacInput {
 		capture: &MacCapture,
 	) -> CoreResult<()> {
 		match target {
-			Target::Desktop | Target::Display(_) => {
-				with_held_keys(&self.source, keys, KEY_GAP, post_global, || control::wait(duration))
-			},
+			Target::Desktop | Target::Display(_) => hold_presses(
+				&self.source,
+				&local_chord(keys, layout_strokes)?,
+				KEY_GAP,
+				post_global,
+				|| control::wait(duration),
+			),
 			Target::Window(id) => {
 				// Read before anything about the target ([`EntryFront::before`]).
 				let entry_front = EntryFront::now();
@@ -477,10 +481,19 @@ fn require_phone_screen(window: &DesktopWindow, remote: Option<RemoteScreen>) ->
 	Ok(())
 }
 
-/// The current keyboard layout's lookup from character to key; `None` when
-/// the layout has no Unicode key layout data to look keys up in.
-fn layout_strokes() -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
-	Ok(Keymap::current()?.map(|keymap| move |character| keymap.stroke(character)))
+/// The current keyboard layout's lookup from character to key in `layer`;
+/// `None` when the layout has no Unicode key layout data to look keys up in.
+fn layout_strokes(layer: KeyLayer) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
+	Ok(Keymap::current()?.map(|keymap| {
+		move |character| match layer {
+			KeyLayer::Typing => keymap.stroke(character),
+			KeyLayer::Command => keymap.command_key(character).map(|code| Keystroke {
+				code,
+				shift: false,
+				option: false,
+			}),
+		}
+	}))
 }
 
 /// [`physical_modifier_check`] for `window` when `remote` forwards the
@@ -3667,16 +3680,7 @@ const fn first_key_settle(activated: bool) -> Duration {
 }
 
 fn global_chord(source: &CGEventSource, keys: &[KeyName]) -> CoreResult<()> {
-	key_chord(source, keys, KEY_GAP, post_global)
-}
-
-fn key_chord(
-	source: &CGEventSource,
-	keys: &[KeyName],
-	gap: Duration,
-	post: impl FnMut(&CGEvent) -> CoreResult<()>,
-) -> CoreResult<()> {
-	press_chord(source, &ansi_keys(keys)?, gap, post)
+	press_chord(source, &local_chord(keys, layout_strokes)?, KEY_GAP, post_global)
 }
 
 fn press_chord(
@@ -3720,28 +3724,92 @@ fn empty_chord() -> DesktopError {
 	DesktopError::invalid_key("key chord must not be empty")
 }
 
-/// The presses for the chord `keys` into `window`. A remote screen hands key
-/// codes to the remote computer, which reads them through its own layout, so
-/// a character there is the key of the layout `layout` looks up.
+/// The keyboard layout layer a chord's characters are looked up in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyLayer {
+	/// The keys that type each character, with the Shift or Option it needs.
+	Typing,
+	/// The keys an app reads a Command shortcut's character from.
+	Command,
+}
+
+/// The presses for the chord `keys` into `window`, each character on the key
+/// of the current layout that `layout` looks up. An app reads a local key
+/// code through that layout, and a Command shortcut through its Command layer
+/// (AZERTY's has `a` where ANSI has `q`); a character the layout lacks, or
+/// every character when the layout publishes no key data, stays at its ANSI
+/// key. A remote screen hands key codes to the remote computer, which reads
+/// them through its own layout, so a character no key types there is refused.
 fn chord_keys<S: Fn(char) -> Option<Keystroke>>(
 	window: &DesktopWindow,
 	keys: &[KeyName],
 	remote: Option<RemoteScreen>,
-	layout: impl FnOnce() -> CoreResult<Option<S>>,
+	layout: impl FnOnce(KeyLayer) -> CoreResult<Option<S>>,
 ) -> CoreResult<Vec<KeyPress>> {
-	match remote {
-		Some(_) => layout_chord(window, keys, remote_layout(window, layout)?),
-		None => ansi_keys(keys),
+	if remote.is_some() {
+		let stroke = remote_layout(window, || layout(KeyLayer::Typing))?;
+		return layout_chord(keys, stroke, |character| {
+			Err(DesktopError::invalid_key(format!(
+				"window {} ({}) shows a remote screen, which receives key codes, and no key on the \
+				 current keyboard layout types '{character}'; nothing was sent",
+				window.id, window.app,
+			)))
+		});
 	}
+	local_chord(keys, layout)
 }
 
-/// `keys` with each character on `stroke`'s key for it, preceded by the Shift
-/// or Option that key needs unless the chord already names it. Letters are
-/// matched case-insensitively, as on the ANSI path.
+/// `keys` for a local app, which reads each key code through the current
+/// layout and a Command shortcut through its Command layer ([`chord_keys`]).
+/// A chord with no character reads no layout. A Ctrl or Option chord without
+/// Command takes a character's layout key only when that key needs no
+/// modifier the chord does not name: an app matches those shortcuts by key
+/// and modifiers, so AZERTY's `ctrl+1` stays Ctrl on the `1` key, unshifted,
+/// as the user presses it. A failed layout read, other than a cancelled one,
+/// leaves every character on its ANSI key, as before layouts were read.
+fn local_chord<S: Fn(char) -> Option<Keystroke>>(
+	keys: &[KeyName],
+	layout: impl FnOnce(KeyLayer) -> CoreResult<Option<S>>,
+) -> CoreResult<Vec<KeyPress>> {
+	if !keys.iter().any(|key| matches!(key, KeyName::Char(_))) {
+		return ansi_keys(keys);
+	}
+	let command = keys.contains(&KeyName::Meta);
+	let layer = if command {
+		KeyLayer::Command
+	} else {
+		KeyLayer::Typing
+	};
+	let stroke = match layout(layer) {
+		Ok(Some(stroke)) => stroke,
+		Ok(None) => return ansi_keys(keys),
+		Err(error) if error.code == ErrorCode::Cancelled => return Err(error),
+		Err(_) => return ansi_keys(keys),
+	};
+	let shortcut = !command
+		&& keys
+			.iter()
+			.any(|key| matches!(key, KeyName::Ctrl | KeyName::Alt));
+	let unadded = |key: &Keystroke| {
+		!shortcut
+			|| ((!key.shift || keys.contains(&KeyName::Shift))
+				&& (!key.option || keys.contains(&KeyName::Alt)))
+	};
+	layout_chord(
+		keys,
+		|character| stroke(character).filter(unadded),
+		|character| Ok(Keystroke { code: char_key_code(character)?, shift: false, option: false }),
+	)
+}
+
+/// `keys` with each character on `stroke`'s key for it, or `missing`'s when
+/// it has none, preceded by the Shift or Option that key needs unless the
+/// chord already names it. Letters are matched case-insensitively, as on the
+/// ANSI path.
 fn layout_chord(
-	window: &DesktopWindow,
 	keys: &[KeyName],
 	stroke: impl Fn(char) -> Option<Keystroke>,
+	missing: impl Fn(char) -> CoreResult<Keystroke>,
 ) -> CoreResult<Vec<KeyPress>> {
 	let mut chord = Vec::with_capacity(keys.len() + 2);
 	for &name in keys {
@@ -3749,13 +3817,10 @@ fn layout_chord(
 			chord.push(KeyPress { name, code: key_code(name)? });
 			continue;
 		};
-		let key = stroke(character.to_ascii_lowercase()).ok_or_else(|| {
-			DesktopError::invalid_key(format!(
-				"window {} ({}) shows a remote screen, which receives key codes, and no key on the \
-				 current keyboard layout types '{character}'; nothing was sent",
-				window.id, window.app,
-			))
-		})?;
+		let key = match stroke(character.to_ascii_lowercase()) {
+			Some(key) => key,
+			None => missing(character)?,
+		};
 		for (needed, modifier) in [(key.shift, KeyName::Shift), (key.option, KeyName::Alt)] {
 			// Once per chord: a second Shift would be released, in reverse,
 			// while the first character's key is still down.
@@ -4948,7 +5013,7 @@ mod tests {
 	fn remote_takeover_chords_press_their_modifiers_as_keys() {
 		let window = screen_sharing();
 		let chord = |keys: &[KeyName]| {
-			chord_keys(&window, keys, Some(RemoteScreen::KeyEvents), || Ok(Some(us_stroke))).unwrap()
+			chord_keys(&window, keys, Some(RemoteScreen::KeyEvents), |_| Ok(Some(us_stroke))).unwrap()
 		};
 		// Screen Sharing reads modifiers from the keyboard state, which only
 		// key transitions move: Command is down while a is pressed.
@@ -5277,7 +5342,7 @@ mod tests {
 		let none = || -> LayoutRead { Ok(None) };
 		for error in [
 			keys_for(&window, "a", Some(RemoteScreen::KeyEvents), none).unwrap_err(),
-			chord_keys(&window, &[KeyName::Char('a')], Some(RemoteScreen::HidReports), none)
+			chord_keys(&window, &[KeyName::Char('a')], Some(RemoteScreen::HidReports), |_| none())
 				.unwrap_err(),
 		] {
 			assert_eq!(error.code, ErrorCode::InputFailed);
@@ -5304,15 +5369,10 @@ mod tests {
 		let press = |name, code| KeyPress { name, code };
 		let remote = Some(RemoteScreen::KeyEvents);
 		let window = screen_sharing();
-		let layout = || Ok(Some(azerty));
+		let layout = |_| Ok(Some(azerty));
 		assert_eq!(chord_keys(&window, &[KeyName::Char('Q')], remote, layout).unwrap(), [press(
 			KeyName::Char('Q'),
 			0
-		)]);
-		let local = || -> LayoutRead { panic!("a local chord reads no keyboard layout") };
-		assert_eq!(chord_keys(&window, &[KeyName::Char('q')], None, local).unwrap(), [press(
-			KeyName::Char('q'),
-			12
 		)]);
 		// The Shift a character needs joins the chord, so Screen Sharing's
 		// background modifier check refuses it before anything is sent.
@@ -5328,12 +5388,92 @@ mod tests {
 	}
 
 	#[test]
+	fn local_chords_press_the_layouts_key_and_command_shortcuts_its_command_layer() {
+		// French AZERTY: a sits on the ANSI q key and z on the ANSI w key, in
+		// its Command layer too, so ANSI codes made Command-A quit and
+		// Command-Z close the window. 1 needs Shift on the ANSI 1 key, whose
+		// Command layer gives &.
+		let layers = std::cell::RefCell::new(Vec::new());
+		let azerty = |layer| {
+			layers.borrow_mut().push(layer);
+			Ok(Some(move |character| {
+				let key = |code, shift| Some(Keystroke { code, shift, option: false });
+				match (layer, character) {
+					(_, 'a') => key(12, false),
+					(_, 'z') => key(13, false),
+					(KeyLayer::Typing, '1') => key(18, true),
+					_ => None,
+				}
+			}))
+		};
+		let press = |name, code| KeyPress { name, code };
+		let meta = press(KeyName::Meta, 55);
+		let window = background_window("TextEdit");
+		let chord = |keys: &[KeyName]| chord_keys(&window, keys, None, azerty).unwrap();
+		assert_eq!(chord(&[KeyName::Meta, KeyName::Char('a')]), [
+			meta,
+			press(KeyName::Char('a'), 12)
+		]);
+		assert_eq!(chord(&[KeyName::Meta, KeyName::Char('Z')]), [
+			meta,
+			press(KeyName::Char('Z'), 13)
+		]);
+		// A character the Command layer lacks stays on its ANSI key, with no
+		// Shift added to the shortcut.
+		assert_eq!(chord(&[KeyName::Meta, KeyName::Char('1')]), [
+			meta,
+			press(KeyName::Char('1'), 18)
+		]);
+		assert_eq!(chord(&[KeyName::Char('1')]), [
+			press(KeyName::Shift, 56),
+			press(KeyName::Char('1'), 18)
+		]);
+		assert_eq!(*layers.borrow(), [
+			KeyLayer::Command,
+			KeyLayer::Command,
+			KeyLayer::Command,
+			KeyLayer::Typing
+		]);
+		// A layout without key data leaves every key at its ANSI position.
+		let none = |_| -> LayoutRead { Ok(None) };
+		assert_eq!(chord_keys(&window, &[KeyName::Meta, KeyName::Char('a')], None, none).unwrap(), [
+			meta,
+			press(KeyName::Char('a'), 0)
+		]);
+		// A Ctrl or Option shortcut gains no modifier: AZERTY's ctrl+1 is
+		// Ctrl on the 1 key, unshifted, while ctrl+a takes the layout's a.
+		let ctrl = press(KeyName::Ctrl, 59);
+		assert_eq!(chord(&[KeyName::Ctrl, KeyName::Char('1')]), [
+			ctrl,
+			press(KeyName::Char('1'), 18)
+		]);
+		assert_eq!(chord(&[KeyName::Ctrl, KeyName::Char('a')]), [
+			ctrl,
+			press(KeyName::Char('a'), 12)
+		]);
+		// A chord without a character reads no layout.
+		let unread = |_| -> LayoutRead { panic!("a chord without a character reads no layout") };
+		let tab = [KeyName::Meta, KeyName::Tab];
+		assert_eq!(chord_keys(&window, &tab, None, unread).unwrap(), ansi_keys(&tab).unwrap());
+		// A failed read leaves the ANSI keys; a cancelled one stops the call.
+		let keys = [KeyName::Meta, KeyName::Char('a')];
+		let failed = |_| -> LayoutRead { Err(DesktopError::input_failed("helper exited 1")) };
+		assert_eq!(chord_keys(&window, &keys, None, failed).unwrap(), [
+			meta,
+			press(KeyName::Char('a'), 0)
+		]);
+		let cancelled = |_| -> LayoutRead { Err(DesktopError::cancelled("cancelled")) };
+		let error = chord_keys(&window, &keys, None, cancelled).unwrap_err();
+		assert_eq!(error.code, ErrorCode::Cancelled);
+	}
+
+	#[test]
 	fn a_remote_chord_presses_a_modifier_two_characters_need_only_once() {
 		// US: ! is Shift-1 and € Shift-Option-2. A second Shift would be
 		// released, in reverse, while 1 is still down.
 		let press = |name, code| KeyPress { name, code };
 		let keys = [KeyName::Char('!'), KeyName::Char('€')];
-		let layout = || Ok(Some(us_stroke));
+		let layout = |_| Ok(Some(us_stroke));
 		assert_eq!(
 			chord_keys(&screen_sharing(), &keys, Some(RemoteScreen::HidReports), layout).unwrap(),
 			[
@@ -5488,16 +5628,21 @@ mod tests {
 		let token = cancellation.token();
 		let mut events = Vec::new();
 		let result = control::with_token_for_test(&token, || {
-			key_chord(&source, &[KeyName::Ctrl, KeyName::Char('a')], KEY_GAP, |event| {
-				events.push((
-					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
-					CGEvent::flags(Some(event)).contains(CGEventFlags::MaskControl),
-				));
-				if events.len() == 1 {
-					cancellation.cancel();
-				}
-				Ok(())
-			})
+			press_chord(
+				&source,
+				&ansi_keys(&[KeyName::Ctrl, KeyName::Char('a')]).unwrap(),
+				KEY_GAP,
+				|event| {
+					events.push((
+						CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
+						CGEvent::flags(Some(event)).contains(CGEventFlags::MaskControl),
+					));
+					if events.len() == 1 {
+						cancellation.cancel();
+					}
+					Ok(())
+				},
+			)
 		});
 		assert!(result.is_err());
 		assert_eq!(events, [(59, true), (59, false)]);
@@ -5570,17 +5715,22 @@ mod tests {
 			let _watch = listener
 				.admit(7, &token)
 				.expect("the user has not used TextEdit");
-			key_chord(&source, &[KeyName::Ctrl, KeyName::Enter], KEY_GAP, |event| {
-				post_guarded(event, intervention_guard(|| Ok(())), |event| {
-					// The user types in TextEdit right after Ctrl goes down.
-					listener.record_for_test(7, Instant::now());
-					events.push((
-						CGEvent::r#type(Some(event)).0,
-						CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
-					));
-					Ok(())
-				})
-			})
+			press_chord(
+				&source,
+				&ansi_keys(&[KeyName::Ctrl, KeyName::Enter]).unwrap(),
+				KEY_GAP,
+				|event| {
+					post_guarded(event, intervention_guard(|| Ok(())), |event| {
+						// The user types in TextEdit right after Ctrl goes down.
+						listener.record_for_test(7, Instant::now());
+						events.push((
+							CGEvent::r#type(Some(event)).0,
+							CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
+						));
+						Ok(())
+					})
+				},
+			)
 		};
 		let error = result.unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
@@ -6737,20 +6887,26 @@ mod tests {
 	fn interrupted_chord_releases_every_attempted_key() {
 		let source = source().expect("Quartz event source");
 		let mut events = Vec::new();
-		let result = key_chord(&source, &[KeyName::Ctrl, KeyName::Enter], KEY_GAP, |event| {
-			let kind = CGEvent::r#type(Some(event));
-			let code = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
-			events.push((
-				kind.0,
-				code,
-				CGEvent::flags(Some(event)).contains(CGEventFlags::MaskControl),
-			));
-			if matches!(kind, CGEventType::KeyDown) && code == 36 {
-				Err(DesktopError::input_failed("focus changed"))
-			} else {
-				Ok(())
-			}
-		});
+		let result = press_chord(
+			&source,
+			&ansi_keys(&[KeyName::Ctrl, KeyName::Enter]).unwrap(),
+			KEY_GAP,
+			|event| {
+				let kind = CGEvent::r#type(Some(event));
+				let code =
+					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+				events.push((
+					kind.0,
+					code,
+					CGEvent::flags(Some(event)).contains(CGEventFlags::MaskControl),
+				));
+				if matches!(kind, CGEventType::KeyDown) && code == 36 {
+					Err(DesktopError::input_failed("focus changed"))
+				} else {
+					Ok(())
+				}
+			},
+		);
 		assert!(result.is_err());
 		// Quartz expresses modifier transitions as FlagsChanged; the final
 		// cleared flag proves Ctrl is released even when Enter's press fails.
@@ -6791,8 +6947,11 @@ mod tests {
 	fn failed_modifier_press_leaves_no_flag_on_cleanup_releases() {
 		let source = source().expect("Quartz event source");
 		let mut events = Vec::new();
-		let result =
-			key_chord(&source, &[KeyName::Ctrl, KeyName::Shift, KeyName::Enter], KEY_GAP, |event| {
+		let result = press_chord(
+			&source,
+			&ansi_keys(&[KeyName::Ctrl, KeyName::Shift, KeyName::Enter]).unwrap(),
+			KEY_GAP,
+			|event| {
 				let kind = CGEvent::r#type(Some(event));
 				let code =
 					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
@@ -6804,7 +6963,8 @@ mod tests {
 				} else {
 					Ok(())
 				}
-			});
+			},
+		);
 		assert!(result.is_err());
 		// Shift's failed press is released first, so no later release still
 		// carries its flag.
