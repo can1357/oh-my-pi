@@ -191,6 +191,11 @@ export class SandboxHostConnection {
 		return this.#failure !== undefined;
 	}
 
+	/** Settles with the host's exit code once its process is gone. */
+	get exited(): Promise<number> {
+		return this.#child.exited;
+	}
+
 	/** Runs `listener` once the connection fails or closes. */
 	onExit(listener: () => void): void {
 		if (this.#failure) listener();
@@ -789,7 +794,11 @@ export async function smokeTestSandboxHost(): Promise<void> {
 		}
 		process.stdout.write(`smoke-test: sandbox ok (${support.backend ?? "unknown"})\n`);
 	} finally {
-		connection?.kill("smoke test done");
+		if (connection) {
+			connection.kill("smoke test done");
+			// Windows refuses to delete the workspace while the host still has it as its cwd.
+			await connection.exited;
+		}
 		await runtime.dispose();
 		if (outsideDir !== undefined) fs.rmSync(outsideDir, { recursive: true, force: true });
 		fs.rmSync(workspace, { recursive: true, force: true });

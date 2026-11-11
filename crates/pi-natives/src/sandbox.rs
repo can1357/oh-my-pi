@@ -19,9 +19,9 @@ use std::{
 };
 
 use mxc_sdk::v1::{
-	self, BackendCapability, ContainerRequest, Containment, FilesystemPolicy, MxcProcess,
+	self, BackendCapability, ClipboardPolicy, ContainerRequest, Containment, FilesystemPolicy, MxcProcess,
 	NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, NetworkRuntimeConfig,
-	ProxyEnforcement, RunOptions, SpawnOptions, TelemetryConfig, WaitResult,
+	ProxyEnforcement, RunOptions, SpawnOptions, TelemetryConfig, UiPolicy, WaitResult,
 	policy::filesystem::{
 		FilesystemPolicyResult, ToolsPolicyOptions, available_tools_policy, temporary_files_policy,
 		user_profile_policy,
@@ -544,6 +544,15 @@ fn build_request(
 			clear_policy_on_exit: None,
 		}),
 		network: Some(network),
+		// MXC's default UI policy disables Win32k system calls, and every program
+		// that links user32 (git, powershell, Git's bash, the pi_natives addon)
+		// then dies in DLL init with STATUS_DLL_INIT_FAILED. Keep Win32k; the
+		// job object still denies clipboard access and input injection.
+		ui: windows.then(|| UiPolicy {
+			disable:               false,
+			clipboard:             ClipboardPolicy::None,
+			allow_input_injection: false,
+		}),
 		containment: Containment::Process,
 		working_directory: cwd,
 		environment: Some(env.into_iter().collect()),
@@ -1107,6 +1116,12 @@ mod tests {
 		};
 		let request = build_request(options, Backend::ProcessContainer, false, true).unwrap();
 		assert_eq!(request.command, r#""node.exe" "a b""#);
+		// MXC's default disables Win32k, which kills every user32 client (git,
+		// powershell) in DLL init; clipboard and input injection stay denied.
+		let ui = request.ui.expect("Windows requests carry an explicit UI policy");
+		assert!(!ui.disable);
+		assert!(matches!(ui.clipboard, ClipboardPolicy::None));
+		assert!(!ui.allow_input_injection);
 	}
 
 	#[test]
