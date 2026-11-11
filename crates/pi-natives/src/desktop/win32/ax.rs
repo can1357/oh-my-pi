@@ -481,7 +481,7 @@ impl AxBackend for Win32Ax {
 	fn set_value(&mut self, handle: &AxHandle, text: &str) -> CoreResult<()> {
 		let element = Self::element(handle)?;
 		let secure = element.is_password().unwrap_or(true);
-		let hwnd = native_window(element);
+		let hwnd = native_window(element).map(super::value_write::combo_target);
 		let class = hwnd.map_or_default(window::class_name);
 		match super::value_write::route(&class) {
 			super::value_write::ValueRoute::Combo => {
