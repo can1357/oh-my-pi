@@ -377,11 +377,10 @@ mod tests {
 		cached(&slot, later, read).unwrap();
 		assert_eq!(reads.get(), 3);
 		// A focus change can select AZERTY even while the old map is fresh.
-		let switched = chord_layout(&slot, || {
-			Ok(Some(Keymap::build(|code, _| (code == 12).then_some('a'))))
-		})
-		.unwrap()
-		.unwrap();
+		let switched =
+			chord_layout(&slot, || Ok(Some(Keymap::build(|code, _| (code == 12).then_some('a')))))
+				.unwrap()
+				.unwrap();
 		assert_eq!(switched.command_key('a'), Some(12));
 		// Returning focus selects the previous layout again. Neither the
 		// pre-activation nor the operation-local map can be reused now.
@@ -391,11 +390,10 @@ mod tests {
 		// Desktop/background character chords also read each source anew,
 		// even when the user changes French -> US within the remote-text TTL.
 		for code in [12, 0] {
-			let active = chord_layout(&slot, || {
-				Ok(Some(Keymap::build(|key, _| (key == code).then_some('a'))))
-			})
-			.unwrap()
-			.unwrap();
+			let active =
+				chord_layout(&slot, || Ok(Some(Keymap::build(|key, _| (key == code).then_some('a')))))
+					.unwrap()
+					.unwrap();
 			assert_eq!(active.command_key('a'), Some(code));
 		}
 	}

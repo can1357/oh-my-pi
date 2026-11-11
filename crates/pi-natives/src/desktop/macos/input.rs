@@ -484,7 +484,9 @@ fn require_phone_screen(window: &DesktopWindow, remote: Option<RemoteScreen>) ->
 }
 
 /// Remote text retains its existing short-lived layout cache.
-fn cached_layout_strokes(layer: KeyLayer) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
+fn cached_layout_strokes(
+	layer: KeyLayer,
+) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
 	Ok(Keymap::current()?.map(|keymap| layout_lookup(layer, keymap)))
 }
 
