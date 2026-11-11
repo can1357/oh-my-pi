@@ -18,11 +18,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import * as path from "node:path";
 import { isPromise } from "node:util/types";
 import { getLogsDir, localDay } from "./dirs";
+import { pruneStaleProcessLogs } from "./logger/prune";
 import { RotatingFileSink } from "./logger/rotating-file";
-import { isPidAlive } from "./pid";
 import { setStderrRedirectTarget } from "./stderr-guard";
 import { drainModuleLoadEvents } from "./timing-buffer";
 import { isRecord } from "./type-guards";
@@ -169,105 +168,6 @@ function dispatchToSinks(event: LogEvent): void {
 		} catch {
 			// Sinks are side channels; they must never break local logging.
 		}
-	}
-}
-
-const PROCESS_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.(\d+)\.log(?:\.(\d+))?$/;
-/** Per-process audit files written by earlier releases; current sinks track rotations in memory. */
-const PROCESS_AUDIT_PATTERN = /^\.omp\.(\d+)-audit\.json$/;
-/** Shared daily logs (plain, size-rolled, or gzipped) written by the winston-era logger. */
-const LEGACY_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.log(?:\.\d+)?(?:\.gz)?$/;
-/** Hash-named audit files written by winston-daily-rotate-file. */
-const LEGACY_AUDIT_PATTERN = /^\.[0-9a-f]{8,}-audit\.json$/;
-const RETAINED_STALE_LOGS_PER_PROCESS_DAY = 1;
-const RETAINED_STALE_LOG_DAYS = 5;
-
-/**
- * Retain one newest completed-process log per process/day within the current
- * and previous four local calendar days, remove completed-process audit files
- * left by earlier releases, and age out legacy shared daily logs and their
- * hash-named audits past the same window. Live PID namespaces are never
- * touched. The calendar-day boundary preserves daily diagnostic coverage while
- * bounding completed-process storage and scans.
- */
-function pruneStaleProcessLogs(dir: string): void {
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	const current = new Date();
-	const currentDate = localDay(current);
-	const cutoff = new Date(current);
-	cutoff.setDate(cutoff.getDate() - (RETAINED_STALE_LOG_DAYS - 1));
-	const cutoffDate = localDay(cutoff);
-	cutoff.setHours(0, 0, 0, 0);
-	const cutoffMs = cutoff.getTime();
-
-	const staleLogsByProcessDay = new Map<string, Array<{ path: string; rollover: number }>>();
-	for (const entry of entries) {
-		if (!entry.isFile()) continue;
-		const entryPath = path.join(dir, entry.name);
-		const legacyMatch = LEGACY_LOG_PATTERN.exec(entry.name);
-		if (legacyMatch?.[1]) {
-			if (legacyMatch[1] < cutoffDate) removeBestEffort(entryPath);
-			continue;
-		}
-		if (LEGACY_AUDIT_PATTERN.test(entry.name)) {
-			try {
-				if (fs.statSync(entryPath).mtimeMs < cutoffMs) removeBestEffort(entryPath);
-			} catch {
-				// Another process may have pruned the same legacy audit.
-			}
-			continue;
-		}
-		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
-		const auditMatch = PROCESS_AUDIT_PATTERN.exec(entry.name);
-		const pidText = logMatch?.[2] ?? auditMatch?.[1];
-		if (!pidText || isPidAlive(Number(pidText))) continue;
-
-		if (auditMatch) {
-			removeBestEffort(entryPath);
-			continue;
-		}
-		if (!logMatch?.[1]) continue;
-		if (logMatch[1] < cutoffDate || logMatch[1] > currentDate) {
-			removeBestEffort(entryPath);
-			continue;
-		}
-
-		const key = `${pidText}:${logMatch[1]}`;
-		const staleLogs = staleLogsByProcessDay.get(key) ?? [];
-		staleLogs.push({
-			path: entryPath,
-			rollover: Number(logMatch[3] ?? 0),
-		});
-		staleLogsByProcessDay.set(key, staleLogs);
-	}
-
-	for (const staleLogs of staleLogsByProcessDay.values()) {
-		if (staleLogs.length <= RETAINED_STALE_LOGS_PER_PROCESS_DAY) continue;
-		const ranked: Array<{ path: string; mtimeMs: number; rollover: number }> = [];
-		for (const stale of staleLogs) {
-			try {
-				ranked.push({ ...stale, mtimeMs: fs.statSync(stale.path).mtimeMs });
-			} catch {
-				// Another process may have pruned the same stale namespace.
-			}
-		}
-		ranked.sort(
-			(a, b) => b.mtimeMs - a.mtimeMs || b.rollover - a.rollover || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
-		);
-		for (const stale of ranked.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) removeBestEffort(stale.path);
-	}
-}
-
-function removeBestEffort(filePath: string): void {
-	try {
-		fs.rmSync(filePath, { force: true });
-	} catch {
-		// Retention is best-effort; another process may have pruned the same file.
 	}
 }
 

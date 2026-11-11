@@ -29,7 +29,8 @@ it("runs continue()'s queued-message hooks and its loop under the agent's log co
 	await logger.withContext({ sessionId: "caller" }, () => agent.continue());
 	logger.flush();
 
-	const [logName] = await fs.readdir(logsDir);
+	const [logName] = (await fs.readdir(logsDir)).filter(name => name.startsWith("omp."));
+	if (!logName) throw new Error("expected a process log file");
 	const probes = (await Bun.file(path.join(logsDir, logName)).text())
 		.trim()
 		.split("\n")

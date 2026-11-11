@@ -35,7 +35,8 @@ function useLogsDir(): { dir: string; logsDir: string } {
 
 async function readRecords(logsDir: string): Promise<LogRecord[]> {
 	logger.flush();
-	const [logName] = await fs.readdir(logsDir);
+	const [logName] = (await fs.readdir(logsDir)).filter(name => name.startsWith("omp."));
+	if (!logName) throw new Error("expected a process log file");
 	return (await Bun.file(path.join(logsDir, logName)).text())
 		.trim()
 		.split("\n")

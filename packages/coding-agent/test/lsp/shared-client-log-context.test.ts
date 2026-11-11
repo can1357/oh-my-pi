@@ -25,7 +25,8 @@ it("names no session on records of an LSP client shared across sessions", async 
 	});
 	logger.flush();
 
-	const [logName] = await fs.readdir(logsDir);
+	const [logName] = (await fs.readdir(logsDir)).filter(name => name.startsWith("omp."));
+	if (!logName) throw new Error("expected a process log file");
 	const resync = (await Bun.file(path.join(logsDir, logName)).text())
 		.trim()
 		.split("\n")

@@ -44,7 +44,7 @@ describe("logger thread service", () => {
 
 	async function fileRecords(): Promise<FileRecord[]> {
 		logger.flush();
-		const names = await fs.readdir(logsDir);
+		const names = (await fs.readdir(logsDir)).filter(name => name.startsWith("omp."));
 		expect(names).toHaveLength(1);
 		const text = await Bun.file(path.join(logsDir, names[0] ?? "")).text();
 		return text
@@ -97,7 +97,8 @@ describe("logger thread service", () => {
 	it("flushes main's file from the worker", async () => {
 		await fixture?.probe.log([{ level: "info", message: "flushed" }]);
 		expect(await fixture?.probe.flush()).toBe(true);
-		const names = await fs.readdir(logsDir);
+		const names = (await fs.readdir(logsDir)).filter(name => name.startsWith("omp."));
+		expect(names).toHaveLength(1);
 		const text = await Bun.file(path.join(logsDir, names[0] ?? "")).text();
 		expect(text).toContain('"message":"flushed"');
 	});

@@ -90,6 +90,10 @@ async function logFileNames(directory: string): Promise<string[]> {
 		.sort();
 }
 
+async function nonLockEntries(directory: string): Promise<string[]> {
+	return (await fs.readdir(directory)).filter(name => name !== ".prune-stamp.lock").sort();
+}
+
 async function readSingleLog(directory: string): Promise<{ name: string; text: string }> {
 	const names = await logFileNames(directory);
 	expect(names).toHaveLength(1);
@@ -395,7 +399,7 @@ describe("DailyRotateFile option and retention contract", () => {
 				expectedLine(result.pid, "info", `date-${day}`, {}, timestamp),
 			);
 		}
-		expect((await fs.readdir(result.primaryDir)).sort()).toEqual(expectedNames);
+		expect(await nonLockEntries(result.primaryDir)).toEqual(expectedNames);
 	});
 
 	test("crosses 10 MiB before rolling the following record to suffix .1", async () => {
@@ -421,6 +425,6 @@ describe("DailyRotateFile option and retention contract", () => {
 		expect(await fs.readFile(path.join(result.primaryDir, rotatedName), "utf8")).toBe(
 			expectedLine(result.pid, "info", "rotation-trigger"),
 		);
-		expect((await fs.readdir(result.primaryDir)).sort()).toEqual([baseName, rotatedName]);
+		expect(await nonLockEntries(result.primaryDir)).toEqual([baseName, rotatedName]);
 	});
 });

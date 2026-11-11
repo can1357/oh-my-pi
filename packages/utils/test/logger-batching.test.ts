@@ -35,7 +35,10 @@ function writtenSizes(): number[] {
 }
 
 function readLines(directory: string): string[] {
-	const names = fs.readdirSync(directory).sort();
+	const names = fs
+		.readdirSync(directory)
+		.filter(name => name.startsWith("omp."))
+		.sort();
 	return names.flatMap(name =>
 		fs
 			.readFileSync(path.join(directory, name), "utf8")
@@ -86,7 +89,10 @@ describe("logger file batching", () => {
 		const burstWrites = writtenSizes();
 		logger.flush();
 
-		const fileBytes = fs.readdirSync(dir).reduce((sum, name) => sum + fs.statSync(path.join(dir, name)).size, 0);
+		const fileBytes = fs
+			.readdirSync(dir)
+			.filter(name => name.startsWith("omp."))
+			.reduce((sum, name) => sum + fs.statSync(path.join(dir, name)).size, 0);
 		expect(burstWrites.length).toBeGreaterThan(0);
 		expect(burstWrites.length).toBeLessThanOrEqual(Math.floor(fileBytes / FLUSH_BYTES));
 		for (const size of burstWrites) expect(size).toBeGreaterThanOrEqual(FLUSH_BYTES);
