@@ -10,6 +10,7 @@ import {
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	ThinkingLevel,
+	type ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	canReplayRemoteCompaction,
@@ -443,14 +444,14 @@ export interface SessionAdvisorsOptions {
 	 */
 	createEditTool?(): AgentTool | undefined;
 	/**
-	 * The execute-time context the bridge's tools resolve approval from.
+	 * The execute-time context for advisor loop and bridge tools.
 	 *
 	 * `ExtensionToolWrapper` reads the approval mode, per-tool policies and
 	 * `autoApprove` only from here; with none it fails closed to `always-ask`
 	 * with empty policies (no user grant), so a native frame that needs a
 	 * prompt cannot run unattended.
 	 */
-	getToolContext?: () => AgentToolContext | undefined;
+	getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	/**
 	 * The live MCP connections Cursor's resource frames answer from.
 	 *
@@ -1482,6 +1483,18 @@ export class SessionAdvisors {
 				providerSessionState: this.#host.providerSessionState,
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
+				// The primary's context, scoped to this advisor: a tool that cancels
+				// (`ask`) stops the advisor, and `bash` judges commands against the
+				// tools the advisor has, not the primary's.
+				getToolContext: toolCall => {
+					const context = this.#advisorGetToolContext?.(toolCall);
+					if (!context) return undefined;
+					return {
+						...context,
+						abort: () => advisorAgent.abort(),
+						toolNames: advisorAgent.state.tools.map(tool => tool.name),
+					};
+				},
 				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
