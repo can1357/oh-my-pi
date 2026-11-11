@@ -32,10 +32,12 @@ import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
+	assertModelSupportsEffortCeiling,
 	automaticThinkingLevel,
 	type ConfiguredThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
+	modelSupportsEffortCeiling,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -175,6 +177,8 @@ export class ModelControls {
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** Hard per-model effort ceiling (e.g. a task spawn's `task.maxEffort` entries); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: ThinkingLevelCeiling | undefined;
+	/** Setting the ceiling comes from (e.g. `task.maxActualEffort`), named in a refused switch's error. */
+	readonly #thinkingLevelCeilingSetting: string | undefined;
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
@@ -185,6 +189,7 @@ export class ModelControls {
 			scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: ThinkingLevelCeiling;
+			thinkingLevelCeilingSetting?: string;
 			serviceTierByFamily?: ServiceTierByFamily;
 		},
 	) {
@@ -192,6 +197,7 @@ export class ModelControls {
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
+		this.#thinkingLevelCeilingSetting = options.thinkingLevelCeilingSetting;
 		if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
 			this.#autoThinking = true;
@@ -223,6 +229,23 @@ export class ModelControls {
 	/** Hard per-model effort ceiling every thinking-level change is clamped to. */
 	get thinkingLevelCeiling(): ThinkingLevelCeiling | undefined {
 		return this.#thinkingLevelCeiling;
+	}
+
+	/**
+	 * Whether `model` can run under its effort ceiling: uncapped, no controllable effort, or a
+	 * supported effort at or below its cap. Clamping cannot fix a model whose lowest effort is above
+	 * its cap, so every model switch checks this first: automatic ones (fallback, promotion, prewalk)
+	 * skip such a model, and {@link setModel}/{@link setModelTemporary}/model cycling refuse it.
+	 */
+	fitsEffortCeiling(model: Model): boolean {
+		const ceiling = this.#thinkingLevelCeiling?.(model);
+		return ceiling === undefined || modelSupportsEffortCeiling(model, ceiling);
+	}
+
+	/** @throws RangeError naming the ceiling setting when `model` fails {@link fitsEffortCeiling}. */
+	#assertFitsEffortCeiling(model: Model): void {
+		const ceiling = this.#thinkingLevelCeiling?.(model);
+		if (ceiling !== undefined) assertModelSupportsEffortCeiling(model, ceiling, this.#thinkingLevelCeilingSetting);
 	}
 
 	/** Configured selector, preserving `auto` while classification is active. */
@@ -313,6 +336,7 @@ export class ModelControls {
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		this.#assertFitsEffortCeiling(targetModel);
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
@@ -359,6 +383,7 @@ export class ModelControls {
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		this.#assertFitsEffortCeiling(targetModel);
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
@@ -482,6 +507,7 @@ export class ModelControls {
 		const next = scopedModels[nextIndex];
 
 		// Apply model
+		this.#assertFitsEffortCeiling(next.model);
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
@@ -513,6 +539,7 @@ export class ModelControls {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
 
+		this.#assertFitsEffortCeiling(nextModel);
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);

@@ -214,6 +214,8 @@ export interface AgentSessionConfig {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard per-model ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort` entry); every later change, including retry-fallback recovery, is re-clamped to the active model's ceiling. */
 	thinkingLevelCeiling?: ThinkingLevelCeiling;
+	/** Setting {@link thinkingLevelCeiling} comes from (e.g. `task.maxActualEffort`), named when a model switch is refused for it. */
+	thinkingLevelCeilingSetting?: string;
 	/**
 	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
 	 * with, its own model instead. Startup model selection, and the return to the primary after a

@@ -86,7 +86,7 @@ import { customMessageEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entr
 import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import { isCompleteReadResult } from "../tools/read-supersede";
-import { type ConfiguredThinkingLevel, modelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
@@ -428,8 +428,8 @@ export interface SessionMaintenanceHost {
 	isDisposed(): boolean;
 	/** Model fallback is disabled (a per-call `model` subagent): no context promotion. */
 	modelFallbackDisabled?(): boolean;
-	/** Hard per-model effort ceiling (a task spawn's), or `undefined` when uncapped. */
-	thinkingLevelCeiling?(model: Model): Effort | undefined;
+	/** Whether `model` can run under the session's effort ceiling ({@link ModelControls.fitsEffortCeiling}). */
+	modelFitsEffortCeiling?(model: Model): boolean;
 	isStreaming(): boolean;
 	isGeneratingHandoff(): boolean;
 	promptGeneration(): number;
@@ -3660,8 +3660,7 @@ export class SessionMaintenance {
 		const targetModel = await this.resolveContextPromotionTarget(currentModel, contextWindow);
 		if (!targetModel) return false;
 		// Like a retry fallback, never promote onto a model whose effort floor sits above its ceiling.
-		const ceiling = this.#host.thinkingLevelCeiling?.(targetModel);
-		if (ceiling !== undefined && !modelSupportsEffortCeiling(targetModel, ceiling)) return false;
+		if (this.#host.modelFitsEffortCeiling?.(targetModel) === false) return false;
 
 		try {
 			await this.#host.setModelTemporary(targetModel, undefined, { ephemeral: true });

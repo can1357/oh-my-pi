@@ -41,7 +41,6 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
-	modelSupportsEffortCeiling,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditModeSetting } from "../edit/settings";
@@ -276,6 +275,8 @@ export interface TurnRecoveryHost {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 	/** Hard per-model effort ceiling for `model`; fallback recovery must never raise thinking above it. */
 	thinkingLevelCeiling(model: Model): Effort | undefined;
+	/** Whether `model` can run under its effort ceiling (`ModelControls.fitsEffortCeiling`); fallbacks skip it otherwise. */
+	modelFitsEffortCeiling(model: Model): boolean;
 	/** Re-clamps an `auto` session's current resolution to the active model's ceiling, keeping `auto`. */
 	clampAutoThinkingToCeiling(): void;
 	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
@@ -2120,8 +2121,7 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
 				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
-				const ceiling = this.#host.thinkingLevelCeiling(candidateModel);
-				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
+				if (!this.#host.modelFitsEffortCeiling(candidateModel)) continue;
 				// Skip a candidate whose window cannot hold the live context so we
 				// never switch onto an oversized request (issue #8065).
 				if (!this.#host.contextFitsModel(candidateModel)) continue;
@@ -2412,8 +2412,7 @@ export class TurnRecovery {
 				}
 				// A candidate whose effort floor exceeds the per-spawn ceiling would be
 				// clamped UP past the cap by its model floor — skip it entirely.
-				const ceiling = this.#host.thinkingLevelCeiling(candidate);
-				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
+				if (!this.#host.modelFitsEffortCeiling(candidate)) continue;
 				// Skip a candidate whose window cannot hold the retry context. The
 				// failed assistant is excluded only when retry removes it; preserved
 				// unexecuted-tool turns remain part of the request (issue #8065).
@@ -2555,8 +2554,8 @@ export class TurnRecovery {
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
 		// Like any fallback, the base model runs under its own effort ceiling, and is skipped when its floor is above it.
+		if (!this.#host.modelFitsEffortCeiling(baseModel)) return false;
 		const ceiling = this.#host.thinkingLevelCeiling(baseModel);
-		if (ceiling !== undefined && !modelSupportsEffortCeiling(baseModel, ceiling)) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
@@ -2628,7 +2627,7 @@ export class TurnRecovery {
 		);
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
-		if (!primaryModel) return false;
+		if (!primaryModel || !this.#host.modelFitsEffortCeiling(primaryModel)) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
 

@@ -5082,6 +5082,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							}
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
+					thinkingLevelCeilingSetting: ceilingSetting?.id,
 					// Subagents are short-lived; never schedule background warm requests.
 					cacheWarming: false,
 					toolNames,
