@@ -23,6 +23,7 @@ import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-codin
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -392,6 +393,32 @@ describe("AgentSession client intent identity", () => {
 		const reopened = await SessionManager.open(origin, undefined, undefined, { throwIfMissing: true });
 		expect(reopened.isClientMessageResolved("intent-owned")).toBe(true);
 		await manager.close();
+	});
+
+	test("a queued input whose image preprocessing crosses a session change cannot reuse an ID the destination took", async () => {
+		const normalizing = Promise.withResolvers<void>();
+		const finishNormalizing = Promise.withResolvers<void>();
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			// Text-only inputs normalize nothing; hold just the image-bearing follow-up.
+			if (!images?.length) return images;
+			normalizing.resolve();
+			await finishNormalizing.promise;
+			return images;
+		});
+		const { session, manager } = setup();
+		const image = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
+		const queued = session.followUp("with image", [image], intent("intent-crossing"));
+		await withTimeout(normalizing.promise, 5_000, "Image normalization never started");
+		expect(await session.newSession()).toBe(true);
+		// The destination never saw the ID, so a new prompt there may take it.
+		await session.prompt("destination request", intent("intent-crossing"));
+		finishNormalizing.resolve();
+		await expect(queued).rejects.toThrow("clientMessageId already submitted: intent-crossing");
+		await session.settleInFlightMessagePersistence();
+		const carriers = manager
+			.getEntries()
+			.filter(entry => entry.type === "message" && entry.clientMessageId === "intent-crossing");
+		expect(carriers).toHaveLength(1);
 	});
 
 	test("a custom expansion retargeted by a session change cannot reuse an ID the destination took", async () => {

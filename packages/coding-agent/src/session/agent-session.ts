@@ -8896,11 +8896,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							return false;
 						}
 						text = customResult;
-						// A session change while the command ran retargets its prompt: its ID was only
-						// admitted in the journal it left, so admit and reserve it again here.
-						if (registration && registration.journalId !== this.sessionManager.getSessionId()) {
-							this.#reserveClientMessageId(registration.id);
-						}
+						// A session change while the command ran retargets its prompt: admit its ID there too.
+						if (registration) this.#readmitClientMessageId(registration.id, registration.journalId);
 					}
 				} finally {
 					if (registration) await this.finishLocalClientMessage(registration, consumed);
@@ -10055,6 +10052,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
 		this.#reserveClientMessageId(options?.clientMessageId);
+		const admittedJournal = this.sessionManager.getSessionId();
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -10086,6 +10084,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		this.#readmitClientMessageId(options.clientMessageId, admittedJournal);
 		this.#allowQueuedMessageDrainRetry();
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		const directive: AgentMessage = {
@@ -10283,6 +10282,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// description was in flight and drop a record that would otherwise land in a
 		// different session's queue.
 		const sessionGeneration = this.#sessionGeneration;
+		// The journal this input's ID was admitted in, for re-admission after the awaits below.
+		const admittedJournal = this.sessionManager.getSessionId();
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed. An aside is non-interrupting by design — it must
@@ -10328,6 +10329,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+			this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
@@ -10343,6 +10345,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#resumeStrandedIrcAsides();
 			return true;
 		}
+		// Normalization and the vision description can span a journal change (switch, branch).
+		this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
 		// The session-agent notice rides via prependMessages (from prompt()),
 		// so it arrives alongside the user message in the same turn (#14093).
 		const queued = this.#pushQueuedUserMessage(
@@ -11357,6 +11361,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#clientMessageAdmissions = { sessionId: journalId, ids: new Set() };
 		}
 		this.#clientMessageAdmissions.ids.add(id);
+	}
+
+	/**
+	 * Re-admit `id` when awaited work crossed a session change: its reservation lives in the journal
+	 * that admitted it (`admittedJournal`), so check and reserve it in the current one instead of
+	 * sharing an ID the destination already took.
+	 */
+	#readmitClientMessageId(id: string | undefined, admittedJournal: string): void {
+		if (id === undefined || admittedJournal === this.sessionManager.getSessionId()) return;
+		this.#reserveClientMessageId(id);
 	}
 
 	#trackClientMessage(message: AgentMessage, clientMessageId: string | undefined): void {
