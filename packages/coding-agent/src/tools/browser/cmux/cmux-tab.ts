@@ -1049,7 +1049,7 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async select(selector: string, ...values: SelectOptionInput[]): Promise<string[]> {
-		const choices = normalizeSelectOptions(values);
+		const choices = normalizeSelectOptions(values, { coercePrimitives: true });
 		return await this.#selectorAction<string[]>(selector, "select", { values: choices });
 	}
 

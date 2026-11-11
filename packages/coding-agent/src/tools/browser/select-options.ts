@@ -6,9 +6,16 @@ export type SelectOptionChoice =
 	| { kind: "string" | "label" | "value"; value: string }
 	| { kind: "index"; value: number };
 
-export function normalizeSelectOptions(values: readonly unknown[]): SelectOptionChoice[] {
+export function normalizeSelectOptions(
+	values: readonly unknown[],
+	options?: { coercePrimitives: boolean },
+): SelectOptionChoice[] {
 	return values.map(value => {
 		if (typeof value === "string") return { kind: "string", value };
+		// Tern and cmux have always stringified non-object choices.
+		if (options?.coercePrimitives && (value === null || typeof value !== "object")) {
+			return { kind: "string", value: String(value) };
+		}
 		if (value && typeof value === "object") {
 			const keys = Object.keys(value);
 			const key = keys.length === 1 ? keys[0] : undefined;

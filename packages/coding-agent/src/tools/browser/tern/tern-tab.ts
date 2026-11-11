@@ -2508,7 +2508,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Select `<select>` options by value, label, or zero-based index. */
 	async select(selector: string | TernSelector, ...values: SelectOptionInput[]): Promise<string[]> {
-		const choices = normalizeSelectOptions(values);
+		const choices = normalizeSelectOptions(values, { coercePrimitives: true });
 		const spec = this.#spec(selector);
 		await this.#target(`tab.select(${describe(selector)})`, spec, "point", null);
 		return await this.#onKit(spec, null, (kitSpec, kitFrame) =>

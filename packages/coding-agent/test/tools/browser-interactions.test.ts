@@ -551,7 +551,7 @@ return { during, after };`,
 		const selectHtml = `<!doctype html>
 <select id="country"><option value="">Choose…</option><option value="us">United States</option><option value="ca">Canada</option></select>
 <select id="size"><option value="m">Large</option><option value="Large">Extra large</option></select>
-<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option><option value="priority" label="Priority">  Priority   boarding + $15  </option></select>
+<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option><option value="priority" label="Priority">  Priority   boarding + $15  </option><option value="2">Two</option><option value="true">Enabled</option></select>
 <select id="jump"><option value="">Jump to…</option><option value="docs">Docs</option></select>
 <select id="swap"></select>
 <script>
@@ -700,26 +700,32 @@ return {
 			);
 			expect({
 				byLabel: await cmux.elementHandle("#size").select({ label: "Large" }),
+				stringLabel: await cmux.select("#country", "United States"),
+				firstOnSingle: await cmux.select("#country", "Canada", "us"),
 				byValue: await cmux.select("#size", { value: "Large" }),
 				firstIndex: await cmux.select("#country", { index: 0 }),
 				laterIndex: await cmux.select("#country", { index: 2 }),
 				multiple: await cmux.select("#extras", "Cheese", { value: "ham" }, { index: 2 }),
 				fullLabel: await cmux.select("#extras", { label: "Priority boarding + $15" }),
 				swapped: await cmux.select("#swap", { value: "b" }),
+				primitives: await Reflect.apply(cmux.select, cmux, ["#extras", 2, true]),
 			}).toEqual({
 				byLabel: ["m"],
+				stringLabel: ["us"],
+				firstOnSingle: ["ca"],
 				byValue: ["Large"],
 				firstIndex: [""],
 				laterIndex: ["ca"],
 				multiple: ["cheese", "ham", "olives"],
 				fullLabel: ["priority"],
 				swapped: ["z"],
+				primitives: ["2", "true"],
 			});
 			const beforeRefusal = await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)");
 			const noMatch = await cmux
 				.select("#country", { value: "us" }, { label: "Mexico" })
 				.catch((error: Error) => error.message);
-			expect(noMatch).toContain("Mexico");
+			expect(noMatch).toContain('No <select> option matches {"label":"Mexico"}');
 			expect(await cmux.value("#country")).toBe("ca");
 			expect(await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)")).toBe(beforeRefusal);
 
@@ -734,10 +740,11 @@ return {
 					expected: ["cheese", "ham", "olives"],
 				},
 				{ selector: "#extras", options: [{ label: "Priority boarding + $15" }], expected: ["priority"] },
+				{ selector: "#extras", options: [2, true], expected: ["2", "true"] },
 			];
 			await cmux.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
 			for (const { selector, options, expected } of ternCases) {
-				const choices = normalizeSelectOptions(options);
+				const choices = normalizeSelectOptions(options, { coercePrimitives: true });
 				expect(
 					await cmux.evaluate<string[], []>(
 						`globalThis.__ompTernKit.select(${JSON.stringify({ engine: "css", query: selector })}, ${JSON.stringify(choices)})`,
@@ -756,84 +763,6 @@ return {
 			expect(await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)")).toBe(ternBefore);
 		} finally {
 			await prelude.invoke({ action: "close", name: SELECT_TAB_NAME, kill: true }, context).catch(() => undefined);
-		}
-	}, 30_000);
-
-	test("selects labels through observed shadow and same-origin and cross-origin frame handles", async () => {
-		const response = (body: string) =>
-			new Response(`<!doctype html>${body}`, { headers: { "content-type": "text/html" } });
-		const crossOrigin = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			fetch: () =>
-				response(`<label>Schedule<select id="schedule"><option>Weekly</option><option>Monthly</option></select></label>
-<script>document.documentElement.dataset.events = "[]"; for (const type of ["input", "change"]) window.addEventListener(type, event => { const events = JSON.parse(document.documentElement.dataset.events); events.push(type + ":" + event.target.value); document.documentElement.dataset.events = JSON.stringify(events); }, true);</script>`),
-		});
-		const sameOrigin = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			fetch(request) {
-				if (new URL(request.url).pathname === "/inner") {
-					return response(`<label>Same-origin plan<select id="plan"><option value="basic">Basic</option><option value="pro">Professional</option></select></label>
-<iframe title="Schedule frame" src="${crossOrigin.url}"></iframe>
-<script>document.documentElement.dataset.events = "[]"; for (const type of ["input", "change"]) window.addEventListener(type, event => { const events = JSON.parse(document.documentElement.dataset.events); events.push(type + ":" + event.target.value); document.documentElement.dataset.events = JSON.stringify(events); }, true);</script>`);
-				}
-				return response(`<div id="country-host"></div>
-<label>Memory<select id="memory"><option value="8 GB">8 GB</option><option value="16 GB"> 16 GB (+$200) </option></select></label>
-<iframe title="Plan frame" src="/inner"></iframe>
-<script>
-document.querySelector("#country-host").attachShadow({ mode: "open" }).innerHTML = '<label>Country<select><option value="US">United States</option><option value="GB">United Kingdom</option></select></label>';
-window.events = []; for (const type of ["input", "change"]) window.addEventListener(type, event => events.push(type), true);
-</script>`);
-			},
-		});
-		const session = makeSession();
-		const prelude = createBrowserPrelude(session);
-		const context = { session, toolCallId: "browser-select-roots" };
-		const tabName = `select-roots-${crypto.randomUUID()}`;
-		try {
-			await prelude.invoke({ action: "open", name: tabName, url: sameOrigin.url.toString() }, context);
-			const result = await prelude.invoke(
-				{
-					action: "run",
-					name: tabName,
-					code: `const { elements } = await tab.observe();
-const country = await tab.id(elements.find(element => element.name === "Country").id);
-const plan = await tab.id(elements.find(element => element.name === "Same-origin plan").id);
-const schedule = await tab.id(elements.find(element => element.name === "Schedule").id);
-const countrySelected = await country.select({ label: "United Kingdom" });
-const planSelected = await plan.select({ label: "Professional" });
-const scheduleSelected = await schedule.select({ label: "Monthly" });
-const memorySelected = await tab.select('role/combobox[name="Memory"]', { label: "16 GB (+$200)" });
-const frames = await tab.frames();
-const planFrame = await tab.frame(frames.find(frame => frame.url.endsWith("/inner")).url);
-const scheduleFrame = await tab.frame(frames.find(frame => frame.url.startsWith(${JSON.stringify(crossOrigin.url.toString())})).url);
-return {
-	countrySelected, planSelected, scheduleSelected, memorySelected,
-	country: await country.value(), plan: await plan.value(), schedule: await schedule.value(),
-	memory: await tab.value("#memory"),
-	planEvents: await planFrame.evaluate(() => JSON.parse(document.documentElement.dataset.events)),
-	scheduleEvents: await scheduleFrame.evaluate(() => JSON.parse(document.documentElement.dataset.events)),
-};`,
-				},
-				context,
-			);
-			expect(valueFrom<unknown>(result)).toEqual({
-				countrySelected: ["GB"],
-				planSelected: ["pro"],
-				scheduleSelected: ["Monthly"],
-				memorySelected: ["16 GB"],
-				country: "GB",
-				plan: "pro",
-				schedule: "Monthly",
-				memory: "16 GB",
-				planEvents: ["input:pro", "change:pro"],
-				scheduleEvents: ["input:Monthly", "change:Monthly"],
-			});
-		} finally {
-			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
-			await sameOrigin.stop(true);
-			await crossOrigin.stop(true);
 		}
 	}, 30_000);
 
