@@ -13,8 +13,6 @@ use crate::desktop::{
 	types::DesktopWindow,
 };
 
-#[cfg(test)]
-mod getall_tests;
 mod menus;
 
 pub struct AtSpiAx {
@@ -542,14 +540,7 @@ impl AtSpiAx {
 			let multiline = state
 				.as_ref()
 				.is_some_and(|states| states.contains(State::MultiLine));
-			let value = if let Some(name) = object.name().cloned() {
-				let builder = atspi::proxy::text::TextProxy::builder(connection.connection())
-					.destination(name)
-					.and_then(|builder| builder.path(object.path().clone()));
-				text_value(builder).await
-			} else {
-				None
-			};
+			let value = text_value(connection.connection(), &object).await;
 			let bounds = if bounds == WalkBounds::Read {
 				frames
 					.screen_bounds(connection.connection(), native.as_deref(), &object)
@@ -973,11 +964,15 @@ async fn text_contents(
 /// crashes Qt 5 and Qt 6 before 6.9.2, and GTK 3 and Firefox apps on
 /// at-spi2-core before 2.45; newer Qt refuses it.
 async fn text_value(
-	builder: zbus::Result<zbus::proxy::Builder<'_, atspi::proxy::text::TextProxy<'_>>>,
+	connection: &atspi::zbus::Connection,
+	object: &ObjectRefOwned,
 ) -> Option<String> {
-	let text = builder
+	let text = atspi::proxy::text::TextProxy::builder(connection)
+		.destination(object.name()?.clone())
 		.ok()?
-		.cache_properties(zbus::proxy::CacheProperties::No)
+		.path(object.path().clone())
+		.ok()?
+		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
 		.build()
 		.await
 		.ok()?;
@@ -1418,6 +1413,93 @@ impl AtSpiAx {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn text_value_reads_text_without_get_all() {
+		use atspi::zbus::{
+			MessageStream, connection::Builder as ConnectionBuilder, message::Type, zvariant::Value,
+		};
+		use futures::StreamExt;
+
+		const TEXT: &str = "org.a11y.atspi.Text";
+		const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
+		const PEER: &str = ":1.7";
+
+		// Reject GetAll on any interface rather than crashing as affected apps
+		// do.
+		async fn app(server: atspi::zbus::Connection, calls: &mut Vec<(String, String)>) {
+			let mut stream = MessageStream::from(&server);
+			while let Some(message) = stream.next().await {
+				let message = message.unwrap();
+				if message.message_type() != Type::MethodCall {
+					continue;
+				}
+				let header = message.header();
+				let interface = header.interface().unwrap().as_str();
+				let member = header.member().unwrap().as_str();
+				match (interface, member) {
+					(PROPERTIES, "GetAll") => {
+						let requested: String = message.body().deserialize().unwrap();
+						calls.push((member.to_owned(), requested));
+						server
+							.reply_error(
+								&header,
+								"org.freedesktop.DBus.Error.NotSupported",
+								&"GetAll is unsafe",
+							)
+							.await
+							.unwrap();
+					},
+					(PROPERTIES, "Get") => {
+						let (requested, property): (String, String) =
+							message.body().deserialize().unwrap();
+						assert_eq!((requested.as_str(), property.as_str()), (TEXT, "CharacterCount"));
+						calls.push((member.to_owned(), format!("{requested}.{property}")));
+						server.reply(&header, &Value::from(12_i32)).await.unwrap();
+					},
+					(TEXT, "GetText") => {
+						let (start, end): (i32, i32) = message.body().deserialize().unwrap();
+						let result: String = "initial text"
+							.chars()
+							.skip(usize::try_from(start).unwrap())
+							.take(usize::try_from(end - start).unwrap())
+							.collect();
+						server.reply(&header, &result).await.unwrap();
+					},
+					_ => panic!("unexpected AT-SPI call: {interface}.{member}"),
+				}
+			}
+		}
+
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let (text, calls) = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let server = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p()
+				.build();
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(server, client).unwrap();
+			let object = ObjectRefOwned::from_static_str_unchecked(PEER, "/text");
+			let mut calls = Vec::new();
+			let text = tokio::select! {
+				text = text_value(&client, &object) => text,
+				() = app(server, &mut calls) => unreachable!("the app stopped answering"),
+			};
+			(text, calls)
+		});
+
+		assert!(
+			calls.iter().all(|(member, _)| member != "GetAll"),
+			"unsafe property calls: {calls:?}"
+		);
+		assert_eq!(text.as_deref(), Some("initial text"));
+		assert!(
+			calls.iter().any(|(member, property)| member == "Get"
+				&& property == "org.a11y.atspi.Text.CharacterCount")
+		);
+	}
 
 	#[test]
 	fn generic_press_never_selects_an_unrelated_editing_action() {
