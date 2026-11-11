@@ -573,6 +573,9 @@ export class JsRuntime {
 					}
 					return awaited;
 				}
+				// Classification is best-effort; keep the engine's completion for valid syntax
+				// the parser does not understand rather than silently dropping its result.
+				if (wrapped.finalExpressionReturned === null) return await awaitMaybePromise(value);
 				// The async wrapper's value is an explicit top-level `return`. A plain script's completion
 				// value is whatever statement ran last (an `if` body, the expression before a trailing
 				// `const`); as in Python, that is not the cell's result.

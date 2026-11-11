@@ -63,11 +63,18 @@ type BabelFunctionDeclaration = {
 /** Top-level declarations whose bindings must survive the cell (demoted and/or published). */
 type BabelPublishableDecl = BabelLexicalDecl | BabelFunctionDeclaration;
 
+type BabelCellExpression = {
+	type?: string;
+	extra?: { parenthesized?: boolean };
+	left?: { type?: string };
+	expressions?: BabelCellExpression[];
+};
+
 type BabelExpressionStatement = {
 	type: "ExpressionStatement";
 	start: number;
 	end: number;
-	expression?: { type?: string; extra?: { parenthesized?: boolean }; left?: { type?: string } };
+	expression?: BabelCellExpression;
 	directive?: string;
 };
 
@@ -1070,10 +1077,10 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 	return result;
 }
 
-async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean }> {
+async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean | null }> {
 	const ast = await parseProgram(code);
 	const program = ast?.program;
-	if (!program) return { source: code, returned: false };
+	if (!program) return { source: code, returned: null };
 	const body = program.body;
 	const asCellResult = (node: { start: number; end: number }) => {
 		const statement = code.slice(node.start, node.end);
@@ -1095,7 +1102,10 @@ async function returnFinalExpression(code: string): Promise<{ source: string; re
 		// `x = value` is a statement, as in Python: only a bare or parenthesized expression is the
 		// cell's result, so a trailing `globalThis.items = items` does not print the whole array.
 		// `({ a, b } = obj)` needs its parentheses to parse, so they do not ask for the value.
-		const assigned = expression.expression;
+		let assigned = expression.expression;
+		while (assigned?.type === "SequenceExpression" && !assigned.extra?.parenthesized) {
+			assigned = assigned.expressions?.at(-1);
+		}
 		if (
 			assigned?.type === "AssignmentExpression" &&
 			(!assigned.extra?.parenthesized || assigned.left?.type === "ObjectPattern")
@@ -1203,7 +1213,7 @@ const LOOKS_LIKE_TS =
 
 export async function wrapCode(
 	code: string,
-): Promise<{ source: string; asyncWrapped: boolean; finalExpressionReturned: boolean }> {
+): Promise<{ source: string; asyncWrapped: boolean; finalExpressionReturned: boolean | null }> {
 	const instrumented = await instrumentRuntimeCallSites(code);
 	const finalExpression = await returnFinalExpression(instrumented);
 	const stripped = stripTypeScript(finalExpression.source);
