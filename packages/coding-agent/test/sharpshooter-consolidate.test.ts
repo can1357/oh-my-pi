@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	renderSharpshooterSessions,
 	runSharpshooterConsolidation,
+	sharpshooterConsolidationMaxTokens,
 	sharpshooterNextConsolidationAt,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/consolidate";
 import {
@@ -313,6 +314,19 @@ describe("sharpshooterNextConsolidationAt", () => {
 			lastError: { at: 50 * minute, message: "boom", failures: 9 },
 		};
 		expect(sharpshooterNextConsolidationAt(state, 5)).toBe(105 * minute);
+	});
+});
+
+describe("sharpshooterConsolidationMaxTokens", () => {
+	it("caps the budget by the model output limit and by the context the prompt leaves free", () => {
+		const roomy = { maxTokens: 64_000, contextWindow: 200_000 };
+		expect(sharpshooterConsolidationMaxTokens(roomy, 10_000)).toBe(32_768);
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: 8192, contextWindow: 200_000 }, 10_000)).toBe(8192);
+		// 100k prompt reserves 110k + 1024 framing, leaving 20_976 of a 132k window.
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: 64_000, contextWindow: 132_000 }, 100_000)).toBe(20_976);
+		// A prompt that already fills the window still requests a usable floor.
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: 64_000, contextWindow: 32_000 }, 40_000)).toBe(1024);
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: null, contextWindow: null }, 500_000)).toBe(32_768);
 	});
 });
 
