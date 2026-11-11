@@ -179,8 +179,11 @@ async function materializeOmpDoc(docPath: string, content: string): Promise<stri
 	// against the filesystem-resolved root, so the target is joined to that
 	// root as well: a target under the unresolved root resolves outside the
 	// resolved one, which would drop every cache hit and make the link vanish
-	// on the second render.
-	const realRoot = (await realpathIfExists(root)) ?? root;
+	// on the second render. A missing root has no realpath: fall back to the
+	// absolute path (the override may be relative) so lexical containment
+	// still proves; the mkdir below creates it and later renders resolve it
+	// canonically.
+	const realRoot = (await realpathIfExists(root)) ?? path.resolve(root);
 	const digest = new Bun.CryptoHasher("sha256").update(content).digest("hex").slice(0, 16);
 	const target = path.resolve(realRoot, digest, docPath);
 	// Write-path containment: a missing leaf is only safe when every existing
