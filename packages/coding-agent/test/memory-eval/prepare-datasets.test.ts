@@ -1,6 +1,7 @@
 import { expect, it } from "bun:test";
 import * as path from "node:path";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, ptree } from "@oh-my-pi/pi-utils";
+import { envWithout } from "../../bench/memory-eval/env";
 import { pythonPath } from "./python";
 
 const PY = path.join(import.meta.dir, "../../bench/memory-eval/py");
@@ -10,7 +11,7 @@ it.skipIf(pythonPath === undefined)("publishes and re-reads non-ASCII datasets a
 	await using dir = await TempDir.create("@memory-eval-prepare-");
 	const out = dir.join("beam.json");
 	const text = JSON.stringify([{ content: "café — naïve 日本語 🙂" }]);
-	const proc = Bun.spawn(
+	const { stderr, exitCode } = await ptree.exec(
 		[
 			pythonPath!,
 			"-c",
@@ -47,18 +48,16 @@ assert marker.read_text(encoding="utf-8") == "rev\\n"
 		{
 			// The script refuses PYTHON* import overrides, so a developer's own must not leak in.
 			env: {
-				...Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.toUpperCase().startsWith("PYTHON"))),
+				...envWithout("PYTHON"),
 				PYTHONUTF8: "0",
 				PYTHONCOERCECLOCALE: "0",
 				LC_ALL: "C",
 				LANG: "C",
 			},
-			stdout: "pipe",
-			stderr: "pipe",
+			allowNonZero: true,
 		},
 	);
-	const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
 	expect(stderr).toBe("");
-	expect(code).toBe(0);
+	expect(exitCode).toBe(0);
 	expect(await Bun.file(out).text()).toBe(text);
 });

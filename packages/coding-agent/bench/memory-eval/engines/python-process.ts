@@ -1,5 +1,6 @@
 /** JSON-lines client for the harness's Python helper processes (the Mnemosyne engine and the embedding server). */
-import { normalizeEnvKey, readLines, toError } from "@oh-my-pi/pi-utils";
+import { readJsonl, toError } from "@oh-my-pi/pi-utils";
+import { envWithout } from "../env";
 
 const STDERR_TAIL_CHARS = 4000;
 const EXIT_GRACE_MS = 5000;
@@ -25,10 +26,12 @@ export class PythonProcess {
 	constructor(label: string, python: string, script: string, env: Record<string, string | undefined>) {
 		this.#label = label;
 		// PYTHONPATH, PYTHONHOME and the like could import other code than the pinned venv while versions still match.
-		const scrubbed = Object.fromEntries(
-			Object.entries(env).filter(([key]) => !normalizeEnvKey(key).startsWith("PYTHON")),
-		);
-		this.#proc = Bun.spawn([python, script], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: scrubbed });
+		this.#proc = Bun.spawn([python, script], {
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			env: envWithout("PYTHON", env),
+		});
 		this.#done = this.#pump(this.#collectStderr());
 	}
 
@@ -92,20 +95,8 @@ export class PythonProcess {
 	}
 
 	async #pump(stderrDone: Promise<void>): Promise<void> {
-		const decoder = new TextDecoder();
 		try {
-			for await (const bytes of readLines(this.#proc.stdout)) {
-				const line = decoder.decode(bytes);
-				if (line.trim() === "") continue;
-				let response: WireResponse;
-				try {
-					response = JSON.parse(line);
-				} catch {
-					this.#fail(new Error(`${this.#label} wrote a non-protocol line: ${line.slice(0, 200)}`));
-					continue;
-				}
-				this.#settle(response);
-			}
+			for await (const response of readJsonl<WireResponse>(this.#proc.stdout)) this.#settle(response);
 			// No response can come after stdout EOF: fail now, waiting only briefly for the exit code and stderr.
 			const grace = Promise.withResolvers<string>();
 			// Unref'd: a normal exit must not hold the harness open for the rest of the grace period.
@@ -116,7 +107,12 @@ export class PythonProcess {
 			]);
 			this.#fail(new Error(`${this.#label} ${exit}: ${this.#stderrTail.trim()}`));
 		} catch (err) {
-			this.#fail(toError(err));
+			// A line that is not JSON ends the stream, and the first failure stands.
+			this.#fail(
+				err instanceof SyntaxError
+					? new Error(`${this.#label} wrote a non-protocol line: ${err.message}`)
+					: toError(err),
+			);
 		}
 	}
 }

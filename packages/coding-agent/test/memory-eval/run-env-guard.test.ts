@@ -1,27 +1,28 @@
 import { afterAll, beforeAll, expect, it, setDefaultTimeout } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { TempDir, ptree } from "@oh-my-pi/pi-utils";
+import { envWithout } from "../../bench/memory-eval/env";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
 // Each case spawns the CLI, which loads the harness and Mnemopi; on a loaded machine that exceeds bun's 5 s default.
 setDefaultTimeout(30_000);
 
 // An explicitly empty cache: a broken guard must fail loading this, not ingest the user's real data.
+let homeDir: TempDir;
 let home: string;
 beforeAll(async () => {
-	home = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-env-guard-"));
+	homeDir = await TempDir.create("@memory-eval-env-guard-");
+	home = homeDir.path();
 });
 afterAll(async () => {
-	await removeWithRetries(home);
+	await homeDir.remove();
 });
 
 /** Runs `run --engine mnemopi` with `extra` added to an environment that has no MNEMOPI_* variables. */
-async function runMnemopi(extra: Record<string, string>): Promise<{ stderr: string; code: number }> {
+async function runMnemopi(extra: Record<string, string>): Promise<{ stderr: string; code: number | null }> {
 	// The engine is created before the dataset is loaded, so no dataset is needed.
-	const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOPI_")));
-	const proc = Bun.spawn(
+	const env = envWithout("MNEMOPI_");
+	const { stderr, exitCode } = await ptree.exec(
 		[
 			process.execPath,
 			RUN,
@@ -35,10 +36,9 @@ async function runMnemopi(extra: Record<string, string>): Promise<{ stderr: stri
 			"--cache-root",
 			home,
 		],
-		{ env: { ...env, ...extra }, stdout: "pipe", stderr: "pipe" },
+		{ env: { ...env, ...extra }, allowNonZero: true },
 	);
-	const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-	return { stderr, code };
+	return { stderr, code: exitCode };
 }
 
 it("run refuses to start mnemopi while MNEMOPI_* variables are set", async () => {
