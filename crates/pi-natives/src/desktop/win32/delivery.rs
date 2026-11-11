@@ -251,8 +251,11 @@ mod tests {
 		assert!(refused(&[(KeyName::Alt, 0), (KeyName::Char('f'), 0)]));
 		assert!(refused(&[(KeyName::Shift, 0)]));
 		assert!(refused(&[(KeyName::Meta, 0)]));
-		// "A", and "1" on AZERTY, which the layout types with Shift
-		assert!(refused(&[(KeyName::Char('A'), 1)]));
+		// "?" on US, which the layout types with Shift, and "@" on German, with
+		// AltGr (Ctrl+Alt). `parse_key` lowercases letters, so "A" arrives as "a"
+		// and posts plainly.
+		assert!(refused(&[(KeyName::Char('?'), 1)]));
+		assert!(refused(&[(KeyName::Char('@'), 6)]));
 		// Unmodified keys and clicks still post.
 		assert!(!refused(&[(KeyName::Char('a'), 0)]));
 		assert!(!refused(&[(KeyName::Enter, 0), (KeyName::Tab, 0)]));
