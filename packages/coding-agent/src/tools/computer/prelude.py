@@ -387,7 +387,7 @@ def _make_computer():
             return details if "backend" in details else None
 
         async def close(self):
-            """End the persistent desktop session; later calls fail."""
+            """End the desktop session: handles, frames and refs reset; the next call opens a new one."""
             await _invoke("close", {})
 
     return _Computer()

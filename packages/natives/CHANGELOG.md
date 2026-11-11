@@ -16,6 +16,10 @@
 - Fixed cancelling a traced command leaving TERM-ignoring descendants alive after their parent exits, including blocked captured output and descendants that escape into new sessions. Cancellation now retains its pre-TERM identities through hard escalation and refreshes late orphan descendants; ordinary script signals and successful background commands keep their existing behavior ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed Zsh's GNU-profile signal names, function-trap activation and alias identity, and OS handler restoration across local scopes and re-exec. Function copies, enable/disable operations, missing function bodies, and failed handler setup now preserve their distinct trap semantics without losing cleanup errors or cancellation status ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Fixed
+
+- Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
