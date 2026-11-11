@@ -55,4 +55,38 @@ describe.skipIf(process.platform === "win32")("worktree add checkout hooks", () 
 		expect(result.exitCode).toBe(17);
 		expect(result.stderr.toString()).toContain("checkout-refused");
 	});
+
+	it("runs the post-checkout hook when git predates `git hook run` (git < 2.36)", async () => {
+		// Git 2.34-style shim on PATH: reports 2.34.1 and rejects the `hook`
+		// subcommand the way real Git < 2.36 does, forwarding everything else.
+		const realGit = (await $`which git`.quiet().text()).trim();
+		const shimDir = path.join(root, "shim");
+		await fs.mkdir(shimDir);
+		const shim = path.join(shimDir, "git");
+		await Bun.write(
+			shim,
+			[
+				"#!/bin/sh",
+				'if [ "$1" = "hook" ]; then echo "git: hook is not a git command" >&2; exit 1; fi',
+				'if [ "$1" = "--version" ]; then echo "git version 2.34.1"; exit 0; fi',
+				`exec "${realGit}" "$@"`,
+				"",
+			].join("\n"),
+		);
+		await fs.chmod(shim, 0o755);
+
+		await hook('printf "%s\\n" "$PWD" "$1" "$2" "$3" > .post-checkout-ran; echo hook-output');
+		const worktree = path.join(root, "legacy");
+		const result = await $`bun ${cli} worktree add --detach ${worktree} HEAD`
+			.cwd(repo)
+			.env({ ...process.env, PATH: `${shimDir}:${process.env.PATH}` })
+			.quiet()
+			.nothrow();
+		const head = (await $`git -C ${repo} rev-parse HEAD`.text()).trim();
+		const marker = (await Bun.file(path.join(worktree, ".post-checkout-ran")).text()).trim().split("\n");
+
+		expect(result.exitCode).toBe(0);
+		expect(marker).toEqual([worktree, "0".repeat(head.length), head, "1"]);
+		expect(result.stderr.toString()).toContain("hook-output");
+	});
 });

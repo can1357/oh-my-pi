@@ -155,10 +155,41 @@ export async function copyGitObjects(isolationRoot, sourceRoot) {
  */
 export async function runPostCheckoutHook(worktreeRoot, head) {
 	const nullOid = "0".repeat(head.length);
+	if (await gitPredatesHookRun()) return runPostCheckoutHookFile(worktreeRoot, nullOid, head);
 	const result = await $`git hook run --ignore-missing post-checkout -- ${nullOid} ${head} 1`
 		.cwd(worktreeRoot)
 		.quiet()
 		.nothrow();
+	return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** True when the `git` on PATH predates the `git hook run` subcommand (Git 2.36). */
+async function gitPredatesHookRun() {
+	const match = /\d+\.\d+/.exec(await $`git --version`.quiet().nothrow().text());
+	if (!match) return false;
+	const [major, minor] = match[0].split(".").map(Number);
+	return major < 2 || (major === 2 && minor < 36);
+}
+
+/**
+ * Git before 2.36 has no `git hook run`, so a worktree add whose clone path
+ * owes a post-checkout run would fail with "git: 'hook' is not a git command"
+ * even though the worktree was created. Execute the hook file directly the way
+ * Git would: resolve `core.hooksPath`, falling back to the common dir's
+ * `hooks/`, treat an absent or non-executable hook as success like
+ * `--ignore-missing` does, and keep the hook's exit status and output.
+ */
+async function runPostCheckoutHookFile(worktreeRoot, nullOid, head) {
+	const configured = (await $`git config core.hooksPath`.cwd(worktreeRoot).quiet().nothrow().text()).trim();
+	const commonDir = (await $`git rev-parse --git-common-dir`.cwd(worktreeRoot).quiet().nothrow().text()).trim();
+	const hooksDir = configured || path.join(commonDir || ".git", "hooks");
+	const file = path.resolve(worktreeRoot, hooksDir, "post-checkout");
+	const executable = await fs.promises.access(file, fs.constants.X_OK).then(
+		() => true,
+		() => false,
+	);
+	if (!executable) return { exitCode: 0, stdout: "", stderr: "" };
+	const result = await $`${file} ${nullOid} ${head} 1`.cwd(worktreeRoot).quiet().nothrow();
 	return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
 
