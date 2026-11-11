@@ -2683,3 +2683,88 @@ async fn pipe_tap_forwards_every_byte_and_counts_them() {
 	assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
 	assert!(!read.open);
 }
+
+/// A run's cut-short value belongs to that run alone: a later run that ends
+/// naturally — whose EXIT trap's `exit` is its first exit — must not inherit
+/// the earlier run's `true`.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_cut_short_does_not_leak_into_a_later_run() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	let first = run("exit 0; echo never").await;
+	assert!(first.ended_by_exit, "the first run really was cut short");
+	let natural = run("trap 'exit 0' EXIT; echo done").await;
+	assert_eq!(natural.exit_code, Some(0));
+	assert!(
+		!natural.ended_by_exit,
+		"the later run finished its script; the EXIT trap's exit cut nothing short"
+	);
+	let again = run("exit 0; echo never").await;
+	assert!(again.ended_by_exit, "the report still fires after the natural end");
+}
+
+/// `exec` replaces the shell (and a POSIX-fatal error ends it the same way):
+/// the run stops — nothing after it runs — but the cause is not `exit` or
+/// `set -e`, so no abort is reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_replacement_and_posix_fatal_are_not_an_exit_abort() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	let replaced = run("exec /usr/bin/false; echo never").await;
+	assert_eq!(replaced.exit_code, Some(1));
+	assert!(
+		!replaced.ended_by_exit,
+		"`exec` stopped the run, but not through an exit/errexit abort"
+	);
+	let missing = run("exec /bin/definitely-missing; echo never").await;
+	assert!(!missing.ended_by_exit, "a failed `exec` ends the shell the same way");
+	let fatal = run("set -o posix; set() { :; }; echo never").await;
+	assert_eq!(fatal.exit_code, Some(2));
+	assert!(!fatal.ended_by_exit, "a POSIX-fatal error is not an exit/errexit abort either");
+}
+
+/// A zsh anonymous-function call after the exit is pending input too.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_cut_short_counts_zsh_anonymous_calls() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	run("emulate zsh").await;
+	let anon = run("exit 0; () { echo never; }").await;
+	assert!(anon.ended_by_exit, "the anonymous call after the exit never ran");
+	let trailing = run("() { echo ran; }; exit 0").await;
+	assert_eq!(trailing.exit_code, Some(0));
+	assert!(!trailing.ended_by_exit, "a trailing exit ends nothing early");
+}

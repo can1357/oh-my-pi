@@ -1036,11 +1036,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 
-		// Normal completion. A per-job `:async:` shell is dropped when the
-		// call settles, so its options never reach a later call either:
-		// report it as the ephemeral shell it is (the notice then makes no
-		// persistence claim).
-		const ephemeralShell = !ownsPersistentSession || options?.sessionKey?.includes(":async:") === true;
+		// Normal completion. A shell the settle path drops — a per-job
+		// `:async:` shell, one whose agent session was left or switched
+		// while the call ran (`isSessionCurrent` false), or one a release
+		// already replaced in the map — never carries its options to a
+		// later call: report it as the ephemeral shell it is (the notice
+		// then makes no persistence claim).
+		const ephemeralShell =
+			!ownsPersistentSession ||
+			options?.sessionKey?.includes(":async:") === true ||
+			options?.isSessionCurrent?.() === false ||
+			shellSessions.get(sessionKey) !== shellSession;
 		return {
 			exitCode: winner.result.exitCode,
 			cancelled: false,

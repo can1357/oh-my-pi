@@ -649,7 +649,9 @@ fn reachable_runs_input(unit: &Unit, from: usize) -> bool {
 		}
 		visited[i] = true;
 		let op = ops[i];
-		if starts_command(unit, op) || op.code == Opcode::FuncDef {
+		// A zsh anonymous-function call runs like a command; so does a
+		// function definition.
+		if starts_command(unit, op) || op.code == Opcode::FuncDef || op.code == Opcode::CallAnon {
 			return true;
 		}
 		// (jump target when the op can leave the linear flow, whether the
@@ -750,16 +752,25 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32, top_
 		matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
 	});
 	vp.status = status;
+	// An `exec` replacement or a POSIX-fatal error ends the shell without
+	// the `exit`/errexit abort this reports.
+	let exit_fatal = std::mem::take(&mut k.exit_fatal);
 	if vp.parent.is_none()
 		&& let Some(run) = vp.runs.front()
 	{
+		let prior = k.exited;
 		k.exited = Some(run.id);
-		// A re-entry whose EXIT trap already started (the trap's end, or an
-		// `exit` inside it) sees a `pc` that still points at the
-		// already-executed `exit` — the trap started without advancing the
-		// interrupted frame — so rescanning would count that op itself.
-		// The first computation stands.
-		if !run.exit_trap_started {
+		if exit_fatal {
+			k.exited_cut_short = false;
+		} else if !run.exit_trap_started || prior != Some(run.id) {
+			// A re-entry whose EXIT trap already started (the trap's end, or
+			// an `exit` inside it) sees a `pc` that still points at the
+			// already-executed `exit` — the trap started without advancing
+			// the interrupted frame — so rescanning would count that op
+			// itself. The first computation stands — but only for the run
+			// that made it: a later run's first exit (the `exit` of the
+			// EXIT trap its natural end started) must not inherit an
+			// earlier run's value.
 			k.exited_cut_short = exit_cut_short(vp, top_unrun);
 		}
 	}
@@ -3239,6 +3250,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 				// POSIX interpretation 383: fatal in a non-interactive shell.
 				let msg = format!("`{}': is a special builtin", f.name).into();
 				k.diag(cx, vp, line, Diag::Usage { msg });
+				k.exit_fatal = true;
 				return Flow::Exit(2);
 			}
 			// zsh: defining `TRAPNAL` sets the trap (`localtraps` saves the
@@ -3781,6 +3793,7 @@ fn for_in(
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
 			// Fatal to a posix shell.
 			clear_scratch(&mut k.root, cx.store, vp);
+			k.exit_fatal = true;
 			return Flow::Exit(1);
 		}
 		items.clear();
@@ -3855,6 +3868,7 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		k.diag(cx, vp, line, d);
 		// An assignment error ends a posix shell.
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
+			k.exit_fatal = true;
 			return Flow::Exit(1);
 		}
 		if let Some(rec) = top_frame(vp).loops.last_mut() {

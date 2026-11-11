@@ -242,6 +242,25 @@ it("classifies a per-job `:async:` shell as ephemeral", async () => {
 	}
 });
 
+it("classifies a session-left owner shell as ephemeral", async () => {
+	__test.run = () => Promise.resolve(nativeResult({ endedByExit: true }));
+	try {
+		// The call owned the persistent session, but its agent session was
+		// switched or left while the call ran: the executor drops that
+		// shell when the call settles, so its options cannot reach a later
+		// call either.
+		const result = await executeBash("set -e; false; echo never-ran", {
+			minimize: false,
+			sessionKey: "probe-session-left",
+			isSessionCurrent: () => false,
+		});
+		expect(result.endedByExit).toBe(true);
+		expect(result.ephemeralShell).toBe(true);
+	} finally {
+		__test.run = undefined;
+	}
+});
+
 it.skipIf(process.platform === "win32")(
 	"reports a cut-short exit end-to-end when the loaded addon carries the flag",
 	async () => {

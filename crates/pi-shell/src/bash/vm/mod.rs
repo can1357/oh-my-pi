@@ -507,6 +507,12 @@ pub struct Kernel {
 	/// its input, which ended it exactly where it would have ended anyway;
 	/// meaningful only together with [`Kernel::exited`]. Not imaged.
 	pub exited_cut_short:   bool,
+	/// Set while an `exec` replacement (or a POSIX-fatal error, which ends
+	/// the shell the same way) is what ends the shell: the run really
+	/// stops, but not through the `exit`/`set -e` abort
+	/// [`Shell::ended_by_exit_cut_short`] reports, so the cut-short scan
+	/// must not claim one. Consumed by `exit_shell`. Not imaged.
+	pub exit_fatal:         bool,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
 	pub exec_signals:       HashMap<RunId, i32>,
@@ -632,6 +638,7 @@ impl Kernel {
 			callout_labels: Vec::new(),
 			exited: None,
 			exited_cut_short: false,
+			exit_fatal: false,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),

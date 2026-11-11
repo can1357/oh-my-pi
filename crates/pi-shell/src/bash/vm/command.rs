@@ -4741,6 +4741,13 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 		Some(Transfer::Return(n)) => Flow::Return(n),
 		Some(Transfer::Break { n, cont }) => Flow::Break { n, cont },
 		Some(Transfer::Exit(n)) => Flow::Exit(n),
+		Some(Transfer::Exec) => {
+			// The shell was replaced (a failed `exec` ends it just the
+			// same): the run stops here, but not through the `exit`/errexit
+			// abort the cut-short report names.
+			k.exit_fatal = true;
+			Flow::Exit(status)
+		},
 		Some(Transfer::DiscardAll(n)) => {
 			let command = matches!(
 				state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
@@ -4761,7 +4768,6 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 				Flow::Discard(n)
 			}
 		},
-		Some(Transfer::Exec) => Flow::Exit(status),
 	}
 }
 
