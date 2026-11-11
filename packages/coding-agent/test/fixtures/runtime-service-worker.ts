@@ -2,6 +2,7 @@ import { type MessagePort, parentPort } from "node:worker_threads";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJobManagerApi,
+	type AsyncJobProgressDelivery,
 	type AsyncJobRunResult,
 } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
@@ -30,11 +31,14 @@ interface Body {
 	finish: PromiseWithResolvers<string | AsyncJobRunResult>;
 	signal?: AbortSignal;
 	report?: (text: string, assignment?: string) => Promise<void>;
+	agentReport?: (text: string) => void;
 	tap?: TextTap;
 }
 
 const bodies = new Map<string, Body>();
 const deliveries: unknown[] = [];
+const progressDeliveries: unknown[] = [];
+let progressDelivered = Promise.withResolvers<void>();
 const events: unknown[] = [];
 const waitStarts = new Map<string, PromiseWithResolvers<void>>();
 
@@ -64,15 +68,21 @@ function bus(value: unknown): EventBus | undefined {
 	return value;
 }
 
-function registerBody(jobs: AsyncJobManagerApi, ownerId: string, withInputs: boolean): string {
+function registerBody(
+	jobs: AsyncJobManagerApi,
+	ownerId: string,
+	withInputs: boolean,
+	progressDelivery?: AsyncJobProgressDelivery,
+): string {
 	const entry: Body = { finish: Promise.withResolvers() };
 	const tap = withInputs ? new TextTap("out", "fixture output") : undefined;
 	entry.tap = tap;
 	const id = jobs.register(
 		"bash",
 		"fixture job",
-		async ({ signal, reportProgress, markRunning }) => {
+		async ({ signal, reportProgress, reportAgentProgress, markRunning }) => {
 			entry.signal = signal;
+			entry.agentReport = text => reportAgentProgress(text);
 			entry.report = (text, assignment) =>
 				reportProgress(text, assignment ? { progress: [{ assignment }] } : undefined);
 			markRunning();
@@ -86,6 +96,7 @@ function registerBody(jobs: AsyncJobManagerApi, ownerId: string, withInputs: boo
 		},
 		{
 			ownerId,
+			progressDelivery,
 			...(tap
 				? {
 						process: { command: "fixture --run", cwd: "/fixture", pids: () => [4242] },
@@ -106,7 +117,15 @@ const probe: RuntimeProbe = async (op, ...args) => {
 		case "noop":
 			return true;
 		case "register":
-			return registerBody(manager(args[0]), String(args[1]), args[2] === true);
+			return registerBody(
+				manager(args[0]),
+				String(args[1]),
+				args[2] === true,
+				args[3] === "wake" || args[3] === "ambient" ? args[3] : undefined,
+			);
+		case "agentProgress":
+			body(args[0]).agentReport?.(String(args[1]));
+			return true;
 		case "progress":
 			await body(args[0]).report?.(String(args[1]), typeof args[2] === "string" ? args[2] : undefined);
 			return true;
@@ -180,6 +199,24 @@ const probe: RuntimeProbe = async (op, ...args) => {
 			return true;
 		case "deliveries":
 			return deliveries.splice(0);
+		case "progressSink":
+			manager(args[0]).registerProgressSink(String(args[1]), {
+				deliver: (jobId, text, job, seq) => {
+					progressDeliveries.push({
+						jobId,
+						text,
+						seq,
+						delivery: job.progressDelivery,
+						isRow: job instanceof RemoteAsyncJob,
+					});
+					progressDelivered.resolve();
+				},
+			});
+			return true;
+		case "awaitProgressDeliveries":
+			await progressDelivered.promise;
+			progressDelivered = Promise.withResolvers<void>();
+			return progressDeliveries.splice(0);
 		case "cost": {
 			const gate = costGate(args[0]);
 			gate.record(Number(args[1]));
