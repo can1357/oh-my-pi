@@ -281,8 +281,8 @@ impl AtSpiAx {
 		self.rt.block_on(cancellable(future))
 	}
 
-	/// [`Self::run`] for a request to one application, which fails once that
-	/// application has not answered within the reply timeout.
+	/// Single-element reads and mutations retain an operation budget.
+	/// Application, focus, ownership and hit-test scans use per-call replies.
 	fn request<T>(&self, future: impl Future<Output = CoreResult<T>>) -> CoreResult<T> {
 		self.run(answered("the application", self.reply_timeout, future))??
 	}
@@ -334,21 +334,21 @@ impl AtSpiAx {
 	/// lookup that fails counts as not holding focus.
 	pub(crate) fn holds_focus(&self, window: &DesktopWindow) -> bool {
 		self
-			.request(async {
+			.run(async {
 				let Ok(app) = self.app_for_window(window).await else {
-					return Ok(false);
+					return false;
 				};
-				let Ok(frames) = Self::frames(&self.connection, &app).await else {
-					return Ok(false);
+				let Ok(frames) = Self::frames(&self.connection, &app, self.reply_timeout).await else {
+					return false;
 				};
 				for frame in frames {
 					if atspi_window_id(&frame) == window.id {
-						return Ok(Self::find_focused(&self.connection, frame, 0, self.reply_timeout)
+						return Self::find_focused(&self.connection, frame, 0, self.reply_timeout)
 							.await
-							.is_ok_and(|found| found.is_some()));
+							.is_ok_and(|found| found.is_some());
 					}
 				}
-				Ok(false)
+				false
 			})
 			.unwrap_or(false)
 	}
@@ -469,12 +469,13 @@ impl AtSpiAx {
 				let Some(bus_name) = app.name() else {
 					continue;
 				};
-				let dbus = atspi::zbus::fdo::DBusProxy::new(&self.connection)
-					.await
+				let dbus = self
+					.reply(atspi::zbus::fdo::DBusProxy::new(&self.connection))
+					.await?
 					.map_err(|err| failed(err.to_string()))?;
-				if dbus
-					.get_connection_unix_process_id(bus_name.clone().into())
-					.await
+				if self
+					.reply(dbus.get_connection_unix_process_id(bus_name.clone().into()))
+					.await?
 					.ok()
 					== Some(pid)
 				{
@@ -482,9 +483,9 @@ impl AtSpiAx {
 				}
 				continue;
 			}
-			let proxy = app
-				.as_accessible_proxy(&self.connection)
-				.await
+			let proxy = self
+				.reply(app.as_accessible_proxy(&self.connection))
+				.await?
 				.map_err(|err| failed(err.to_string()))?;
 			match answered("the application", self.reply_timeout, proxy.name()).await {
 				Ok(name)
@@ -516,32 +517,27 @@ impl AtSpiAx {
 		}
 	}
 
+	/// `app`'s children that are top-level windows. Each reply, not the
+	/// traversal, gets a deadline.
 	async fn frames(
 		connection: &Connection,
 		app: &ObjectRefOwned,
-	) -> Result<Vec<ObjectRefOwned>, String> {
-		Self::top_levels(connection, app).await
-	}
-
-	/// `app`'s children that are top-level windows.
-	async fn top_levels(
-		connection: &atspi::zbus::Connection,
-		app: &ObjectRefOwned,
-	) -> Result<Vec<ObjectRefOwned>, String> {
-		let proxy = app
-			.as_accessible_proxy(connection)
-			.await
-			.map_err(|err| err.to_string())?;
-		let children = proxy.get_children().await.map_err(|err| err.to_string())?;
+		reply_timeout: Duration,
+	) -> CoreResult<Vec<ObjectRefOwned>> {
+		let proxy = answered("the application", reply_timeout, app.as_accessible_proxy(connection))
+			.await?
+			.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
+		let children = answered("the application", reply_timeout, proxy.get_children())
+			.await?
+			.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
 		let mut frames = Vec::new();
 		for child in children {
-			let child_proxy = child
-				.as_accessible_proxy(connection)
-				.await
-				.map_err(|err| err.to_string())?;
-			if child_proxy
-				.get_role()
-				.await
+			let child_proxy =
+				answered("the application", reply_timeout, child.as_accessible_proxy(connection))
+					.await?
+					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
+			if answered("the application", reply_timeout, child_proxy.get_role())
+				.await?
 				.is_ok_and(|role| top_level_role(role, true))
 			{
 				frames.push(child);
@@ -594,26 +590,27 @@ impl AtSpiAx {
 	/// containment: overlapping windows and same-process dialogs are distinct
 	/// input destinations.
 	async fn top_level(
-		connection: &atspi::zbus::Connection,
+		connection: &Connection,
 		mut object: ObjectRefOwned,
+		reply_timeout: Duration,
 	) -> CoreResult<ObjectRefOwned> {
 		for _ in 0..64 {
-			let proxy = object
-				.as_accessible_proxy(connection)
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
-			let role = proxy
-				.get_role()
-				.await
+			let proxy =
+				answered("the application", reply_timeout, object.as_accessible_proxy(connection))
+					.await?
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
+			let role = answered("the application", reply_timeout, proxy.get_role())
+				.await?
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
 			if top_level_role(role, false) {
 				return Ok(object);
 			}
-			let parent = proxy
-				.parent()
-				.await
+			let parent = answered("the application", reply_timeout, proxy.parent())
+				.await?
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window parent: {err}")))?;
-			if top_level_role(role, true) && Self::is_application(connection, &parent).await {
+			if top_level_role(role, true)
+				&& Self::is_application(connection, &parent, reply_timeout).await?
+			{
 				return Ok(object);
 			}
 			if parent.is_null() || parent == object {
@@ -625,17 +622,22 @@ impl AtSpiAx {
 		Err(DesktopError::ax_failed("AT-SPI element has no identifiable top-level window"))
 	}
 
-	async fn is_application(connection: &atspi::zbus::Connection, object: &ObjectRefOwned) -> bool {
+	async fn is_application(
+		connection: &Connection,
+		object: &ObjectRefOwned,
+		reply_timeout: Duration,
+	) -> CoreResult<bool> {
 		if object.is_null() {
-			return false;
+			return Ok(false);
 		}
-		let Ok(proxy) = object.as_accessible_proxy(connection).await else {
-			return false;
+		let Ok(proxy) =
+			answered("the application", reply_timeout, object.as_accessible_proxy(connection)).await?
+		else {
+			return Ok(false);
 		};
-		proxy
-			.get_role()
-			.await
-			.is_ok_and(|role| role == Role::Application)
+		Ok(answered("the application", reply_timeout, proxy.get_role())
+			.await?
+			.is_ok_and(|role| role == Role::Application))
 	}
 
 	/// Each call has its own reply timeout: reading a whole application can
@@ -651,9 +653,8 @@ impl AtSpiAx {
 		if depth > 40 || root.is_null() {
 			return Ok(None);
 		}
-		let proxy = root
-			.as_accessible_proxy(connection)
-			.await
+		let proxy = answered("the application", reply_timeout, root.as_accessible_proxy(connection))
+			.await?
 			.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
 		if answered("the application", reply_timeout, proxy.get_state())
 			.await?
@@ -733,11 +734,12 @@ impl AtSpiAx {
 	/// The deepest element under `root` at screen point (`x`, `y`). A placed
 	/// frame is hit-tested in its window coordinates.
 	async fn descend(
-		connection: &zbus::Connection,
+		connection: &Connection,
 		root: ObjectRefOwned,
 		placement: Option<Placement>,
 		x: i32,
 		y: i32,
+		reply_timeout: Duration,
 	) -> CoreResult<Option<AxHandle>> {
 		let (coords, x, y) = match placement {
 			Some(placement) => {
@@ -749,13 +751,14 @@ impl AtSpiAx {
 		let mut ancestors = Vec::new();
 		for _ in 0..64 {
 			let has_component = {
-				let accessible = current
-					.as_accessible_proxy(connection)
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI hit-test element: {err}")))?;
-				accessible
-					.get_interfaces()
-					.await
+				let accessible =
+					answered("the application", reply_timeout, current.as_accessible_proxy(connection))
+						.await?
+						.map_err(|err| {
+							DesktopError::ax_failed(format!("AT-SPI hit-test element: {err}"))
+						})?;
+				answered("the application", reply_timeout, accessible.get_interfaces())
+					.await?
 					.map_err(|err| {
 						DesktopError::ax_failed(format!("AT-SPI hit-test interfaces: {err}"))
 					})?
@@ -766,26 +769,33 @@ impl AtSpiAx {
 			}
 			// GetAccessibleAtPoint returns an immediate child, not
 			// necessarily the leaf that owns the requested pixel.
-			let child = Self::component(connection, &current)
-				.await
-				.map_err(DesktopError::ax_failed)?
-				.get_accessible_at_point(x, y, coords)
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI element at point: {err}")))?;
+			let component =
+				answered("the application", reply_timeout, Self::component(connection, &current))
+					.await?
+					.map_err(DesktopError::ax_failed)?;
+			let child = answered(
+				"the application",
+				reply_timeout,
+				component.get_accessible_at_point(x, y, coords),
+			)
+			.await?
+			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI element at point: {err}")))?;
 			if child.is_null() || child == current {
 				return Ok(Some(AxHandle::AtSpi(current)));
 			}
 			// GTK4 returns the deepest element from the frame, then offsets the
 			// point twice below it and can name a child the point is not in.
 			if placement.is_some() {
-				let inside = Self::component(connection, &child)
-					.await
-					.map_err(DesktopError::ax_failed)?
-					.get_extents(CoordType::Window)
-					.await
-					.is_ok_and(|(left, top, width, height)| {
-						Placement { x: left, y: top, width, height }.contains(x, y)
-					});
+				let component =
+					answered("the application", reply_timeout, Self::component(connection, &child))
+						.await?
+						.map_err(DesktopError::ax_failed)?;
+				let inside =
+					answered("the application", reply_timeout, component.get_extents(CoordType::Window))
+						.await?
+						.is_ok_and(|(left, top, width, height)| {
+							Placement { x: left, y: top, width, height }.contains(x, y)
+						});
 				if !inside {
 					return Ok(Some(AxHandle::AtSpi(current)));
 				}
@@ -1243,76 +1253,78 @@ impl AxBackend for AtSpiAx {
 	fn window_root(&mut self, win: &DesktopWindow) -> CoreResult<AxHandle> {
 		self.frames = FrameCache::default();
 		let failed = |err: String| DesktopError::ax_failed(format!("AT-SPI window root: {err}"));
-		let who = if win.app.is_empty() {
-			"the application"
-		} else {
-			win.app.as_str()
-		};
 		self
 			.run(async {
 				let app = self.app_for_window(win).await?;
-				answered(who, self.reply_timeout, async {
-					let frames = Self::frames(&self.connection, &app).await.map_err(failed)?;
-					let mut matches = Vec::new();
-					for frame in frames {
-						let id = atspi_window_id(&frame);
-						if win.id.starts_with("atspi:") {
-							if id == win.id {
-								return Ok(frame);
-							}
-							continue;
+				let frames = Self::frames(&self.connection, &app, self.reply_timeout).await?;
+				let mut matches = Vec::new();
+				for frame in frames {
+					let id = atspi_window_id(&frame);
+					if win.id.starts_with("atspi:") {
+						if id == win.id {
+							return Ok(frame);
 						}
-						let proxy = frame
-							.as_accessible_proxy(&self.connection)
-							.await
-							.map_err(|err| failed(err.to_string()))?;
-						if proxy.name().await.map_err(|err| failed(err.to_string()))? == win.title {
-							matches.push(frame);
-						}
+						continue;
 					}
-					if matches.len() == 1 {
-						Ok(matches.remove(0))
-					} else {
-						Err(failed(format!(
-							"window '{}' has {} matching AT-SPI frames",
-							win.title,
-							matches.len()
-						)))
+					let proxy = self
+						.reply(frame.as_accessible_proxy(&self.connection))
+						.await?
+						.map_err(|err| failed(err.to_string()))?;
+					if self
+						.reply(proxy.name())
+						.await?
+						.map_err(|err| failed(err.to_string()))?
+						== win.title
+					{
+						matches.push(frame);
 					}
-				})
-				.await?
+				}
+				if matches.len() == 1 {
+					Ok(matches.remove(0))
+				} else {
+					Err(failed(format!(
+						"window '{}' has {} matching AT-SPI frames",
+						win.title,
+						matches.len()
+					)))
+				}
 			})?
 			.map(AxHandle::AtSpi)
 	}
 
 	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
 		let object = Self::object(h).clone();
-		self.request(async {
+		self.run(async {
 			let connection = &self.connection;
-			let object = Self::top_level(connection, object).await?;
-			let id = atspi_window_id(&object);
-			if windows.iter().any(|window| window.id == id) {
-				return Ok(id);
-			}
-			let name = object
-				.name()
-				.ok_or_else(|| DesktopError::ax_failed("AT-SPI window has no bus owner"))?;
-			let dbus = atspi::zbus::fdo::DBusProxy::new(connection)
-				.await
-				.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-			let pid = dbus
-				.get_connection_unix_process_id(name.clone().into())
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window pid: {err}")))?;
-			let title = object
-				.as_accessible_proxy(connection)
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?
-				.name()
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
-			native_window_for_frame(windows, pid, &title)
-		})
+			let object = Self::top_level(connection, object, self.reply_timeout).await?;
+			// The ancestry scan is per-reply; the following single-window
+			// identification keeps its operation budget.
+			answered("the application", self.reply_timeout, async {
+				let id = atspi_window_id(&object);
+				if windows.iter().any(|window| window.id == id) {
+					return Ok(id);
+				}
+				let name = object
+					.name()
+					.ok_or_else(|| DesktopError::ax_failed("AT-SPI window has no bus owner"))?;
+				let dbus = atspi::zbus::fdo::DBusProxy::new(connection)
+					.await
+					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
+				let pid = dbus
+					.get_connection_unix_process_id(name.clone().into())
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window pid: {err}")))?;
+				let title = object
+					.as_accessible_proxy(connection)
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?
+					.name()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
+				native_window_for_frame(windows, pid, &title)
+			})
+			.await?
+		})?
 	}
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
@@ -1458,11 +1470,10 @@ impl AxBackend for AtSpiAx {
 				.await
 				.map_err(DesktopError::ax_failed)?
 			{
-				let frames =
-					answered("the application", *reply_timeout, Self::frames(connection, &app))
-						.await?
-						.map_err(DesktopError::ax_failed)?;
+				let frames = Self::frames(connection, &app, *reply_timeout).await?;
 				for frame in frames {
+					// This probes one frame, not the traversal: retain its
+					// single-element operation budget.
 					let Some(placement) = answered(
 						"the application",
 						*reply_timeout,
@@ -1489,8 +1500,7 @@ impl AxBackend for AtSpiAx {
 			let Some((root, placement)) = root else {
 				return Ok(None);
 			};
-			answered("the application", *reply_timeout, Self::descend(bus, root, placement, x, y))
-				.await?
+			Self::descend(bus, root, placement, x, y, *reply_timeout).await
 		}))?
 	}
 
@@ -2066,11 +2076,11 @@ mod tests {
 			let (server, client) = tokio::try_join!(server.build(), client).unwrap();
 			let object = |path| ObjectRefOwned::from_static_str_unchecked(PEER, path);
 			let path = |object: ObjectRefOwned| object.path_as_str().to_owned();
-			let top_levels = AtSpiAx::top_levels(&client, &object("/app")).await;
+			let top_levels = AtSpiAx::frames(&client, &object("/app"), REPLY_TIMEOUT).await;
 			let mut owners = Vec::new();
 			for element in ["/open", "/dialog", "/ok"] {
 				owners.push(
-					AtSpiAx::top_level(&client, object(element))
+					AtSpiAx::top_level(&client, object(element), REPLY_TIMEOUT)
 						.await
 						.map(path)
 						.ok(),
@@ -2676,7 +2686,7 @@ mod tests {
 			for (path, placement, x, y) in
 				[("/frame", claims[0].flatten(), 390, 460), ("/editor", None, 20, 15)]
 			{
-				let element = AtSpiAx::descend(&client, object(path), placement, x, y)
+				let element = AtSpiAx::descend(&client, object(path), placement, x, y, REPLY_TIMEOUT)
 					.await
 					.unwrap();
 				found.push(element.map(|element| AtSpiAx::object(&element).path_as_str().to_owned()));
@@ -2764,6 +2774,7 @@ mod tests {
 		}
 
 		struct Element {
+			delay:    Duration,
 			name:     &'static str,
 			role:     Role,
 			focused:  bool,
@@ -2777,11 +2788,13 @@ mod tests {
 				self.name.to_owned()
 			}
 
-			fn get_role(&self) -> u32 {
+			async fn get_role(&self) -> u32 {
+				tokio::time::sleep(self.delay).await;
 				self.role as u32
 			}
 
-			fn get_state(&self) -> Vec<u32> {
+			async fn get_state(&self) -> Vec<u32> {
+				tokio::time::sleep(self.delay).await;
 				let state = if self.focused {
 					State::Focused as u64
 				} else {
@@ -2851,6 +2864,7 @@ mod tests {
 			backend(HUNG_CALL_TIMEOUT, |server| {
 				server
 					.serve_at("/org/a11y/atspi/accessible/root", Element {
+						delay:    Duration::ZERO,
 						name:     "main",
 						role:     Role::DesktopFrame,
 						focused:  false,
@@ -2863,6 +2877,7 @@ mod tests {
 					.serve_at("/silent", Silent { cancel: None })
 					.unwrap()
 					.serve_at("/editor", Element {
+						delay:    Duration::ZERO,
 						name:     "Editor",
 						role:     Role::Application,
 						focused:  false,
@@ -2870,6 +2885,7 @@ mod tests {
 					})
 					.unwrap()
 					.serve_at("/editor/frame", Element {
+						delay: Duration::ZERO,
 						name: "Document",
 						role: Role::Frame,
 						focused,
@@ -2879,6 +2895,80 @@ mod tests {
 					.serve_at("/editor/frame", Extents { x: 10, y: 20, delay })
 					.unwrap()
 			})
+		}
+
+		fn slow_tree() -> (AtSpiAx, Connection, DesktopWindow) {
+			let (ax, server) = backend(HUNG_CALL_TIMEOUT, |server| {
+				server
+					.serve_at("/org/a11y/atspi/accessible/root", Element {
+						delay:    Duration::ZERO,
+						name:     "main",
+						role:     Role::DesktopFrame,
+						focused:  false,
+						children: vec![(PEER.to_owned(), path("/editor"))],
+					})
+					.unwrap()
+					.serve_at("/editor", Element {
+						delay:    Duration::ZERO,
+						name:     "Editor",
+						role:     Role::Application,
+						focused:  false,
+						children: vec![
+							(PEER.to_owned(), path("/editor/frame")),
+							(PEER.to_owned(), path("/editor/other")),
+						],
+					})
+					.unwrap()
+					.serve_at("/editor/frame", Element {
+						delay:    Duration::from_millis(600),
+						name:     "",
+						role:     Role::Frame,
+						focused:  false,
+						children: vec![(PEER.to_owned(), path("/editor/frame/entry"))],
+					})
+					.unwrap()
+					.serve_at("/editor/other", Element {
+						delay:    Duration::from_millis(600),
+						name:     "",
+						role:     Role::Frame,
+						focused:  false,
+						children: Vec::new(),
+					})
+					.unwrap()
+					.serve_at("/editor/frame/entry", Element {
+						delay:    Duration::from_millis(600),
+						name:     "",
+						role:     Role::Entry,
+						focused:  true,
+						children: Vec::new(),
+					})
+					.unwrap()
+			});
+			let window = DesktopWindow {
+				id:      format!("atspi:{PEER}:/editor/frame"),
+				title:   String::new(),
+				app:     "Editor".to_owned(),
+				pid:     None,
+				x:       0,
+				y:       0,
+				width:   300,
+				height:  200,
+				focused: true,
+			};
+			(ax, server, window)
+		}
+
+		#[test]
+		fn focus_scan_keeps_a_responsive_tree_past_one_reply_limit() {
+			let (ax, _server, window) = slow_tree();
+			assert!(ax.holds_focus(&window));
+		}
+
+		#[test]
+		fn window_root_keeps_a_responsive_frame_scan_past_one_reply_limit() {
+			let (mut ax, _server, window) = slow_tree();
+			let root = ax.window_root(&window).unwrap();
+			assert_eq!(AtSpiAx::object(&root).path_as_str(), "/editor/frame");
 		}
 
 		#[test]
@@ -2947,6 +3037,7 @@ mod tests {
 			let (mut ax, _server) = backend(HUNG_CALL_TIMEOUT, |server| {
 				server
 					.serve_at("/org/a11y/atspi/accessible/root", Element {
+						delay:    Duration::ZERO,
 						name:     "main",
 						role:     Role::DesktopFrame,
 						focused:  false,
@@ -2954,6 +3045,7 @@ mod tests {
 					})
 					.unwrap()
 					.serve_at("/editor", Element {
+						delay:    Duration::ZERO,
 						name:     "Editor",
 						role:     Role::Application,
 						focused:  false,
@@ -2961,6 +3053,7 @@ mod tests {
 					})
 					.unwrap()
 					.serve_at("/editor/frame", Element {
+						delay:    Duration::ZERO,
 						name:     "Document",
 						role:     Role::Frame,
 						focused:  true,

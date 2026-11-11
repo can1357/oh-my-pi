@@ -30,6 +30,7 @@
 
 - Fixed the Linux `computer` tool hanging for the rest of the session, and freezing the app, once a `press()` or `menu.select()` opened a modal dialog in a GTK 3 app such as Audacity: reads of an app that does not answer now fail with `Timeout` after 5 s while screenshots and input keep working ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed responsive Linux AT-SPI windows disappearing when enumeration takes longer than 5 s in total: the timeout now applies to each application reply, not the whole window scan ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed responsive Linux AT-SPI focus, window-ownership and hit-test scans timing out in aggregate; traversal replies are now bounded individually while single-element reads and mutations retain their operation budgets ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.9] - 2026-11-11
 
