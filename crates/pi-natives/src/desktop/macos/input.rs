@@ -3765,8 +3765,8 @@ fn chord_keys<S: Fn(char) -> Option<Keystroke>>(
 /// Command takes a character's layout key only when that key needs no
 /// modifier the chord does not name: an app matches those shortcuts by key
 /// and modifiers, so AZERTY's `ctrl+1` stays Ctrl on the `1` key, unshifted,
-/// as the user presses it. A failed layout read, other than a cancelled one,
-/// leaves every character on its ANSI key, as before layouts were read.
+/// as the user presses it. A failed layout read stops the call before any
+/// key is posted: an ANSI fallback could turn select-all into quit.
 fn local_chord<S: Fn(char) -> Option<Keystroke>>(
 	keys: &[KeyName],
 	layout: impl FnOnce(KeyLayer) -> CoreResult<Option<S>>,
@@ -3780,11 +3780,8 @@ fn local_chord<S: Fn(char) -> Option<Keystroke>>(
 	} else {
 		KeyLayer::Typing
 	};
-	let stroke = match layout(layer) {
-		Ok(Some(stroke)) => stroke,
-		Ok(None) => return ansi_keys(keys),
-		Err(error) if error.code == ErrorCode::Cancelled => return Err(error),
-		Err(_) => return ansi_keys(keys),
+	let Some(stroke) = layout(layer)? else {
+		return ansi_keys(keys);
 	};
 	let shortcut = !command
 		&& keys
@@ -5455,16 +5452,19 @@ mod tests {
 		let unread = |_| -> LayoutRead { panic!("a chord without a character reads no layout") };
 		let tab = [KeyName::Meta, KeyName::Tab];
 		assert_eq!(chord_keys(&window, &tab, None, unread).unwrap(), ansi_keys(&tab).unwrap());
-		// A failed read leaves the ANSI keys; a cancelled one stops the call.
+		// A failed or timed-out read must not turn Command-A into ANSI Cmd-Q.
+		// Propagate it before constructing any chord, just like cancellation.
 		let keys = [KeyName::Meta, KeyName::Char('a')];
-		let failed = |_| -> LayoutRead { Err(DesktopError::input_failed("helper exited 1")) };
-		assert_eq!(chord_keys(&window, &keys, None, failed).unwrap(), [
-			meta,
-			press(KeyName::Char('a'), 0)
-		]);
-		let cancelled = |_| -> LayoutRead { Err(DesktopError::cancelled("cancelled")) };
-		let error = chord_keys(&window, &keys, None, cancelled).unwrap_err();
-		assert_eq!(error.code, ErrorCode::Cancelled);
+		for expected in [
+			DesktopError::input_failed("helper exited 1"),
+			DesktopError::timeout("the keyboard layout helper did not finish"),
+			DesktopError::cancelled("cancelled"),
+		] {
+			let code = expected.code;
+			let failed = |_| -> LayoutRead { Err(expected) };
+			let error = chord_keys(&window, &keys, None, failed).unwrap_err();
+			assert_eq!(error.code, code);
+		}
 	}
 
 	#[test]
