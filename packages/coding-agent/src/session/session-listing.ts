@@ -1327,13 +1327,57 @@ async function continuationsAfter(
 		return name !== undefined && name.createdAt >= after && path.resolve(file) !== self;
 	});
 	const continuations = new Map<string, SessionInfo[]>();
-	for (const session of await collectSessionsFromFiles(later, storage, false)) {
+	const linked = await filterContinuationFiles(later, storage);
+	for (const session of await collectSessionsFromFiles(linked, storage, false)) {
 		if (!session.continuationOf) continue;
 		const siblings = continuations.get(session.continuationOf);
 		if (siblings) siblings.push(session);
 		else continuations.set(session.continuationOf, [session]);
 	}
 	return continuations;
+}
+
+/**
+ * The files among `files` whose header names a session in `continuationOf`.
+ * Reads only the prefix {@link scanSessionFile} takes the header from; that
+ * scan reads on through the file when the prefix holds no prompt or reply,
+ * which costs seconds over a directory of large sessions. A file found not to
+ * continue anything is cached under its stat identity.
+ */
+async function filterContinuationFiles(files: string[], storage: SessionStorage): Promise<string[]> {
+	const cache = getSessionScanCache(storage);
+	const continues = async (file: string): Promise<boolean> => {
+		let stat: SessionStorageStat;
+		try {
+			stat = storage.statSync(file);
+		} catch {
+			return false;
+		}
+		for (const key of [`h\0${file}`, `s\0${file}`, `c\0${file}`]) {
+			const cached = cache.get(key);
+			if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+				return cached.info?.continuationOf !== undefined;
+			}
+		}
+		let content: string;
+		try {
+			[content] = await storage.readTextSlices(file, SESSION_LIST_PREFIX_BYTES, 0);
+		} catch {
+			return false;
+		}
+		const header = parseSessionListHeader(content, parseJsonlLenient<Record<string, unknown>>(content));
+		if (header?.continuationOf !== undefined) return true;
+		cache.set(`c\0${file}`, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
+		return false;
+	};
+	const workerCount = getSessionListWorkerCount(files.length);
+	const keep: boolean[] = [];
+	await Promise.all(
+		Array.from({ length: workerCount }, async (_, worker) => {
+			for (let i = worker; i < files.length; i += workerCount) keep[i] = await continues(files[i]);
+		}),
+	);
+	return files.filter((_, i) => keep[i]);
 }
 
 /** {@link lastActivity}, read once per session file. */
