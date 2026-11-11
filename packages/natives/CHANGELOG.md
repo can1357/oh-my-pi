@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows computer use now reports a locked, disconnected or secure desktop instead of leaving failed captures and undelivered input unexplained ([#18947](https://github.com/can1357/oh-my-pi/pull/18947) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
@@ -12,8 +16,6 @@
 ### Fixed
 
 - Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
-- Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success
-- Windows computer use now reports a locked, disconnected or secure desktop instead of leaving failed captures and undelivered input unexplained.
 
 ## [18.18.9] - 2026-11-11
 
