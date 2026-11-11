@@ -58,7 +58,7 @@
 
 ### Fixed
 
-- Windows `setValue()` now confirms text values, notifies the app for native combo changes, and refuses combo-box writes it cannot verify or notify reliably.
+- Windows `setValue()` now confirms text values, notifies the app for native combo changes, and refuses combo-box writes it cannot verify or notify reliably ([#18915](https://github.com/can1357/oh-my-pi/pull/18915) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
