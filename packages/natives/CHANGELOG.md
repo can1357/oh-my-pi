@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- Windows menu selections that open a modal dialog no longer report a delivery timeout when the new dialog is responsive.
+- Windows menu selections that open a modal dialog no longer report a delivery timeout when the new dialog is responsive ([#18922](https://github.com/can1357/oh-my-pi/pull/18922) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
