@@ -13,6 +13,8 @@ import contextNotesTextDescription from "../prompts/tools/context-notes-text.md"
 import newContextDescription from "../prompts/tools/new-context.md" with { type: "text" };
 import {
 	CONTEXT_NOTES_ENTRY_TYPE,
+	CONTEXT_NOTES_WINDOW_ENTRY_TYPE,
+	contextNotesWindowSnapshotIndex,
 	type ContextNotesEntry,
 	getContextNotes,
 	MAX_CONTEXT_NOTES_BYTES,
@@ -140,6 +142,9 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 			throw new ToolError("Experimental context notes were not saved because the session branch changed.");
 		}
 
+		if (contextNotesWindowSnapshotIndex(manager.getBranch()) < 0) {
+			manager.appendCustomEntry(CONTEXT_NOTES_WINDOW_ENTRY_TYPE);
+		}
 		const data: ContextNotesEntry = { version: 1, text: params.text };
 		const entryId = manager.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, data);
 		await manager.flush();

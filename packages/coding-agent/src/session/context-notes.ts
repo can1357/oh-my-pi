@@ -3,6 +3,8 @@ import type { CustomEntry, SessionEntry } from "./session-entries";
 import contextNotesPrompt from "../prompts/system/context-notes.md" with { type: "text" };
 
 export const CONTEXT_NOTES_ENTRY_TYPE = "experimental_context_notes";
+/** Journal marker fixing the injected notebook at its pre-write revision for this context window. */
+export const CONTEXT_NOTES_WINDOW_ENTRY_TYPE = "experimental_context_notes_window";
 export const MAX_CONTEXT_NOTES_BYTES = 16_384;
 
 export interface ContextNotesEntry {
@@ -34,12 +36,14 @@ function isContextNotesData(data: unknown): data is ContextNotesEntry {
 }
 
 /**
- * Returns the latest valid notebook revision visible after the active context-reset boundary.
- * Invalid historical custom entries are ignored so a malformed journal record cannot mask an
- * earlier valid notebook revision.
+ * Returns the latest valid notebook revision before `end`, after the active reset boundary.
+ * Invalid historical entries cannot mask an earlier valid notebook revision.
  */
-export function getContextNotes(entries: readonly SessionEntry[]): ContextNotesRevision | undefined {
-	for (let index = entries.length - 1; index >= 0; index--) {
+export function getContextNotes(
+	entries: readonly SessionEntry[],
+	end = entries.length,
+): ContextNotesRevision | undefined {
+	for (let index = end - 1; index >= 0; index--) {
 		const entry = entries[index];
 		if (entry.type === "reset_boundary") return undefined;
 		if (!isContextNotesEntry(entry) || !isContextNotesData(entry.data)) continue;
@@ -48,12 +52,24 @@ export function getContextNotes(entries: readonly SessionEntry[]): ContextNotesR
 	return undefined;
 }
 
-/**
- * Renders the context injection for the latest visible non-empty notebook revision.
- * An absent or explicitly cleared notebook returns an empty string so callers add no context.
- */
-export function renderContextNotes(entries: readonly SessionEntry[]): string {
-	const notes = getContextNotes(entries);
+/** Finds the first-write snapshot in the active context window, or -1 before any write. */
+export function contextNotesWindowSnapshotIndex(entries: readonly SessionEntry[]): number {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type === "compaction" || entry.type === "reset_boundary") break;
+		if (entry.type === "custom" && entry.customType === CONTEXT_NOTES_WINDOW_ENTRY_TYPE) return index;
+	}
+	return -1;
+}
+
+/** Resolves the notebook revision injected when this window was built, not later tool writes. */
+export function getWindowContextNotes(entries: readonly SessionEntry[]): ContextNotesRevision | undefined {
+	const snapshotIndex = contextNotesWindowSnapshotIndex(entries);
+	return getContextNotes(entries, snapshotIndex < 0 ? entries.length : snapshotIndex);
+}
+
+/** Renders the window's non-empty notebook revision for model context. */
+export function renderContextNotes(notes: ContextNotesRevision | undefined): string {
 	if (!notes || notes.text.length === 0) return "";
 	return prompt.render(contextNotesPrompt, { notes: notes.text }).trim();
 }

@@ -23,7 +23,7 @@ import {
 	REWIND_REPORT_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
-import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
+import { CONTEXT_NOTES_ENTRY_TYPE, getWindowContextNotes, renderContextNotes } from "./context-notes";
 import {
 	type CompactionEntry,
 	type CustomMessageEntry,
@@ -699,8 +699,8 @@ export function buildSessionContext(
 	}
 
 	if (!options?.transcript) {
-		const notes = getContextNotes(path);
-		const renderedNotes = renderContextNotes(path);
+		const notes = getWindowContextNotes(path);
+		const renderedNotes = renderContextNotes(notes);
 		if (notes && renderedNotes.length > 0) {
 			const sourceEntry = path.find(entry => entry.id === notes.entryId);
 			if (sourceEntry) {

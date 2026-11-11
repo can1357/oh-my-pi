@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Resuming after a `context_notes` write now retains the active window's cached prompt prefix; the new notebook revision takes effect at the next context window boundary ([#18836](https://github.com/can1357/oh-my-pi/issues/18836)).
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

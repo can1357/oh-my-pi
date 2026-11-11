@@ -189,6 +189,49 @@ describe("experimental context notes", () => {
 		const advisorBound = toolSession(settings, SessionManager.inMemory(), "advisor-session");
 		expect(ContextNotesTool.createIf(advisorBound)).toBeNull();
 	});
+
+	it("rebuilds the live notebook prefix after writes and advances it only at a new window", async () => {
+		using tempDir = TempDir.createSync("@omp-context-notes-cache-");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const manager = SessionManager.create(tempDir.path(), sessionDir);
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const tool = new ContextNotesTool(toolSession(settings, manager));
+		try {
+			manager.appendMessage({ role: "user", content: "start", timestamp: 1 });
+			const live = manager.buildSessionContext().messages;
+			await tool.execute("first", { text: "v1" });
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("expected persisted session file");
+			const resumed = await SessionManager.open(file, sessionDir);
+			try {
+				expect(resumed.buildSessionContext().messages).toEqual(live);
+			} finally {
+				await resumed.close();
+			}
+
+			await tool.execute("second", { text: "v2" });
+			expect(manager.buildSessionContext().messages).toEqual(live);
+			manager.appendCompaction("new window", undefined, "", 100);
+			const nextWindow = manager.buildSessionContext().messages;
+			expect(nextWindow[0]).toMatchObject({ role: "custom", customType: CONTEXT_NOTES_ENTRY_TYPE });
+			expect(JSON.stringify(nextWindow[0])).toContain("v2");
+			await tool.execute("third", { text: "v3" });
+			expect(manager.buildSessionContext().messages).toEqual(nextWindow);
+			const afterWrite = await SessionManager.open(file, sessionDir);
+			try {
+				expect(afterWrite.buildSessionContext().messages).toEqual(nextWindow);
+			} finally {
+				await afterWrite.close();
+			}
+			await tool.execute("clear", { text: "" });
+			expect(manager.buildSessionContext().messages).toEqual(nextWindow);
+			manager.appendCompaction("cleared window", undefined, "", 100);
+			expect(manager.buildSessionContext().messages[0]?.role).not.toBe("custom");
+			expect(getContextNotes(manager.getBranch())?.text).toBe("");
+		} finally {
+			await manager.close();
+		}
+	});
 	it("does not append notes when the branch changes while disk preparation is pending", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
