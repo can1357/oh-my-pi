@@ -130,8 +130,9 @@ describe("uncaught JavaScript cell errors", () => {
 	});
 
 	it("take omp's tree from its own code, not from PI_PACKAGE_DIR", async () => {
+		const stack = `Error: x\n    at asset (/opt/omp/lib.ts:1:2)\n    at host (${ERROR_TEXT}:1:2)`;
 		const script = `import { formatCellError } from ${JSON.stringify(ERROR_TEXT)};
-console.log(formatCellError("Error: x\\n    at f (/home/me/project/lib.ts:1:2)", { filename: "js-cell-1.js", cwd: "/tmp" }));`;
+console.log(formatCellError(${JSON.stringify(stack)}, { filename: "js-cell-1.js", cwd: "/tmp" }));`;
 		const child = Bun.spawn(["bun", "-e", script], {
 			env: { ...process.env, PI_PACKAGE_DIR: "/opt/omp" },
 			stdout: "pipe",
@@ -139,7 +140,9 @@ console.log(formatCellError("Error: x\\n    at f (/home/me/project/lib.ts:1:2)",
 		});
 		const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
 		expect(code).toBe(0);
-		expect(stdout).toContain("at f (/home/me/project/lib.ts:1:2)");
+		expect(stdout).toContain("at asset (/opt/omp/lib.ts:1:2)");
+		expect(stdout).not.toContain(ERROR_TEXT);
+		expect(stdout).toContain("(1 omp frame hidden)");
 	});
 });
 
