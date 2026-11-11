@@ -174,6 +174,7 @@ describe("createModelMentionSource", () => {
 		expect(all.map(item => item.value)).toContain("demo/worker");
 		expect(all.map(item => item.label)).not.toContain("@image");
 		expect(suggestions("smol")).toContainEqual(role!);
+		expect(suggestions("@smol")).toContainEqual(role!);
 
 		const draft = "use ^@sm";
 		const completed = applyModelMentionCompletion([draft], 0, draft.length, role!, "^@sm");
@@ -184,6 +185,79 @@ describe("createModelMentionSource", () => {
 		expect(updated.lines).toEqual(["use ^demo/other "]);
 		scoped = [worker];
 		expect(suggestions("@smol")).toEqual([]);
+	});
+
+	test("keeps roles and their inheritors selectable when a configured effort is unsupported", async () => {
+		await initTheme();
+		const worker = buildModel({
+			...makeModel("demo", "worker"),
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
+		});
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(Settings.isolated({ modelRoles: { smol: "demo/worker:off" } })),
+			registry: { getError: () => undefined, getAvailable: () => [worker], getAll: () => [worker] },
+			scopedModels: () => [],
+		});
+
+		for (const role of ["smol", "tiny", "memory", "widget"]) {
+			const prefix = `^@${role}`;
+			const completion = getModelMentionSuggestions(prefix, candidates);
+			if (completion.kind !== "matched") throw new Error(`Expected ${role} role suggestion`);
+			const item = completion.suggestions.items.find(item => item.value === `@${role}`);
+			if (!item) throw new Error(`Expected ${role} role`);
+			expect(item.description).toMatch(/off.*unsupported/);
+			expect(applyModelMentionCompletion([prefix], 0, prefix.length, item, prefix).lines).toEqual(["^demo/worker "]);
+		}
+	});
+
+	test("only offers OpenRouter route roles when the literal route is in the mention scope", async () => {
+		await initTheme();
+		const base = buildModel({
+			...makeModel("openrouter", "z-ai/glm-4.7-20251222"),
+			api: "openai-completions",
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
+		const routed = buildModel({ ...base, id: `${base.id}:nitro` });
+		const available = [base];
+		let scoped: Model[] = [];
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(
+				Settings.isolated({
+					modelRoles: {
+						default: `openrouter/${base.id}`,
+						smol: `openrouter/${routed.id}`,
+					},
+				}),
+			),
+			registry: {
+				getError: () => undefined,
+				getAvailable: () => [...available],
+				getAll: () => [...available],
+			},
+			scopedModels: () => scoped,
+		});
+		const roles = () => {
+			const completion = getModelMentionSuggestions("^@", candidates);
+			return completion.kind === "matched" ? completion.suggestions.items : [];
+		};
+
+		const defaultRole = roles().find(item => item.value === "@default");
+		if (!defaultRole) throw new Error("Expected the scoped base model role");
+		expect(applyModelMentionCompletion(["^@default"], 0, 9, defaultRole, "^@default").lines).toEqual([
+			"^openrouter/z-ai/glm-4.7-20251222 ",
+		]);
+		expect(roles().find(item => item.value === "@smol")).toBeUndefined();
+
+		available.push(routed);
+		const role = roles().find(item => item.value === "@smol");
+		if (!role) throw new Error("Expected the scoped literal route role");
+		expect(applyModelMentionCompletion(["^@smol"], 0, 6, role, "^@smol").lines).toEqual([
+			"^openrouter/z-ai/glm-4.7-20251222:nitro ",
+		]);
+
+		scoped = [base];
+		expect(roles().find(item => item.value === "@smol")).toBeUndefined();
 	});
 
 	test("navigates native role suggestions that resolve to the same model", async () => {

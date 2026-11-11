@@ -17,7 +17,8 @@ const MODEL_MENTION_CONTEXT_RE = /(?:^|\s)(\^[^\s]*)$/;
 const MAX_MODEL_MENTION_SUGGESTIONS = 20;
 const MAX_EFFORT_CANDIDATE_MODELS = 3;
 
-interface ModelMentionItem extends AutocompleteItem {
+/** A model or role choice with the concrete selector inserted on acceptance. */
+export interface ModelMentionItem extends AutocompleteItem {
 	modelSelector?: string;
 }
 
@@ -27,7 +28,7 @@ interface ModelMentionItem extends AutocompleteItem {
  */
 export type ModelMentionCandidateSource = ((query: string) => ReadonlyArray<ModelBrowserItem>) & {
 	availableModelIds?: () => ReadonlySet<string>;
-	roles?: () => ReadonlyArray<AutocompleteItem>;
+	roles?: () => ReadonlyArray<ModelMentionItem>;
 };
 
 interface ModelBrowserModules {
@@ -98,9 +99,8 @@ export function getModelMentionSuggestions(
 	const prefix = textBeforeCursor.match(MODEL_MENTION_CONTEXT_RE)?.[1];
 	if (!prefix) return { kind: "unhandled" };
 	const query = prefix.slice(1);
-	const roleRows = (candidates.roles?.() ?? []).filter(item =>
-		subsequenceMatch(query.toLowerCase(), item.label.toLowerCase()),
-	);
+	const roleQuery = query.toLowerCase();
+	const roleRows = (candidates.roles?.() ?? []).filter(item => subsequenceMatch(roleQuery, item.label.toLowerCase()));
 	const items = [...roleRows, ...mentionRows(query, candidates)].slice(0, MAX_MODEL_MENTION_SUGGESTIONS);
 	return items.length > 0 ? { kind: "matched", suggestions: { items, prefix } } : { kind: "no-match" };
 }
@@ -165,6 +165,8 @@ export function createModelMentionSource(host: {
 		if (roleScope !== scope.items) {
 			roleScope = scope.items;
 			const models = scope.items.map(item => item.model);
+			const scopedSelectors = new Set<string>();
+			for (const item of scope.items) scopedSelectors.add(item.selector);
 			roleItems = [];
 			for (const role of host.source.knownRoleIds) {
 				const info = host.source.getRoleInfo(role);
@@ -172,13 +174,18 @@ export function createModelMentionSource(host: {
 				const { model, thinkingLevel } = host.source.resolveRoleValue(`@${role}`, models);
 				if (!model) continue;
 				const selector = `${model.provider}/${model.id}`;
+				if (!scopedSelectors.has(selector)) continue;
 				const effort = getSupportedEfforts(model).find(level => level === thinkingLevel);
-				if (thinkingLevel && thinkingLevel !== "auto" && !effort) continue;
 				const value = effort ? `${selector}:${effort}` : selector;
 				if (effort && availableModelIds().has(value)) continue;
 				const name = modelMentionDisplayName(model);
+				const description = effort
+					? modelMentionName(name, effort)
+					: thinkingLevel && thinkingLevel !== "auto"
+						? `${name} · ${thinkingLevel} unsupported; effort omitted`
+						: name;
 				roleItems.push({
-					...mentionRow(`@${role}`, effort ? modelMentionName(name, effort) : name),
+					...mentionRow(`@${role}`, description),
 					modelSelector: value,
 				});
 			}

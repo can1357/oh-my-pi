@@ -94,9 +94,11 @@ With the default batched task schema, supply shared `context` and per-item `task
 
 ## User-tagged model agents
 
-Type `^` in the composer to choose a model from the same scope and ranking as the `Alt+P` session picker. Accepting a completion inserts an atomic chip showing its display name. For example, type `Have ^`, pick a model, then finish with `review this change`.
+Type `^` in the composer to choose a model from the same scope as the `Alt+P` session picker. Model suggestions follow the picker's ranking, with matching model roles listed first. Accepting a completion inserts an atomic chip showing its display name. For example, type `Have ^`, pick a model, then finish with `review this change`.
 
-The popup also lists visible chat model roles, such as `@smol`, with their resolved models. Search by role name or `^@role`; accepting a role inserts its concrete model selector, including its configured effort when supported. It then follows the existing model-mention behavior below.
+The popup also lists visible chat model roles, such as `@smol`, with their resolved models. Search by role name or `^@role`; accepting a role inserts its concrete model selector, including its configured effort when supported. If the model does not support that effort, the popup notes that it is omitted and inserts the selector without it. The selected model then follows the existing model-mention behavior below.
+
+Roles whose resolved model is outside the mention scope are omitted, including virtual OpenRouter route IDs without a matching scoped model.
 
 On submit, each first-mentioned model receives a branch-local pseudonym (`m1`, `m2`, …). The user message carries `<model agent="m1" name="Display Name"/>`; the task description lists its provider/model selector. `task`, eval `agent()`, and `workpool()` accept that pseudonym as their `agent`. These agents use the bundled general-purpose task template, not a specialist template, and are intended only for requests explicitly naming the tagged model.
 
