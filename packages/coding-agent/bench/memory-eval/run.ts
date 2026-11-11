@@ -6,12 +6,10 @@
 //        --polyphonic turns on polyphonic recall (mnemopi needs `--mnemopi-recall enhanced`, mnemosyne).
 //   diff <a.json> <b.json>
 //   calibration-check <a.json> <b.json>   (a: py/upstream_run_a.py dump, b: run --protocol upstream-compat result)
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { isEnoent, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { isEnoent, TempDir, toError } from "@oh-my-pi/pi-utils";
 import { normalizeToLF } from "../../src/edit/normalize";
 import { sha256File } from "../../src/utils/file-hash";
 import { type CalibrationDump, compareCalibration, corpusSha256, runUpstreamCompat } from "./compat";
@@ -42,8 +40,7 @@ export async function harnessHash(dir: string = import.meta.dir): Promise<string
 	const files = (await Array.fromAsync(new Bun.Glob("**/*.{ts,py}").scan(dir))).sort();
 	const parts = await Promise.all(
 		files.map(
-			async file =>
-				`${file.replaceAll("\\", "/")}\0${normalizeToLF(await Bun.file(path.join(dir, file)).text())}`,
+			async file => `${file.replaceAll("\\", "/")}\0${normalizeToLF(await Bun.file(path.join(dir, file)).text())}`,
 		),
 	);
 	return Bun.hash(parts.join("\0")).toString(16);
@@ -180,7 +177,8 @@ async function runCommand(argv: string[]): Promise<void> {
 	const harness = await harnessHash();
 	const dataDir = path.join(cacheRoot, "data");
 	const result = await pinnedCheckout(REPO_ROOT, async git => {
-		const storeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-"));
+		const storeDir = await TempDir.create("@memory-eval-");
+		const storeRoot = storeDir.path();
 		try {
 			let run: RunOutput;
 			let excluded: ExcludedQuestion[] = [];
@@ -235,7 +233,7 @@ async function runCommand(argv: string[]): Promise<void> {
 			await engine.dispose();
 			// A just-closed SQLite file can block deletion for a while (Windows); a leftover scratch store must
 			// never cost a finished run its result file.
-			await removeWithRetries(storeRoot).catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
+			await storeDir.remove().catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
 		}
 	});
 	// A harness file edited after the hash was taken would run under the old fingerprint, even in a dirty checkout.
@@ -406,7 +404,7 @@ if (import.meta.main) {
 		else if (subcommand === "calibration-check") await calibrationCheckCommand(rest);
 		else throw new Error("usage: run.ts <run|diff|calibration-check> ...");
 	} catch (error) {
-		console.error(error instanceof Error ? error.message : String(error));
+		console.error(toError(error).message);
 		process.exit(1);
 	}
 }

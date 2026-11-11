@@ -3,6 +3,7 @@
 // non-finite or < 0.99.
 import { cosineSimilarity, embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { mean, toError } from "@oh-my-pi/pi-utils";
 import { assertMnemopiEnvClean } from "./engines/mnemopi";
 
 const MODEL = "BAAI/bge-small-en-v1.5";
@@ -45,9 +46,9 @@ async function main(file: string | undefined): Promise<void> {
 	);
 	if (!vectors || vectors.length !== py.texts.length) throw new Error("mnemopi returned no usable embeddings");
 	const cosines = vectors.map((vector, i) => parityCosine(vector, py.vectors[i]));
-	const mean = cosines.reduce((sum, c) => sum + c, 0) / cosines.length;
+	const meanCosine = mean(cosines);
 	console.log(
-		`${cosines.length} texts: min cosine ${Math.min(...cosines).toFixed(6)}, mean cosine ${mean.toFixed(6)}`,
+		`${cosines.length} texts: min cosine ${Math.min(...cosines).toFixed(6)}, mean cosine ${meanCosine.toFixed(6)}`,
 	);
 	assertParity(cosines);
 }
@@ -56,7 +57,7 @@ if (import.meta.main) {
 	try {
 		await main(Bun.argv[2]);
 	} catch (error) {
-		console.error(error instanceof Error ? error.message : String(error));
+		console.error(toError(error).message);
 		process.exit(1);
 	}
 }

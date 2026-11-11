@@ -1,5 +1,5 @@
 /** JSON-lines client for the harness's Python helper processes (the Mnemosyne engine and the embedding server). */
-import { normalizeEnvKey, readLines } from "@oh-my-pi/pi-utils";
+import { normalizeEnvKey, readLines, toError } from "@oh-my-pi/pi-utils";
 
 const STDERR_TAIL_CHARS = 4000;
 const EXIT_GRACE_MS = 5000;
@@ -48,7 +48,7 @@ export class PythonProcess {
 		} catch (err) {
 			// A broken pipe means the process is gone: wait for the pump to attach its exit code and stderr.
 			await this.#done;
-			this.#fail(err instanceof Error ? err : new Error(String(err)));
+			this.#fail(toError(err));
 		}
 		return waiter.promise;
 	}
@@ -116,7 +116,7 @@ export class PythonProcess {
 			]);
 			this.#fail(new Error(`${this.#label} ${exit}: ${this.#stderrTail.trim()}`));
 		} catch (err) {
-			this.#fail(err instanceof Error ? err : new Error(String(err)));
+			this.#fail(toError(err));
 		}
 	}
 }

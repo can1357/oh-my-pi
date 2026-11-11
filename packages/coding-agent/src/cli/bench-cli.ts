@@ -20,7 +20,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { formatDuration, formatNumber, nearestRank, prompt } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, mean, nearestRank, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { formatModelStringWithRouting } from "../config/model-resolver";
@@ -412,10 +412,6 @@ function metricStats(values: number[]): MetricStats {
 		p95: nearestRank(sorted, 0.95),
 		max: sorted[sorted.length - 1]!,
 	};
-}
-
-function mean(values: number[]): number {
-	return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function captureUsage(message: AssistantMessage): BenchCacheUsage {
