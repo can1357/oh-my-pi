@@ -23,6 +23,11 @@
 //! command redirected them with `exec`. Higher-numbered descriptors persist;
 //! duplicates of standard streams follow the current command's streams.
 //!
+//! **Forks.** Between engine calls the store holds the whole root state, so
+//! the driver publishes a copy of it at each command boundary
+//! ([`Session::latest_image`]); [`Session::restore`] starts a second session
+//! from that copy while the first one keeps running its command.
+//!
 //! **`exit`.** A root run is a `bash -c` script: `exit N` (or `set -e`)
 //! unwinds the run with status `N`, runs the `EXIT` trap at the run boundary,
 //! and the shell stays usable for the next command with its state intact
@@ -69,7 +74,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
 	bash::{
 		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, MemStore, PipeTap,
-		Profile, RunId, Script, Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
+		Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit, Signal,
+		Step, ToolCall, VprocSel,
 		store::{Key, MiscKey, Record},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -212,6 +218,9 @@ pub enum SessionError {
 	/// The engine refused the initial state.
 	#[error("could not create the shell")]
 	Create(#[source] ShellError),
+	/// The engine refused the [`Image`] of [`Session::restore`].
+	#[error("could not restore the shell")]
+	Restore(#[source] RestoreError),
 	/// The driver task is gone (it panicked, or its runtime shut down), or
 	/// an earlier run became
 	/// [`SessionError::Unresponsive`].
@@ -273,6 +282,53 @@ impl SpawnObserver for Children {
 	}
 }
 
+/// The root state of a [`Session`] between two commands.
+///
+/// Variables, functions, aliases, options, traps, the working directory and
+/// the job table; [`Session::restore`] starts a new session from it. Cheap to
+/// clone; clones share the state.
+#[derive(Clone)]
+pub struct Image(Arc<MemStore>);
+
+impl Image {
+	/// The shell's working directory in this state.
+	pub fn cwd(&self) -> BString {
+		store_cwd(&self.0)
+	}
+}
+
+/// The [`Image`] a [`Session`] published at its last command boundary.
+///
+/// Boundaries are its creation and the end of each command. Readable while a
+/// command runs: pi forks a busy session from it. Cheap to clone; clones share
+/// the slot.
+#[derive(Clone)]
+pub struct LatestImage(Arc<Mutex<Image>>);
+
+impl LatestImage {
+	/// The state as of the last command boundary: while a command runs, the
+	/// state it started from.
+	pub fn get(&self) -> Image {
+		self.0.lock().clone()
+	}
+
+	fn new(store: &MemStore) -> Self {
+		Self(Arc::new(Mutex::new(Image(Arc::new(store.clone())))))
+	}
+
+	fn publish(&self, store: &MemStore) {
+		*self.0.lock() = Image(Arc::new(store.clone()));
+	}
+}
+
+/// The shell's working directory as `store` records it.
+fn store_cwd(store: &MemStore) -> BString {
+	match store.record(Key::Misc(MiscKey::Cwd)) {
+		Some(Record::Misc(cwd)) => cwd.clone(),
+		_ => BString::default(),
+	}
+}
+
 /// The wake bell of a driver task: its waker (handed to worker threads and
 /// held by the [`Session`]) stores a permit the driver awaits; it never
 /// blocks.
@@ -297,6 +353,7 @@ pub struct Session {
 	/// Rings the driver's bell.
 	waker:    Waker,
 	children: Children,
+	image:    LatestImage,
 }
 
 impl Session {
@@ -310,6 +367,24 @@ impl Session {
 	///
 	/// [`SessionError::Create`] when the engine refuses the initial state.
 	pub fn new(config: SessionConfig) -> Result<Self, SessionError> {
+		Self::start(config, None)
+	}
+
+	/// Start a shell from `image` (a fork of the session it came from): its
+	/// variables, functions, options and working directory are the image's,
+	/// so [`SessionConfig::env`] only configures pi's commands and
+	/// [`SessionConfig::cwd`] is unused. Background jobs the image lists as
+	/// running belong to the source session; here they are done (status
+	/// 137). `$RANDOM` is reseeded.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Restore`] when the engine refuses the image.
+	pub fn restore(config: SessionConfig, image: &Image) -> Result<Self, SessionError> {
+		Self::start(config, Some(image))
+	}
+
+	fn start(config: SessionConfig, image: Option<&Image>) -> Result<Self, SessionError> {
 		let SessionConfig { env, cwd, fs, vfs, runtime, output_decoding } = config;
 		let (jobs, rx) = flume::unbounded();
 		let children = Children::default();
@@ -327,16 +402,46 @@ impl Session {
 		// A subshell's background in-engine work ends with it: nothing
 		// (no process for `pkill`, no job for `kill %N`) could reach it.
 		let engine = Engine::new(EngineConfig { end_orphan_jobs: true, ..EngineConfig::default() });
-		let mut store = MemStore::new();
-		// A program's shell: no history, line editor or completion system.
-		let init = ShellInit { env, cwd, profile: Profile::Tool, ..ShellInit::default() };
-		let mut shell = Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
-			.map_err(SessionError::Create)?;
+		let (mut shell, store) = match image {
+			None => {
+				let mut store = MemStore::new();
+				// A program's shell: no history, line editor or completion system.
+				let init = ShellInit { env, cwd, profile: Profile::Tool, ..ShellInit::default() };
+				let shell =
+					Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
+						.map_err(SessionError::Create)?;
+				(shell, store)
+			},
+			Some(image) => {
+				let mut store = MemStore::clone(&image.0);
+				let opts = RestoreOpts { reseed_random: true, ..RestoreOpts::default() };
+				let (shell, _) =
+					Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts)
+						.map_err(SessionError::Restore)?;
+				(shell, store)
+			},
+		};
 		// Nothing observes events: skip building them.
 		shell.set_event_mask(EventMask::NONE);
-		let driver = Driver { shell, store, host, bell, jobs: rx, children: children.clone(), tools };
+		let image = LatestImage::new(&store);
+		let driver = Driver {
+			shell,
+			store,
+			host,
+			bell,
+			jobs: rx,
+			children: children.clone(),
+			tools,
+			image: image.clone(),
+		};
 		runtime.spawn(driver.serve());
-		Ok(Self { jobs: Some(jobs), waker, children })
+		Ok(Self { jobs: Some(jobs), waker, children, image })
+	}
+
+	/// The session's state as of its last command boundary; see
+	/// [`LatestImage`].
+	pub fn latest_image(&self) -> LatestImage {
+		self.image.clone()
 	}
 
 	/// The live externals of the run in flight; usable while
@@ -532,6 +637,8 @@ struct Driver {
 	children: Children,
 	/// The host callouts in flight (`timeout`, `nohup`, `git`).
 	tools:    ToolCalls,
+	/// Updated at the end of each command.
+	image:    LatestImage,
 }
 
 impl Driver {
@@ -643,10 +750,8 @@ impl Driver {
 		self.shell.set_event_mask(EventMask::NONE);
 		self.host.set_reported_error(None);
 		self.restore_overlay(saved);
-		let cwd = match self.store.record(Key::Misc(MiscKey::Cwd)) {
-			Some(Record::Misc(cwd)) => cwd.clone(),
-			_ => BString::default(),
-		};
+		self.image.publish(&self.store);
+		let cwd = store_cwd(&self.store);
 		// The caller may have stopped waiting (dropped future).
 		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd });
 	}

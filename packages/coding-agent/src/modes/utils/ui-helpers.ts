@@ -78,6 +78,7 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
+	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ShowStatusOptions,
 } from "../../modes/types";
@@ -111,6 +112,7 @@ import {
 	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildParentIrcMessageCard,
 	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
@@ -127,11 +129,6 @@ import {
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
 import type { DroppedPrompt } from "../../session/agent-session-types";
-
-interface RenderInitialMessagesOptions {
-	preserveExistingChat?: boolean;
-	clearTerminalHistory?: boolean;
-}
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -288,7 +285,7 @@ export class UiHelpers {
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
-		const notice = { styleFn, toast: options?.toast };
+		const notice = { styleFn, toast: options?.toast, action: options?.action };
 
 		if (last && last === this.ctx.lastStatus) {
 			if (this.ctx.lastStatus.message !== message) {
@@ -447,6 +444,15 @@ export class UiHelpers {
 			}
 			case "user":
 			case "developer": {
+				if (message.role === "user" && message.parentIrc) {
+					const card = buildParentIrcMessageCard(
+						message.parentIrc,
+						message.timestamp,
+						() => this.ctx.toolOutputExpanded,
+					);
+					this.ctx.chatContainer.addChild(card);
+					break;
+				}
 				const userText = message.role === "user" ? textContent(message.content) : "";
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
@@ -820,8 +826,12 @@ export class UiHelpers {
 			} else if (message.role === "toolResult") {
 				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
+				// Mirror the call side: resolve the wire toolName through the registry
+				// so aliased results route under the canonical name their call used.
+				const tool = this.ctx.viewSession.getToolByName(message.toolName);
+				const renderToolName = toolRenderName(message.toolName, tool);
 				const isReadGroupResult =
-					message.toolName === "read" &&
+					renderToolName === "read" &&
 					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
 				if (isReadGroupResult) {
 					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
@@ -899,13 +909,13 @@ export class UiHelpers {
 					} else {
 						this.ctx.pendingTools.delete(message.toolCallId);
 						if (
-							message.toolName === "wait" &&
+							renderToolName === "wait" &&
 							component instanceof ToolExecutionComponent &&
 							component.isDisplaceableBlock()
 						) {
 							waitingPoll = component;
 						} else if (
-							message.toolName === "todo" &&
+							renderToolName === "todo" &&
 							component instanceof ToolExecutionComponent &&
 							component.canBeDisplacedBy("todo")
 						) {
@@ -1257,6 +1267,7 @@ export class UiHelpers {
 				}
 			}
 			committed = true;
+			options.onCommit?.(context);
 
 			// Show compaction info if session was compacted.
 			const allEntries = this.ctx.viewSession.sessionManager.getEntries();

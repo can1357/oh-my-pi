@@ -16,6 +16,87 @@
 - Fixed cancelling a traced command leaving TERM-ignoring descendants alive after their parent exits, including blocked captured output and descendants that escape into new sessions. Cancellation now retains its pre-TERM identities through hard escalation and refreshes late orphan descendants; ordinary script signals and successful background commands keep their existing behavior ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed Zsh's GNU-profile signal names, function-trap activation and alias identity, and OS handler restoration across local scopes and re-exec. Function copies, enable/disable operations, missing function bodies, and failed handler setup now preserve their distinct trap semantics without losing cleanup errors or cancellation status ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+## [18.18.9] - 2026-11-11
+
+### Added
+
+- `OMP_APPLEFM_DISABLE=1` builds without the Apple Foundation Models bridge and never probes Xcode or the Command Line Tools; it cannot be combined with `OMP_APPLEFM_SWIFTC` ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
+
+### Changed
+
+- The macOS addon's install name is `@rpath/libpi_natives.dylib` instead of the directory it was built in ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
+- A set `OMP_APPLEFM_SWIFTC` must name a usable Swift 6.4+ compiler with a macOS 27+ SDK: the build now fails instead of falling back to Xcode, the Command Line Tools, or a build without Apple Foundation Models ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
+
+### Fixed
+
+- Fixed macOS window screenshots drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; windows spanning displays or partly off screen are captured whole at their on-screen size, except while a sheet larger than the window is open ([#17757](https://github.com/can1357/oh-my-pi/pull/17757) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.18.8] - 2026-11-11
+
+### Changed
+
+- macOS keys, typing and held keys for a window now go to a sheet attached to it that holds keyboard focus, such as an Open sheet or Finder's Go to Folder, as macOS sends them, instead of throwing `InvalidTarget` and naming the sheet; so do keys for a control of that sheet, which reports the window under it as its own ([#18675](https://github.com/can1357/oh-my-pi/pull/18675) by [@will-bogusz](https://github.com/will-bogusz))
+- Computer input no longer fails with `InputBusy` the moment another omp session's call holds the desktop, such as an `apps.open` waiting for its window: it waits up to 5 seconds for that call to finish, on macOS, Linux and Windows ([#18746](https://github.com/can1357/oh-my-pi/pull/18746) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed a crash when parsing Markdown with very deeply nested lists or block quotes, such as a line of several hundred `- ` markers, which made editing such files kill the process ([#18707](https://github.com/can1357/oh-my-pi/issues/18707))
+- Fixed the shell's `git` builtin on Windows with `bash.gitGuard` (or smart git) on failing every allowed command with exit 127 (`…\Git\cmd\git: No such file or directory`); it now runs `git.exe` ([#18722](https://github.com/can1357/oh-my-pi/issues/18722))
+- Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles ([#18745](https://github.com/can1357/oh-my-pi/pull/18745) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background input and takeover refusing every call, with nothing sent, while Finder is in front with its focus on the desktop and a Finder window open; Finder gets its front status back with its focus left on the desktop ([#18680](https://github.com/can1357/oh-my-pi/pull/18680) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.18.6] - 2026-11-09
+
+### Fixed
+
+- Fixed GTK4 apps such as Files (Nautilus) on X11: element clicks and `computer.elementAt()` now find their elements where they are on screen, and `ax()` no longer marks their enabled controls `(disabled)` ([#18643](https://github.com/can1357/oh-my-pi/pull/18643) by [@will-bogusz](https://github.com/will-bogusz))
+- `grep` no longer searches the file its own output is redirected into, nor standard input redirected from that same file: both are refused with `input file is also the output`, as GNU grep does ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added Zig syntax highlighting for fenced Zig code in Markdown.
+- Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
+
+### Fixed
+
+- Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
+- Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
+- Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
+- Fixed setValue() on Linux reporting success when Firefox or Thunderbird fields, including password fields, were not actually updated; failures now identify the affected field appropriately.
+
+## [18.18.1] - 2026-11-08
+
+### Added
+
+- macOS `ax()` lines show what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `(readonly)` on web text fields the page locks, `actions=` beyond its press, and names for unlabeled window buttons ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- macOS `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with the call that reads it whole ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS `ax()` dates read in local time with their offset, the form `setValue` takes back, and `axPerform` runs a listed action in any case, with or without its `AX` prefix ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS background left drags across the text of one native text view, such as a TextEdit document, now select that text through accessibility, and `drag` resolves to `{ selection, focusReturn }`; drags on web page text and links still throw `BackgroundUnavailable` ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- macOS `ax()` no longer marks every cell of a focused table or sidebar `(focused)`; only the element holding the app's keyboard focus is ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS `axPerform` reports a followed Preview PDF link or an opened Finder item as unconfirmed instead of failed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- The embedded shell's `comm` merges in the same locale order as its `sort`, so `comm` on `sort` output under a UTF-8 locale no longer reports unsorted input and drops common lines
+- An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
+- macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
+- Fixed large brace expansions running as literal text or silently dropping words: expansions support up to 4,194,304 words and report an error above that limit ([#18092](https://github.com/can1357/oh-my-pi/pull/18092) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
+- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
+- Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

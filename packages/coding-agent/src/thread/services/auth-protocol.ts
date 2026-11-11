@@ -156,6 +156,7 @@ export type AuthStorageProtocol = {
 	"credentials.list": RpcMethod<[provider?: string], StoredAuthCredential[]>;
 	"credentials.has": RpcMethod<[provider: string], boolean>;
 	"credentials.hasOAuth": RpcMethod<[provider: string], boolean>;
+	"credentials.hasSubscription": RpcMethod<[provider: string], boolean>;
 	"credentials.getOAuth": RpcMethod<[provider: string], OAuthCredential | undefined>;
 	"credentials.set": RpcMethod<[provider: string, credential: AuthCredentialEntry], void>;
 	"credentials.upsert": RpcMethod<[provider: string, credential: AuthCredential], AuthCredentialSnapshotEntry[]>;
@@ -247,6 +248,7 @@ export type AuthStorageProtocol = {
 	>;
 	"usage.setProvider": RpcMethod<[provider: Provider, usageProvider: UsageProvider, apiKey?: string], void>;
 	"usage.removeProvider": RpcMethod<[provider: Provider], void>;
+	"usage.replaceConfiguredProviders": RpcMethod<[providers: [Provider, UsageProvider][]], void>;
 
 	"health.model": RpcMethod<[provider: Provider, options: ModelUsageHealthOptions], ModelUsageHealth>;
 	"health.check": RpcMethod<[options?: WireCheckCredentialsOptions], CredentialHealthResult[]>;

@@ -1,8 +1,8 @@
 //! Terminal system calls behind the engine's [`Terminal`] seam.
 //!
 //! - [`NativeTerminal`]: the process host's [`Terminal`] over the real
-//!   terminals of this process (Unix; every operation off Unix fails with
-//!   `Unsupported`).
+//!   terminals of this process (Unix), or over its console (Windows,
+//!   [`crate::sys::console`]).
 //! - [`TermiosGuard`]: saves a terminal's modes and puts them back when dropped
 //!   (optionally switching it to raw mode first).
 //! - Free functions over raw descriptors (`attrs`, `set_attrs`, `window_size`,
@@ -633,7 +633,9 @@ mod unix {
 /// them, so an embedding process gets its terminal back as it was; it
 /// always does when dropped during a panic. Ptys the shell opened itself
 /// (`zpty`) are never held or restored: their master must see the hang-up
-/// when their program ends.
+/// when their program ends. Nor are they drained before a mode change:
+/// the engine reads their masters itself, so `TCSADRAIN` would wait on
+/// the read it blocks.
 #[derive(Default)]
 pub struct NativeTerminal {
 	#[cfg(unix)]
@@ -641,7 +643,14 @@ pub struct NativeTerminal {
 	/// The device of the terminal [`Terminal::open_controlling`] opened.
 	#[cfg(unix)]
 	shtty:   Option<libc::dev_t>,
-	#[cfg_attr(not(unix), expect(dead_code, reason = "nothing to restore off Unix"))]
+	/// The devices of the ptys [`Terminal::open_pty`] opened.
+	#[cfg(unix)]
+	ptys:    Vec<libc::dev_t>,
+	/// The console (whose modes always go back: it is shared with the
+	/// shell that started this one).
+	#[cfg(windows)]
+	console: crate::sys::console::WindowsConsole,
+	#[cfg_attr(not(unix), expect(dead_code, reason = "the console is always restored"))]
 	restore: bool,
 }
 
@@ -655,6 +664,10 @@ impl NativeTerminal {
 			guards: Vec::new(),
 			#[cfg(unix)]
 			shtty: None,
+			#[cfg(unix)]
+			ptys: Vec::new(),
+			#[cfg(windows)]
+			console: crate::sys::console::WindowsConsole::new(),
 			restore,
 		}
 	}
@@ -712,6 +725,15 @@ impl Terminal for NativeTerminal {
 			let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 			self.guards.push(TermiosGuard::save(borrowed)?);
 		}
+		// A pty processes output as it is written: changing its modes at
+		// once leaves what is queued as draining first would.
+		let when = if when == SetWhen::Drain
+			&& unix::device(fd).is_some_and(|dev| self.ptys.contains(&dev))
+		{
+			SetWhen::Now
+		} else {
+			when
+		};
 		set_attrs(fd, attrs, when)
 	}
 
@@ -762,67 +784,69 @@ impl Terminal for NativeTerminal {
 	}
 
 	fn open_pty(&mut self, size: Option<TtyInfo>) -> io::Result<Pty> {
+		use std::os::fd::AsRawFd;
 		let (master, slave, name) = open_pty(size)?;
+		// Device numbers come back as ptys are reused: one entry each.
+		if let Some(dev) = unix::device(slave.as_raw_fd())
+			&& !self.ptys.contains(&dev)
+		{
+			self.ptys.push(dev);
+		}
 		Ok(Pty { master: file(master), slave: file(slave), name })
 	}
 }
 
-#[cfg(not(unix))]
-fn unsupported<T>() -> io::Result<T> {
-	Err(io::ErrorKind::Unsupported.into())
-}
-
-#[cfg(not(unix))]
+#[cfg(windows)]
 impl Terminal for NativeTerminal {
-	fn is_terminal(&self, _h: OsHandle) -> bool {
-		false
+	fn is_terminal(&self, h: OsHandle) -> bool {
+		self.console.is_terminal(h)
 	}
 
-	fn attrs(&self, _h: OsHandle) -> io::Result<Termios> {
-		unsupported()
+	fn attrs(&self, h: OsHandle) -> io::Result<Termios> {
+		self.console.attrs(h)
 	}
 
-	fn set_attrs(&mut self, _h: OsHandle, _attrs: &Termios, _when: SetWhen) -> io::Result<()> {
-		unsupported()
+	fn set_attrs(&mut self, h: OsHandle, attrs: &Termios, when: SetWhen) -> io::Result<()> {
+		self.console.set_attrs(h, attrs, when)
 	}
 
-	fn size(&self, _h: OsHandle) -> io::Result<TtyInfo> {
-		unsupported()
+	fn size(&self, h: OsHandle) -> io::Result<TtyInfo> {
+		self.console.size(h)
 	}
 
-	fn set_size(&mut self, _h: OsHandle, _size: TtyInfo) -> io::Result<()> {
-		unsupported()
+	fn set_size(&mut self, h: OsHandle, size: TtyInfo) -> io::Result<()> {
+		self.console.set_size(h, size)
 	}
 
-	fn foreground(&self, _h: OsHandle) -> io::Result<i32> {
-		unsupported()
+	fn foreground(&self, h: OsHandle) -> io::Result<i32> {
+		self.console.foreground(h)
 	}
 
-	fn set_foreground(&mut self, _h: OsHandle, _pgid: i32) -> io::Result<()> {
-		unsupported()
+	fn set_foreground(&mut self, h: OsHandle, pgid: i32) -> io::Result<()> {
+		self.console.set_foreground(h, pgid)
 	}
 
-	fn session(&self, _h: OsHandle) -> io::Result<i32> {
-		unsupported()
+	fn session(&self, h: OsHandle) -> io::Result<i32> {
+		self.console.session(h)
 	}
 
-	fn name(&self, _h: OsHandle) -> io::Result<BString> {
-		unsupported()
+	fn name(&self, h: OsHandle) -> io::Result<BString> {
+		self.console.name(h)
 	}
 
 	fn process_group(&self) -> i32 {
-		0
+		self.console.process_group()
 	}
 
-	fn set_process_group(&mut self, _pid: i32, _pgid: i32) -> io::Result<()> {
-		unsupported()
+	fn set_process_group(&mut self, pid: i32, pgid: i32) -> io::Result<()> {
+		self.console.set_process_group(pid, pgid)
 	}
 
 	fn open_controlling(&mut self) -> io::Result<Option<Shtty>> {
-		unsupported()
+		self.console.open_controlling()
 	}
 
-	fn open_pty(&mut self, _size: Option<TtyInfo>) -> io::Result<Pty> {
-		unsupported()
+	fn open_pty(&mut self, size: Option<TtyInfo>) -> io::Result<Pty> {
+		self.console.open_pty(size)
 	}
 }

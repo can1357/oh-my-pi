@@ -16,8 +16,7 @@
  *   are attempted even with a zero/shorter horizon or zero/unknown usage.
  *   This fallback ignores non-terminal deferrals, but keeps live credit
  *   eligibility, terminal-attempt dedupe, and the account cooldown. It still
- *   needs consent, except that a host with no prompt UI spends it while
- *   auto-redeem is unset (see {@link headlessApprovedResetActions}).
+ *   needs consent: under `unset` it is asked about, never spent unasked.
  *   The `keepCredits` reserve is deliberately ignored here — reserving a
  *   credit that is about to expire preserves nothing. If the window resets
  *   naturally before the credit expires, broader salvage skips the mostly-free
@@ -68,7 +67,7 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
-import type { ResetAutoRedeemMode } from "./settings";
+import type { ResetAutoRedeemMode, ResetWindow, ResetWindowModes } from "./settings";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 
 /** A chat window counts as exhausted at `usedFraction >= 0.999` (used_percent >= 99.9). */
@@ -77,7 +76,9 @@ export const WINDOW_EXHAUSTED_MIN_FRACTION = 0.999;
 export const MAX_PLAUSIBLE_WEEKLY_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_000;
 /** A 5h reset can never be more than one window length (5h) away; +1h slack for skew. */
 export const MAX_PLAUSIBLE_PRIMARY_REMAINING_MS = 5 * 3_600_000 + 60 * 60_000;
-/** Shared last-chance expiry horizon; bypasses salvage usage thresholds, non-terminal deferrals and, with no prompt UI, unset consent; never cooldown. */
+/** Slack before a live 429 deadline past the reported resets counts as a later window: the hint is rounded. */
+const LIVE_HINT_TOLERANCE_MS = 5 * 60_000;
+/** Shared last-chance expiry horizon; bypasses salvage usage thresholds and non-terminal deferrals, never consent or cooldown. */
 export const IMMINENT_RESET_EXPIRY_MS = 5 * 60_000;
 /** Below this usage on BOTH chat windows, non-imminent salvage restores too little to bother. */
 export const SALVAGE_MIN_USED_FRACTION = 0.25;
@@ -93,40 +94,31 @@ export const DEBOUNCE_BUCKET_MS = 60_000;
 /** Floor between salvage sweeps; dedupe keys make sweeps idempotent, this just avoids useless re-planning. */
 export const SWEEP_MIN_INTERVAL_MS = 60_000;
 
-export function shouldEvaluateCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean {
-	return mode !== "no";
+/** Whether any window may spend, possibly after asking; all `no` turns the planners off. */
+export function resetWindowsEnabled(modes: ResetWindowModes): boolean {
+	return Object.values(modes).some(mode => mode !== "no");
 }
 
-export function shouldPromptCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean {
-	return mode === "unset";
-}
+const MODE_RANK: Record<ResetAutoRedeemMode, number> = { no: 0, unset: 1, yes: 2 };
 
 /**
- * Planned spends a host with no prompt UI may make while auto-redeem is unset:
- * only a credit expiring within {@link IMMINENT_RESET_EXPIRY_MS} qualifies,
- * whether a salvage or a restore spends it, since nobody can be asked before it
- * is lost. The approved target names that credit, so redeem cannot pick a later one.
+ * The consent governing a spend on `window`. An unknown window (a live 429 wait
+ * that fits either chat window) needs both chat windows: the least permissive wins.
  */
-export function headlessApprovedResetActions<T extends Pick<CodexResetAction, "expiresInMs" | "target" | "creditId">>(
-	actions: readonly T[],
-): readonly T[] {
-	const approved: T[] = [];
-	for (const action of actions) {
-		if (action.expiresInMs === undefined || action.expiresInMs > IMMINENT_RESET_EXPIRY_MS) continue;
-		approved.push(action.creditId ? { ...action, target: { ...action.target, creditId: action.creditId } } : action);
-	}
-	return approved;
+export function resetWindowMode(modes: ResetWindowModes, window: ResetWindow | undefined): ResetAutoRedeemMode {
+	if (window) return modes[window] ?? "no";
+	const fiveHour = modes["5h"] ?? "no";
+	const weekly = modes.weekly ?? "no";
+	return MODE_RANK[fiveHour] < MODE_RANK[weekly] ? fiveHour : weekly;
 }
 
 /** Planner settings from a provider's `codexResets.*` or `claudeResets.*` group. */
-export function resetPlanSettings(cfg: {
-	autoRedeem: ResetAutoRedeemMode;
-	minBlockedMinutes: number;
-	keepCredits: number;
-	salvageHorizonHours: number;
-}): CodexResetPlanInput["settings"] {
+export function resetPlanSettings(
+	modes: ResetWindowModes,
+	cfg: { minBlockedMinutes: number; keepCredits: number; salvageHorizonHours: number },
+): CodexResetPlanInput["settings"] {
 	return {
-		enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
+		modes,
 		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
@@ -139,6 +131,7 @@ export type CodexResetTrigger = "blocked" | "sweep";
 /** Why one account produced no action (or, with `accountKey: "*"`, a whole rule was off). */
 export type CodexResetSkipReason =
 	| "disabled"
+	| "window-disabled"
 	| "wrong-provider"
 	| "spark-model"
 	| "no-identity"
@@ -166,7 +159,8 @@ export interface CodexResetPlanInput {
 	/** `this.model.id` — gates the `blocked-account` rule only. */
 	modelId: string;
 	settings: {
-		enabled: boolean;
+		/** Per-window consent; a planned spend whose window is `no` is skipped. */
+		modes: ResetWindowModes;
 		/** `blocked-account`: skip when the natural unblock is closer than this. */
 		minBlockedMinutes: number;
 		/** `blocked-account`: never spend below this many remaining credits. */
@@ -196,6 +190,8 @@ export interface CodexResetPlanInput {
 /** One credit to spend. `redeemResetCredit` picks the account's soonest-expiring credit. */
 export interface CodexResetAction {
 	reason: "blocked-account" | "expiring-credit";
+	/** Window whose consent governs this spend; absent when it could be either chat window. */
+	window?: "5h" | "weekly";
 	target: ResetCreditTarget;
 	accountKey: string;
 	/** Once-per-episode dedupe key; record in `attemptedKeys` BEFORE consuming. */
@@ -307,15 +303,16 @@ function codexChatWindows(report: UsageReport): CodexChatWindowSnapshot[] {
 	return windows;
 }
 
-/** The fullest chat window with known usage: the one a salvage redeem restores. */
+/**
+ * The fullest chat window with known usage: the one a salvage redeem restores. A tie
+ * goes to weekly, so a spend that restores the weekly window is governed by its key.
+ */
 function fullestChatWindow(windows: readonly CodexChatWindowSnapshot[]): CodexChatWindowSnapshot | undefined {
 	let fullest: CodexChatWindowSnapshot | undefined;
 	for (const window of windows) {
-		if (
-			window.usedFraction !== undefined &&
-			window.usedFraction >= 0 &&
-			(!fullest || window.usedFraction > (fullest.usedFraction ?? 0))
-		) {
+		if (window.usedFraction === undefined || window.usedFraction < 0) continue;
+		const top = fullest?.usedFraction ?? 0;
+		if (!fullest || window.usedFraction > top || (window.usedFraction === top && window.window === "weekly")) {
 			fullest = window;
 		}
 	}
@@ -344,7 +341,9 @@ function usedFractionForWindow(snapshot: AccountSnapshot, window: CodexChatWindo
 export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexResetPlan {
 	const { nowMs, settings } = input;
 	const skipped: CodexResetSkip[] = [];
-	if (!settings.enabled) return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
+	if (!resetWindowsEnabled(settings.modes)) {
+		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
+	}
 
 	// Rule-wide gates for `blocked-account`: a redeem can only unblock the turn
 	// when the turn is actually on Codex, and it is unknown whether a credit
@@ -429,6 +428,9 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			remainingMs: number;
 			unblockAtMs: number;
 			blockedWindows: ("5h" | "weekly")[];
+			window: "5h" | "weekly" | undefined;
+			/** Spends without a prompt, so it outranks a candidate that needs one. */
+			approved: boolean;
 		}
 		const candidates: RestoreCandidate[] = [];
 		for (const snapshot of snapshots) {
@@ -483,18 +485,37 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				}
 				unblockAtMs = latest;
 				blockedWindows = exhausted.map(e => e.window);
+				// A plausible live wait that outlasts every exhausted window's reset (by more
+				// than rounding slack) or that no 5h window can span proves a weekly block
+				// the pre-block report missed; the account stays blocked until then.
+				if (
+					liveUnblockAtMs !== undefined &&
+					liveUnblockAtMs - nowMs <= MAX_PLAUSIBLE_WEEKLY_REMAINING_MS &&
+					(liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_PRIMARY_REMAINING_MS ||
+						liveUnblockAtMs - latest > LIVE_HINT_TOLERANCE_MS)
+				) {
+					if (!blockedWindows.includes("weekly")) blockedWindows.push("weekly");
+					unblockAtMs = Math.max(unblockAtMs, liveUnblockAtMs);
+				}
 			} else if (liveUnblockAtMs !== undefined) {
 				// The report's windows look healthy but the live 429 says otherwise:
 				// the snapshot predates the block. Trust the provider's own hint for
-				// the unblock horizon, classifying the window by its scale.
+				// the unblock horizon; a wait that fits a 5h window could be either window.
 				if (liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_WEEKLY_REMAINING_MS) {
 					skip("reset-implausible");
 					continue;
 				}
 				unblockAtMs = liveUnblockAtMs;
-				blockedWindows = [liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_PRIMARY_REMAINING_MS ? "weekly" : "5h"];
+				blockedWindows = liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_PRIMARY_REMAINING_MS ? ["weekly"] : [];
 			} else {
 				skip("no-exhausted-window");
+				continue;
+			}
+			// Any weekly block governs by the weekly key; no known window needs both keys.
+			const window = blockedWindows.includes("weekly") ? "weekly" : blockedWindows[0];
+			const mode = resetWindowMode(settings.modes, window);
+			if (mode === "no") {
+				skip("window-disabled");
 				continue;
 			}
 			const remainingMs = unblockAtMs - nowMs;
@@ -520,10 +541,11 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("cooldown");
 				continue;
 			}
-			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows });
+			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows, window, approved: mode === "yes" });
 		}
 		candidates.sort((a, b) => {
-			// Active account first: the sticky session credential stays usable.
+			if (a.approved !== b.approved) return a.approved ? -1 : 1;
+			// Then the active account: the sticky session credential stays usable.
 			if (a.snapshot.active !== b.snapshot.active) return a.snapshot.active ? -1 : 1;
 			// Then spend the credit that dies soonest.
 			const aExpiry = a.snapshot.creditExpiresAtMs ?? Number.POSITIVE_INFINITY;
@@ -541,6 +563,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		if (best) {
 			restore = {
 				reason: "blocked-account",
+				window: best.window,
 				target: best.snapshot.target,
 				accountKey: best.snapshot.accountKey,
 				attemptKey: blockedAttemptKey(best.snapshot.accountKey, best.unblockAtMs),
@@ -578,6 +601,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		// let the provider decide whether there is anything left to restore.
 		const fullestWindow = fullestChatWindow(snapshot.windows);
 		const salvageUsedFraction = fullestWindow?.usedFraction;
+		if (resetWindowMode(settings.modes, fullestWindow?.window) === "no") {
+			skip("window-disabled");
+			continue;
+		}
 		if (!imminent && (salvageUsedFraction === undefined || salvageUsedFraction < SALVAGE_MIN_USED_FRACTION)) {
 			skip("window-mostly-free");
 			continue;
@@ -598,6 +625,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		}
 		salvages.push({
 			reason: "expiring-credit",
+			window: fullestWindow?.window,
 			target: snapshot.target,
 			accountKey: snapshot.accountKey,
 			attemptKey,

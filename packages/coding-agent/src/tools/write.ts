@@ -87,6 +87,7 @@ import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 import {
 	cfgLspDiagnosticsDeduplicate,
 	cfgLspDiagnosticsOnWrite,
+	cfgLspEnabled,
 	cfgLspFormatOnWrite,
 	cfgLspRequestTimeout,
 } from "../lsp/settings";
@@ -645,7 +646,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	/** Resolves the LSP writethrough from the current `lsp.*` settings so changes apply to the next write. */
 	#lspWritethrough(): { writethrough: WritethroughCallback; deferred: DeferredDiagnostics | undefined } {
-		if (!(this.session.enableLsp ?? true)) return { writethrough: writethroughNoop, deferred: undefined };
+		if (!(this.session.enableLsp ?? true) || !cfgLspEnabled.get(this.session.settings)) {
+			return { writethrough: writethroughNoop, deferred: undefined };
+		}
 		const { settings } = this.session;
 		const enableDiagnostics = cfgLspDiagnosticsOnWrite.get(settings);
 		const dedup = enableDiagnostics && cfgLspDiagnosticsDeduplicate.get(settings);
@@ -1029,10 +1032,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 							toolCall: { id: _toolCallId, onUpdate, context },
 						}),
 					);
+					// The flag tells the prewalk gate this write was not implementation work.
+					const fileFreeDetails: WriteToolDetails = touchesNoFiles ? { touchesNoFiles: true } : {};
 					if (handlerResult) {
 						const result: AgentToolResult<WriteToolDetails> = {
 							content: handlerResult.content,
-							details: handlerResult.details ?? {},
+							details: { ...handlerResult.details, ...fileFreeDetails },
 							isError: handlerResult.isError,
 							useless: handlerResult.useless,
 						};
@@ -1043,7 +1048,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					if (stripped) {
 						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 					}
-					return { content: [{ type: "text", text: resultText }], details: {} };
+					return { content: [{ type: "text", text: resultText }], details: fileFreeDetails };
 				}
 				// Read-only scheme: the router rejects the write with its uniform error.
 				if (!policy) await router.write(path, cleanContent);

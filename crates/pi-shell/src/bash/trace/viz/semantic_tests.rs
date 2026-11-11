@@ -7,6 +7,7 @@ use crate::bash::{
 	engine::{Engine, EngineConfig},
 	event::AssignScope,
 	ids::{ModeId, Vpid},
+	syntax::{CompleteCommand, Features, parse_all},
 	trace::{
 		Node,
 		history::{HistoryData, HistoryEvent},
@@ -21,52 +22,91 @@ struct Unit {
 	nodes:  Vec<Node>,
 }
 struct Fixture {
-	script: BString,
-	units:  Vec<Unit>,
-	cache:  Cache,
+	script:    BString,
+	units:     Vec<Unit>,
+	cache:     Cache,
+	announced: Option<usize>,
+}
+/// One announced unit compiled from `command`, whose spans index `bytes`.
+fn unit(engine: &Engine, bytes: &[u8], command: CompleteCommand) -> Unit {
+	let at = command.span.lo;
+	let (lowered, _) = engine.compile(command, bytes, ModeId::Bash, Features::NONE, true);
+	let parents = crate::bash::trace::nodes::parents(&lowered.nodes);
+	let nodes = lowered
+		.nodes
+		.iter()
+		.zip(parents)
+		.map(|(info, parent)| Node::new(info.kind, info.lo, info.hi, parent))
+		.collect();
+	Unit {
+		at,
+		source: lowered.source.clone(),
+		syntax: lowered
+			.trace_syntax
+			.get()
+			.expect("observed native syntax")
+			.as_ref()
+			.clone(),
+		nodes,
+	}
 }
 impl Fixture {
 	fn new(script: &str) -> Self {
-		let mut units = Vec::new();
 		let engine = Engine::new(EngineConfig::default());
-		for command in parse_all(script.as_bytes(), Features::NONE)
+		let units = parse_all(script.as_bytes(), Features::NONE)
 			.expect("canonical parse")
 			.commands
-		{
-			let at = command.span.lo;
-			let lowered =
-				engine.compile(command, script.as_bytes(), ModeId::Bash, Features::NONE, true);
-			let parents = crate::bash::trace::nodes::parents(&lowered.nodes);
-			let nodes = lowered
-				.nodes
-				.iter()
-				.zip(parents)
-				.map(|(info, parent)| Node::new(info.kind, info.lo, info.hi, parent))
-				.collect();
-			units.push(Unit {
-				at,
-				source: lowered.source.clone(),
-				syntax: lowered
-					.trace_syntax
-					.get()
-					.expect("observed native syntax")
-					.as_ref()
-					.clone(),
-				nodes,
-			});
-		}
-		Self { script: script.into(), units, cache: Cache::default() }
+			.into_iter()
+			.map(|command| unit(&engine, script.as_bytes(), command))
+			.collect::<Vec<_>>();
+		Self { announced: None, script: script.into(), units, cache: Cache::default() }
 	}
 
-	fn root(&self, unit: usize) -> &Command {
-		let SyntaxTree::List(list) = &self.units[unit].syntax.tree else {
+	/// A fixture shaped like the segmented minimizer runner: one unit per
+	/// `;`-separated pipeline, announced at its own span, with the separator
+	/// between two of them inside no unit at all.
+	fn segmented(script: &str) -> Self {
+		let crate::minimizer::plan::CommandPlan::Chain { segments } =
+			crate::minimizer::plan::analyze(script)
+		else {
+			panic!("expected a segmented chain")
+		};
+		let engine = Engine::new(EngineConfig::default());
+		let units = segments
+			.iter()
+			.map(|segment| {
+				let bytes = segment.command.as_bytes();
+				let command = parse_all(bytes, Features::NONE)
+					.expect("segment parse")
+					.commands
+					.into_iter()
+					.next()
+					.expect("one command per segment");
+				let mut unit = unit(&engine, bytes, command);
+				unit.at = segment.source_at;
+				unit
+			})
+			.collect::<Vec<_>>();
+		Self { announced: None, script: script.into(), units, cache: Cache::default() }
+	}
+
+	fn root(&self, unit: usize) -> Command<'_> {
+		let Root::List(list) = self.units[unit].syntax.tree.view() else {
 			panic!("canonical list")
 		};
-		&list.items[0].and_or.first.stages[0].cmd
+		list
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap()
 	}
 
 	fn key(&self, unit: usize) -> NodeKey {
-		NodeKey::engine(unit as u32, self.root(unit).id)
+		NodeKey::engine(unit as u32, self.root(unit).id())
 	}
 
 	fn present(&self, events: &[HistoryEvent], options: &Options) -> Presentation {
@@ -93,12 +133,15 @@ impl VizSource for Fixture {
 
 	fn unit(&self, index: usize) -> Option<super::super::runtime::SourceUnit<'_>> {
 		let unit = self.units.get(index)?;
+		// An unannounced unit is not in the trace yet: it has no start, and
+		// no compiled syntax to draw.
+		let announced = self.announced.is_none_or(|count| index < count);
 		Some(super::super::runtime::SourceUnit {
 			index:      index as u32,
 			source:     BStr::new(&unit.source),
-			at:         Some(unit.at),
+			at:         announced.then_some(unit.at),
 			line:       1,
-			syntax:     Some(&unit.syntax),
+			syntax:     announced.then_some(&unit.syntax),
 			projection: 0,
 			nodes:      &unit.nodes,
 			callout:    false,
@@ -302,11 +345,20 @@ fn guards_suppress_only_real_builtin_status_one_and_keep_leaf_identity() {
 	] {
 		for resolved in [ResolvedKind::Intrinsic, ResolvedKind::External, ResolvedKind::Function] {
 			let f = Fixture::new(&format!("if {guard}; then echo yes; fi"));
-			let CommandKind::If(branch) = &f.root(0).kind else {
+			let CommandKind::If(branch) = f.root(0).kind() else {
 				panic!("if")
 			};
-			let tested = &branch.arms[0].cond.items[0].and_or.first.stages[0].cmd;
-			let key = NodeKey::engine(0, tested.id);
+			let cond = branch.arms().next().unwrap().cond;
+			let tested = cond
+				.items()
+				.first()
+				.unwrap()
+				.and_or()
+				.first()
+				.stages()
+				.first()
+				.unwrap();
+			let key = NodeKey::engine(0, tested.id());
 			let events = vec![expanded(1, key, resolved), end(2, key, 1)];
 			let options = Options { cursor: Some(events.len()), ..Options::default() };
 			let p = f.present(&events, &options);
@@ -341,10 +393,11 @@ fn guards_suppress_only_real_builtin_status_one_and_keep_leaf_identity() {
 #[test]
 fn fast_completions_are_real_and_never_copied_to_compound_scaffolding() {
 	let f = Fixture::new("for x in a; do true; done");
-	let CommandKind::For(loop_) = &f.root(0).kind else {
+	let CommandKind::For(loop_) = f.root(0).kind() else {
 		panic!("for")
 	};
-	let child = NodeKey::engine(0, loop_.body.items[0].and_or.first.stages[0].cmd.id);
+	let body = loop_.body().items().first().unwrap().and_or().first();
+	let child = NodeKey::engine(0, body.stages().first().unwrap().id());
 	let events = vec![end(1, child, 0), end(2, f.key(0), 0)];
 	let p = f.present(&events, &Options { cursor: Some(2), ..Options::default() });
 	assert!(
@@ -443,4 +496,46 @@ fn live_and_restored_sources_share_the_same_semantic_renderer() {
 	let live = serde_json::to_value(f.present(&[], &Options::default())).unwrap();
 	assert_eq!(restored["rows"], live["rows"]);
 	assert_eq!(restored["original"], live["original"]);
+}
+
+/// Statement and literal rows of a Pseudo presentation: text, indentation and
+/// role.
+fn statements(p: &Presentation) -> Vec<(String, u32, Option<&'static str>)> {
+	p.rows
+		.iter()
+		.filter(|r| r.role == Some("stmt") || r.role == Some("raw"))
+		.map(|r| {
+			(
+				r.segments
+					.iter()
+					.map(|s| s.text.as_str())
+					.collect::<String>(),
+				r.depth,
+				r.role,
+			)
+		})
+		.collect()
+}
+
+#[test]
+fn segmented_statement_chain_never_draws_a_separator_row() {
+	// Regression for #18258: the minimizer runs each `;`-separated pipeline as
+	// its own unit, so the separator sits outside every unit's span. The gap
+	// between two announced units, and the `;` opening the chain still ahead of
+	// the engine, were drawn as literal `;` rows. `;` carries no meaning of its
+	// own in Pseudo — `list()` already drops the one inside a single list.
+	let mut f = Fixture::segmented("echo a; echo b");
+	assert_eq!(f.units.len(), 2, "one unit per statement");
+	assert_eq!(f.units.iter().map(|u| u.at).collect::<Vec<_>>(), [0, 8]);
+	f.announced = Some(0);
+	let pending = statements(&f.present(&[], &Options::default()));
+	f.announced = Some(1);
+	let running = statements(&f.present(&[], &Options::default()));
+	f.announced = Some(2);
+	let finished = statements(&f.present(&[], &Options::default()));
+	let expected =
+		[("print(\"a\")".to_owned(), 0, Some("stmt")), ("print(\"b\")".to_owned(), 0, Some("stmt"))];
+	assert_eq!(pending, expected, "pending");
+	assert_eq!(running, expected, "running");
+	assert_eq!(finished, expected, "finished");
 }

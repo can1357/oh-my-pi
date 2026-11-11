@@ -25,6 +25,7 @@ const EXTRA_SYNTAXES: &[(&str, &str)] = &[
 	("Terraform", include_str!("Terraform.sublime-syntax")),
 	("TOML", include_str!("TOML.sublime-syntax")),
 	("VimL", include_str!("VimL.sublime-syntax")),
+	("Zig", include_str!("Zig.sublime-syntax")),
 	// The later entry shadows syntect's backtracking Markdown grammar.
 	("Markdown", include_str!("Markdown.sublime-syntax")),
 ];

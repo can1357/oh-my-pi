@@ -10,6 +10,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -1433,6 +1434,40 @@ describe("ACP agent", () => {
 			"Unknown ACP ext method",
 		);
 
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("lists extension modules configured for the requested project, not the ACP process", async () => {
+		const harness = await createHarness();
+		const other = path.join(harness.cwdA, "other");
+		const target = path.join(harness.cwdB, "fleet");
+		await Bun.write(path.join(other, "package.json"), JSON.stringify({ omp: { extensions: ["./wrong.ts"] } }));
+		await Bun.write(path.join(other, "wrong.ts"), "export default function wrong() {}\n");
+		await Bun.write(path.join(target, "package.json"), JSON.stringify({ omp: { extensions: ["./hello.ts"] } }));
+		await Bun.write(path.join(target, "hello.ts"), "export default function hello() {}\n");
+		await Bun.write(path.join(harness.cwdA, ".omp", "config.yml"), "extensions:\n  - ./other\n");
+		await Bun.write(
+			path.join(harness.cwdB, ".omp", "config.yml"),
+			"extensions:\n  - ./fleet\ndisabledExtensions:\n  - extension-module:hello\n",
+		);
+		cfgExtensions.set(Settings.instance, [other]);
+
+		const result = await harness.agent.extMethod("_omp/extensions", { cwd: harness.cwdB });
+		expect(result.extensions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "extension-module:hello",
+					path: path.join(target, "hello.ts"),
+					state: "disabled",
+					disabledReason: "item-disabled",
+					source: expect.objectContaining({ level: "project" }),
+				}),
+			]),
+		);
+		expect(result.extensions).not.toEqual(
+			expect.arrayContaining([expect.objectContaining({ id: "extension-module:wrong" })]),
+		);
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -3541,7 +3576,7 @@ describe("ACP agent", () => {
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledTimes(1);
 		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledWith(
-			expect.objectContaining({ askDialog: expect.any(Function) }),
+			expect.objectContaining({ formDialog: expect.any(Function) }),
 			true,
 		);
 
@@ -3874,6 +3909,129 @@ describe("ACP agent", () => {
 							timedOut: true,
 						},
 					],
+				});
+				expect(onTimeout).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		const DEPLOY_FORM = `<form>
+  <p>Staging is green; production has a pending migration.</p>
+  <fieldset>
+    <legend>Target</legend>
+    <label><input type="radio" name="target" value="staging" checked> Staging</label>
+    <label><input type="radio" name="target" value="prod"> Production</label>
+  </fieldset>
+  <fieldset>
+    <legend>Checks</legend>
+    <label><input type="checkbox" name="checks" value="lint" checked> Lint</label>
+    <label><input type="checkbox" name="checks" value="e2e"> E2E</label>
+  </fieldset>
+  <label><input type="checkbox" name="notify" value="yes"> Notify the channel</label>
+  <label>Replicas <input type="number" name="replicas" value="2" min="1" max="5" required></label>
+  <label>Notes <textarea name="notes" placeholder="Anything else?"></textarea></label>
+  <input type="hidden" name="source" value="ci">
+</form>`;
+
+		it("translates an HTML form into one elicitation with a property per field", async () => {
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { target: "prod", checks: ["lint", "e2e", "bogus"], notify: true, replicas: 3, notes: "ship it" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form", FORM_CAPABILITIES);
+
+			const result = await ctx.formDialog!(DEPLOY_FORM);
+
+			expect(calls).toHaveLength(1);
+			const request = calls[0]!;
+			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
+			expect(request.message).toContain("Staging is green; production has a pending migration.");
+			expect(request.requestedSchema.required).toEqual(["replicas"]);
+			expect(request.requestedSchema.properties).toEqual({
+				target: {
+					type: "string",
+					title: "Target",
+					oneOf: [
+						{ const: "staging", title: "Staging" },
+						{ const: "prod", title: "Production" },
+					],
+					default: "staging",
+				},
+				target_other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
+				checks: {
+					type: "array",
+					title: "Checks",
+					items: {
+						anyOf: [
+							{ const: "lint", title: "Lint" },
+							{ const: "e2e", title: "E2E" },
+						],
+					},
+					default: ["lint"],
+				},
+				checks_other: {
+					type: "string",
+					title: "Checks — Other",
+					description: "Another answer, added to those checked",
+				},
+				notify: { type: "boolean", title: "Notify the channel", default: false },
+				replicas: { type: "number", title: "Replicas", minimum: 1, maximum: 5, default: 2 },
+				notes: { type: "string", title: "Notes", description: "Anything else?" },
+			});
+			expect(result).toEqual({
+				data: {
+					source: "ci",
+					target: "prod",
+					checks: ["lint", "e2e"],
+					notify: "yes",
+					replicas: 3,
+					notes: "ship it",
+				},
+			});
+		});
+
+		it("folds a group's Other text into its value", async () => {
+			const { connection } = createElicitConnection(async () => ({
+				action: "accept",
+				content: {
+					target: "staging",
+					target_other: " canary ",
+					checks: ["lint"],
+					checks_other: "smoke",
+					replicas: 2,
+				},
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-other", FORM_CAPABILITIES);
+
+			const result = await ctx.formDialog!(DEPLOY_FORM);
+
+			expect(result?.data).toMatchObject({ target: "canary", checks: ["lint", "smoke"] });
+		});
+
+		it("returns undefined when a form elicitation is cancelled", async () => {
+			const { connection } = createElicitConnection(async () => ({ action: "cancel" }));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-cancel", FORM_CAPABILITIES);
+
+			expect(await ctx.formDialog!(DEPLOY_FORM)).toBeUndefined();
+		});
+
+		it("submits the form's defaults when a form elicitation times out", async () => {
+			vi.useFakeTimers();
+			try {
+				const { promise: never } = Promise.withResolvers<CreateElicitationResponse>();
+				const { connection } = createElicitConnection(() => never);
+				const ctx = createAcpExtensionUiContext(connection, () => "session-form-timeout", FORM_CAPABILITIES);
+				const onTimeout = vi.fn();
+
+				const pending = ctx.formDialog!(DEPLOY_FORM, { timeout: 10, onTimeout });
+				await Promise.resolve();
+				vi.advanceTimersByTime(10);
+				await Promise.resolve();
+
+				expect(await pending).toEqual({
+					data: { source: "ci", target: "staging", checks: ["lint"], replicas: 2, notes: "" },
+					timedOut: true,
 				});
 				expect(onTimeout).toHaveBeenCalledTimes(1);
 			} finally {

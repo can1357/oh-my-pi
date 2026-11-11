@@ -37,7 +37,7 @@ function attachHistory(editor: CustomEditor): HistoryStorage {
 async function createHarness(factory: ExtensionFactory) {
 	const runtime = new ExtensionRuntime();
 	const generatedMessages: Array<string | (TextContent | ImageContent)[]> = [];
-	runtime.sendUserMessage = (content?: string | (TextContent | ImageContent)[]) => {
+	runtime.sendUserMessage = async (content?: string | (TextContent | ImageContent)[]) => {
 		if (content !== undefined) generatedMessages.push(content);
 	};
 	const sessionManager = SessionManager.inMemory(process.cwd());

@@ -20,6 +20,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopDragResult,
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
@@ -30,6 +31,7 @@ import type {
 } from "@oh-my-pi/pi-natives";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { expandTilde } from "@oh-my-pi/pi-utils/path";
+import { truncate } from "@oh-my-pi/pi-utils/format";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -102,7 +104,7 @@ export interface NativeDesktopSession {
 	bringToCurrentSpace(windowId: string): Promise<void>;
 	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
 	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<DesktopDragResult | null | void>;
 	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
 	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
 	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
@@ -335,17 +337,6 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 }
 
-function matchesFilter(window: DesktopWindow, filter?: WindowFilter, appPids?: ReadonlySet<number>): boolean {
-	if (!filter) return true;
-	const app = filter.app?.toLocaleLowerCase();
-	const title = filter.title?.toLocaleLowerCase();
-	return (
-		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || matchesWindowApp(window, app, appPids)) &&
-		(!title || window.title.toLocaleLowerCase().includes(title))
-	);
-}
-
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;
 	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
@@ -368,6 +359,24 @@ const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
 const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
+/** JSON-escaped characters of a drag's selected text its output line quotes; the returned selection keeps it whole. */
+const DRAG_SELECTION_PREVIEW_CHARS = 24;
+
+/**
+ * The native action `perform(action)` runs, as the key the refusals check and the name macOS native
+ * is sent, so the two cannot disagree: native `native_action_name` trims Unicode White_Space (unlike
+ * JS `trim`, it drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu`
+ * to `AXPress`, `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs
+ * whichever of the element's actions matches with only ASCII letters folded; on this key the
+ * steps before the match only uppercase the `AX` prefix.
+ */
+function nativeActionKey(action: string): string {
+	const name = action
+		.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "")
+		.replace(/[A-Z]/g, letter => letter.toLowerCase());
+	if (name === "show_menu") return "axshowmenu";
+	return name.startsWith("ax") ? name : `ax${name}`;
+}
 
 /**
  * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
@@ -753,8 +762,8 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		// The names native `axPerform` runs as `AXRaise` (its `action_name` mapping).
-		if (action.trim().toLowerCase() === "raise" || action === "AXRaise") {
+		const native = nativeActionKey(action);
+		if (native === "axraise") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -763,11 +772,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		// The names native `axPerform` runs as `AXOpen` (`action_name` prefixes "AX"
-		// to any other name). On an item in Chrome's Open panel it brings the
-		// panel's application to the front, even when the action fails, and it
-		// stays there.
-		if (this.#session.capabilities.backend === "quartz" && (action === "AXOpen" || action === "Open")) {
+		// On an item in Chrome's Open panel `AXOpen` brings the panel's application to the front, even
+		// when the action fails, and it stays there.
+		if (this.#session.capabilities.backend === "quartz" && native === "axopen") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -777,8 +784,8 @@ class El {
 			);
 		}
 		const menu = menuOption(options);
-		// The names native `axPerform` runs as `AXShowMenu`, which opens the element's context menu.
-		if (["showmenu", "show_menu"].includes(action.trim().toLowerCase()) || action === "AXShowMenu") {
+		// `AXShowMenu` opens the element's context menu.
+		if (native === "axshowmenu") {
 			refuseMenu(
 				this.#session,
 				context,
@@ -790,8 +797,7 @@ class El {
 		}
 		if (menu !== undefined)
 			refuseMenu(this.#session, context, "perform with menu", "a menu", MENU_ROUTE, `element ${this.ref}`);
-		// The names native `axPerform` runs as `AXPress`.
-		if (action.trim().toLowerCase() === "press" || action === "AXPress") {
+		if (native === "axpress") {
 			refuseControlMenu(
 				this.#session,
 				context,
@@ -800,7 +806,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
+		// macOS runs the key the refusals checked; UIA and AT-SPI match their own action names as given.
+		const sent = this.#session.capabilities.backend === "quartz" ? native : action;
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, sent, menu));
 	}
 
 	/**
@@ -1109,24 +1117,36 @@ class Win {
 		);
 	}
 
-	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
+	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "drag", native, `window ${this.id}`);
 		refuseMenuPress(this.#session, context, native);
+		let selection: AxTextSelection | undefined;
 		await sendInput(
 			this.#session,
 			context,
 			"drag",
 			native.takeover,
-			fallback =>
-				this.#session.drag(
+			async fallback => {
+				const result = await this.#session.drag(
 					this.id,
 					points.map(([x, y]) => ({ x, y })),
 					{ ...native, ...fallback },
-				),
+				);
+				selection = result?.selection;
+				return result?.focusReturn;
+			},
 			this.pid,
 		);
+		if (!selection) return undefined;
+		// The returned selection keeps the whole text; the output line quotes its start.
+		const quoted = truncate(JSON.stringify(selection.text).slice(1, -1), DRAG_SELECTION_PREVIEW_CHARS);
+		context.output.push({
+			type: "text",
+			text: `drag selected "${quoted}" through accessibility instead of dragging; no mouse input was sent`,
+		});
+		return selection;
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
@@ -1714,6 +1734,8 @@ export class ComputerWorkerCore {
 			const windows = await nativeCall(signal, () => session.listWindows());
 			let appPids: Set<number> | undefined;
 			const app = filter?.app?.toLocaleLowerCase();
+			// Decide before title/id filtering, so another app cannot substitute for the named app.
+			const exactApp = !!app && windows.some(window => window.app.toLocaleLowerCase() === app);
 			// An app filter that names no window's app is looked up as an application id or path.
 			if (
 				app &&
@@ -1731,7 +1753,20 @@ export class ComputerWorkerCore {
 					}
 				}
 			}
-			return { windows, appPids, matches: windows.filter(window => matchesFilter(window, filter, appPids)) };
+			const title = filter?.title?.toLocaleLowerCase();
+			return {
+				windows,
+				appPids,
+				matches: windows.filter(window => {
+					if (!filter) return true;
+					return (
+						(filter.id === undefined || window.id === String(filter.id)) &&
+						(!app ||
+							(exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
+						(!title || window.title.toLocaleLowerCase().includes(title))
+					);
+				}),
+			};
 		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",

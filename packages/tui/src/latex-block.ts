@@ -372,14 +372,14 @@ function binomBox(top: Box, bottom: Box): Box {
  * A drawn radical for a multi-line radicand: overline row on top, bar column
  * on the left, hook at the bottom. Single-line radicands stay flat (`√x̄`).
  */
-function radicalBox(inner: Box, degree: string | null): Box {
+function radicalBox(inner: Box, degree: string | null, wrap: (run: string) => string): Box {
 	const lines: string[] = [` ┌${BAR.repeat(inner.width + 1)}`];
 	for (let y = 0; y < inner.lines.length; y++) {
 		lines.push((y === inner.lines.length - 1 ? "╲│ " : " │ ") + inner.lines[y]);
 	}
 	const box: Box = { lines, baseline: inner.baseline + 1, width: inner.width + 3 };
 	if (!degree) return box;
-	const deg = latexToUnicode(`^{${degree}}`);
+	const deg = latexToUnicode(wrap(`^{${degree}}`));
 	// Degree sits one row above the baseline, at the radical's upper left.
 	return hconcat([{ lines: [deg, spaces(visibleWidth(deg))], baseline: 1, width: visibleWidth(deg) }, box]);
 }
@@ -1020,7 +1020,7 @@ function parseExpr(src: string, ctx: Ctx = ROOT_CTX): Box {
 				// Display style always draws the roof (like LaTeX); inline math
 				// keeps the flat `√(…)` form via latexToUnicode.
 				flush();
-				boxes.push(paint(radicalBox(parseExpr(arg.text, inner()), degree)));
+				boxes.push(paint(radicalBox(parseExpr(arg.text, inner()), degree, ctx.wrap)));
 				i = arg.end;
 				continue;
 			}

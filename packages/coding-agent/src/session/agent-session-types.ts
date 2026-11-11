@@ -5,6 +5,7 @@ import type {
 	AgentToolContext,
 	StreamFn,
 	ThinkingLevel,
+	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -46,10 +47,11 @@ import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
-import type { SettingsGatedToolDelta } from "./session-tools";
+import type { SettingsGatedToolDelta, SystemPromptRebuilder } from "./session-tools";
 import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
@@ -69,7 +71,9 @@ export interface AgentSessionDisposeOptions {
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
 	 * instead of the generic `"dispose"` used for normal programmatic disposal
-	 * (`/quit`, test teardown, subagent completion).
+	 * (`/quit`, test teardown, subagent completion). `EXIT` (also a subagent cut
+	 * off by its owner's shutdown) additionally records a turn still in flight as
+	 * interrupted, so `omp --restore` goes on with it.
 	 */
 	reason?: postmortem.Reason;
 }
@@ -348,10 +352,9 @@ export interface AgentSessionConfig {
 	/** Current session message-to-LLM conversion pipeline. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	rebuildSystemPrompt?: SystemPromptRebuilder;
+	/** Sources of the initial base prompt, as returned by `buildSystemPrompt`. */
+	systemPromptSources?: SystemPromptSources;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -399,14 +402,14 @@ export interface AgentSessionConfig {
 	 */
 	advisorCreateEditTool?(): AgentTool | undefined;
 	/**
-	 * The execute-time context the advisor's bridge tools resolve approval from.
+	 * The execute-time context for the advisor's loop and bridge tools.
 	 *
 	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
 	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
 	 * with none it fails closed to `always-ask` with empty policies (no user
 	 * grant), so a bridge tool that needs a prompt cannot run unattended.
 	 */
-	advisorGetToolContext?: () => AgentToolContext | undefined;
+	advisorGetToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	/**
 	 * The live MCP connections the advisor's Cursor resource frames answer from.
 	 *
@@ -505,11 +508,23 @@ export interface PromptOptions {
 	 * synchronous; perform asynchronous recovery after the prompt settles.
 	 */
 	onPromptDropped?: (prompt: DroppedPrompt) => void;
+	/**
+	 * Text prompts that must run after this one, in order. The session holds them off the
+	 * queue until this prompt reaches the agent (its run goes live, it lands on a queue, or an
+	 * extension or custom command finishes handling it), then queues them right behind it, so
+	 * no drain or other run can deliver them first. If this prompt never gets there (dropped,
+	 * refused, its setup throws, or its extension command fails), they are reported with it in
+	 * {@link DroppedPrompt.followUps}. An extension command among them rejects the whole
+	 * prompt before anything is sent.
+	 */
+	followUps?: readonly string[];
 }
 
 /** Payload for a submission's onPromptDropped or AgentSession.setPromptDropped:
  *  a user prompt cancelled before it reached the agent, so it was never
- *  persisted to the session. */
+ *  persisted to the session. A prompt carrying {@link PromptOptions.followUps}
+ *  is also reported when its setup throws or the extension command it ran
+ *  fails, so the follow-ups are never lost with it. */
 export interface DroppedPrompt {
 	/** The prompt exactly as typed, before template/command expansion. */
 	text: string;
@@ -517,6 +532,8 @@ export interface DroppedPrompt {
 	images?: ImageContent[];
 	/** Why the session refused it (e.g. the cost cap), for hosts to show beside the restored text; absent for an abort. */
 	reason?: string;
+	/** {@link PromptOptions.followUps} that were never sent, in order. */
+	followUps?: string[];
 }
 
 /** Options for AgentSession.followUp(). */
@@ -595,6 +612,7 @@ export interface ContextUsageBreakdown {
 	systemPromptTokens: number;
 	systemToolsTokens: number;
 	systemContextTokens: number;
+	instructionFilesTokens: number;
 	skillsTokens: number;
 	messagesTokens: number;
 }
@@ -671,6 +689,12 @@ export interface EphemeralTurnOptions {
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
 	onTextDelta?: (delta: string) => void | Promise<void>;
+	/**
+	 * Receives the provider's message for every side turn it billed, as soon as the
+	 * provider settles it (including an error event that never returns a reply), so
+	 * off-transcript callers can journal the spend. A throw is logged, never surfaced.
+	 */
+	onUsage?: (message: AssistantMessage) => void;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
 	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */

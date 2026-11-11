@@ -220,8 +220,18 @@ describe("taskFile dispatch", () => {
 		expect(result.details?.progress).toBeUndefined();
 	});
 
-	it("formats file instructions exactly like inline ones", async () => {
-		const source = "  First instruction.  \r\n\r\n\r\nSecond instruction.\r\n  ";
+	it("keeps instruction whitespace, identically for file and inline text", async () => {
+		const lines = [
+			"First instruction.  ",
+			"",
+			"",
+			"Second paragraph.",
+			"",
+			"| column | value |",
+			"| --- | --- |",
+			"| a  |  b |",
+		];
+		const source = ` \r\n${lines.join("\r\n")}\r\n\t `;
 		const taskFile = await writeTaskFile("formatted.md", source);
 		const tool = await createTool();
 
@@ -230,6 +240,7 @@ describe("taskFile dispatch", () => {
 
 		expect(executions).toHaveLength(2);
 		expect(executions[0].task).toBe(executions[1].task);
+		expect(executions[0].task).toEndWith(`\n${lines.join("\n")}`);
 	});
 
 	it("keeps literal JSON escape sequences in file contents", async () => {
