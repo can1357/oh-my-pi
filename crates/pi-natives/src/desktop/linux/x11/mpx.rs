@@ -88,6 +88,7 @@ const OWNER_PREFIX: &str = "OMP MPX v2.";
 /// Two pairs leave room for real-device hotplug even after concurrent sessions.
 const MAX_PAIRS: usize = 2;
 /// Master pointer property naming the session that holds the pair.
+#[cfg(test)]
 const HOLDER_PROPERTY: &str = "_OMP_MPX_HOLDER";
 /// How long a session's end waits for the server to drop its unplugged slaves.
 const UNPLUG_TIMEOUT: Duration = Duration::from_secs(1);
@@ -102,8 +103,6 @@ pub(super) struct Mpx {
 	conn:            RustConnection,
 	root:            Window,
 	atoms:           Atoms,
-	/// `_OMP_MPX_HOLDER`, the master pointer property naming the pair's holder.
-	holder:          Atom,
 	/// Bottom-right screen corner: the virtual cursor rests there between
 	/// actions, where its sprite is all but off-screen.
 	park:            (i16, i16),
@@ -161,12 +160,7 @@ impl Mpx {
 			)));
 		}
 		let atoms = Atoms::intern(&conn)?;
-		let holder = conn
-			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
-			.map_err(mpx_failed)?
-			.reply()
-			.map_err(mpx_failed)?
-			.atom;
+		let holder = atoms.mpx_holder;
 		let owner = Owner::current();
 		let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
 		let name = owner.as_ref().map_or_else(
@@ -199,7 +193,6 @@ impl Mpx {
 			conn,
 			root,
 			atoms,
-			holder,
 			park,
 			name,
 			master_pointer,
@@ -774,7 +767,7 @@ impl Drop for Mpx {
 		self.pointer.destroy();
 		release_pair(
 			&self.conn,
-			self.holder,
+			self.atoms.mpx_holder,
 			self.root,
 			self.park,
 			self.master_pointer,
