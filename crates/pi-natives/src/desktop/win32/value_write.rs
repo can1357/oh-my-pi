@@ -97,7 +97,10 @@ fn combo_failure(writing: bool) -> super::super::error::DesktopError {
 pub(super) fn combo_target(
 	hwnd: windows_sys::Win32::Foundation::HWND,
 ) -> windows_sys::Win32::Foundation::HWND {
-	use windows_sys::Win32::UI::WindowsAndMessaging::{COMBOBOXINFO, GetComboBoxInfo, GetParent};
+	use windows_sys::Win32::UI::{
+		Controls::{COMBOBOXINFO, GetComboBoxInfo},
+		WindowsAndMessaging::GetParent,
+	};
 	// A raw UIA ref can name the edit child rather than the combo itself.
 	// Only normalize the edit handle the native combo API identifies.
 	// SAFETY: GetParent only queries the supplied handle.
@@ -210,7 +213,7 @@ pub(super) fn set_combo(
 			// A native message can bypass an edit child's read-only policy.
 			// Refuse before clearing the combo's existing selection.
 			// SAFETY: GetWindowLongW only queries the identified edit handle.
-			if unsafe { GetWindowLongW(info.hwndItem, GWL_STYLE) } as u32
+			if unsafe { GetWindowLongW(info.hwndItem, GWL_STYLE) }
 				& windows_sys::Win32::UI::WindowsAndMessaging::ES_READONLY
 				!= 0
 			{
@@ -319,10 +322,12 @@ mod tests {
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn editing_an_unlisted_value_clears_the_previous_selection() {
-		use windows_sys::Win32::UI::WindowsAndMessaging::{
-			CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWN, CBS_HASSTRINGS, COMBOBOXINFO,
-			CreateWindowExW, DestroyWindow, GetComboBoxInfo, GetWindowTextW, SendMessageW, WS_CHILD,
-			WS_OVERLAPPED,
+		use windows_sys::Win32::UI::{
+			Controls::{COMBOBOXINFO, GetComboBoxInfo},
+			WindowsAndMessaging::{
+				CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWN, CBS_HASSTRINGS,
+				CreateWindowExW, DestroyWindow, GetWindowTextW, SendMessageW, WS_CHILD, WS_OVERLAPPED,
+			},
 		};
 		let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
 		let (frame, combo, empty) = (wide("STATIC"), wide("COMBOBOX"), wide(""));
