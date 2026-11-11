@@ -29,6 +29,8 @@ The guide never enters Eval stdout, output sinks, artifact spilling or Spotlight
 
 Advisors lack this hidden-message channel and keep reading the full topic before first use. Safety rules that govern the first browser action, including Linux X11 focus, borrowed-session navigation and page-integrity rules, stay in pre-call guidance rather than the delayed guide.
 
+Sessions without `read` already inline the full documentation and receive no separate first-call guide.
+
 ## JavaScript API
 
 ```js
