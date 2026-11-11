@@ -5,14 +5,19 @@
 //! a click in an app too busy to answer accessibility is placed as it
 //! happens.
 
-use std::{collections::VecDeque, time::Duration};
+use std::{
+	collections::VecDeque,
+	time::{Duration, Instant},
+};
 
 use libc::pid_t;
 use objc2::rc::autoreleasepool;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use parking_lot::Mutex;
 
 use super::{
 	input::drag_pasteboard_count,
+	permission::responsible_pid,
 	skylight::{MOUSE_BUTTON_EVENTS, hid_buttons, since_last_click, window_owner_pid},
 };
 
@@ -28,8 +33,9 @@ const DELIVERY: Duration = Duration::from_millis(50);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Went {
 	/// To this process: the one a press was routed to, or the owner of the
-	/// window a drag-and-drop session was released over.
-	To(pid_t),
+	/// window a drag-and-drop session was released over; with the app a
+	/// press's process draws for, when it is no app of its own.
+	To(pid_t, Option<pid_t>),
 	/// To no process: a press `WindowServer` named no target for.
 	Nowhere,
 	/// Where a click from before the journal's record went: a release whose
@@ -53,29 +59,35 @@ pub(crate) struct ClickJournal(Mutex<Journal>);
 
 struct Journal {
 	/// `WindowServer`'s HID button counters at the start of `seen`.
-	base:   [u32; 6],
+	base:    [u32; 6],
 	/// Button events of each [`MOUSE_BUTTON_EVENTS`] type the tap has seen
 	/// that the HID counters count too.
-	seen:   [u32; 6],
+	seen:    [u32; 6],
 	/// What a click older than every one in `recent` counts as: in the
 	/// user's app once the journal starts, since nothing from before then
 	/// can be read any more, and after the tap missed events that a tool
 	/// swallowed before the session's tap, which kept them from every app;
 	/// unknown after macOS disabled the tap, when they reached apps unseen.
-	before: Option<bool>,
+	before:  Option<bool>,
 	/// macOS disabled the tap since the record started.
-	lost:   bool,
-	recent: VecDeque<Button>,
+	lost:    bool,
+	/// The user's button events of each type the HID counters never
+	/// counted, such as a remote tool's posts to the session tap, and when
+	/// the tap delivered the latest; kept across restarts, so readings only
+	/// ever count up.
+	skipped: ([u32; 6], Option<Instant>),
+	recent:  VecDeque<Button>,
 }
 
 impl Default for ClickJournal {
 	fn default() -> Self {
 		Self(Mutex::new(Journal {
-			base:   [0; 6],
-			seen:   [0; 6],
-			before: None,
-			lost:   false,
-			recent: VecDeque::with_capacity(RECENT),
+			base:    [0; 6],
+			seen:    [0; 6],
+			before:  None,
+			lost:    false,
+			skipped: ([0; 6], None),
+			recent:  VecDeque::with_capacity(RECENT),
 		}))
 	}
 }
@@ -107,8 +119,17 @@ impl ClickJournal {
 		let Some(kind) = index(kind) else {
 			return;
 		};
+		let at = Instant::now();
 		// The tap's thread has no autorelease pool of its own.
 		let drags = autoreleasepool(|_| drag_pasteboard_count());
+		let host = if kind % 2 == 0 {
+			pid_t::try_from(target)
+				.ok()
+				.filter(|&pid| pid > 0)
+				.and_then(service_host)
+		} else {
+			None
+		};
 		// Asked outside the lock, which a reading must not wait on
 		// `WindowServer` for.
 		let dropped = self.0.lock().dropped(kind, drags);
@@ -118,19 +139,58 @@ impl ClickJournal {
 		let mut journal = self.0.lock();
 		// Read under the lock, after `WindowServer` counted this event.
 		let hid = hid_buttons();
-		journal.record(kind, target, drags, owner, hid);
+		journal.record(kind, Routed { target, host }, drags, owner, hid, at);
 	}
 
-	/// The HID button counters now, and whether the latest click they count
-	/// went to `user`'s app; `None` while the tap has not delivered it yet or
-	/// missed it.
-	pub(in crate::desktop) fn place(&self, user: pid_t) -> ([u32; 6], Option<bool>) {
+	/// What a reading of the user's clicks sees now: the HID button counters
+	/// plus the user's presses and releases they skipped, whether the latest
+	/// click went to `user`'s app rather than `target`, `None` while the tap
+	/// has not delivered it yet or missed it, and when the latest skipped one
+	/// came.
+	pub(in crate::desktop) fn place(&self, user: pid_t, target: pid_t) -> Reading {
 		let mut journal = self.0.lock();
 		// Read under the lock, after `seen`.
 		let hid = hid_buttons();
 		let idle = since_last_click().is_some_and(|since| since > DELIVERY);
-		(hid, journal.place(user, hid, idle))
+		journal.reading(user, target, hid, idle)
 	}
+}
+
+/// One reading of the journal, as [`ClickJournal::place`] returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct Reading {
+	/// `WindowServer`'s HID button counters, plus the user's button events
+	/// they never counted, such as a remote tool's posts to the session tap.
+	pub buttons: [u32; 6],
+	/// Whether the latest click went to the user's app.
+	pub placed:  Option<bool>,
+	/// When the tap delivered the latest event the counters never counted.
+	pub skipped: Option<Instant>,
+}
+
+/// The process a press was routed to, as the tap reads it.
+#[derive(Clone, Copy)]
+struct Routed {
+	/// `kCGEventTargetUnixProcessID`.
+	target: i64,
+	/// The app the process works for, when it is no app of its own.
+	host:   Option<pid_t>,
+}
+
+/// The app `pid` draws for, when it is not a regular app itself: a view
+/// service such as `openAndSavePanelService` draws a sandboxed app's Open
+/// panel, and macOS holds that app responsible for it. A regular app is
+/// never mapped: one started from a terminal has the terminal responsible
+/// for it, yet a click on it is a click on it.
+fn service_host(pid: pid_t) -> Option<pid_t> {
+	let regular = autoreleasepool(|_| {
+		NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+			.is_some_and(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
+	});
+	if regular {
+		return None;
+	}
+	responsible_pid(pid).filter(|&host| host != pid)
 }
 
 impl Journal {
@@ -149,13 +209,17 @@ impl Journal {
 	/// never counts more than `WindowServer` did: an event beyond that is one
 	/// the HID counters skip, or one counted before the record started, and
 	/// moves `base` on rather than stand in for an event still on its way.
-	const fn see(&mut self, kind: usize, hid: [u32; 6]) {
+	/// Returns how many events beyond `WindowServer`'s count that was.
+	const fn see(&mut self, kind: usize, hid: [u32; 6]) -> u32 {
 		self.seen[kind] = self.seen[kind].wrapping_add(1);
 		let counted = hid[kind].wrapping_sub(self.base[kind]);
+		let beyond = self.seen[kind].wrapping_sub(counted);
 		// Wrapping difference: positive when the tap saw more.
-		if self.seen[kind].wrapping_sub(counted) as i32 > 0 {
+		if beyond as i32 > 0 {
 			self.base[kind] = hid[kind].wrapping_sub(self.seen[kind]);
+			return beyond;
 		}
+		0
 	}
 
 	/// The press a release of `kind` ends, if the journal has it.
@@ -184,20 +248,27 @@ impl Journal {
 	fn record(
 		&mut self,
 		kind: usize,
-		target: i64,
+		routed: Routed,
 		drags: isize,
 		owner: Option<pid_t>,
 		hid: [u32; 6],
+		at: Instant,
 	) {
-		self.see(kind, hid);
+		let beyond = self.see(kind, hid);
+		if beyond > 0 {
+			self.skipped.0[kind] = self.skipped.0[kind].wrapping_add(beyond);
+			self.skipped.1 = Some(at);
+		}
 		let went = if kind % 2 == 0 {
-			match pid_t::try_from(target) {
-				Ok(pid) if pid > 0 => Went::To(pid),
+			match pid_t::try_from(routed.target) {
+				Ok(pid) if pid > 0 => Went::To(pid, routed.host),
 				_ => Went::Nowhere,
 			}
 		} else {
 			match self.press(kind) {
-				Some(press) if press.drags != drags => owner.map_or(press.went, Went::To),
+				Some(press) if press.drags != drags => {
+					owner.map_or(press.went, |owner| Went::To(owner, None))
+				},
 				Some(press) => press.went,
 				None => Went::Before,
 			}
@@ -216,7 +287,12 @@ impl Journal {
 	/// button before the session's tap, as remappers do, delivers it to no
 	/// app; after macOS disabled the tap it is unknown, as those events
 	/// reached apps.
-	fn place(&mut self, user: pid_t, hid: [u32; 6], idle: bool) -> Option<bool> {
+	///
+	/// A press routed to `target` goes to it; one routed to `user`, or to a
+	/// process that is no app of its own and draws for `user`, such as the
+	/// service that draws a sandboxed app's Open panel, goes to the user's
+	/// app.
+	fn place(&mut self, user: pid_t, target: pid_t, hid: [u32; 6], idle: bool) -> Option<bool> {
 		let behind =
 			(0..hid.len()).any(|kind| self.seen[kind] != hid[kind].wrapping_sub(self.base[kind]));
 		if behind {
@@ -234,10 +310,23 @@ impl Journal {
 			.back()
 			.map_or(Went::Before, |button| button.went)
 		{
-			Went::To(pid) => Some(pid == user),
+			Went::To(pid, _) if pid == target => Some(false),
+			Went::To(pid, host) => Some(pid == user || host == Some(user)),
 			Went::Nowhere => Some(false),
 			Went::Before => self.before,
 		}
+	}
+}
+
+impl Journal {
+	/// A reading at HID counters `hid`: see [`ClickJournal::place`].
+	fn reading(&mut self, user: pid_t, target: pid_t, hid: [u32; 6], idle: bool) -> Reading {
+		let placed = self.place(user, target, hid, idle);
+		let mut buttons = hid;
+		for (button, skipped) in buttons.iter_mut().zip(self.skipped.0) {
+			*button = button.wrapping_add(skipped);
+		}
+		Reading { buttons, placed, skipped: self.skipped.1 }
 	}
 }
 
@@ -255,6 +344,8 @@ mod tests {
 	const USER: pid_t = 10;
 	const TARGET: pid_t = 20;
 	const WINDOW_SERVER: pid_t = 30;
+	const PANEL_SERVICE: pid_t = 40;
+	const OTHER_APP: pid_t = 50;
 	const LEFT_DOWN: usize = 0;
 	const LEFT_UP: usize = 1;
 	const OTHER_DOWN: usize = 4;
@@ -283,9 +374,14 @@ mod tests {
 		/// The tap delivers the user's event of `kind`, routed to `target`,
 		/// with the drag pasteboard at `drags` and `owner` under the pointer.
 		fn delivered(&mut self, kind: usize, target: pid_t, drags: isize, owner: Option<pid_t>) {
+			self.routed(kind, Routed { target: i64::from(target), host: None }, drags, owner);
+		}
+
+		/// As [`Self::delivered`], with the press's process as the tap reads it.
+		fn routed(&mut self, kind: usize, routed: Routed, drags: isize, owner: Option<pid_t>) {
 			self
 				.journal
-				.record(kind, i64::from(target), drags, owner, self.hid);
+				.record(kind, routed, drags, owner, self.hid, Instant::now());
 		}
 
 		/// A user's event `WindowServer` counted and the tap delivered.
@@ -302,7 +398,11 @@ mod tests {
 		}
 
 		fn place(&mut self, idle: bool) -> Option<bool> {
-			self.journal.place(USER, self.hid, idle)
+			self.reading(idle).placed
+		}
+
+		fn reading(&mut self, idle: bool) -> Reading {
+			self.journal.reading(USER, TARGET, self.hid, idle)
 		}
 	}
 
@@ -420,5 +520,46 @@ mod tests {
 		assert_eq!(session.place(false), Some(true));
 		session.user(LEFT_UP, 0, 3, Some(TARGET));
 		assert_eq!(session.place(false), Some(true));
+	}
+
+	#[test]
+	fn a_press_the_counters_skip_reaches_a_reading_as_a_click_with_its_time() {
+		// A remote tool's click on the target, posted to the session tap:
+		// the tap delivers it, the HID counters never count it.
+		let mut session = Session::started();
+		let before = session.reading(false);
+		assert_eq!(before.skipped, None);
+		let posted = Instant::now();
+		session.delivered(LEFT_DOWN, TARGET, 3, None);
+		let pressed = session.reading(false);
+		assert_eq!(pressed.buttons, [6, 5, 0, 0, 0, 0], "a reading sees the press");
+		assert_eq!(pressed.placed, Some(false));
+		assert!(pressed.skipped.is_some_and(|at| at >= posted));
+		session.delivered(LEFT_UP, 0, 3, None);
+		assert_eq!(session.reading(false).buttons, [6, 6, 0, 0, 0, 0]);
+		// A restart after a missed event keeps the count, so readings never
+		// go back.
+		session.counted(OTHER_DOWN);
+		session.reading(true);
+		assert_eq!(session.reading(false).buttons, [6, 6, 0, 0, 1, 0]);
+	}
+
+	#[test]
+	fn a_press_goes_to_the_target_then_the_user_then_the_app_a_service_draws_for() {
+		let press = |target: pid_t, host: Option<pid_t>| {
+			let mut session = Session::started();
+			let routed = Routed { target: i64::from(target), host };
+			session.counted(LEFT_DOWN);
+			session.routed(LEFT_DOWN, routed, 3, None);
+			session.place(false)
+		};
+		// The target, even when it works for the user's app.
+		assert_eq!(press(TARGET, Some(USER)), Some(false));
+		assert_eq!(press(USER, None), Some(true));
+		// The service drawing the user's app's Open panel.
+		assert_eq!(press(PANEL_SERVICE, Some(USER)), Some(true));
+		assert_eq!(press(PANEL_SERVICE, Some(OTHER_APP)), Some(false));
+		// A regular app, which `service_host` never maps.
+		assert_eq!(press(OTHER_APP, None), Some(false));
 	}
 }
