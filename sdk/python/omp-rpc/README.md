@@ -326,7 +326,8 @@ be parsed).
   its settled `choices` and later `retired` frame. Report display and acceptance
   with `predict_next_message_feedback(prediction_id, "shown")` or
   `predict_next_message_feedback(prediction_id, "accepted", rank=i)`, and
-  withdraw it with `predict_next_message_cancel(prediction_id=None)`.
+  withdraw it with `predict_next_message_cancel(prediction_id=None)`. Send these
+  from your UI thread, not from the listener (see Error Handling).
 
 ## Host-Owned Custom Tools
 
@@ -496,6 +497,10 @@ allows:
   `client.protocol_errors` and `client.on_protocol_error(...)`
 - listener exceptions no longer kill the stdout reader thread; they are exposed
   through `client.listener_errors` and `client.on_listener_error(...)`
+- listeners run on the stdout reader thread, which also delivers command
+  responses, so a command sent from a listener raises `RpcConcurrencyError`
+  instead of stalling every frame until it times out; hand it to another thread
+  (a queue your UI loop drains, or a `threading.Thread`)
 
 For long-lived hosts, retained event and stderr history is bounded by default:
 
