@@ -362,12 +362,17 @@ export class BrowserNetworkManager {
 		this.#recordsById.clear();
 	}
 
-	/** Whether a main-frame document, fetch, or XHR request started at or after `since` is still in flight. */
+	/** Sequence assigned to the next request, for an action's request boundary. */
+	get nextRequestSeq(): number {
+		return this.#nextSeq;
+	}
+
+	/** Whether a main-frame document, fetch, or XHR request at or after `since` is still in flight. */
 	hasPendingRequests(since: number): boolean {
 		const mainFrame = this.#page.mainFrame();
 		return this.#records.some(
 			record =>
-				record.ts >= since &&
+				record.seq >= since &&
 				record.durationMs === undefined &&
 				SETTLE_RESOURCE_TYPES[record.resourceType] === true &&
 				(record.resourceType !== "document" || record.request.frame() === mainFrame),
