@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- `menu.select()` and `menu.items()` on macOS, Linux and Windows now name the items a menu offers when a label in the path is not found, instead of only saying it was not found
+- `menu.select()` and `menu.items()` on macOS, Linux and Windows now name the items a menu offers when a label in the path is not found, instead of only saying it was not found ([#18923](https://github.com/can1357/oh-my-pi/pull/18923) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
