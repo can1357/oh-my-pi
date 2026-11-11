@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Session selector parent labels now match parent sessions by session id as well as file path ([#18818](https://github.com/can1357/oh-my-pi/pull/18818) by [@iliaal](https://github.com/iliaal))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

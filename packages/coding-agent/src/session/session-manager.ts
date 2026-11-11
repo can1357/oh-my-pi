@@ -132,7 +132,16 @@ import {
 	normalizeSessionWorkspace,
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
-import { recordSessionRecap, recordSessionTitle } from "./session-index";
+import {
+	closeSessionIndex,
+	deleteMissingSessionLineageUnderDirectory,
+	deleteSessionLineageByPath,
+	recordSessionLineage,
+	recordSessionLineageAsync,
+	recordSessionRecap,
+	recordSessionTitle,
+	repointSessionLineageUnderDirectory,
+} from "./session-index";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -840,6 +849,12 @@ interface SessionBodyStamp {
 	prefix: string;
 }
 
+interface SessionLineageSnapshot {
+	sessionId: string;
+	parentSession: string | undefined;
+	cwd: string;
+}
+
 /**
  * One full-file serialization: title slot, header, and entry lines in file
  * order plus their total UTF-8 byte length. Kept as lines so the file backend
@@ -849,6 +864,7 @@ interface SessionFileBody {
 	lines: string[];
 	bytes: number;
 	stamp: SessionBodyStamp;
+	lineage: SessionLineageSnapshot;
 }
 
 /** Whether `text` is exactly the concatenation of `lines`, compared without building it. */
@@ -1044,6 +1060,7 @@ export class SessionManager {
 	#inMemoryArtifactCounter = 0;
 
 	#suppressBreadcrumb = false;
+	#suppressLineage = false;
 	/**
 	 * The last breadcrumb this manager wrote marked a lazy fresh session whose
 	 * JSONL is not yet on disk. Cleared (and the crumb re-stamped non-fresh) once
@@ -1562,6 +1579,7 @@ export class SessionManager {
 			}
 		}
 		this.#recordFullRewrite(body.bytes);
+		await this.#recordPersistedLineageAsync(target, body.lineage, { allowReleased: !commitGuard });
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -1587,6 +1605,52 @@ export class SessionManager {
 		this.#expectedDiskSize = bytes;
 	}
 
+	#recordPersistedLineage(sessionPath: string | undefined, snapshot?: SessionLineageSnapshot): void {
+		if (this.#suppressLineage || !sessionPath || !this.#persist || !(this.#storage instanceof FileSessionStorage)) {
+			return;
+		}
+		recordSessionLineage({
+			sessionId: snapshot ? snapshot.sessionId : this.#sessionId,
+			parentSession: snapshot ? snapshot.parentSession : this.#header.parentSession,
+			sessionPath,
+			cwd: snapshot ? snapshot.cwd : this.#header.cwd || this.#cwd,
+		});
+	}
+
+	async #recordPersistedLineageAsync(
+		sessionPath: string | undefined,
+		snapshot?: SessionLineageSnapshot,
+		options?: { allowReleased?: boolean },
+	): Promise<void> {
+		if (this.#suppressLineage || !sessionPath || !this.#persist || !(this.#storage instanceof FileSessionStorage)) {
+			return;
+		}
+		const sessionId = snapshot ? snapshot.sessionId : this.#sessionId;
+		const parentSession = snapshot ? snapshot.parentSession : this.#header.parentSession;
+		const cwd = snapshot ? snapshot.cwd : this.#header.cwd || this.#cwd;
+		await recordSessionLineageAsync(
+			{
+				sessionId,
+				parentSession,
+				sessionPath,
+				cwd,
+			},
+			{
+				commitGuard: () => {
+					if (this.#released && !options?.allowReleased) return false;
+					if (
+						sessionId === this.#sessionId &&
+						!this.#sessionFileRelocating &&
+						(!this.#sessionFile || path.resolve(this.#sessionFile) !== path.resolve(sessionPath))
+					) {
+						return false;
+					}
+					return true;
+				},
+			},
+		);
+	}
+
 	/**
 	 * Confirm a publish the backend only queued. The manager's durability state
 	 * (durable size, current-marking) advances only here, never at queue time:
@@ -1604,12 +1668,12 @@ export class SessionManager {
 	 * store's queue-time size check fail-fasts before a second provisional
 	 * publish can queue behind the unconfirmed one.
 	 */
-	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void): void {
+	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void | Promise<void>): void {
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
 		if (!confirmed) return;
 		void confirmed
-			.then(() => {
-				onConfirm?.();
+			.then(async () => {
+				await onConfirm?.();
 			})
 			.catch(err => {
 				this.#fileIsCurrent = false;
@@ -1652,7 +1716,12 @@ export class SessionManager {
 			revision: this.#bodyRevision,
 			prefix: titleLine + headerLine,
 		};
-		return { lines, bytes, stamp };
+		const lineage: SessionLineageSnapshot = {
+			sessionId: this.#sessionId,
+			parentSession: this.#header.parentSession,
+			cwd: this.#header.cwd || this.#cwd,
+		};
+		return { lines, bytes, stamp, lineage };
 	}
 
 	#historyContainsAssistantMessage(): boolean {
@@ -1727,8 +1796,8 @@ export class SessionManager {
 				// The success handler below is the single place the replacement
 				// becomes durable state.
 				const generation = ++this.#deferredPublishGen;
-				const { bytes, stamp } = body;
-				this.#confirmDeferredPublish(targetPath, () => {
+				const { bytes, stamp, lineage } = body;
+				this.#confirmDeferredPublish(targetPath, async () => {
 					// A newer deferred publish owns the durability record now;
 					// this body is no longer on the backend, so record nothing.
 					if (generation !== this.#deferredPublishGen) return;
@@ -1757,6 +1826,7 @@ export class SessionManager {
 						this.#materializeBreadcrumb();
 						this.#rewriteRequired = false;
 						this.#hasTitleSlot = true;
+						await this.#recordPersistedLineageAsync(targetPath, lineage);
 					}
 				});
 				return;
@@ -1770,6 +1840,7 @@ export class SessionManager {
 				this.#materializeBreadcrumb();
 				this.#rewriteRequired = false;
 				this.#hasTitleSlot = true;
+				this.#recordPersistedLineage(targetPath, body.lineage);
 			} else {
 				// Destination body is current on disk; in-memory still needs a
 				// header-cwd rewrite after repoint, but entries are durable.
@@ -1850,6 +1921,7 @@ export class SessionManager {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
 							this.#recordFullRewrite(body.bytes);
+							await this.#recordPersistedLineageAsync(sessionFile, body.lineage);
 						}
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
@@ -1860,6 +1932,7 @@ export class SessionManager {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
 							this.#recordFullRewrite(body.bytes);
+							await this.#recordPersistedLineageAsync(sessionFile, body.lineage);
 						}
 					} catch {
 						// A superseding rewrite owns the durability record when its body cannot be read back.
@@ -1867,6 +1940,7 @@ export class SessionManager {
 					return false;
 				}
 				this.#recordFullRewrite(body.bytes);
+				await this.#recordPersistedLineageAsync(sessionFile, body.lineage);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -2315,6 +2389,7 @@ export class SessionManager {
 		const persist = options?.persist ?? this.#persist;
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
+		clone.#suppressLineage = this.#suppressLineage;
 		clone.restoreState(this.captureState());
 		if (!persist) {
 			clone.#sessionFile = undefined;
@@ -2487,6 +2562,7 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		await this.#recordPersistedLineageAsync(resolvedSessionFile);
 	}
 
 	/**
@@ -2516,6 +2592,11 @@ export class SessionManager {
 			await this.#storage.deleteSessionWithArtifacts(sessionPath);
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
+		}
+		if (this.#storage instanceof FileSessionStorage) {
+			await deleteSessionLineageByPath(sessionPath);
+			const artifactsDir = artifactsDirectoryFor(sessionPath);
+			if (artifactsDir) await deleteMissingSessionLineageUnderDirectory(artifactsDir);
 		}
 	}
 
@@ -2664,6 +2745,7 @@ export class SessionManager {
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 				let sessionMoved = false;
 				let artifactsRenamed = false;
+				let artifactsRelocated = false;
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
@@ -2693,6 +2775,7 @@ export class SessionManager {
 							// a merge leaves the rollback below to the session file alone.
 							artifactsRenamed =
 								(await relocateArtifactsDirectory(oldArtifactsDir, newArtifactsDir)) === "renamed";
+							artifactsRelocated = true;
 						}
 					}
 				} catch (err) {
@@ -2722,6 +2805,15 @@ export class SessionManager {
 					}
 
 					throw err;
+				}
+
+				if (
+					artifactsRelocated &&
+					oldArtifactsDir &&
+					newArtifactsDir &&
+					this.#storage instanceof FileSessionStorage
+				) {
+					await repointSessionLineageUnderDirectory(oldArtifactsDir, newArtifactsDir);
 				}
 
 				if (sessionFileExisted && sessionPathChanged) {
@@ -2982,6 +3074,10 @@ export class SessionManager {
 			this.#forceFileCreation = false;
 			this.#hasTitleSlot = false;
 			this.#draftOnlySessionCleanupArmed = false;
+			if (this.#storage instanceof FileSessionStorage) {
+				await deleteSessionLineageByPath(sessionFile);
+				if (artifactsDir) await deleteMissingSessionLineageUnderDirectory(artifactsDir);
+			}
 		} catch (err) {
 			if (!isEnoent(err)) {
 				logger.warn("Failed to drop empty session on close", { sessionFile, error: String(err) });
@@ -2992,56 +3088,62 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
-		// Closing gives up this process's ownership claim; a later write reclaims it.
-		const claim = this.#sessionClaim;
-		claim?.release?.();
-		if (claim) claim.release = undefined;
-		// A prior `flushSync` can self-conflict with this manager's own
-		// unconfirmed deferred publish; drain despite the latch so that
-		// publish can still confirm before we give up on the transcript.
-		await this.#scheduleDiskWork(
-			async () => {
-				const hadWriter = this.#writer !== undefined;
-				await this.#closeWriterHandle();
-				if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
-					this.#fileIsCurrent = true;
-			},
-			{ ignorePriorError: true },
-		);
-		await this.#pendingArtifactCopy?.done;
-		await this.#dropIfEmptyAndNoDraft();
-		// Wait for any queued backing writes (IndexedSessionStorage per-path
-		// tail) to become durable so a graceful shutdown does not exit while
-		// a fire-and-forget publish is still on the wire.
-		await this.#scheduleDiskWork(
-			async () => {
-				await this.#storage.drain();
-			},
-			{ ignorePriorError: true },
-		);
-		if (
-			this.#diskFailure &&
-			this.#sessionFile &&
-			this.#storage.defersSyncPublish &&
-			!this.#entriesReleased &&
-			this.#shouldHaveSessionFile()
-		) {
-			// Deferred-publish only: a synchronous backend's drain() is a
-			// no-op, so any failure there is a genuine external conflict or a
-			// permanent write failure, not a self-race this retry can catch
-			// up on. seal() disabled the ordinary mid-life repair path, so
-			// close() issues the terminal write directly instead.
-			const operationError = this.#diskFailure;
-			const sessionFile = this.#sessionFile;
+		try {
+			// Closing gives up this process's ownership claim; a later write reclaims it.
+			const claim = this.#sessionClaim;
+			claim?.release?.();
+			if (claim) claim.release = undefined;
+			// A prior `flushSync` can self-conflict with this manager's own
+			// unconfirmed deferred publish; drain despite the latch so that
+			// publish can still confirm before we give up on the transcript.
 			await this.#scheduleDiskWork(
 				async () => {
-					await this.#publishAuthoritativeBody(sessionFile, operationError);
-					this.#clearDiskError();
+					const hadWriter = this.#writer !== undefined;
+					await this.#closeWriterHandle();
+					if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+						this.#fileIsCurrent = true;
 				},
 				{ ignorePriorError: true },
-			).catch(() => undefined);
+			);
+			await this.#pendingArtifactCopy?.done;
+			await this.#dropIfEmptyAndNoDraft();
+			// Wait for any queued backing writes (IndexedSessionStorage per-path
+			// tail) to become durable so a graceful shutdown does not exit while
+			// a fire-and-forget publish is still on the wire.
+			await this.#scheduleDiskWork(
+				async () => {
+					await this.#storage.drain();
+				},
+				{ ignorePriorError: true },
+			);
+			if (
+				this.#diskFailure &&
+				this.#sessionFile &&
+				this.#storage.defersSyncPublish &&
+				!this.#entriesReleased &&
+				this.#shouldHaveSessionFile()
+			) {
+				// Deferred-publish only: a synchronous backend's drain() is a
+				// no-op, so any failure there is a genuine external conflict or a
+				// permanent write failure, not a self-race this retry can catch
+				// up on. seal() disabled the ordinary mid-life repair path, so
+				// close() issues the terminal write directly instead.
+				const operationError = this.#diskFailure;
+				const sessionFile = this.#sessionFile;
+				await this.#scheduleDiskWork(
+					async () => {
+						await this.#publishAuthoritativeBody(sessionFile, operationError);
+						this.#clearDiskError();
+					},
+					{ ignorePriorError: true },
+				).catch(() => undefined);
+			}
+			if (this.#diskFailure) throw this.#diskFailure;
+		} finally {
+			if (this.#storage instanceof FileSessionStorage) {
+				closeSessionIndex();
+			}
 		}
-		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
 	/**
@@ -3087,6 +3189,9 @@ export class SessionManager {
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
+		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+			closeSessionIndex();
+		}
 	}
 
 	getCwd(): string {
@@ -4265,6 +4370,9 @@ export class SessionManager {
 		};
 		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
 		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);
+		if (storage instanceof FileSessionStorage) {
+			recordSessionLineage({ sessionId: id, parentSession: null, sessionPath: file, cwd: header.cwd });
+		}
 		return file;
 	}
 
@@ -4440,7 +4548,13 @@ export class SessionManager {
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; parentSession?: string; suppressBreadcrumb?: boolean; throwIfMissing?: boolean },
+		options?: {
+			initialCwd?: string;
+			parentSession?: string;
+			suppressBreadcrumb?: boolean;
+			suppressLineage?: boolean;
+			throwIfMissing?: boolean;
+		},
 	): Promise<SessionManager> {
 		const probed = await loadSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
 		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
@@ -4460,6 +4574,7 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+		manager.#suppressLineage = options?.suppressLineage === true;
 		// Freshness gate for fail-closed callers (revive): the cwd probe above
 		// yields, so re-read after it and adopt only the fresh snapshot. A
 		// transcript deleted, truncated, or replaced mid-probe then fails
@@ -4508,13 +4623,18 @@ export class SessionManager {
 		// launch cwd, which would make the `moveTo` below a no-op whenever the move
 		// target equals it. moveTo never chdirs, so the stale cwd is only the
 		// relocation source, not a directory we enter.
-		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, { initialCwd: recordedCwd });
+		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, {
+			initialCwd: recordedCwd,
+			suppressLineage: true,
+		});
 		try {
 			await manager.moveTo(cwd, sessionDir);
 		} catch (error) {
 			await manager.close();
 			throw error;
 		}
+		manager.#suppressLineage = false;
+		await manager.#recordPersistedLineageAsync(manager.#sessionFile);
 		return manager;
 	}
 

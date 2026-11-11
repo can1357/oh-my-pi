@@ -36,11 +36,33 @@ import {
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
 import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md" with { type: "text" };
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { replaceFileAtomically, writeFileAtomically } from "../utils/atomic-file";
+import { isRegularFile } from "../utils/regular-file";
 import { BLOB_HASH_RE, BlobStore } from "./blob-store";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
+import {
+	closeSessionIndex,
+	deleteMissingSessionLineageUnderDirectory,
+	deleteSessionLineageByPath,
+	getSessionLineage,
+	isSessionPathReference,
+	listSessionLineagesUnderDirectory,
+	recordSessionLineagesAsync,
+	repointSessionLineageUnderDirectory,
+	resolveLocalSessionPath,
+	type SessionLineage,
+	type SessionLineageEntry,
+} from "./session-index";
 import { findSessionFiles } from "./session-listing";
-import { loadEntriesFromFile, parseSessionContent, readSessionHeaderId } from "./session-loader";
+import {
+	loadEntriesFromFile,
+	parseSessionContent,
+	parseSessionFileName,
+	readSessionHeader,
+	readSessionHeaderId,
+	rewriteSessionHeaderParentText,
+	tryReadSessionHeaderId,
+} from "./session-loader";
 import { SessionManager } from "./session-manager";
 import { FileSessionStorage } from "./session-storage";
 
@@ -60,6 +82,10 @@ export interface SessionArchiveManifest {
 	cwd: string;
 	/** omp version that wrote the archive. */
 	omp: string;
+	/** Source session file path on the packing machine, when recorded. */
+	sessionFile?: string;
+	/** Realpath of `sessionFile` on the packing machine when `sessionFile` was a symlink. */
+	realSessionFile?: string;
 }
 
 /**
@@ -289,11 +315,18 @@ export async function packSession(sessionFile: string, outPath: string): Promise
 		if (header?.type !== "session") {
 			throw new SessionTransferError(`Not an omp session file (no session header): ${source}`);
 		}
+		// Artifacts sit beside the journal's real name (see copySessionArtifacts).
+		let realSource = source;
+		try {
+			realSource = await fs.promises.realpath(source);
+		} catch {}
 		const manifest: SessionArchiveManifest = {
 			version: SESSION_ARCHIVE_VERSION,
 			id,
 			cwd: header.cwd,
 			omp: VERSION,
+			sessionFile: source,
+			...(realSource !== source ? { realSessionFile: realSource } : {}),
 		};
 		const members: (readonly [string, ArchiveMemberContent])[] = [
 			[MANIFEST_MEMBER, `${JSON.stringify(manifest, null, 2)}\n`],
@@ -302,11 +335,6 @@ export async function packSession(sessionFile: string, outPath: string): Promise
 		const hashes = new Set<string>();
 		collectBlobHashes(journalText, hashes);
 
-		// Artifacts sit beside the journal's real name (see copySessionArtifacts).
-		let realSource = source;
-		try {
-			realSource = await fs.promises.realpath(source);
-		} catch {}
 		const artifactsDir = realSource.slice(0, -".jsonl".length);
 		if (realSource.endsWith(".jsonl")) {
 			for (const relative of await listFilesRecursive(artifactsDir)) {
@@ -359,7 +387,7 @@ function parseManifest(bytes: Uint8Array, archive: string): SessionArchiveManife
 	if (!isRecord(value)) {
 		throw new SessionTransferError(`Bad session archive ${archive}: manifest.json is not an object.`);
 	}
-	const { version, id, cwd, omp } = value;
+	const { version, id, cwd, omp, sessionFile, realSessionFile } = value;
 	if (typeof version !== "number") {
 		throw new SessionTransferError(`Bad session archive ${archive}: manifest.json has no version.`);
 	}
@@ -372,7 +400,20 @@ function parseManifest(bytes: Uint8Array, archive: string): SessionArchiveManife
 	if (typeof id !== "string" || typeof cwd !== "string" || typeof omp !== "string") {
 		throw new SessionTransferError(`Bad session archive ${archive}: manifest.json needs string id, cwd, and omp.`);
 	}
-	return { version, id, cwd, omp };
+	if (sessionFile !== undefined && typeof sessionFile !== "string") {
+		throw new SessionTransferError(`Bad session archive ${archive}: manifest.json sessionFile must be a string.`);
+	}
+	if (realSessionFile !== undefined && typeof realSessionFile !== "string") {
+		throw new SessionTransferError(`Bad session archive ${archive}: manifest.json realSessionFile must be a string.`);
+	}
+	return {
+		version,
+		id,
+		cwd,
+		omp,
+		...(sessionFile ? { sessionFile } : {}),
+		...(realSessionFile ? { realSessionFile } : {}),
+	};
 }
 
 /**
@@ -529,9 +570,188 @@ async function setAside(files: readonly string[]): Promise<AsidePath[]> {
 	return aside;
 }
 
+async function isRestoredTranscriptAtPath(filePath: string, sessionId: string): Promise<boolean> {
+	if (!(await isRegularFile(filePath))) return false;
+	const headerId = await tryReadSessionHeaderId(filePath);
+	return headerId === undefined || headerId === sessionId;
+}
+
+async function rewriteSessionHeaderParentPath(filePath: string, newParentPath: string): Promise<void> {
+	let text: string;
+	try {
+		text = await Bun.file(filePath).text();
+	} catch {
+		return;
+	}
+	const updated = rewriteSessionHeaderParentText(text, newParentPath);
+	if (updated === undefined || updated === text) return;
+	try {
+		await writeFileAtomically(filePath, updated);
+	} catch (error) {
+		logger.debug("Failed to normalize unpacked artifact parent path", {
+			filePath,
+			newParentPath,
+			error: String(error),
+		});
+	}
+}
+
+function canSiblingOwnArtifactItem(otherRelative: string, itemRelative: string): boolean {
+	const otherStem = otherRelative.slice(0, -".jsonl".length);
+	return (
+		path.posix.dirname(itemRelative) === path.posix.dirname(otherRelative) ||
+		(otherStem.length > 0 && itemRelative.startsWith(`${otherStem}/`))
+	);
+}
+
+async function indexUnpackedArtifactSessions(
+	placed: { sessionFile: string; id: string },
+	placedArtifacts: string,
+	cwd: string,
+	artifacts: readonly (readonly [string, Uint8Array])[],
+	manifest: SessionArchiveManifest,
+): Promise<void> {
+	const candidates: Array<{ relative: string; placedPath: string }> = [];
+	for (const [relative] of artifacts) {
+		if (!relative.endsWith(".jsonl")) continue;
+		candidates.push({
+			relative,
+			placedPath: path.resolve(placedArtifacts, ...relative.split("/")),
+		});
+	}
+	if (candidates.length === 0) return;
+
+	const artifactSessions: Array<{ relative: string; placedPath: string; header: SessionHeader }> = [];
+	for (const candidate of candidates) {
+		if (!(await isRegularFile(candidate.placedPath))) continue;
+		let childHeader: SessionHeader | undefined;
+		try {
+			childHeader = await readSessionHeader(candidate.placedPath);
+		} catch {
+			continue;
+		}
+		if (!childHeader?.id) continue;
+		artifactSessions.push({
+			relative: candidate.relative,
+			placedPath: candidate.placedPath,
+			header: childHeader,
+		});
+	}
+	if (artifactSessions.length === 0) return;
+
+	const unpackedIds = new Set<string>([placed.id]);
+	for (const item of artifactSessions) unpackedIds.add(item.header.id);
+	const artifactsByRelLengthDesc = [...artifactSessions].sort((a, b) => b.relative.length - a.relative.length);
+	const knownOldRootSessionPaths = new Set<string>();
+	const knownOldArtifactsDirs = new Set<string>();
+	const addKnownOldRootPath = (rootPath: string | undefined): void => {
+		const trimmed = rootPath?.trim();
+		if (!trimmed) return;
+		const norm = trimmed.replaceAll("\\", "/");
+		knownOldRootSessionPaths.add(norm);
+		if (norm.toLowerCase().endsWith(".jsonl")) {
+			knownOldArtifactsDirs.add(norm.slice(0, -".jsonl".length));
+		}
+	};
+	addKnownOldRootPath(manifest.sessionFile);
+	addKnownOldRootPath(manifest.realSessionFile);
+
+	const findMatchedSibling = (
+		item: { relative: string; placedPath: string; header: SessionHeader },
+		rawNorm: string,
+	) => {
+		for (const other of artifactsByRelLengthDesc) {
+			if (other.placedPath === item.placedPath || other.header.id === item.header.id) continue;
+			const exactUnderKnownRoot =
+				rawNorm.endsWith(`/${other.relative}`) &&
+				knownOldArtifactsDirs.has(rawNorm.slice(0, -(other.relative.length + 1)));
+			if (
+				exactUnderKnownRoot ||
+				((rawNorm === other.relative || rawNorm.endsWith(`/${other.relative}`)) &&
+					canSiblingOwnArtifactItem(other.relative, item.relative))
+			) {
+				return other;
+			}
+		}
+		return undefined;
+	};
+
+	for (const item of artifactSessions) {
+		const rawParent = item.header.parentSession?.trim();
+		if (!rawParent || !isSessionPathReference(rawParent)) continue;
+		const rawNorm = rawParent.replaceAll("\\", "/");
+		const matchedSibling = findMatchedSibling(item, rawNorm);
+		if (matchedSibling && rawNorm.endsWith(`/${matchedSibling.relative}`)) {
+			const dirPrefix = rawNorm.slice(0, -(matchedSibling.relative.length + 1));
+			if (dirPrefix) addKnownOldRootPath(`${dirPrefix}.jsonl`);
+		}
+	}
+
+	const lineageEntries: SessionLineageEntry[] = [];
+	for (const item of artifactSessions) {
+		const rawParent = item.header.parentSession?.trim() || null;
+		let resolvedParent: string | null = rawParent;
+		let rewrittenParentPath: string | undefined;
+
+		if (rawParent && isSessionPathReference(rawParent)) {
+			const localRawParent = resolveLocalSessionPath(rawParent);
+			let keepExternalLocalParent = false;
+			if (
+				localRawParent &&
+				localRawParent !== path.resolve(placed.sessionFile) &&
+				(await isRegularFile(localRawParent))
+			) {
+				const localHeaderId = await tryReadSessionHeaderId(localRawParent);
+				if (localHeaderId !== undefined && !unpackedIds.has(localHeaderId)) {
+					keepExternalLocalParent = true;
+					resolvedParent = localHeaderId;
+				}
+			}
+
+			if (!keepExternalLocalParent) {
+				const rawNorm = rawParent.replaceAll("\\", "/");
+				const matchedSibling = findMatchedSibling(item, rawNorm);
+				if (matchedSibling) {
+					resolvedParent = matchedSibling.header.id;
+					rewrittenParentPath = matchedSibling.placedPath;
+				} else {
+					const generatedParent = parseSessionFileName(rawParent);
+					if (generatedParent) {
+						if (generatedParent.id === placed.id) {
+							resolvedParent = placed.id;
+							rewrittenParentPath = placed.sessionFile;
+						} else {
+							resolvedParent = generatedParent.id;
+						}
+					} else if (knownOldRootSessionPaths.has(rawNorm)) {
+						resolvedParent = placed.id;
+						rewrittenParentPath = placed.sessionFile;
+					}
+				}
+			}
+		}
+
+		if (rewrittenParentPath) {
+			await rewriteSessionHeaderParentPath(item.placedPath, rewrittenParentPath);
+		}
+		lineageEntries.push({
+			sessionId: item.header.id,
+			parentSession: resolvedParent === item.header.id ? null : resolvedParent,
+			sessionPath: item.placedPath,
+			cwd: item.header.cwd || cwd,
+		});
+	}
+
+	await recordSessionLineagesAsync(lineageEntries);
+}
+
 async function removeSessionFiles(sessionFile: string): Promise<void> {
+	const artifactsDir = sessionFile.slice(0, -".jsonl".length);
 	await fs.promises.rm(sessionFile, { force: true });
-	await fs.promises.rm(sessionFile.slice(0, -".jsonl".length), { recursive: true, force: true });
+	await fs.promises.rm(artifactsDir, { recursive: true, force: true });
+	await deleteSessionLineageByPath(sessionFile);
+	if (sessionFile.endsWith(".jsonl")) await deleteMissingSessionLineageUnderDirectory(artifactsDir);
+	closeSessionIndex();
 }
 
 /**
@@ -616,6 +836,17 @@ export async function unpackSession(archivePath: string, options: UnpackSessionO
 		const releases: (() => void)[] = [];
 		try {
 			for (const file of localCopies) releases.push(claimSessionOrRefuse(id, file, "replace"));
+			const previousLineages = new Map<string, SessionLineage>();
+			if (localCopies.length > 0) {
+				const rootLineage = getSessionLineage(id, { readHeaderId: () => undefined });
+				if (rootLineage) previousLineages.set(rootLineage.sessionId, rootLineage);
+				for (const localFile of localCopies) {
+					if (!localFile.endsWith(".jsonl")) continue;
+					for (const descendant of await listSessionLineagesUnderDirectory(localFile.slice(0, -".jsonl".length))) {
+						previousLineages.set(descendant.sessionId, descendant);
+					}
+				}
+			}
 			const aside = await setAside(localCopies);
 			let placed: { sessionFile: string; id: string };
 			try {
@@ -625,9 +856,34 @@ export async function unpackSession(archivePath: string, options: UnpackSessionO
 				);
 			} catch (error) {
 				await restoreAside(aside);
+				await deleteSessionLineageByPath(stagedFile);
+				await deleteMissingSessionLineageUnderDirectory(stagedArtifacts);
+				const restoredLineages: SessionLineageEntry[] = [];
+				for (const prev of previousLineages.values()) {
+					if (await isRestoredTranscriptAtPath(prev.sessionPath, prev.sessionId)) {
+						restoredLineages.push({
+							sessionId: prev.sessionId,
+							parentSession: prev.parentSessionId,
+							sessionPath: prev.sessionPath,
+							cwd: prev.cwd,
+							updatedAt: prev.updatedAt,
+						});
+					}
+				}
+				await recordSessionLineagesAsync(restoredLineages);
+				closeSessionIndex();
 				throw error;
 			}
 			for (const { backup } of aside) await fs.promises.rm(backup, { recursive: true, force: true });
+			const placedArtifacts = placed.sessionFile.slice(0, -".jsonl".length);
+			for (const localFile of localCopies) {
+				if (!localFile.endsWith(".jsonl")) continue;
+				const localArtifacts = localFile.slice(0, -".jsonl".length);
+				await repointSessionLineageUnderDirectory(localArtifacts, placedArtifacts);
+				await deleteMissingSessionLineageUnderDirectory(localArtifacts);
+			}
+			await indexUnpackedArtifactSessions(placed, placedArtifacts, cwd, contents.artifacts, contents.manifest);
+			closeSessionIndex();
 			const mode: UnpackMode = localCopies.length > 0 ? "replaced" : "created";
 			logger.info("Unpacked session", { mode, replaced: localCopies, ...placed });
 			return { ...placed, mode };

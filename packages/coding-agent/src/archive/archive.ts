@@ -15,7 +15,15 @@ import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/ren
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatAge, formatCount } from "@oh-my-pi/pi-utils";
 import { type HistoryEntry, HistoryStorage } from "../session/history-storage";
-import { listSessionRecaps, type SessionRecap } from "../session/session-index";
+import {
+	getSessionLineage,
+	isSessionPathReference,
+	listSessionRecaps,
+	prefetchParentHeaderIds,
+	resolveLocalSessionPath,
+	resolveParentSessionReference,
+	type SessionRecap,
+} from "../session/session-index";
 import {
 	findSessionFiles,
 	listRecentProjects,
@@ -26,6 +34,7 @@ import {
 	sessionDisplayName,
 } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
+import { isRegularFile } from "../utils/regular-file";
 
 /** A listed session. Times are ISO-8601. */
 export interface ArchiveSession {
@@ -141,6 +150,37 @@ export async function archiveSessions(cwd: string | undefined, limit: number): P
 	return { text: lines.join("\n"), records };
 }
 
+async function resolveArchiveParent(
+	parentSession: string | undefined,
+	sessionId: string,
+	sessionPath: string,
+): Promise<string | undefined> {
+	if (!parentSession) return undefined;
+	const trimmed = parentSession.trim();
+	if (!trimmed) return parentSession;
+	if (isSessionPathReference(trimmed)) {
+		const localParent = resolveLocalSessionPath(trimmed);
+		if (localParent && (await isRegularFile(localParent))) return parentSession;
+	}
+	const direct = getSessionLineage(trimmed, { readHeaderId: () => undefined })?.sessionPath;
+	if (direct) return direct;
+	let resolvedParentId = getSessionLineage(sessionId, { readHeaderId: () => undefined })?.parentSessionId ?? null;
+	if (!resolvedParentId) {
+		const headerIdCache = await prefetchParentHeaderIds([
+			{ parentSession: trimmed, forSessionId: sessionId, sessionPath },
+		]);
+		resolvedParentId = resolveParentSessionReference(trimmed, {
+			forSessionId: sessionId,
+			sessionPath,
+			readHeaderId: p => headerIdCache.get(p),
+		});
+	}
+	if (resolvedParentId && resolvedParentId !== trimmed) {
+		return getSessionLineage(resolvedParentId, { readHeaderId: () => undefined })?.sessionPath ?? parentSession;
+	}
+	return parentSession;
+}
+
 /**
  * One session by id prefix or absolute file path, with every recap and its
  * newest `limit` prompts.
@@ -155,9 +195,10 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 		.map(toArchiveRecap)
 		.reverse();
 	const prompts = HistoryStorage.open().getRecent(limit, { sessionId: info.id }).map(toArchivePrompt).reverse();
+	const parent = await resolveArchiveParent(info.parentSessionPath, info.id, file);
 	const record: ArchiveSessionDetail = {
 		...toArchiveSession(info, recaps.at(-1)?.text),
-		parent: info.parentSessionPath,
+		parent,
 		recaps,
 		prompts,
 	};

@@ -26,7 +26,14 @@ import {
 	getApprovalGrants,
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
 import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
-import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	getDbBusyTimeoutMs,
+	isRecord,
+	setAgentDir,
+	setInteractiveHost,
+	TempDir,
+} from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
 /** Tool that keys `args.path` like read/write/edit do. */
@@ -173,6 +180,104 @@ describe("approval grant store", () => {
 		clearApprovalGrants(agentDir);
 		expect(getApprovalGrants(agentDir, "one").present([sessionKey, globalKey]).size).toBe(0);
 		expect(getApprovalGrants(agentDir, "two").present([sessionKey, globalKey]).size).toBe(0);
+	});
+
+	it("leaves no database behind when clearing before any global grant was recorded", () => {
+		const agentDir = freshAgentDir();
+		const file = path.join(agentDir, APPROVAL_CACHE_FILENAME);
+		clearApprovalGrants(agentDir);
+		expect(fs.existsSync(file)).toBe(false);
+	});
+
+	it("waits out a concurrent exclusive lock in present() instead of forgetting remembered grants", async () => {
+		const agentDir = freshAgentDir();
+		const file = path.join(agentDir, APPROVAL_CACHE_FILENAME);
+		const key = approvalGrantKey("write", "/shared/target.ts");
+		getApprovalGrants(agentDir, "writer").record(key, "write", "global");
+
+		const readyMarker = path.join(agentDir, "locked");
+		const locker = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"-e",
+				`
+				import { Database } from "bun:sqlite";
+				import * as fs from "node:fs";
+				const [dbPath, marker] = process.argv.slice(1);
+				const db = new Database(dbPath);
+				db.run("PRAGMA busy_timeout = 5000");
+				db.run("PRAGMA locking_mode = EXCLUSIVE");
+				db.run("BEGIN EXCLUSIVE");
+				fs.writeFileSync(marker, "1");
+				await Bun.sleep(220);
+				db.run("COMMIT");
+				db.run("PRAGMA locking_mode = NORMAL");
+				db.query("SELECT 1 FROM grants LIMIT 1").get();
+				db.close();
+				`,
+				file,
+				readyMarker,
+			],
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+
+		try {
+			while (!fs.existsSync(readyMarker) && locker.exitCode === null) {
+				await Bun.sleep(10);
+			}
+			expect(getApprovalGrants(agentDir, "reader").present([key]).has(key)).toBe(true);
+			expect(await locker.exited).toBe(0);
+		} finally {
+			if (locker.exitCode === null) locker.kill("SIGKILL");
+		}
+	});
+
+	it("waits out a >1s exclusive lock in headless record() instead of silently dropping the grant", async () => {
+		const agentDir = freshAgentDir();
+		const file = path.join(agentDir, APPROVAL_CACHE_FILENAME);
+		const firstKey = approvalGrantKey("write", "/shared/first.ts");
+		const secondKey = approvalGrantKey("write", "/shared/second.ts");
+		getApprovalGrants(agentDir, "writer").record(firstKey, "write", "global");
+
+		const prevInteractive = setInteractiveHost(false);
+		expect(getDbBusyTimeoutMs()).toBe(1000);
+
+		const readyMarker = path.join(agentDir, "exclusive-write-locked");
+		const locker = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"-e",
+				`
+				import { Database } from "bun:sqlite";
+				import * as fs from "node:fs";
+				const [dbPath, marker] = process.argv.slice(1);
+				const db = new Database(dbPath);
+				db.run("PRAGMA busy_timeout = 5000");
+				db.run("BEGIN EXCLUSIVE");
+				fs.writeFileSync(marker, "1");
+				await Bun.sleep(1500);
+				db.run("COMMIT");
+				db.close();
+				`,
+				file,
+				readyMarker,
+			],
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+
+		try {
+			while (!fs.existsSync(readyMarker) && locker.exitCode === null) {
+				await Bun.sleep(10);
+			}
+			getApprovalGrants(agentDir, "writer").record(secondKey, "write", "global");
+			expect(await locker.exited).toBe(0);
+			expect(getApprovalGrants(agentDir, "reader").present([secondKey]).has(secondKey)).toBe(true);
+		} finally {
+			setInteractiveHost(prevInteractive);
+			if (locker.exitCode === null) locker.kill("SIGKILL");
+		}
 	});
 });
 

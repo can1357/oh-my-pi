@@ -1,6 +1,7 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ensureSqliteLockShim } from "@oh-my-pi/pi-utils";
 
 const SQLITE_MAGIC = new Uint8Array([
 	0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00,
@@ -48,6 +49,7 @@ function configureSqliteReadConnection(db: Database): Database {
  * (Windows then refuses to delete it).
  */
 export async function openSqliteReadConnection(filePath: string): Promise<Database> {
+	ensureSqliteLockShim();
 	if (await requiresWalSidecarInitialization(filePath)) {
 		return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
 	}

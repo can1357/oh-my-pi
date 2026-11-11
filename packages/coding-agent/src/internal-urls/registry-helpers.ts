@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
+import { isRegularFile } from "../utils/regular-file";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -184,7 +185,7 @@ export async function hasResolvableTranscript(agentId: string): Promise<boolean>
 		if (ref?.session) return true;
 		// A running worker resolves to a "no transcript yet" note, not an error.
 		if (ref?.status === "running") return true;
-		if (ref?.sessionFile && (await isReadableFile(ref.sessionFile))) return true;
+		if (ref?.sessionFile && (await isRegularFile(ref.sessionFile))) return true;
 		const files = await sessionFilesFromDisk();
 		for (const id of files.keys()) {
 			if (id.toLowerCase() === lower) return true;
@@ -194,14 +195,4 @@ export async function hasResolvableTranscript(agentId: string): Promise<boolean>
 		// transcript cannot be promised, never that delivery should fail.
 	}
 	return false;
-}
-
-/** True when `file` exists and is a regular file; never throws. */
-async function isReadableFile(file: string): Promise<boolean> {
-	try {
-		const stat = await fs.stat(file);
-		return stat.isFile();
-	} catch {
-		return false;
-	}
 }

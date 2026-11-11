@@ -201,10 +201,9 @@ const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
-async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
+function runWorkerEntrypoint(arg: string | undefined): Promise<void> | null {
 	if (arg === TINY_WORKER_ARG) {
-		await runTinyWorker();
-		return true;
+		return runTinyWorker();
 	}
 	if (arg === STATS_SYNC_WORKER_ARG) {
 		// The sync worker handles messages via `self.onmessage`, assigned during
@@ -221,12 +220,13 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 			pending.push(event);
 		};
 		scope.onmessage = buffer;
-		await import("@oh-my-pi/omp-stats/sync-worker");
-		const handler = scope.onmessage;
-		if (handler && handler !== buffer) {
-			for (const event of pending) handler.call(scope, event);
-		}
-		return true;
+		return (async () => {
+			await import("@oh-my-pi/omp-stats/sync-worker");
+			const handler = scope.onmessage;
+			if (handler && handler !== buffer) {
+				for (const event of pending) handler.call(scope, event);
+			}
+		})();
 	}
 	// Bun flushes messages the parent posted before spawn once this entry's
 	// top-level evaluation completes. Install a buffering inbox synchronously
@@ -236,27 +236,31 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TAB_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
-		await import("./tools/browser/tab-worker-entry");
-		return true;
+		return (async () => {
+			await import("./tools/browser/tab-worker-entry");
+		})();
 	}
 	if (arg === COMPUTER_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
-		const { startComputerWorker } = await import("./tools/computer/worker-entry");
-		startComputerWorker();
-		return true;
+		return (async () => {
+			const { startComputerWorker } = await import("./tools/computer/worker-entry");
+			startComputerWorker();
+		})();
 	}
 	if (arg === JS_EVAL_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
-		await import("./eval/js/worker-entry");
-		return true;
+		return (async () => {
+			await import("./eval/js/worker-entry");
+		})();
 	}
 	if (arg === SUBAGENT_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
-		await import("./thread/subagent-worker-entry");
-		return true;
+		return (async () => {
+			await import("./thread/subagent-worker-entry");
+		})();
 	}
 	if (arg === JS_EVAL_PROCESS_ARG) {
 		// This selector is the synchronous bootstrap boundary: keep the evaluator
@@ -268,85 +272,97 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		// The JS evaluator forwards user-controlled payloads (tool-call args,
 		// display outputs); a non-serializable one must fail that cell, not
 		// SIGKILL the kernel and erase the eval session's state.
-		await runIpcSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(
+		return runIpcSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(
 			transport => startJsEvalProcess(transport, interceptUnhandledRejections),
 			{ rethrowConnectedSendErrors: true },
 		);
-		return true;
 	}
 	if (arg === STT_WORKER_ARG) {
-		const { startSttWorker } = await import("./stt/asr-worker");
-		await runIpcSubprocessWorker(startSttWorker);
-		return true;
+		return (async () => {
+			const { startSttWorker } = await import("./stt/asr-worker");
+			await runIpcSubprocessWorker(startSttWorker);
+		})();
 	}
 	if (arg === TTS_WORKER_ARG) {
-		const { startTtsWorker } = await import("./tts/tts-worker");
-		await runIpcSubprocessWorker(startTtsWorker);
-		return true;
+		return (async () => {
+			const { startTtsWorker } = await import("./tts/tts-worker");
+			await runIpcSubprocessWorker(startTtsWorker);
+		})();
 	}
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
-		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
-		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
-		return true;
+		return (async () => {
+			const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
+			await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		})();
 	}
 	if (arg === MNEMOPI_EMBED_SERVER_WORKER_ARG) {
-		const { startMnemopiEmbedServerFromEnvironment } = await import("./mnemopi/embed-server");
-		await startMnemopiEmbedServerFromEnvironment();
-		return true;
+		return (async () => {
+			const { startMnemopiEmbedServerFromEnvironment } = await import("./mnemopi/embed-server");
+			await startMnemopiEmbedServerFromEnvironment();
+		})();
 	}
 	if (arg === STATS_ACTIVITY_WORKER_ARG) {
-		const { startStatsActivityWorker } = await import("./stats/activity-worker");
-		await runIpcSubprocessWorker(startStatsActivityWorker);
-		return true;
+		return (async () => {
+			const { startStatsActivityWorker } = await import("./stats/activity-worker");
+			await runIpcSubprocessWorker(startStatsActivityWorker);
+		})();
 	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
 		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
-		await import("./launch/terminal-output-worker");
-		return true;
+		return (async () => {
+			await import("./launch/terminal-output-worker");
+		})();
 	}
 	if (arg === PARENT_WATCHDOG_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
-		await import("./subprocess/parent-watchdog-worker");
-		return true;
+		return (async () => {
+			await import("./subprocess/parent-watchdog-worker");
+		})();
 	}
 	if (arg === DAEMON_BROKER_WORKER_ARG) {
 		// Worker selectors must dispatch before the normal command graph loads.
-		const { startDaemonBrokerFromEnvironment } = await import("./launch/broker");
-		await startDaemonBrokerFromEnvironment();
-		return true;
+		return (async () => {
+			const { startDaemonBrokerFromEnvironment } = await import("./launch/broker");
+			await startDaemonBrokerFromEnvironment();
+		})();
 	}
 	if (arg === LSP_MUX_WORKER_ARG) {
-		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
-		await startLspMuxFromEnvironment();
-		return true;
+		return (async () => {
+			const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
+			await startLspMuxFromEnvironment();
+		})();
 	}
 	if (arg === IDA_HOST_WORKER_ARG) {
-		const { startIdaHostFromEnvironment } = await import("./ida/host");
-		await startIdaHostFromEnvironment();
-		return true;
+		return (async () => {
+			const { startIdaHostFromEnvironment } = await import("./ida/host");
+			await startIdaHostFromEnvironment();
+		})();
 	}
 	if (arg === BLOB_BROKER_WORKER_ARG) {
-		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
-		await startBlobBrokerFromEnvironment();
-		return true;
+		return (async () => {
+			const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
+			await startBlobBrokerFromEnvironment();
+		})();
 	}
 	if (arg === TEXT_PREDICT_WORKER_ARG) {
-		const { startTextPredictDaemonFromEnvironment } = await import("./predict/daemon");
-		await startTextPredictDaemonFromEnvironment();
-		return true;
+		return (async () => {
+			const { startTextPredictDaemonFromEnvironment } = await import("./predict/daemon");
+			await startTextPredictDaemonFromEnvironment();
+		})();
 	}
 	if (arg === AUTO_UPDATE_WORKER_ARG) {
 		// Selector boundary keeps the updater graph out of ordinary startup. The worker
 		// downloads releases, so it needs the PI_PROXY handling ordinary commands get.
-		await installNetworkBootstrap();
-		const { runAutoUpdateWorker } = await import("./cli/auto-update");
-		await runAutoUpdateWorker();
-		return true;
+		return (async () => {
+			await installNetworkBootstrap();
+			const { runAutoUpdateWorker } = await import("./cli/auto-update");
+			await runAutoUpdateWorker();
+		})();
 	}
-	return false;
+	return null;
 }
 
 /**
@@ -535,11 +551,16 @@ export async function runCli(argv: string[]): Promise<void> {
 	if (isWorkerHostSelector(resolvedArgv[0])) {
 		// Invoke dispatch first so its inbox is installed before asynchronous
 		// process-name setup yields; neither dependency belongs in prepaint.
-		const [dispatched] = await Promise.all([runWorkerEntrypoint(resolvedArgv[0]), setFullProcessName()]);
-		if (!dispatched) {
+		const worker = runWorkerEntrypoint(resolvedArgv[0]);
+		if (worker === null) {
 			process.stderr.write(`Error: unknown worker selector: ${resolvedArgv[0]}\n`);
 			process.exitCode = 1;
+			return;
 		}
+		if ((isProcessEntry || !Bun.isMainThread) && !process.env.PI_TEST_NO_NATIVES) {
+			installSqliteLockShim();
+		}
+		await Promise.all([worker, setFullProcessName()]);
 		return;
 	}
 

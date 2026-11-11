@@ -581,3 +581,61 @@ describe("skill description compressor cost gate", () => {
 		expect(Date.now() - started).toBeLessThan(400);
 	});
 });
+
+describe("skill description store concurrency", () => {
+	let tempDir = "";
+
+	beforeEach(async () => {
+		tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-skill-store-concurrency-"));
+	});
+
+	afterEach(async () => {
+		await fs.promises.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("waits out a peer write lock longer than 100ms using the shared SQLite busy timeout", async () => {
+		const dbPath = path.join(tempDir, "skill-descriptions.db");
+		using store = SkillDescriptionStore.open(dbPath);
+		store.put("seed", "initial");
+		if (process.platform !== "win32") {
+			expect(fs.statSync(dbPath).mode & 0o777).toBe(0o600);
+		}
+
+		const readyMarker = path.join(tempDir, "locked");
+		const locker = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"-e",
+				`
+				import { Database } from "bun:sqlite";
+				import * as fs from "node:fs";
+				const [dbPath, marker] = process.argv.slice(1);
+				const db = new Database(dbPath);
+				db.run("PRAGMA busy_timeout = 5000");
+				db.run("BEGIN IMMEDIATE");
+				fs.writeFileSync(marker, "1");
+				await Bun.sleep(250);
+				db.run("INSERT OR REPLACE INTO skill_descriptions (key, description) VALUES ('peer', 'from-peer')");
+				db.run("COMMIT");
+				db.close();
+				`,
+				dbPath,
+				readyMarker,
+			],
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+
+		try {
+			while (!fs.existsSync(readyMarker) && locker.exitCode === null) {
+				await Bun.sleep(10);
+			}
+			store.put("local", "from-local");
+			expect(await locker.exited).toBe(0);
+			expect(store.get("local")).toBe("from-local");
+			expect(store.get("peer")).toBe("from-peer");
+		} finally {
+			if (locker.exitCode === null) locker.kill("SIGKILL");
+		}
+	});
+});

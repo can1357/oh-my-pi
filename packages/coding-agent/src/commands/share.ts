@@ -47,7 +47,10 @@ export default class Share extends Command {
 		let sm: SessionManager | undefined;
 		if (sessionPath) {
 			try {
-				sm = await SessionManager.open(sessionPath, undefined, undefined, { throwIfMissing: true });
+				sm = await SessionManager.open(sessionPath, undefined, undefined, {
+					suppressLineage: true,
+					throwIfMissing: true,
+				});
 			} catch (err) {
 				if (!isEnoent(err)) throw err;
 			}

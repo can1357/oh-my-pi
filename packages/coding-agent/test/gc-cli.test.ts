@@ -1172,6 +1172,136 @@ describe("runGcCommand cold-session archive", () => {
 		expect(rows.map(row => row.session_id)).toEqual(["keep-me"]);
 	});
 
+	test("preserves retained session_lineage rows across gc runs when an archived copy shares the same header id", async () => {
+		const archivedOnlyFile = await writeSession(root, "project-a", "archive-only", "complete", { ageDays: 90 });
+		const archivedNestedFile = path.join(archivedOnlyFile.slice(0, -".jsonl".length), "0-task.jsonl");
+		await fs.mkdir(path.dirname(archivedNestedFile), { recursive: true });
+		await Bun.write(
+			archivedNestedFile,
+			[
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "archive-nested",
+					timestamp: "2024-01-01T00:00:00.000Z",
+					cwd: "/tmp",
+				}),
+				JSON.stringify({ type: "message", message: { role: "assistant", content: [] } }),
+				"",
+			].join("\n"),
+		);
+		await agePath(archivedNestedFile, 90);
+		const oldSharedFile = await writeSession(root, "project-a", "shared-id", "complete", {
+			ageDays: 90,
+			filename: "2024-01-01T00-00-00-000Z_shared-id",
+		});
+		const liveSharedFile = await writeSession(root, "project-b", "shared-id", "complete", {
+			ageDays: 2,
+			filename: "2026-01-01T00-00-00-000Z_shared-id",
+		});
+		const liveParentFile = await writeSession(root, "project-b", "parent-id", "complete", { ageDays: 2 });
+		const liveNestedFile = path.join(liveParentFile.slice(0, -".jsonl".length), "0-live-task.jsonl");
+		await fs.mkdir(path.dirname(liveNestedFile), { recursive: true });
+		await Bun.write(
+			liveNestedFile,
+			`${JSON.stringify({ type: "session", version: 3, id: "live-nested", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" })}\n`,
+		);
+
+		const dbPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		{
+			using db = new Database(dbPath);
+			db.run(`
+				CREATE TABLE session_lineage (
+					session_id TEXT PRIMARY KEY,
+					parent_session_id TEXT,
+					session_path TEXT NOT NULL,
+					cwd TEXT,
+					updated_at INTEGER NOT NULL DEFAULT 100
+				)
+			`);
+			const insert = db.prepare(
+				"INSERT INTO session_lineage (session_id, parent_session_id, session_path, cwd, updated_at) VALUES (?, ?, ?, ?, 100)",
+			);
+			insert.run("parent-id", null, path.resolve(liveParentFile), "/tmp");
+			insert.run("live-nested", "parent-id", path.resolve(liveNestedFile), "/tmp");
+			insert.run("shared-id", "parent-id", path.resolve(oldSharedFile), "/old-cwd");
+			insert.run("archive-only", null, path.resolve(archivedOnlyFile), "/tmp");
+			insert.run("archive-nested", "archive-only", path.resolve(archivedNestedFile), "/tmp");
+			insert.finalize();
+		}
+
+		const firstGc = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		});
+		expect(firstGc.archive?.archived).toBe(2);
+		expect(firstGc.archive?.errors).toEqual([]);
+
+		{
+			using check = new Database(dbPath, { readonly: true });
+			const rows = check
+				.query<
+					{ session_id: string; parent_session_id: string | null; session_path: string; cwd: string | null },
+					[]
+				>("SELECT session_id, parent_session_id, session_path, cwd FROM session_lineage ORDER BY session_id")
+				.all();
+			expect(rows).toEqual([
+				{
+					session_id: "live-nested",
+					parent_session_id: "parent-id",
+					session_path: path.resolve(liveNestedFile),
+					cwd: "/tmp",
+				},
+				{
+					session_id: "parent-id",
+					parent_session_id: null,
+					session_path: path.resolve(liveParentFile),
+					cwd: "/tmp",
+				},
+				{
+					session_id: "shared-id",
+					parent_session_id: "parent-id",
+					session_path: path.resolve(liveSharedFile),
+					cwd: "/tmp",
+				},
+			]);
+		}
+
+		// Second GC run archives nothing new while `archive/` still holds `shared-id`'s `.jsonl.gz` copy.
+		const secondGc = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		});
+		expect(secondGc.archive?.archived).toBe(0);
+		expect(secondGc.archive?.errors).toEqual([]);
+
+		{
+			using check = new Database(dbPath, { readonly: true });
+			const sharedRow = check
+				.query<{ parent_session_id: string | null; session_path: string }, [string]>(
+					"SELECT parent_session_id, session_path FROM session_lineage WHERE session_id = ?",
+				)
+				.get("shared-id");
+			expect(sharedRow).toEqual({
+				parent_session_id: "parent-id",
+				session_path: path.resolve(liveSharedFile),
+			});
+		}
+	});
+
 	test("removes archived main and nested session rows from stats", async () => {
 		const session = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
 		const nestedSession = path.join(session.slice(0, -".jsonl".length), "nested.jsonl");

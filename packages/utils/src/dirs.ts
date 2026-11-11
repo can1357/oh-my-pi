@@ -526,6 +526,24 @@ let preProfileAgentDirEnv: string | undefined = resolvePreProfileAgentDir(
 // tests passing a temp HOME short-circuit to a deterministic path.
 const RESOLVER_HOME = os.homedir();
 
+const agentDirChangeListeners = new Set<() => void>();
+
+function notifyAgentDirChange(): void {
+	for (const listener of agentDirChangeListeners) {
+		try {
+			listener();
+		} catch {}
+	}
+}
+
+/** Register a callback invoked whenever the resolved agent directory or profile changes. */
+export function onAgentDirChange(listener: () => void): () => void {
+	agentDirChangeListeners.add(listener);
+	return () => {
+		agentDirChangeListeners.delete(listener);
+	};
+}
+
 /**
  * Rebuild the dirs resolver from the current environment, reusing the profile
  * resolved at module load. Directory-affecting keys (XDG_*_HOME and, in default
@@ -541,6 +559,7 @@ export function refreshDirsFromEnv(): void {
 		agentDirOverride: resolveActiveAgentDirOverride(),
 		profile: activeProfile,
 	});
+	notifyAgentDirChange();
 }
 
 // =============================================================================
@@ -561,6 +580,7 @@ export function setAgentDir(dir: string): void {
 	for (const key of PROFILE_ENV_KEYS) {
 		delete process.env[key];
 	}
+	notifyAgentDirChange();
 }
 
 /**
@@ -623,6 +643,7 @@ export function setProfile(profile: string | undefined): void {
 		}
 		dirs = new DirResolver({ agentDirOverride: preProfileAgentDirEnv });
 	}
+	notifyAgentDirChange();
 }
 
 /** Get the active named profile. Undefined means the default profile. */

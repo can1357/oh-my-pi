@@ -5,10 +5,12 @@
 ### Added
 
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+- `/resume` and archive session views now resolve fork lineage immediately from `history.db` without scanning session files ([#18818](https://github.com/can1357/oh-my-pi/pull/18818) by [@iliaal](https://github.com/iliaal))
 
 ### Fixed
 
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
+- Parallel sessions sharing `skill-descriptions.db`, `approval-cache.db`, `history.db`, and CLI worker subprocesses no longer hit `SQLITE_BUSY` or release live SQLite locks under multi-session contention ([#18818](https://github.com/can1357/oh-my-pi/pull/18818) by [@iliaal](https://github.com/iliaal))
 
 ## [18.18.9] - 2026-11-11
 

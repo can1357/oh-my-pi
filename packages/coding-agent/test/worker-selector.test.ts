@@ -1,7 +1,11 @@
+import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { isPidRunning } from "@oh-my-pi/pi-utils/procmgr";
 import { runCli } from "../src/cli";
+import type { WorkerInbound, WorkerOutbound } from "../src/eval/js/worker-protocol";
 
 // The worker-host re-entry seam dispatches any `__omp_worker_*` selector to
 // `runWorkerEntrypoint`. An unrecognized selector must fail loudly rather than
@@ -204,6 +208,80 @@ describe("worker selector dispatch", () => {
 			const alive = !child.killed && child.exitCode === null;
 			child.kill("SIGKILL");
 			expect(alive).toBe(true);
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"installs the SQLite OFD lock shim in CLI worker subprocesses before worker code opens a database",
+		async () => {
+			const repoRoot = path.resolve(__dirname, "../../..");
+			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-worker-ofd-lock-"));
+			const dbPath = path.join(tempDir, "worker.db");
+			const seed = new Database(dbPath, { create: true });
+			seed.run("CREATE TABLE items (id INTEGER PRIMARY KEY)");
+			seed.close();
+
+			const listeners = new Set<(msg: WorkerOutbound) => void>();
+			const waitForOutbound = (predicate: (msg: WorkerOutbound) => boolean): Promise<WorkerOutbound> => {
+				const { promise, resolve } = Promise.withResolvers<WorkerOutbound>();
+				const onMsg = (msg: WorkerOutbound): void => {
+					if (!predicate(msg)) return;
+					listeners.delete(onMsg);
+					resolve(msg);
+				};
+				listeners.add(onMsg);
+				return promise;
+			};
+
+			const worker = Bun.spawn({
+				cmd: [process.execPath, "packages/coding-agent/src/cli.ts", "__omp_worker_js_eval_process"],
+				cwd: repoRoot,
+				ipc(message) {
+					for (const listener of listeners) listener(message as WorkerOutbound);
+				},
+				serialization: "advanced",
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+
+			try {
+				const snapshot = { cwd: tempDir, sessionId: "worker-ofd-test" };
+				const ready = waitForOutbound(msg => msg.type === "ready" || msg.type === "init-failed");
+				worker.send({ type: "init", snapshot } satisfies WorkerInbound);
+				expect((await ready).type).toBe("ready");
+
+				const runDone = waitForOutbound(msg => msg.type === "result" && msg.runId === "run-1");
+				worker.send({
+					type: "run",
+					runId: "run-1",
+					filename: "cell.ts",
+					snapshot,
+					code: `
+						import { Database } from "bun:sqlite";
+						import * as fs from "node:fs";
+						const heldDb = new Database(${JSON.stringify(dbPath)});
+						heldDb.run("BEGIN EXCLUSIVE");
+						(globalThis as Record<string, unknown>).__heldDb = heldDb;
+						const fd = fs.openSync(${JSON.stringify(dbPath)}, "r");
+						fs.closeSync(fd);
+					`,
+				} satisfies WorkerInbound);
+				const result = await runDone;
+				expect(result).toMatchObject({ type: "result", runId: "run-1", ok: true });
+
+				const contender = new Database(dbPath);
+				try {
+					contender.run("PRAGMA busy_timeout = 0");
+					expect(() => contender.run("BEGIN IMMEDIATE")).toThrow(/locked|busy/i);
+				} finally {
+					contender.close();
+				}
+			} finally {
+				worker.kill("SIGKILL");
+				await worker.exited;
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			}
 		},
 	);
 });

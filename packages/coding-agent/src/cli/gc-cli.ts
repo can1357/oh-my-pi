@@ -7,6 +7,7 @@ import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { isCompressScratchPath } from "@oh-my-pi/omp-stats/parser";
 import {
+	ensureSqliteLockShim,
 	formatBytes,
 	getAgentDir,
 	getBlobsDir,
@@ -22,16 +23,20 @@ import {
 	isPidAlive,
 	normalizePathForComparison,
 	readLines,
+	relativePathWithinNormalizedRoot,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
+import { readSessionHeaderId } from "../session/session-header";
+import { directoryPathPrefixBounds } from "../session/session-index";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
-import { readSessionHeaderId } from "../session/session-loader";
 import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
+import { mapWithConcurrencyLimit } from "../task/parallel";
+import { isRegularFileMissing } from "../utils/regular-file";
 import {
 	type CompressCandidate,
 	type CompressMethod,
@@ -738,16 +743,6 @@ async function listFilesIfPresent(dir: string): Promise<string[]> {
 	}
 }
 
-/** Whether a pointer's target is verifiably gone; unreadable targets count as present. */
-async function sessionFileMissing(sessionFile: string): Promise<boolean> {
-	try {
-		return !(await fs.stat(sessionFile)).isFile();
-	} catch (error) {
-		const code = codeOf(error);
-		return code === "ENOENT" || code === "ENOTDIR";
-	}
-}
-
 /**
  * Pointer files (custom-session markers, terminal breadcrumbs) past
  * {@link STALE_POINTER_GRACE_MS} whose recorded session file is gone.
@@ -764,7 +759,7 @@ async function collectDanglingPointers(
 		const stat = await statIfPresent(file);
 		if (!stat || stat.mtimeMs > deleteBeforeMs) continue;
 		const target = resolveTarget(await readTextIfPresent(file));
-		if (!target || !(await sessionFileMissing(target))) continue;
+		if (!target || !(await isRegularFileMissing(target))) continue;
 		candidates.push({ kind, paths: [file], bytes: stat.size });
 	}
 	return candidates;
@@ -1141,65 +1136,241 @@ function tableExists(db: Database, table: string): boolean {
 	return row?.present === 1;
 }
 
-function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
+interface HistoryCleanupLineageOptions {
+	archivedPaths?: ReadonlySet<string>;
+	retainedSessions?: readonly SessionInfo[];
+}
+
+async function deleteHistoryRowsForSessions(
+	dbPath: string,
+	sessionIds: string[],
+	lineageOptions: HistoryCleanupLineageOptions = {},
+): Promise<{ deleted: number; ftsRebuilt: boolean }> {
 	if (sessionIds.length === 0) return { deleted: 0, ftsRebuilt: false };
+	const archivedPaths = lineageOptions.archivedPaths ?? new Set<string>();
+	const retainedPathsById = new Map<string, Set<string>>();
+	const retainedRepresentativeById = new Map<string, SessionInfo>();
+	for (const session of lineageOptions.retainedSessions ?? []) {
+		if (!session.id) continue;
+		const resolved = path.resolve(session.path);
+		let pathsForId = retainedPathsById.get(session.id);
+		if (!pathsForId) {
+			pathsForId = new Set<string>();
+			retainedPathsById.set(session.id, pathsForId);
+		}
+		pathsForId.add(resolved);
+		if (!retainedRepresentativeById.has(session.id)) {
+			retainedRepresentativeById.set(session.id, session);
+		}
+	}
+
+	ensureSqliteLockShim();
 	const db = new Database(dbPath);
 	try {
 		db.run("PRAGMA busy_timeout = 5000");
 		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
 		const hasRecaps = tableExists(db, "session_recaps");
 		const hasTitles = tableExists(db, "session_titles");
-		if (!hasHistory && !hasRecaps && !hasTitles) return { deleted: 0, ftsRebuilt: false };
+		const hasLineage = tableExists(db, "session_lineage");
+		if (!hasHistory && !hasRecaps && !hasTitles && !hasLineage) return { deleted: 0, ftsRebuilt: false };
 		const hasFts = hasHistory && tableExists(db, "history_fts");
+		const hasLineagePath = hasLineage && tableHasColumn(db, "session_lineage", "session_path");
+		const hasLineageCwd = hasLineagePath && tableHasColumn(db, "session_lineage", "cwd");
+		const hasLineageUpdatedAt = hasLineagePath && tableHasColumn(db, "session_lineage", "updated_at");
+		const repointSql = hasLineagePath
+			? `UPDATE session_lineage SET session_path = ?${hasLineageCwd ? ", cwd = ?" : ""}${hasLineageUpdatedAt ? ", updated_at = CAST(strftime('%s','now') AS INTEGER)" : ""} WHERE session_id = ?`
+			: undefined;
+
 		using deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
-		// Recaps and titles are session-scoped side output with no life beyond their session.
+		// Recaps and titles are session-scoped side output; lineage rows stay while a retained copy still lives on disk.
 		using deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
 		using deleteTitlesStmt = hasTitles ? db.prepare("DELETE FROM session_titles WHERE session_id = ?") : undefined;
+		using selectLineagePathStmt = hasLineagePath
+			? db.prepare("SELECT session_path FROM session_lineage WHERE session_id = ?")
+			: undefined;
+		using selectNestedLineageStmt = hasLineagePath
+			? db.prepare(
+					"SELECT session_id, session_path FROM session_lineage WHERE session_path >= ? AND session_path < ? AND substr(session_path, 1, length(?)) = ? AND typeof(session_id) = 'text' AND typeof(session_path) = 'text'",
+				)
+			: undefined;
+		using deleteLineageOtherIdAtPathStmt = hasLineagePath
+			? db.prepare("DELETE FROM session_lineage WHERE session_path = ? AND session_id != ?")
+			: undefined;
+		using repointLineageStmt = repointSql ? db.prepare(repointSql) : undefined;
+		using deleteLineageStmt = hasLineage ? db.prepare("DELETE FROM session_lineage WHERE session_id = ?") : undefined;
+		using deleteNestedLineageStmt = hasLineagePath
+			? db.prepare("DELETE FROM session_lineage WHERE session_id = ? AND session_path = ?")
+			: undefined;
+		const nestedCandidates: Array<{ id: string; sessionPath: string }> = [];
+		const pathsToVerify = new Set<string>();
+		if (selectNestedLineageStmt) {
+			for (const archivedPath of archivedPaths) {
+				if (!archivedPath.endsWith(SESSION_SUFFIX)) continue;
+				const bounds = directoryPathPrefixBounds(sessionArtifactsPath(archivedPath));
+				if (!bounds) continue;
+				const nestedRows = selectNestedLineageStmt.all(
+					bounds.prefix,
+					bounds.upper,
+					bounds.prefix,
+					bounds.prefix,
+				) as Array<{ session_id: string; session_path: string }>;
+				for (const row of nestedRows) {
+					nestedCandidates.push({ id: row.session_id, sessionPath: row.session_path });
+					pathsToVerify.add(row.session_path);
+				}
+			}
+		}
+		if (selectLineagePathStmt) {
+			for (const id of sessionIds) {
+				const lineageRow = selectLineagePathStmt.get(id) as { session_path?: string | null } | null;
+				if (typeof lineageRow?.session_path !== "string") continue;
+				const currentPath = path.resolve(lineageRow.session_path);
+				if (
+					!retainedPathsById.get(id)?.has(currentPath) &&
+					!(retainedRepresentativeById.has(id) && deleteLineageOtherIdAtPathStmt && repointLineageStmt) &&
+					!archivedPaths.has(currentPath)
+				) {
+					pathsToVerify.add(currentPath);
+				}
+			}
+		}
+		type VerifiedPathPresence =
+			| { kind: "missing" }
+			| { kind: "unreadable" }
+			| { kind: "header"; id: string | undefined };
+		const verifiedPresence = new Map<string, VerifiedPathPresence>();
+		if (pathsToVerify.size > 0) {
+			const paths = [...pathsToVerify];
+			const checks = await mapWithConcurrencyLimit(paths, 16, async (p): Promise<VerifiedPathPresence> => {
+				if (await isRegularFileMissing(p)) return { kind: "missing" };
+				try {
+					const id = await readSessionHeaderId(p);
+					return { kind: "header", id: id && id.length > 0 ? id : undefined };
+				} catch {
+					return { kind: "unreadable" };
+				}
+			});
+			for (let i = 0; i < paths.length; i++) {
+				const presence = checks.results[i];
+				if (presence) verifiedPresence.set(paths[i], presence);
+			}
+		}
+		const missingNestedLineage = nestedCandidates.filter(row => {
+			const presence = verifiedPresence.get(row.sessionPath);
+			if (!presence || presence.kind === "unreadable") return false;
+			return presence.kind === "missing" || presence.id !== row.id;
+		});
 		let deleted = 0;
 		const tx = db.transaction((ids: string[]) => {
 			for (const id of ids) {
 				deleteRecapsStmt?.run(id);
 				deleteTitlesStmt?.run(id);
+				if (hasLineage) {
+					if (!selectLineagePathStmt) {
+						deleteLineageStmt?.run(id);
+					} else {
+						const lineageRow = selectLineagePathStmt.get(id) as { session_path?: string | null } | null;
+						if (typeof lineageRow?.session_path === "string") {
+							const currentPath = path.resolve(lineageRow.session_path);
+							const retainedPaths = retainedPathsById.get(id);
+							const retainedFallback = retainedRepresentativeById.get(id);
+							const presence = verifiedPresence.get(currentPath);
+							if (retainedPaths?.has(currentPath)) {
+								// Retained copy is already the indexed lineage path.
+							} else if (retainedFallback && deleteLineageOtherIdAtPathStmt && repointLineageStmt) {
+								const fallbackPath = path.resolve(retainedFallback.path);
+								const fallbackCwd = retainedFallback.cwd ? path.resolve(retainedFallback.cwd) : null;
+								deleteLineageOtherIdAtPathStmt.run(fallbackPath, id);
+								if (hasLineageCwd) {
+									repointLineageStmt.run(fallbackPath, fallbackCwd, id);
+								} else {
+									repointLineageStmt.run(fallbackPath, id);
+								}
+							} else if (
+								!archivedPaths.has(currentPath) &&
+								(!presence ||
+									presence.kind === "unreadable" ||
+									(presence.kind === "header" && presence.id === id))
+							) {
+								// Custom `--session` transcript outside `sessionsRoot` still exists on disk
+								// (or a live writer repointed `session_path` after the pre-transaction probe).
+							} else {
+								deleteLineageStmt?.run(id);
+							}
+						} else if (lineageRow !== null) {
+							deleteLineageStmt?.run(id);
+						}
+					}
+				}
 				if (!deleteStmt) continue;
 				const result = deleteStmt.run(id) as SqliteRunResult;
 				deleted += sqliteNumber(result.changes);
 			}
+			for (const nested of missingNestedLineage) {
+				deleteNestedLineageStmt?.run(nested.id, nested.sessionPath);
+				if (!retainedPathsById.has(nested.id)) {
+					deleteRecapsStmt?.run(nested.id);
+					deleteTitlesStmt?.run(nested.id);
+				}
+			}
 			if (deleted > 0 && hasFts) db.run("INSERT INTO history_fts(history_fts) VALUES('rebuild')");
 		});
-		tx(sessionIds);
+		tx.immediate(sessionIds);
 		return { deleted, ftsRebuilt: deleted > 0 && hasFts };
 	} finally {
 		db.close();
 	}
 }
 
-async function collectArchivedSessionIds(archiveRoot: string, track: ProgressTracker): Promise<string[]> {
+async function collectArchivedSessionReferences(
+	archiveRoot: string,
+	sessionsRoot: string,
+	track: ProgressTracker,
+): Promise<{ ids: string[]; sourcePaths: Set<string> }> {
 	const ids = new Set<string>();
+	const sourcePaths = new Set<string>();
+	const normalizedArchiveRoot = path.resolve(archiveRoot);
 	for (const file of track.each("Scanning archive for history ids", await collectCompressedJsonlFiles(archiveRoot))) {
+		const relative = relativePathWithinNormalizedRoot(normalizedArchiveRoot, path.resolve(file));
+		if (relative && relative.endsWith(".gz")) {
+			sourcePaths.add(path.resolve(sessionsRoot, relative.slice(0, -".gz".length)));
+		}
 		const id = (await scanArchivedSession(file))?.id;
 		if (id) ids.add(id);
 	}
-	return [...ids].sort();
+	return { ids: [...ids].sort(), sourcePaths };
 }
 
 async function cleanupHistoryRowsForArchivedSessions(
 	options: ResolvedGcOptions,
 	archiveRoot: string,
-	archivedSessionIds: string[],
+	sessionsRoot: string,
+	newlyArchivedSessions: readonly SessionInfo[],
+	retainedSessions: readonly SessionInfo[],
 	result: ArchiveGcResult,
 ): Promise<void> {
 	const dbPath = getHistoryDbPath(options.agentDir);
 	if (!(await pathExists(dbPath))) return;
 
-	const cleanupIds = new Set(archivedSessionIds);
+	const cleanupIds = new Set<string>();
+	const archivedPaths = new Set<string>();
+	for (const session of newlyArchivedSessions) {
+		cleanupIds.add(session.id);
+		archivedPaths.add(path.resolve(session.path));
+	}
 	try {
-		for (const id of await collectArchivedSessionIds(archiveRoot, options.track)) cleanupIds.add(id);
+		const archived = await collectArchivedSessionReferences(archiveRoot, sessionsRoot, options.track);
+		for (const id of archived.ids) cleanupIds.add(id);
+		for (const sourcePath of archived.sourcePaths) archivedPaths.add(sourcePath);
 	} catch (error) {
 		result.errors.push(`history cleanup scan: ${errorMessage(error)}`);
 	}
 
 	try {
-		const cleanup = deleteHistoryRowsForSessions(dbPath, [...cleanupIds]);
+		const cleanup = await deleteHistoryRowsForSessions(dbPath, [...cleanupIds], {
+			archivedPaths,
+			retainedSessions,
+		});
 		result.historyRowsDeleted = cleanup.deleted;
 		result.ftsRebuilt = cleanup.ftsRebuilt;
 	} catch (error) {
@@ -1699,7 +1870,7 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 				}
 			}
 		});
-		tx(plans);
+		tx.immediate(plans);
 		return deleted;
 	} finally {
 		db.close();
@@ -1713,9 +1884,10 @@ async function collectArchivedStatsSessions(
 	onError: (file: string, error: unknown) => void,
 ): Promise<StatsSession[]> {
 	const sessions: StatsSession[] = [];
+	const normalizedArchiveRoot = path.resolve(archiveRoot);
 	for (const file of track.each("Scanning archive for stats", await collectCompressedJsonlFiles(archiveRoot))) {
-		const relative = path.relative(archiveRoot, file);
-		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+		const relative = relativePathWithinNormalizedRoot(normalizedArchiveRoot, path.resolve(file));
+		if (!relative) continue;
 		const sourcePath = path.join(sessionsRoot, relative.slice(0, -".gz".length));
 		try {
 			const identities = createStatsIdentities();
@@ -1934,20 +2106,27 @@ async function runArchiveGc(
 	await sweepSessionStagingFiles(options, sessionsRoot, registeredSessionPaths, result);
 	if (!options.apply) return result;
 
-	const archivedSessionIds: string[] = [];
 	const archivedSessions: SessionInfo[] = [];
 	for (const candidate of options.track.each("Archiving sessions", candidates)) {
 		try {
 			await moveSessionWithArtifacts(candidate);
 			result.archived += 1;
-			archivedSessionIds.push(candidate.session.id);
 			archivedSessions.push(candidate.session);
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);
 		}
 	}
 
-	await cleanupHistoryRowsForArchivedSessions(options, archiveRoot, archivedSessionIds, result);
+	const newlyArchivedPaths = new Set(archivedSessions.map(session => path.resolve(session.path)));
+	const retainedSessions = sessions.filter(session => !newlyArchivedPaths.has(path.resolve(session.path)));
+	await cleanupHistoryRowsForArchivedSessions(
+		options,
+		archiveRoot,
+		sessionsRoot,
+		archivedSessions,
+		retainedSessions,
+		result,
+	);
 	await cleanupStatsRowsForArchivedSessions(options, archiveRoot, archivedSessions, result);
 	return result;
 }

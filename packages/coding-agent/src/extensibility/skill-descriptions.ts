@@ -1,4 +1,4 @@
-import { Database, type Statement } from "bun:sqlite";
+import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
@@ -6,10 +6,12 @@ import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import {
 	getAgentDir,
+	getDbBusyTimeoutMs,
 	getSkillDescriptionsDbPath,
 	isBunTestRuntime,
 	isEexist,
 	logger,
+	openSqliteDatabaseSync,
 	postmortem,
 	prompt,
 } from "@oh-my-pi/pi-utils";
@@ -263,12 +265,17 @@ function adoptLegacyDatabase(legacyPath: string, dbPath: string): void {
 	try {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
 		fs.rmSync(staging, { force: true });
-		const legacy = new Database(legacyPath, { readonly: true });
-		try {
-			legacy.run("VACUUM INTO ?", [staging]);
-		} finally {
-			legacy.close();
-		}
+		openSqliteDatabaseSync(
+			legacyPath,
+			legacy => {
+				try {
+					legacy.run("VACUUM INTO ?", [staging]);
+				} finally {
+					legacy.close();
+				}
+			},
+			{ readonly: true, busyTimeoutMs: getDbBusyTimeoutMs() },
+		);
 		try {
 			fs.linkSync(staging, dbPath);
 		} catch (error) {
@@ -309,19 +316,20 @@ export class SkillDescriptionStore {
 	 */
 	static open(dbPath: string = resolveSkillDescriptionsDbPath()): SkillDescriptionStore {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
-		const db = new Database(dbPath, { create: true });
-		try {
-			// Install before any lock-taking statement (SQLite cache contention, #2421).
-			db.run("PRAGMA busy_timeout = 100");
-			db.run("PRAGMA journal_mode=WAL");
-			db.run("PRAGMA synchronous=NORMAL");
-			db.run("CREATE TABLE IF NOT EXISTS skill_descriptions (key TEXT PRIMARY KEY, description TEXT NOT NULL)");
-			if (process.platform !== "win32") fs.chmodSync(dbPath, 0o600);
-			return new SkillDescriptionStore(dbPath, db);
-		} catch (error) {
-			db.close();
-			throw error;
-		}
+		return openSqliteDatabaseSync(
+			dbPath,
+			db => {
+				db.run("CREATE TABLE IF NOT EXISTS skill_descriptions (key TEXT PRIMARY KEY, description TEXT NOT NULL)");
+				if (process.platform !== "win32") fs.chmodSync(dbPath, 0o600);
+				return new SkillDescriptionStore(dbPath, db);
+			},
+			{
+				create: true,
+				busyTimeoutMs: getDbBusyTimeoutMs(),
+				journalMode: "WAL",
+				synchronous: "NORMAL",
+			},
+		);
 	}
 
 	/** @throws on SQLite errors. */

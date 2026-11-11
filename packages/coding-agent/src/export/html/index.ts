@@ -274,6 +274,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 	try {
 		sm = await SessionManager.open(inputPath, undefined, undefined, {
 			suppressBreadcrumb: true,
+			suppressLineage: true,
 			throwIfMissing: true,
 		});
 	} catch (err) {

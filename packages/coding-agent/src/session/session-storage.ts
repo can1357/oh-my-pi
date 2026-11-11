@@ -16,12 +16,9 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import {
-	overlayTitleSlotContent,
-	parseTitleSlotFromContent,
-	type SessionTitleUpdate,
-	serializeTitleSlot,
-} from "./session-title-slot";
+import { tryReadSessionHeaderIdSync } from "./session-header";
+import { deleteMissingSessionLineageUnderDirectory, deleteSessionLineageByPath } from "./session-index";
+import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 /** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
 const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
@@ -560,39 +557,6 @@ testSessionOwnersDir();
 
 function sessionOwnersDir(): string {
 	return testSessionOwnersDir() ?? getSessionOwnersDir();
-}
-
-/** Bytes read to find a header at claim time: the title slot plus a header line fit well inside. */
-const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
-
-/**
- * The session id in the header of the file at `sessionPath`, read
- * synchronously from a bounded prefix (past the title slot), or `undefined`
- * when there is no readable file or no header in that prefix.
- */
-function readSessionHeaderIdSync(sessionPath: string): string | undefined {
-	let prefix: string;
-	try {
-		const fd = fs.openSync(sessionPath, "r");
-		try {
-			const buf = Buffer.alloc(SESSION_HEADER_PREFIX_BYTES);
-			prefix = buf.toString("utf8", 0, fs.readSync(fd, buf, 0, buf.length, 0));
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		return undefined;
-	}
-	if (parseTitleSlotFromContent(prefix)) prefix = prefix.slice(prefix.indexOf("\n") + 1);
-	const end = prefix.indexOf("\n");
-	if (end === -1) return undefined;
-	try {
-		const entry: unknown = JSON.parse(prefix.slice(0, end));
-		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
-			return typeof entry.id === "string" ? entry.id : undefined;
-		}
-	} catch {}
-	return undefined;
 }
 
 /**
@@ -1327,7 +1291,7 @@ export class FileSessionStorage implements SessionStorage {
 	 * owned, so it never moves a session off its file.
 	 */
 	claimSession(sessionId: string, sessionPath: string): (() => void) | null {
-		const onDisk = readSessionHeaderIdSync(sessionPath);
+		const onDisk = tryReadSessionHeaderIdSync(sessionPath);
 		if (onDisk !== undefined && onDisk !== sessionId) return null;
 		let held = sessionLeases.get(sessionId);
 		if (!held) {
@@ -1358,25 +1322,36 @@ export class FileSessionStorage implements SessionStorage {
 	 * Conditionally delete under the same cross-process lock used by the first
 	 * durable append to a draft-only session.
 	 */
-	deleteSessionWithArtifactsIf(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean> {
-		const deleted = this.withSessionFileLockSync(sessionPath, () => {
-			const content = fs.readFileSync(sessionPath, "utf-8");
-			if (!shouldDelete(content)) return false;
+	async deleteSessionWithArtifactsIf(
+		sessionPath: string,
+		shouldDelete: (content: string) => boolean,
+	): Promise<boolean> {
+		const artifactsDir = sessionPath.slice(0, -6);
+		let unlinked = false;
+		try {
+			return this.withSessionFileLockSync(sessionPath, () => {
+				const content = fs.readFileSync(sessionPath, "utf-8");
+				if (!shouldDelete(content)) return false;
 
-			fs.unlinkSync(sessionPath);
-			const artifactsDir = sessionPath.slice(0, -6);
-			try {
-				fs.rmSync(artifactsDir, { recursive: true, force: true });
-			} catch (err) {
-				const error = toError(err);
-				throw new Error(
-					`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
-					{ cause: error },
-				);
+				fs.unlinkSync(sessionPath);
+				unlinked = true;
+				try {
+					fs.rmSync(artifactsDir, { recursive: true, force: true });
+				} catch (err) {
+					const error = toError(err);
+					throw new Error(
+						`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
+						{ cause: error },
+					);
+				}
+				return true;
+			});
+		} finally {
+			if (unlinked) {
+				await deleteSessionLineageByPath(sessionPath);
+				if (sessionPath.endsWith(".jsonl")) await deleteMissingSessionLineageUnderDirectory(artifactsDir);
 			}
-			return true;
-		});
-		return Promise.resolve(deleted);
+		}
 	}
 
 	/**
@@ -1386,6 +1361,7 @@ export class FileSessionStorage implements SessionStorage {
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
 		// Delete the session file itself
 		await this.unlink(sessionPath);
+		await deleteSessionLineageByPath(sessionPath);
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
@@ -1402,6 +1378,8 @@ export class FileSessionStorage implements SessionStorage {
 					cause: error,
 				},
 			);
+		} finally {
+			if (sessionPath.endsWith(".jsonl")) await deleteMissingSessionLineageUnderDirectory(artifactsDir);
 		}
 
 		// Remove EPERM-rewrite leftovers (`<name>.jsonl.<snowflake>.bak`): the

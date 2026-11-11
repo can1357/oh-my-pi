@@ -11,10 +11,33 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
+import { mapWithConcurrencyLimit } from "../task/parallel";
+import { isRegularFile } from "../utils/regular-file";
+import {
+	parseSessionFileName,
+	parseSessionHeaderText,
+	readSessionHeader,
+	SESSION_HEADER_READ_LIMIT,
+	tryReadSessionHeaderId,
+} from "./session-header";
+import {
+	getSessionLineage,
+	listSessionLineages,
+	listSessionTitles,
+	lookupSessionTitle,
+	normalizeSessionCwd,
+	prefetchParentHeaderIds,
+	recordSessionLineageAsync,
+	recordSessionLineages,
+	recordSessionTitle,
+	recordSessionTitles,
+	resolveParentSessionReference,
+	type SessionLineage,
+	type SessionLineageEntry,
+} from "./session-index";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
-import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -56,6 +79,8 @@ export interface SessionInfo {
 	 * synthesized {@link SessionInfo}s (cross-project stubs, tests) leave it unset.
 	 */
 	status?: SessionStatus;
+	/** True when the session header could only be partially recovered from a truncated/malformed prefix. */
+	headerIncomplete?: boolean;
 }
 
 export interface ResolvedSessionMatch {
@@ -386,16 +411,30 @@ function parseSessionListHeaderLine(line: string, titleOverride?: string | null)
 	};
 }
 
+interface ParsedSessionListHeader {
+	header: SessionListHeader;
+	complete: boolean;
+}
+
 function parseSessionListHeader(
 	content: string,
 	entries: Array<Record<string, unknown>>,
-): SessionListHeader | undefined {
+): ParsedSessionListHeader | undefined {
 	const firstEntry = entries[0];
 	const parsedSlotTitle = normalizeTitleOverride(
 		firstEntry?.type === "title" && typeof firstEntry.title === "string" ? firstEntry.title : undefined,
 	);
 	const parsedHeader = sessionListHeaderFromRecord(entries[firstEntry?.type === "title" ? 1 : 0], parsedSlotTitle);
-	if (parsedHeader) return parsedHeader;
+	if (parsedHeader) return { header: parsedHeader, complete: true };
+
+	const structured = parseSessionHeaderText(content);
+	if (structured) {
+		const fromStructured = sessionListHeaderFromRecord(
+			structured as unknown as Record<string, unknown>,
+			normalizeTitleOverride(structured.title),
+		);
+		if (fromStructured) return { header: fromStructured, complete: true };
+	}
 
 	let slotTitle: string | null | undefined;
 	let firstNonEmpty = true;
@@ -407,9 +446,34 @@ function parseSessionListHeader(
 			firstNonEmpty = false;
 			continue;
 		}
-		return parseSessionListHeaderLine(line, slotTitle);
+		const partial = parseSessionListHeaderLine(line, slotTitle);
+		return partial ? { header: partial, complete: false } : undefined;
 	}
 	return undefined;
+}
+
+async function readCompleteSessionListHeader(
+	file: string,
+	storage: SessionStorage,
+): Promise<SessionListHeader | undefined> {
+	try {
+		if (storage instanceof FileSessionStorage) {
+			const full = await readSessionHeader(file);
+			return full
+				? sessionListHeaderFromRecord(
+						full as unknown as Record<string, unknown>,
+						normalizeTitleOverride(full.title),
+					)
+				: undefined;
+		}
+		const [widePrefix] = await storage.readTextSlices(file, SESSION_HEADER_READ_LIMIT, 0);
+		const full = parseSessionHeaderText(widePrefix);
+		return full
+			? sessionListHeaderFromRecord(full as unknown as Record<string, unknown>, normalizeTitleOverride(full.title))
+			: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function getSessionListWorkerCount(fileCount: number): number {
@@ -455,12 +519,20 @@ async function scanSessionFile(
 		);
 		const { size, mtime } = stat;
 		const entries = parseJsonlLenient<Record<string, unknown>>(content);
-		const header = parseSessionListHeader(content, entries);
-		if (!header) {
+		const parsedHeader = parseSessionListHeader(content, entries);
+		if (!parsedHeader) {
 			// Cache the negative result too: an unparseable file stays unparseable
 			// until its stat identity changes.
 			cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
 			return undefined;
+		}
+		let { header, complete: headerComplete } = parsedHeader;
+		if (!headerComplete && size > SESSION_LIST_PREFIX_BYTES) {
+			const completeHeader = await readCompleteSessionListHeader(file, storage);
+			if (completeHeader) {
+				header = completeHeader;
+				headerComplete = true;
+			}
 		}
 
 		let parsedMessageCount = 0;
@@ -540,6 +612,7 @@ async function scanSessionFile(
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
 			status: withStatus ? deriveSessionStatus(suffix) : undefined,
+			...(headerComplete ? {} : { headerIncomplete: true }),
 		};
 		// The cache keeps its own shallow copy; hits also hand out copies, so
 		// callers can never mutate the shared cached object.
@@ -592,7 +665,8 @@ function compareNewestFirst(a: SessionInfo, b: SessionInfo): number {
 	return (
 		b.modified.getTime() - a.modified.getTime() ||
 		b.created.getTime() - a.created.getTime() ||
-		b.path.localeCompare(a.path)
+		b.path.localeCompare(a.path) ||
+		path.resolve(b.path).localeCompare(path.resolve(a.path))
 	);
 }
 
@@ -818,10 +892,18 @@ async function pickerListing(
 	// touch the process-wide history.db.
 	const useIndex = storage instanceof FileSessionStorage;
 	const titles = useIndex ? listSessionTitles() : new Map<string, string>();
-	const sessions = await indexedSessions(files, titles);
+	const lineages = useIndex ? listSessionLineages() : new Map<string, SessionLineage>();
+	const sessions = await indexedSessions(files, titles, lineages);
 	// Start the scan only now: its reads would otherwise queue ahead of the stats above.
-	const complete = scan().then(scanned => {
-		if (useIndex) indexScannedTitles(scanned, titles);
+	const complete = scan().then(async scanned => {
+		if (useIndex) {
+			try {
+				await indexScannedTitles(scanned, titles);
+				await indexScannedLineages(scanned, lineages);
+			} catch (error) {
+				logger.debug("Session picker index backfill failed", { error: String(error) });
+			}
+		}
 		return filterSessionsForPicker(scanned, pinnedIds);
 	});
 	return sessions.length > 0 ? { sessions, complete } : settledListing(await complete);
@@ -829,33 +911,46 @@ async function pickerListing(
 
 /**
  * Preliminary picker rows for the `files` whose session id has an indexed
- * title, from the file name, `stat`, and the title alone. What only a content
- * read yields stays neutral: no `cwd`, first message, or status. A titled
- * session is never {@link isEmptySession} and each id gets one row, so the
- * rows are a subset of the full scan's.
+ * title, from the file name, `stat`, and the index (`session_titles` +
+ * `session_lineage`) alone. What only a content read yields stays neutral: no
+ * first message or status. A titled session is never {@link isEmptySession} and
+ * each id gets one row, so the rows are a subset of the full scan's.
  */
-async function indexedSessions(files: readonly string[], titles: ReadonlyMap<string, string>): Promise<SessionInfo[]> {
+async function indexedSessions(
+	files: readonly string[],
+	titles: ReadonlyMap<string, string>,
+	lineages: ReadonlyMap<string, SessionLineage>,
+): Promise<SessionInfo[]> {
 	if (titles.size === 0) return [];
-	const titled = new Map<string, { file: string; title: string }>();
+	const titled = new Map<string, { file: string; title: string; lineage: SessionLineage | undefined }>();
 	for (const file of files) {
 		const id = sessionIdFromSessionPath(file);
 		if (!id || titled.has(id)) continue;
+		const resolvedFile = path.resolve(file);
+		const indexedLineage = lineages.get(id);
+		// Copied session files across project buckets share `id`; leave path mismatches
+		// for the full scan so another bucket's cwd, parent, or title never leaks onto the copy.
+		if (indexedLineage && indexedLineage.sessionPath !== resolvedFile) continue;
 		const title = sanitizeSessionName(titles.get(id));
-		if (title) titled.set(id, { file, title });
+		if (title) titled.set(id, { file, title, lineage: indexedLineage });
 	}
 	const sessions = await Promise.all(
-		Array.from(titled, async ([id, { file, title }]): Promise<SessionInfo | undefined> => {
+		Array.from(titled, async ([id, { file, title, lineage }]): Promise<SessionInfo | undefined> => {
 			let stat: fs.Stats;
 			try {
 				stat = await fs.promises.stat(file);
 			} catch {
 				return undefined;
 			}
+			const parentSessionPath = lineage?.parentSessionId
+				? (lineages.get(lineage.parentSessionId)?.sessionPath ?? lineage.parentSessionId)
+				: undefined;
 			return {
 				path: file,
 				id,
-				cwd: "",
+				cwd: lineage?.cwd ?? "",
 				title,
+				...(parentSessionPath ? { parentSessionPath } : {}),
 				created: sessionCreatedFromSessionPath(file) ?? stat.mtime,
 				modified: stat.mtime,
 				messageCount: 0,
@@ -872,13 +967,182 @@ async function indexedSessions(files: readonly string[], titles: ReadonlyMap<str
  * Upsert the scanned titles history.db lacks or holds differently, e.g. of
  * sessions titled before the index existed, so the next listing pre-populates them.
  */
-function indexScannedTitles(sessions: readonly SessionInfo[], indexed: ReadonlyMap<string, string>): void {
-	const changed = new Map<string, string>();
+async function indexScannedTitles(
+	sessions: readonly SessionInfo[],
+	indexed: ReadonlyMap<string, string>,
+): Promise<void> {
+	const dirty: Array<{ id: string; path: string; title: string }> = [];
 	for (const session of sessions) {
 		const title = sanitizeSessionName(session.title);
-		if (title && indexed.get(session.id) !== title) changed.set(session.id, title);
+		if (title && indexed.get(session.id) !== title) {
+			dirty.push({ id: session.id, path: session.path, title });
+		}
+	}
+	if (dirty.length === 0) return;
+	const live = await mapWithConcurrencyLimit(dirty, getSessionListWorkerCount(dirty.length), candidate =>
+		isRegularFile(candidate.path),
+	);
+	const changed = new Map<string, string>();
+	for (let i = 0; i < dirty.length; i++) {
+		if (live.results[i]) changed.set(dirty[i].id, dirty[i].title);
 	}
 	recordSessionTitles(changed);
+}
+
+interface ScannedLineageCandidate {
+	session: SessionInfo;
+	resolvedPath: string;
+}
+
+async function isLiveScannedSessionAtPath(session: SessionInfo, resolvedPath: string): Promise<boolean> {
+	if (session.headerIncomplete) return await isRegularFile(resolvedPath);
+	return (await tryReadSessionHeaderId(resolvedPath)) === session.id;
+}
+
+async function indexScannedLineages(
+	sessions: readonly SessionInfo[],
+	indexed: ReadonlyMap<string, SessionLineage>,
+): Promise<void> {
+	const scannedIdByPath = new Map<string, string>();
+	const candidatesById = new Map<string, ScannedLineageCandidate[]>();
+	for (const session of sessions) {
+		if (!session.id) continue;
+		const resolvedPath = path.resolve(session.path);
+		scannedIdByPath.set(resolvedPath, session.id);
+		const candidate: ScannedLineageCandidate = { session, resolvedPath };
+		const existing = candidatesById.get(session.id);
+		if (existing) {
+			existing.push(candidate);
+		} else {
+			candidatesById.set(session.id, [candidate]);
+		}
+	}
+	const indexedIdByPath = new Map<string, string>();
+	for (const lineage of indexed.values()) indexedIdByPath.set(lineage.sessionPath, lineage.sessionId);
+
+	const duplicateGroups: Array<{ sessionId: string; candidates: ScannedLineageCandidate[] }> = [];
+	for (const [sessionId, candidates] of candidatesById) {
+		if (candidates.length > 1) {
+			const indexedPath = indexed.get(sessionId)?.sessionPath;
+			candidates.sort((a, b) => {
+				if (a.resolvedPath === indexedPath && b.resolvedPath !== indexedPath) return -1;
+				if (b.resolvedPath === indexedPath && a.resolvedPath !== indexedPath) return 1;
+				return compareNewestFirst(a.session, b.session);
+			});
+			duplicateGroups.push({ sessionId, candidates });
+		}
+	}
+
+	const resolvedDuplicates = new Map<string, ScannedLineageCandidate | undefined>();
+	if (duplicateGroups.length > 0) {
+		const winners = await mapWithConcurrencyLimit(
+			duplicateGroups,
+			getSessionListWorkerCount(duplicateGroups.length),
+			async group => {
+				for (const candidate of group.candidates) {
+					if (await isLiveScannedSessionAtPath(candidate.session, candidate.resolvedPath)) {
+						return candidate;
+					}
+				}
+				return undefined;
+			},
+		);
+		for (let i = 0; i < duplicateGroups.length; i++) {
+			resolvedDuplicates.set(duplicateGroups[i].sessionId, winners.results[i]);
+		}
+	}
+
+	const chosenCandidates: Array<{
+		session: SessionInfo;
+		resolvedPath: string;
+		current: SessionLineage | undefined;
+		verifiedLive: boolean;
+	}> = [];
+	for (const [sessionId, candidates] of candidatesById) {
+		const current = indexed.get(sessionId);
+		if (candidates.length === 1) {
+			chosenCandidates.push({
+				session: candidates[0].session,
+				resolvedPath: candidates[0].resolvedPath,
+				current,
+				verifiedLive: false,
+			});
+		} else {
+			const chosen = resolvedDuplicates.get(sessionId);
+			if (chosen) {
+				chosenCandidates.push({
+					session: chosen.session,
+					resolvedPath: chosen.resolvedPath,
+					current,
+					verifiedLive: true,
+				});
+			}
+		}
+	}
+
+	const headerIdCache = await prefetchParentHeaderIds(
+		chosenCandidates.map(chosen => ({
+			parentSession: chosen.session.parentSessionPath,
+			forSessionId: chosen.session.id,
+			sessionPath: chosen.resolvedPath,
+			existingParentSessionId: chosen.current?.parentSessionId ?? null,
+			batchPathToId: scannedIdByPath,
+			indexedPathToId: indexedIdByPath,
+		})),
+		getSessionListWorkerCount(chosenCandidates.length),
+	);
+
+	const readCachedHeaderId = (p: string): string | undefined => scannedIdByPath.get(p) ?? headerIdCache.get(p);
+	const dirty: Array<{
+		session: SessionInfo;
+		resolvedPath: string;
+		verifiedLive: boolean;
+		entry: SessionLineageEntry;
+	}> = [];
+	for (const { session, resolvedPath, current, verifiedLive } of chosenCandidates) {
+		const resolvedCwd = session.cwd ? normalizeSessionCwd(session.cwd) || null : null;
+		const effectiveCwd = resolvedCwd ?? (current?.sessionPath === resolvedPath ? current.cwd : null);
+		const rawParent = session.parentSessionPath?.trim() || null;
+		const preserveIndexedParent = rawParent === null && session.headerIncomplete === true;
+		const expectedParentId = preserveIndexedParent
+			? (current?.parentSessionId ?? null)
+			: resolveParentSessionReference(rawParent, {
+					forSessionId: session.id,
+					sessionPath: resolvedPath,
+					existingParentSessionId: current?.parentSessionId ?? null,
+					batchPathToId: scannedIdByPath,
+					indexedPathToId: indexedIdByPath,
+					readHeaderId: readCachedHeaderId,
+				});
+		if (
+			!current ||
+			current.sessionPath !== resolvedPath ||
+			current.cwd !== effectiveCwd ||
+			current.parentSessionId !== expectedParentId
+		) {
+			dirty.push({
+				session,
+				resolvedPath,
+				verifiedLive,
+				entry: {
+					sessionId: session.id,
+					parentSession: expectedParentId,
+					sessionPath: resolvedPath,
+					cwd: resolvedCwd,
+				},
+			});
+		}
+	}
+
+	if (dirty.length === 0) return;
+	const live = await mapWithConcurrencyLimit(dirty, getSessionListWorkerCount(dirty.length), item =>
+		item.verifiedLive ? Promise.resolve(true) : isLiveScannedSessionAtPath(item.session, item.resolvedPath),
+	);
+	const changed: SessionLineageEntry[] = [];
+	for (let i = 0; i < dirty.length; i++) {
+		if (live.results[i]) changed.push(dirty[i].entry);
+	}
+	recordSessionLineages(changed, { readHeaderId: readCachedHeaderId });
 }
 
 /** Most recent session with resumable content, skipping 0-turn empties. Exported for testing. */
@@ -1025,19 +1289,6 @@ async function holdsEntry(file: string, id: string, storage: SessionStorage): Pr
 		return false;
 	}
 	return found;
-}
-
-/**
- * The creation time (epoch milliseconds) and session id a generated
- * `<file-safe timestamp>_<id>.jsonl` name records
- * (`2026-10-26T18-29-27-740Z_…`, the ISO time with `:` and `.` replaced);
- * `undefined` for any other name.
- */
-function parseSessionFileName(file: string): { createdAt: number; id: string } | undefined {
-	const match = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z_(.+)\.jsonl$/.exec(path.basename(file));
-	if (!match) return undefined;
-	const createdAt = Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`);
-	return Number.isFinite(createdAt) ? { createdAt, id: match[5] } : undefined;
 }
 
 /** Options for {@link findSessionContinuation}. */
@@ -1622,7 +1873,19 @@ export async function getRecentSessions(
 		const info = await scanSessionFile(file, storage, true, stat);
 		if (!info || isEmptySession(info)) continue;
 		const title = sanitizeSessionName(info.title);
-		if (useIndex && title && info.id) recordSessionTitle(info.id, title);
+		if (useIndex && info.id) {
+			if (title) recordSessionTitle(info.id, title);
+			await recordSessionLineageAsync({
+				sessionId: info.id,
+				parentSession:
+					info.parentSessionPath ??
+					(info.headerIncomplete
+						? getSessionLineage(info.id, { readHeaderId: () => undefined })?.parentSessionId
+						: undefined),
+				sessionPath: info.path,
+				cwd: info.cwd || null,
+			});
+		}
 		recent.push({ path: file, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
 	}
 	return recent;

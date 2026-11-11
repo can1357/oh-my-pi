@@ -985,9 +985,9 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		return this.#menu.selectedItem;
 	}
 
-	/** Label of the session at `sessionPath` in this listing, else its file name. */
+	/** Label of the session at `sessionPath` (or id) in this listing, else its file name. */
 	parentLabel(sessionPath: string): string {
-		const parent = this.#allSessions.find(s => s.path === sessionPath);
+		const parent = this.#allSessions.find(s => s.path === sessionPath || s.id === sessionPath);
 		return parent ? sessionLabel(parent) : path.basename(sessionPath, ".jsonl");
 	}
 

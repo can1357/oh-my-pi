@@ -319,3 +319,55 @@ test.each([
 		db.close();
 	}
 });
+
+test("readonly open neither creates a missing store nor quarantines a damaged one", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-readonly-");
+	const missingPath = dir.join("missing.db");
+	expect(() => openSqliteDatabaseSync(missingPath, db => db, { readonly: true })).toThrow();
+	expect(fs.existsSync(missingPath)).toBe(false);
+
+	const damagedPath = dir.join("damaged.db");
+	const damaged = Buffer.from("not a sqlite database".repeat(32));
+	await fs.promises.writeFile(damagedPath, damaged);
+	expect(() =>
+		openSqliteDatabaseSync(damagedPath, db => db.query("SELECT * FROM sqlite_master").all(), {
+			readonly: true,
+			recoverCorruption: true,
+		}),
+	).toThrow();
+	expect(await fs.promises.readFile(damagedPath)).toEqual(damaged);
+	expect(await backupNames(dir.path(), "damaged.db")).toEqual([]);
+});
+
+test("connection pragmas apply before initialization and survive corruption recovery", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-pragmas-");
+	const dbPath = dir.join("store.db");
+	await corruptSchemaPages(dbPath);
+
+	const observed = openSqliteDatabaseSync(
+		dbPath,
+		db => {
+			try {
+				const journalMode = db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode;
+				const synchronous = db.query<{ synchronous: number }, []>("PRAGMA synchronous").get()?.synchronous;
+				const busyTimeout = db.query<{ timeout: number }, []>("PRAGMA busy_timeout").get()?.timeout;
+				return { journalMode, synchronous, busyTimeout };
+			} finally {
+				db.close();
+			}
+		},
+		{
+			create: true,
+			busyTimeoutMs: 7500,
+			journalMode: "WAL",
+			synchronous: "NORMAL",
+			recoverCorruption: true,
+		},
+	);
+
+	expect(observed).toEqual({
+		journalMode: "wal",
+		synchronous: 1,
+		busyTimeout: 7500,
+	});
+});

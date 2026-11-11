@@ -161,6 +161,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		const openStart = performance.now();
 		const sessionManager = await SessionManager.open(workingCopy, undefined, undefined, {
 			suppressBreadcrumb: true,
+			suppressLineage: true,
 		});
 		const openMs = performance.now() - openStart;
 

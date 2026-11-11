@@ -1,5 +1,5 @@
 /** Shared SQLite opening, error attribution, and result-code classification for persistent stores. */
-import { Database } from "bun:sqlite";
+import { Database, type DatabaseOptions } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
@@ -135,15 +135,63 @@ function closeFailedDatabase(db: Database | undefined, error: unknown, identity:
 	}
 }
 
-/** Controls opt-in replacement of an unrecoverably corrupt SQLite store. */
-export interface SqliteOpenOptions {
+export type SqliteJournalMode = "DELETE" | "TRUNCATE" | "PERSIST" | "MEMORY" | "WAL" | "OFF";
+export type SqliteSynchronousMode = "OFF" | "NORMAL" | "FULL" | "EXTRA";
+
+/** Controls connection flags, pragmas, and opt-in replacement of an unrecoverably corrupt SQLite store. */
+export interface SqliteOpenOptions extends DatabaseOptions {
+	/** Busy handler timeout in milliseconds; defaults to `getDbBusyTimeoutMs()`. */
+	busyTimeoutMs?: number;
+	/** `PRAGMA journal_mode` applied before `initialize` on writable connections. */
+	journalMode?: SqliteJournalMode;
+	/** `PRAGMA synchronous` applied before `initialize` on writable connections. */
+	synchronous?: SqliteSynchronousMode;
 	/**
 	 * Preserve a corrupt store and its sidecars, recreate it, and run the
-	 * initializer once more. Disabled by default.
+	 * initializer once more. Disabled by default, and ignored when the open flags
+	 * do not permit creating a replacement file.
 	 */
 	recoverCorruption?: boolean;
 	/** Runs after preservation and before the replacement is initialized. */
 	onCorruptionPreserved?: (backupPath: string, error: unknown) => void;
+}
+
+function toDatabaseOptions(options: SqliteOpenOptions): DatabaseOptions | undefined {
+	const { readonly, create, readwrite, safeIntegers, strict } = options;
+	if (
+		readonly === undefined &&
+		create === undefined &&
+		readwrite === undefined &&
+		safeIntegers === undefined &&
+		strict === undefined
+	) {
+		return undefined;
+	}
+	return { readonly, create, readwrite, safeIntegers, strict };
+}
+
+function canCreateStore(options: SqliteOpenOptions): boolean {
+	if (options.readonly || options.create === false) return false;
+	return options.create === true || options.readwrite === undefined;
+}
+
+function canRecoverStore(options: SqliteOpenOptions): boolean {
+	return Boolean(options.recoverCorruption && canCreateStore(options));
+}
+
+function configureConnection(db: Database, options: SqliteOpenOptions): void {
+	const rawTimeout = options.busyTimeoutMs ?? getDbBusyTimeoutMs();
+	const busyTimeoutMs = Number.isFinite(rawTimeout) && rawTimeout >= 0 ? Math.trunc(rawTimeout) : getDbBusyTimeoutMs();
+	// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
+	db.run(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+	if (!options.readonly) {
+		if (options.journalMode !== undefined) {
+			db.run(`PRAGMA journal_mode = ${options.journalMode}`);
+		}
+		if (options.synchronous !== undefined) {
+			db.run(`PRAGMA synchronous = ${options.synchronous}`);
+		}
+	}
 }
 
 /**
@@ -176,18 +224,19 @@ async function openWithBusyRetries<T>(
 	initialize: (db: Database) => T | Promise<T>,
 	options: SqliteOpenOptions,
 ): Promise<T> {
+	const dbOptions = toDatabaseOptions(options);
+	const recoverCorruption = canRecoverStore(options);
 	for (let attempt = 0; ; attempt++) {
 		let db: Database | undefined;
 		const identity = sqliteFileIdentity(dbPath);
 		try {
 			ensureSqliteLockShim();
-			db = new Database(dbPath);
-			// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
-			db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+			db = dbOptions ? new Database(dbPath, dbOptions) : new Database(dbPath);
+			configureConnection(db, options);
 			return await initialize(db);
 		} catch (caught) {
-			const error = options.recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
-			if (options.recoverCorruption && isSqliteCorruptionError(error)) {
+			const error = recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
+			if (recoverCorruption && isSqliteCorruptionError(error)) {
 				registerCorruptHandle(dbPath, db);
 				throw new SqliteAttemptFailure(error, identity, { db });
 			}
@@ -203,14 +252,16 @@ async function openWithBusyRetries<T>(
 function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: SqliteOpenOptions): T {
 	let db: Database | undefined;
 	const identity = sqliteFileIdentity(dbPath);
+	const dbOptions = toDatabaseOptions(options);
+	const recoverCorruption = canRecoverStore(options);
 	try {
 		ensureSqliteLockShim();
-		db = new Database(dbPath);
-		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+		db = dbOptions ? new Database(dbPath, dbOptions) : new Database(dbPath);
+		configureConnection(db, options);
 		return initialize(db);
 	} catch (caught) {
-		const error = options.recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
-		if (options.recoverCorruption && isSqliteCorruptionError(error)) {
+		const error = recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
+		if (recoverCorruption && isSqliteCorruptionError(error)) {
 			registerCorruptHandle(dbPath, db);
 			throw new SqliteAttemptFailure(error, identity, { db });
 		}
@@ -279,7 +330,7 @@ function corruptionPreservationError(corruption: unknown, dbPath: string, preser
 function recoverCorruptDatabase(dbPath: string, error: unknown, options: SqliteOpenOptions): void {
 	if (!(error instanceof SqliteAttemptFailure)) throw annotateSqliteError(error, dbPath);
 	const failure = error;
-	if (!options.recoverCorruption || !failure.canRecover || !isSqliteCorruptionError(failure.original)) {
+	if (!canRecoverStore(options) || !failure.canRecover || !isSqliteCorruptionError(failure.original)) {
 		throw annotateSqliteError(failure.original, dbPath);
 	}
 
@@ -332,8 +383,9 @@ export async function openSqliteDatabase<T>(
 		recoverCorruptDatabase(dbPath, error, options);
 	}
 
+	const retryOptions: SqliteOpenOptions = { ...options, recoverCorruption: false, onCorruptionPreserved: undefined };
 	try {
-		return await openWithBusyRetries(dbPath, initialize, {});
+		return await openWithBusyRetries(dbPath, initialize, retryOptions);
 	} catch (error) {
 		throw annotateSqliteError(error instanceof SqliteAttemptFailure ? error.original : error, dbPath);
 	}
@@ -354,8 +406,9 @@ export function openSqliteDatabaseSync<T>(
 		recoverCorruptDatabase(dbPath, error, options);
 	}
 
+	const retryOptions: SqliteOpenOptions = { ...options, recoverCorruption: false, onCorruptionPreserved: undefined };
 	try {
-		return openOnce(dbPath, initialize, {});
+		return openOnce(dbPath, initialize, retryOptions);
 	} catch (error) {
 		throw annotateSqliteError(error instanceof SqliteAttemptFailure ? error.original : error, dbPath);
 	}

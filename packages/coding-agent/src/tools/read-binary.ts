@@ -1,9 +1,9 @@
-import * as fs from "node:fs/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { acquireIdaDatabase, cfgIdaAvailable, isExecutableFile, isIdaDatabasePath, SLICE_SEPARATOR } from "../ida";
 import type { ToolSession } from "../sdk";
+import { isRegularFile } from "../utils/regular-file";
 import { formatPathRelativeToCwd, resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult } from "./read-format";
 import type { ParsedSelector } from "./read-selector";
@@ -45,14 +45,6 @@ export function parseBinaryView(view: string): BinaryView {
 	return { kind: "pseudocode", target: view };
 }
 
-async function isFile(absolutePath: string): Promise<boolean> {
-	try {
-		return (await fs.stat(absolutePath)).isFile();
-	} catch {
-		return false;
-	}
-}
-
 /**
  * Split `readPath` into an executable/IDB file and an IDA view suffix. Returns
  * null when IDA is disabled, the path has no `:`, the whole path is an existing
@@ -61,10 +53,10 @@ async function isFile(absolutePath: string): Promise<boolean> {
 export async function resolveBinaryViewPath(session: ToolSession, readPath: string): Promise<BinaryViewTarget | null> {
 	if (!cfgIdaAvailable.get(session.settings)) return null;
 	if (!readPath.includes(":")) return null;
-	if (await isFile(resolveReadPath(readPath, session.cwd))) return null;
+	if (await isRegularFile(resolveReadPath(readPath, session.cwd))) return null;
 	for (let i = readPath.lastIndexOf(":"); i > 0; i = readPath.lastIndexOf(":", i - 1)) {
 		const absolutePath = resolveReadPath(readPath.slice(0, i), session.cwd);
-		if (!(await isFile(absolutePath))) continue;
+		if (!(await isRegularFile(absolutePath))) continue;
 		if (isIdaDatabasePath(absolutePath) || (await isExecutableFile(absolutePath))) {
 			return { absolutePath, ...splitSliceView(readPath.slice(i + 1)) };
 		}

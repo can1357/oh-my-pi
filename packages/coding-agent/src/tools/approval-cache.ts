@@ -9,16 +9,21 @@
  * Checks open a short-lived read-only connection and answer every candidate key in one query;
  * they never create the database or touch its schema. Only recording a grant creates the file.
  */
-import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ToolTier } from "@oh-my-pi/pi-agent-core";
-import { getAgentDir, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	getDbBusyTimeoutMs,
+	logger,
+	openSqliteDatabaseSync,
+	resolveEquivalentPath,
+} from "@oh-my-pi/pi-utils";
 
 /** File name of the approval cache inside the agent directory. */
 export const APPROVAL_CACHE_FILENAME = "approval-cache.db";
 
-/** `busy_timeout` for the rare case of two instances writing at the same time. */
+/** `busy_timeout` floor so concurrent sessions never silently drop a user-approved grant or clear. */
 const BUSY_TIMEOUT_MS = 5000;
 
 /** Grant key for one capability tier: an exact target, a directory key, or a tree key. */
@@ -61,43 +66,58 @@ export class ApprovalCache implements ApprovalGrantStore {
 
 	present(keys: readonly string[]): ReadonlySet<string> {
 		if (keys.length === 0) return new Set();
-		let db: Database;
+		let opened = false;
 		try {
-			db = new Database(this.filePath, { readonly: true });
-		} catch {
-			// No database yet: nothing was ever remembered "always".
-			return new Set();
-		}
-		try {
-			const rows = db
-				.query<{ key: string }, string[]>(`SELECT key FROM grants WHERE key IN (${keys.map(() => "?").join(",")})`)
-				.all(...keys);
-			return new Set(rows.map(row => row.key));
+			return openSqliteDatabaseSync(
+				this.filePath,
+				db => {
+					opened = true;
+					try {
+						const rows = db
+							.query<{ key: string }, string[]>(
+								`SELECT key FROM grants WHERE key IN (${keys.map(() => "?").join(",")})`,
+							)
+							.all(...keys);
+						return new Set(rows.map(row => row.key));
+					} finally {
+						db.close();
+					}
+				},
+				{ readonly: true, busyTimeoutMs: getDbBusyTimeoutMs() },
+			);
 		} catch (err) {
-			logger.debug("approval cache: read failed", { err: String(err), path: this.filePath });
+			// No database yet: nothing was ever remembered "always".
+			if (opened) {
+				logger.debug("approval cache: read failed", { err: String(err), path: this.filePath });
+			}
 			return new Set();
-		} finally {
-			db.close();
 		}
 	}
 
 	record(key: string, tool: string): void {
 		try {
 			fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-			const db = new Database(this.filePath, { create: true });
-			try {
-				db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-				db.run(
-					"CREATE TABLE IF NOT EXISTS grants (key TEXT PRIMARY KEY, tool TEXT NOT NULL, approved_at TEXT NOT NULL)",
-				);
-				db.query("INSERT INTO grants (key, tool, approved_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING").run(
-					key,
-					tool,
-					new Date().toISOString(),
-				);
-			} finally {
-				db.close();
-			}
+			openSqliteDatabaseSync(
+				this.filePath,
+				db => {
+					try {
+						db.run(
+							"CREATE TABLE IF NOT EXISTS grants (key TEXT PRIMARY KEY, tool TEXT NOT NULL, approved_at TEXT NOT NULL)",
+						);
+						db.query(
+							"INSERT INTO grants (key, tool, approved_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING",
+						).run(key, tool, new Date().toISOString());
+					} finally {
+						db.close();
+					}
+				},
+				{
+					create: true,
+					busyTimeoutMs: Math.max(BUSY_TIMEOUT_MS, getDbBusyTimeoutMs()),
+					journalMode: "WAL",
+					synchronous: "NORMAL",
+				},
+			);
 		} catch (err) {
 			logger.warn("approval cache: write failed", { err: String(err), path: this.filePath });
 		}
@@ -105,19 +125,24 @@ export class ApprovalCache implements ApprovalGrantStore {
 
 	/** Delete every remembered grant; a missing database has nothing to forget. */
 	clear(): void {
-		let db: Database;
+		let opened = false;
 		try {
-			db = new Database(this.filePath, { readwrite: true });
-		} catch {
-			return;
-		}
-		try {
-			db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-			db.run("DELETE FROM grants");
+			openSqliteDatabaseSync(
+				this.filePath,
+				db => {
+					opened = true;
+					try {
+						db.run("DELETE FROM grants");
+					} finally {
+						db.close();
+					}
+				},
+				{ readwrite: true, busyTimeoutMs: Math.max(BUSY_TIMEOUT_MS, getDbBusyTimeoutMs()) },
+			);
 		} catch (err) {
-			logger.warn("approval cache: clear failed", { err: String(err), path: this.filePath });
-		} finally {
-			db.close();
+			if (opened) {
+				logger.warn("approval cache: clear failed", { err: String(err), path: this.filePath });
+			}
 		}
 	}
 }
