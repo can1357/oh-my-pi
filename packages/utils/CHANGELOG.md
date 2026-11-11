@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.9] - 2026-11-11
+
 ### Added
 
 - Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
