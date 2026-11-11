@@ -871,17 +871,19 @@ function updateRecallCounts(
 	results: readonly RecallResult[],
 	options: RecallOptionsInternal,
 ): void {
-	const timestamp = nowIso();
-	for (const tierLabel of ["working", "episodic"] as const) {
-		const ids = results.filter(r => r.tier_label === tierLabel).map(r => r.id);
-		if (ids.length === 0) continue;
-		const table = tierLabel === "working" ? "working_memory" : "episodic_memory";
-		const { where, params } = buildWhere(beam, "", options);
-		beam.db.run(
-			`UPDATE ${table} SET recall_count = COALESCE(recall_count, 0) + 1, last_recalled = ? WHERE id IN (${placeholders(ids.length)}) AND ${where}`,
-			[timestamp, ...ids, ...params],
-		);
-	}
+	withLoopPhase("mnemopi.recall", () => {
+		const timestamp = nowIso();
+		for (const tierLabel of ["working", "episodic"] as const) {
+			const ids = results.filter(r => r.tier_label === tierLabel).map(r => r.id);
+			if (ids.length === 0) continue;
+			const table = tierLabel === "working" ? "working_memory" : "episodic_memory";
+			const { where, params } = buildWhere(beam, "", options);
+			beam.db.run(
+				`UPDATE ${table} SET recall_count = COALESCE(recall_count, 0) + 1, last_recalled = ? WHERE id IN (${placeholders(ids.length)}) AND ${where}`,
+				[timestamp, ...ids, ...params],
+			);
+		}
+	});
 }
 
 function collectMemoryCandidates(
@@ -1160,11 +1162,13 @@ async function linearRecallWithoutReranker(
 		...enhancedOptions,
 		updateRecallCounts: false,
 	});
-	if (options.includeFacts === true) results.push(...factRecall(beam, query, factRecallLimit(topK)));
-	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-	const selected = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
-	if (options.updateRecallCounts !== false) updateRecallCounts(beam, selected, enhancedOptions);
-	return selected;
+	return withLoopPhase("mnemopi.recall", () => {
+		if (options.includeFacts === true) results.push(...factRecall(beam, query, factRecallLimit(topK)));
+		results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+		const selected = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
+		if (options.updateRecallCounts !== false) updateRecallCounts(beam, selected, enhancedOptions);
+		return selected;
+	});
 }
 
 /** Retrieve first-stage candidates without reranking, final MMR, clipping or counting. */
@@ -1315,9 +1319,11 @@ function matchesRecallFilters(result: OrchestratedRecallResult, options: RecallO
 
 /** Changes whenever any connection commits to the database or this connection changes a row. */
 function databaseWriteToken(beam: BeamMemoryState): string {
-	const version = beam.db.query("PRAGMA data_version").get() as { data_version: number };
-	const changes = beam.db.query("SELECT total_changes() AS changes").get() as { changes: number };
-	return `${version.data_version}:${changes.changes}`;
+	return withLoopPhase("mnemopi.recall", () => {
+		const version = beam.db.query("PRAGMA data_version").get() as { data_version: number };
+		const changes = beam.db.query("SELECT total_changes() AS changes").get() as { changes: number };
+		return `${version.data_version}:${changes.changes}`;
+	});
 }
 
 /**
@@ -1440,6 +1446,10 @@ export function formatContext(beam: BeamMemoryState, results: readonly RecallRes
 }
 
 export function factRecall(beam: BeamMemoryState, query: string, topK = 30): FactRecallResult[] {
+	return withLoopPhase("mnemopi.recall", () => factRecallInPhase(beam, query, topK));
+}
+
+function factRecallInPhase(beam: BeamMemoryState, query: string, topK: number): FactRecallResult[] {
 	if (topK <= 0 || !tableExists(beam, "facts")) return [];
 	let matched: Row[] = [];
 	if (tableExists(beam, "fts_facts")) {

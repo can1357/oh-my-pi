@@ -602,7 +602,11 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 				const original = merged.find(candidate => candidate.id === result.id);
 				return original !== undefined && origins.get(original)?.memory === target.memory;
 			});
-			target.memory.countRecallResults(selected, { channelId: target.bank });
+			try {
+				target.memory.countRecallResults(selected, { channelId: target.bank });
+			} catch (error) {
+				logger.warn("Mnemopi: recall count update failed", { bank: target.bank, error: toError(error).message });
+			}
 		}
 		return withLoopPhase("mnemopi.recall", () => {
 			if (successfulTargets === 0 && failures.length > 0) {

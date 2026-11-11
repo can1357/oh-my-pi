@@ -212,6 +212,34 @@ describe("scoped recall without reranking", () => {
 	}
 });
 
+describe("scoped recall count failures", () => {
+	it("keeps healthy-bank results when another bank cannot update recall counts", async () => {
+		const { state } = startSession({
+			"mnemopi.scoping": "per-project-tagged",
+			"mnemopi.recallLimit": 5,
+		});
+		const targets = state.getScopedRecallTargets();
+		const failedBank = targets[0];
+		const healthyBank = targets[1];
+		const healthyId = healthyBank.memory.remember("deployment healthy bank note", { scope: "global" });
+		const failedCount = spyOn(failedBank.memory, "countRecallResults").mockImplementation(() => {
+			throw new Error("SQLITE_BUSY: database is locked");
+		});
+		const healthyCount = spyOn(healthyBank.memory, "countRecallResults");
+
+		try {
+			const results = await state.collectScopedRecallResults("deployment");
+
+			expect(results.map(result => result.id)).toContain(healthyId);
+			expect(failedCount).toHaveBeenCalledTimes(1);
+			expect(healthyCount).toHaveBeenCalled();
+		} finally {
+			failedCount.mockRestore();
+			healthyCount.mockRestore();
+		}
+	});
+});
+
 describe("merged bank reranking", () => {
 	for (const polyphonic of [false, true]) {
 		it(`scores one complete merged pool in ${polyphonic ? "polyphonic" : "linear"} mode`, async () => {
