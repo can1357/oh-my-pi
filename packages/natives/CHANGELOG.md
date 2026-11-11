@@ -86,6 +86,7 @@
 ### Added
 
 - `OMP_APPLEFM_DISABLE=1` builds without the Apple Foundation Models bridge and never probes Xcode or the Command Line Tools; it cannot be combined with `OMP_APPLEFM_SWIFTC` ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
+- Added OS-level process containment through MXC (seatbelt, bubblewrap, processcontainer): `sandboxSupport()`, `sandboxDiscoverPaths(env)` and `SandboxProcess.spawn()` run an argv under read-write/read-only/denied path lists with an `allow`, `deny` or loopback-`proxy` network posture ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Changed
 

@@ -814,7 +814,8 @@ export class ExtensionUiController {
 		view: SandboxAccessView,
 		options: { signal?: AbortSignal } = {},
 	): Promise<SandboxAccessDialogAnswer> {
-		const answer = await this.#presentDialog<SandboxAccessDialogAnswer>(options.signal, settle => {
+		const prompt = { kind: "permission", msg: view.intent } as const;
+		const answer = await this.#presentDialog<SandboxAccessDialogAnswer>(prompt, options.signal, settle => {
 			const editor = this.ctx.editor;
 			const drafting = editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight;
 			const dialog = new SandboxAccessDialogComponent(view, {
