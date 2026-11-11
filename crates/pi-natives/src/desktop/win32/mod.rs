@@ -434,8 +434,8 @@ mod tests {
 				.unwrap();
 			// SAFETY: no preconditions.
 			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
-			// Both windows belong to this process.
-			let pid = Some(std::process::id());
+			// Both windows belong to the window host.
+			let pid = Some(windows.host.id());
 			assert_eq!(
 				control::take_focus_return(),
 				Some(DesktopFocusReturn { handed_back: true, previous_pid: pid, front_pid: pid }),
@@ -456,7 +456,7 @@ mod tests {
 		backend
 			.element_input(&element, &input, DeliveryMode::ForegroundReturnFocus, &token)
 			.unwrap();
-		let pid = Some(std::process::id());
+		let pid = Some(windows.host.id());
 		assert_eq!(
 			control::take_focus_return(),
 			Some(DesktopFocusReturn { handed_back: false, previous_pid: pid, front_pid: pid })
