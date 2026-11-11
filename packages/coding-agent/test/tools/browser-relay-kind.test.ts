@@ -188,7 +188,7 @@ describe("resolveBrowserKind in a subagent", () => {
 		delete process.env.PI_BROWSER_RELAY;
 		try {
 			const guidance = createBrowserPrelude(subagent({ "browser.relay": true })).guidance;
-			expect(guidance ?? "").not.toContain("# Browser Relay");
+			expect(guidance).toBe(createBrowserPrelude(subagent({ "browser.relay": false })).guidance);
 		} finally {
 			if (saved !== undefined) process.env.PI_BROWSER_RELAY = saved;
 		}
