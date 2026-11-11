@@ -532,13 +532,7 @@ function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): 
 		segmentStart += 1;
 		if (segmentStart >= lowerBareName.length) break;
 
-		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) {
-			let segmentEnd = segmentStart;
-			while (segmentEnd < lowerBareName.length && lowerBareName.charCodeAt(segmentEnd) !== 45) {
-				segmentEnd += 1;
-			}
-			return lowerPrefix.length === segmentEnd - segmentStart ? 1000 : 900;
-		}
+		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) return 900;
 	}
 
 	return 0;

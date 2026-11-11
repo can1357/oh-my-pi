@@ -198,6 +198,21 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result?.items.map(item => item.value)).toEqual(["last-report"]);
 		});
 
+		it("keeps a command prefix ahead of skills matching a whole inner segment", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "jobs", description: "Manage jobs" },
+					{ name: "skill:diagnosing-vanished-job-pods", description: "Diagnose pods" },
+					{ name: "skill:hermes-scheduled-job-triage", description: "Triage scheduled work" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/job"], 0, 4);
+
+			expect(result?.items.map(item => item.value)).toEqual(["jobs"]);
+		});
+
 		it("collapses skills into a single skill: namespace row at prompt start", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[
