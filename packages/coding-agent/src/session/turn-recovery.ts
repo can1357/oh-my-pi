@@ -2765,6 +2765,11 @@ export class TurnRecovery {
 			this.#activeRetryFallback = activeFallback;
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			await this.#host.setModelWithProviderSessionReset(currentModel);
+			// A manual `setModel()` may have completed while the restore awaited:
+			// it advances `#fallbackGeneration` and installs the newer model and its
+			// configured effort. Only reapply the fallback's effort when this
+			// continuation still owns the session and the fallback model is active.
+			if (generation !== this.#fallbackGeneration || this.#host.model() !== currentModel) return false;
 			// `setThinkingLevel(thinkingToApply)` already installed the primary's
 			// effort; reapply the fallback's after reinstating the fallback model
 			// (the model restore never reapplies thinking, and the level clamps

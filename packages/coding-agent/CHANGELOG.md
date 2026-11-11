@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Recovery stays within each session's allowed account pool. Overlapping non-quota cooldowns keep their deadlines. Explicit model choices remain intact during recovery, and cancellation restores the previous model without persisting a retry-driven switch ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
@@ -425,9 +429,7 @@
 
 ### Fixed
 
-- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Recovery stays within each session's allowed account pool. Overlapping non-quota cooldowns keep their deadlines. Explicit model choices remain intact during recovery, and cancellation restores the previous model without persisting a retry-driven switch ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren))
 
-## [18.16.0] - 2026-11-02
 
 ### Added
 
