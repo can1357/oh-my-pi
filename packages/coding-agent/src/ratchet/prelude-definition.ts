@@ -5,6 +5,7 @@ import type { ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dia
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
+import { askUser } from "../extensibility/extensions/user-wait";
 import { cfgRatchetEnabled } from "../tools/settings";
 import ratchetDocumentation from "../prompts/tools/ratchet.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -149,38 +150,47 @@ async function askApproval(
 	// The reviewed material goes in the question body: every dialog surface renders it
 	// (ACP forwards the question text but not per-option previews).
 	const body = `${question}\n\n${preview}`;
-	if (ui.askDialog) {
-		const askDialog = ui.askDialog;
-		const result: ExtensionAskDialogResult | undefined = await untilAborted(context.signal, () =>
-			askDialog([
-				{
-					id: stage,
-					header,
-					question: body,
-					options: [
-						{ label: "Approve", description: "Record this approval and continue" },
-						{ label: "Revise", description: "Say what to change; nothing is recorded" },
-						{ label: "Abort", description: "Stop the ratchet run" },
-					],
-				},
-			]),
-		);
-		if (!result) return { approved: false, aborted: true };
-		if (result.kind === "chat") return { approved: false, aborted: false, feedback: "User asked to discuss first" };
-		const answer = result.results[0];
-		if (!answer || answer.timedOut) return { approved: false, aborted: false, feedback: "No answer before timeout" };
-		const choice = answer.selectedOptions[0];
-		if (choice === "Approve") return { approved: true };
-		if (choice === "Abort") return { approved: false, aborted: true };
-		const feedback = answer.customInput ?? answer.note ?? (await ui.input("What should change?"));
-		return { approved: false, aborted: false, feedback: feedback ?? "" };
-	}
-	const choice = await untilAborted(context.signal, () =>
-		ui.select(`${header}\n\n${body}`, ["Approve", "Revise", "Abort"]),
+	// One permission wait for the review, its follow-up input included.
+	return askUser(
+		ui,
+		async (): Promise<ApprovalOutcome> => {
+			if (ui.askDialog) {
+				const askDialog = ui.askDialog;
+				const result: ExtensionAskDialogResult | undefined = await untilAborted(context.signal, () =>
+					askDialog([
+						{
+							id: stage,
+							header,
+							question: body,
+							options: [
+								{ label: "Approve", description: "Record this approval and continue" },
+								{ label: "Revise", description: "Say what to change; nothing is recorded" },
+								{ label: "Abort", description: "Stop the ratchet run" },
+							],
+						},
+					]),
+				);
+				if (!result) return { approved: false, aborted: true };
+				if (result.kind === "chat")
+					return { approved: false, aborted: false, feedback: "User asked to discuss first" };
+				const answer = result.results[0];
+				if (!answer || answer.timedOut)
+					return { approved: false, aborted: false, feedback: "No answer before timeout" };
+				const choice = answer.selectedOptions[0];
+				if (choice === "Approve") return { approved: true };
+				if (choice === "Abort") return { approved: false, aborted: true };
+				const feedback = answer.customInput ?? answer.note ?? (await ui.input("What should change?"));
+				return { approved: false, aborted: false, feedback: feedback ?? "" };
+			}
+			const choice = await untilAborted(context.signal, () =>
+				ui.select(`${header}\n\n${body}`, ["Approve", "Revise", "Abort"]),
+			);
+			if (choice === "Approve") return { approved: true };
+			if (choice !== "Revise") return { approved: false, aborted: true };
+			return { approved: false, aborted: false, feedback: (await ui.input("What should change?")) ?? "" };
+		},
+		() => ({ kind: "permission", msg: `${header}: ${question}` }),
 	);
-	if (choice === "Approve") return { approved: true };
-	if (choice !== "Revise") return { approved: false, aborted: true };
-	return { approved: false, aborted: false, feedback: (await ui.input("What should change?")) ?? "" };
 }
 
 function result(text: string, details: unknown): AgentToolResult<unknown> {

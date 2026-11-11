@@ -1059,7 +1059,7 @@ export interface QueueUpdateEvent {
 	liveSteered?: number;
 }
 
-/** A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none. */
+/** A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none. */
 export interface UserWaitStartEvent {
 	type: "user_wait_start";
 	id: number;
@@ -1067,6 +1067,8 @@ export interface UserWaitStartEvent {
 	kind: "permission" | "question";
 	/** What the dialog asks, in a line. */
 	msg?: string;
+	/** The dialog settles on its own when its deadline passes (`ask.timeout`) and the agent goes on. */
+	deadline?: boolean;
 }
 
 /** The dialog of the `user_wait_start` with the same `id` settled. */

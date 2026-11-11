@@ -4585,13 +4585,15 @@ func (v QueueUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"queue_update"`, nil)
 }
 
-// A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.
+// A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none.
 type UserWaitStartEvent struct {
 	ID int64 `json:"id"`
 	// An approval to grant, or a question to answer.
 	Kind UserWaitStartEventKind `json:"kind"`
 	// What the dialog asks, in a line.
 	Msg *string `json:"msg,omitempty"`
+	// The dialog settles on its own when its deadline passes (`ask.timeout`) and the agent goes on.
+	Deadline *bool `json:"deadline,omitempty"`
 }
 
 func (v *UserWaitStartEvent) UnmarshalJSON(data []byte) error {
@@ -4605,6 +4607,7 @@ func (v *UserWaitStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("id", &out.ID)
 	d.required("kind", &out.Kind)
 	d.optional("msg", &out.Msg)
+	d.optional("deadline", &out.Deadline)
 	if d.err != nil {
 		return d.err
 	}

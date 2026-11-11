@@ -199,8 +199,12 @@ export const eventDefs = {
 			id: "number.integer",
 			kind: doc("'permission' | 'question'", "An approval to grant, or a question to answer."),
 			"msg?": doc("string", "What the dialog asks, in a line."),
+			"deadline?": doc(
+				"boolean",
+				"The dialog settles on its own when its deadline passes (`ask.timeout`) and the agent goes on.",
+			),
 		},
-		"A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.",
+		"A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none.",
 	),
 	UserWaitEndEvent: doc(
 		{ type: "'user_wait_end'", id: "number.integer" },

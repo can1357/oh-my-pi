@@ -923,13 +923,15 @@ confirmation of a change rather than independent queue state.
 { "type": "user_wait_end", "id": 3 }
 ```
 
-A running prompt is waiting on a dialog for the user's answer: a tool approval,
-`ask`, an extension's `confirm`/`select`/`input`/`editor`/`custom`/ask/form
-dialog, or a coding-plan reserve confirmation. `kind` is `permission` for an
-approval and `question` otherwise; `msg` is the dialog's title or first
-question. The end with the same `id` follows when the dialog settles. Dialogs
-opened while no prompt runs (the user's own slash command) and dialogs with a
-deadline (`ask.timeout`), which settle on their own, send neither.
+A running prompt is waiting on the user's answer: a tool approval, `ask`, an
+extension's `confirm`/`select`/`input`/`editor`/`custom`/ask/form dialog, a
+`cfg://` change, an MCP sign-in, or a coding-plan reserve confirmation. One
+wait is one pair, however many dialogs it shows: an `ask` answered field by
+field, or an approval shown as a `select`. `kind` is `permission` for an
+approval and `question` otherwise; `msg` is what it asks, in a line.
+`deadline: true` marks a wait that settles on its own when `ask.timeout`
+passes. The end with the same `id` follows when the wait settles. Dialogs
+opened while no prompt runs (the user's own slash command) send neither.
 
 Extension runner errors are emitted separately as:
 

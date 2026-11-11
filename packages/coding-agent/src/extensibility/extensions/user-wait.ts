@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { firstFieldQuestion } from "@oh-my-pi/pi-tui/html-form/data";
 import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -10,11 +11,55 @@ export interface UserPrompt {
 	msg?: string;
 }
 
+export interface UserWaitOptions {
+	/**
+	 * The dialog settles on its own once its deadline passes (`ask.timeout`) and the agent goes on, possibly with
+	 * nobody at the machine: the wait is still reported, but its time stays the agent's.
+	 */
+	deadline?: boolean;
+}
+
 /**
- * Runs a dialog that waits for the user's answer, so its session can treat the time as the user's, not the agent's.
- * `describe` says what the dialog asks; it is read only when the wait is reported.
+ * Runs `dialog`, which waits for the user's answer, as one wait for the user: its session reports the wait while a
+ * prompt runs and treats its time as the user's, not the agent's. `describe` says what the dialog asks; it is read
+ * only when the wait is reported.
  */
-export type UserWaitTracker = <T>(dialog: () => Promise<T>, describe?: () => UserPrompt) => Promise<T>;
+export type UserWaitTracker = <T>(
+	dialog: () => Promise<T>,
+	describe: () => UserPrompt,
+	options?: UserWaitOptions,
+) => Promise<T>;
+
+/** Set while a wait's dialog runs: the dialogs it opens through a tracked UI are part of that wait. */
+const openWait = new AsyncLocalStorage<true>();
+
+/** Runs the dialog of a wait for the user; a wait it opens in turn is part of this one ({@link insideUserWait}). */
+export function enterUserWait<T>(dialog: () => Promise<T>): Promise<T> {
+	return openWait.run(true, dialog);
+}
+
+/** Whether the caller runs inside the dialog of a wait for the user, so a dialog it opens is part of that wait. */
+export function insideUserWait(): boolean {
+	return openWait.getStore() === true;
+}
+
+/** The tracker of each UI {@link trackUserWaits} returned. */
+const trackers = new WeakMap<object, UserWaitTracker>();
+
+/**
+ * Runs `dialog` on `ui` as one wait for the user that its caller describes, whatever dialogs it opens: an `ask`
+ * answered field by field is one question, and a tool approval shown as a `select` is still a permission. A `ui`
+ * that {@link trackUserWaits} did not return belongs to no session, so the dialog just runs.
+ */
+export function askUser<T>(
+	ui: object,
+	dialog: () => Promise<T>,
+	describe: () => UserPrompt,
+	options?: UserWaitOptions,
+): Promise<T> {
+	const track = trackers.get(ui);
+	return track ? track(dialog, describe, options) : dialog();
+}
 
 const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 
@@ -36,14 +81,15 @@ const DIALOGS: Record<string, (args: unknown[]) => UserPrompt> = {
 type Method = (...args: unknown[]) => unknown;
 
 /**
- * `ui` with each dialog run through `track`, unless its options give it a deadline (`ask.timeout`): such a dialog
- * settles on its own and the agent goes on, possibly with nobody at the machine, so its time stays the agent's. Every
- * other member passes through. Members are read from `ui` on every access, so one it replaces later is the one called.
+ * `ui` with each dialog run through `track` as a wait for the user, described by the dialog and its arguments; one
+ * whose options give it a deadline (`ask.timeout`) is a wait with a deadline. A dialog opened inside a wait already
+ * running (see {@link askUser}) is part of it. Every other member passes through. Members are read from `ui` on every
+ * access, so one it replaces later is the one called.
  */
 export function trackUserWaits(ui: ExtensionUIContext, track: UserWaitTracker): ExtensionUIContext {
 	// Wrappers keep their identity while the member they wrap does.
 	const methods = new Map<PropertyKey, { value: Method; method: Method }>();
-	return new Proxy(ui, {
+	const tracked = new Proxy(ui, {
 		get(target, property) {
 			const value: unknown = Reflect.get(target, property, target);
 			if (typeof value !== "function") return value;
@@ -53,15 +99,18 @@ export function trackUserWaits(ui: ExtensionUIContext, track: UserWaitTracker): 
 				typeof property === "string" && Object.hasOwn(DIALOGS, property) ? DIALOGS[property] : undefined;
 			const method: Method = describe
 				? (...args) =>
-						args.some(arg => isRecord(arg) && typeof arg.timeout === "number" && arg.timeout > 0)
-							? value.apply(target, args)
-							: track(
-									() => value.apply(target, args),
-									() => describe(args),
-								)
+						track(
+							() => value.apply(target, args),
+							() => describe(args),
+							{
+								deadline: args.some(arg => isRecord(arg) && typeof arg.timeout === "number" && arg.timeout > 0),
+							},
+						)
 				: value.bind(target);
 			methods.set(property, { value: value as Method, method });
 			return method;
 		},
 	});
+	trackers.set(tracked, track);
+	return tracked;
 }

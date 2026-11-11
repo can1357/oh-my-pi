@@ -2154,7 +2154,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// An MCP sign-in can wait for the user mid-turn; like the auto-QA and cfg:// prompts below, it runs as a wait for
 		// the user (AgentSession.waitForUser).
 		this.mcpManager?.setAuthHandler((serverName, challenge) =>
-			this.session.waitForUser(() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge)),
+			this.session.waitForUser(
+				() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge),
+				() => ({ kind: "permission", msg: `Sign in to MCP server ${serverName}` }),
+			),
 		);
 		this.#eventBus = eventBus;
 		this.#subagentEventBus = subagentEventBus;
@@ -2510,19 +2513,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `Settings.instance` is the disk-backed singleton; passing it explicitly
 		// guarantees the decision persists even when the prompt is triggered
 		// from a subagent whose own `Settings` is an in-memory snapshot.
-		setAutoQaConsentHandler(() => this.session.waitForUser(() => this.#promptAutoQaConsent()), Settings.instance);
+		setAutoQaConsentHandler(
+			() =>
+				this.session.waitForUser(
+					() => this.#promptAutoQaConsent(),
+					() => ({ kind: "permission", msg: "Report a tool issue?" }),
+				),
+			Settings.instance,
+		);
 		// Same wiring for cfg:// writes: every settings change the agent makes is
 		// confirmed here, and `/save` persists to disk. Subagents and headless
 		// sessions are refused by the handler before reaching this host. Changes
 		// to this session's settings get the settings panel's in-process side
 		// effects (a `defaultThinkingLevel` change also switches the live session).
 		setCfgApprovalHost({
-			// With `ask.timeout` set the prompt settles on its own and the turn goes on, so it stays agent time,
-			// like a timed `ask`.
+			// With `ask.timeout` set the prompt settles on its own and the turn goes on: a wait with a deadline, like a
+			// timed `ask`.
 			approve: (request, options) =>
-				askTimeoutMs(this.session.settings) === undefined
-					? this.session.waitForUser(() => this.#promptCfgChange(request, options?.signal))
-					: this.#promptCfgChange(request, options?.signal),
+				this.session.waitForUser(
+					() => this.#promptCfgChange(request, options?.signal),
+					() => ({ kind: "permission", msg: `${request.save ? "Save" : "Change"} ${request.path}?` }),
+					{ deadline: askTimeoutMs(this.session.settings) !== undefined },
+				),
 			applied: change => {
 				if (change.settings !== this.session.settings) return;
 				this.#selectorController.handleSettingChange(change.path, change.value);

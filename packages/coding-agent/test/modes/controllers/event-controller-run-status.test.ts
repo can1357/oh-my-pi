@@ -1,15 +1,13 @@
 /**
  * The run status `EventController` publishes (title separator + OSC 7501
- * record): what a settled turn leaves behind, and how user-blocking prompts
- * move the run between `blocked` and `working`.
+ * record): what a settled turn leaves behind, and how the session's waits for
+ * the user move the run between `blocked` and `working`.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
@@ -50,23 +48,6 @@ function agentEnd(messages: AssistantMessage[]): Extract<AgentSessionEvent, { ty
 
 function toolStart(toolCallId: string, toolName: string, args: Record<string, unknown>): AgentSessionEvent {
 	return { type: "tool_execution_start", toolCallId, toolName, args } as unknown as AgentSessionEvent;
-}
-
-function toolEnd(toolCallId: string, toolName: string): AgentSessionEvent {
-	return {
-		type: "tool_execution_end",
-		toolCallId,
-		toolName,
-		result: { content: [{ type: "text", text: "ok" }], details: {} },
-		isError: false,
-	} as unknown as AgentSessionEvent;
-}
-
-/** `ask` call arguments: one HTML form asking `question` as a yes/no radio group. */
-function askArgs(question: string): Record<string, unknown> {
-	return {
-		html: `<form><p>${question}</p><label><input type="radio" name="q" value="yes"> Yes</label><label><input type="radio" name="q" value="no"> No</label></form>`,
-	};
 }
 
 describe("EventController run status at turn end", () => {
@@ -142,36 +123,31 @@ describe("EventController settle with a queued compaction", () => {
 	});
 });
 
-describe("EventController run status while prompts wait on the user", () => {
-	it("reports the prompt still waiting when another resolves, and working once none is left", async () => {
+describe("EventController run status while the session waits on the user", () => {
+	const waitStart = (id: number, msg: string): AgentSessionEvent => ({
+		type: "user_wait_start",
+		id,
+		kind: "question",
+		msg,
+	});
+
+	it("reports the wait still open when another settles, and working once none is left", async () => {
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		const controller = new EventController(createInteractiveModeContext());
 
 		await controller.handleEvent(AGENT_START);
-		await controller.handleEvent(toolStart("ask-1", "ask", askArgs("Use Postgres?")));
-		await controller.handleEvent(toolStart("ask-2", "ask", askArgs("Deploy now?")));
+		await controller.handleEvent(waitStart(1, "Use Postgres?"));
+		await controller.handleEvent(waitStart(2, "Deploy now?"));
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: "Deploy now?" });
 
-		await controller.handleEvent(toolEnd("ask-2", "ask"));
+		await controller.handleEvent({ type: "user_wait_end", id: 2 });
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: "Use Postgres?" });
 
-		await controller.handleEvent(toolEnd("ask-1", "ask"));
+		await controller.handleEvent({ type: "user_wait_end", id: 1 });
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
-	it("reports a tool call that needs approval as blocked on permission", async () => {
-		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
-		cfgToolsApproval.override(settings, { bash: "prompt" });
-		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
-		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
-
-		await controller.handleEvent(AGENT_START);
-		await controller.handleEvent(toolStart("bash-1", "bash", { command: "rm -rf build" }));
-
-		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
-	});
-
-	it("reports a dialog the session waits on inside a tool call as blocked until it settles", async () => {
+	it("reports working as soon as an approval is answered, while its tool still runs", async () => {
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		const controller = new EventController(createInteractiveModeContext());
 
@@ -184,28 +160,15 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
-	it("judges a focused subagent's tool call by the subagent's own settings and session approvals", async () => {
+	it("keeps a run's end result when a wait it left open settles afterwards", async () => {
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
-		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
-		let approved = false;
-		const controller = new EventController(
-			createInteractiveModeContext({
-				viewSession: {
-					getToolByName: () => bash,
-					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
-					hasSessionApproval: (key: string) => approved && key === "bash\0exec",
-				},
-			}),
-		);
+		const controller = new EventController(createInteractiveModeContext());
 
-		// The root session runs yolo; the focused subagent asks before exec-tier calls.
 		await controller.handleEvent(AGENT_START);
-		await controller.handleEvent(toolStart("bash-1", "bash", { command: "make" }));
-		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+		await controller.handleEvent(waitStart(1, "Deploy now?"));
+		await controller.handleEvent(agentEnd([assistant("stop")]));
+		await controller.handleEvent({ type: "user_wait_end", id: 1 });
 
-		approved = true;
-		report.mockClear();
-		await controller.handleEvent(toolStart("bash-2", "bash", { command: "make" }));
-		expect(report).not.toHaveBeenCalledWith(expect.objectContaining({ state: "blocked" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "done" });
 	});
 });

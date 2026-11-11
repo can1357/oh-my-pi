@@ -38,6 +38,7 @@ import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectItem } from "../extensibility/extensions";
+import { askUser } from "../extensibility/extensions/user-wait";
 import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
@@ -447,14 +448,17 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
 		try {
-			if (extensionUi.formDialog) {
-				const formDialog = extensionUi.formDialog.bind(extensionUi);
-				answered = await untilAborted(dialogSignal, () =>
-					formDialog(params.html, { timeout, signal: dialogSignal }),
-				);
-			} else {
-				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
-			}
+			// One wait for the whole form, a question with or without a deadline, however the host shows it.
+			answered = await askUser(
+				extensionUi,
+				() => {
+					if (!extensionUi.formDialog) return askFieldByField(extensionUi, form, timeout, dialogSignal);
+					const formDialog = extensionUi.formDialog.bind(extensionUi);
+					return untilAborted(dialogSignal, () => formDialog(params.html, { timeout, signal: dialogSignal }));
+				},
+				() => ({ kind: "question", msg: questions.get(named[0]!) }),
+				{ deadline: timeout !== undefined },
+			);
 		} catch (error) {
 			if (error instanceof Error && error.name === "AbortError") throw abortError();
 			throw error;

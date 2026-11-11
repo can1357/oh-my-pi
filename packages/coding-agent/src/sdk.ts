@@ -3771,10 +3771,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}),
 			createAnnotationsAPI,
 		);
-		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open, and reports
-		// it while a prompt runs.
-		const trackUserWait: UserWaitTracker = (dialog, describe) =>
-			hasSession ? session.waitForUser(dialog, describe) : dialog();
+		// A dialog waits for the user, not the agent: the session reports it while a prompt runs and lets the display
+		// sleep while one is open.
+		const trackUserWait: UserWaitTracker = (dialog, describe, options) =>
+			hasSession ? session.waitForUser(dialog, describe, options) : dialog();
 		extensionRunner.setUserWaitTracker(trackUserWait);
 
 		credentialDisabledTarget = extensionRunner;

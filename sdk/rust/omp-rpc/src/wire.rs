@@ -3992,7 +3992,7 @@ pub struct QueueUpdateEvent {
 	pub live_steered: i64,
 }
 
-/// A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.
+/// A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserWaitStartEvent {
 	pub id: i64,
@@ -4001,6 +4001,9 @@ pub struct UserWaitStartEvent {
 	/// What the dialog asks, in a line.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub msg: Option<String>,
+	/// The dialog settles on its own when its deadline passes (`ask.timeout`) and the agent goes on.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub deadline: Option<bool>,
 }
 
 /// The dialog of the `user_wait_start` with the same `id` settled.
@@ -4053,7 +4056,7 @@ pub enum RpcAgentEvent {
 	GoalUpdated(GoalUpdatedEvent),
 	/// Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.
 	QueueUpdate(QueueUpdateEvent),
-	/// A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.
+	/// A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none.
 	UserWaitStart(UserWaitStartEvent),
 	/// The dialog of the `user_wait_start` with the same `id` settled.
 	UserWaitEnd(UserWaitEndEvent),

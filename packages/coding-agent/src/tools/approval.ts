@@ -20,6 +20,7 @@ import type {
 	ExtensionApprovalPrompt,
 	ExtensionUIContext,
 } from "../extensibility/extensions/types";
+import { askUser, type UserPrompt } from "../extensibility/extensions/user-wait";
 
 import {
 	type ApprovalGrantStore,
@@ -857,21 +858,29 @@ export async function requestApproval(
 	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
 	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);
 	const full = [...header, ...details, ...(folderBlock ? [folderBlock] : []), ...appendix].join("\n");
-	if (ui.approve) {
-		const summary = approvalSummary(details);
-		const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
-		const compact = [
-			...header,
-			...(summary ? [summary] : []),
-			...(compactBlock ? [compactBlock] : []),
-			...appendix,
-		].join("\n");
-		const answer = await ui.approve({
-			full,
-			compact,
-			...(session ? { session } : {}),
-			...(grants.length > 0 ? { grants } : {}),
-		});
+	const summary = approvalSummary(details);
+	const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
+	const compact = [
+		...header,
+		...(summary ? [summary] : []),
+		...(compactBlock ? [compactBlock] : []),
+		...appendix,
+	].join("\n");
+	// A permission wait however the host shows it, an approval dialog or a select.
+	const describe = (): UserPrompt => ({ kind: "permission", msg: compact });
+	const approve = ui.approve;
+	if (approve) {
+		const answer = await askUser(
+			ui,
+			() =>
+				approve.call(ui, {
+					full,
+					compact,
+					...(session ? { session } : {}),
+					...(grants.length > 0 ? { grants } : {}),
+				}),
+			describe,
+		);
 		if (answer === "once" || (answer === "session" && session)) return answer;
 		if (typeof answer === "object" && answer !== null && grants.some(grant => grant.scope === answer.grant)) {
 			return { grant: answer.grant, always: answer.always === true };
@@ -879,7 +888,10 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices)));
+	return approvalAnswerForChoice(
+		choices,
+		await askUser(ui, () => ui.select(full, approvalChoiceLabels(choices)), describe),
+	);
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

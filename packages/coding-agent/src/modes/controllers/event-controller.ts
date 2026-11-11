@@ -52,15 +52,6 @@ import {
 	isUserInterruptAbort,
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
-import {
-	approvalRestrictions,
-	formatApprovalPrompt,
-	resolveApproval,
-	sessionApprovalScope,
-} from "../../tools/approval";
-import { recoverAskHtml } from "../../tools/ask";
-import { firstFieldQuestion } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
@@ -95,7 +86,7 @@ import {
 	cfgTerminalShowImages,
 	cfgTerminalShowProgress,
 } from "../settings";
-import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
+import { cfgReadToolResultPreview } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
@@ -228,10 +219,10 @@ export class EventController {
 	 * the call's `tool_execution_end` carries its `running` start result.
 	 */
 	#settledBeforeReturn = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
-	/** What the run waits on the user for: tool calls predicted to prompt (an approval or `ask`),
-	 *  cleared at their tool_execution_end, and the dialogs the session reports open (`user-wait:<id>`), cleared at
-	 *  their user_wait_end. The run reports `blocked` while any is left. */
-	#blockingPrompts = new Map<string, RunStatus>();
+	/** The waits for the user the session reports open while a prompt runs (user_wait_start until its
+	 *  user_wait_end), each with the `blocked` status it reports: the newest as it opens, the oldest left as one
+	 *  settles. */
+	#userWaits = new Map<number, RunStatus>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
@@ -498,10 +489,16 @@ export class EventController {
 			},
 			user_wait_start: async event => {
 				const blocked: RunStatus = { state: "blocked", kind: event.kind, msg: event.msg };
-				this.#blockingPrompts.set(`user-wait:${event.id}`, blocked);
+				this.#userWaits.set(event.id, blocked);
 				setRunStatus(blocked);
 			},
-			user_wait_end: async event => this.#releaseBlockingPrompt(`user-wait:${event.id}`),
+			// Back to `working` only when the LAST wait settles: with queued prompts (parallel approvals, a hook's
+			// dialog inside a tool call), the first to settle must not clear the signal while another still waits.
+			user_wait_end: async event => {
+				if (this.#userWaits.delete(event.id)) {
+					setRunStatus(this.#userWaits.values().next().value ?? { state: "working" });
+				}
+			},
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -1097,7 +1094,7 @@ export class EventController {
 		this.#toolReplyBlocks.clear();
 		this.#backgroundCallIds.clear();
 		this.#settledBeforeReturn.clear();
-		this.#blockingPrompts.clear();
+		this.#userWaits.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -2084,11 +2081,6 @@ export class EventController {
 		this.#updateWorkingMessageFromIntent(event.intent);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
-		const blocked = this.#blockingPrompt(renderToolName, event.args);
-		if (blocked) {
-			this.#blockingPrompts.set(event.toolCallId, blocked);
-			setRunStatus(blocked);
-		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId) && !this.#toolTimelineComponents.has(event.toolCallId)) {
 			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
@@ -2165,61 +2157,6 @@ export class EventController {
 			}
 		}
 		this.#startToolApprovalPreview(event.toolCallId);
-	}
-
-	/**
-	 * Drop one thing the run waited on the user for. The run returns to `working`
-	 * only when the LAST one goes: with queued prompts (always-ask approvals, a
-	 * hook's dialog inside a tool call), the first to settle must not clear the
-	 * blocked signal while another still waits; the run reports that one instead.
-	 */
-	#releaseBlockingPrompt(key: string): void {
-		if (this.#blockingPrompts.delete(key)) {
-			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
-		}
-	}
-
-	/**
-	 * The `blocked` status of a tool call that waits on the user before it
-	 * completes: an `ask` question, or an approval prompt. The extension wrapper
-	 * waits on `uiContext.select(...)` after emitting `tool_execution_start`, so
-	 * an approval-mode / per-tool `prompt` policy is user-blocking — the run
-	 * reads `blocked`, not `working`. Mirrors the wrapper's `resolveApproval`
-	 * inputs (approvalMode + tools.approval, grants, restrictions) and prompt
-	 * text, all read from the viewed session — a focused subagent runs under its
-	 * own settings, conversation, and session approvals; uses `resolveApproval`
-	 * rather than `requiresApproval` so a `deny` policy does not throw in the
-	 * render path.
-	 */
-	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
-		if (toolName === "ask") {
-			const html = recoverAskHtml(args);
-			return {
-				state: "blocked",
-				kind: "question",
-				msg: html === undefined ? undefined : firstFieldQuestion(parseHtmlForm(html)),
-			};
-		}
-		const session = this.ctx.viewSession;
-		const tool = session.getToolByName(toolName);
-		if (!tool) return undefined;
-		const sessionSettings = session.settings;
-		const mode = cfgToolsApprovalMode.get(sessionSettings);
-		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(sessionSettings);
-		const grants = mode === "always-ask-cached" ? session.getApprovalGrants() : undefined;
-		const approval = resolveApproval(
-			tool,
-			args,
-			mode,
-			userPolicies,
-			grants,
-			approvalRestrictions(sessionSettings, session.sessionManager.getCwd()),
-		);
-		if (approval.policy !== "prompt") return undefined;
-		// Approved for this session: the wrapper runs it without asking.
-		const scope = sessionApprovalScope(approval, tool.name);
-		if (scope && session.hasSessionApproval(scope.key)) return undefined;
-		return { state: "blocked", kind: "permission", msg: formatApprovalPrompt(tool, args, approval.reason) };
 	}
 
 	async #handleToolExecutionUpdate(
@@ -2344,9 +2281,6 @@ export class EventController {
 		// which only fire `tool_execution_end`, never `_update` — do not leave
 		// the UI looking idle while the session keeps streaming (#3857).
 		this.#ensureWorkingLoaderWhileStreaming();
-		// `ask` ids are in the map too (added at tool_execution_start), so this also
-		// covers them without leaking ids until turn end.
-		this.#releaseBlockingPrompt(event.toolCallId);
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
 				const component = this.ctx.pendingTools.get(event.toolCallId);
@@ -2690,7 +2624,8 @@ export class EventController {
 		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
-		this.#blockingPrompts.clear();
+		// A wait still open at the end is the end's to report; its late user_wait_end must not report `working`.
+		this.#userWaits.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);

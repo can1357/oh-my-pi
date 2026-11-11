@@ -114,6 +114,16 @@ describe("SDK session dialogs and the computer display hold", () => {
 		stopReason: "toolUse",
 	});
 
+	type UserWaitEvent = Extract<AgentSessionEvent, { type: "user_wait_start" | "user_wait_end" }>;
+	/** The waits for the user `target` reports, as they arrive. */
+	function userWaits(target: AgentSession): UserWaitEvent[] {
+		const waits: UserWaitEvent[] = [];
+		target.subscribe(event => {
+			if (event.type === "user_wait_start" || event.type === "user_wait_end") waits.push(event);
+		});
+		return waits;
+	}
+
 	it("ends the hold while `ask` waits for an answer", async () => {
 		const target = await createSession({}, [call("ask", { html: GO_ON_FORM }), { content: ["done"] }]);
 		const running = target.prompt("go");
@@ -125,38 +135,45 @@ describe("SDK session dialogs and the computer display hold", () => {
 		expect(releases).toEqual([1, 2]);
 	});
 
-	it("keeps the hold while an `ask` with an `ask.timeout` deadline waits, since the turn goes on unattended", async () => {
+	it("keeps the hold while an `ask` with an `ask.timeout` deadline waits, and still reports the wait", async () => {
 		const target = await createSession({ "ask.timeout": 30 }, [
 			call("ask", { html: GO_ON_FORM }),
 			{ content: ["done"] },
 		]);
+		const waits = userWaits(target);
 		const running = target.prompt("go");
 		const open = await dialog.promise;
 		expect(open).toMatchObject({ turn: 1, releases: 0 });
+		expect(waits).toEqual([
+			{ type: "user_wait_start", id: expect.any(Number), kind: "question", msg: "Go on?", deadline: true },
+		]);
 		open.answer("Yes");
 		await running;
 		expect(releases).toEqual([1]);
 	});
 
-	it("ends the hold while a tool approval waits for an answer", async () => {
+	it("ends the hold while a tool approval waits, and reports it as one permission wait though shown as a select", async () => {
 		const target = await createSession({ "tools.approvalMode": "always-ask" }, [
 			call("bash", { command: "echo hi" }),
 			{ content: ["done"] },
 		]);
+		const waits = userWaits(target);
 		const running = target.prompt("go");
 		const open = await dialog.promise;
 		expect(open).toMatchObject({ turn: undefined, releases: 1 });
+		const [start] = waits;
+		expect(waits).toEqual([
+			{ type: "user_wait_start", id: expect.any(Number), kind: "permission", msg: expect.stringContaining("bash") },
+		]);
 		open.answer("Deny");
 		await running;
 		expect(releases).toEqual([1, 2]);
+		expect(waits).toEqual([start, { type: "user_wait_end", id: start.id }]);
 	});
 
 	it("reports a dialog a running prompt waits on, but not one the user opens while idle", async () => {
 		const target = await createSession({}, [call("ask", { html: GO_ON_FORM }), { content: ["done"] }]);
-		const waits: Extract<AgentSessionEvent, { type: "user_wait_start" | "user_wait_end" }>[] = [];
-		target.subscribe(event => {
-			if (event.type === "user_wait_start" || event.type === "user_wait_end") waits.push(event);
-		});
+		const waits = userWaits(target);
 
 		// An extension command's own prompt, opened at the idle editor.
 		const picked = target.extensionRunner!.getUIContext().select("Pick a branch", []);
