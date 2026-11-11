@@ -1115,10 +1115,16 @@ export interface HandoffOptions {
 	thinkingLevel?: ThinkingLevel;
 }
 
-export function renderHandoffPrompt(customInstructions?: string): string {
-	if (!customInstructions) return HANDOFF_DOCUMENT_PROMPT;
+export function renderHandoffPrompt(
+	customInstructions?: string,
+	options?: Pick<SummaryOptions, "promptOverride" | "extraContext">,
+): string {
+	if (!customInstructions && !options?.promptOverride && !options?.extraContext?.length)
+		return HANDOFF_DOCUMENT_PROMPT;
 	return prompt.render(handoffDocumentPrompt, {
 		additionalFocus: customInstructions,
+		promptOverride: options?.promptOverride,
+		extraContext: options?.extraContext,
 	});
 }
 

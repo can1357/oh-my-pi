@@ -63,6 +63,7 @@ describe("AgentSession handoff", () => {
 		sharedDir = TempDir.createSync("@pi-handoff-shared-");
 		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("aimlapi", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -168,6 +169,142 @@ describe("AgentSession handoff", () => {
 		expect(session.agent.state.messages.some(message => message.role === "compactionSummary")).toBe(true);
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
+	});
+
+	it("uses the preferred cache-friendly handoff for manual compaction instead of reserializing history", async () => {
+		const textModel = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
+		if (!textModel) throw new Error("Expected text-only open model");
+		session.agent.setModel(textModel);
+		session.agent.setSystemPrompt(["Live extension override"]);
+		session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+		const history = await session.convertMessagesToLlm(session.agent.state.messages);
+		const handoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nKeep working");
+		const softSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Unexpected cold summary"));
+
+		const result = await session.compact("retain the failing regression");
+
+		expect(softSpy).not.toHaveBeenCalled();
+		expect(handoffSpy).toHaveBeenCalledTimes(1);
+		expect(handoffSpy.mock.calls[0]![1]).toMatchObject({ id: textModel.id, provider: textModel.provider });
+		const context = handoffSpy.mock.calls[0]![0];
+		expect(context.systemPrompt).toEqual(["Live extension override"]);
+		expect(context.messages.slice(0, history.length)).toEqual(history);
+		expect(JSON.stringify(context.messages.at(-1))).toContain("retain the failing regression");
+		expect(result.summary).toContain("Keep working");
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction", method: "handoff" });
+	});
+
+	it("falls back to soft compaction when the preferred manual handoff exceeds the provider window", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		const handoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockRejectedValue(new Error("context window exceeded"));
+		const softSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "windowed summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+
+		const result = await session.compact();
+
+		expect(handoffSpy).toHaveBeenCalledTimes(1);
+		expect(softSpy).toHaveBeenCalledTimes(1);
+		expect(result.summary).toBe("windowed summary");
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction", method: "soft" });
+	});
+
+	it("keeps compaction-hook instructions, recalled context and preserved state in a manual handoff", async () => {
+		const sessionFile = session.sessionFile;
+		if (!sessionFile) throw new Error("Expected persisted history");
+		await session.dispose();
+		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
+		const loaded = await loadExtensions([], tempDir.path());
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", () => ({
+					prompt: `Preserve the deployment failure involving ${HANDOFF_SECRET}`,
+					context: ["The failed deployment targets staging", `Credential: ${HANDOFF_SECRET}`],
+					preserveData: { deployment: "staging" },
+				}));
+			},
+			tempDir.path(),
+			new EventBus(),
+			loaded.runtime,
+			"handoff-compaction-context",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			loaded.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [] } }),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.methodOrder": ["handoff"], "compaction.keepRecentTokens": 1 }),
+			modelRegistry,
+			extensionRunner,
+			obfuscator,
+		});
+		const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("Deployment recap");
+
+		await session.compact("keep the rollback plan");
+
+		const request = JSON.stringify(handoffSpy.mock.calls[0]![0].messages.at(-1));
+		expect(request).toContain("Preserve the deployment failure");
+		expect(request).toContain("The failed deployment targets staging");
+		expect(request).toContain("keep the rollback plan");
+		expect(request).not.toContain(HANDOFF_SECRET);
+		expect(request).toContain(obfuscator.obfuscate(HANDOFF_SECRET));
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({
+			type: "compaction",
+			preserveData: { deployment: "staging" },
+		});
+	});
+
+	it("keeps an explicit soft mode authoritative over the handoff preference", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		const handoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockRejectedValue(new Error("Unexpected handoff"));
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "explicit soft summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+
+		const result = await session.compact(undefined, { mode: "soft" });
+
+		expect(handoffSpy).not.toHaveBeenCalled();
+		expect(result.summary).toBe("explicit soft summary");
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction", method: "soft" });
+	});
+
+	it("cancels a manual handoff without committing history or starting the soft fallback", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		const started = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async (_context, _model, options) => {
+			const finished = Promise.withResolvers<string>();
+			options.streamOptions.signal?.addEventListener(
+				"abort",
+				() => finished.reject(new DOMException("Cancelled", "AbortError")),
+				{ once: true },
+			);
+			started.resolve();
+			return finished.promise;
+		});
+		const softSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Unexpected fallback"));
+		const compaction = session.compact();
+		await started.promise;
+		session.abortCompaction();
+
+		await expect(compaction).rejects.toBeInstanceOf(compactionModule.CompactionCancelledError);
+		expect(softSpy).not.toHaveBeenCalled();
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+		expect(session.isCompacting).toBe(false);
 	});
 
 	it("dispatches a prompt only after manual handoff commits its compaction", async () => {
@@ -1186,83 +1323,90 @@ describe("AgentSession handoff", () => {
 			expect.objectContaining({ type: "agent_end", isTerminal: true, yielded: true }),
 		]);
 	});
-	it("resets to the base system prompt before generating a handoff", async () => {
-		const model = session.model;
-		if (!model) {
-			throw new Error("Expected model to be set");
-		}
-		await session.dispose();
-		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+	for (const autoTriggered of [false, true]) {
+		it(
+			autoTriggered
+				? "keeps the live hook prompt cache prefix for automatic handoff"
+				: "resets to the base system prompt before manual handoff",
+			async () => {
+				const model = session.model;
+				if (!model) {
+					throw new Error("Expected model to be set");
+				}
+				await session.dispose();
+				sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 
-		const extensionsResult = await loadExtensions([], tempDir.path());
-		const extensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			tempDir.path(),
-			sessionManager,
-			modelRegistry,
+				const extensionsResult = await loadExtensions([], tempDir.path());
+				const extensionRunner = new ExtensionRunner(
+					extensionsResult.extensions,
+					extensionsResult.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				const emitBeforeAgentStart = vi.spyOn(extensionRunner, "emitBeforeAgentStart").mockResolvedValueOnce({
+					systemPrompt: ["Hook override"],
+				});
+				vi.spyOn(extensionRunner, "emit").mockResolvedValue(undefined);
+
+				const mock = createMockModel({
+					responses: [{ content: ["normal response"] }],
+				});
+				const agent = new Agent({
+					getApiKey: () => "test-key",
+					initialState: {
+						model,
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+					},
+					streamFn: mock.stream,
+				});
+
+				session = new AgentSession({
+					agent,
+					sessionManager,
+					settings: Settings.isolated({ "compaction.enabled": false, "compaction.keepRecentTokens": 1 }),
+					modelRegistry,
+					extensionRunner,
+				});
+				sessionManager.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: "seed" }],
+					timestamp: Date.now() - 2,
+				});
+				sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "seed response" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					stopReason: "stop",
+					usage: {
+						input: 16,
+						output: 8,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 24,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: Date.now() - 1,
+				});
+
+				await session.prompt("hello from user");
+				const generateHandoffSpy = vi
+					.spyOn(compactionModule, "generateHandoffFromContext")
+					.mockResolvedValue("## Goal\nContinue from here");
+				await session.handoff(undefined, { autoTriggered });
+
+				expect(emitBeforeAgentStart).toHaveBeenCalledTimes(1);
+				expect(mock.calls.map(c => c.context.systemPrompt?.join("\n\n") ?? "")).toEqual(["Hook override"]);
+				const handoffCall = generateHandoffSpy.mock.calls[0];
+				if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
+				expect(handoffCall[0].systemPrompt).toEqual(autoTriggered ? mock.calls[0]!.context.systemPrompt : ["Test"]);
+			},
 		);
-		const emitBeforeAgentStart = vi.spyOn(extensionRunner, "emitBeforeAgentStart").mockResolvedValueOnce({
-			systemPrompt: ["Hook override"],
-		});
-		vi.spyOn(extensionRunner, "emit").mockResolvedValue(undefined);
-
-		const mock = createMockModel({
-			responses: [{ content: ["normal response"] }],
-		});
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: mock.stream,
-		});
-
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false, "compaction.keepRecentTokens": 1 }),
-			modelRegistry,
-			extensionRunner,
-		});
-		sessionManager.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "seed" }],
-			timestamp: Date.now() - 2,
-		});
-		sessionManager.appendMessage({
-			role: "assistant",
-			content: [{ type: "text", text: "seed response" }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			stopReason: "stop",
-			usage: {
-				input: 16,
-				output: 8,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 24,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now() - 1,
-		});
-
-		await session.prompt("hello from user");
-		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockResolvedValue("## Goal\nContinue from here");
-		await session.handoff();
-
-		expect(emitBeforeAgentStart).toHaveBeenCalledTimes(1);
-		expect(mock.calls.map(c => c.context.systemPrompt?.join("\n\n") ?? "")).toEqual(["Hook override"]);
-		const handoffCall = generateHandoffSpy.mock.calls[0];
-		if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
-		expect(handoffCall[0].systemPrompt).toEqual(["Test"]);
-	});
+	}
 
 	it("forwards the agent's provider prompt-cache key to the handoff request", async () => {
 		// Cache parity: the live loop routes on the agent's promptCacheKey

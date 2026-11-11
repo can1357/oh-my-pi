@@ -56,7 +56,7 @@ The same minimum-content guard exists inside `SessionMaintenance.handoff()` and 
 - Builds the handoff request through the **same side-request pipeline a live turn uses**, shared with ephemeral turns:
    1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
    2. Converts the snapshot with `convertMessagesToLlm(...)` for the handoff model (the snapcompact archive view that model may read, session `transformContext`, LLM conversion, and obfuscation).
-   3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the committed summary does not inherit a per-turn `before_agent_start` override.
+   3. Builds provider `Context` with `agent.buildSideRequestContext(...)` — normalized tools and provider-context transforms matching the loop. Automatic handoff and manual `/compact` using handoff send the live system prompt, including a per-turn `before_agent_start` override, for cache reuse. Explicit `/handoff` uses the base system prompt. Only generated text is committed; neither path pins an override onto subsequent turns.
    4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
 - Obfuscates the final provider context and calls `generateHandoffFromContext(...)` through the host side-stream transport.
 - Deobfuscates the returned handoff text.
@@ -81,13 +81,15 @@ await generateHandoffFromContext(context, model, {
 
 Important generation properties:
 
-- The request shares the live provider cache prefix because the `Context` is built by the identical transform + normalization pipeline the loop uses, and routed with the same `promptCacheKey` the turn used.
+- Automatic handoff and manual `/compact` using handoff preserve the live provider prefix through the same transform + normalization pipeline and `promptCacheKey`. Actual reuse depends on server cache support, routing, eviction, and the model's chat template. Explicit `/handoff` can diverge at the system prompt when a per-turn override is active.
 - The handoff instruction is a trailing `user` message, not a developer message, so the cached prefix remains aligned with the prior turn (the trailing message is the only divergence point).
 - `toolChoice: "none"` prevents intentional tool dispatch on normal providers; the compatibility retry uses `"auto"` only after an explicit-tool-choice rejection.
 - Returned assistant content is filtered to text blocks and joined with `\n`; tool-call blocks are ignored.
 - `stopReason === "error"` after the compatibility retry throws a generation error.
 
 Capture is direct from the oneshot response; no agent-loop events or latest-assistant-message scan are involved.
+
+Manual `/compact` honors a preferred `handoff` method through the normal compaction lifecycle, including `session_before_compact` cancellation/replacement and `session.compacting` instructions, recalled context and preserved data. Hook instructions and context are rendered into the trailing user message after secret obfuscation, leaving earlier messages intact. A generation failure advances to the next configured method; cancellation commits nothing and does not start a fallback. Explicit `/compact soft` still forces the independent summarizer. See [prefix caching](compaction.md#prefix-caching-with-open-model-servers) for the unavoidable cache boundary after the summary replaces history.
 
 ### 3) Cancellation checks
 

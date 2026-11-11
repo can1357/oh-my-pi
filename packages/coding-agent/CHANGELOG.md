@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Manual compaction honors the preferred handoff method and reuses the live prompt prefix, with soft compaction as fallback
+
+### Fixed
+
+- Automatic handoff preserves extension system-prompt overrides for prompt-cache reuse
+- Speculative compaction keeps its isolated provider session and transport preferences
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

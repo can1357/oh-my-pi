@@ -1,4 +1,4 @@
-/** Ordered automatic context-maintenance methods and their settings metadata. */
+/** Ordered context-maintenance methods and their settings metadata. */
 
 import {
 	type CompactionSettings as EngineCompactionSettings,

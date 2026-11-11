@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- LiteLLM uses the shared prompt-cache key for cache affinity and session logs, with the conversation id as fallback
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

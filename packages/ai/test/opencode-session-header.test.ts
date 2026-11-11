@@ -8,7 +8,7 @@ import {
 	type OpenAIRequestSetupModel,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
@@ -361,7 +361,13 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 		const response = await completeSimple(
 			makeLiteLLMCompletionsModel(),
 			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			{ apiKey: "key", sessionId: "session-1", cacheRetention: "none", fetch: fetchMock as typeof fetch },
+			{
+				apiKey: "key",
+				sessionId: "session-1",
+				promptCacheKey: "shared-cache",
+				cacheRetention: "none",
+				fetch: fetchMock as typeof fetch,
+			},
 		);
 
 		expect(response.stopReason).toBe("stop");
@@ -369,33 +375,71 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 		expect(headersSeen[0]?.get("session_id")).toBeNull();
 	});
 
-	it("keeps a configured x-litellm-session-id over the conversation session id", () => {
+	it("keeps a configured x-litellm-session-id over inferred conversation and cache affinity", () => {
 		const setup = resolveOpenAIRequestSetup(makeLiteLLMCompletionsModel(), {
 			apiKey: "key",
 			messages: [],
 			extraHeaders: { "X-LiteLLM-Session-Id": "run-42" },
 			sessionId: "session-1",
+			promptCacheSessionId: "shared-cache",
 		});
 		expect(setup.headers["X-LiteLLM-Session-Id"]).toBe("run-42");
 		expect(setup.headers["x-litellm-session-id"]).toBeUndefined();
 	});
 
-	it("does not turn a shared prompt-cache key into a LiteLLM conversation", () => {
+	it("uses a shared prompt-cache key for LiteLLM affinity instead of the side-request session", () => {
 		const model = makeLiteLLMCompletionsModel();
 		const cacheOnly = resolveOpenAIRequestSetup(model, {
 			apiKey: "key",
 			messages: [],
 			promptCacheSessionId: "shared-cache",
 		});
-		expect(cacheOnly.headers["x-litellm-session-id"]).toBeUndefined();
+		expect(cacheOnly.headers["x-litellm-session-id"]).toBe("shared-cache");
 		const conversation = resolveOpenAIRequestSetup(model, {
 			apiKey: "key",
 			messages: [],
 			promptCacheSessionId: "shared-cache",
 			sessionId: "conversation",
 		});
-		expect(conversation.headers["x-litellm-session-id"]).toBe("conversation");
+		expect(conversation.headers["x-litellm-session-id"]).toBe("shared-cache");
 	});
+
+	for (const provider of ["litellm", "team-models"]) {
+		it(`routes live and compaction GLM requests with the same LiteLLM affinity for ${provider}`, async () => {
+			const headersSeen: Headers[] = [];
+			const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+				headersSeen.push(new Headers(init?.headers));
+				return chatSse();
+			};
+			const model = buildDiscoveredModel(
+				{
+					id: "glm-5.3-flash",
+					name: "GLM 5.3 Flash",
+					provider,
+					api: "openai-completions",
+					baseUrl: "https://litellm.example/v1",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 200_000,
+					maxTokens: 8192,
+				},
+				"litellm",
+			);
+			const context = { messages: [{ role: "user" as const, content: "same prefix", timestamp: 0 }] };
+			const options = { apiKey: "key", promptCacheKey: "parent-prefix", fetch: fetchMock as typeof fetch };
+
+			const live = await completeSimple(model, context, { ...options, sessionId: "conversation" });
+			const side = await completeSimple(model, context, { ...options, sessionId: "conversation:side:summary" });
+
+			expect(live.stopReason).toBe("stop");
+			expect(side.stopReason).toBe("stop");
+			expect(headersSeen.map(headers => headers.get("x-litellm-session-id"))).toEqual([
+				"parent-prefix",
+				"parent-prefix",
+			]);
+		});
+	}
 
 	it("applies omp's common User-Agent as the global inference default", async () => {
 		const userAgents: Array<string | null> = [];

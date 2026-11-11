@@ -1,3 +1,6 @@
+{{#if promptOverride}}
+{{promptOverride}}
+{{else}}
 <critical>
 Write a handoff document for another instance of yourself.
 The handoff MUST be sufficient for seamless continuation without access to this conversation.
@@ -43,6 +46,15 @@ Use exactly this structure:
 ## Next Steps
 1. [What should happen next]
 </output>
+{{/if}}
+
+{{#if extraContext}}
+<additional-context>
+{{#each extraContext}}
+- {{this}}
+{{/each}}
+</additional-context>
+{{/if}}
 
 {{#if additionalFocus}}
 <instruction>

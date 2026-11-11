@@ -561,6 +561,11 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+	/** Keep the live system prompt for a manual compaction side request. */
+	preserveLivePrompt?: boolean;
+	/** Summary instructions and recalled context supplied by compaction hooks. */
+	promptOverride?: string;
+	extraContext?: string[];
 }
 
 /** Result from cycleModel(). */

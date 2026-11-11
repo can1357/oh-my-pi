@@ -5,6 +5,10 @@ provider "litellm" {
 	env "LITELLM_API_KEY"
 	discovery label="LiteLLM" allow-unauthenticated=#true
 
-	// The proxy groups request logs into sessions by this header.
+	// LiteLLM uses this header for deployment/pod affinity as well as logs.
+	// Side requests keep separate transport session ids but must reach the
+	// same cached prefix as the live turn. Fall back to the conversation id
+	// when prompt caching is disabled; explicit caller headers still win.
+	prompt-cache-session-header "x-litellm-session-id"
 	session-header "x-litellm-session-id"
 }

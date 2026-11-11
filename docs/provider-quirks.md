@@ -1328,6 +1328,8 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/kimi
 
 LiteLLM is an open-source AI proxy and gateway that unifies access to multiple LLM providers behind an OpenAI-compatible API host. In `pi`, it operates using the OpenAI Chat Completions (`openai-completions`) transport pipeline.
 
+- **Cache affinity**: the KDL policy sends `x-litellm-session-id` from `promptCacheKey ?? sessionId` for OpenAI-compatible requests. Handoff/speculative side requests retain their separate transport `sessionId` but share the live cache-affinity header. With `cacheRetention: none`, the header falls back to the conversation id. Explicit configured headers win. LiteLLM session logs group by this header, so deliberately shared cache keys also group those requests together. Custom providers using `discovery.type: litellm` inherit the same policy through `providerType`.
+
 ### Special casings
 
 - **Anthropic & Bedrock tool compatibility (`packages/ai/src/providers/openai-completions.ts`)**:

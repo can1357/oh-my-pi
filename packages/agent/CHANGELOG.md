@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Handoff prompt rendering accepts compaction-hook instructions and additional context without reserializing history
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

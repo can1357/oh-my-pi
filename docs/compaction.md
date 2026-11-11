@@ -89,6 +89,56 @@ ACP sessions forward automatic maintenance as JSON-RPC extension notifications:
 
 Clients that do not implement them can ignore them.
 
+### Prefix caching with open-model servers
+
+There are two separate cache boundaries:
+
+- **Generating the summary:** handoff sends the live system prompt, normalized tools and transformed conversation, followed by a summary instruction. Automatic handoff and manual `/compact` using the handoff method preserve the live system prompt, including extension overrides. The request shares the live `promptCacheKey` but uses a separate provider `sessionId`, so background generation does not interleave with the active transport session.
+- **Continuing after compaction:** the summary replaces the start of the history. Ordinary causal KV caches can reuse tokens only up to the first changed token; retained messages after the new summary must be prefilled again, even when their own text is unchanged. Keeping the system prompt and tools stable preserves that earlier prefix; it cannot preserve the discarded conversation's KV state.
+
+Manual `/compact` walks the configured method order, including `handoff`. `/compact soft` explicitly selects the independent summarizer, which serializes history into text under a separate system prompt and therefore cannot reuse the live conversation prefix. Soft compaction remains useful for smaller compaction models and for windowed fallback after the original input no longer fits. `shake` remains an automatic method or a separate `/shake` command.
+
+For a text-only open model served through a private gateway, a configuration that prefers cache reuse is:
+
+```yaml
+provider:
+  appendOnlyContext: on
+compaction:
+  methodOrder: [handoff, soft]
+```
+
+`appendOnlyContext: auto` already enables stable prefixes for recognized local providers and local/private IP endpoints. A gateway with a corporate DNS name may need `on`. The sample order deliberately selects handoff before soft; retain `remote` or `snapcompact` earlier when those methods are wanted. Explicit `/handoff` keeps its base-system-prompt semantics, so a transient extension override can prevent cache reuse for that command.
+
+The server must also have prefix caching enabled and route requests to a replica that still holds the prefix. A shared `promptCacheKey` is a routing hint where supported, not a guarantee that a gateway honors it or that cached blocks have survived eviction. For vLLM, avoid `--exclude-tools-when-tool-choice-none` when relying on handoff prefix reuse: handoff disables tool calls but keeps tool definitions to match the live prompt.
+
+Validate on the actual backend with a long, warmed conversation: compare handoff generation and the first turn after compaction separately. Existing OTEL spans tagged `omp.gen_ai.oneshot.kind = handoff` expose `gen_ai.usage.input_tokens` and `gen_ai.usage.cache_read.input_tokens` when the provider reports them. Compare cached input, request latency and backend prefill metrics against the same workload before the change; missing usage counters do not prove a cache miss. CPU timings in the harness alone cannot establish GPU cache hits.
+
+Server references: [vLLM automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/), [vLLM tool-choice behavior](https://docs.vllm.ai/en/latest/features/tool_calling/).
+
+#### LiteLLM → vLLM with GLM-5.3-Flash
+
+The harness sends the stable cache key as `x-litellm-session-id` on its OpenAI-compatible LiteLLM route, including discovered custom LiteLLM providers. Transport session IDs remain separate. An explicit configured header takes precedence; avoid a fixed header shared by unrelated conversations. LiteLLM also uses this value to group session logs.
+
+For multiple deployments in one LiteLLM model group, enable its deployment session affinity (merge this check with any existing checks):
+
+```yaml
+router_settings:
+  optional_pre_call_checks: [session_affinity]
+```
+
+If an `api_base` points to a Kubernetes service balancing several vLLM pods, deployment affinity alone does not select the pod. On LiteLLM versions supporting it, use a headless service with `litellm_params.kubernetes_pod_discovery: true`. Multiple LiteLLM replicas need shared Redis for deployment pins. A single vLLM replica does not need pod discovery. See [LiteLLM affinity](https://docs.litellm.ai/docs/routing#session-affinity-sticky-sessions) and [pod routing](https://docs.litellm.ai/docs/proxy/cache_aware_routing).
+
+GLM-5.3-Flash combines KDA recurrent state with sparse MLA, so validate prefix-cache support against the installed vLLM version and startup logs, not just the presence of an ordinary KV-cache pool. Enable prefix caching and keep the hybrid cache manager supported by that version. The [vLLM model recipe](https://recipes.vllm.ai/zai-org/GLM-5.3-Flash) documents `glm5_next` tokenization, `glm47` tool/reasoning parsers, and mandatory reasoning with `low`, `high`, `max` effort. Its template injects effort into the system prompt: use the same effective effort for the live turn and summary when measuring prefix reuse. Disabling thinking is not a shortcut for this model.
+
+If LMCache is installed, its [GLM-5.3-Flash recipe](https://docs.lmcache.ai/recipes/glm5_3_flash.html) has additional hybrid-state requirements and version-specific caveats. Do not apply LMCache flags to a plain vLLM deployment.
+
+For a **single vLLM replica running 0.30.0**, pod affinity does not improve cache hits: all requests already reach the same replica. Prioritize the resolved engine configuration and cache correctness:
+
+- Confirm prefix caching is enabled and the hybrid recurrent-state cache resolves to `align`. Both `--enable-prefix-caching` and `--mamba-cache-mode align` exist in [0.30.0](https://docs.vllm.ai/en/v0.30.0/configuration/engine_args/#cacheconfig); inspect startup configuration before adding overrides. Do not copy newer-version cache flags blindly.
+- Upstream [issue #59115](https://github.com/vllm-project/vllm/issues/59115) reports GLM-5.3-Flash failures on 0.30.0 with long mixed prefill/decode workloads. Maintainers identify fixes for an out-of-bounds kpool access and prefix-cache corruption affecting MTP. This is configuration-dependent evidence, not proof that every 0.30.0 deployment is affected.
+- Validate a patched stable engine before performance tuning. The [0.31.0 release](https://github.com/vllm-project/vllm/releases/tag/v0.31.0) explicitly includes the related fixes (#57317, #57477) and additional GLM recurrent-state/speculative-decoding corrections. Test compatibility and correctness on the actual GPU/checkpoint before upgrading production.
+- Compare warmed handoff and post-compaction requests separately under the same load and reasoning effort. Cache eviction and recurrent-state checkpoint boundaries can still limit reuse on one replica.
+
 ### Compaction shape (visual)
 
 ```text

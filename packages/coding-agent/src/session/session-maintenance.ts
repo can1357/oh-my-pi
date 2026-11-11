@@ -1365,8 +1365,8 @@ export class SessionMaintenance {
 							(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
 						);
 					case "soft":
-						return true;
 					case "handoff":
+						return true;
 					case "shake":
 						return false;
 				}
@@ -1383,7 +1383,7 @@ export class SessionMaintenance {
 				if (!explicitSnapcompact) return new Error(reason);
 				const fallback =
 					resolveCompactionMethodOrder(compactionSettings.methodOrder).find(
-						method => method !== "snapcompact" && runsManually(method),
+						method => (method === "remote" || method === "soft") && runsManually(method),
 					) ?? "soft";
 				return new Error(`${reason}. Run /compact ${fallback} instead.`);
 			};
@@ -1582,6 +1582,25 @@ export class SessionMaintenance {
 				details = compactionPrep.details;
 				preserveData = compactionPrep.preserveData;
 				providerReplayThroughEntryId = compactionPrep.providerReplayThroughEntryId;
+			} else if (selectedMethod === "handoff") {
+				const generated = await this.#host
+					.generateHandoffDocument(options?.internalGuidance ?? customInstructions ?? "", {
+						preserveLivePrompt: true,
+						promptOverride: compactionPrep.hookPrompt,
+						extraContext: compactionPrep.hookContext,
+						signal: compactionAbortController.signal,
+					})
+					.catch(error => {
+						if (compactionAbortController.signal.aborted) {
+							throw new CompactionCancelledError(undefined, { cause: compactionAbortController.signal.reason });
+						}
+						throw error;
+					});
+				if (!generated) throw new Error("Handoff generation produced no content");
+				({ summary, details } = handoffSummaryFromDocument(generated.document, preparation));
+				firstKeptEntryId = preparation.firstKeptEntryId;
+				tokensBefore = preparation.tokensBefore;
+				preserveData = compactionPrep.preserveData;
 			} else if (snapcompactResult) {
 				summary = snapcompactResult.summary;
 				shortSummary = snapcompactResult.shortSummary;
@@ -3812,15 +3831,15 @@ export class SessionMaintenance {
 						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
-						sessionId: this.#host.sessionId(),
+						sessionId: options?.sessionId ?? this.#host.sessionId(),
 						// Explicit cache keys only (never a sessionId fallback): V2
 						// treats any truthy key as provenance for x-opencode-session.
 						// Conventional summaries run on `candidate`; remote compaction
 						// may send a different api/model, so it is gated separately.
-						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
+						promptCacheKey: options?.promptCacheKey ?? this.#host.getPromptCacheKeyForModel(candidate),
 						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets(candidate),
+						preferWebsockets: options?.preferWebsockets ?? this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						// Route every summarization HTTP request through the
 						// session's side-stream transport so the provider

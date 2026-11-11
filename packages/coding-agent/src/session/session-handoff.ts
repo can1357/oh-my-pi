@@ -140,7 +140,10 @@ export class SessionHandoff {
 			// Both can diverge from this.#host.sessionId() (tan/subagent/shared sessions), so
 			// mirror exactly what the live turn populated the cache under.
 			const handoffPromptCacheKey = this.#host.getPromptCacheKeyForModel(model) ?? this.#host.agent.sessionId;
-			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
+			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions), {
+				promptOverride: this.#host.obfuscateTextForProvider(options?.promptOverride),
+				extraContext: options?.extraContext?.map(context => this.#host.obfuscateTextForProvider(context) ?? ""),
+			});
 			const handoffSnapshot: AgentMessage[] = [
 				...this.#host.agent.state.messages,
 				{
@@ -151,12 +154,15 @@ export class SessionHandoff {
 				},
 			];
 			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal, model);
-			// Base system prompt, not a per-turn `before_agent_start` hook override —
-			// the document seeds the post-compaction context and must not carry
-			// prompt-specific hook state.
+			// Automatic maintenance must read the exact prefix the live turn cached,
+			// including before_agent_start overrides. The generated text alone is
+			// persisted, so this does not pin that override onto future turns.
+			// Explicit /handoff keeps its base-prompt semantics.
 			const handoffContext = await this.#host.agent.buildSideRequestContext(
 				handoffLlmMessages,
-				this.#host.baseSystemPrompt(),
+				options?.autoTriggered || options?.preserveLivePrompt
+					? this.#host.agent.state.systemPrompt
+					: this.#host.baseSystemPrompt(),
 			);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
