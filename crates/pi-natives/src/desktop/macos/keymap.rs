@@ -80,7 +80,13 @@ impl Keymap {
 	/// `KEYMAP_TTL`; `None` when the layout publishes no Unicode key layout
 	/// data.
 	pub(super) fn current() -> CoreResult<Option<Arc<Self>>> {
-		cached(&CURRENT, Instant::now(), Self::read)
+		cached(&CURRENT, Instant::now(), false, Self::read)
+	}
+
+	/// Activation can switch the input source for the target document.
+	/// Do not reuse a map read before that focus change.
+	pub(super) fn fresh() -> CoreResult<Option<Arc<Self>>> {
+		cached(&CURRENT, Instant::now(), true, Self::read)
 	}
 
 	/// Text Input Sources asserts that it runs on the main queue, which the
@@ -164,10 +170,12 @@ impl Keymap {
 fn cached(
 	slot: &CachedKeymap,
 	now: Instant,
+	fresh: bool,
 	read: impl FnOnce() -> CoreResult<Option<Keymap>>,
 ) -> CoreResult<Option<Arc<Keymap>>> {
 	let mut slot = slot.lock();
-	if let Some((read_at, keymap)) = &*slot
+	if !fresh
+		&& let Some((read_at, keymap)) = &*slot
 		&& now.saturating_duration_since(*read_at) < KEYMAP_TTL
 	{
 		return Ok(keymap.clone());
@@ -333,19 +341,34 @@ mod tests {
 			Ok(Some(Keymap::build(translate)))
 		};
 		let start = Instant::now();
-		cached(&slot, start, read).unwrap();
-		let reused = cached(&slot, start + KEYMAP_TTL / 2, || panic!("read within the TTL")).unwrap();
+		cached(&slot, start, false, read).unwrap();
+		let reused =
+			cached(&slot, start + KEYMAP_TTL / 2, false, || panic!("read within the TTL")).unwrap();
 		assert_eq!(
 			reused.unwrap().stroke('q'),
 			Some(Keystroke { code: 0, shift: false, option: false })
 		);
-		cached(&slot, start + KEYMAP_TTL, read).unwrap();
+		cached(&slot, start + KEYMAP_TTL, false, read).unwrap();
 		assert_eq!(reads.get(), 2);
 		// A cancelled read reaches the caller, and the next call reads again.
 		let later = start + KEYMAP_TTL * 2;
-		let cancelled = cached(&slot, later, || Err(DesktopError::cancelled("cancelled")));
+		let cancelled = cached(&slot, later, false, || Err(DesktopError::cancelled("cancelled")));
 		assert_eq!(cancelled.err().map(|error| error.code), Some(ErrorCode::Cancelled));
-		cached(&slot, later, read).unwrap();
+		cached(&slot, later, false, read).unwrap();
 		assert_eq!(reads.get(), 3);
+		// A focus change can select AZERTY even while the old map is fresh.
+		let switched = cached(&slot, later, true, || {
+			Ok(Some(Keymap::build(|code, _| (code == 12).then_some('a'))))
+		})
+		.unwrap()
+		.unwrap();
+		assert_eq!(switched.command_key('a'), Some(12));
+		assert_eq!(
+			cached(&slot, later, false, || panic!("fresh map should replace the cache"))
+				.unwrap()
+				.unwrap()
+				.command_key('a'),
+			Some(12)
+		);
 	}
 }

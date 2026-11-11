@@ -331,9 +331,9 @@ impl MacInput {
 		let remote = process::remote_screen(pid);
 		require_phone_screen(window, remote)?;
 		let gap = key_gap(remote);
-		let chord = chord_keys(window, keys, remote, layout_strokes)?;
 		match mode {
 			DeliveryMode::Background => {
+				let chord = chord_keys(window, keys, remote, layout_strokes)?;
 				if remote == Some(RemoteScreen::KeyEvents)
 					&& chord.iter().any(|key| key.name.is_modifier())
 				{
@@ -372,6 +372,7 @@ impl MacInput {
 				skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
 					control::wait(first_key_settle(activated))?;
 					element_keys(pid, element, || {
+						let chord = chord_keys(window, keys, remote, fresh_layout_strokes)?;
 						if remote.is_some() {
 							// As for typed text: a remote screen may read modifiers
 							// from the keyboard state, which only
@@ -414,9 +415,9 @@ impl MacInput {
 				let remote = process::remote_screen(pid);
 				require_phone_screen(&window, remote)?;
 				let gap = key_gap(remote);
-				let held = chord_keys(&window, keys, remote, layout_strokes)?;
 				match mode {
 					DeliveryMode::Background => {
+						let held = chord_keys(&window, keys, remote, layout_strokes)?;
 						if remote == Some(RemoteScreen::KeyEvents)
 							&& held.iter().any(|key| key.name.is_modifier())
 						{
@@ -449,6 +450,7 @@ impl MacInput {
 					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
 						skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
 							control::wait(first_key_settle(activated))?;
+							let held = chord_keys(&window, keys, remote, fresh_layout_strokes)?;
 							let body = || control::wait(duration);
 							if remote.is_some() {
 								hold_bare_keys(
@@ -484,7 +486,20 @@ fn require_phone_screen(window: &DesktopWindow, remote: Option<RemoteScreen>) ->
 /// The current keyboard layout's lookup from character to key in `layer`;
 /// `None` when the layout has no Unicode key layout data to look keys up in.
 fn layout_strokes(layer: KeyLayer) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
-	Ok(Keymap::current()?.map(|keymap| {
+	map_layout_strokes(layer, Keymap::current()?)
+}
+
+/// Read after the takeover target and its element have keyboard focus:
+/// macOS may select that document's remembered input source on activation.
+fn fresh_layout_strokes(layer: KeyLayer) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
+	map_layout_strokes(layer, Keymap::fresh()?)
+}
+
+fn map_layout_strokes(
+	layer: KeyLayer,
+	keymap: Option<std::sync::Arc<Keymap>>,
+) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
+	Ok(keymap.map(|keymap| {
 		move |character| match layer {
 			KeyLayer::Typing => keymap.stroke(character),
 			KeyLayer::Command => keymap.command_key(character).map(|code| Keystroke {
