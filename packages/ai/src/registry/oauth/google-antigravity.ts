@@ -15,6 +15,7 @@ const LOAD_CODE_ASSIST_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:loadCodeA
 const ONBOARD_USER_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:onboardUser`;
 const OPERATIONS_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal`;
 const FREE_TIER_ID = "free-tier";
+export const DEFAULT_FALLBACK_PROJECT_ID = "aicode-consumers";
 const ONBOARD_TIMEOUT_MS = 30_000;
 const ONBOARD_POLL_INTERVAL_MS = 1_000;
 const PROVIDER = "google-antigravity";
@@ -121,15 +122,21 @@ function getFreeTierIneligibility(
 	};
 }
 
-function assertFreeTierEligible(payload: LoadCodeAssistResponse): void {
+function assertFreeTierEligible(payload: LoadCodeAssistResponse, onProgress?: (message: string) => void): void {
 	if (isFreeTierAllowed(payload)) return;
 	const ineligibility = getFreeTierIneligibility(payload);
 	if (!ineligibility) return;
-	const validation = ineligibility.validationUrl ? `\n${ineligibility.validationUrl}` : "";
-	throw new AIError.OAuthError(`${ineligibility.reasonMessage}${validation}`, {
-		kind: "provisioning",
-		provider: PROVIDER,
-	});
+	if (ineligibility.validationUrl) {
+		const validation = `\n${ineligibility.validationUrl}`;
+		throw new AIError.OAuthError(`${ineligibility.reasonMessage}${validation}`, {
+			kind: "provisioning",
+			provider: PROVIDER,
+		});
+	}
+	const reason = ineligibility.reasonMessage.replace(/\.+$/, "");
+	onProgress?.(
+		`Account not eligible for free-tier auto-onboarding: ${reason}. Falling back to default consumer project...`,
+	);
 }
 
 async function requestCloudCodeAssist({
@@ -273,8 +280,11 @@ async function discoverProject(
 	onProgress?.("Checking Cloud Code Assist account status...");
 	try {
 		const initial = await loadCodeAssist(context);
-		assertFreeTierEligible(initial);
+		assertFreeTierEligible(initial, onProgress);
 		if (!hasMessageField(initial, "currentTier")) {
+			if (!isFreeTierAllowed(initial) && getFreeTierIneligibility(initial)) {
+				return DEFAULT_FALLBACK_PROJECT_ID;
+			}
 			onProgress?.("Provisioning the Antigravity free tier...");
 			await onboardUser(context);
 		}
@@ -283,19 +293,12 @@ async function discoverProject(
 		const refreshed = await loadCodeAssist(context);
 		const projectId = extractProjectId(refreshed);
 		if (projectId) return projectId;
-		throw new AIError.OAuthError("loadCodeAssist did not return a cloudaicompanionProject", {
-			kind: "provisioning",
-			provider: PROVIDER,
-		});
+
+		onProgress?.("No companion project returned; falling back to default consumer project...");
+		return DEFAULT_FALLBACK_PROJECT_ID;
 	} catch (error) {
 		throwIfLoginCancelled(signal);
-		if (error instanceof AIError.LoginCancelledError || error instanceof AIError.OAuthError) {
-			throw error;
-		}
-		throw new AIError.OAuthError(
-			`Could not discover an Antigravity project. ${error instanceof Error ? error.message : String(error)}`,
-			{ kind: "discovery", provider: PROVIDER, cause: error },
-		);
+		throw error;
 	}
 }
 

@@ -1205,6 +1205,10 @@
 
 - Updated OpenAI Codex requests to improve routing by communicating the selected model and service tier across Responses, WebSocket, and remote-compaction requests.
 
+### Fixed
+
+- Fixed Antigravity OAuth project discovery failing on accounts with ineligible free-tier provisioning or missing companion project by gracefully falling back to the standard consumer project `aicode-consumers` when no interactive verification challenge is required ([#5019](https://github.com/can1357/oh-my-pi/issues/5019)).
+
 ## [18.1.7] - 2026-09-03
 
 ### Fixed
