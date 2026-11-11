@@ -70,6 +70,7 @@ fn combo_verdict(expected: &str, actual: &str, secure: bool) -> CoreResult<()> {
 	})
 }
 
+#[cfg(target_os = "windows")]
 fn combo_failure(writing: bool) -> super::super::error::DesktopError {
 	super::super::error::DesktopError::ax_failed(if writing {
 		"the combo box may already have changed, but no value or selection was confirmed; select the \
@@ -123,8 +124,8 @@ pub(super) fn set_combo(
 		Controls::{COMBOBOXINFO, GetComboBoxInfo},
 		WindowsAndMessaging::{
 			CB_FINDSTRINGEXACT, CB_GETCURSEL, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE,
-			CBN_SELENDOK, GWL_STYLE, GetDlgCtrlID, GetParent, GetWindowLongW, SMTO_ABORTIFHUNG,
-			SendMessageTimeoutW, WM_COMMAND, WM_GETTEXT, WM_SETTEXT,
+			CBN_SELENDOK, GWL_STYLE, GetDlgCtrlID, GetParent, GetWindowLongW, IsWindow,
+			SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND, WM_GETTEXT, WM_SETTEXT,
 		},
 	};
 
@@ -180,8 +181,16 @@ pub(super) fn set_combo(
 			if send(hwnd, CB_SETCURSEL, index, 0)? != index as isize {
 				return Err(failed());
 			}
+			// Native combo documentation specifies SELENDOK before SELCHANGE:
+			// https://learn.microsoft.com/en-us/windows/win32/controls/about-combo-boxes
 			for code in [CBN_SELENDOK, CBN_SELCHANGE] {
 				send(parent, WM_COMMAND, (id | (code << 16)) as usize, hwnd as isize)?;
+				// A synchronous app handler may destroy the combo. Do not
+				// deliver another notification naming its now-stale HWND.
+				// SAFETY: IsWindow only checks the supplied native handles.
+				if unsafe { IsWindow(hwnd) == 0 || IsWindow(parent) == 0 } {
+					return Err(failed());
+				}
 			}
 			if send(hwnd, CB_GETCURSEL, 0, 0)? != index as isize {
 				return Err(failed());
@@ -291,15 +300,6 @@ mod tests {
 		assert_eq!(plan(true, CBS_DROPDOWNLIST, Some(2)), ComboPlan::Select(2));
 	}
 
-	#[test]
-	fn combo_errors_distinguish_preparation_from_partial_writes() {
-		let preparation = combo_failure(false).to_string();
-		assert!(preparation.contains("nothing was written"));
-		assert!(!preparation.contains("may already have changed"));
-		let partial = combo_failure(true).to_string();
-		assert!(partial.contains("may already have changed"));
-		assert!(!partial.contains("nothing was written"));
-	}
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn combo_preparation_errors_confirm_nothing_was_written() {
@@ -387,6 +387,105 @@ mod tests {
 		static ORIGINAL_COMBO_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
 			= const { std::cell::Cell::new(None) };
 		static ITEM_NAME_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+		static ORIGINAL_PARENT_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
+			= const { std::cell::Cell::new(None) };
+		static DESTROY_ON_NOTIFICATION: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
+		static NOTIFICATIONS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+	}
+
+	#[cfg(target_os = "windows")]
+	unsafe extern "system" fn notification_parent(
+		hwnd: windows_sys::Win32::Foundation::HWND,
+		message: u32,
+		wparam: usize,
+		lparam: isize,
+	) -> isize {
+		use windows_sys::Win32::UI::WindowsAndMessaging::{
+			CallWindowProcW, DestroyWindow, WM_COMMAND,
+		};
+		if message == WM_COMMAND {
+			let code = ((wparam >> 16) & 0xffff) as u32;
+			NOTIFICATIONS.with(|notifications| notifications.borrow_mut().push(code));
+			if code == DESTROY_ON_NOTIFICATION.with(|destroy| destroy.get()) {
+				// SAFETY: lparam is the combo this test created and owns.
+				unsafe { DestroyWindow(lparam as _) };
+			}
+		}
+		let original = ORIGINAL_PARENT_PROC.with(|proc| proc.get());
+		// SAFETY: the test saved this native parent's original procedure.
+		unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) }
+	}
+
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn native_combo_notifications_stop_after_the_target_is_destroyed() {
+		use windows_sys::Win32::UI::WindowsAndMessaging::{
+			CB_ADDSTRING, CBN_SELCHANGE, CBN_SELENDOK, CreateWindowExW, DestroyWindow, GWLP_WNDPROC,
+			IsWindow, SendMessageW, SetWindowLongPtrW, WNDPROC, WS_CHILD, WS_OVERLAPPED,
+		};
+		let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+		// SAFETY: this thread owns the windows and subclasses only its parent;
+		// the strings outlive their synchronous native calls.
+		unsafe {
+			let parent = CreateWindowExW(
+				0,
+				wide("STATIC").as_ptr(),
+				wide("").as_ptr(),
+				WS_OVERLAPPED,
+				0,
+				0,
+				100,
+				100,
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null(),
+			);
+			assert!(!parent.is_null());
+			let original =
+				SetWindowLongPtrW(parent, GWLP_WNDPROC, notification_parent as *const () as isize);
+			ORIGINAL_PARENT_PROC
+				.with(|proc| proc.set(std::mem::transmute::<isize, WNDPROC>(original)));
+			for destroy_on in [u32::MAX, CBN_SELENDOK, CBN_SELCHANGE] {
+				let combo = CreateWindowExW(
+					0,
+					wide("COMBOBOX").as_ptr(),
+					wide("").as_ptr(),
+					WS_CHILD | CBS_DROPDOWN | CBS_HASSTRINGS,
+					0,
+					0,
+					100,
+					100,
+					parent,
+					1 as _,
+					std::ptr::null_mut(),
+					std::ptr::null(),
+				);
+				assert!(!combo.is_null());
+				SendMessageW(combo, CB_ADDSTRING, 0, wide("green").as_ptr() as isize);
+				DESTROY_ON_NOTIFICATION.with(|destroy| destroy.set(destroy_on));
+				NOTIFICATIONS.with(|notifications| notifications.borrow_mut().clear());
+				let result = set_combo(combo, "green", true, false);
+				if destroy_on == u32::MAX {
+					result.unwrap();
+				} else {
+					let error = result.unwrap_err().to_string();
+					assert!(error.contains("may already have changed"), "{error}");
+					assert!(!error.contains("nothing was written"), "{error}");
+				}
+				let expected: &[u32] = if destroy_on == CBN_SELENDOK {
+					&[CBN_SELENDOK]
+				} else {
+					&[CBN_SELENDOK, CBN_SELCHANGE]
+				};
+				NOTIFICATIONS
+					.with(|notifications| assert_eq!(notifications.borrow().as_slice(), expected));
+				if IsWindow(combo) != 0 {
+					DestroyWindow(combo);
+				}
+			}
+			DestroyWindow(parent);
+		}
 	}
 
 	#[cfg(target_os = "windows")]
