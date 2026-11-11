@@ -244,7 +244,8 @@ mod tests {
 
 	#[test]
 	fn posted_input_holding_a_modifier_is_refused() {
-		let refused = |keys: &[(KeyName, u8)]| posted_modifiers_dropped(keys.iter().copied()).is_some();
+		let refused =
+			|keys: &[(KeyName, u8)]| posted_modifiers_dropped(keys.iter().copied()).is_some();
 		// ctrl+a, alt+f, a shift-click and the Windows key
 		assert!(refused(&[(KeyName::Ctrl, 0), (KeyName::Char('a'), 0)]));
 		assert!(refused(&[(KeyName::Alt, 0), (KeyName::Char('f'), 0)]));

@@ -500,7 +500,12 @@ mod background {
 				with_keys(target, &keys, || {
 					post(target, WM_MOUSEMOVE, 0, point)?;
 					control::bounded_hold(duration, |pressed| {
-						post(target, if pressed { down } else { up }, if pressed { button_flag } else { 0 }, point)
+						post(
+							target,
+							if pressed { down } else { up },
+							if pressed { button_flag } else { 0 },
+							point,
+						)
 					})
 				})
 			},
@@ -703,7 +708,8 @@ mod background {
 		}
 
 		/// Posts one key transition. Background keys never hold a modifier
-		/// ([`ensure_unmodified`]), so none is a system key.
+		/// ([`ensure_unmodified`]), so Alt is never down and no transition is a
+		/// `WM_SYSKEY*` message.
 		fn transition(&self, vk: u16, down: bool) -> CoreResult<()> {
 			// SAFETY: MapVirtualKeyW is a pure scalar lookup.
 			let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } & 0xff;
@@ -842,7 +848,7 @@ mod background {
 		control::check()?;
 		let root = hwnd(id)?;
 		ensure_text_supported(id, root)?;
-		let mut emitter = KeyEmitter::to(id, root, element, EventKind::TextInput)?;
+		let emitter = KeyEmitter::to(id, root, element, EventKind::TextInput)?;
 		let mut left: usize = graphemes_str(text)
 			.map(|grapheme| text_units(grapheme).count())
 			.sum();
