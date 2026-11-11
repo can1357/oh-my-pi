@@ -8,7 +8,6 @@ The Eval `browser` facade opens, reuses, scripts, and closes named Chromium, Ele
 - JavaScript/Python facades: `packages/coding-agent/src/tools/browser/prelude.{js,py}`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/browser.md`
 - Model-facing core, sent with the first browser call's output: `packages/coding-agent/src/prompts/tools/browser-core.md`
-- Pre-call safety guidance template: `packages/coding-agent/src/prompts/system/browser-guidance.md`
 - Tab lifecycle: `packages/coding-agent/src/tools/browser/tab-supervisor.ts`
 - Browser worker and inner tab API: `packages/coding-agent/src/tools/browser/tab-worker.ts`
 - Browser registry and launch modes: `packages/coding-agent/src/tools/browser/{registry,launch,attach}.ts`
