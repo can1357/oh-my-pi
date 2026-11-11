@@ -16,8 +16,8 @@ import {
 
 /** Reply the prediction prompt asks for when the model has no confident guess. */
 const SKIP_REPLY = "NO_PREDICTION";
-/** Longer replies are rambling, not a message the user would type; drop them. */
-const MAX_PREDICTION_LENGTH = 500;
+/** The prompt's own one-line limit; a longer reply broke it and is rambling, not a message the user would type. */
+const MAX_PREDICTION_LENGTH = 240;
 /** Most alternatives one request asks for and the composer offers. */
 export const MAX_PREDICTION_CHOICES = 4;
 /**
@@ -83,7 +83,8 @@ export function parseComposerPrediction(reply: string): string | undefined {
 	let text = sanitizeText(reply).replace(/\s+/g, " ").trim();
 	const quoted = WRAPPING_QUOTES.exec(text);
 	if (quoted) text = (quoted[1] ?? quoted[2] ?? quoted[3] ?? "").trim();
-	if (!text || text.includes(SKIP_REPLY) || text.length > MAX_PREDICTION_LENGTH) return undefined;
+	// Characters as the prompt states the limit: code points, so an emoji is one, not two UTF-16 units.
+	if (!text || text.includes(SKIP_REPLY) || [...text].length > MAX_PREDICTION_LENGTH) return undefined;
 	return text;
 }
 
@@ -238,6 +239,7 @@ export class ComposerPredictionController {
 			const { replyText, assistantMessage } = await source.session.runEphemeralTurn({
 				promptText: prompt.render(composerPredictionPrompt, {
 					skip: SKIP_REPLY,
+					maxLength: MAX_PREDICTION_LENGTH,
 					choices: alternatives ? MAX_PREDICTION_CHOICES : undefined,
 				}),
 				maxTokens: source.session.ephemeralMaxTokensPreservesRequest() ? PREDICTION_MAX_TOKENS : undefined,

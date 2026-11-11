@@ -17,6 +17,7 @@
 
 - `curl -fsSL https://omp.sh/install | sh` and `install.ps1` now install the standalone binary by default, even when bun is present, so installs get delta updates; pass `--source`/`-Source` for a bun package install
 - Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+- Composer predictions now first check whether you want something done to what the assistant just produced (reformat it, extend it, retry it, or change one detail) before guessing a new question, and match your usual message length instead of a fixed 20-word cap; suggestions over 240 characters are dropped instead of 500 ([#16689](https://github.com/can1357/oh-my-pi/pull/16689) by [@trukhinyuri](https://github.com/trukhinyuri))
 
 ## [18.18.7] - 2026-11-10
 
