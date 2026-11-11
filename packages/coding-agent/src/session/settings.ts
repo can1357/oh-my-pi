@@ -456,7 +456,10 @@ export function validateSystemPromptTemplates(value: unknown): Record<string, st
 	return value as Record<string, string>;
 }
 
-/** Per-model system prompt: model-selector substring (case-insensitive) → Handlebars template path. Config-file only. */
+/**
+ * Per-model system prompt: model-selector substring (case-insensitive) → Handlebars template path. Config-file only.
+ * Templates should be copies of the bundled `src/prompts/system/system-prompt.md`; see docs/system-prompt-customization.md.
+ */
 export const cfgSystemPromptTemplates = register({
 	id: "systemPromptTemplates",
 	type: "record",

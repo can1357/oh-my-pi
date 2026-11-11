@@ -27,6 +27,7 @@ On Anthropic, the system cache breakpoint lands on the last block before the fir
 | `SYSTEM.md`                             | Discovered config file | Existing plain-text custom route. Used only when no explicit override is supplied.                                                 |
 | `--append-system-prompt <text-or-file>` | CLI                    | Adds plain text to the rendered prompt. Highest append precedence.                                                                 |
 | `APPEND_SYSTEM.md`                      | Discovered config file | Existing plain-text append route; used when the append flag is absent.                                                             |
+| `systemPromptTemplates`                 | `config.yml` setting   | Per-model Handlebars template file. Used only when no custom prompt above applies. See [Per-model templates](#per-model-templates). |
 
 **CLI precedence:** An explicit `--system-prompt` or `--system-prompt-template` flag wins over discovered `SYSTEM_TEMPLATE.md` and `SYSTEM.md`; an explicit `--append-system-prompt` wins over discovered `APPEND_SYSTEM.md`. The two custom-prompt flags are mutually exclusive, and supplying both fails clearly. An explicitly supplied empty `--system-prompt` literal still counts as explicit and suppresses custom-prompt discovery.
 
@@ -124,7 +125,7 @@ on
 
 those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` remain private implementation details for the plain route. The calendar date is not exposed as a template value — it rides a per-request reminder on the first user turn together with the session cwd.
 
-Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. An explicit malformed or empty template fails clearly and is never downgraded to plain text. Discovered empty templates are skipped. Malformed templates discovered by `buildSystemPrompt()` warn and fall back to the bundled prompt; CLI-discovered source is forwarded as explicit SDK input and therefore fails on malformed Handlebars.
+Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / `systemPromptTemplates` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. An explicit malformed or empty template fails clearly and is never downgraded to plain text. Discovered empty templates are skipped. Malformed templates discovered by `buildSystemPrompt()` warn and fall back to the bundled prompt; CLI-discovered source is forwarded as explicit SDK input and therefore fails on malformed Handlebars.
 
 ## Recipes
 
@@ -186,17 +187,28 @@ This is a complete, runnable Handlebars Markdown template. It uses only built-in
 
 ### Per-model templates
 
-`systemPromptTemplates` in `config.yml` maps model-selector substrings to Handlebars template files; it replaces the bundled template for matching models:
+`systemPromptTemplates` in `config.yml` maps model-selector substrings to Handlebars template files. A matching template replaces the bundled `system-prompt.md` for that model:
 
 ```yaml
 systemPromptTemplates:
-  "openrouter/z-ai/glm": ~/.omp/agent/prompts/glm.md
+  "openrouter/qwen": ~/.omp/agent/prompts/qwen-openrouter.md
   "qwen": ~/.omp/agent/prompts/qwen.md
 ```
 
-Keys match the active `provider/model-id` as case-insensitive substrings. When several keys match, the longest (most specific) wins, so `openrouter/qwen` beats `qwen` regardless of config order. Keys must not be blank: use `SYSTEM.md` or `APPEND_SYSTEM.md` for a prompt that applies to every model. Template paths must be absolute or start with `~/`, because relative paths would point at a different file in each project and in subagent worktrees.
+#### Start from the bundled template
 
-Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`, and they also apply to subagent sessions. A template **MUST** reference every field below, because the prompt block for each is produced only by the template:
+Base every per-model template on the bundled default instruction template, [`packages/coding-agent/src/prompts/system/system-prompt.md`](../packages/coding-agent/src/prompts/system/system-prompt.md). Copy that file, then adapt its prose for the target model. It already references every required field below and carries the tool policy, delegation, and workflow guidance a template written from scratch would lose. The [Handlebars template example](#supply-a-handlebars-template) above is not a valid starting point: it lacks required fields. Follow [Migrate the bundled prompt](#migrate-the-bundled-prompt), and diff your copy against the shipped file after each OMP update.
+
+#### Matching
+
+- Keys match the active `provider/model-id` as case-insensitive substrings.
+- When several keys match, the longest wins regardless of config order: above, `openrouter/qwen/qwen3-coder` uses `qwen-openrouter.md` and every other qwen model uses `qwen.md`.
+- Blank keys are rejected. Use `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, or `APPEND_SYSTEM.md` for a prompt that applies to every model.
+- Paths must be absolute or start with `~/`. Relative paths are rejected because they would resolve to a different file in each project and subagent worktree.
+
+#### Required fields
+
+Templates receive the same Handlebars fields as `SYSTEM_TEMPLATE.md`. Each field below produces a prompt section only through the template, so a template **MUST** reference all of them:
 
 - `{{subagent}}`
 - `{{toolInventory}}`
@@ -206,9 +218,14 @@ Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`, and they also 
 - `{{alwaysApplyRules}}`
 - `{{internalUrls}}`
 
-These count wherever the field appears in the template, even inside a branch that never renders (a comment does not count). A template missing any of them is rejected with an error naming the file and the missing fields, instead of silently dropping that guidance. Copying `system-prompt.md` is the safest starting point.
+A reference counts anywhere in the template, including a branch that never renders; a Handlebars comment does not count. A template missing any of them is rejected with an error naming the file and the missing fields.
 
-The prompt re-renders whenever the selected template changes: on `/model` and role switches, on retry-fallback hops, and when `systemPromptTemplates` is edited mid-session. Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence, and the per-model file is not read while one of them applies. If the selected file is missing, OMP logs a warning and uses the bundled prompt. An empty or invalid template file is an error.
+#### Runtime behavior
+
+- Templates also apply to subagent sessions; keep the `{{#if subagent}}` branches from the bundled template.
+- The prompt re-renders when the selected template changes: on `/model` and role switches, retry-fallback hops, and mid-session edits to `systemPromptTemplates`.
+- Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence; the per-model file is not read while one of them applies.
+- A missing file logs a warning and falls back to the bundled prompt. An empty or invalid file is an error.
 
 ### Replace the personality block
 
