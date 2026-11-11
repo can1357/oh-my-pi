@@ -9,6 +9,7 @@
 ### Fixed
 
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
+- GitHub Actions watches now show per-step progress, states, and durations, with Ctrl+O expansion and native Tern Surface Protocol views (by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.18.9] - 2026-11-11
 

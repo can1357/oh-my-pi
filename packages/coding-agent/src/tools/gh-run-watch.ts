@@ -33,11 +33,12 @@ import type {
 	GhActionsJobsResponse,
 	GhActionsRunApi,
 	GhActionsRunListResponse,
+	GhActionsStepApi,
 	GhBranchApiResponse,
 	GhRunReference,
 	GithubInput,
 } from "./gh-types";
-import type { GhFailedJobLog, GhRunJobSnapshot, GhRunSnapshot } from "@oh-my-pi/pi-tui/tools/github";
+import type { GhFailedJobLog, GhRunJobSnapshot, GhRunSnapshot, GhRunStepSnapshot } from "@oh-my-pi/pi-tui/tools/github";
 import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -98,6 +99,22 @@ export function parseRunReference(value: string | undefined): GhRunReference {
 	};
 }
 
+function normalizeRunStep(step: GhActionsStepApi): GhRunStepSnapshot | null {
+	const number = step.number;
+	if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) {
+		return null;
+	}
+
+	return {
+		number,
+		name: normalizeOptionalString(step.name) ?? `step-${number}`,
+		status: normalizeOptionalString(step.status),
+		conclusion: normalizeOptionalString(step.conclusion),
+		startedAt: normalizeOptionalString(step.started_at),
+		completedAt: normalizeOptionalString(step.completed_at),
+	};
+}
+
 export function normalizeRunJob(job: GhActionsJobApi): GhRunJobSnapshot | null {
 	if (typeof job.id !== "number") {
 		return null;
@@ -111,6 +128,13 @@ export function normalizeRunJob(job: GhActionsJobApi): GhRunJobSnapshot | null {
 		startedAt: normalizeOptionalString(job.started_at),
 		completedAt: normalizeOptionalString(job.completed_at),
 		url: normalizeOptionalString(job.html_url),
+		...(job.steps == null
+			? {}
+			: {
+					steps: job.steps
+						.map(step => normalizeRunStep(step))
+						.filter((step): step is GhRunStepSnapshot => step !== null),
+				}),
 	};
 }
 
@@ -211,14 +235,27 @@ export function parseTimestampMs(value: string | undefined): number | undefined 
 	return Number.isNaN(timestamp) ? undefined : timestamp;
 }
 
-export function getJobDurationSeconds(job: GhRunJobSnapshot, observedAtMs: number): number | undefined {
-	const startedAtMs = parseTimestampMs(job.startedAt);
-	if (startedAtMs === undefined) {
+function getDurationSeconds(
+	startedAt: string | undefined,
+	completedAt: string | undefined,
+	observedAtMs: number,
+): number | undefined {
+	const startedAtMs = parseTimestampMs(startedAt);
+	// GitHub returns Go's zero time for timestamps on steps that have not
+	// started yet. It parses as a valid, ancient date, but must not become an
+	// elapsed duration.
+	if (startedAtMs === undefined || startedAtMs <= 0) {
 		return undefined;
 	}
 
-	const completedAtMs = parseTimestampMs(job.completedAt) ?? observedAtMs;
+	const parsedCompletedAtMs = parseTimestampMs(completedAt);
+	const completedAtMs =
+		parsedCompletedAtMs !== undefined && parsedCompletedAtMs > 0 ? parsedCompletedAtMs : observedAtMs;
 	return Math.max(0, Math.floor((completedAtMs - startedAtMs) / 1000));
+}
+
+export function getJobDurationSeconds(job: GhRunJobSnapshot, observedAtMs: number): number | undefined {
+	return getDurationSeconds(job.startedAt, job.completedAt, observedAtMs);
 }
 
 export function buildRunWatchJobDetails(job: GhRunJobSnapshot, observedAtMs: number): GhRunWatchJobDetails {
@@ -228,6 +265,17 @@ export function buildRunWatchJobDetails(job: GhRunJobSnapshot, observedAtMs: num
 		status: job.status,
 		conclusion: job.conclusion,
 		durationSeconds: getJobDurationSeconds(job, observedAtMs),
+		...(job.steps === undefined
+			? {}
+			: {
+					steps: job.steps.map(step => ({
+						number: step.number,
+						name: step.name,
+						status: step.status,
+						conclusion: step.conclusion,
+						durationSeconds: getDurationSeconds(step.startedAt, step.completedAt, observedAtMs),
+					})),
+				}),
 		url: job.url,
 	};
 }
