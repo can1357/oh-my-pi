@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The extension tells omp whether Chrome has a print preview open, so a browser call a page's `window.print()` holds fails at once with the preview named
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

@@ -1945,6 +1945,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		userDriven,
 		relay: browser.kind.kind === "relay",
+		printPreview: true,
 	};
 }
 
@@ -2160,6 +2161,8 @@ async function recycleTimedOutWorkerTab(
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
 		relay: tab.kindTag === "relay",
+		// A recycled tab of a browser omp launched keeps that browser's printing-off profile.
+		printPreview: tab.kindTag !== "headless",
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.

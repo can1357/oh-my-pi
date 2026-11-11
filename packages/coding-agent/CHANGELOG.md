@@ -24,6 +24,7 @@
 ### Fixed
 
 - A page calling `window.print()` no longer hangs the browser omp launches: its profile starts with printing turned off, so `print()` returns at once and `tab.pdf()` still makes PDFs
+- In a browser omp attaches to (the relay, `app.cdp_url`, `app.path`), a call that a page's print preview holds now fails within about a second with an error saying a print preview is open and what clears it (the user cancels it, or navigating away), instead of timing out and killing the tab; the tab keeps its page
 
 ## [18.18.8] - 2026-11-11
 

@@ -46,7 +46,9 @@ export type RelayRpcRequest =
 	 * Where Chrome saved the download a driven page reported as `guid` (`Page.downloadWillBegin`), as a
 	 * {@link FoundDownload}.
 	 */
-	| { op: "findDownload"; guid: string };
+	| { op: "findDownload"; guid: string }
+	/** Whether a print preview is open in the extension's browser: `true` or `false`. */
+	| { op: "printPreviewOpen" };
 
 /** The extension's answer to `findDownload`: null when it paired no Chrome download with that report. */
 export type FoundDownload = { filename: string; state: "in_progress" | "interrupted" | "complete" } | null;
@@ -68,6 +70,9 @@ export const FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different ext
 
 /** Hello capability of an extension that answers `findDownload` (it holds Chrome's `downloads` permission). */
 export const DOWNLOADS_PROTOCOL_VERSION = 1;
+
+/** Hello capability of an extension that answers `printPreviewOpen`. */
+export const PRINT_PREVIEW_PROTOCOL_VERSION = 1;
 /**
  * Whether a relay or extension reported a well-formed omp release version.
  * Stricter than `Bun.semver.order`, which ranks strings with trailing text;
@@ -132,6 +137,8 @@ export type ExtToRelayMessage =
 			reloadProtocol?: number;
 			/** {@link DOWNLOADS_PROTOCOL_VERSION} when the extension answers `findDownload`. Absent in older extensions. */
 			downloadsProtocol?: number;
+			/** {@link PRINT_PREVIEW_PROTOCOL_VERSION} when the extension answers `printPreviewOpen`. Absent in older extensions. */
+			printPreviewProtocol?: number;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

@@ -112,6 +112,11 @@ export type WorkerInitPayload =
 			userDriven?: boolean;
 			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
 			relay?: boolean;
+			/**
+			 * The browser can open a print preview over the page: omp attached to it rather than launching it on a profile
+			 * it seeded with printing off. Each run then checks whether a preview holds the page.
+			 */
+			printPreview?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */

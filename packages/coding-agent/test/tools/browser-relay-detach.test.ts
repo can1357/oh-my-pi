@@ -9,7 +9,10 @@ import {
 	ensureChromiumExecutable,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
+import {
+	DISCARDED_TABS_PROTOCOL_VERSION,
+	PRINT_PREVIEW_PROTOCOL_VERSION,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import * as tabSupervisor from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { getTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
@@ -36,6 +39,8 @@ class ChromeBackedExtension {
 	readonly #relay: WebSocket;
 	readonly #chrome: WebSocket;
 	#seq = 0;
+	/** Leave this many `printPreviewOpen` questions unanswered, as a busy extension would. */
+	unansweredPrintPreviewChecks = 0;
 	readonly #replies = new Map<number, (message: Record<string, unknown>) => void>();
 	/** The page target's flat session while "chrome.debugger" is attached. */
 	#root: string | undefined;
@@ -83,6 +88,7 @@ class ChromeBackedExtension {
 				userAgent: "test",
 				browserVersion: "Chrome/151.0.0.0",
 				discardedTabsProtocol: DISCARDED_TABS_PROTOCOL_VERSION,
+				printPreviewProtocol: PRINT_PREVIEW_PROTOCOL_VERSION,
 				tabs: [
 					{
 						tabId: TAB_ID,
@@ -184,6 +190,18 @@ class ChromeBackedExtension {
 				if (!this.#inFlight.delete(sent.id)) return;
 				if (isRecord(answer.error)) return this.#reply(id, { error: String(answer.error.message) });
 				return this.#reply(id, { result: answer.result });
+			}
+			case "printPreviewOpen": {
+				if (this.unansweredPrintPreviewChecks > 0) {
+					this.unansweredPrintPreviewChecks--;
+					return;
+				}
+				// `chrome.debugger.getTargets()` lists the preview as a `chrome://print/` page; so does Chrome's own target list.
+				const { result } = await this.#chromeSend("Target.getTargets", {}).promise;
+				const infos = isRecord(result) && Array.isArray(result.targetInfos) ? result.targetInfos : [];
+				return this.#reply(id, {
+					result: infos.some(info => isRecord(info) && String(info.url).startsWith("chrome://print")),
+				});
 			}
 			default:
 				return this.#reply(id, { result: {} });
@@ -755,6 +773,146 @@ describe("relay tabs Chrome detaches omp from", () => {
 				resume.resolve();
 				held.mockRestore();
 			}
+		},
+		60_000,
+	);
+
+	/**
+	 * Hold `target` the way Chrome's print preview holds a page that called `print()`: a `chrome://print/` page is open,
+	 * and a click on `#print` stops the page's script in a nested wait that still runs a plain evaluation but settles
+	 * no promise. Headless Chrome opens no preview; a debugger pause waits the same way. Resolves to the release.
+	 */
+	async function holdLikePrintPreview(target: Page): Promise<() => Promise<void>> {
+		if (!chromium) throw new Error("Chromium not launched");
+		await target.evaluate(
+			`document.body.insertAdjacentHTML("beforeend", '<button id="print" onclick="debugger">Print</button>')`,
+		);
+		const debuggee = await target.createCDPSession();
+		await debuggee.send("Debugger.enable");
+		const browserSession = await chromium.target().createCDPSession();
+		const { targetId } = await browserSession.send("Target.createTarget", { url: "chrome://print/" });
+		return async () => {
+			await debuggee.send("Debugger.resume").catch(() => undefined);
+			await debuggee.detach();
+			await browserSession.send("Target.closeTarget", { targetId });
+			await browserSession.detach();
+		};
+	}
+
+	/**
+	 * On the open tab: a held call fails with the preview named instead of running to its timeout, and the page
+	 * survives. Through the relay, `ext` also shows a slow call the preview does not hold running to its end, a check
+	 * the extension never answers giving way to the next, and the failed call's held key being released.
+	 */
+	async function expectPrintPreviewReported(ext?: ChromeBackedExtension): Promise<void> {
+		if (!page) throw new Error("page missing");
+		const release = await holdLikePrintPreview(page);
+		try {
+			let keyUp: Promise<void> | undefined;
+			if (ext) {
+				const promiseCheck = (params: unknown) => isRecord(params) && params.expression === "Promise.resolve()";
+				const firstCheck = ext.nextSend("Runtime.evaluate", promiseCheck);
+				const slow = invoke({
+					action: "run",
+					// omp evaluates in its own world; the page's DOM is what both sides share.
+					code: `return await page.evaluate(() => new Promise(resolve => new MutationObserver(() => resolve(document.documentElement.dataset.release)).observe(document.documentElement, { attributeFilter: ["data-release"] })));`,
+					timeout: 20,
+				});
+				await firstCheck;
+				// A second check runs only after the first found the page answering.
+				await ext.nextSend("Runtime.evaluate", promiseCheck);
+				await page.evaluate("document.documentElement.dataset.release = 'slow'");
+				expect((await slow).value).toBe("slow");
+				ext.unansweredPrintPreviewChecks = 1;
+				keyUp = ext.nextSend("Input.dispatchKeyEvent", params => isRecord(params) && params.type === "keyUp");
+			}
+			const failure = await invoke({
+				action: "run",
+				code: ext ? "await tab.keyDown('Shift'); await tab.click('#print');" : "await tab.click('#print');",
+				timeout: 20,
+			}).catch((error: unknown) => error);
+			expect(String(failure)).toContain("print preview is holding it");
+			await keyUp;
+		} finally {
+			await release();
+		}
+		// The tab was neither reloaded nor replaced.
+		expect((await invoke(readMark)).value).toBe("kept");
+	}
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"fails a relay call a print preview holds and keeps the tab, but not a slow call beside the preview",
+		async () => {
+			await expectPrintPreviewReported(await openRelayTab());
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"fails a connected browser's call a print preview holds and keeps the tab",
+		async () => {
+			if (!chromium || !site) throw new Error("Chromium not launched");
+			extension = undefined;
+			relay = undefined;
+			page = await chromium.newPage();
+			const caseId = crypto.randomUUID();
+			pageUrl = `${site.url}login?case=${caseId}`;
+			await page.goto(pageUrl);
+			tool = {
+				cwd: "/tmp",
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				settings: Settings.isolated({
+					"browser.enabled": true,
+					"browser.relay": false,
+					"browser.cmux": false,
+					"browser.tern": false,
+					"tools.maxTimeout": 0,
+				}),
+			};
+			const cdpUrl = `http://${new URL(chromium.wsEndpoint()).host}`;
+			await invoke({ action: "open", app: { cdp_url: cdpUrl, target: caseId }, timeout: 20 });
+			await invoke({ action: "run", code: "await page.evaluate(() => { window.mark = 'kept'; });", timeout: 10 });
+			await expectPrintPreviewReported();
+		},
+		60_000,
+	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"never checks a browser omp launched for a print preview, before or after a recycle",
+		async () => {
+			if (!site) throw new Error("site not started");
+			tool = {
+				cwd: "/tmp",
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				settings: Settings.isolated({
+					"browser.enabled": true,
+					"browser.relay": false,
+					"browser.cmux": false,
+					"browser.tern": false,
+					"tools.maxTimeout": 0,
+				}),
+			};
+			// A spy calls through: the init messages still reach the workers.
+			const sent = spyOn(Worker.prototype, "postMessage");
+			let posted: unknown[] = [];
+			try {
+				await invoke({ action: "open", url: `${site.url}login`, timeout: 20 });
+				// A run past its timeout recycles the tab onto a new worker.
+				await invoke({ action: "run", ...HANG, timeout: 2 }).catch(() => undefined);
+				await invoke(readMark);
+			} finally {
+				posted = sent.mock.calls.map(([msg]) => msg);
+				sent.mockRestore();
+			}
+			const inits = posted.filter(msg => isRecord(msg) && msg.type === "init");
+			expect(inits.length).toBe(2);
+			expect(inits.map(msg => isRecord(msg) && isRecord(msg.payload) && msg.payload.printPreview === true)).toEqual([
+				false,
+				false,
+			]);
 		},
 		60_000,
 	);
