@@ -697,6 +697,19 @@ diff --git a/lib/puppeteer/common/WaitTask.js b/lib/puppeteer/common/WaitTask.js
 index eee0d68b24442c5628266663a2d6334a7f1f1540..24a07eec697f644c4f6219d66efbd7420cc1ffe3 100644
 --- a/lib/puppeteer/common/WaitTask.js
 +++ b/lib/puppeteer/common/WaitTask.js
+@@ -156,6 +156,12 @@ export class WaitTask {
+             if (error.message.includes('Cannot find context with specified id')) {
+                 return;
+             }
++            // A cross-process navigation can reuse the numeric context id
++            // before Page.frameNavigated invalidates the old utility handle.
++            // Let the replacement context rearm this wait, as above.
++            if (error.message.includes('Argument should belong to the same JavaScript world as target object')) {
++                return;
++            }
+             // Errors coming from WebDriver BiDi. TODO: Adjust messages after
+             // https://github.com/w3c/webdriver-bidi/issues/540 is resolved.
+             if (error.message.includes('DiscardedBrowsingContextError')) {
 @@ -176,6 +176,9 @@ export class WaitTask {
   */
  export class TaskManager {
