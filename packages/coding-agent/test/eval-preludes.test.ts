@@ -176,6 +176,11 @@ describe("eval prelude host invocation", () => {
 		};
 		expect(noted("const tabs = await probe.list?.(); print(tabs)")).toBe(1);
 		expect(noted("print(Object.keys(probe))")).toBe(1);
+		expect(noted("print(Object.keys(globalThis.probe))")).toBe(1);
+		expect(noted("const { probe: alias } = globalThis; print(Object.keys(alias))")).toBe(1);
+		expect(noted("const { probe } = globalThis; print(Object.keys(probe))")).toBe(1);
+		expect(noted("print(Object.keys(page.globalThis.probe))")).toBe(0);
+		expect(noted("const { probe: alias } = page; print(Object.keys(alias))")).toBe(0);
 		expect(noted('print("open the probe") // probe\nprint(page.probe, myprobe, Object.keys(globalThis))')).toBe(0);
 		expect(noted('# probe\nprint("""probe""")')).toBe(0);
 	});

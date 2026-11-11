@@ -2061,18 +2061,24 @@ export class SessionTools {
 	 * the live set), compaction (which drops old notices), and resume.
 	 */
 	takeEvalPreludeNotice(): CustomMessage<EvalPreludeNoticeDetails> | undefined {
-		const known = new Set(this.#promptSurface.evalPreludes.map(definition => definition.name));
+		const known = new Map(
+			this.#promptSurface.evalPreludes.map(definition => [definition.name, this.#baseSystemPrompt.join("\n\n")]),
+		);
 		for (const message of this.#host.agent.state.messages) {
 			if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_NOTICE_MESSAGE_TYPE) continue;
 			const details = message.details;
 			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.added) if (typeof name === "string") known.set(name, String(message.content));
 			for (const name of details.removed) if (typeof name === "string") known.delete(name);
 		}
 		const live = this.#host.evalPreludes();
 		const liveNames = new Set(live.map(definition => definition.name));
-		const added = live.filter(definition => !known.has(definition.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
+		const added = live.filter(
+			definition =>
+				!known.has(definition.name) ||
+				(Boolean(definition.guidance) && !known.get(definition.name)?.includes(definition.guidance!.trim())),
+		);
+		const removed = [...known.keys()].filter(name => !liveNames.has(name));
 		if (added.length === 0 && removed.length === 0) return undefined;
 		// Topic docs are served through `read`; sessions without it get them inline,
 		// matching the eval description's `inlineTopics` fallback.

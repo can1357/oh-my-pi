@@ -116,7 +116,9 @@ export function noteEvalPreludesNamed(code: string, session: ToolSession): void 
 	const bare = code.replace(STRINGS_AND_COMMENTS, '""');
 	for (const definition of getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])) {
 		if (!definition.firstCallDocumentation?.trim()) continue;
-		const named = new RegExp(`(?<![\\w$./-])${definition.name}(?![\\w$/-]|\\s*:)`).test(bare);
+		const named =
+			new RegExp(`(?<![\\w$./-])(?:globalThis\\s*\\.\\s*)?${definition.name}(?![\\w$/-]|\\s*:)`).test(bare) ||
+			new RegExp(`\\{[^{}]*\\b${definition.name}\\s*[:,}=][^{}]*\\}\\s*=\\s*globalThis\\b`).test(bare);
 		if (named) session.noteEvalPreludeCall(definition.name);
 	}
 }
