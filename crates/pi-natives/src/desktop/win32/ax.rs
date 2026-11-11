@@ -485,7 +485,7 @@ impl AxBackend for Win32Ax {
 		let class = hwnd.map_or_default(window::class_name);
 		match super::value_write::route(&class) {
 			super::value_write::ValueRoute::Combo => {
-				super::value_write::set_combo(
+				return super::value_write::set_combo(
 					hwnd.ok_or_else(|| {
 						DesktopError::ax_failed(
 							"combo box has no native window; select the item via press/click instead",
@@ -493,7 +493,8 @@ impl AxBackend for Win32Ax {
 					})?,
 					text,
 					element.is_enabled().map_err(ax_error)?,
-				)?;
+					secure,
+				);
 			},
 			super::value_write::ValueRoute::RefuseCombo => {
 				return Err(DesktopError::ax_failed(

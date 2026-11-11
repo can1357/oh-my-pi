@@ -27,6 +27,10 @@
 
 - Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
 
+### Fixed
+
+- Windows `setValue()` now confirms text values, notifies the app for native combo changes, and refuses combo-box writes it cannot verify or notify reliably, including extended-combo descendants; native combo messages are timeout-bounded without provider item-name calls, and inexact matches report an unverified value that may have changed ([#18915](https://github.com/can1357/oh-my-pi/pull/18915) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
