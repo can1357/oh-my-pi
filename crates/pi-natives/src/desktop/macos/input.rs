@@ -501,11 +501,11 @@ fn layout_lookup(
 ) -> impl Fn(char) -> Option<Keystroke> {
 	move |character| match layer {
 		KeyLayer::Typing => keymap.stroke(character),
-		KeyLayer::Command => keymap.command_key(character).map(|code| Keystroke {
-			code,
-			shift: false,
-			option: false,
-		}),
+		KeyLayer::Command => {
+			keymap
+				.command_key(character)
+				.map(|code| Keystroke { code, shift: false, option: false })
+		},
 	}
 }
 
