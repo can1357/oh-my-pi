@@ -886,7 +886,7 @@ impl X11Capture {
 				Err(error) => return Err(request_failed(error)),
 			}
 		}
-		image::imageops::overlay(image, &part, i64::from(part_x - x), i64::from(part_y - y));
+		draw_over(image, &part, ((part_x - x) as u32, (part_y - y) as u32));
 		Ok(true)
 	}
 
@@ -1201,6 +1201,42 @@ fn rectangle_at((x, y): (i32, i32), rectangle: &Rectangle) -> Area {
 		u32::from(rectangle.width),
 		u32::from(rectangle.height),
 	)
+}
+
+/// Draws `part` over `image` with its top-left at `(left, top)` the way a
+/// compositing manager does: in premultiplied alpha, each product rounded to
+/// the nearest step, so a menu's translucent shadow comes out as on screen.
+fn draw_over(image: &mut RgbaImage, part: &RgbaImage, (left, top): (u32, u32)) {
+	let scale = |value: u32, alpha: u32| (value * alpha + 127) / 255;
+	let (width, height) = image.dimensions();
+	for (column, row, source) in part.enumerate_pixels() {
+		let (column, row) = (left + column, top + row);
+		if column >= width || row >= height {
+			continue;
+		}
+		let target = image.get_pixel_mut(column, row);
+		let [red, green, blue, opacity] = source.0.map(u32::from);
+		match opacity {
+			0 => {},
+			255 => *target = *source,
+			_ => {
+				let [below_red, below_green, below_blue, below_opacity] = target.0.map(u32::from);
+				let keep = 255 - opacity;
+				let alpha = opacity + scale(below_opacity, keep);
+				let channel = |source: u32, below: u32| {
+					let premultiplied =
+						scale(source, opacity) + scale(scale(below, below_opacity), keep);
+					((premultiplied * 255 + alpha / 2) / alpha).min(255) as u8
+				};
+				*target = Rgba([
+					channel(red, below_red),
+					channel(green, below_green),
+					channel(blue, below_blue),
+					alpha as u8,
+				]);
+			},
+		}
+	}
 }
 
 /// Clears the pixels of `image` outside `shape`, rectangles relative to the
@@ -1938,5 +1974,33 @@ mod tests {
 		let data = [0x00, 0xf8, 0xe0, 0x07, 0x1f, 0x00, 0, 0];
 		let image = zpixmap_to_rgba(&data, 3, 1, 16, 16, 32, true, masks).expect("decode");
 		assert_eq!(image.as_raw().as_slice(), [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
+	}
+
+	#[test]
+	fn translucent_popup_pixels_land_as_a_compositor_draws_them() {
+		// pixman's OVER onto an opaque window: source + destination * (255 -
+		// alpha) / 255, in premultiplied alpha, each product rounded to nearest.
+		let mul = |a: u32, b: u32| {
+			let t = a * b + 0x80;
+			((t >> 8) + t) >> 8
+		};
+		for alpha in 1..255u32 {
+			for premultiplied in (0..=alpha).step_by(7) {
+				let masks =
+					ColorMasks { red: 0xff_0000, green: 0xff00, blue: 0xff, alpha: 0xff00_0000 };
+				let raw = (alpha << 24 | premultiplied << 16).to_le_bytes();
+				let popup = zpixmap_to_rgba(&raw, 1, 1, 32, 32, 32, true, masks).expect("decode");
+				for below in (0..=255u32).step_by(15) {
+					let mut image = RgbaImage::from_pixel(1, 1, Rgba([below as u8, 0, 0, 255]));
+					draw_over(&mut image, &popup, (0, 0));
+					let expected = premultiplied + mul(below, 255 - alpha);
+					assert_eq!(
+						pixel(&image, (0, 0)),
+						[expected as u8, 0, 0, 255],
+						"alpha {alpha}, source {premultiplied}, below {below}"
+					);
+				}
+			}
+		}
 	}
 }
