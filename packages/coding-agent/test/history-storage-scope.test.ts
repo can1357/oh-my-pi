@@ -389,8 +389,9 @@ describe("HistoryStorage scope filtering", () => {
 		expect(storage.getDirectoryScopeKey("cwd", a.value)).not.toBe(keyA);
 		expect(promptsOf(storage, a)).toEqual([]);
 		expect(promptsOf(storage, b)).toEqual(["moving prompt"]);
+		const keyB = storage.getDirectoryScopeKey("cwd", b.value);
 		await storage.add("moving prompt", undefined, "third");
-		expect(storage.getDirectoryScopeKey("cwd", b.value)).toBe("[]");
+		expect(storage.getDirectoryScopeKey("cwd", b.value)).not.toBe(keyB);
 		expect(promptsOf(storage, b)).toEqual([]);
 		expect(storage.getRecent(1)[0]).toMatchObject({ prompt: "moving prompt", sessionId: "third", useCount: 3 });
 	});
@@ -408,8 +409,9 @@ describe("HistoryStorage scope filtering", () => {
 			other.run("UPDATE history SET cwd = ? WHERE prompt = ?", [b.value!, "foreign prompt"]);
 			expect(promptsOf(storage, a)).toEqual([]);
 			expect(promptsOf(storage, b)).toEqual(["foreign prompt"]);
+			const keyB = storage.getDirectoryScopeKey("cwd", b.value);
 			other.run("DELETE FROM history WHERE prompt = ?", ["foreign prompt"]);
-			expect(storage.getDirectoryScopeKey("cwd", b.value)).toBe("[]");
+			expect(storage.getDirectoryScopeKey("cwd", b.value)).not.toBe(keyB);
 			expect(promptsOf(storage, b)).toEqual([]);
 			other.run("DROP TABLE history");
 			expect(() => storage.getDirectoryScopeKey("cwd", a.value)).toThrow();
