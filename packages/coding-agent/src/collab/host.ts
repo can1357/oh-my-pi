@@ -30,6 +30,7 @@ import type { SessionEntry as StoredSessionEntry } from "../session/session-entr
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
+import { CollabTestIsolationError } from "./paths";
 import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
@@ -576,9 +577,14 @@ export class CollabHost {
 		// succeeded. Publication failure warns but never breaks hosting (#6099).
 		// The in-flight task is tracked so a stop() that overtakes it withdraws
 		// the result before resolving: a successor room reuses this endpoint.
+		let isolationError: CollabTestIsolationError | undefined;
 		const publishing = publishCollabHost(this.#registrySource(), { instanceId: this.#instanceId }).then(
 			publication => publication,
 			err => {
+				if (err instanceof CollabTestIsolationError) {
+					isolationError = err;
+					return null;
+				}
 				logger.warn("Collab host registry publication failed", { error: String(err) });
 				this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
 					dim: true,
@@ -589,6 +595,10 @@ export class CollabHost {
 		this.#pendingPublication = publishing;
 		const publication = await publishing;
 		this.#pendingPublication = null;
+		if (isolationError) {
+			await this.#teardown();
+			throw isolationError;
+		}
 		if (this.ending) {
 			// stop() began, or the relay closed fatally, while publication was in
 			// flight: withdraw it here too (close is idempotent) and refuse to

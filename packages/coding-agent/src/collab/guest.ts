@@ -37,6 +37,7 @@ import { GuestLifecycleEmitter } from "../extensibility/extensions/lifecycle-mir
 import { setSessionTerminalTitle } from "../utils/title-generator";
 import { importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
+import { assertIsolatedTestCollabDir } from "./paths";
 import {
 	type AgentSnapshot,
 	COLLAB_PROTO,
@@ -205,8 +206,14 @@ function omittedStreamDeltas(
 	return omitted;
 }
 
+export interface CollabGuestOptions {
+	/** Override directory for guest replica `.jsonl` snapshots. Defaults to `<configRoot>/collab`. */
+	replicaDir?: string;
+}
+
 export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
+	readonly #replicaDir: string | undefined;
 	#socket: CollabSocket | null = null;
 	#roomId = "";
 	/**
@@ -321,8 +328,9 @@ export class CollabGuestLink {
 		return true;
 	}
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: InteractiveModeContext, options?: CollabGuestOptions) {
 		this.#ctx = ctx;
+		this.#replicaDir = options?.replicaDir;
 	}
 
 	async join(link: string): Promise<void> {
@@ -545,7 +553,8 @@ export class CollabGuestLink {
 		this.#pendingSnapshot = null;
 		this.#clearSnapshotProgressTimer();
 		if (!pending || this.#left) return;
-		const replicaPath = path.join(getConfigRootDir(), "collab", `${this.#roomId}-${this.#replicaId}.jsonl`);
+		const replicaDir = assertIsolatedTestCollabDir(this.#replicaDir ?? path.join(getConfigRootDir(), "collab"));
+		const replicaPath = path.join(replicaDir, `${this.#roomId}-${this.#replicaId}.jsonl`);
 		// A child of the host's session, as a sibling move is.
 		const header = {
 			...pending.header,

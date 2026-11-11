@@ -29,6 +29,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { getBaseConfigRoot, isEnoent, isFsError } from "@oh-my-pi/pi-utils";
+import { assertIsolatedTestCollabDir } from "./paths";
 
 /** Discovery metadata / IPC protocol version. Mixed omp versions fail safely. */
 export const COLLAB_REGISTRY_VERSION = 1;
@@ -161,7 +162,7 @@ export class CollabLinkError extends Error {
  * discoverable from any other (issue #6099 user story 18).
  */
 export function collabHostsRuntimeDir(): string {
-	return path.join(getBaseConfigRoot(), "run", "collab-hosts");
+	return assertIsolatedTestCollabDir(path.join(getBaseConfigRoot(), "run", "collab-hosts"));
 }
 
 interface DiscoveryMetadata {
@@ -397,7 +398,7 @@ export async function publishCollabHost(
 	source: CollabHostRegistrySource,
 	options?: CollabPublishOptions,
 ): Promise<CollabHostPublication> {
-	const dir = options?.dir ?? collabHostsRuntimeDir();
+	const dir = assertIsolatedTestCollabDir(options?.dir ?? collabHostsRuntimeDir());
 	await ensurePrivateDir(dir);
 
 	const instanceId = options?.instanceId ?? crypto.randomBytes(8).toString("hex");
@@ -606,7 +607,7 @@ async function listEntry(dir: string, name: string, timeoutMs: number): Promise<
 }
 
 async function listLiveEntries(options?: CollabListOptions): Promise<LiveEntry[]> {
-	const dir = options?.dir ?? collabHostsRuntimeDir();
+	const dir = assertIsolatedTestCollabDir(options?.dir ?? collabHostsRuntimeDir());
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
 	let names: string[];
 	try {
