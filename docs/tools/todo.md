@@ -51,7 +51,8 @@ The tool returns a single-shot `AgentToolResult`:
 
 - `content`: one text part containing the summary from `formatSummary(...)`.
    - Empty final state with no errors: `Todo list cleared.` (`Todo list is empty.` for a pure-`view` call).
-   - Non-empty final state: remaining-item list, current phase progress, then a per-phase tree.
+   - Successful non-empty mutation: remaining count and first remaining item, overall/current phase progress, and `Use op: "view" for the full task list.` The per-phase tree is omitted; structured details still contain every task.
+   - Non-empty `view` or op-specific error: full remaining-item list, current phase progress, then a per-phase tree.
    - Op-specific errors prefix the summary with `Errors: ...`; schema failures instead return `Invalid todo arguments: ...`. Both set `isError: true` and leave returned/persisted phases at their pre-call state.
 - `details`:
    - `phases: TodoPhase[]`

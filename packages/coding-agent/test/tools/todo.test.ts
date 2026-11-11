@@ -73,9 +73,12 @@ describe("TodoTool auto-start behavior", () => {
 		expect(tasks.map(task => task.status)).toEqual(["in_progress", "pending"]);
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary from todo");
-		expect(summary.text).toContain("Remaining items (2):");
+		expect(summary.text).toContain("Remaining items: 2. First remaining item:");
 		expect(summary.text).toContain("status [in_progress] (Execution)");
-		expect(summary.text).toContain("diagnostics [pending] (Execution)");
+		expect(summary.text).not.toContain("diagnostics");
+		expect(summary.text).not.toContain("  Execution:");
+		expect(summary.text).toContain('Use op: "view" for the full task list.');
+		expect(tasks.map(task => task.content)).toEqual(["status", "diagnostics"]);
 	});
 
 	it("auto-promotes the next pending task when current task is completed", async () => {
@@ -92,7 +95,7 @@ describe("TodoTool auto-start behavior", () => {
 		expect(result.details?.completedTasks).toEqual([{ phase: "Execution", content: "status" }]);
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary from todo");
-		expect(summary.text).toContain("Remaining items (1):");
+		expect(summary.text).toContain("Remaining items: 1. First remaining item:");
 		expect(summary.text).toContain("diagnostics [in_progress] (Execution)");
 		const completedResult = await tool.execute("call-3", { op: "done", task: "diagnostics" });
 		const completedSummary = completedResult.content.find(part => part.type === "text");
@@ -100,6 +103,8 @@ describe("TodoTool auto-start behavior", () => {
 			throw new Error("Expected text summary from todo");
 		}
 		expect(completedSummary.text).toContain("Remaining items: none.");
+		expect(completedSummary.text).toContain('Use op: "view" for the full task list.');
+		expect(completedSummary.text).not.toContain("    - [X]");
 	});
 });
 
@@ -310,7 +315,7 @@ describe("TodoTool operations", () => {
 		const summary = blocked.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary from todo");
 		// `a` stays the only open item; `b` leaves the remaining/open set but is surfaced as blocked.
-		expect(summary.text).toContain("Remaining items (1):");
+		expect(summary.text).toContain("Remaining items: 1. First remaining item:");
 		expect(summary.text).toContain("1 blocked");
 
 		const unblocked = await tool.execute("call-3", { op: "unblock", task: "b" });
@@ -494,6 +499,7 @@ describe("TodoTool operations", () => {
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Todo list cleared.");
+		expect(summary.text).not.toContain('Use op: "view"');
 	});
 
 	it("drops all tasks in a phase", async () => {
@@ -530,6 +536,38 @@ describe("TodoTool operations", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("First");
 		expect(summary.text).toContain("Second");
+		expect(summary.text).toContain("Remaining items (2):");
+		expect(summary.text).toContain("  Work:");
+		expect(summary.text).toContain("    - [ ] First");
+		expect(summary.text).toContain("    - [ ] Second");
+		expect(summary.text).not.toContain('Use op: "view"');
+	});
+
+	it("keeps the full pre-call list on an op-specific error", async () => {
+		const session = createSession([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "First", status: "completed" },
+					{ content: "Second", status: "in_progress" },
+					{ content: "Third", status: "pending" },
+				],
+			},
+		]);
+		const previous = structuredClone(session.getTodoPhases?.());
+		const result = await new TodoTool(session).execute("call-error", { op: "done", task: "Missing" });
+		const summary = result.content.find(part => part.type === "text");
+		if (summary?.type !== "text") throw new Error("Expected text summary");
+		expect(result.isError).toBe(true);
+		expect(summary.text).toStartWith("Errors:");
+		expect(summary.text).toContain("Remaining items (2):");
+		expect(summary.text).toContain("Second [in_progress] (Work)");
+		expect(summary.text).toContain("Third [pending] (Work)");
+		expect(summary.text).toContain("    - [X] First");
+		expect(summary.text).toContain("    - [ ] Third");
+		expect(summary.text).not.toContain('Use op: "view"');
+		expect(result.details?.phases).toEqual(previous);
+		expect(session.getTodoPhases?.()).toEqual(previous);
 	});
 
 	it("view on an empty list reports empty, not cleared", async () => {
@@ -538,6 +576,7 @@ describe("TodoTool operations", () => {
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Todo list is empty.");
+		expect(summary.text).not.toContain('Use op: "view"');
 		expect(result.isError).toBeUndefined();
 	});
 });
