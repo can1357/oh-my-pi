@@ -3153,5 +3153,119 @@ mod tests {
 				Some(ErrorCode::Timeout)
 			);
 		}
+
+		/// A menu element that names its parent, as `menu_children` checks.
+		struct MenuNode {
+			name:     &'static str,
+			role:     Role,
+			parent:   &'static str,
+			children: &'static [&'static str],
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl MenuNode {
+			#[zbus(property)]
+			fn name(&self) -> String {
+				self.name.to_owned()
+			}
+
+			#[zbus(property)]
+			fn parent(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path(self.parent))
+			}
+
+			fn get_role(&self) -> u32 {
+				self.role as u32
+			}
+
+			#[allow(clippy::unused_self, reason = "every fake menu element is enabled")]
+			fn get_state(&self) -> Vec<u32> {
+				let state = State::Enabled as u64 | State::Sensitive as u64;
+				vec![state as u32, (state >> 32) as u32]
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				self
+					.children
+					.iter()
+					.map(|child| (PEER.to_owned(), path(child)))
+					.collect()
+			}
+		}
+
+		/// Qt 5 and 6 publish a menu bar item's menu as a `PopupMenu` child of
+		/// that item, where GTK publishes a `Menu`.
+		#[test]
+		fn a_qt_menu_bar_item_opens_its_popup_menu() {
+			let (mut ax, _server) = backend(HUNG_CALL_TIMEOUT, |server| {
+				let menu = |name, role, parent, children: &'static [&'static str]| MenuNode {
+					name,
+					role,
+					parent,
+					children,
+				};
+				server
+					.serve_at("/org/a11y/atspi/accessible/root", Element {
+						name:     "main",
+						role:     Role::DesktopFrame,
+						focused:  false,
+						children: vec![(PEER.to_owned(), path("/qt"))],
+					})
+					.unwrap()
+					.serve_at("/qt", Element {
+						name:     "qtapp",
+						role:     Role::Application,
+						focused:  false,
+						children: vec![(PEER.to_owned(), path("/qt/frame"))],
+					})
+					.unwrap()
+					.serve_at("/qt/frame", Element {
+						name:     "Notes",
+						role:     Role::Frame,
+						focused:  true,
+						children: vec![(PEER.to_owned(), path("/qt/bar"))],
+					})
+					.unwrap()
+					.serve_at("/qt/bar", menu("", Role::MenuBar, "/qt/frame", &["/qt/file"]))
+					.unwrap()
+					.serve_at("/qt/file", menu("File", Role::MenuItem, "/qt/bar", &["/qt/popup"]))
+					.unwrap()
+					.serve_at(
+						"/qt/popup",
+						menu("", Role::PopupMenu, "/qt/file", &["/qt/mark", "/qt/other"]),
+					)
+					.unwrap()
+					.serve_at("/qt/mark", menu("Mark", Role::MenuItem, "/qt/popup", &[]))
+					.unwrap()
+					.serve_at("/qt/other", menu("Other", Role::MenuItem, "/qt/popup", &[]))
+					.unwrap()
+			});
+			let window = DesktopWindow {
+				id:      format!("atspi:{PEER}:/qt/frame"),
+				title:   "Notes".into(),
+				app:     "qtapp".into(),
+				pid:     None,
+				x:       0,
+				y:       0,
+				width:   300,
+				height:  200,
+				focused: true,
+			};
+			let bar = ax.menu_items(&window, &[]).unwrap();
+			assert_eq!(
+				bar.iter()
+					.map(|item| (item.title.as_str(), item.has_submenu))
+					.collect::<Vec<_>>(),
+				[("File", true)]
+			);
+			let file = ax.menu_items(&window, &["File".to_owned()]).unwrap();
+			assert_eq!(
+				file
+					.iter()
+					.map(|item| (item.path.join(" > "), item.has_submenu))
+					.collect::<Vec<_>>(),
+				[("File > Mark".to_owned(), false), ("File > Other".to_owned(), false)]
+			);
+		}
 	}
 }
