@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `omp update` runs mise, Homebrew, bun, and npm on the terminal's own output, so their progress bars redraw in place instead of printing every frame as a new line
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
