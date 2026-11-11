@@ -483,14 +483,8 @@ impl AxBackend for Win32Ax {
 		let secure = element.is_password().unwrap_or(true);
 		let hwnd = native_window(element);
 		let class = hwnd.map_or_default(window::class_name);
-		let combo = element.get_control_type().map_err(ax_error)? == ControlType::ComboBox;
-		match super::value_write::route(&class, combo) {
+		match super::value_write::route(&class) {
 			super::value_write::ValueRoute::Combo => {
-				if !element.is_enabled().map_err(ax_error)? {
-					return Err(DesktopError::ax_failed(
-						"the combo box is disabled; nothing was written",
-					));
-				}
 				super::value_write::set_combo(
 					hwnd.ok_or_else(|| {
 						DesktopError::ax_failed(
@@ -498,6 +492,7 @@ impl AxBackend for Win32Ax {
 						)
 					})?,
 					text,
+					element.is_enabled().map_err(ax_error)?,
 				)?;
 			},
 			super::value_write::ValueRoute::RefuseCombo => {
@@ -513,8 +508,13 @@ impl AxBackend for Win32Ax {
 					.map_err(ax_error)
 			})?,
 		}
-		let actual = pattern_value(element).or_else(|| legacy_value(element));
-		super::value_write::verify(text, actual.as_deref(), secure)
+		let pattern = pattern_value(element);
+		let legacy = if pattern.is_none() {
+			legacy_value(element)
+		} else {
+			None
+		};
+		super::value_write::verdict(text, pattern.as_deref(), legacy.as_deref(), secure)
 	}
 
 	fn focus(&mut self, handle: &AxHandle) -> CoreResult<()> {

@@ -58,7 +58,7 @@
 
 ### Fixed
 
-- Windows `setValue()` now confirms the value read back and notifies your app when selecting a native combo-box item, instead of reporting success for text the app did not accept.
+- Windows `setValue()` now confirms text values, notifies the app for native combo changes, and refuses combo-box writes it cannot verify or notify reliably.
 
 ## [18.18.8] - 2026-11-11
 
