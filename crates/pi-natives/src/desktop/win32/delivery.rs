@@ -4,6 +4,8 @@
 //! hit-test, and text-shaping logic is exercised by the host test suite on
 //! every platform.
 
+use crate::desktop::keys::KeyName;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventKind {
 	MouseClick,
@@ -168,6 +170,25 @@ pub fn text_input_unsupported(class: &str, arm64: bool) -> Option<&'static str> 
 	)
 }
 
+/// Why background input holding a modifier never arrives as sent, given each
+/// held key and the modifiers its keyboard layout adds to type it
+/// (`VkKeyScan`'s high byte: 1 Shift, 2 Ctrl, 4 Alt). Apps read Ctrl, Alt,
+/// Shift and the Windows key from their thread's key state when they handle a
+/// key or click (`TranslateMessage`, `TranslateAccelerator`, `WinForms`
+/// `ModifierKeys`, Qt), and a posted message never sets it: a posted `ctrl+s`
+/// types "s", and a posted ctrl-click is a plain click.
+pub fn posted_modifiers_dropped(
+	keys: impl IntoIterator<Item = (KeyName, u8)>,
+) -> Option<&'static str> {
+	keys
+		.into_iter()
+		.any(|(key, implicit)| key.is_modifier() || implicit != 0)
+		.then_some(
+			"apps read Ctrl, Alt, Shift and the Windows key from key state that posted input never \
+			 sets, so the keys or click would arrive without them",
+		)
+}
+
 /// Names the non-client region of a `WM_NCHITTEST` result where a posted drag
 /// can never work: caption and sizing-border presses enter the system
 /// move/size modal loop, which follows only real pointer input.
@@ -220,6 +241,22 @@ pub fn text_units(text: &str) -> impl Iterator<Item = TextUnit> + '_ {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn posted_input_holding_a_modifier_is_refused() {
+		let refused = |keys: &[(KeyName, u8)]| posted_modifiers_dropped(keys.iter().copied()).is_some();
+		// ctrl+a, alt+f, a shift-click and the Windows key
+		assert!(refused(&[(KeyName::Ctrl, 0), (KeyName::Char('a'), 0)]));
+		assert!(refused(&[(KeyName::Alt, 0), (KeyName::Char('f'), 0)]));
+		assert!(refused(&[(KeyName::Shift, 0)]));
+		assert!(refused(&[(KeyName::Meta, 0)]));
+		// "A", and "1" on AZERTY, which the layout types with Shift
+		assert!(refused(&[(KeyName::Char('A'), 1)]));
+		// Unmodified keys and clicks still post.
+		assert!(!refused(&[(KeyName::Char('a'), 0)]));
+		assert!(!refused(&[(KeyName::Enter, 0), (KeyName::Tab, 0)]));
+		assert!(!refused(&[]));
+	}
 
 	#[test]
 	fn recognizes_real_classes_and_rejects_lookalikes() {

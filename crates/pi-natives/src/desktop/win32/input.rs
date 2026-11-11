@@ -252,7 +252,7 @@ mod background {
 				SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
 				WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
 				WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDBLCLK,
-				WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+				WM_RBUTTONDOWN, WM_RBUTTONUP,
 			},
 		},
 	};
@@ -266,15 +266,14 @@ mod background {
 		ax::Win32Ax,
 		delivery::{
 			EventKind, TargetTraits, TextUnit, is_chromium_class, non_client_drag_region,
-			posts_double_click, text_input_unsupported, text_units, would_be_silently_dropped,
+			posted_modifiers_dropped, posts_double_click, text_input_unsupported, text_units,
+			would_be_silently_dropped,
 		},
 		window,
 	};
 
 	const MK_LBUTTON: usize = 0x0001;
 	const MK_RBUTTON: usize = 0x0002;
-	const MK_SHIFT: usize = 0x0004;
-	const MK_CONTROL: usize = 0x0008;
 	const MK_MBUTTON: usize = 0x0010;
 	const WHEEL_DELTA: i32 = 120;
 
@@ -426,10 +425,6 @@ mod background {
 		answered.then_some(hit as isize)
 	}
 
-	const fn mouse_flags(modifiers: Modifiers) -> usize {
-		(if modifiers.ctrl { MK_CONTROL } else { 0 }) | (if modifiers.shift { MK_SHIFT } else { 0 })
-	}
-
 	const fn mouse_messages(button: MouseButton) -> (u32, u32, u32, usize) {
 		match button {
 			MouseButton::Left => (WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK, MK_LBUTTON),
@@ -478,42 +473,34 @@ mod background {
 				let (target, point) = child_at(root, x, y)?;
 				ensure_delivery(id, target, kind)?;
 				let (down, up, double, button_flag) = mouse_messages(button);
-				let flags = mouse_flags(modifiers);
+				ensure_unmodified(target, super::modifier_keys(modifiers))?;
 				// SAFETY: GetClassLongW reads the class style of a live window.
 				let wants_double = unsafe { GetClassLongW(target, GCL_STYLE) } & CS_DBLCLKS != 0;
-				with_modifiers(target, modifiers, || {
-					for index in 0..count {
-						if index > 0 {
-							control::wait(CLICK_GAP)?;
-						}
-						let press = if posts_double_click(index, wants_double) {
-							double
-						} else {
-							down
-						};
-						post(target, WM_MOUSEMOVE, flags, point)?;
-						post(target, press, flags | button_flag, point)?;
-						let result = control::sent_gap_wait(CLICK_HOLD, index + 1 == count);
-						let release = control::cleanup(|| post(target, up, flags, point));
-						super::completed(result, release)?;
+				for index in 0..count {
+					if index > 0 {
+						control::wait(CLICK_GAP)?;
 					}
-					Ok(())
-				})
+					let press = if posts_double_click(index, wants_double) {
+						double
+					} else {
+						down
+					};
+					post(target, WM_MOUSEMOVE, 0, point)?;
+					post(target, press, button_flag, point)?;
+					let result = control::sent_gap_wait(CLICK_HOLD, index + 1 == count);
+					let release = control::cleanup(|| post(target, up, 0, point));
+					super::completed(result, release)?;
+				}
+				Ok(())
 			},
 			PointerEvent::Hold { x, y, button, keys, duration } => {
 				let (target, point) = child_at(root, x, y)?;
 				ensure_delivery(id, target, kind)?;
 				let (down, up, _, button_flag) = mouse_messages(button);
-				let flags = mouse_flags(control::key_modifiers(&keys));
 				with_keys(target, &keys, || {
-					post(target, WM_MOUSEMOVE, flags, point)?;
+					post(target, WM_MOUSEMOVE, 0, point)?;
 					control::bounded_hold(duration, |pressed| {
-						post(
-							target,
-							if pressed { down } else { up },
-							if pressed { flags | button_flag } else { flags },
-							point,
-						)
+						post(target, if pressed { down } else { up }, if pressed { button_flag } else { 0 }, point)
 					})
 				})
 			},
@@ -543,10 +530,9 @@ mod background {
 				ensure_delivery(id, target, kind)?;
 				let start = packed_point(client.x, client.y)?;
 				let (down, up, _, button_flag) = mouse_messages(button);
-				let flags = mouse_flags(control::key_modifiers(&keys));
 				with_keys(target, &keys, || {
-					post(target, WM_MOUSEMOVE, flags, start)?;
-					post(target, down, flags | button_flag, start)?;
+					post(target, WM_MOUSEMOVE, 0, start)?;
+					post(target, down, button_flag, start)?;
 					let mut end = start;
 					let movement = (|| {
 						control::wait(CLICK_HOLD)?;
@@ -558,12 +544,12 @@ mod background {
 							.try_for_each(|(index, &(x, y))| {
 								control::check()?;
 								let next = client_point(target, x, y)?;
-								post(target, WM_MOUSEMOVE, flags | button_flag, next)?;
+								post(target, WM_MOUSEMOVE, button_flag, next)?;
 								end = next;
 								control::sent_gap_wait(DRAG_STEP, index == last)
 							})
 					})();
-					let release = control::cleanup(|| post(target, up, flags, end));
+					let release = control::cleanup(|| post(target, up, 0, end));
 					super::completed(movement, release)
 				})
 			},
@@ -681,8 +667,7 @@ mod background {
 	}
 
 	struct KeyEmitter {
-		hwnd:      HWND,
-		alt_depth: u8,
+		hwnd: HWND,
 	}
 	impl KeyEmitter {
 		/// Only an established focus target may receive posted text/keys.
@@ -693,7 +678,7 @@ mod background {
 					"no unambiguous focused control in the target window; no input was sent",
 				)
 			})?;
-			Ok(Self { hwnd, alt_depth: 0 })
+			Ok(Self { hwnd })
 		}
 
 		/// The control of window `id` (`root`) that background keys of `kind`
@@ -709,7 +694,7 @@ mod background {
 							"the element's control window is not inside window {id}"
 						)));
 					}
-					Self { hwnd, alt_depth: 0 }
+					Self { hwnd }
 				},
 				_ => Self::focused(root)?,
 			};
@@ -717,40 +702,24 @@ mod background {
 			Ok(emitter)
 		}
 
-		fn transition(&mut self, vk: u16, down: bool) -> CoreResult<()> {
+		/// Posts one key transition. Background keys never hold a modifier
+		/// ([`ensure_unmodified`]), so none is a system key.
+		fn transition(&self, vk: u16, down: bool) -> CoreResult<()> {
 			// SAFETY: MapVirtualKeyW is a pure scalar lookup.
 			let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } & 0xff;
 			let mut bits = 1u32 | (scan << 16);
 			if is_extended(vk) {
 				bits |= 1 << 24;
 			}
-			if self.alt_depth > 0 || vk == VK_MENU {
-				bits |= 1 << 29;
-			}
 			if !down {
 				bits |= (1 << 30) | (1 << 31);
 			}
-			let system = self.alt_depth > 0 || vk == VK_MENU;
 			post(
 				self.hwnd,
-				if down {
-					if system { WM_SYSKEYDOWN } else { WM_KEYDOWN }
-				} else if system {
-					WM_SYSKEYUP
-				} else {
-					WM_KEYUP
-				},
+				if down { WM_KEYDOWN } else { WM_KEYUP },
 				usize::from(vk),
 				i32::from_ne_bytes(bits.to_ne_bytes()) as isize,
-			)?;
-			if vk == VK_MENU {
-				self.alt_depth = if down {
-					self.alt_depth.saturating_add(1)
-				} else {
-					self.alt_depth.saturating_sub(1)
-				};
-			}
-			Ok(())
+			)
 		}
 
 		fn emit(&mut self, key: KeyName, direction: KeyDirection) -> CoreResult<()> {
@@ -760,60 +729,25 @@ mod background {
 			}
 		}
 
-		fn key(&mut self, key: KeyName, down: bool) -> CoreResult<()> {
-			let (vk, implicit) = virtual_key(key)?;
-			let modifiers = [
-				(implicit & 1 != 0).then_some(VK_SHIFT),
-				(implicit & 2 != 0).then_some(VK_CONTROL),
-				(implicit & 4 != 0).then_some(VK_MENU),
-			];
-			if down {
-				for (index, modifier) in modifiers.iter().enumerate() {
-					if let Some(modifier) = modifier
-						&& let Err(error) = self.transition(*modifier, true)
-					{
-						let cleanup = control::cleanup(|| {
-							let mut cleanup = Ok(());
-							for &held in modifiers[..index].iter().flatten().rev() {
-								cleanup = super::completed(cleanup, self.transition(held, false));
-							}
-							cleanup
-						});
-						return super::completed(Err(error), cleanup);
-					}
-				}
-			}
-			let result = self.transition(vk, down);
-			if !down || result.is_err() {
-				let cleanup = control::cleanup(|| {
-					let mut cleanup = Ok(());
-					for modifier in modifiers.into_iter().flatten().rev() {
-						cleanup = super::completed(cleanup, self.transition(modifier, false));
-					}
-					cleanup
-				});
-				return super::completed(result, cleanup);
-			}
-			result
+		fn key(&self, key: KeyName, down: bool) -> CoreResult<()> {
+			self.transition(virtual_key(key)?.0, down)
 		}
 	}
 
-	fn with_modifiers(
-		hwnd: HWND,
-		modifiers: Modifiers,
-		operation: impl FnOnce() -> CoreResult<()>,
-	) -> CoreResult<()> {
-		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
-		with_held_keys(
-			&mut emitter,
-			super::modifier_keys(modifiers),
-			KeyEmitter::emit,
-			|_| {
-				control::check()?;
-				operation()
-			},
-			super::completed,
-		)
+	/// Refuses background input holding a modifier before anything is posted:
+	/// see [`posted_modifiers_dropped`]. Every key was already resolved.
+	fn ensure_unmodified(hwnd: HWND, keys: impl IntoIterator<Item = KeyName>) -> CoreResult<()> {
+		let keys = keys
+			.into_iter()
+			.map(|key| (key, virtual_key(key).map_or(0, |(_, implicit)| implicit)));
+		posted_modifiers_dropped(keys).map_or(Ok(()), |reason| {
+			let class = window::class_name(hwnd);
+			Err(DesktopError::background_unavailable(format!(
+				"window {} ({class}) drops background input that holds a modifier: {reason}; no \
+				 input was sent",
+				hwnd as usize,
+			)))
+		})
 	}
 
 	fn with_keys(
@@ -838,7 +772,8 @@ mod background {
 				)));
 			}
 		}
-		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
+		ensure_unmodified(hwnd, keys.iter().copied())?;
+		let mut emitter = KeyEmitter { hwnd };
 		with_held_keys(
 			&mut emitter,
 			keys.iter().copied(),
@@ -889,6 +824,7 @@ mod background {
 			EventKind::Keystroke
 		};
 		let mut emitter = KeyEmitter::to(id, root, element, kind)?;
+		ensure_unmodified(emitter.hwnd, keys.iter().copied())?;
 		with_held_keys(
 			&mut emitter,
 			keys.iter().copied(),
