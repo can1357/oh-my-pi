@@ -217,11 +217,9 @@ function baseUrlTable(
 
 class RemoteCredentials implements CredentialsApi {
 	readonly #remote: AuthRemote;
-	readonly #availability: RemoteAuthAvailability;
 
-	constructor(remote: AuthRemote, availability: RemoteAuthAvailability) {
+	constructor(remote: AuthRemote) {
 		this.#remote = remote;
-		this.#availability = availability;
 	}
 
 	get generation(): number {
@@ -255,13 +253,12 @@ class RemoteCredentials implements CredentialsApi {
 		return this.#remote.callSync("credentials.has", provider);
 	}
 	hasOAuth(provider: string): boolean {
-		return this.#availability.of(provider).oauth;
+		return this.#remote.callSync("credentials.hasOAuth", provider);
 	}
 	hasSubscription(provider: string): boolean {
 		return this.#remote.callSync("credentials.hasSubscription", provider);
 	}
 	getOAuth(provider: string): OAuthCredential | undefined {
-		if (!this.#availability.of(provider).oauth) return undefined;
 		return this.#remote.callSync("credentials.getOAuth", provider);
 	}
 	set(provider: string, credential: AuthCredentialEntry): Promise<void> {
@@ -659,7 +656,7 @@ export class RemoteAuthStorageBackend implements AuthStorageBackend {
 	constructor(remote: AuthRemote) {
 		this.#remote = remote;
 		const availability = new RemoteAuthAvailability(remote);
-		this.credentials = new RemoteCredentials(remote, availability);
+		this.credentials = new RemoteCredentials(remote);
 		this.keys = new RemoteKeys(remote, availability);
 		this.oauth = new RemoteOAuth(remote, availability);
 		this.sessions = new RemoteSessions(remote, availability);

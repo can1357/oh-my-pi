@@ -570,8 +570,7 @@ export interface ModelMatchPreferences {
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
-type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> &
-	Partial<Pick<ModelRegistry, "hasProvider" | "getAllEnabled" | "getProviderModels">>;
+type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
@@ -2231,20 +2230,16 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 	}
 
 	const scoped = { ...options, cliModel };
-	const available = preferredModels ?? modelRegistry.getAvailable();
+	const scope: CliModelScope = {
+		all: modelRegistry.getAll(),
+		available: preferredModels ?? modelRegistry.getAvailable(),
+	};
 	const disabled = disabledProviderIds(settings);
-	if (disabled.size === 0) {
-		return resolveCliModelInScope(scoped, {
-			all: modelRegistry.getAllEnabled ? modelRegistry.getAllEnabled() : modelRegistry.getAll(),
-			available,
-		});
-	}
+	if (disabled.size === 0) return resolveCliModelInScope(scoped, scope);
 
 	const enabled = resolveCliModelInScope(scoped, {
-		all: modelRegistry.getAllEnabled
-			? modelRegistry.getAllEnabled("chat", disabled)
-			: modelRegistry.getAll().filter(model => !disabled.has(model.provider)),
-		available: available.filter(model => !disabled.has(model.provider)),
+		all: scope.all.filter(model => !disabled.has(model.provider)),
+		available: scope.available.filter(model => !disabled.has(model.provider)),
 	});
 	if (enabled.model) return enabled;
 
@@ -2252,10 +2247,8 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 	// directly; otherwise re-resolve unfiltered to see what the selector was
 	// aiming at, so the refusal names the provider instead of reading as a typo.
 	const blocked = cliProvider
-		? modelRegistry.getProviderModels
-			? modelRegistry.getProviderModels(cliProvider).find(model => modelKind(model) === "chat")?.provider
-			: modelRegistry.getAll().find(model => model.provider.toLowerCase() === cliProvider.toLowerCase())?.provider
-		: resolveCliModelInScope(scoped, { all: modelRegistry.getAll(), available }).model?.provider;
+		? scope.all.find(model => model.provider.toLowerCase() === cliProvider.toLowerCase())?.provider
+		: resolveCliModelInScope(scoped, scope).model?.provider;
 	if (blocked === undefined || !disabled.has(blocked)) return enabled;
 	return {
 		model: undefined,

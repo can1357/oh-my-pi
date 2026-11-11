@@ -9,7 +9,6 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
@@ -2814,7 +2813,7 @@ export async function runRootCommand(
 					const qualified =
 						Boolean(parsedArgs.provider) ||
 						(namedProvider !== undefined &&
-							modelRegistry.getProviderModels(namedProvider).some(model => modelKind(model) === "chat"));
+							modelRegistry.getAll().some(model => model.provider.toLowerCase() === namedProvider));
 					const suggestions = qualified
 						? []
 						: fuzzyFilter(

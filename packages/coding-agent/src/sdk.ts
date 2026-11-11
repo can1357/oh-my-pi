@@ -3243,9 +3243,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.refresh("online-if-uncached"),
 				);
 			}
-			let allEnabledModels: Model[] | undefined;
-			const getAllEnabledModels = () =>
-				(allEnabledModels ??= modelRegistry.getAllEnabled("chat", disabledProviders));
+			const allEnabledModels =
+				disabledProviders.size === 0
+					? modelRegistry.getAll()
+					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
 			const availableModels =
 				disabledProviders.size === 0
 					? modelRegistry.getAvailable()
@@ -3283,7 +3284,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const availableOriginal = parseModelPattern(originalSelector, availableModels, matchPreferences);
 						const originalModel =
 							availableOriginal.model ??
-							parseModelPattern(originalSelector, getAllEnabledModels(), matchPreferences).model;
+							parseModelPattern(originalSelector, allEnabledModels, matchPreferences).model;
 						const chainKey = resolveRetryFallbackChainKey(
 							fallbackContext,
 							originalSelector,
@@ -3329,7 +3330,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				({ pattern }) => parseModelPattern(pattern, availableModels, matchPreferences).model,
 			)
 				? availableModels
-				: getAllEnabledModels();
+				: allEnabledModels;
 			let usageFallbackTriggered = false;
 			let usageFallbackReason: { from: string; reason: string } | undefined;
 			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
@@ -3502,9 +3503,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// A single provider-qualified selector names its closest siblings, the same
 				// hint `resolveCliModel` gives before the selector was deferred here.
 				const hint =
-					deferredModelPatterns.length === 1
-						? providerModelHint(deferredModelPatterns[0], getAllEnabledModels())
-						: "";
+					deferredModelPatterns.length === 1 ? providerModelHint(deferredModelPatterns[0], allEnabledModels) : "";
 				modelFallbackMessage = `Model ${requested} not found${hint ? `.${hint}` : ""}`;
 			}
 		}

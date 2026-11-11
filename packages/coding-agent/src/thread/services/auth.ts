@@ -404,11 +404,10 @@ function mirrorModelRegistry(remote: RemoteObject<ModelRegistryProtocol>): Model
 const prewarmedMirrors = new Set<ModelRegistry>();
 
 /**
- * Build worker `peer`'s mirror of `registry` now and compose its available
- * catalog (`getAvailable`), so the first subagent session there finds it
- * warm without hydrating unauthenticated or disabled cached providers. The
- * mirror stays alive for the worker's life. Resolves once done; rejects when
- * the worker exits first.
+ * Build worker `peer`'s mirror of `registry` now and compose its catalog
+ * (`getAll`, `getAvailable`), so the first subagent session there finds it
+ * warm. The mirror stays alive for the worker's life. Resolves once done;
+ * rejects when the worker exits first.
  */
 export async function prewarmModelRegistryMirror(peer: WorkerPeer, registry: ModelRegistry): Promise<void> {
 	const host = await peerState(peer.link).mirrorHost.promise;
@@ -513,8 +512,9 @@ export const authService: ThreadService = {
 		const lanes = globals.slowModeLanes;
 		anthropicSlowModeLanes.useLaneSource(key => lanes.lane(key));
 		const host: MirrorHost = registry => {
-			// Decoding `registry` built the mirror; composing the available catalog now keeps first use cheap.
+			// Decoding `registry` built the mirror; composing the catalog now keeps first use cheap.
 			prewarmedMirrors.add(registry);
+			registry.getAll("all");
 			registry.getAvailable("all");
 		};
 		settleQuietly(globals.attachMirrorHost(host));
