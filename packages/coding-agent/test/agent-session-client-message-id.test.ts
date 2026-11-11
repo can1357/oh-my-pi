@@ -395,6 +395,39 @@ describe("AgentSession client intent identity", () => {
 		await manager.close();
 	});
 
+	test("a queued custom message whose image preprocessing crosses a session change cannot reuse an ID the destination took", async () => {
+		const normalizing = Promise.withResolvers<void>();
+		const finishNormalizing = Promise.withResolvers<void>();
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			// Text-only inputs normalize nothing; hold just the image-bearing custom message.
+			if (!images?.length) return images;
+			normalizing.resolve();
+			await finishNormalizing.promise;
+			return images;
+		});
+		const { session, manager } = setup();
+		const image = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
+		const queued = session.promptCustomMessage(
+			{ customType: "skill", content: [{ type: "text", text: "skill" }, image], display: true, attribution: "user" },
+			{ queueOnly: true, streamingBehavior: "followUp", clientMessageId: "intent-custom-crossing" },
+		);
+		await withTimeout(normalizing.promise, 5_000, "Image normalization never started");
+		expect(await withTimeout(session.newSession(), 5_000, "newSession waited on the queued message")).toBe(true);
+		// The destination never saw the ID, so a new prompt there may take it.
+		await session.prompt("destination request", intent("intent-custom-crossing"));
+		finishNormalizing.resolve();
+		await expect(queued).rejects.toThrow("clientMessageId already submitted: intent-custom-crossing");
+		await session.settleInFlightMessagePersistence();
+		const carriers = manager
+			.getEntries()
+			.filter(
+				entry =>
+					(entry.type === "message" || entry.type === "custom_message") &&
+					entry.clientMessageId === "intent-custom-crossing",
+			);
+		expect(carriers).toHaveLength(1);
+	});
+
 	test("a queued input whose image preprocessing crosses a session change cannot reuse an ID the destination took", async () => {
 		const normalizing = Promise.withResolvers<void>();
 		const finishNormalizing = Promise.withResolvers<void>();

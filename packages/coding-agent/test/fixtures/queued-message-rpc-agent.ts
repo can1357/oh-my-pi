@@ -63,5 +63,20 @@ const session = new AgentSession({
 	sessionManager: SessionManager.inMemory(process.cwd()),
 	settings: Settings.isolated({ "compaction.enabled": false }),
 	modelRegistry,
+	// `/hop` handles its input itself by switching to a fresh session, as a custom command may.
+	customCommands: [
+		{
+			path: "hop",
+			resolvedPath: "hop",
+			source: "user",
+			command: {
+				name: "hop",
+				description: "Switches to a new session",
+				execute: async (_args, ctx) => {
+					await ctx.newSession();
+				},
+			},
+		},
+	],
 });
 await runRpcMode(session);

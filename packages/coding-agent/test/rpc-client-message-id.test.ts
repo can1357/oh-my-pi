@@ -319,6 +319,26 @@ describe("RPC client message identity", () => {
 		expect(found.messages).toMatchObject([{ message: { content: [{ type: "text", text: "new session" }] } }]);
 	});
 
+	test("checks a prompt pipelined behind a session-switching custom command against the new session", async () => {
+		const rpc = await start();
+		await rpc.command("prompt", { message: "old session", clientMessageId: "intent-moved" });
+		await rpc.next(frame => frame.type === "agent_end");
+		// `/hop` arrives as a prompt, not a session-change frame, yet the next prompt runs after its switch.
+		const [moved, prompted] = await rpc.pipeline(
+			["prompt", { message: "/hop" }],
+			["prompt", { message: "after the move", clientMessageId: "intent-moved" }],
+		);
+		expect(moved).toMatchObject({ success: true });
+		expect(prompted).toMatchObject({ success: true });
+		await rpc.next(
+			frame =>
+				frame.type === "message_end" &&
+				frame.clientMessageId === "intent-moved" &&
+				isRecord(frame.message) &&
+				JSON.stringify(frame.message.content).includes("after the move"),
+		);
+	});
+
 	test("a pipelined abort_and_prompt rejected in the target session cancels no earlier input", async () => {
 		const rpc = await start();
 		await rpc.command("prompt", { message: "kept by the branch", clientMessageId: "intent-branched" });

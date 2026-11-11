@@ -1929,6 +1929,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		acceptKey: string;
 		/** Session the acceptance check ran against; undefined when deferred to the handler. */
 		checkedSessionId?: string;
+		/**
+		 * Deferred past the handler to the input's ordered dispatch: it follows a slash-command prompt
+		 * whose handler does not hold back later handlers, so only its dispatch sees the switch it made.
+		 */
+		untilDispatch?: boolean;
 		sessionKey?: string;
 	}
 	const clientMessageIdsInFlight = new Set<string>();
@@ -1945,6 +1950,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			throw new Error(`clientMessageId already submitted: ${id}`);
 		}
 	};
+	/** A prompt that may run a slash command, which can switch sessions (`ctx.newSession()`) before later input. */
+	const mayChangeSession = (command: RpcCommand): boolean =>
+		(command.type === "prompt" || command.type === "abort_and_prompt") && command.message.startsWith("/");
 	/** Returns false when the frame must be rejected without entering the input gate. */
 	const acceptClientMessageId = (command: RpcCommand): boolean => {
 		if (Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) {
@@ -1952,10 +1960,23 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			pendingSessionChanges.add(command);
 			return true;
 		}
+		const accepted = admitClientMessageId(command);
+		// Its own ID is checked against the session it runs in; input behind it waits for its outcome.
+		if (accepted && mayChangeSession(command)) {
+			sessionChangeEpoch++;
+			pendingSessionChanges.add(command);
+		}
+		return accepted;
+	};
+	const admitClientMessageId = (command: RpcCommand): boolean => {
 		const id = correlatedClientMessageId(command);
 		if (id === undefined) return true;
 		const acceptKey = `epoch:${sessionChangeEpoch}\u0000${id}`;
 		const checkedSessionId = pendingSessionChanges.size === 0 ? session.sessionManager.getSessionId() : undefined;
+		// An abort cancels the local command ahead of it rather than following it, so it keeps the handler check.
+		const untilDispatch =
+			command.type !== "abort_and_prompt" &&
+			[...pendingSessionChanges].some(pending => !Object.hasOwn(SESSION_CHANGE_TYPES, pending.type));
 		try {
 			assertClientMessageId(id);
 			if (clientMessageIdsInFlight.has(acceptKey)) throw new Error(`clientMessageId already submitted: ${id}`);
@@ -1965,15 +1986,19 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			return false;
 		}
 		clientMessageIdsInFlight.add(acceptKey);
-		clientMessageAdmissions.set(command, { id, acceptKey, checkedSessionId });
+		clientMessageAdmissions.set(command, { id, acceptKey, checkedSessionId, untilDispatch });
 		return true;
 	};
-	/** Throw the acceptance rejection, or run the deferred check, then hold the ID in the target session. */
-	const requireClientMessageAdmission = (command: RpcCommand): void => {
+	/**
+	 * Throw the acceptance rejection, or run the deferred check, then hold the ID in the target session.
+	 * An admission deferred until dispatch is checked only when its ordered dispatch passes `atDispatch`.
+	 */
+	const requireClientMessageAdmission = (command: RpcCommand, atDispatch = false): void => {
 		if (correlatedClientMessageId(command) === undefined) return;
 		if (!clientMessageAdmissions.has(command)) acceptClientMessageId(command);
 		const admission = clientMessageAdmissions.get(command)!;
 		if (admission instanceof Error) throw admission;
+		if (admission.untilDispatch !== atDispatch) return;
 		if (admission.checkedSessionId !== session.sessionManager.getSessionId()) {
 			assertClientMessageAvailableInSession(admission.id);
 			// Accepted with its check deferred, an abort invalidates earlier input only now that it validated.
@@ -1985,7 +2010,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		clientMessageIdsInFlight.add(admission.sessionKey);
 	};
 	const releaseClientMessageId = (command: RpcCommand): void => {
-		if (pendingSessionChanges.delete(command)) return;
+		// A slash-command prompt is both a pending session change and a correlated input: release both.
+		if (pendingSessionChanges.delete(command) && Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return;
 		const admission = clientMessageAdmissions.get(command);
 		if (admission === undefined || admission instanceof Error) return;
 		clientMessageAdmissions.delete(command);
@@ -2008,6 +2034,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return "local";
 			};
 			if (!isCurrent()) return "cancelled";
+			// Input behind a slash-command prompt is checked here, in the session that command left it in.
+			requireClientMessageAdmission(command, true);
 			let text = command.message;
 			let images = command.images;
 			const runner = session.extensionRunner;

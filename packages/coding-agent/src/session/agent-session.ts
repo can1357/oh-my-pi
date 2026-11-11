@@ -10866,6 +10866,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
+		// The journal this input's ID was admitted in, for re-admission after the awaits below.
+		const admittedJournal = this.sessionManager.getSessionId();
 		const details =
 			options?.queueChipText !== undefined
 				? ({
@@ -10898,6 +10900,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+			this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
@@ -10914,6 +10917,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#resumeStrandedIrcAsides();
 			return;
 		}
+		// Normalization and the vision description can span a journal change (switch, branch).
+		this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
 		if (deliverAs === "followUp") {
