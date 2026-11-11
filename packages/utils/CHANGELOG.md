@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.8] - 2026-11-11
+
 ### Removed
 
 - Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
