@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can import `formTheme`, `styledSpans`, `compactText`, `rowsText`, `parseXdUrl` and `cfgExtensionTranscriptPresenters` from `@oh-my-pi/pi-coding-agent` instead of internal module paths, which stop the extension from loading when a file moves ([#18849](https://github.com/can1357/oh-my-pi/pull/18849) by [@materemias](https://github.com/materemias))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
