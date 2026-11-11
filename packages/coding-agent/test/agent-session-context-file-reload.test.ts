@@ -221,6 +221,31 @@ describe("workspace tree in the system prompt", () => {
 		);
 	});
 
+	it("gives a resumed conversation back its own tree after another one rescanned", async () => {
+		await withTreeSession(
+			async (session, tempDir) => {
+				const cwd = session.sessionManager.getCwd();
+				const earlier = SessionManager.create(cwd, tempDir.join("sessions"));
+				earlier.appendMessage({ role: "user", content: "earlier", timestamp: 1 });
+				await earlier.ensureOnDisk();
+				await earlier.flush();
+				const earlierFile = earlier.getSessionFile();
+				await earlier.close();
+				if (!earlierFile) throw new Error("Expected the earlier session to be on disk");
+				expect(await session.switchSession(earlierFile)).toBe(true);
+
+				await Bun.write(path.join(cwd, "checked_out_entry.txt"), "x");
+				expect(await session.newSession()).toBe(true);
+				expect(session.systemPrompt.join("\n")).toContain("checked_out_entry.txt");
+
+				// The earlier conversation was sent the first scan; the new one's rescan must not leak into it.
+				expect(await session.switchSession(earlierFile)).toBe(true);
+				expect(session.systemPrompt.join("\n")).not.toContain("checked_out_entry.txt");
+			},
+			{ persisted: true },
+		);
+	});
+
 	it("keeps the tree when the current session is reloaded from disk", async () => {
 		await withTreeSession(
 			async session => {

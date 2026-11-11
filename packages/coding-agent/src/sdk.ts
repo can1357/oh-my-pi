@@ -2066,15 +2066,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		: cfgIncludeWorkspaceTree.get(settings)
 			? scanWorkspaceTree(cwd)
 			: undefined;
-	// Directory and transcript epoch the current tree describes. A rebuild
-	// after the session cwd changes (`/move`, resuming a session from another
-	// project) or a fresh transcript starts (`/clear`, `/new`) rescans so the
-	// prompt reflects the tree on disk (e.g. after a branch checkout). Every
-	// other rebuild, including resuming a session in the same directory, reuses
-	// it so an existing conversation's cached prompt prefix stays byte-stable.
-	// A tree the caller supplied is theirs: it is never replaced by a scan.
+	// Conversation, directory, and transcript epoch the current tree describes.
+	// A rebuild after the conversation's cwd changes (`/move`, resuming a
+	// session from another project) or a fresh transcript starts (`/clear`,
+	// `/new`) rescans so the prompt reflects the tree on disk (e.g. after a
+	// branch checkout). Every other rebuild keeps the conversation's own tree,
+	// so its cached prompt prefix stays byte-stable: `workspaceTrees` hands a
+	// resumed conversation back the scan it was last sent with, even when
+	// another conversation rescanned in between. A tree the caller supplied is
+	// theirs: it is never replaced by a scan.
+	let workspaceTreeConversation: string | undefined;
 	let workspaceTreeRoot = path.resolve(cwd);
 	let workspaceTreeEpoch = 0;
+	const workspaceTrees = new Map<string, { root: string; scan: Promise<WorkspaceTree> }>();
 	// Tree from a mid-session scan; supersedes the startup value handed to subagents.
 	let lateWorkspaceTree: WorkspaceTree | undefined;
 
@@ -4382,11 +4386,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (includeWorkspaceTree && !options.workspaceTree) {
 				const treeRoot = path.resolve(promptCwd);
 				const treeEpoch = hasSession ? session.transcriptEpoch : 0;
-				if (!workspaceTreePromise || treeRoot !== workspaceTreeRoot || treeEpoch !== workspaceTreeEpoch) {
-					const scan = scanWorkspaceTree(treeRoot);
+				const conversation = sessionManager.getSessionId();
+				const held = workspaceTrees.get(conversation);
+				const stale =
+					treeEpoch !== workspaceTreeEpoch ||
+					((workspaceTreeConversation ?? conversation) === conversation && treeRoot !== workspaceTreeRoot);
+				// Not stale: a conversation seen before gets its own scan back; one first
+				// seen here shares the current scan when it describes the same directory.
+				const kept = stale
+					? undefined
+					: held?.root === treeRoot
+						? held.scan
+						: treeRoot === workspaceTreeRoot
+							? workspaceTreePromise
+							: undefined;
+				const scan = kept ?? scanWorkspaceTree(treeRoot);
+				workspaceTrees.set(conversation, { root: treeRoot, scan });
+				workspaceTreeConversation = conversation;
+				workspaceTreeRoot = treeRoot;
+				workspaceTreeEpoch = treeEpoch;
+				if (scan !== workspaceTreePromise) {
 					workspaceTreePromise = scan;
-					workspaceTreeRoot = treeRoot;
-					workspaceTreeEpoch = treeEpoch;
 					scan.then(
 						tree => {
 							if (workspaceTreePromise === scan) lateWorkspaceTree = tree;
