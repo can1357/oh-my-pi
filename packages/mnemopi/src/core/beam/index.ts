@@ -1,6 +1,17 @@
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { ftsWeight, importanceWeight, maxEpisodeChars, proactiveLinkingEnabled, vectorWeight } from "../../config";
+import {
+	ftsWeight,
+	importanceWeight,
+	maxEpisodeChars,
+	proactiveLinkingEnabled,
+	rerankApiKey,
+	rerankApiUrl,
+	rerankCandidates,
+	rerankModel,
+	rerankScoreMode,
+	vectorWeight,
+} from "../../config";
 import { closeQuietly, openDatabase } from "../../db";
 import { AnnotationStore } from "../annotations";
 import { EpisodicGraph } from "../episodic-graph";
@@ -93,6 +104,15 @@ function normalizeConfig(options: BeamMemoryOptions): BeamConfig {
 		// is consulted at recall time; the env vars still win over both.
 		polyphonicRecall: options.polyphonicRecall ?? configured.polyphonicRecall,
 		enhancedRecall: options.enhancedRecall ?? configured.enhancedRecall,
+		rerankApiUrl: options.rerankApiUrl ?? configured.rerankApiUrl ?? rerankApiUrl(),
+		rerankModel: options.rerankModel ?? configured.rerankModel ?? rerankModel(),
+		rerankApiKey:
+			options.rerankApiKey ??
+			configured.rerankApiKey ??
+			rerankApiKey(options.rerankApiUrl ?? configured.rerankApiUrl),
+		rerankCandidates: options.rerankCandidates ?? configured.rerankCandidates ?? rerankCandidates(),
+		rerankScoreMode: options.rerankScoreMode ?? configured.rerankScoreMode ?? rerankScoreMode(),
+		rerankFn: options.rerankFn ?? configured.rerankFn,
 	};
 }
 function autoMigrateAnnotations(db: Database, dbPath: string | undefined): void {

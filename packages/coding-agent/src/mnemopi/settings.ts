@@ -214,6 +214,78 @@ export const cfgMnemopiEmbeddingApiKey = register({
 		condition: "mnemopiActive",
 	},
 });
+export const cfgMnemopiRerankModel = register({
+	id: "mnemopi.rerankModel",
+	type: "string",
+	default: undefined,
+	env: { name: "MNEMOPI_RERANK_MODEL", fallback: "blank" },
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Rerank Model",
+		description: "Optional cross-encoder reranking model id (e.g. bge-reranker-v2-m3 or cohere/rerank-v3.5)",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiRerankApiUrl = register({
+	id: "mnemopi.rerankApiUrl",
+	type: "string",
+	default: undefined,
+	env: { name: "MNEMOPI_RERANK_API_URL", fallback: "blank" },
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Rerank API URL",
+		description: "Optional reranking endpoint (OpenRouter/Cohere/TEI format) passed to Mnemopi",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiRerankApiKey = register({
+	id: "mnemopi.rerankApiKey",
+	type: "string",
+	credential: true,
+	default: undefined,
+	env: { name: "MNEMOPI_RERANK_API_KEY", fallback: "blank" },
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Rerank API Key",
+		description: "Optional rerank API key passed to Mnemopi",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiRerankCandidates = register({
+	id: "mnemopi.rerankCandidates",
+	type: "number",
+	default: 40,
+	env: { name: "MNEMOPI_RERANK_CANDIDATES" },
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Rerank Candidates",
+		description: "Number of initial recall candidates to send to the reranker before MMR diversity filtering",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiRerankScoreMode = register({
+	id: "mnemopi.rerankScoreMode",
+	type: "enum",
+	values: ["auto", "logit", "probability"] as const,
+	default: "auto",
+	env: { name: "MNEMOPI_RERANK_SCORE_MODE" },
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Rerank Score Mode",
+		description:
+			"How to interpret reranker output: auto (logit for BGE/BCE, probability for Cohere), logit (sigmoid normalized), or probability",
+		condition: "mnemopiActive",
+	},
+});
 
 export const cfgMnemopiLlmMode = register({
 	id: "mnemopi.llmMode",

@@ -302,8 +302,8 @@ export interface MnemopiSessionStateApi {
 		id: string,
 		options?: MnemopiMemoryEditOptions,
 	): MnemopiMemoryEditResult;
-	collectScopedRecallResults(query: string): Promise<RecallResult[]>;
-	recallResultsScoped(query: string): Promise<RecallResult[]>;
+	collectScopedRecallResults(query: string, signal?: AbortSignal): Promise<RecallResult[]>;
+	recallResultsScoped(query: string, signal?: AbortSignal): Promise<RecallResult[]>;
 	formatScopedRecallContext(results: readonly RecallResult[], format?: "bullet" | "json"): string | undefined;
 	rememberScoped(memory: MnemopiRememberInput, options?: MnemopiRememberOptions, target?: MnemopiBankTarget): string;
 	getScopedStats(): MnemopiBankStats[];
@@ -547,9 +547,9 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		});
 	}
 
-	async collectScopedRecallResults(query: string): Promise<RecallResult[]> {
+	async collectScopedRecallResults(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
 		const parent = this.#remoteParent();
-		if (parent) return await parent.collectScopedRecallResults(query);
+		if (parent) return await parent.collectScopedRecallResults(query, signal);
 		const scoped = this.#local();
 		const merged: RecallResult[] = [];
 		const byId = new Map<string, number>();
@@ -557,15 +557,20 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		const failures: Array<{ bank: string; error: Error }> = [];
 		let successfulTargets = 0;
 		const sharedFallbackQuery = deriveSharedRecallFallbackQuery(query, scoped.retain.bank, scoped.global?.bank);
+		const rerankAtMerge = scoped.recall.length > 1 && Boolean(this.config.providerOptions.rerankApiUrl);
 		for (const target of scoped.recall) {
+			if (signal?.aborted) break;
 			const queries =
 				target.bank === scoped.global?.bank && sharedFallbackQuery ? [query, sharedFallbackQuery] : [query];
 			let targetSucceeded = false;
 			try {
 				for (const recallQuery of queries) {
+					if (signal?.aborted) break;
 					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
 						includeFacts: true,
 						channelId: target.bank,
+						signal,
+						skipRerank: rerankAtMerge,
 					});
 					targetSucceeded = true;
 					withLoopPhase("mnemopi.recall", () => {
@@ -584,6 +589,11 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 			}
 			if (targetSucceeded) successfulTargets++;
 		}
+		if (rerankAtMerge && merged.length > 0 && !signal?.aborted) {
+			const reranked = await this.#rerankMergedCandidates(query, merged, signal);
+			merged.length = 0;
+			merged.push(...reranked);
+		}
 		return withLoopPhase("mnemopi.recall", () => {
 			if (successfulTargets === 0 && failures.length > 0) {
 				if (failures.length === 1) throw failures[0].error;
@@ -599,8 +609,52 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		});
 	}
 
-	recallResultsScoped(query: string): Promise<RecallResult[]> {
-		return this.collectScopedRecallResults(query);
+	recallResultsScoped(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
+		return this.collectScopedRecallResults(query, signal);
+	}
+
+	async #rerankMergedCandidates(
+		query: string,
+		candidates: RecallResult[],
+		signal?: AbortSignal,
+	): Promise<RecallResult[]> {
+		const { rerankApiUrl, rerankModel, rerankApiKey, rerankScoreMode } = this.config.providerOptions;
+		if (!rerankApiUrl || candidates.length === 0 || !query.trim()) return candidates;
+
+		const documents = candidates.map(c => {
+			if (c.tier_label === "fact" && c.subject && c.predicate) {
+				return `${c.subject} ${c.predicate} ${c.content}`.trim();
+			}
+			return c.content.length > 4096 ? c.content.slice(0, 4096) : c.content;
+		});
+
+		try {
+			const { executeRerank } = requireMnemopi();
+			const scores = await executeRerank(query, documents, {
+				apiUrl: rerankApiUrl,
+				model: rerankModel,
+				apiKey: rerankApiKey,
+				scoreMode: rerankScoreMode,
+				signal,
+			});
+			if (!scores || scores.length !== candidates.length) return candidates;
+
+			const scoreMap = new Map(scores.map(s => [s.index, s.relevanceScore]));
+			if (scoreMap.size !== candidates.length) return candidates;
+			for (let i = 0; i < candidates.length; i++) {
+				if (!scoreMap.has(i)) return candidates;
+			}
+			const reordered = candidates.map((candidate, index) => {
+				const score = scoreMap.get(index);
+				if (score === undefined) return candidate;
+				const adjusted = candidate.veracity === "false" ? Number.NEGATIVE_INFINITY : score;
+				return { ...candidate, score: adjusted };
+			});
+			reordered.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+			return reordered;
+		} catch {
+			return candidates;
+		}
 	}
 
 	formatScopedRecallContext(
@@ -656,7 +710,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 
 	/** Recalls `query` into a prompt block plus the memories it holds; undefined when aborted. */
 	async #recallBlock(query: string, signal?: AbortSignal): Promise<RecallBlock | undefined> {
-		const results = await this.collectScopedRecallResults(query);
+		const results = await this.collectScopedRecallResults(query, signal);
 		if (signal?.aborted) return undefined;
 		if (results.length === 0) return { text: "", memories: [] };
 		const { text, offsets } = formatRecallBlock(results);

@@ -533,6 +533,14 @@ async function resolveMnemopiProviderOptions(
 		embeddingApiKey:
 			config.providerOptions.embeddingApiKey ??
 			(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)),
+		rerankModel: config.providerOptions.rerankModel,
+		rerankApiUrl: config.providerOptions.rerankApiUrl,
+		rerankApiKey:
+			config.providerOptions.rerankApiKey ??
+			(config.providerOptions.rerankApiUrl
+				? await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.rerankApiUrl)
+				: undefined),
+		rerankScoreMode: config.providerOptions.rerankScoreMode,
 		llm: false,
 	};
 

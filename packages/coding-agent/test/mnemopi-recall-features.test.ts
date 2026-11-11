@@ -118,3 +118,14 @@ describe("mnemopi.enhancedRecall", () => {
 		}
 	});
 });
+
+describe("mnemopi cancellation signal", () => {
+	it("forwards cancellation signal to scoped recall and aborts immediately", async () => {
+		const { state, tools } = startSession({});
+		await retain(tools, "deploy guide on cluster A");
+		const controller = new AbortController();
+		controller.abort();
+		const results = await state.collectScopedRecallResults("deploy", controller.signal);
+		expect(results).toEqual([]);
+	});
+});

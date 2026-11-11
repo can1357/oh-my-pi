@@ -1,4 +1,5 @@
-import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { logger, popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { executeRerank, type RerankCandidateScore } from "../rerank";
 import {
 	importedWeight,
 	inferredWeight,
@@ -21,6 +22,7 @@ import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
+import { clipToWindow } from "../text-window";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
@@ -46,7 +48,12 @@ type RecallOptionsInternal = RecallOptions & {
 	ignoreSessionScope?: boolean;
 	currentSensitive?: boolean;
 	updateRecallCounts?: boolean;
+	signal?: AbortSignal;
+	skipRerank?: boolean;
 };
+
+/** Internal storage for unclipped candidate text used only during reranking. */
+const candidateFullContent = new WeakMap<RecallResult, string>();
 
 type CandidateSignals = {
 	fts: number;
@@ -787,6 +794,9 @@ function scoreCandidate(
 		truncated: preview.truncated,
 		full_length: preview.fullLength,
 	};
+	if (preview.truncated) {
+		candidateFullContent.set(result, content);
+	}
 	return result;
 }
 
@@ -1104,11 +1114,86 @@ export async function recallEnhanced(
 	return withLoopPhase("mnemopi.recall", () => {
 		// A write committed while recall awaited may be missing from this ranking: skip the
 		// put and keep the stale token so the next lookup starts from an empty cache.
-		const cacheable = cache !== null && databaseWriteToken(beam) === token;
+		const cacheable = cache !== null && databaseWriteToken(beam) === token && options.signal?.aborted !== true;
 		if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
 		if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
 		return results;
 	});
+}
+
+const MAX_RERANK_INPUT_CHARS = 4096;
+
+async function applyCrossEncoderRerank(
+	beam: BeamMemoryState,
+	query: string,
+	candidates: RecallResult[],
+	signal?: AbortSignal,
+): Promise<RecallResult[]> {
+	if (candidates.length === 0 || query.trim().length === 0) return candidates;
+	const { rerankFn, rerankApiUrl, rerankModel, rerankApiKey } = beam.config;
+	if (!rerankFn && !rerankApiUrl) return candidates;
+
+	const documents = candidates.map(candidate => {
+		let raw: string;
+		if (candidate.tier_label === "fact" && candidate.subject && candidate.predicate) {
+			raw = factSearchableText(String(candidate.subject), String(candidate.predicate), String(candidate.content));
+		} else {
+			raw = candidateFullContent.get(candidate) ?? candidate.content;
+		}
+		return clipToWindow(raw, MAX_RERANK_INPUT_CHARS);
+	});
+	let scores: RerankCandidateScore[] | null = null;
+	try {
+		if (rerankFn) {
+			scores = await rerankFn(query, documents);
+		} else if (rerankApiUrl) {
+			scores = await executeRerank(query, documents, {
+				apiUrl: rerankApiUrl,
+				model: rerankModel,
+				apiKey: rerankApiKey,
+				scoreMode: beam.config.rerankScoreMode,
+				signal,
+			});
+		}
+	} catch (error) {
+		logger.warn("mnemopi: cross-encoder rerank invocation failed; using first-stage order", {
+			error: String(error),
+		});
+		return candidates;
+	}
+
+	// Reject partial scores to avoid mixing incompatible scoring scales.
+	if (!scores || scores.length !== candidates.length) {
+		return candidates;
+	}
+
+	const scoreMap = new Map<number, number>();
+	for (const item of scores) {
+		scoreMap.set(item.index, item.relevanceScore);
+	}
+
+	// Reject duplicate or missing indices to ensure complete, unique candidate coverage.
+	if (scoreMap.size !== candidates.length) {
+		return candidates;
+	}
+	for (let i = 0; i < candidates.length; i++) {
+		if (!scoreMap.has(i)) return candidates;
+	}
+
+	const reordered = candidates.map((candidate, index) => {
+		const score = scoreMap.get(index);
+		if (score === undefined) return candidate;
+		// Reapply veracity penalty so known-false memories are not promoted.
+		const adjustedScore = candidate.veracity === "false" ? Number.NEGATIVE_INFINITY : score;
+		return {
+			...candidate,
+			// Keep unrounded score for ordering and MMR diversity; rounding happens at output boundary.
+			score: adjustedScore,
+		};
+	});
+
+	reordered.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+	return reordered;
 }
 
 async function linearRecallEnhanced(
@@ -1117,6 +1202,7 @@ async function linearRecallEnhanced(
 	topK: number,
 	options: RecallEnhancedOptions & RecallOptionsInternal,
 ): Promise<RecallResult[]> {
+	if (topK <= 0) return [];
 	const useSynonyms = options.useSynonyms !== false;
 	const enhancedOptions: RecallOptionsInternal = {
 		...options,
@@ -1124,19 +1210,28 @@ async function linearRecallEnhanced(
 		useIntent: options.useIntent !== false,
 		useMmr: options.useMmr !== false,
 	};
-	const results = await recall(beam, query, Math.max(topK * 2, topK), {
+	const rerankActive = !options.skipRerank && Boolean(beam.config.rerankFn || beam.config.rerankApiUrl);
+	const pool = rerankActive ? Math.max(topK, beam.config.rerankCandidates ?? 40) : Math.max(topK * 2, topK);
+
+	const results = await recall(beam, query, pool, {
 		...enhancedOptions,
 		updateRecallCounts: false,
 	});
-	return withLoopPhase("mnemopi.recall", () => {
+	withLoopPhase("mnemopi.recall", () => {
 		if (options.includeFacts === true) {
-			const facts = factRecall(beam, query, factRecallLimit(topK));
+			const facts = factRecall(beam, query, factRecallLimit(rerankActive ? pool : topK));
 			results.push(...facts);
 		}
 		results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-		const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
+		if (rerankActive && results.length > pool) results.length = pool;
+	});
+
+	const reranked = rerankActive ? await applyCrossEncoderRerank(beam, query, results, options.signal) : results;
+
+	return withLoopPhase("mnemopi.recall", () => {
+		const finalResults = rerankRecallResults(reranked, options.mmrLambda ?? 0.7, topK);
 		if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
-		return finalResults;
+		return finalResults.map(r => ({ ...r, score: round4(r.score ?? 0) }));
 	});
 }
 
@@ -1153,9 +1248,15 @@ async function polyphonicRecallEnhanced(
 	options: RecallEnhancedOptions & RecallOptionsInternal,
 ): Promise<RecallResult[]> {
 	if (topK <= 0) return [];
-	// A wider pool than requested so filters applied below still leave `topK` rows.
-	const pool = Math.max(topK * 2, topK);
-	const baseline = await linearRecallEnhanced(beam, query, pool, options);
+	const rerankActive = Boolean(beam.config.rerankFn || beam.config.rerankApiUrl);
+	const pool = rerankActive ? Math.max(topK, beam.config.rerankCandidates ?? 40) : Math.max(topK * 2, topK);
+
+	// The baseline for the hybrid voice must NOT run cross-encoder reranking;
+	// reranking is applied once on the fused candidate pool.
+	const baseline = await linearRecallEnhanced(beam, query, pool, {
+		...options,
+		skipRerank: true,
+	});
 	const fused = await orchestrateRecall(beam, query, pool, {
 		...options,
 		includeFacts: options.includeFacts === true,
@@ -1165,24 +1266,37 @@ async function polyphonicRecallEnhanced(
 		contextBudget: Number.POSITIVE_INFINITY,
 	});
 	const previewChars = options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS;
-	const results: RecallResult[] = [];
+	const candidates: RecallResult[] = [];
 	for (const result of fused) {
-		if (results.length >= topK) break;
 		if (!matchesRecallFilters(result, options)) continue;
 		const mapped: RecallResult = {
 			...result,
-			score: round4((result.combined_score ?? 0) / POLYPHONIC_MAX_COMBINED_SCORE),
+			score: (result.combined_score ?? 0) / POLYPHONIC_MAX_COMBINED_SCORE,
 		};
 		// Rows reached only through the graph/fact/temporal/vector voices are hydrated in full.
 		if (typeof mapped.truncated !== "boolean") {
-			const preview = clipRecallContent(mapped.content, previewChars);
+			const fullContent = candidateFullContent.get(result) ?? result.content;
+			const preview = clipRecallContent(result.content, previewChars);
 			mapped.content = preview.content;
 			mapped.truncated = preview.truncated;
 			mapped.full_length = preview.fullLength;
+			if (preview.truncated) {
+				candidateFullContent.set(mapped, fullContent);
+			}
+		} else {
+			const existing = candidateFullContent.get(result);
+			if (existing) {
+				candidateFullContent.set(mapped, existing);
+			}
 		}
-		results.push(mapped);
+		candidates.push(mapped);
+		if (!rerankActive && candidates.length >= topK) break;
+		if (candidates.length >= pool) break;
 	}
-	return results;
+
+	const reranked = rerankActive ? await applyCrossEncoderRerank(beam, query, candidates, options.signal) : candidates;
+	const finalResults = rerankRecallResults(reranked, options.mmrLambda ?? 0.7, topK);
+	return finalResults.map(r => ({ ...r, score: round4(r.score ?? 0) }));
 }
 
 /**
@@ -1252,6 +1366,10 @@ function enhancedRecallCacheScope(
 		polyphonic,
 		topK,
 	};
+	if (beam.config.rerankApiUrl) {
+		scope.rerankApiUrl = beam.config.rerankApiUrl;
+		scope.rerankModel = beam.config.rerankModel ?? null;
+	}
 	const record = options as Record<string, unknown>;
 	for (const key of Object.keys(record).sort()) {
 		const value = record[key];

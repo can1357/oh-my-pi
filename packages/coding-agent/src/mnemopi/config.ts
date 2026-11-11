@@ -28,6 +28,11 @@ import {
 	cfgMnemopiRecallContextTurns,
 	cfgMnemopiRecallLimit,
 	cfgMnemopiRecallMaxQueryChars,
+	cfgMnemopiRerankApiKey,
+	cfgMnemopiRerankApiUrl,
+	cfgMnemopiRerankCandidates,
+	cfgMnemopiRerankScoreMode,
+	cfgMnemopiRerankModel,
 	cfgMnemopiRetainEveryNTurns,
 	cfgMnemopiScoping,
 } from "./settings";
@@ -38,7 +43,17 @@ export type MnemopiScoping = "global" | "per-project" | "per-project-tagged";
 
 export type MnemopiProviderOptions = Pick<
 	MnemopiOptions,
-	"noEmbeddings" | "embeddingModel" | "embeddingApiUrl" | "embeddingApiKey" | "llm" | "debug"
+	| "noEmbeddings"
+	| "embeddingModel"
+	| "embeddingApiUrl"
+	| "embeddingApiKey"
+	| "rerankModel"
+	| "rerankApiUrl"
+	| "rerankApiKey"
+	| "rerankCandidates"
+	| "rerankScoreMode"
+	| "llm"
+	| "debug"
 >;
 
 export interface MnemopiBackendConfig {
@@ -111,6 +126,11 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 			embeddingModel,
 			embeddingApiUrl: cfgMnemopiEmbeddingApiUrl.get(settings),
 			embeddingApiKey: cfgMnemopiEmbeddingApiKey.get(settings),
+			rerankModel: cfgMnemopiRerankModel.get(settings),
+			rerankApiUrl: cfgMnemopiRerankApiUrl.get(settings),
+			rerankApiKey: cfgMnemopiRerankApiKey.get(settings),
+			rerankCandidates: Math.max(1, Math.floor(cfgMnemopiRerankCandidates.get(settings))),
+			rerankScoreMode: cfgMnemopiRerankScoreMode.get(settings),
 			llm:
 				llmMode === "remote"
 					? {

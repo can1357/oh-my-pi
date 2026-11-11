@@ -90,6 +90,42 @@ export function embeddingApiKey(env: Env = process.env): string {
 export function embeddingApiUrl(env: Env = process.env): string {
 	return envString("MNEMOPI_EMBEDDING_API_URL", envString("OPENROUTER_BASE_URL", DEFAULT_EMBEDDING_API_URL, env), env);
 }
+export function rerankModel(env: Env = process.env): string | undefined {
+	const model = envOptionalString("MNEMOPI_RERANK_MODEL", env);
+	return model?.trim() || undefined;
+}
+
+export function rerankApiUrl(env: Env = process.env): string | undefined {
+	const url = envOptionalString("MNEMOPI_RERANK_API_URL", env);
+	return url?.trim() || undefined;
+}
+
+export function rerankApiKey(url?: string, env: Env = process.env): string {
+	const explicit = envOptionalString("MNEMOPI_RERANK_API_KEY", env);
+	if (explicit !== undefined) return explicit.trim();
+
+	const targetUrl = url?.trim() || rerankApiUrl(env);
+	if (!targetUrl) return "";
+
+	if (hostMatchesUrl(targetUrl, "openrouter")) {
+		return envString("OPENROUTER_API_KEY", "", env);
+	}
+	if (hostMatchesUrl(targetUrl, "openai")) {
+		return envString("OPENAI_API_KEY", "", env);
+	}
+	if (hostMatchesUrl(targetUrl, "cohere")) {
+		return envString("COHERE_API_KEY", "", env);
+	}
+	return "";
+}
+
+export function rerankCandidates(env: Env = process.env): number {
+	return Math.max(1, envInt("MNEMOPI_RERANK_CANDIDATES", 40, env));
+}
+
+export function rerankScoreMode(env: Env = process.env): "auto" | "logit" | "probability" {
+	return envOneOf("MNEMOPI_RERANK_SCORE_MODE", ["auto", "logit", "probability"] as const, "auto", env);
+}
 
 export function embeddingsViaApi(env: Env = process.env): boolean {
 	return envTruthy("MNEMOPI_EMBEDDINGS_VIA_API", env);

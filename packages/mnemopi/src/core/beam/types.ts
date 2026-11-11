@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { QueryCache } from "../query-cache";
+import type { ApiKey } from "@oh-my-pi/pi-ai";
+import type { RerankFunction } from "../rerank";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -67,6 +69,12 @@ export interface BeamConfig {
 	polyphonicRecall?: boolean;
 	/** Per-instance enhanced recall (query cache) gate; `undefined` defers to the process-wide default. */
 	enhancedRecall?: boolean;
+	rerankApiUrl?: string;
+	rerankModel?: string;
+	rerankApiKey?: ApiKey;
+	rerankCandidates?: number;
+	rerankScoreMode?: "auto" | "logit" | "probability";
+	rerankFn?: RerankFunction;
 }
 
 export interface BeamMemoryOptions {
@@ -81,6 +89,12 @@ export interface BeamMemoryOptions {
 	polyphonicRecall?: boolean;
 	/** Cache `recallEnhanced` results per query and options. `MNEMOPI_ENHANCED_RECALL` wins when set. */
 	enhancedRecall?: boolean;
+	rerankApiUrl?: string;
+	rerankModel?: string;
+	rerankApiKey?: ApiKey;
+	rerankCandidates?: number;
+	rerankScoreMode?: "auto" | "logit" | "probability";
+	rerankFn?: RerankFunction;
 	eventEmitter?: (event: BeamEvent) => void;
 	pluginManager?: BeamPluginManager | null;
 	annotations?: AnnotationStoreLike | null;
@@ -197,12 +211,14 @@ export interface RecallOptions {
 	 * {@link RECALL_CONTENT_PREVIEW_CHARS} (500).
 	 */
 	contentPreviewChars?: number;
+	signal?: AbortSignal;
 }
 
 export interface RecallEnhancedOptions extends RecallOptions {
 	/** Set `false` to bypass the enhanced-recall result cache for this call. */
 	useCache?: boolean;
 	includeFacts?: boolean;
+	skipRerank?: boolean;
 }
 
 export interface MemoryRow {
