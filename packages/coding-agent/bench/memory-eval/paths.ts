@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import { venvPython } from "../../src/eval/py/runtime";
 
 /** Resolve the cache explicitly for isolated runs instead of relying on platform-specific home variables. */
 export function resolveCacheRoot(root?: string): string {
@@ -7,9 +8,7 @@ export function resolveCacheRoot(root?: string): string {
 	return root === undefined ? path.join(os.homedir(), ".cache", "omp-memory-eval") : path.resolve(root);
 }
 
-/** `uv venv` uses Scripts/python.exe on native Windows, bin/python on POSIX. */
+/** Interpreter of the engine virtualenv under the cache root. */
 export function enginePython(cacheRoot: string): string {
-	return process.platform === "win32"
-		? path.join(cacheRoot, "venv-engine", "Scripts", "python.exe")
-		: path.join(cacheRoot, "venv-engine", "bin", "python");
+	return venvPython(path.join(cacheRoot, "venv-engine"));
 }

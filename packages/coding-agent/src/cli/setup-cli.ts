@@ -3,7 +3,6 @@
  *
  * Handles `omp setup` for onboarding and `omp setup <component>` for optional dependencies.
  */
-import * as path from "node:path";
 import { APP_NAME, getProjectDir, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
@@ -12,6 +11,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
+import { venvPython } from "../eval/py/runtime";
 import { discoverAuthStorage } from "../sdk";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
@@ -81,9 +81,7 @@ export interface PythonCheckResult {
 }
 
 function managedPythonPath(): string {
-	return process.platform === "win32"
-		? path.join(MANAGED_PYTHON_ENV, "Scripts", "python.exe")
-		: path.join(MANAGED_PYTHON_ENV, "bin", "python");
+	return venvPython(MANAGED_PYTHON_ENV);
 }
 
 /**
