@@ -3449,6 +3449,11 @@ describe("expanded computer APIs", () => {
 	it("keeps the worker's own error ahead of the stop it reports", async () => {
 		let stops = 0;
 		const partial = "type: 3 of 10 characters were sent before the input was cancelled";
+		const output = {
+			displays: [{ type: "text" as const, text: "MARK" }],
+			screenshots: [],
+			returnValue: undefined,
+		};
 		const supervisor = new ComputerSupervisor(
 			toolSession(),
 			() => {
@@ -3462,7 +3467,7 @@ describe("expanded computer APIs", () => {
 						if (message.type !== "run") return;
 						stops += 1;
 						const error = { name: "ToolError", message: partial, isToolError: true, isAbort: false };
-						queueMicrotask(() => emit({ type: "result", id: message.id, ok: false, error }));
+						queueMicrotask(() => emit({ type: "result", id: message.id, ok: false, error, output }));
 					},
 					onMessage: handler => {
 						handlers.add(handler);
@@ -3478,9 +3483,9 @@ describe("expanded computer APIs", () => {
 			{ read: () => stops, forget: () => {} },
 		);
 		try {
-			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(
-				`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`,
-			);
+			const result = await supervisor.run("1", 1_000, snapshot());
+			expect(result.displays).toEqual(output.displays);
+			expect(result.error?.message).toBe(`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`);
 		} finally {
 			await supervisor.close();
 		}
