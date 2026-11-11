@@ -327,7 +327,7 @@ await runRpcMode(session);
 			output,
 			"(2 selected) Choose enabled jobs",
 			["pytest", "go-quality", "lint", "Other (type your own)", "Done selecting"],
-			{ initialIndex: 2, selectionMarker: "checkbox", checkedIndices, markableCount: 3 },
+			{ initialIndex: 2, selectionMarker: "checkbox", checkedIndices, markableCount: 4 },
 		);
 		const request = requireRequest(output.mock.calls[0]?.[0]);
 
@@ -340,7 +340,7 @@ await runRpcMode(session);
 			initialIndex: 2,
 			selectionMarker: "checkbox",
 			checkedIndices: [0, 1],
-			markableCount: 3,
+			markableCount: 4,
 		});
 
 		respond(pendingRequests, request.id, { value: "lint" });
