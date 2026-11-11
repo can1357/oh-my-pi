@@ -34,8 +34,8 @@ export type AgentKind = "main" | "sub" | "advisor";
  * accepted result never terminalized.
  */
 export interface AgentRunLifecycle {
-	/** When the session reported the current run's start (see {@link AgentRegistryApi.startRun}). */
-	runStartedAt?: number;
+	/** Registry-wide sequence number of the current run (see {@link AgentRegistryApi.startRun}). */
+	run?: number;
 	/** When the run produced its final response (an accepted terminal `yield`). */
 	responseAt?: number;
 	/** When the run's final result was accepted by its driver. */
@@ -148,10 +148,10 @@ export interface AgentRegistryApi {
 	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean;
 	/** Transition `id` to `status` when it still matches `expected`. */
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
-	/** Enter a new run on `id` that started at `startedAt`, `running` already or not, when it still matches `expected`. */
-	startRun(id: string, expected?: AgentRefExpectation, startedAt?: number): boolean;
-	/** Record that the current run handed over its final result. */
-	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
+	/** Enter a new run on `id`, `running` already or not, when it still matches `expected`. */
+	startRun(id: string, expected?: AgentRefExpectation): boolean;
+	/** Record that the current run, or run number `run` when given, handed over its final result. */
+	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number, run?: number): boolean;
 	/** Accepted-but-running refs whose run already finished. */
 	staleAcceptedRuns(): AgentRef[];
 	/** Record a short activity gist for the work-aware roster. */
@@ -206,6 +206,8 @@ export class AgentRegistry implements AgentRegistryApi {
 	readonly #listeners = new Set<RegistryListener>();
 	/** Last generation minted for a ref object of this registry. */
 	#generation = 0;
+	/** Last run number handed out by {@link startRun}. */
+	#runSeq = 0;
 	/** Which of these agents are blocked until others finish. */
 	readonly awaits: AgentAwaitsApi = new AgentAwaits();
 
@@ -339,16 +341,14 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * Enter a new run on `id`. A session can start a wake or follow-up run
 	 * before the previous run's `idle` arrives, so the ref is still `running`
 	 * and {@link setStatus} keeps its lifecycle. This also rotates the
-	 * run-scoped milestones in that case, and stamps `runStartedAt`. A caller
-	 * on another thread passes `startedAt` from where the run started, since
-	 * the call reaches this registry later.
+	 * run-scoped milestones in that case, and gives the run a new `run` number.
 	 */
-	startRun(id: string, expected?: AgentRefExpectation, startedAt = Date.now()): boolean {
+	startRun(id: string, expected?: AgentRefExpectation): boolean {
 		const wasRunning = this.#refs.get(id)?.status === "running";
 		if (!this.setStatus(id, "running", expected)) return false;
 		const ref = this.#refs.get(id);
 		if (!ref) return false;
-		ref.lifecycle = { runStartedAt: startedAt };
+		ref.lifecycle = { run: ++this.#runSeq };
 		if (wasRunning) this.#emit({ type: "metadata_changed", ref });
 		return true;
 	}
@@ -367,17 +367,16 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * ref re-entered `running`).
 	 *
 	 * Returns false when the id is gone, aborted, or no longer owned by
-	 * `expected`, or when the session started a newer run after `responseAt`;
-	 * those cases must not stamp a newer generation or run.
+	 * `expected`, or when `run` is not the current run; those cases must not
+	 * stamp a newer generation or run.
 	 */
-	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean {
+	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number, run?: number): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
-		// The result came from a run that ended before the current one started (its driver
-		// awaited while a wake began): it does not settle the run in flight. A run yields only
-		// after its start and a model response, so a start in the yield's millisecond is a later run.
-		const runStartedAt = ref.status === "running" ? ref.lifecycle?.runStartedAt : undefined;
-		if (responseAt !== undefined && runStartedAt !== undefined && runStartedAt >= responseAt) return false;
+		// The result came from an earlier run (its driver awaited while a wake began): it does
+		// not settle the run in flight.
+		const current = ref.status === "running" ? ref.lifecycle?.run : undefined;
+		if (run !== undefined && current !== undefined && current !== run) return false;
 		const now = Date.now();
 		ref.lifecycle = {
 			...ref.lifecycle,

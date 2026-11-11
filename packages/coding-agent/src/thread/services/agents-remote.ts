@@ -122,12 +122,12 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		return this.#remote.callSync("setStatus", id, status, expected);
 	}
 
-	startRun(id: string, expected?: AgentRefExpectation, startedAt = Date.now()): boolean {
-		return this.#remote.callSync("startRun", id, expected, startedAt);
+	startRun(id: string, expected?: AgentRefExpectation): boolean {
+		return this.#remote.callSync("startRun", id, expected);
 	}
 
-	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean {
-		return this.#remote.callSync("markResultAccepted", id, expected, responseAt);
+	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number, run?: number): boolean {
+		return this.#remote.callSync("markResultAccepted", id, expected, responseAt, run);
 	}
 
 	staleAcceptedRuns(): AgentRef[] {
@@ -174,7 +174,7 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 	/** Subscribes on the session's own thread view and reports each transition to main in order. */
 	syncSessionStatus(id: string, session: AgentSessionHandle): () => void {
 		return session.subscribeRunState(status => {
-			if (status === "running") this.#remote.notify("startRun", id, session, Date.now());
+			if (status === "running") this.#remote.notify("startRun", id, session);
 			else this.#remote.notify("setStatus", id, status, session);
 		});
 	}
