@@ -143,7 +143,7 @@ An explicit model or thinking-level selection after the handoff takes ownership:
 
 ### What is classified
 
-Only new, user-authored tasks in the top-level session: typed prompts, user-invoked `/skill:` prompts, and queued follow-ups when they are delivered. Steering is never classified, since it amends the task already running. Acknowledgements such as `ok` or `thanks`, synthetic continuation turns, agent-attributed messages, subagents, plan mode, and tasks where prewalk is already armed are skipped.
+Only new, user-authored tasks in the top-level session: typed prompts, user-invoked `/skill:` prompts, and queued follow-ups when they are delivered. Steering is never classified, since it amends the task already running. Acknowledgements such as `ok` or `thanks`, synthetic continuation turns, agent-attributed messages, subagents, plan mode, and tasks where prewalk is already armed are skipped. Subagents have their own per-agent control; see [Subagent prewalk](#subagent-prewalk).
 
 The judge runs alongside the rest of prompt setup (memory recall, hooks, auto thinking), and its decision is applied just before the request is sent, so it adds latency only when it is the slowest setup step.
 
@@ -162,3 +162,20 @@ Auto-prewalk is an optimization and fails open. A missing native judge, a judge 
 ## Subagent prewalk
 
 Task subagents have separate prewalk controls: agent frontmatter, `task.prewalk`, and per-agent `task.agentPrewalk` overrides. See [Task agent discovery](./task-agent-discovery.md) for their precedence and target selection.
+
+Those controls arm unconditionally. `task.agentPrewalkAuto` lets the judge decide per assignment instead:
+
+```yaml
+task:
+   agentPrewalkAuto:
+      task: "on"
+      builder: "openai/gpt-5-mini"
+```
+
+Each entry maps an agent name to `"on"` (hand off to `prewalk.autoTarget`), `"off"`, or a target model pattern or role. A missing entry behaves like `"off"`.
+
+The judgment happens once at spawn, on the assignment text, with the same native judge, routes, and fixed 0.70 threshold as Auto-prewalk (see [What it decides](#what-it-decides) and [Requirements](#requirements)). When it arms, the subagent gets the same handoff an unconditional subagent prewalk would; otherwise it runs without prewalk.
+
+An unconditional arm from agent frontmatter, `task.prewalk`, or `task.agentPrewalk` wins and is never judged. Seance, per-call-model, and restricted-tool (plan mode) spawns are skipped without a judgment, as are spawns whose target is unavailable or equals the starting model and effort.
+
+Subagent auto-prewalk fails open: a missing native judge, a judge error, the timeout, or a low-signal assignment leaves the spawn without prewalk. It is independent of `prewalk.auto`. A kept-alive subagent keeps its spawn decision for follow-ups. The judgment is recorded as model usage on the subagent session under the purpose `auto-prewalk`.

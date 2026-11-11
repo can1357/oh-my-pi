@@ -656,6 +656,13 @@ export const cfgTaskAgentPrewalk = register({
 	default: {} as Record<string, string>,
 });
 
+export const cfgTaskAgentPrewalkAuto = register({
+	id: "task.agentPrewalkAuto",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, string>,
+});
+
 export const cfgTaskAgentAdvisor = register({
 	id: "task.agentAdvisor",
 	protocolDefault: ["rpc", "acp"],

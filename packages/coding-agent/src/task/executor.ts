@@ -161,6 +161,7 @@ import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly"
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
+	cfgTaskAgentPrewalkAuto,
 	cfgTaskMaxEffort,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
@@ -178,7 +179,10 @@ import {
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
+	cfgPrewalkAutoTarget,
 } from "../session/settings";
+import { classifyAutoPrewalk, type ClassifyAutoPrewalkDeps } from "../auto-prewalk/classifier";
+import { type JudgmentUsage, journalJudgmentUsage } from "../judgment";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 import {
@@ -1414,6 +1418,30 @@ interface SubagentRunMonitor {
  */
 function isAsyncResultInjection(message: AgentMessage | undefined): boolean {
 	return message?.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE;
+}
+
+/**
+ * Judges one assignment for `task.agentPrewalkAuto`. False on a non-arming or
+ * failed judgment: the spawn then runs without prewalk.
+ */
+async function judgeSubagentAutoPrewalk(
+	request: string,
+	agentName: string,
+	deps: ClassifyAutoPrewalkDeps,
+): Promise<boolean> {
+	const decision = await classifyAutoPrewalk({ request, history: [] }, deps).catch(error => {
+		logger.debug("auto-prewalk: skipped after a failure", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	});
+	if (decision?.arm) return true;
+	logger.debug("Subagent auto-prewalk judgment did not arm; skipping prewalk", {
+		agent: agentName,
+		route: decision?.route,
+		prewalkProbability: decision?.probabilities.prewalk,
+	});
+	return false;
 }
 
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
@@ -4878,15 +4906,31 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn. A per-call
 			// worker never switches models, so it never prewalks.
+			// `task.agentPrewalkAuto` (same "on"/"off"/pattern grammar; "on" targets
+			// `prewalk.autoTarget`) asks the judge per assignment when nothing arms
+			// unconditionally. The judgment runs only after the target is known to be
+			// usable; a non-arming or failed judgment leaves the spawn without prewalk.
 			const perCallModelGrants = options.perCallModelGrants;
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern =
+			const judgmentUsage: JudgmentUsage[] = [];
+			const unconditionalPattern =
 				preparedSession || perCallModelGrants
 					? undefined
 					: resolveAgentPrewalkPattern({
 							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
 							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
 						});
+			const autoEntry =
+				unconditionalPattern === undefined && !preparedSession && !perCallModelGrants && !restrictToolNames
+					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
+					: undefined;
+			const autoPattern = autoEntry
+				? resolveAgentPrewalkPattern({
+						settingsOverride: autoEntry,
+						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+					})
+				: undefined;
+			const prewalkPattern = unconditionalPattern ?? autoPattern;
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
@@ -4906,7 +4950,19 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						pattern: prewalkPattern,
 					});
 				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+					const armed =
+						unconditionalPattern !== undefined ||
+						(await awaitAbortable(
+							judgeSubagentAutoPrewalk(assignment?.trim() || task, agent.name, {
+								settings,
+								registry: modelRegistry,
+								sessionId: id,
+								signal: abortSignal,
+								onUsage: usage => judgmentUsage.push(usage),
+								telemetry: options.parentTelemetry,
+							}),
+						));
+					if (armed) prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
 				}
 			}
 
@@ -5050,6 +5106,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
+			// Bill the auto-prewalk judgment to the child session it decided for.
+			const journalJudgment = journalJudgmentUsage(sessionManager);
+			if (journalJudgment) {
+				for (const usage of judgmentUsage) journalJudgment(usage);
+			}
 			if (preparedSession) openedSessionManager = sessionManager;
 			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
