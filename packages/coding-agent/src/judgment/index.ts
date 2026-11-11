@@ -26,7 +26,7 @@ import {
 	createNativeJudge,
 	type ImageContent,
 	isJudgmentApi,
-	nativeJudgmentAcceptsImages,
+	judgmentImagesWithin,
 	nativeJudgmentImageBounds,
 	nativeJudgmentSupportsBoxes,
 	nativeJudgmentSupportsImages,
@@ -49,6 +49,7 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import type { JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
@@ -301,21 +302,27 @@ const WHOLE_IMAGE: BoxEdges = { top: 0, bottom: 1, left: 0, right: 1 };
 
 /**
  * `images` sized into `model`'s native judgment bounds, which the API enforces by rejecting rather than
- * resizing: an image already within them is sent as is, any other goes through {@link fitImage}. A
- * request-wide byte cap is split evenly so the fitted set also fits as a whole.
+ * resizing: an image within its even share of them is sent as is, any other goes through {@link fitImage}.
+ * The share splits request-wide byte and patch caps so the fitted set also fits as a whole.
  */
 async function fitNativeImages(model: Model, images: readonly ImageContent[]): Promise<FittedImage[]> {
 	const bounds = nativeJudgmentImageBounds(model);
 	if (!bounds) return images.map(image => ({ image, content: WHOLE_IMAGE }));
-	const maxBytes = Math.min(
-		bounds.maxBytes ?? Infinity,
-		Math.floor((bounds.maxTotalBytes ?? Infinity) / images.length),
-	);
+	const share: JudgmentImageInput = { ...bounds };
+	if (bounds.maxTotalBytes !== undefined) {
+		share.maxBytes = Math.min(bounds.maxBytes ?? Infinity, Math.floor(bounds.maxTotalBytes / images.length));
+	}
+	if (bounds.maxTotalPatches !== undefined) {
+		share.maxTotalPatches = Math.floor(bounds.maxTotalPatches / images.length);
+	}
 	const fitted: FittedImage[] = [];
 	// Sequential on purpose: each fit decodes and re-encodes a whole image.
 	for (const image of images) {
-		const within = nativeJudgmentAcceptsImages(model, [image]) && Buffer.byteLength(image.data, "base64") <= maxBytes;
-		fitted.push(within ? { image, content: WHOLE_IMAGE } : await fitImage(image, { ...bounds, maxBytes }));
+		fitted.push(
+			judgmentImagesWithin([image], share)
+				? { image, content: WHOLE_IMAGE }
+				: await fitImage(image, { ...share, maxPatches: share.maxTotalPatches }),
+		);
 	}
 	return fitted;
 }

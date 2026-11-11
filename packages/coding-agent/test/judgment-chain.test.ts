@@ -574,6 +574,52 @@ describe("ChainJudge", () => {
 		expect([sent.width, sent.height]).toEqual([280, 280]);
 	});
 
+	it("splits a request-wide patch cap across images that each fit it alone", async () => {
+		const liquid = {
+			...JEV_PREVIEW,
+			id: "d1.1",
+			api: "liquid-systemone",
+			provider: "liquid",
+			baseUrl: "https://api.liquid.ai",
+			input: ["text", "image"],
+		} as Model<Api>;
+		const settings = Settings.isolated({ modelRoles: { judge: `${liquid.provider}/${liquid.id}` } });
+		const registry = makeRegistry([liquid], { liquid: "liquid_key" });
+		let images: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				images = JSON.parse(String(init?.body)).images;
+				return Response.json({
+					model: liquid.id,
+					answers: { visible: { type: "noul", noul: 0.75 } },
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		// 2304x2304 covers 72x72 = 5184 patches: within Liquid's 10,000 alone, over it as a pair.
+		const side = 2304;
+		const large: ImageContent = {
+			type: "image",
+			data: encodeRawPng(new Uint8Array(side * side * 3), side, side, 3).toBase64(),
+			mimeType: "image/png",
+		};
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "compare these",
+			questions: { visible: { type: "noul", instructions: "Is an object visible?" } },
+			images: [large, large],
+		});
+
+		expect(result.answers.visible.noul).toBe(0.75);
+		let patches = 0;
+		for (const url of images) {
+			const { width, height } = await new Bun.Image(Buffer.from(url.split(",")[1], "base64")).metadata();
+			patches += Math.ceil(width / 32) * Math.ceil(height / 32);
+		}
+		expect(images).toHaveLength(2);
+		expect(patches).toBeLessThanOrEqual(10_000);
+	});
+
 	it("measures box answers on the source image its question names, not the padded fit sent", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}` },
@@ -1007,7 +1053,7 @@ describe("ChainJudge", () => {
 	it("does not charge local image preparation to a native candidate's deadline", async () => {
 		using fixture = nativeLoopback();
 		fixture.recover();
-		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(ai, "judgmentImagesWithin").mockReturnValue(false);
 		vi.spyOn(imageResize, "fitImage").mockImplementation(async image => {
 			// AbortSignal.timeout uses the platform clock; image work must outlast that real deadline.
 			await Bun.sleep(400);
@@ -1026,7 +1072,7 @@ describe("ChainJudge", () => {
 		using fixture = nativeLoopback();
 		const started = Promise.withResolvers<void>();
 		const fitted = Promise.withResolvers<imageResize.FittedImage>();
-		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(ai, "judgmentImagesWithin").mockReturnValue(false);
 		vi.spyOn(imageResize, "fitImage").mockImplementation(() => {
 			started.resolve();
 			return fitted.promise;

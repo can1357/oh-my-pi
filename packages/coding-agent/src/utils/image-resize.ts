@@ -1,6 +1,7 @@
 import { inflateSync } from "node:zlib";
 import type { BoxEdges, ImageContent } from "@oh-my-pi/pi-ai";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { JUDGMENT_IMAGE_PATCH_SIDE, judgmentImagePatches } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { encodeRawPng } from "./png-encode";
 
 export interface ImageResizeOptions {
@@ -572,6 +573,8 @@ export interface ImageFitBounds {
 	maxPixels?: number;
 	/** Encoded bytes. */
 	maxBytes?: number;
+	/** {@link judgmentImagePatches} of the scaled image. */
+	maxPatches?: number;
 }
 
 /** An image re-encoded by {@link fitImage}. */
@@ -609,9 +612,21 @@ async function fitImageBytes(
 	{ width, height }: { width: number; height: number },
 	bounds: ImageFitBounds,
 ): Promise<{ buffer: Uint8Array; mimeType: string; width: number; height: number; content: BoxEdges }> {
-	const { minSide = 1, maxSide = Infinity, minPixels = 1, maxPixels = Infinity, maxBytes = Infinity } = bounds;
+	const {
+		minSide = 1,
+		maxSide = Infinity,
+		minPixels = 1,
+		maxPixels = Infinity,
+		maxBytes = Infinity,
+		maxPatches = Infinity,
+	} = bounds;
 	const area = width * height;
-	const ceiling = Math.min(maxSide / Math.max(width, height), Math.sqrt(maxPixels / area));
+	const patch = JUDGMENT_IMAGE_PATCH_SIDE;
+	const ceiling = Math.min(
+		maxSide / Math.max(width, height),
+		Math.sqrt(maxPixels / area),
+		Math.sqrt((maxPatches * patch * patch) / area),
+	);
 	const floor = Math.max(minSide / Math.min(width, height), Math.sqrt(minPixels / area));
 	// Reaching a minimum never crosses a maximum; padding below covers what scaling leaves short.
 	const scale = floor > 1 ? Math.min(floor, ceiling) : Math.min(1, ceiling);
@@ -621,6 +636,15 @@ async function fitImageBytes(
 	if (scaledWidth * scaledHeight > maxPixels) {
 		if (scaledWidth >= scaledHeight) scaledWidth = Math.floor(maxPixels / scaledHeight);
 		else scaledHeight = Math.floor(maxPixels / scaledWidth);
+	}
+	// Partial patches count whole, so a size within the patch area can still cover one row or column too
+	// many; trim the longer side to the whole patches the shorter side leaves.
+	if (judgmentImagePatches(scaledWidth, scaledHeight) > maxPatches) {
+		if (scaledWidth >= scaledHeight) {
+			scaledWidth = Math.max(1, patch * Math.floor(maxPatches / Math.ceil(scaledHeight / patch)));
+		} else {
+			scaledHeight = Math.max(1, patch * Math.floor(maxPatches / Math.ceil(scaledWidth / patch)));
+		}
 	}
 
 	let canvasWidth = Math.max(scaledWidth, minSide);
