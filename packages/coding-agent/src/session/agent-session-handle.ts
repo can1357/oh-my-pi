@@ -150,6 +150,8 @@ export interface AgentSessionHandle {
 		reason?: string;
 		preserveCompaction?: boolean;
 		deliverQueuedMessages?: boolean;
+		/** Whether a user interrupt may retract the turn it stopped and hand its prompt back. */
+		retake?: boolean;
 	}): Promise<void>;
 	/** Replace the pooled-turn yield contract. */
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void>;

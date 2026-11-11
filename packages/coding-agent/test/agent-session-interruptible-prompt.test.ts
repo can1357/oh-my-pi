@@ -239,4 +239,39 @@ describe("AgentSession.getInterruptiblePrompt", () => {
 			await harness.dispose();
 		}
 	});
+
+	/**
+	 * The host decides once whether an interrupt may take the turn back: the
+	 * composer restore and the branch cut are one decision. A host that refused
+	 * the restore must not lose the turn from the transcript instead, or the
+	 * operator's words are gone from both places.
+	 */
+	it("leaves the turn in place when the host refuses the retake", async () => {
+		const harness = await drivenTurn();
+		try {
+			const { emit, turn } = await harness.start();
+			emit({ type: "start", partial: thinkingPartial("") });
+			emit({ type: "thinking_start", contentIndex: 0, partial: thinkingPartial("") });
+			emit({
+				type: "thinking_delta",
+				contentIndex: 0,
+				delta: "considering",
+				partial: thinkingPartial("considering"),
+			});
+			await settle();
+			expect(harness.session.getInterruptiblePrompt()).toEqual({
+				text: "fix the failing test",
+				images: undefined,
+			});
+
+			await harness.session.abort({ reason: USER_INTERRUPT_LABEL, retake: false });
+			await turn;
+			await settle();
+
+			expect(harness.dropped).toEqual([]);
+			expect(harness.session.messages.some(message => message.role === "user")).toBe(true);
+		} finally {
+			await harness.dispose();
+		}
+	});
 });
