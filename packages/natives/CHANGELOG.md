@@ -6,6 +6,10 @@
 
 - `ShellRunResult` carries `endedByExit`: true when `exit` or an armed `set -e` cut the run short with commands still left to run (whatever followed the abort did not run); a trailing `exit` at the end of the input, which ends the run where the input's end would have, is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
 
+### Fixed
+
+- Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
