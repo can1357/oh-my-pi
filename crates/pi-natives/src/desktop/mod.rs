@@ -1184,29 +1184,31 @@ impl Worker {
 		let Ok(target) = self.registry.target(reference) else {
 			return error;
 		};
-		let parsed = Target::parse(&target);
-		let window = if !matches!(parsed, Target::Window(_)) {
-			let found = self
-				.backend()
-				.and_then(|backend| backend.windows())
-				.and_then(|windows| {
-					let id = self.ax()?.window_id(&handle, &windows)?;
-					windows
-						.into_iter()
-						.find(|window| window.id == id)
-						.ok_or_else(|| {
-							DesktopError::window_not_found("the element's window is unavailable")
-						})
-				});
-			let Ok(window) = found else {
-				return error;
-			};
-			window
-		} else {
-			let Ok(window) = self.window(&parsed) else {
-				return error;
-			};
-			window
+		let window = match Target::parse(&target) {
+			target @ Target::Window(_) => {
+				let Ok(window) = self.window(&target) else {
+					return error;
+				};
+				window
+			},
+			Target::Desktop | Target::Display(_) => {
+				let found = self
+					.backend()
+					.and_then(|backend| backend.windows())
+					.and_then(|windows| {
+						let id = self.ax()?.window_id(&handle, &windows)?;
+						windows
+							.into_iter()
+							.find(|window| window.id == id)
+							.ok_or_else(|| {
+								DesktopError::window_not_found("the element's window is unavailable")
+							})
+					});
+				let Ok(window) = found else {
+					return error;
+				};
+				window
+			},
 		};
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let Some(ax) = backend.as_mut().ok().and_then(|backend| backend.ax()) else {

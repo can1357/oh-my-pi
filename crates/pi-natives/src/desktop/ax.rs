@@ -405,6 +405,7 @@ pub(crate) struct AxReadAs {
 
 #[cfg(any(target_os = "macos", test))]
 impl AxReadAs {
+	/// Callers pass only an answered role and fully answered chosen labels.
 	pub(crate) fn from_labels(role: String, labels: [Option<String>; 3]) -> Self {
 		Self {
 			role,

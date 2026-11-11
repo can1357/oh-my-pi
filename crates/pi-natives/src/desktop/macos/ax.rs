@@ -1314,7 +1314,7 @@ struct ElementLabels {
 	complete:    bool,
 }
 
-/// Decodes only labels already in the batch. In particular, an AXValue can
+/// Decodes only labels already in the batch. In particular, an `AXValue` can
 /// itself be an AX element whose display value needs more synchronous reads.
 fn element_labels(values: &NodeValues) -> CoreResult<ElementLabels> {
 	let native_role = required_string(values.get(ROLE), "AXRole")?;
@@ -2390,6 +2390,8 @@ fn set_timeout(element: &AXUIElement) -> CoreResult<()> {
 
 #[cfg(test)]
 thread_local! {
+	// Includes failed lone AX calls, so the projection regression does not
+	// depend on the test process having Accessibility permission.
 	static SINGLE_ATTRIBUTE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -2816,7 +2818,7 @@ mod tests {
 
 	#[test]
 	fn fingerprint_decoding_does_not_query_an_ax_element_value() {
-		use super::{SINGLE_ATTRIBUTE_READS, create_system_wide, read_as_values};
+		use super::{SINGLE_ATTRIBUTE_READS, read_as_values};
 		let role = CFString::from_static_str("AXRadioGroup");
 		let title = CFString::from_static_str("Choice");
 		let child = create_system_wide();
