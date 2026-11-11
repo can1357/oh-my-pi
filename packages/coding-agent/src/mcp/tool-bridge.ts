@@ -261,24 +261,52 @@ function formatStructuredContent(structured: Record<string, unknown>): string {
 }
 
 /**
- * True when a text block already carries the structured payload verbatim. A
- * spec-compliant server duplicates `structuredContent` into a TextContent block
- * for back-compat; detecting that avoids emitting the JSON twice.
+ * True when text already carries the structured payload. Beyond a verbatim
+ * echo, this covers the MCP SDK's `{ result: value }` wrapper for non-object
+ * tool returns: the SDK auto-wraps list/string returns, so `structuredContent`
+ * never verbatim-matches the `content` text blocks that carry the same value.
+ *
+ * A partial match does NOT count: if content covers only part of the wrapped
+ * payload (extra items, extra keys), the rendering is kept so the model still
+ * sees the full structured result.
  */
 function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
+	const wrapped =
+		Object.hasOwn(structured, "result") && Object.keys(structured).length === 1 ? structured.result : undefined;
+	const wrappedItems = Array.isArray(wrapped) ? wrapped : undefined;
+	let textCount = 0;
+	let matchedItems = 0;
 	for (const item of content) {
 		if (item.type !== "text") continue;
 		const trimmed = item.text.trim();
 		if (trimmed.length === 0) continue;
 		let parsed: unknown;
+		let parseFailed = false;
 		try {
 			parsed = JSON.parse(trimmed);
 		} catch {
-			continue;
+			parseFailed = true;
 		}
-		if (Bun.deepEquals(parsed, structured)) return true;
+		if (!parseFailed && Bun.deepEquals(parsed, structured)) return true;
+		if (
+			wrapped !== undefined &&
+			((typeof wrapped === "string" && trimmed === wrapped) || (!parseFailed && Bun.deepEquals(parsed, wrapped)))
+		) {
+			return true;
+		}
+		textCount++;
+		const next = wrappedItems?.[matchedItems];
+		if (
+			next !== undefined &&
+			matchedItems === textCount - 1 &&
+			((typeof next === "string" && trimmed === next) || (!parseFailed && Bun.deepEquals(parsed, next)))
+		) {
+			matchedItems++;
+		}
 	}
-	return false;
+	return (
+		wrappedItems !== undefined && textCount > 0 && textCount === wrappedItems.length && matchedItems === textCount
+	);
 }
 
 /** Build a CustomToolResult from a callTool response. */
