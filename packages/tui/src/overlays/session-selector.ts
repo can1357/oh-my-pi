@@ -194,6 +194,20 @@ function sessionPreview(session: SessionSelectorEntry, forkedFrom: string | unde
 	]);
 }
 
+/** BCP 47 tag from the POSIX locale variables (`LC_ALL`, then `LC_TIME`, then `LANG`), or `undefined` to use the runtime default. */
+export function systemDateLocale(env: Readonly<Record<string, string | undefined>>): string | undefined {
+	const raw = env.LC_ALL || env.LC_TIME || env.LANG;
+	const tag = raw?.replace(/[.@].*$/, "").replace(/_/g, "-");
+	if (!tag || tag === "C" || tag === "POSIX") return undefined;
+	try {
+		return Intl.DateTimeFormat.supportedLocalesOf(tag)[0];
+	} catch {
+		return undefined;
+	}
+}
+
+const dateLocale = systemDateLocale(process.env);
+
 /** Absolute dates of week-old sessions; `toLocaleDateString` goes through Intl on every call. */
 const localeDateCache = new WeakMap<Date, { time: number; text: string }>();
 
@@ -213,7 +227,7 @@ function formatSessionDate(date: Date): string {
 
 	const cached = localeDateCache.get(date);
 	if (cached?.time === time) return cached.text;
-	const text = date.toLocaleDateString();
+	const text = date.toLocaleDateString(dateLocale);
 	localeDateCache.set(date, { time, text });
 	return text;
 }

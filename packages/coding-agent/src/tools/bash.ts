@@ -654,10 +654,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				reason: `Blocked by bash pattern: ${denied.rule.match}`,
 			};
 		}
-		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
-		if (!compoundSegments && criticalCommand) {
-			return { tier: "exec", override: true, reason: "Critical pattern detected" };
-		}
 		const prompted =
 			authorityDecision.kind === "prompt" ? authorityDecision : decision.kind === "prompt" ? decision : undefined;
 		if (prompted) {
@@ -667,6 +663,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				policy: "prompt",
 				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
+		}
+		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
+		if (!compoundSegments && criticalCommand) {
+			return { tier: "exec", override: true, reason: "Critical pattern detected" };
 		}
 		if (compoundSegments) {
 			for (const segment of compoundSegments) {

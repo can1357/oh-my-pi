@@ -249,6 +249,38 @@ describe("Spotlight holdout", () => {
 	});
 });
 
+describe("Spotlight overhead", () => {
+	it("breaks failed results down by cause, as shares of the results that called Spotlight", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo", "failures").marker();
+		b.user("go");
+		const failedBash = (shape: { failures: number; failureCauses?: Record<string, number> }) => {
+			const [id] = b.request({
+				cacheRead: 10_000,
+				cacheWrite: 500,
+				calls: [{ name: "bash", args: { command: "ls" } }],
+			});
+			b.result(id, { text: "ok", shape: { inTokens: 3000, outTokens: 3000, ...shape } });
+		};
+		failedBash({ failures: 2, failureCauses: { no_credential: 2 } });
+		failedBash({ failures: 1, failureCauses: { no_credential: 1 } });
+		failedBash({ failures: 2, failureCauses: { timeout: 1, rate_limited: 1 } });
+		// Journaled before pi recorded causes.
+		failedBash({ failures: 1 });
+		shortenedRead(b);
+		await write("failures.jsonl", b);
+
+		const { overhead } = await dashboard();
+
+		expect(overhead.failureRate).toBe(4 / 5);
+		expect(overhead.failureCauses).toEqual([
+			{ cause: "no_credential", results: 2, share: 2 / 5 },
+			{ cause: "rate_limited", results: 1, share: 1 / 5 },
+			{ cause: "timeout", results: 1, share: 1 / 5 },
+			{ cause: "unrecorded", results: 1, share: 1 / 5 },
+		]);
+	});
+});
+
 describe("Spotlight edits", () => {
 	it("does not count a re-read after an edit of the file, or a rerun after any edit, as fetching back", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();

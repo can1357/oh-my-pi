@@ -335,6 +335,7 @@ export async function initDb(): Promise<Database> {
 			artifacts TEXT,
 			sp_calls INTEGER,
 			sp_failures INTEGER,
+			sp_failure_causes TEXT,
 			sp_ms REAL,
 			sp_cost REAL,
 			shape_ms REAL,
@@ -408,6 +409,8 @@ export async function initDb(): Promise<Database> {
 		["kept", "TEXT"],
 		// No read was gated before this existed: the default is exact.
 		["gated", "INTEGER NOT NULL DEFAULT 0"],
+		// Failed calls by cause (JSON); shape entries before pi journaled it leave it NULL.
+		["sp_failure_causes", "TEXT"],
 	] as const) {
 		if (!spotlightResultColumns.some(existing => existing.name === column)) {
 			db.run(`ALTER TABLE spotlight_results ADD COLUMN ${column} ${type}`);
@@ -1998,6 +2001,7 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 			"artifacts",
 			"sp_calls",
 			"sp_failures",
+			"sp_failure_causes",
 			"sp_ms",
 			"sp_cost",
 			"shape_ms",
@@ -2012,7 +2016,7 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 		identity: ["tool_call_id"],
 		upsert: `ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
 			${["tool", "in_chars", "out_chars", "in_tokens", "out_tokens", "steps", "hidden_lines"].map(fromDetails).join(",\n")},
-			${["original_url", "path", "start_line", "lines", "hidden", "artifacts", "sp_calls", "sp_failures", "sp_ms", "sp_cost", "shape_ms", "plain_chars", "plain_tokens", "capped_tokens", "heat", "kept"].map(coalesce).join(",\n")},
+			${["original_url", "path", "start_line", "lines", "hidden", "artifacts", "sp_calls", "sp_failures", "sp_failure_causes", "sp_ms", "sp_cost", "shape_ms", "plain_chars", "plain_tokens", "capped_tokens", "heat", "kept"].map(coalesce).join(",\n")},
 			has_details = MAX(spotlight_results.has_details, excluded.has_details),
 			holdout = MAX(spotlight_results.holdout, excluded.holdout),
 			score_free = MAX(spotlight_results.score_free, excluded.score_free),
@@ -2045,6 +2049,7 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 					r.artifacts ? JSON.stringify(r.artifacts) : null,
 					r.spotlight?.calls ?? null,
 					r.spotlight?.failures ?? null,
+					r.spotlight?.failureCauses ? JSON.stringify(r.spotlight.failureCauses) : null,
 					r.spotlight?.ms ?? null,
 					r.spotlight?.costUsd ?? null,
 					r.shapeMs,

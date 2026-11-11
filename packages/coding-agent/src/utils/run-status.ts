@@ -14,8 +14,11 @@ import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
 import { setTerminalTitleState, type TerminalTitleState } from "./title-generator";
 
-/** What a blocked run waits on: an approval prompt or an `ask` question. */
+/** What a blocked run waits on: an approval (`permission`) or an answer (`question`). */
 export type BlockedKind = "permission" | "question";
+
+/** A dialog waiting on the user; `msg` says for what. */
+export type BlockedStatus = { readonly state: "blocked"; readonly kind: BlockedKind; readonly msg?: string };
 
 /**
  * The agent's run status, in OSC 7501 terms:
@@ -27,8 +30,11 @@ export type BlockedKind = "permission" | "question";
  */
 export type RunStatus =
 	| { readonly state: "idle" | "working" | "done" }
-	| { readonly state: "blocked"; readonly kind: BlockedKind; readonly msg?: string }
+	| BlockedStatus
 	| { readonly state: "error"; readonly msg?: string };
+
+/** The run's own status, as the event flow reports it; `blocked` comes only from open dialogs. */
+export type RunFlowStatus = Exclude<RunStatus, BlockedStatus>;
 
 const OSC_7501 = "\x1b]7501;";
 const ST = "\x1b\\";
@@ -38,7 +44,10 @@ const CLEAR_REPORT = `${OSC_7501}state=clear${ST}`;
 const MSG_MAX_BYTES = 2048;
 
 const runtime: {
-	status: RunStatus;
+	/** The event flow's status, set by {@link setRunStatus}. */
+	status: RunFlowStatus;
+	/** Open dialogs' holds from {@link holdBlockedStatus}, newest last. */
+	dialogs: BlockedStatus[];
 	/** `terminal.programStatus`; off removes the record and stops reporting. */
 	enabled: boolean;
 	/** Set at teardown so a late transition cannot leave a record in the parent
@@ -47,14 +56,20 @@ const runtime: {
 	/** The report the terminal holds, so a repeated status writes nothing. */
 	reported: string | undefined;
 	/** The `working` status a command-line prompt holds from startup until its run reports. */
-	startup: RunStatus | undefined;
+	startup: RunFlowStatus | undefined;
 } = {
 	status: { state: "idle" },
+	dialogs: [],
 	enabled: true,
 	disposed: false,
 	reported: undefined,
 	startup: undefined,
 };
+
+/** What every surface shows: the newest open dialog, else the event flow's status. */
+function shownStatus(): RunStatus {
+	return runtime.dialogs.at(-1) ?? runtime.status;
+}
 
 function titleState(status: RunStatus): TerminalTitleState {
 	if (status.state === "working") return "working";
@@ -86,10 +101,15 @@ function formatReport(status: RunStatus): string {
 function report(): void {
 	if (runtime.disposed || !runtime.enabled) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	const next = formatReport(runtime.status);
+	const next = formatReport(shownStatus());
 	if (next === runtime.reported) return;
 	writeTerminalSequence(next);
 	runtime.reported = next;
+}
+
+function publish(): void {
+	setTerminalTitleState(titleState(shownStatus()));
+	report();
 }
 
 function clear(): void {
@@ -101,12 +121,29 @@ function clear(): void {
 /**
  * Publish a run status transition from the interactive event flow: the title
  * separator (`tui.titleState`) and, unless `terminal.programStatus` is off, the
- * OSC 7501 root record.
+ * OSC 7501 root record. While a dialog is open, it shows instead.
  */
-export function setRunStatus(status: RunStatus): void {
+export function setRunStatus(status: RunFlowStatus): void {
 	runtime.status = status;
-	setTerminalTitleState(titleState(status));
-	report();
+	publish();
+}
+
+/**
+ * Show the run as `blocked` while a dialog waits on the user, whatever the event
+ * flow reports meanwhile: a run that ends under an open dialog still waits on
+ * the user. The returned release drops the hold, and the surfaces show the next
+ * open dialog, else the event flow's current status.
+ */
+export function holdBlockedStatus(status: BlockedStatus): () => void {
+	const hold = { ...status };
+	runtime.dialogs.push(hold);
+	publish();
+	return () => {
+		const index = runtime.dialogs.indexOf(hold);
+		if (index === -1) return;
+		runtime.dialogs.splice(index, 1);
+		publish();
+	};
 }
 
 /** Turn OSC 7501 reporting on or off (`terminal.programStatus`); off removes the record. */
@@ -122,7 +159,8 @@ export function setProgramStatusEnabled(enabled: boolean): void {
  * `error` survive a prompt, so they are left alone rather than reported twice.
  */
 export function resendProgramStatus(): void {
-	if (runtime.status.state === "done" || runtime.status.state === "error") return;
+	const { state } = shownStatus();
+	if (state === "done" || state === "error") return;
 	runtime.reported = undefined;
 	report();
 }
@@ -130,6 +168,7 @@ export function resendProgramStatus(): void {
 /**
  * Claim the terminal's status record when the UI takes over the terminal: the
  * counterpart to {@link disposeProgramStatus} and the only release of its latch.
+ * A UI starts with no dialog open, so holds left by a previous one are dropped.
  *
  * `startupRun` marks a command-line prompt that runs once startup ends: the
  * first report is then `working`, not the `idle` that a supervisor waiting on
@@ -138,12 +177,13 @@ export function resendProgramStatus(): void {
  */
 export function initProgramStatus(options?: { startupRun?: boolean }): void {
 	runtime.disposed = false;
+	runtime.dialogs.length = 0;
 	runtime.startup = undefined;
 	if (options?.startupRun) {
 		runtime.startup = { state: "working" };
 		runtime.status = runtime.startup;
 		// Not `setRunStatus`: the record waits for `setProgramStatusEnabled`, but the title follows now.
-		setTerminalTitleState(titleState(runtime.status));
+		setTerminalTitleState(titleState(shownStatus()));
 	}
 }
 
