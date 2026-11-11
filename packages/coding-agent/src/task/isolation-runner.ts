@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { postmortem, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -504,7 +504,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return cleanupPromise;
 	};
 	const releaseIsolation = (): Promise<void> => {
-		releasePromise ??= (async () => {
+		if (releasePromise) return releasePromise;
+		releasePromise = (async () => {
 			if (!workspace || !changes || retainWorkspace) {
 				await cleanupHandle();
 				return;
@@ -550,6 +551,15 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				await cleanupHandle();
 			}
 		})();
+		// Session teardown has only a short grace period. Once the session has
+		// stopped, let a signal exit wait for the final capture and backend stop
+		// rather than abandoning a large sandbox when that grace period expires.
+		const unregister = postmortem.register(`isolation-release:${opts.agentId}`, () => releasePromise, {
+			exitOnly: true,
+			deadlineMs: 120_000,
+			waitMessage: "Finishing isolated task cleanup",
+		});
+		void releasePromise.then(unregister, unregister);
 		return releasePromise;
 	};
 	try {

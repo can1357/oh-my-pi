@@ -77,7 +77,7 @@ describe("anthropic oauth alignment", () => {
 					expect(String(input)).toBe("https://api.anthropic.com/v1/oauth/token");
 					const headers = new Headers(init?.headers);
 					expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
-					expect(headers.get("User-Agent")).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+					expect(headers.get("User-Agent")).toBe("anthropic-sdk-typescript/0.128.0 userOAuthProvider");
 					return new Response(
 						JSON.stringify({
 							access_token: "new-access-token",

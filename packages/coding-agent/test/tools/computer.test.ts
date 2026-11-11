@@ -2137,6 +2137,38 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	it("prefers exact app names across all windows and keeps substring ambiguity otherwise", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.listWindows = async () => [
+			{ ...windowFixture, app: "Google Chrome", title: "Home" },
+			{ ...windowFixture, id: "7", app: "Google Chrome for Testing", title: "Report" },
+			{ ...windowFixture, id: "8", app: "Google Chrome Canary", title: "Report" },
+		];
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"exact-app",
+			`const listed = await desktop.windows({ app: "gOoGlE cHrOmE" });
+			const selected = await desktop.window({ app: "GOOGLE CHROME", wait: 100 });
+			const titled = await desktop.windows({ app: "Google Chrome", title: "Report" });
+			let miss; try { await desktop.window({ app: "Google Chrome", title: "Report" }); } catch (error) { miss = error.message; }
+			const partial = await desktop.windows({ app: "Chrome" });
+			let ambiguous; try { await desktop.window({ app: "Chrome" }); } catch (error) { ambiguous = error.message; }
+			return { listed: listed.map(w => w.id), selected: selected.id, titled, miss, partial: partial.length, ambiguous };`,
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toMatchObject({
+			listed: ["42"],
+			selected: "42",
+			titled: [],
+			miss: expect.stringContaining("no window matches"),
+			partial: 3,
+			ambiguous: expect.stringContaining("multiple windows match"),
+		});
+	});
+
 	it("keeps an app-filter miss without scanning applications when windows have no process identity", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();

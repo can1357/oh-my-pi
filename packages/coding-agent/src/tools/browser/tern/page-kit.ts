@@ -1,7 +1,7 @@
 import ariaBundle from "../aria/aria-snapshot.bundle.txt" with { type: "text" };
 import type { AriaSnapshotPayload } from "../aria/aria-snapshot";
 import { DEFAULT_STYLE_PROPERTIES, type QueryBox } from "../queries";
-import { SEMANTIC_QUERY_HANDLERS } from "../query-handlers";
+import { roleRules, SEMANTIC_QUERY_HANDLERS } from "../query-handlers";
 import type { Observation } from "../tab-protocol";
 import type { TernSelector } from "./selectors";
 
@@ -203,16 +203,11 @@ const SEMANTIC_SOURCE = Object.entries(SEMANTIC_QUERY_HANDLERS)
 	.join(",\n");
 
 // Page-side kit body. Plain JS (no eval/new Function/string timers: runs under page CSP) in the
-// scope set up by TERN_KIT_SOURCE, where `loadAria` (fresh ARIA bundle instance), `semantic`,
+// scope set up by TERN_KIT_SOURCE, where `loadAria` (fresh ARIA bundle instance), `semantic`, `roleRules`,
 // `INTERACTIVE_ROLES` and `DEFAULT_STYLES` are bound. No backticks or `${` in here: this is a String.raw
 // template.
 const KIT_BODY = String.raw`
 const STATE_ROLES_CHECKED = new Set(["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"]);
-const NAME_FROM_CONTENT = new Set([
-	"button", "cell", "checkbox", "columnheader", "gridcell", "heading", "link", "menuitem",
-	"menuitemcheckbox", "menuitemradio", "option", "radio", "row", "rowheader", "switch", "tab",
-	"tooltip", "treeitem",
-]);
 const SKIP_TAGS = new Set(["script", "style", "template", "noscript", "head", "meta", "link", "title"]);
 const POINTER_ACTIONS = new Set(["click", "dblclick", "hover", "check", "drag", "upload"]);
 const ENABLED_ACTIONS = new Set(["click", "dblclick", "check", "type", "fill", "upload"]);
@@ -338,172 +333,9 @@ const textQueryAll = (root, query, cache, out) => {
 };
 
 // ---- roles and names -----------------------------------------------------------------------
+// Roles and names come from roleRules(), the code the role/ engine uses, so a name observe() reports selects the
+// same element again. Take a fresh instance per pass: it caches roles.
 
-// A section is a region only when it has a name, as the role/ handler decides: from its references, label or title.
-const hasAccessibleLabel = el =>
-	!!(
-		idrefText(el, "aria-labelledby") ||
-		normalizeSpace(el.getAttribute("aria-label")) ||
-		normalizeSpace(el.getAttribute("title"))
-	);
-const insideSectioning = el => {
-	for (let current = composedParent(el); current; current = composedParent(current)) {
-		if (["article", "aside", "main", "nav", "section"].includes(current.localName)) return true;
-	}
-	return false;
-};
-const implicitRole = el => {
-	const tag = el.localName;
-	switch (tag) {
-		case "a":
-		case "area":
-			return el.hasAttribute("href") ? "link" : tag === "a" ? "generic" : null;
-		case "button":
-			return "button";
-		case "input": {
-			const type = inputType(el);
-			if (type === "hidden") return null;
-			if (type === "checkbox") return "checkbox";
-			if (type === "radio") return "radio";
-			if (type === "range") return "slider";
-			if (type === "number") return "spinbutton";
-			if (["button", "submit", "reset", "image", "file", "color"].includes(type)) return "button";
-			if (type === "search") return el.hasAttribute("list") ? "combobox" : "searchbox";
-			return el.hasAttribute("list") ? "combobox" : "textbox";
-		}
-		case "textarea":
-			return "textbox";
-		case "select":
-			return el.multiple || el.size > 1 ? "listbox" : "combobox";
-		case "option":
-			return "option";
-		case "optgroup":
-		case "fieldset":
-		case "details":
-			return "group";
-		case "summary":
-			return "button";
-		case "img":
-			return el.getAttribute("alt") === "" ? "none" : "img";
-		case "ul":
-		case "ol":
-		case "menu":
-			return "list";
-		case "li":
-			return "listitem";
-		case "dt":
-			return "term";
-		case "dd":
-			return "definition";
-		case "nav":
-			return "navigation";
-		case "main":
-			return "main";
-		case "aside":
-			return "complementary";
-		case "header":
-			return insideSectioning(el) ? "generic" : "banner";
-		case "footer":
-			return insideSectioning(el) ? "generic" : "contentinfo";
-		case "section":
-			return hasAccessibleLabel(el) ? "region" : "generic";
-		case "form":
-			return "form";
-		case "search":
-			return "search";
-		case "article":
-			return "article";
-		case "dialog":
-			return "dialog";
-		case "h1":
-		case "h2":
-		case "h3":
-		case "h4":
-		case "h5":
-		case "h6":
-			return "heading";
-		case "p":
-			return "paragraph";
-		case "blockquote":
-			return "blockquote";
-		case "figure":
-			return "figure";
-		case "table":
-			return "table";
-		case "thead":
-		case "tbody":
-		case "tfoot":
-			return "rowgroup";
-		case "tr":
-			return "row";
-		case "th":
-			return el.getAttribute("scope") === "row" ? "rowheader" : "columnheader";
-		case "td":
-			return "cell";
-		case "caption":
-			return "caption";
-		case "hr":
-			return "separator";
-		case "progress":
-			return "progressbar";
-		case "meter":
-			return "meter";
-		case "output":
-			return "status";
-		case "code":
-			return "code";
-		case "div":
-		case "span":
-		case "b":
-		case "i":
-		case "u":
-		case "small":
-		case "label":
-			return el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable) ? "textbox" : "generic";
-		default:
-			return el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable) ? "textbox" : null;
-	}
-};
-const roleOf = el => {
-	const explicit = (el.getAttribute("role") || "").trim().split(/\s+/)[0].toLowerCase();
-	if (explicit) return explicit === "presentation" ? "none" : explicit;
-	return implicitRole(el);
-};
-const idrefText = (el, attribute) => {
-	const ids = (el.getAttribute(attribute) || "").split(/\s+/).filter(Boolean);
-	if (!ids.length) return "";
-	const root = el.getRootNode();
-	const lookup = id => (root.getElementById ? root.getElementById(id) : null) || document.getElementById(id);
-	return normalizeSpace(ids.map(id => {
-		const target = lookup(id);
-		if (!target) return "";
-		// A target named by its own label, alt or control value gives that, as the role/ handler reads it.
-		const own = normalizeSpace(target.getAttribute("aria-label"));
-		if (own) return own;
-		if (target.localName === "img" || target.localName === "area") {
-			const alt = normalizeSpace(target.getAttribute("alt"));
-			if (alt) return alt;
-		}
-		// A select or text area stands for its value, as an embedded control does.
-		if (target.localName === "select") return normalizeSpace(Array.from(target.selectedOptions, option => option.text).join(" "));
-		if (target.localName === "textarea") return normalizeSpace(target.value);
-		if (target.localName === "input") {
-			const type = inputType(target);
-			if (type === "image") {
-				return normalizeSpace(target.getAttribute("alt") || target.getAttribute("value") || target.getAttribute("title")) || "Submit";
-			}
-			if (["button", "submit", "reset"].includes(type)) {
-				return normalizeSpace(target.value) || (type === "submit" ? "Submit" : type === "reset" ? "Reset" : "");
-			}
-			// A text field stands for its value; a checkbox's or radio's value ("on") is not text it shows.
-			if (!["checkbox", "radio", "file", "hidden", "range"].includes(type)) return normalizeSpace(target.value);
-		}
-		// A hidden target (visibility, display: none, aria-hidden, a hidden ancestor) is read whole, as the
-		// accessibility tree reads one aria-labelledby names; its own aria-labelledby is not followed.
-		const text = contentText(target, null, hiddenForA11y(target) ? "any" : "visible", false);
-		return text || normalizeSpace(target.getAttribute("title"));
-	}).join(" "));
-};
 const hiddenForA11y = el => {
 	for (let current = el; current; current = composedParent(current)) {
 		if (current.getAttribute && current.getAttribute("aria-hidden") === "true") return true;
@@ -511,98 +343,6 @@ const hiddenForA11y = el => {
 	if (typeof el.checkVisibility === "function" && !el.checkVisibility()) return true;
 	const style = getComputedStyle(el);
 	return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
-};
-// Text an element contributes as name-from-content: text nodes, embedded control values, a child's
-// aria-labelledby text, aria-label or image alt. Text under visibility: hidden is left out, as
-// Chromium's accessibility tree leaves it out, unless visibility is "any" (a hidden referenced root,
-// read whole, display: none descendants included).
-const contentText = (el, skip, visibility = "visible", followRefs = true) => {
-	let out = "";
-	const walk = (node, visibility) => {
-		for (let child = node.firstChild; child; child = child.nextSibling) {
-			if (child.nodeType === Node.TEXT_NODE) {
-				if (visibility === "visible" || visibility === "any") out += child.nodeValue || "";
-				continue;
-			}
-			if (child.nodeType !== Node.ELEMENT_NODE || child === skip || SKIP_TAGS.has(child.localName)) continue;
-			if (visibility !== "any" && child.getAttribute("aria-hidden") === "true") continue;
-			const style = getComputedStyle(child);
-			if (style.display === "none" && visibility !== "any") continue;
-			const block = style.display !== "inline" && style.display !== "contents";
-			if (block) out += " ";
-			const shown = visibility === "any" || style.visibility === "visible";
-			const inner = visibility === "any" ? "any" : style.visibility;
-			const label = child.getAttribute("aria-label");
-			const labelledBy = followRefs ? idrefText(child, "aria-labelledby") : "";
-			const field = child.localName === "input" || child.localName === "select" || child.localName === "textarea";
-			const inputButton = child.localName === "input" && ["button", "submit", "reset"].includes(inputType(child));
-			const childRole = (child.getAttribute("role") || "").trim().split(/\s+/)[0].toLowerCase();
-			// A range reads its ARIA value text, then value, before the DOM value.
-			const range = (child.localName === "input" && inputType(child) === "range") || childRole === "slider" || childRole === "spinbutton";
-			// A text field's value stands in for it; a checkbox's or radio's value ("on" by default) is not
-			// text it shows, and an input button is named by its label before its value.
-			const valueIsText = field && !inputButton && (child.localName !== "input" || !["checkbox", "radio", "file", "hidden", "image"].includes(inputType(child)));
-			// A nested field contributes its value, not its own label.
-			if (range) {
-				if (shown) out += child.getAttribute("aria-valuetext") || child.getAttribute("aria-valuenow") || child.value || "";
-			} else if (valueIsText) {
-				if (shown) out += child.localName === "select" ? Array.from(child.selectedOptions, option => option.text).join(" ") : child.value || "";
-			} else if (labelledBy) out += shown ? labelledBy : "";
-			else if (label) out += shown ? label : "";
-			else if (child.localName === "img") out += shown ? child.getAttribute("alt") || "" : "";
-			else if (inputButton) out += shown ? child.value || "" : "";
-			else if (!field && child.shadowRoot) walk(child.shadowRoot, inner);
-			else if (!field) walk(child, inner);
-			if (block) out += " ";
-		}
-	};
-	if (el.shadowRoot) walk(el.shadowRoot, visibility);
-	else walk(el, visibility);
-	return normalizeSpace(out);
-};
-const accessibleName = (el, role) => {
-	// aria-labelledby wins over aria-label, as in the role/ handler and Chrome's accessibility tree.
-	const labelledBy = idrefText(el, "aria-labelledby");
-	if (labelledBy) return labelledBy;
-	const label = normalizeSpace(el.getAttribute("aria-label"));
-	if (label) return label;
-	// An optgroup is named by its label, never by the label of the select around it.
-	if (el.localName === "optgroup") {
-		const groupLabel = normalizeSpace(el.getAttribute("label"));
-		if (groupLabel) return groupLabel;
-	} else if (el.labels && el.labels.length) {
-		const text = normalizeSpace(Array.from(el.labels, labelEl => contentText(labelEl, el)).join(" "));
-		if (text) return text;
-	}
-	const tag = el.localName;
-	if (tag === "img" || tag === "area" || (tag === "input" && inputType(el) === "image")) {
-		const alt = normalizeSpace(el.getAttribute("alt"));
-		if (alt) return alt;
-	}
-	if (tag === "input") {
-		const type = inputType(el);
-		if (type === "button" || type === "submit" || type === "reset") {
-			const value = normalizeSpace(el.value);
-			if (value) return value;
-			if (type === "submit") return "Submit";
-			if (type === "reset") return "Reset";
-		}
-	}
-	// A figure has no native name: Chrome does not name it from its figcaption.
-	if (tag === "fieldset" || tag === "table") {
-		const caption = el.querySelector(tag === "fieldset" ? "legend" : "caption");
-		if (caption) {
-			const text = contentText(caption, null);
-			if (text) return text;
-		}
-	}
-	if (NAME_FROM_CONTENT.has(role || roleOf(el))) {
-		const text = contentText(el, null);
-		if (text) return text;
-	}
-	const title = normalizeSpace(el.getAttribute("title"));
-	if (title) return title;
-	return normalizeSpace(el.getAttribute("placeholder") || el.getAttribute("aria-placeholder"));
 };
 
 // ---- resolution ----------------------------------------------------------------------------
@@ -628,11 +368,12 @@ const resolveAll = sel => {
 			return out;
 		}
 		case "aria": {
+			const rules = roleRules();
 			const wantedName = sel.name === undefined ? undefined : normalizeSpace(sel.name);
 			return deepElements(document).filter(el => {
-				const role = roleOf(el);
+				const role = rules.role(el);
 				if (sel.role !== undefined && role !== sel.role) return false;
-				if (wantedName !== undefined && accessibleName(el, role) !== wantedName) return false;
+				if (wantedName !== undefined && rules.name(el) !== wantedName) return false;
 				return !hiddenForA11y(el);
 			});
 		}
@@ -641,8 +382,9 @@ const resolveAll = sel => {
 		case "testid":
 		case "alt":
 		case "title":
-		case "role":
 			return Array.from(semantic[sel.engine](document, sel.query));
+		case "role":
+			return roleRules().query(document, sel.query);
 		case "ariaRef": {
 			const el = ariaRefs.resolveAriaRef(sel.ref);
 			return el ? [el] : [];
@@ -805,13 +547,6 @@ const observeValue = (el, role) => {
 	if (role === "textbox" && el.isContentEditable) return normalizeSpace(el.innerText) || undefined;
 	return undefined;
 };
-const ownText = el => {
-	let out = "";
-	for (let child = el.firstChild; child; child = child.nextSibling) {
-		if (child.nodeType === Node.TEXT_NODE) out += child.nodeValue || "";
-	}
-	return normalizeSpace(out);
-};
 const flatChildren = el => {
 	if (el.shadowRoot) return Array.from(el.shadowRoot.children);
 	if (el.localName === "slot" && typeof el.assignedElements === "function") {
@@ -819,6 +554,14 @@ const flatChildren = el => {
 		if (assigned.length) return assigned;
 	}
 	return Array.from(el.children);
+};
+// The text an element holds directly, not inside its children.
+const ownText = el => {
+	let out = "";
+	for (let child = el.firstChild; child; child = child.nextSibling) {
+		if (child.nodeType === Node.TEXT_NODE) out += child.nodeValue || "";
+	}
+	return normalizeSpace(out);
 };
 const intersectsViewport = el => {
 	const rect = el.getBoundingClientRect();
@@ -834,13 +577,14 @@ const observe = opts => {
 		if (!root) throw new Error("tab.observe: selector " + JSON.stringify(opts.root) + " matched no element");
 	}
 	const focused = deepActiveElement();
+	const rules = roleRules();
 	const collected = [];
 	const visit = (el, inSelect) => {
 		const tag = el.localName;
 		if (SKIP_TAGS.has(tag) || el.getAttribute("aria-hidden") === "true" || el.inert) return false;
 		const style = getComputedStyle(el);
 		if (style.display === "none" && !inSelect) return false;
-		const role = roleOf(el);
+		const role = rules.role(el);
 		const rect = el.getBoundingClientRect();
 		const rendered =
 			inSelect || (style.visibility !== "hidden" && style.visibility !== "collapse" && rect.width > 0 && rect.height > 0);
@@ -852,23 +596,15 @@ const observe = opts => {
 				INTERACTIVE_ROLES.has(role) ||
 				states.some(state => /^(checked|pressed|selected|expanded)=/.test(state)) ||
 				el === focused;
-			let name = accessibleName(el, role);
-			let include = interactive;
-			if (!include && includeAll) {
-				if (role === "generic") {
-					name = name || ownText(el);
-					include = !!name;
-				} else {
-					name = name || ownText(el);
-					include = true;
-				}
-			}
-			if (include && viewportOnly && !intersectsViewport(inSelect && el.closest("select") ? el.closest("select") : el)) {
-				include = false;
-			}
+			// The accessible name only, as the Chromium observe reports it, so the entry's role/ selector finds it again.
+			const name = rules.name(el);
+			// With includeAll, a plain container is listed only when something names it.
+			const include =
+				(interactive || (includeAll && (role !== "generic" || !!name))) &&
+				(!viewportOnly || intersectsViewport(inSelect && el.closest("select") ? el.closest("select") : el));
 			if (include) {
 				const description =
-					idrefText(el, "aria-describedby") ||
+					rules.description(el) ||
 					normalizeSpace(el.getAttribute("aria-description")) ||
 					(name !== normalizeSpace(el.getAttribute("title")) ? normalizeSpace(el.getAttribute("title")) : "");
 				entry = {
@@ -883,6 +619,12 @@ const observe = opts => {
 				};
 				collected.push(entry);
 			}
+		}
+		// With includeAll, text is listed as its own StaticText entry, as the Chromium observe lists it, unless the
+		// element's name already says it. A StaticText entry has no role/ selector.
+		if (includeAll && rendered && (!viewportOnly || intersectsViewport(el))) {
+			const text = ownText(el);
+			if (text && text !== entry?.name) collected.push({ el, role: "StaticText", name: text, states: [], drop: false });
 		}
 		let descendantInteractive = false;
 		const childInSelect = inSelect || tag === "select";
@@ -1387,7 +1129,7 @@ if (window !== window.parent) {
  * Script (valid both as a top-level classic script and as a function body) that installs the kit as
  * `globalThis.__ompTernKit` in the current realm if absent and, in a child frame, registers the frame's
  * index path (`"0"`, `"1.0"`, …) via `webkit.messageHandlers.stencilFrame`. Idempotent. Embeds a private
- * instance of the Playwright ARIA bundle and the Chromium semantic query handlers; defines no other
+ * instance of the Playwright ARIA bundle, the semantic query handlers and the role rules; defines no other
  * globals and uses nothing CSP-gated.
  */
 export const TERN_KIT_SOURCE = [
@@ -1401,6 +1143,7 @@ export const TERN_KIT_SOURCE = [
 	"return module.exports;",
 	"};",
 	`const semantic = {\n${SEMANTIC_SOURCE}\n};`,
+	`const roleRules = ${roleRules.toString()};`,
 	`const INTERACTIVE_ROLES = new Set(${JSON.stringify(INTERACTIVE_ROLES)});`,
 	`const DEFAULT_STYLES = ${JSON.stringify(DEFAULT_STYLE_PROPERTIES)};`,
 	KIT_BODY,

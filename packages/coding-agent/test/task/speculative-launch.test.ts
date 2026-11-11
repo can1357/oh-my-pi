@@ -208,6 +208,25 @@ describe("task speculative launch", () => {
 		expect(manager.getJob("Beta")!.status).toBe("completed");
 	});
 
+	it("adopts an empty model placeholder without changing the submitted arguments", async () => {
+		const { tool, manager, session } = await openSession();
+		const submitted = {
+			context: "ctx",
+			tasks: [{ name: "Alpha", agent: "task", task: "Do A.", model: [] as string[] }],
+		};
+		const original = structuredClone(submitted);
+		session.update(toolCall, JSON.stringify(submitted));
+		await spawn("Alpha").started.promise;
+		session.finalize({ toolCall, args: submitted });
+		const result = await tool.execute(toolCall.id, submitted);
+		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(1);
+		expect(submitted).toEqual(original);
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha"]);
+		spawn("Alpha").release.resolve();
+		await manager.getJob("Alpha")!.promise;
+		expect(manager.getJob("Alpha")!.status).toBe("completed");
+	});
+
 	it("aborts launched agents when the finished call is invalid", async () => {
 		const { session } = await openSession();
 		session.update(toolCall, alphaClosed);

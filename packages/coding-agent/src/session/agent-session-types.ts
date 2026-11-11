@@ -491,11 +491,23 @@ export interface PromptOptions {
 	 * is queued as an aside.
 	 */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+	/**
+	 * Text prompts that must run after this one, in order. The session holds them off the
+	 * queue until this prompt reaches the agent (its run goes live, it lands on a queue, or an
+	 * extension or custom command finishes handling it), then queues them right behind it, so
+	 * no drain or other run can deliver them first. If this prompt never gets there (dropped,
+	 * refused, its setup throws, or its extension command fails), they are reported with it in
+	 * {@link DroppedPrompt.followUps}. An extension command among them rejects the whole
+	 * prompt before anything is sent.
+	 */
+	followUps?: readonly string[];
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
  *  before it reached the agent (an abort or usage preflight denial raced turn
- *  setup), so it was never persisted to the session. */
+ *  setup), so it was never persisted to the session. A prompt carrying
+ *  {@link PromptOptions.followUps} is also reported when its setup throws or the
+ *  extension command it ran fails, so the follow-ups are never lost with it. */
 export interface DroppedPrompt {
 	/** The prompt exactly as typed, before template/command expansion. */
 	text: string;
@@ -503,6 +515,8 @@ export interface DroppedPrompt {
 	images?: ImageContent[];
 	/** Why the session refused it (e.g. the cost cap), for hosts to show beside the restored text; absent for an abort. */
 	reason?: string;
+	/** {@link PromptOptions.followUps} that were never sent, in order. */
+	followUps?: string[];
 }
 
 /** Options for AgentSession.followUp(). */
@@ -653,6 +667,12 @@ export interface EphemeralTurnOptions {
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
 	onTextDelta?: (delta: string) => void | Promise<void>;
+	/**
+	 * Receives the provider's message for every side turn it billed, as soon as the
+	 * provider settles it (including an error event that never returns a reply), so
+	 * off-transcript callers can journal the spend. A throw is logged, never surfaced.
+	 */
+	onUsage?: (message: AssistantMessage) => void;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
 	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */

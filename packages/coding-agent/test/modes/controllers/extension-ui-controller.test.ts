@@ -297,6 +297,30 @@ describe("ExtensionUiController form dialog", () => {
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.getFocused()).toBe(harness.editor);
 	});
+	it("returns notes for the selected option without changing form values", async () => {
+		const harness = makeHarness();
+		const pending = harness.controller.showFormDialog(html);
+		const dialog = harness.getFocused();
+		expect(dialog).toBeInstanceOf(HtmlFormDialog);
+
+		harness.handleInput("n");
+		harness.handleInput("unselected draft");
+		harness.handleInput("\r");
+		harness.handleInput("\x1b[B");
+		harness.handleInput("n");
+		harness.handleInput("shared cache");
+		harness.handleInput("\r");
+		harness.handleInput(" ");
+		harness.handleInput("\t");
+		harness.handleInput("\r");
+
+		expect(await pending).toEqual({
+			data: { db: "postgres" },
+			notes: [{ name: "db", question: "Database", option: "Postgres", value: "postgres", text: "shared cache" }],
+		});
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
 
 	it("resolves undefined on Esc and restores the editor", async () => {
 		const harness = makeHarness();
@@ -308,14 +332,21 @@ describe("ExtensionUiController form dialog", () => {
 		expect(harness.getFocused()).toBe(harness.editor);
 	});
 
-	it("submits the current values when the timeout lapses", async () => {
+	it("submits current values and an active note draft when the timeout lapses", async () => {
 		const harness = makeHarness();
 		const onTimeout = vi.fn();
 		const pending = harness.controller.showFormDialog(html, { timeout: 20, onTimeout });
+		harness.handleInput("n");
+		harness.handleInput("local store");
 
-		expect(await pending).toEqual({ data: { db: "sqlite" }, timedOut: true });
+		expect(await pending).toEqual({
+			data: { db: "sqlite" },
+			notes: [{ name: "db", question: "Database", option: "SQLite", value: "sqlite", text: "local store" }],
+			timedOut: true,
+		});
 		expect(onTimeout).toHaveBeenCalledTimes(1);
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
 	});
 
 	it("tears the form down when the signal aborts", async () => {

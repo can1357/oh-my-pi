@@ -4,7 +4,14 @@
 //! `command -v`/`-V`. Goldens: bash 5.3.20 (`/opt/homebrew/bin/bash -c
 //! '…'`).
 
-use crate::testkit::{FakeHost, Fault, run_script};
+use std::sync::{Arc, Mutex};
+
+use bstr::{BStr, BString};
+
+use crate::{
+	bash::SpawnSpec,
+	testkit::{FakeHost, Fault, MemFs, run_script},
+};
 
 fn run(src: &str) -> (String, String, i32) {
 	let out = run_script(FakeHost::new(), src.as_bytes(), &[], Fault::None);
@@ -174,4 +181,37 @@ fn path_misses_run_the_hosts_fallback() {
 		Fault::None,
 	);
 	assert_eq!(String::from_utf8_lossy(&out.stdout), "install mytool\n3\n");
+}
+
+/// A host command whose arguments are written for the program it shadows
+/// (`Host::defers_to_path`: Windows's `find /c /v ""` is cmd's `FIND`)
+/// runs `PATH`'s program of that name; other arguments run the host's
+/// command, and so does a deferred one `PATH` has no program for.
+#[test]
+fn a_deferred_host_command_runs_the_program_it_shadows() {
+	let spawned: Arc<Mutex<Vec<BString>>> = Arc::default();
+	let fs = MemFs::new();
+	fs.add_file("/bin/find", b"", 0o755);
+	let seen = Arc::clone(&spawned);
+	let mut host = FakeHost::new()
+		.with_fs(fs)
+		.with_path_deferral(|_: &BStr, argv: &[BString]| {
+			argv.get(1).is_some_and(|a| a.starts_with(b"/"))
+		})
+		.with_spawner(Box::new(move |spec: SpawnSpec<'_>| {
+			seen
+				.lock()
+				.expect("spawn log")
+				.push(BString::from(spec.path.to_vec()));
+			Err(std::io::Error::other("spawned"))
+		}));
+	host.countdown("find", 1, 7);
+	let out = run_script(
+		host,
+		b"PATH=/bin; find /c x; echo $?; find . -name x; echo $?; PATH=/none; find /c x; echo $?",
+		&[],
+		Fault::None,
+	);
+	assert_eq!(*spawned.lock().expect("spawn log"), [BString::from("/bin/find")]);
+	assert_eq!(String::from_utf8_lossy(&out.stdout), "126\n7\n7\n");
 }
