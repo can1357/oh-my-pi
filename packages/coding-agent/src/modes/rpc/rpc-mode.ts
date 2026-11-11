@@ -2088,13 +2088,16 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					});
 				const builtinResult = await (
 					registration ? session.withLocalClientMessage(registration, runBuiltin) : runBuiltin()
-				).catch((builtinError: unknown) => {
-					if (registration) session.finishLocalClientMessage(registration, false);
+				).catch(async (builtinError: unknown) => {
+					if (registration) await session.finishLocalClientMessage(registration, false);
 					throw builtinError;
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);
 				if (registration) {
-					session.finishLocalClientMessage(registration, builtinResult !== false && !("prompt" in builtinResult));
+					await session.finishLocalClientMessage(
+						registration,
+						builtinResult !== false && !("prompt" in builtinResult),
+					);
 				}
 				if (!isCurrent()) return "cancelled";
 				if (builtinResult !== false) {

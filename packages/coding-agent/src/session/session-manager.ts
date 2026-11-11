@@ -3794,6 +3794,26 @@ export class SessionManager {
 	}
 
 	/**
+	 * Journal `ids` as resolved in another session file of this storage, one this manager has left.
+	 * Reopening takes that journal's own writer and ownership claim, then gives them back.
+	 */
+	async resolveClientMessagesInJournal(sessionFile: string, ids: readonly string[]): Promise<void> {
+		const journal = await SessionManager.open(sessionFile, undefined, this.#storage, {
+			suppressBreadcrumb: true,
+			throwIfMissing: true,
+		});
+		try {
+			journal.appendCustomEntry(
+				CLIENT_MESSAGE_RESOLUTION_CUSTOM_TYPE,
+				{ clientMessageIds: [...new Set(ids)] },
+				{ forceFileCreation: true },
+			);
+		} finally {
+			await journal.close();
+		}
+	}
+
+	/**
 	 * Appends extend the entry array in place; switch, reload, branch rewrites and rollback replace it.
 	 * The index therefore catches up on new entries and rebuilds only when the array changes.
 	 */

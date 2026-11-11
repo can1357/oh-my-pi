@@ -8898,7 +8898,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						text = customResult;
 					}
 				} finally {
-					if (registration) this.finishLocalClientMessage(registration, consumed);
+					if (registration) await this.finishLocalClientMessage(registration, consumed);
 				}
 			}
 
@@ -11391,7 +11391,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * another journal while this command still runs, and only this exact registration may be finished.
 	 */
 	beginLocalClientMessage(id: string): LocalClientMessageRegistration {
-		const registration: LocalClientMessageRegistration = { id, journalId: this.sessionManager.getSessionId() };
+		const registration: LocalClientMessageRegistration = {
+			id,
+			journalId: this.sessionManager.getSessionId(),
+			sessionFile: this.sessionManager.getSessionFile(),
+		};
 		this.#localClientMessages.set(registration, false);
 		return registration;
 	}
@@ -11402,13 +11406,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * End {@link beginLocalClientMessage}; `consumed` journals the resolution. A registration a
-	 * transition already resolved is gone, so its finish is a no-op and never touches a newer one.
+	 * End {@link beginLocalClientMessage}; `consumed` journals the resolution in the admitting journal,
+	 * reopening its file when an unrelated transition left it while the command was still deciding.
+	 * A registration a transition already resolved is gone, so its finish is a no-op and never
+	 * touches a newer one. Like {@link resolveClientMessages}, a journal failure is logged, never thrown.
 	 */
-	finishLocalClientMessage(registration: LocalClientMessageRegistration, consumed: boolean): void {
-		if (!this.#localClientMessages.delete(registration)) return;
-		if (consumed && registration.journalId === this.sessionManager.getSessionId()) {
+	async finishLocalClientMessage(registration: LocalClientMessageRegistration, consumed: boolean): Promise<void> {
+		if (!this.#localClientMessages.delete(registration) || !consumed) return;
+		if (registration.journalId === this.sessionManager.getSessionId()) {
 			this.resolveClientMessages([registration.id]);
+			return;
+		}
+		// An in-memory journal that was left is gone; nothing could reopen it to reconcile.
+		if (registration.sessionFile === undefined) return;
+		try {
+			await this.sessionManager.resolveClientMessagesInJournal(registration.sessionFile, [registration.id]);
+		} catch (error) {
+			logger.warn("Failed to journal client message resolution in the admitting session", {
+				id: registration.id,
+				sessionFile: registration.sessionFile,
+				error: toError(error).message,
+			});
 		}
 	}
 

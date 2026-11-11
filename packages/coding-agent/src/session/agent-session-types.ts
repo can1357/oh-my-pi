@@ -456,6 +456,8 @@ export interface LocalClientMessageRegistration {
 	readonly id: string;
 	/** Journal (session manager) that admitted the input. */
 	readonly journalId: string;
+	/** That journal's session file; absent for an in-memory session. */
+	readonly sessionFile: string | undefined;
 }
 
 /** Options for AgentSession.prompt(). */

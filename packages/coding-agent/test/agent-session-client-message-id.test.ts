@@ -329,6 +329,40 @@ describe("AgentSession client intent identity", () => {
 		expect(found.persistedClientMessageIds).toEqual(["intent-expanding"]);
 	});
 
+	test("a custom command that finishes locally after an unrelated session change resolves in its admitting session", async () => {
+		const disk = TempDir.createSync("@client-message-deferred-finish-");
+		cleanup.push(async () => disk.removeSync());
+		const running = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const local: LoadedCustomCommand = {
+			path: "local",
+			resolvedPath: "local",
+			source: "user",
+			command: {
+				name: "local",
+				description: "Handles the input itself after a delay",
+				execute: async () => {
+					running.resolve();
+					await finish.promise;
+				},
+			},
+		};
+		const manager = SessionManager.create(disk.path(), disk.path());
+		const { session } = setup({ manager, config: { customCommands: [local] } });
+		await session.prompt("history so the admitting session stays on disk");
+		const origin = manager.getSessionFile();
+		if (!origin) throw new Error("Expected a persistent origin session");
+		const handled = session.prompt("/local", intent("intent-deferred"));
+		await withTimeout(running.promise, 5_000, "The custom command never started");
+		expect(await session.newSession()).toBe(true);
+		finish.resolve();
+		expect(await handled).toBe(false);
+		const reopened = await SessionManager.open(origin, undefined, undefined, { throwIfMissing: true });
+		expect(reopened.isClientMessageResolved("intent-deferred")).toBe(true);
+		// The destination never admitted the input, so its ID stays free there.
+		expect(manager.isClientMessageResolved("intent-deferred")).toBe(false);
+	});
+
 	test("a queued follow-up keeps its ID taken after a branch changes the journal", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
