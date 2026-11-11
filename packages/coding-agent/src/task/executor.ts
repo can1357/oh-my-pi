@@ -2642,6 +2642,8 @@ async function driveSessionToResult(
 			// failures keep the old path.
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
 			if (!recoverableStop || abortSignal.aborted || endsRun(err)) throw err;
+		} finally {
+			AgentRegistry.global().clearInitialPromptPending(session.getAgentId?.() ?? "", session);
 		}
 
 		// The forced final turn must answer through `yield`, or with no tools at all.
@@ -4094,6 +4096,7 @@ interface SubagentSessionSpec {
 		| "systemPrompt"
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
+		| "initialPromptPending"
 	>;
 	preparedSession?: Pick<PreparedSeanceSession, "promptSuffix">;
 	prompt: SubagentPromptInputs;
@@ -4102,6 +4105,7 @@ interface SubagentSessionSpec {
 /** Launch-only session inputs: a revived session restores these from its transcript or goes without. */
 interface SubagentLaunchInputs {
 	workPoolYieldItems: readonly WorkPoolYieldItem[];
+	initialPromptPending?: boolean;
 	resolveServiceTierByFamily?: CreateAgentSessionOptions["resolveServiceTierByFamily"];
 	onFirstChatDispatch?: () => void;
 }
@@ -4136,6 +4140,7 @@ function buildSubagentSessionOptions(
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
 		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
 		awaitingAssignment: launch !== undefined,
+		initialPromptPending: launch?.initialPromptPending,
 		systemPrompt: defaultPrompt => {
 			// A revive shows the roster the parked session's prompt held, and a rebuild that leaves the
 			// rest of the prompt unchanged keeps the roster the prompt it replaces showed: peer rows carry
@@ -5074,6 +5079,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			try {
 				sessionPromise = createAgentSession(
 					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, mcpFollower, {
+						initialPromptPending: true,
 						workPoolYieldItems: options.workPoolYieldItems ?? [],
 						// A revived session restores the tier history it persisted (including
 						// tiers a provider rejected or an extension changed since spawn); only
@@ -5081,6 +5087,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						resolveServiceTierByFamily,
 						onFirstChatDispatch: () => {
 							firstChatDispatchAt ??= performance.now();
+							if (session) AgentRegistry.global().clearInitialPromptPending(id, session);
 						},
 					}),
 				);

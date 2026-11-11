@@ -13,6 +13,7 @@ import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -47,6 +48,7 @@ beforeEach(async () => {
 	restoreEnvValue("HOME", home);
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	setAgentDir(path.join(home, ".omp", "agent"));
+	IrcBus.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	registerMockApi(MOCK_API_SOURCE);
@@ -55,6 +57,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	await AgentLifecycleManager.global().dispose();
 	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	unregisterCustomApis(MOCK_API_SOURCE);
 	vi.restoreAllMocks();
@@ -66,11 +69,11 @@ afterEach(async () => {
 });
 
 it.each([
-	{ label: "the parent", from: MAIN_AGENT_ID, ownTurn: false },
-	{ label: "a peer", from: "SiblingScout", ownTurn: true },
+	{ label: "the parent", from: MAIN_AGENT_ID },
+	{ label: "a peer", from: "SiblingScout" },
 ])(
 	"delivers the assignment when $label messages the subagent during startup",
-	async ({ from, ownTurn }) => {
+	async ({ from }) => {
 		const cwd = path.join(root, "home", "work");
 		const artifactsDir = path.join(root, "artifacts");
 		await fs.mkdir(cwd, { recursive: true });
@@ -151,10 +154,11 @@ it.each([
 			expect(result.exitCode).toBe(0);
 			await ircSeen.promise;
 			await session.waitForIdle();
-			// Every turn sees the assignment. The parent's message rides the assignment's turn; a peer's
-			// waits for a turn of its own after the run, whose result must not answer the peer.
+			// Every turn sees the assignment, and startup IRC reaches the model only after
+			// the initial brief, whether queued as a parent follow-up or a separate peer wake.
 			expect(requests.every(request => request.assignment)).toBe(true);
-			expect(requests[0]!.irc).toBe(!ownTurn);
+			expect(requests[0]!.irc).toBe(false);
+			expect(requests.slice(1).some(request => request.irc)).toBe(true);
 		} finally {
 			authStorage.close();
 		}
