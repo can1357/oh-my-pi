@@ -383,8 +383,8 @@ export interface AgentSessionConfig {
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */
-	advisorTools?: AgentTool[];
-	/** Build a fresh `read` for each advisor so repeat-read hints count only that advisor's deliveries. */
+	advisorTools?: Tool[];
+	/** Build a fresh `read` for each advisor; required when `advisorTools` includes `read`. */
 	advisorCreateReadTool?(): Tool;
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and

@@ -70,6 +70,7 @@ describe("advisor stale tool-result eviction", () => {
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
 			advisorTools: [readTool],
+			advisorCreateReadTool: () => ({ ...readTool }),
 			advisorStreamFn: advisorMock.stream,
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");

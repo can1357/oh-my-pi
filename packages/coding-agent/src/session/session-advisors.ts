@@ -428,8 +428,8 @@ export interface AdvisorCatchupOptions {
 /** Inputs that configure the advisor roster owned by a session. */
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
-	tools?: AgentTool[];
-	/** Build a fresh `read` for each advisor so repeat-read hints count only that advisor's deliveries. */
+	tools?: Tool[];
+	/** Build a fresh `read` for each advisor; required when a roster grants `read`. */
 	createReadTool?: () => Tool;
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
@@ -564,7 +564,7 @@ export interface AdvisorStatusOverviewEntry {
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
 	#advisorEnabled: boolean;
-	#advisorTools: AgentTool[] | undefined;
+	#advisorTools: Tool[] | undefined;
 	#advisorCreateReadTool: SessionAdvisorsOptions["createReadTool"];
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
 	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
@@ -1378,7 +1378,13 @@ export class SessionAdvisors {
 				config.tools === undefined ? new Set([...ADVISOR_DEFAULT_TOOL_NAMES, "recall"]) : new Set(config.tools);
 			const tools = (this.#advisorTools ?? [])
 				.filter(t => names.has(t.name))
-				.map(t => (t.name === "read" ? (this.#advisorCreateReadTool?.() ?? t) : t));
+				.map(t => {
+					if (t.name !== "read") return t;
+					if (!this.#advisorCreateReadTool) {
+						throw new Error("A per-advisor read tool factory is required when advisor tools include read");
+					}
+					return this.#advisorCreateReadTool();
+				});
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			for (const tool of advisorLoopTools) {

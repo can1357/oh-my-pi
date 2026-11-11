@@ -180,6 +180,7 @@ describe("advisor tool-call loop guard", () => {
 			settings,
 			modelRegistry,
 			advisorTools: [failingReadTool],
+			advisorCreateReadTool: () => ({ ...failingReadTool }),
 			advisorStreamFn,
 			advisorConfigs:
 				advisorConfig === undefined ? undefined : Array.isArray(advisorConfig) ? advisorConfig : [advisorConfig],

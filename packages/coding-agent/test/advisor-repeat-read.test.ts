@@ -1,6 +1,6 @@
 import { expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -38,13 +38,6 @@ it("does not count a sibling advisor's read toward its own repeat warning, even 
 		getSessionSpawns: () => "*",
 		settings,
 		getToolByName: name => (name === "eval" ? evalTool : undefined),
-	};
-	const placeholderRead: AgentTool = {
-		name: "read",
-		label: "Read",
-		description: "Unused shared read",
-		parameters: type({}),
-		execute: async () => ({ content: [{ type: "text", text: "shared reader was used" }] }),
 	};
 	const results: string[] = [];
 	let calls = 0;
@@ -104,7 +97,7 @@ it("does not count a sibling advisor's read toward its own repeat warning, even 
 		sessionManager: SessionManager.inMemory(temp.path()),
 		settings,
 		modelRegistry: new ModelRegistry(auth, temp.join("models.yml")),
-		advisorTools: [placeholderRead],
+		advisorTools: [new ReadTool(toolSession)],
 		advisorCreateReadTool: () => new ReadTool(toolSession),
 		advisorStreamFn: stream,
 		advisorConfigs: [{ name: "First" }, { name: "Second" }, { name: "Third" }],
@@ -117,6 +110,42 @@ it("does not count a sibling advisor's read toward its own repeat warning, even 
 		expect(results).toHaveLength(3);
 		expect(results).toEqual(["sample\ntext", "sample\ntext", "sample\ntext"]);
 	} finally {
+		await session.dispose();
+		auth.close();
+		await temp.remove();
+	}
+});
+
+it("rejects a shared read tool when no per-advisor factory is provided", async () => {
+	const temp = TempDir.createSync("@pi-advisor-repeat-read-missing-factory-");
+	const auth = createInMemoryAuthStorage();
+	auth.keys.setRuntime("anthropic", "test-key");
+	const settings = Settings.isolated({ "todo.enabled": false });
+	const model = createMockModel({ provider: "anthropic" });
+	const toolSession: ToolSession = {
+		cwd: temp.path(),
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings,
+	};
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: [], tools: [] },
+			streamFn: model.stream,
+		}),
+		sessionManager: SessionManager.inMemory(temp.path()),
+		settings,
+		modelRegistry: new ModelRegistry(auth, temp.join("models.yml")),
+		advisorTools: [new ReadTool(toolSession)],
+		advisorConfigs: [{ name: "First" }, { name: "Second" }, { name: "Third" }],
+	});
+	try {
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(() => session.setAdvisorEnabled(true)).toThrow("A per-advisor read tool factory is required");
+	} finally {
+		session.setAdvisorEnabled(false);
 		await session.dispose();
 		auth.close();
 		await temp.remove();
