@@ -1463,7 +1463,12 @@ mod tests {
 			.unwrap();
 		release_pair(&conn, holder, root, park, pair.0, pair.1, &[slave]);
 		assert_eq!(
-			conn.xinput_xi_get_focus(pair.1).unwrap().reply().unwrap().focus,
+			conn
+				.xinput_xi_get_focus(pair.1)
+				.unwrap()
+				.reply()
+				.unwrap()
+				.focus,
 			NONE,
 			"a retired pair must not retain its target's virtual focus"
 		);
