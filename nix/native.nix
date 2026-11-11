@@ -1,4 +1,5 @@
 {
+  apple-sdk_27 ? null,
   cmake,
   craneLib,
   lib,
@@ -8,9 +9,11 @@
   rustPlatform,
   source,
   stdenv,
+  swiftPackages,
   writeText,
   withWaylandScreencast ? false,
   withFatLto ? true,
+  withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
 }:
 let
   rootCargoToml = builtins.readFile (source + "/Cargo.toml");
@@ -70,7 +73,8 @@ let
       pkg-config
       rustPlatform.bindgenHook
     ];
-    buildInputs = lib.optionals withWaylandScreencast [ pipewire ];
+    buildInputs =
+      lib.optionals withWaylandScreencast [ pipewire ] ++ lib.optional withAppleFm apple-sdk_27;
     strictDeps = true;
     doCheck = false;
     # Stamping, patching, and signing belong to the downstream package.
@@ -206,10 +210,30 @@ let
     }
   );
 in
+assert lib.assertMsg (
+  withAppleFm -> apple-sdk_27 != null
+) "Apple Foundation Models requires apple-sdk_27; provide it or set withAppleFm = false.";
 craneLib.buildPackage (
   commonArgs
   // {
     cargoArtifacts = dependencyArtifacts;
+    # Only real sources compile the bridge; Swift must not invalidate the
+    # dummy dependency artifacts.
+    env =
+      commonArgs.env
+      // lib.optionalAttrs withAppleFm {
+        OMP_APPLEFM_SWIFTC = lib.getExe' swiftPackages.swift "swiftc";
+      };
+    # Only the real-source stage has the bridge script; dependency sources
+    # contain dummy build scripts. Never allow fallback to host Xcode/CLT.
+    preBuild = lib.optionalString withAppleFm ''
+      toolchain="$(/bin/sh crates/pi-natives/src/applefm/build-bridge.sh detect)"
+      if [ -z "$toolchain" ] || [ "''${toolchain%%$'\t'*}" != "$OMP_APPLEFM_SWIFTC" ]; then
+        echo "OMP requires its Nix Swift 6.4+ compiler and the macOS 27 SDK; host toolchains are not supported" >&2
+        exit 1
+      fi
+      echo "Apple Foundation Models toolchain: $toolchain"
+    '';
     passthru = {
       inherit platform dependencyArtifacts;
     };

@@ -639,6 +639,26 @@ For a non-interactive smoke check:
 bun dev -- --version
 ```
 
+#### Apple Silicon Nix builds
+
+`nix build .#omp` uses nixpkgs' wrapped `swiftPackages.swift` compiler and
+`apple-sdk_27` without relying on host Xcode/CLT. The wrapper supplies Swift's
+standard-library paths; the bare `swiftPackages.swiftc` compiler is not sufficient.
+The build rejects fallback to a host compiler. The compiler and SDK are build-only
+dependencies; a missing `apple-sdk_27` fails evaluation with an opt-out hint.
+
+The SDK belongs to the Crane native build in `nix/native.nix`. Only its real-source
+stage selects Swift and enforces compiler selection before Cargo runs, keeping
+Swift out of the dummy dependency artifacts. The final `nix/package.nix` stage
+checks the embedded bridge after packaging.
+
+Install checks load the bridge on macOS 27+ and accept only valid availability
+responses. On older macOS, `unsupported_os` only confirms a non-empty embedded
+bridge, not successful loading. Model use still requires an eligible device and
+enabled/downloaded Apple Intelligence models. Downstream callers can set
+`omp.override { withAppleFm = false; }` to omit the Swift/SDK dependencies and
+bridge requirement; the official Apple Silicon package enables it by default.
+
 ### Debug Command
 
 `/debug` opens tools for debugging, reporting, and profiling.
