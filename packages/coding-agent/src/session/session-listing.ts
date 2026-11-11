@@ -550,21 +550,19 @@ async function scanSessionFile(
 	}
 }
 
-async function collectSessionsFromFileStride(
-	files: string[],
-	storage: SessionStorage,
-	startIndex: number,
-	stride: number,
-	withStatus: boolean,
-): Promise<SessionInfo[]> {
-	const sessions: SessionInfo[] = [];
-
-	for (let i = startIndex; i < files.length; i += stride) {
-		const session = await scanSessionFile(files[i], storage, withStatus);
-		if (session) sessions.push(session);
-	}
-
-	return sessions;
+/**
+ * `visit` applied to each of `files`, results in `files` order. Large lists
+ * are split across {@link getSessionListWorkerCount} interleaved workers.
+ */
+async function mapSessionFiles<T>(files: string[], visit: (file: string) => Promise<T>): Promise<T[]> {
+	const workerCount = getSessionListWorkerCount(files.length);
+	const results: T[] = [];
+	await Promise.all(
+		Array.from({ length: workerCount }, async (_, worker) => {
+			for (let i = worker; i < files.length; i += workerCount) results[i] = await visit(files[i]);
+		}),
+	);
+	return results;
 }
 
 async function collectSessionsFromFiles(
@@ -572,19 +570,8 @@ async function collectSessionsFromFiles(
 	storage: SessionStorage,
 	withStatus: boolean,
 ): Promise<SessionInfo[]> {
-	const workerCount = getSessionListWorkerCount(files.length);
-	const sessions =
-		workerCount === 1
-			? await collectSessionsFromFileStride(files, storage, 0, 1, withStatus)
-			: (
-					await Promise.all(
-						Array.from({ length: workerCount }, (_, workerIndex) =>
-							collectSessionsFromFileStride(files, storage, workerIndex, workerCount, withStatus),
-						),
-					)
-				).flat();
-
-	return sessions.sort(compareNewestFirst);
+	const sessions = await mapSessionFiles(files, file => scanSessionFile(file, storage, withStatus));
+	return sessions.filter(session => session !== undefined).sort(compareNewestFirst);
 }
 
 /** Newest `modified` first; ties break on `created`, then path, so every listing orders alike. */
@@ -1370,13 +1357,7 @@ async function filterContinuationFiles(files: string[], storage: SessionStorage)
 		cache.set(`c\0${file}`, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
 		return false;
 	};
-	const workerCount = getSessionListWorkerCount(files.length);
-	const keep: boolean[] = [];
-	await Promise.all(
-		Array.from({ length: workerCount }, async (_, worker) => {
-			for (let i = worker; i < files.length; i += workerCount) keep[i] = await continues(files[i]);
-		}),
-	);
+	const keep = await mapSessionFiles(files, continues);
 	return files.filter((_, i) => keep[i]);
 }
 
