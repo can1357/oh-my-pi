@@ -1,7 +1,18 @@
 import { describe, expect, test, vi } from "bun:test";
 import type { DesktopRosterWindow } from "@oh-my-pi/pi-natives";
-import { NativeWindowWatch } from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
+import { NativeWindowWatch, readTabFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
+import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
+import type { WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
+import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
+import {
+	closeLaunchedBrowser,
+	launchHeadlessBrowser,
+	removeUserDataDir,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { browserShowsWindows } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { chromiumAvailable } from "./chromium-probe";
+
+const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 const BROWSER = 501;
 const USER_APP = 777;
@@ -29,10 +40,11 @@ const USER_WINDOW = win(20, { pid: USER_APP, app: "TextEdit", x: 1210, width: 70
 const FRAME = { x: TAB_WINDOW.x, y: TAB_WINDOW.y, width: TAB_WINDOW.width, height: TAB_WINDOW.height, visible: true };
 const HIDDEN = { ...FRAME, visible: false };
 
-/** A watch reading `rosters` in turn; `frames` are what the page reports at each call (then the shown tab's frame). */
+/** A watch reading `rosters` in turn; the last supplied frame stays current. */
 function watchWith(rosters: DesktopRosterWindow[][], frames: (typeof FRAME)[] = []): NativeWindowWatch {
+	let frame = FRAME;
 	return new NativeWindowWatch(
-		async () => frames.shift() ?? FRAME,
+		async () => (frame = frames.shift() ?? frame),
 		() => rosters.shift(),
 	);
 }
@@ -43,12 +55,99 @@ async function call(watch: NativeWindowWatch): Promise<string[]> {
 }
 
 describe("browsers that show windows", () => {
-	test("leaves a headless browser out, its recycled tabs included, and keeps every visible one", () => {
-		// A recycled tab attaches to its browser, which used to count as showing windows.
+	test("leaves headless and unidentified CDP browsers out, including recycled tabs", () => {
 		expect(browserShowsWindows({ kind: "headless", headless: true })).toBe(false);
 		expect(browserShowsWindows({ kind: "headless", headless: false })).toBe(true);
-		expect(browserShowsWindows({ kind: "connected", cdpUrl: "http://127.0.0.1:9222" })).toBe(true);
+		expect(browserShowsWindows({ kind: "connected", cdpUrl: "http://127.0.0.1:9222" })).toBe(false);
+		expect(browserShowsWindows({ kind: "connected", cdpUrl: "https://remote.example" })).toBe(false);
 		expect(browserShowsWindows({ kind: "spawned", path: "/Applications/App.app" })).toBe(true);
+	});
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("native-window frame isolation", () => {
+	test("ignores page overrides of window geometry and visibility", async () => {
+		const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true });
+		try {
+			const page = await browser.newPage();
+			const frame = await readTabFrame(page);
+			expect(frame).toBeDefined();
+			await page
+				.mainFrame()
+				.mainRealm()
+				.evaluate(() => {
+					for (const name of ["screenX", "screenY", "outerWidth", "outerHeight"]) {
+						Object.defineProperty(globalThis, name, { value: 9000 });
+					}
+					Object.defineProperty(document, "visibilityState", { value: "hidden" });
+				});
+			expect(await readTabFrame(page)).toEqual(frame);
+		} finally {
+			await closeLaunchedBrowser(browser);
+			if (userDataDir) await removeUserDataDir(userDataDir);
+		}
+	});
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE || process.platform !== "darwin")("native notices in worker output", () => {
+	test("separates a notice from an unterminated stdout write", async () => {
+		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({ headless: true });
+		const begin = vi.spyOn(NativeWindowWatch.prototype, "beginCall").mockImplementation(() => {});
+		const end = vi.spyOn(NativeWindowWatch.prototype, "endCall").mockResolvedValue(["native notice"]);
+		const ready = Promise.withResolvers<WorkerOutbound>();
+		const result = Promise.withResolvers<Extract<WorkerOutbound, { type: "result" }>>();
+		const closed = Promise.withResolvers<void>();
+		let receive!: (message: WorkerInbound | WorkerOutbound) => void;
+		new WorkerCore(
+			{
+				send(message) {
+					if (message.type === "ready" || message.type === "init-failed") ready.resolve(message);
+					if (message.type === "result") result.resolve(message);
+				},
+				onMessage(handler) {
+					receive = handler;
+					return () => {};
+				},
+				close() {
+					closed.resolve();
+				},
+			},
+			false,
+		);
+		try {
+			if (!userDataDir) throw new Error("Expected an isolated browser profile");
+			receive({
+				type: "init",
+				payload: {
+					mode: "headless",
+					browserWSEndpoint: wsEndpoint,
+					safeDir: getPuppeteerDir(),
+					uploadDir: `${userDataDir}/uploads`,
+					showsWindows: true,
+				},
+			});
+			expect((await ready.promise).type).toBe("ready");
+			receive({
+				type: "run",
+				id: "notice",
+				name: "notice",
+				code: 'process.stdout.write("progress");',
+				timeoutMs: 30_000,
+				session: { cwd: process.cwd() },
+			});
+			const reply = await result.promise;
+			if (!reply.ok) throw new Error(reply.error.message);
+			expect(reply.payload.displays).toEqual([
+				{ type: "text", text: "progress" },
+				{ type: "text", text: "native notice" },
+			]);
+		} finally {
+			receive({ type: "close" });
+			await closed.promise;
+			begin.mockRestore();
+			end.mockRestore();
+			await closeLaunchedBrowser(browser);
+			if (userDataDir) await removeUserDataDir(userDataDir);
+		}
 	});
 });
 
@@ -107,12 +206,86 @@ describe("browser native-window report", () => {
 		).toEqual([]);
 	});
 
+	test("does not adopt another app's matching frame when the browser pid is known", async () => {
+		const twin = win(21, { pid: USER_APP, app: "TextEdit" });
+		const sheet = win(22, { pid: USER_APP, app: "TextEdit", x: 300, y: 120, width: 600, height: 420 });
+		const rosters = [[twin], [sheet, twin]];
+		const watch = new NativeWindowWatch(
+			async () => FRAME,
+			() => rosters.shift(),
+			BROWSER,
+		);
+		expect(await call(watch)).toEqual([]);
+	});
+
 	test("names the picker of a tab whose window moved during the call", async () => {
 		const moved = win(10, { x: 400 });
 		// Only over the tab where it moved to.
 		const picker = win(31, { layer: 101, x: 1300, y: 300, width: 240, height: 180 });
-		const [line] = await call(watchWith([[TAB_WINDOW], [picker, moved]]));
+		const [line] = await call(watchWith([[TAB_WINDOW], [picker, moved]], [{ ...FRAME, x: moved.x }]));
 		expect(line).toContain("a popup list or picker");
+	});
+
+	test("follows a tab moved to another browser window while its old window stays open", async () => {
+		const moved = win(11, { x: 500 });
+		const picker = win(31, { layer: 101, x: 1400, y: 300, width: 240, height: 180 });
+		const watch = watchWith(
+			[
+				[TAB_WINDOW, moved],
+				[TAB_WINDOW, moved],
+				[TAB_WINDOW, moved],
+				[picker, TAB_WINDOW, moved],
+			],
+			[FRAME, { ...FRAME, x: moved.x }],
+		);
+		expect(await call(watch)).toEqual([]);
+		expect(await call(watch)).toHaveLength(1);
+	});
+
+	test("does not attribute a picker overlapping two browser windows", async () => {
+		const other = win(11, { x: 500 });
+		const picker = win(31, { layer: 101, x: 600, y: 300, width: 240, height: 180 });
+		expect(
+			await call(
+				watchWith([
+					[TAB_WINDOW, other],
+					[picker, TAB_WINDOW, other],
+				]),
+			),
+		).toEqual([]);
+	});
+
+	test("rechecks visibility after the call instead of attributing the newly selected tab's picker", async () => {
+		const picker = win(31, { layer: 101, x: 100, y: 300, width: 240, height: 180 });
+		let frame = FRAME;
+		const rosters = [[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [picker, TAB_WINDOW]];
+		const watch = new NativeWindowWatch(
+			async () => frame,
+			() => rosters.shift(),
+		);
+		await call(watch);
+		watch.beginCall(false);
+		frame = HIDDEN;
+		expect(await watch.endCall()).toEqual([]);
+	});
+
+	test("rechecks visibility when a delayed picker is sampled", async () => {
+		vi.useFakeTimers();
+		try {
+			const picker = win(31, { layer: 101, x: 100, y: 300, width: 240, height: 180 });
+			let frame = FRAME;
+			const rosters = [[TAB_WINDOW], [TAB_WINDOW], [picker, TAB_WINDOW], [picker, TAB_WINDOW], [picker, TAB_WINDOW]];
+			const watch = new NativeWindowWatch(
+				async () => frame,
+				() => rosters.shift(),
+			);
+			await call(watch);
+			frame = HIDDEN;
+			vi.advanceTimersByTime(2_000);
+			expect(await call(watch)).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("does not take a browser window opening or coming back for one the call raised", async () => {
