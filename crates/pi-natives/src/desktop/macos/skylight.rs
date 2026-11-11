@@ -1651,10 +1651,10 @@ fn rearm_for_front<T>(
 
 impl FrontApp {
 	/// Extend only an unbroken watch, before the blocking worker is queued.
-	pub(in super::super) fn extend_pick_watch(&self, deadline: Instant) {
+	pub(in super::super) fn extend_pick_watch(&self, deadline: Instant) -> bool {
 		PICK_LOG
 			.lock()
-			.extend(self.read_at, Instant::now(), deadline);
+			.extend(self.read_at, Instant::now(), deadline)
 	}
 
 	/// Until `deadline`, puts this app back in front without raising its
@@ -1844,14 +1844,16 @@ impl PickLog {
 		})
 	}
 
-	fn extend(&mut self, at: Instant, now: Instant, deadline: Instant) {
-		if self.since(at, now).is_some() {
-			self.watch_until = Some(
-				self
-					.watch_until
-					.map_or(deadline, |until| until.max(deadline)),
-			);
+	fn extend(&mut self, at: Instant, now: Instant, deadline: Instant) -> bool {
+		if self.since(at, now).is_none() {
+			return false;
 		}
+		self.watch_until = Some(
+			self
+				.watch_until
+				.map_or(deadline, |until| until.max(deadline)),
+		);
+		true
 	}
 
 	/// Sampling ended or could not start: the watch vouches for nothing,
@@ -4634,7 +4636,7 @@ mod tests {
 		let queued = (read + PICK_WATCH).checked_sub(SWITCH_SAMPLE).unwrap();
 		let mut log = pick_log(Some((read, read + PICK_WATCH)));
 		log.sampled_at = Some(queued);
-		log.extend(read, queued, queued + Duration::from_millis(500));
+		assert!(log.extend(read, queued, queued + Duration::from_millis(500)));
 		let started = read + PICK_WATCH + SWITCH_SAMPLE;
 		// The sampler kept running while the worker was queued.
 		log.sampled_at = Some(started);
@@ -4648,6 +4650,9 @@ mod tests {
 		log.sampled_at = Some(read);
 		let stalled = read + SWITCH_SAMPLE * 3;
 		assert!(log.since(read, stalled).is_none());
+		let deadline = log.watch_until;
+		assert!(!log.extend(read, stalled, stalled + PICK_WATCH));
+		assert_eq!(log.watch_until, deadline, "a failed extension must not renew stale coverage");
 		log.record(reading(HOLD_USER, 0).picks, stalled);
 		assert!(log.since(read, stalled).is_none());
 		assert!(log.since(stalled, stalled).is_some());

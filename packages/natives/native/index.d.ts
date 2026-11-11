@@ -440,9 +440,10 @@ export declare class MacOSFrontApp {
   /**
    * Extends the captured app's existing key-reroute watch through the next
    * `durationMs`, without reading a temporarily frontmost browser or
-   * putting an app in front. A watch with a gap is never restarted.
+   * putting an app in front. Returns whether the unbroken watch was extended;
+   * a watch with a gap is never restarted.
    */
-  watchInput(durationMs: number): void
+  watchInput(durationMs: number): boolean
   /**
    * Puts this app back in front, without raising its windows, each time the
    * app that took the front from it takes it again during the next

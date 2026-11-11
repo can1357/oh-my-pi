@@ -331,8 +331,8 @@ function canOpenWindow(method: string, params: Record<string, unknown> | undefin
 
 /** The app in front of the user, as `macOSFrontApp` from `@oh-my-pi/pi-natives` reads it. */
 export interface FrontApp {
-	/** Extends the captured app's existing key-reroute watch without reading the current front app or moving focus. */
-	watchInput(durationMs: number): void;
+	/** Extends the captured app's existing watch; false means a fresh front-app read is needed. Does not move focus. */
+	watchInput(durationMs: number): boolean;
 	/**
 	 * Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the
 	 * user picks an app. Resolves how many times.
@@ -1264,6 +1264,7 @@ export class RelayBridge {
 			return false;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
+			const read = this.#readFrontApp;
 			// A popup can activate Chrome before its event reaches us. Reuse a fresh pre-activation snapshot rather
 			// than reading Chrome on the rest of the input burst, and extend that same app's native watch.
 			const now = Date.now();
@@ -1277,10 +1278,9 @@ export class RelayBridge {
 						: null;
 			tab.frontAtInput = app
 				? this.#readFrontAtInput(() => {
-						app.watchInput(POPUP_AFTER_INPUT_MS);
-						return app;
+						return app.watchInput(POPUP_AFTER_INPUT_MS) ? app : read(browserPid);
 					}, browserPid)
-				: this.#readFrontAtInput(this.#readFrontApp, browserPid);
+				: this.#readFrontAtInput(read, browserPid);
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);

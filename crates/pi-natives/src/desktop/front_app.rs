@@ -18,7 +18,8 @@ pub struct MacosFrontApp {
 impl MacosFrontApp {
 	/// Extends the captured app's existing key-reroute watch through the next
 	/// `durationMs`, without reading a temporarily frontmost browser or
-	/// putting an app in front. A watch with a gap is never restarted.
+	/// putting an app in front. Returns whether the unbroken watch was extended;
+	/// a watch with a gap is never restarted.
 	#[napi]
 	#[cfg_attr(
 		not(target_os = "macos"),
@@ -28,13 +29,18 @@ impl MacosFrontApp {
 			reason = "only macOS watches an app's input"
 		)
 	)]
-	pub fn watch_input(&self, duration_ms: u32) {
+	pub fn watch_input(&self, duration_ms: u32) -> bool {
 		#[cfg(target_os = "macos")]
-		self.app.extend_pick_watch(
-			std::time::Instant::now() + std::time::Duration::from_millis(duration_ms.into()),
-		);
+		{
+			self.app.extend_pick_watch(
+				std::time::Instant::now() + std::time::Duration::from_millis(duration_ms.into()),
+			)
+		}
 		#[cfg(not(target_os = "macos"))]
-		let _ = duration_ms;
+		{
+			let _ = duration_ms;
+			false
+		}
 	}
 
 	/// Puts this app back in front, without raising its windows, each time the
