@@ -24,7 +24,7 @@
 //!
 //! Only keys typed on a keyboard are moved, never keys a process posted. Keys
 //! are never moved when the user chose the target or switched to another app
-//! (a mouse button pressed, a ⌘ or ⌃ held, or another process's panel taking
+//! (a mouse button pressed, a ⌘/⌃/⌥ held, or another process's panel taking
 //! the keyboard, as Spotlight's does), and no key pressed while secure
 //! keyboard entry is on is moved.
 use std::{
@@ -87,10 +87,10 @@ const KEY_FOCUS_RETURNED: i64 = 0x8000;
 const HID_SYSTEM_STATE: i32 = 1;
 /// Left, right and other mouse button down and up.
 const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
-/// ⌘ and ⌃: ⌘-Tab, ⌘-H, Spaces and launcher hotkeys pick an app with them.
-const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000;
-/// How recent a ⌘ or ⌃ must be for an app coming forward to count as the
-/// user's switch: ⌘-Tab activates its app a few milliseconds after ⌘ is
+/// ⌘, ⌃ and ⌥: app-switching shortcuts and launcher hotkeys use them.
+const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000 | 0x0008_0000;
+/// How recent a switch modifier must be for an app coming forward to count as
+/// the user's switch: ⌘-Tab activates its app a few milliseconds after ⌘ is
 /// released.
 const CHORD_WINDOW: Duration = Duration::from_millis(250);
 
@@ -257,13 +257,13 @@ fn forget_lifted(held: &mut Vec<Held>, target: pid_t, is_down: impl Fn(i64) -> b
 	});
 }
 
-/// When the user last held ⌘ or ⌃, from the flags changes the session tap
+/// When the user last held ⌘/⌃/⌥, from the flags changes the session tap
 /// sees.
 #[derive(Clone, Copy, Debug)]
 struct Chord {
 	held: bool,
-	/// When ⌘ or ⌃ was last down. Its release counts: ⌘-Tab picks its app
-	/// as ⌘ comes up, however long it was held.
+	/// When a switch modifier was last down. Its release counts: ⌘-Tab picks its
+	/// app as ⌘ comes up, however long it was held.
 	last: Option<Instant>,
 }
 
@@ -282,8 +282,8 @@ impl Chord {
 		self.held = held;
 	}
 
-	/// The latest time ⌘ or ⌃ was down, as of `now`; `held_now` is the
-	/// system's current modifier state, in case a flags change was missed.
+	/// The latest time a switch modifier was down, as of `now`; `held_now` is
+	/// the system's current modifier state, in case a flags change was missed.
 	const fn last(&mut self, held_now: bool, now: Instant) -> Option<Instant> {
 		if held_now || self.held {
 			self.last = Some(now);
@@ -319,7 +319,7 @@ impl Theft {
 	}
 
 	/// Whether the user picked an app: a mouse button went down or up since
-	/// the action started, or since the theft once there is one, or ⌘/⌃ was
+	/// the action started, or since the theft once there is one, or ⌘/⌃/⌥ was
 	/// held within the chord window.
 	fn user_acted(&self, signals: UserSignals, now: Instant) -> bool {
 		let since = match self.holder {
@@ -511,11 +511,11 @@ impl Theft {
 			registry.cancel(self.generation, self.target, &GENERATION);
 			self.end();
 		}
-		// A physical ⌘/⌃ press chooses the target even when it already holds
-		// the keyboard, so no new focus notification announces the choice.
+		// A physical ⌘/⌃/⌥ press chooses the target even when it already
+		// holds the keyboard, so no focus notification announces the choice.
 		if self.stolen()
 			&& matches!(key.stroke, Some(Stroke::Press))
-			&& matches!(key.code, 54 | 55 | 59 | 62)
+			&& matches!(key.code, 54 | 55 | 58 | 59 | 61 | 62)
 		{
 			self.holder = Holder::UserChose;
 		}
@@ -570,7 +570,7 @@ impl Theft {
 
 /// Whether secure keyboard entry is on: a password field or a terminal with
 /// secure keyboard entry has the keyboard.
-fn secure_entry() -> bool {
+pub(super) fn secure_entry() -> bool {
 	// SAFETY: a read-only query of the system keyboard state.
 	unsafe { IsSecureEventInputEnabled() != 0 }
 }
@@ -1375,20 +1375,24 @@ mod tests {
 	fn a_switch_modifier_counts_while_held_and_when_released() {
 		const COMMAND: u64 = 0x0010_0108;
 		const CONTROL: u64 = 0x0004_0101;
+		const OPTION: u64 = 0x0008_0120;
 		const SHIFT: u64 = 0x0002_0102;
 		const NONE: u64 = 0x100;
 		let t0 = Instant::now();
 		let ms = Duration::from_millis;
-		// ⌘ held 600 ms for a ⌘-Tab; the target comes forward 5 ms after ⌘ is
-		// released.
-		let mut chord = Chord::new(NONE, t0);
-		chord.flags_changed(COMMAND, t0);
-		chord.flags_changed(NONE, t0 + ms(600));
-		let mut theft = theft();
-		let at = t0 + ms(605);
-		let signals = UserSignals { buttons: BUTTONS, last_chord: chord.last(false, at) };
-		theft.notify(NEW_FRONT, 1, TARGET, signals, at);
-		assert!(!theft.reroutes(false, BUTTONS));
+		// The switch modifier is released before the target's delayed focus
+		// notification; keys must still stay in the app the user chose.
+		for modifier in [COMMAND, OPTION] {
+			let mut chord = Chord::new(NONE, t0);
+			chord.flags_changed(modifier, t0);
+			chord.flags_changed(NONE, t0 + ms(600));
+			let mut rig = Rig::new();
+			let at = t0 + ms(605);
+			let signals = UserSignals { buttons: BUTTONS, last_chord: chord.last(false, at) };
+			rig.theft.notify(NEW_FRONT, 1, TARGET, signals, at);
+			rig.theft.publish(&mut rig.registry);
+			assert_eq!(rig.key(Q, Stroke::Press), KEPT);
+		}
 		// ⌃ already held as the action starts, or held without a flags change
 		// seen: it is down now.
 		assert_eq!(Chord::new(CONTROL, t0).last(false, t0 + ms(900)), Some(t0 + ms(900)));
@@ -1540,13 +1544,15 @@ mod tests {
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
 		// A switch modifier pressed while it already holds the keyboard
 		// needs no repeated front-app notification to end the theft.
-		let mut rig = Rig::new();
-		rig.steal();
-		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
-		assert_eq!(rig.key(55, Stroke::Press), KEPT);
-		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), KEPT);
-		assert_eq!(rig.key(Q, Stroke::Release), MOVED);
-		assert_eq!(rig.key(55, Stroke::Release), KEPT);
+		for modifier in [55, 58, 61] {
+			let mut rig = Rig::new();
+			rig.steal();
+			assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+			assert_eq!(rig.key(modifier, Stroke::Press), KEPT);
+			assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), KEPT);
+			assert_eq!(rig.key(Q, Stroke::Release), MOVED);
+			assert_eq!(rig.key(modifier, Stroke::Release), KEPT);
+		}
 
 		// The same, read back after the focus tap was disabled.
 		for (front, focus, signals) in
@@ -1587,7 +1593,7 @@ mod tests {
 		assert!(!typed_by_user(4321, SYNTHETIC_EVENT_TAG));
 	}
 
-	fn keys_after_reusing_a_reroute(flags: u64) -> [Option<pid_t>; 3] {
+	fn keys_after_front_read(read: skylight::ReadForTest) -> (Option<u32>, [Option<pid_t>; 3]) {
 		let _serial = control::OWNERSHIP_TEST.lock();
 		struct RestoreRegistry(Option<Registry>);
 		impl Drop for RestoreRegistry {
@@ -1603,9 +1609,9 @@ mod tests {
 		let _restore = RestoreRegistry(Some(std::mem::replace(&mut *REGISTRY.lock(), rig.registry)));
 		let (mut reroute, _) = KeyReroute::unwatched_for_test(generation);
 		reroute.armed.buttons = mouse_buttons();
-		// The same caller that rearms browser reads must keep the armed tap.
-		// Exercise delivery after publication, not the snapshot predicates.
-		skylight::with_reused_reroute_for_test(reroute, flags, || {
+		// Observe physical-key destinations after the production front-app
+		// transaction, including publication of its no-reroute fallback.
+		skylight::with_watched_reroute_for_test(reroute, read, || {
 			[Stroke::Press, Stroke::Repeat, Stroke::Release].map(|stroke| {
 				rig.theft
 					.route(&mut REGISTRY.lock(), user_key(Q, stroke), false, BUTTONS)
@@ -1615,11 +1621,21 @@ mod tests {
 
 	#[test]
 	fn reusing_an_armed_reroute_keeps_delivering_the_users_keys() {
-		assert_eq!(keys_after_reusing_a_reroute(0), [MOVED; 3]);
+		assert_eq!(keys_after_front_read(skylight::ReadForTest::Reuse(0)).1, [MOVED; 3]);
 	}
 
 	#[test]
 	fn an_option_pick_keeps_the_users_keys_in_the_chosen_app() {
-		assert_eq!(keys_after_reusing_a_reroute(0x8_0000), [KEPT; 3]);
+		assert_eq!(keys_after_front_read(skylight::ReadForTest::Reuse(0x8_0000)).1, [KEPT; 3]);
+	}
+
+	#[test]
+	fn secure_input_seen_before_target_activation_stops_later_routing() {
+		assert_eq!(keys_after_front_read(skylight::ReadForTest::SecureThenOff).1, [KEPT; 3]);
+	}
+
+	#[test]
+	fn a_changing_desktop_returns_the_latest_front_app_without_routing_keys() {
+		assert_eq!(keys_after_front_read(skylight::ReadForTest::Unstable), (Some(3), [KEPT; 3]),);
 	}
 }

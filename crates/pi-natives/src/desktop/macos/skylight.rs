@@ -1544,26 +1544,45 @@ pub(in super::super) struct FrontApp {
 /// setting up its taps can stall the sampler past what the watch tolerates.
 pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 	let spi = FOREGROUND.as_ref()?;
+	front_app_with(
+		browser,
+		|| {
+			let read_at = Instant::now();
+			let picks = Picks::read(spi);
+			let user = browser.and_then(|_| picks.front.and_then(|front| psn_pid(&front)));
+			Some((user, (read_at, picks)))
+		},
+		|browser, user| rearm(browser, user, Instant::now()),
+		|browser, user, armed| armed.covers_now(user, browser),
+		|picks, read_at, rearm| watch_picks(spi, picks, read_at, rearm),
+	)
+}
+
+fn front_app_with(
+	browser: Option<pid_t>,
+	mut read: impl FnMut() -> Option<(Option<pid_t>, (Instant, Picks))>,
+	mut arm: impl FnMut(pid_t, pid_t) -> Rearm,
+	mut covers: impl FnMut(pid_t, pid_t, &Rearm) -> bool,
+	publish: impl FnMut(Picks, Instant, Rearm) -> bool,
+) -> Option<FrontApp> {
 	read_front_app(
 		|| {
-			let (read_at, picks, rearm) = if let Some(browser) = browser {
-				let ((read_at, picks), rearm) = rearm_for_front(
+			let ((read_at, picks), rearm) = if let Some(browser) = browser {
+				rearm_for_front(
 					|| {
-						let read_at = Instant::now();
-						let picks = Picks::read(spi);
-						Some((psn_pid(&picks.front?)?, (read_at, picks)))
+						let (user, snapshot) = read()?;
+						Some((user?, snapshot))
 					},
-					|user| rearm(browser, user, Instant::now()),
-					|user, armed| armed.covers_now(user, browser),
+					|user| arm(browser, user),
+					|user, armed| covers(browser, user, armed),
 					Rearm::cancel_candidate,
-				)?;
-				(read_at, picks, rearm)
+				)?
 			} else {
-				(Instant::now(), Picks::read(spi), Rearm::Replace(None))
+				(read()?.1, Rearm::Replace(None))
 			};
 			Some((read_at, picks, rearm))
 		},
-		|picks, read_at, rearm| watch_picks(spi, picks, read_at, rearm),
+		publish,
 		#[cfg(test)]
 		|| {},
 	)
@@ -1679,6 +1698,8 @@ struct Picks {
 	front:     Option<ProcessSerialNumber>,
 	/// The process holding the keyboard.
 	key_focus: Option<ProcessSerialNumber>,
+	/// Secure keyboard entry may suppress the target tap entirely.
+	secure:    bool,
 }
 
 impl Picks {
@@ -1695,6 +1716,7 @@ impl Picks {
 				// which writes the 8-byte PSN and one status byte.
 				(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 			}),
+			secure:    super::key_reroute::secure_entry(),
 		}
 	}
 
@@ -1780,6 +1802,9 @@ impl PickLog {
 			self.watch_from = Some(now);
 		}
 		self.sampled_at = self.sampled_at.max(Some(now));
+		if picks.secure {
+			self.cancel_reroute(KeyReroute::cancel);
+		}
 		if picks.flags & SWITCH_MODIFIERS != 0 {
 			self.chord = self.chord.max(Some(now));
 		}
@@ -1928,11 +1953,18 @@ fn rearm(browser: pid_t, user: pid_t, now: Instant) -> Rearm {
 }
 
 #[cfg(test)]
-pub(super) fn with_reused_reroute_for_test<T>(
+pub(super) enum ReadForTest {
+	Reuse(u64),
+	SecureThenOff,
+	Unstable,
+}
+
+#[cfg(test)]
+pub(super) fn with_watched_reroute_for_test<T>(
 	reroute: KeyReroute,
-	flags: u64,
+	read: ReadForTest,
 	deliver: impl FnOnce() -> T,
-) -> T {
+) -> (Option<u32>, T) {
 	struct RestoreLog(Option<PickLog>);
 	impl Drop for RestoreLog {
 		fn drop(&mut self) {
@@ -1951,14 +1983,41 @@ pub(super) fn with_reused_reroute_for_test<T>(
 		reroute:     Some((now, reroute)),
 	};
 	let _restore = RestoreLog(Some(mem::replace(&mut *PICK_LOG.lock(), log)));
-	// An operation owns focus during this read: a discarded candidate
-	// cannot be hidden by successfully installing a replacement tap.
-	let _owner = control::own_focus().unwrap();
-	let candidate = rearm(200, 100, now);
-	PICK_LOG
-		.lock()
-		.watch_read(Picks { flags, front: None, key_focus: None }, now, candidate);
-	deliver()
+	let _owner = matches!(&read, ReadForTest::Reuse(_)).then(|| control::own_focus().unwrap());
+	let picks = Picks { secure: false, flags: 0, front: None, key_focus: None };
+	let front = match read {
+		ReadForTest::Reuse(flags) => {
+			let candidate = rearm(200, 100, now);
+			PICK_LOG
+				.lock()
+				.watch_read(Picks { flags, ..picks }, now, candidate);
+			None
+		},
+		ReadForTest::SecureThenOff => {
+			// Secure entry suppresses target key callbacks. Only the focus
+			// sampler sees it before focus loss turns it off again.
+			PICK_LOG.lock().record(Picks { secure: true, ..picks }, now);
+			PICK_LOG.lock().record(picks, now);
+			None
+		},
+		ReadForTest::Unstable => {
+			let mut readings = (0_u32..8).map(|user| {
+				(
+					Some(100 + pid_t::try_from(user).unwrap()),
+					(now, Picks { front: Some(ProcessSerialNumber { high: 0, low: user }), ..picks }),
+				)
+			});
+			front_app_with(
+				Some(200),
+				|| readings.next(),
+				|_, _| Rearm::Replace(Some(KeyReroute::unwatched_for_test(0).0)),
+				|_, _, _| true,
+				|picks, at, candidate| PICK_LOG.lock().watch_read(picks, at, candidate),
+			)
+			.map(|app| app.psn.low)
+		},
+	};
+	(front, deliver())
 }
 
 /// Whether a reroute stays given what the log `seen` since it was set up. A
@@ -2912,7 +2971,12 @@ mod tests {
 
 		let _serial = control::OWNERSHIP_TEST.lock();
 		let now = Instant::now();
-		let picks = Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_USER) };
+		let picks = Picks {
+			secure:    false,
+			flags:     0,
+			front:     Some(HOLD_USER),
+			key_focus: Some(HOLD_USER),
+		};
 		let log = &Mutex::new(pick_log(None));
 		let (older, _) = KeyReroute::unwatched_for_test(1);
 		let (newer, _) = KeyReroute::unwatched_for_test(2);
@@ -2997,30 +3061,6 @@ mod tests {
 		}
 		assert_eq!(setup.get(), 1);
 		assert_eq!(owned.get(), 1, "denied input must not acquire ownership");
-	}
-
-	#[test]
-	fn a_front_read_stops_rearming_while_the_user_keeps_switching() {
-		let _serial = control::OWNERSHIP_TEST.lock();
-		let mut reads = (0..8).map(|user| (user, user));
-		let setups = Cell::new(0);
-		let mut ended = Vec::new();
-		let (snapshot, candidate) = rearm_for_front(
-			|| reads.next(),
-			|_| {
-				setups.set(setups.get() + 1);
-				let (reroute, end) = KeyReroute::unwatched_for_test(0);
-				ended.push(end);
-				Rearm::Replace(Some(reroute))
-			},
-			|_, _| true,
-			Rearm::cancel_candidate,
-		)
-		.expect("return the latest front app even if no setup interval is quiet");
-		assert_eq!(snapshot, 3);
-		assert_eq!(setups.get(), 3);
-		assert!(matches!(candidate, Rearm::Replace(None)));
-		assert!(ended.iter().all(|end| end.load(Ordering::Acquire)));
 	}
 
 	/// Signals after `clicks` hardware clicks (left down and up), timed between
@@ -4419,7 +4459,7 @@ mod tests {
 		HoldInput {
 			at,
 			clicked: false,
-			picks: Picks { flags, front: Some(front), key_focus: Some(front) },
+			picks: Picks { secure: false, flags, front: Some(front), key_focus: Some(front) },
 			logged: Some(PickEvidence::default()),
 		}
 	}
@@ -4459,7 +4499,12 @@ mod tests {
 		// The panel opens during the hold.
 		let mut hold = self::hold();
 		let panel = HoldInput {
-			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			picks: Picks {
+				secure:    false,
+				flags:     0,
+				front:     Some(HOLD_USER),
+				key_focus: Some(HOLD_THIRD),
+			},
 			..reading(HOLD_USER, 0)
 		};
 		assert_eq!(hold.observe(HOLD_USER, &panel), HoldStep::Wait);
@@ -4468,7 +4513,12 @@ mod tests {
 		// front is no panel.
 		let mut hold = self::hold();
 		let early = HoldInput {
-			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_BROWSER) },
+			picks: Picks {
+				secure:    false,
+				flags:     0,
+				front:     Some(HOLD_USER),
+				key_focus: Some(HOLD_BROWSER),
+			},
 			..reading(HOLD_USER, 0)
 		};
 		assert_eq!(hold.observe(HOLD_USER, &early), HoldStep::Wait);
@@ -4532,11 +4582,21 @@ mod tests {
 		let later = start + SWITCH_SAMPLE;
 		let mut log = pick_log(Some((start, start + PICK_WATCH)));
 		log.record(
-			Picks { flags: COMMAND, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			Picks {
+				secure:    false,
+				flags:     COMMAND,
+				front:     Some(HOLD_USER),
+				key_focus: Some(HOLD_THIRD),
+			},
 			start,
 		);
 		log.record(
-			Picks { flags: SHIFT, front: Some(HOLD_USER), key_focus: Some(HOLD_BROWSER) },
+			Picks {
+				secure:    false,
+				flags:     SHIFT,
+				front:     Some(HOLD_USER),
+				key_focus: Some(HOLD_BROWSER),
+			},
 			later,
 		);
 		let all = log.since(start, later).expect("watched since the read");
@@ -4609,6 +4669,7 @@ mod tests {
 		let newer = read + SWITCH_SAMPLE;
 		let mut log = pick_log(Some((read, read + PICK_WATCH)));
 		let picks = Picks {
+			secure:    false,
 			flags:     COMMAND | OPTION_MODIFIER,
 			front:     Some(HOLD_USER),
 			key_focus: Some(HOLD_THIRD),
@@ -4646,7 +4707,12 @@ mod tests {
 		let mut hold = self::hold();
 		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
 		let panel = HoldInput {
-			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			picks: Picks {
+				secure:    false,
+				flags:     0,
+				front:     Some(HOLD_USER),
+				key_focus: Some(HOLD_THIRD),
+			},
 			..reading(HOLD_USER, 0)
 		};
 		assert_eq!(hold.observe(HOLD_USER, &panel), HoldStep::Wait);
@@ -4856,7 +4922,12 @@ mod tests {
 		)
 		.expect("absence must cover the secure read without retrying");
 		assert_eq!(snapshot, 1);
-		let picks = Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_USER) };
+		let picks = Picks {
+			secure:    false,
+			flags:     0,
+			front:     Some(HOLD_USER),
+			key_focus: Some(HOLD_USER),
+		};
 		assert!(log.watch_read(picks, now, rearm));
 		assert!(log.reroute.is_none());
 		assert!(ended.load(Ordering::Acquire));
@@ -4889,7 +4960,12 @@ mod tests {
 		let start = Instant::now();
 		let boundary = start + PICK_WATCH;
 		let now = boundary.checked_sub(SWITCH_SAMPLE).unwrap();
-		let picks = Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_USER) };
+		let picks = Picks {
+			secure:    false,
+			flags:     0,
+			front:     Some(HOLD_USER),
+			key_focus: Some(HOLD_USER),
+		};
 		for expired in [false, true] {
 			let mut log = pick_log(Some((start, boundary)));
 			log.sampled_at = Some(now);
