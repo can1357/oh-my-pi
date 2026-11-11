@@ -58,6 +58,46 @@ export interface BoundedProbeSpawnOptions extends BackendProbeOptions {
 	timeoutCeilingMs?: number;
 }
 
+/** `timeoutMs` (when positive) clamped to `ceiling`, else `ceiling`. */
+export function probeBound(timeoutMs: number | undefined, ceiling = DEFAULT_PROBE_TIMEOUT_MS): number {
+	return Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : ceiling, ceiling);
+}
+
+/**
+ * Await a spawned probe's exit, calling `kill` once `bound` ms pass or `signal` aborts. A killed
+ * probe reports `exitCode: null` with the reason, as soon as the kill is issued: reaping can
+ * take far longer than the bound (`taskkill /T` alone runs ~0.7 s on Windows) and finishes in
+ * the background, so it never eats into the caller's discovery budget.
+ */
+export async function awaitBoundedProbe(
+	exited: Promise<number>,
+	kill: () => void,
+	bound: number,
+	signal?: AbortSignal,
+): Promise<BoundedProbeResult> {
+	const killed = Promise.withResolvers<null>();
+	let timedOut = false;
+	let aborted = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		kill();
+		killed.resolve(null);
+	}, bound);
+	const onAbort = (): void => {
+		aborted = true;
+		kill();
+		killed.resolve(null);
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		const exitCode = await Promise.race([exited, killed.promise]);
+		return { exitCode: timedOut || aborted ? null : exitCode, timedOut, aborted };
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 /**
  * Spawn `command` detached from the host's stdio, bounded by a timeout and an
  * optional AbortSignal. Never inherits stdin (the Windows wedge in #9466) and
@@ -74,8 +114,7 @@ export async function runBoundedProbe(
 	if (signal?.aborted) {
 		return { exitCode: null, timedOut: false, aborted: true };
 	}
-	const ceiling = Math.max(timeoutCeilingMs ?? 0, DEFAULT_PROBE_TIMEOUT_MS);
-	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : ceiling, ceiling);
+	const bound = probeBound(timeoutMs, Math.max(timeoutCeilingMs ?? 0, DEFAULT_PROBE_TIMEOUT_MS));
 	const detached = process.platform !== "win32";
 	const proc = Bun.spawn(command, {
 		cwd,
@@ -86,8 +125,6 @@ export async function runBoundedProbe(
 		windowsHide: true,
 		detached,
 	});
-	let timedOut = false;
-	let aborted = false;
 	const killDirectChild = (): void => {
 		try {
 			proc.kill("SIGKILL");
@@ -133,22 +170,7 @@ export async function runBoundedProbe(
 		}
 		killDirectChild();
 	};
-	const timer = setTimeout(() => {
-		timedOut = true;
-		forceKill();
-	}, bound);
-	const onAbort = (): void => {
-		aborted = true;
-		forceKill();
-	};
-	signal?.addEventListener("abort", onAbort, { once: true });
-	try {
-		const exitCode = await proc.exited;
-		return { exitCode: timedOut || aborted ? null : exitCode, timedOut, aborted };
-	} finally {
-		clearTimeout(timer);
-		signal?.removeEventListener("abort", onAbort);
-	}
+	return awaitBoundedProbe(proc.exited, forceKill, bound, signal);
 }
 
 /** A single interpreter candidate to probe, plus the label used in failure messages. */
@@ -186,7 +208,7 @@ export async function probeCandidates(
 		runProbe = runBoundedProbe,
 	}: BackendProbeOptions & { cwd: string; runProbe?: BoundedProbeRunner },
 ): Promise<CandidateProbeResult> {
-	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS);
+	const bound = probeBound(timeoutMs);
 	const deadline = Date.now() + bound;
 	const failures: string[] = [];
 	let timedOut = false;

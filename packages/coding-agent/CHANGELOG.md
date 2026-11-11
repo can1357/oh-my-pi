@@ -293,6 +293,10 @@
 ### Removed
 
 - Removed `/mcp smithery-search`, `/mcp smithery-login` and `/mcp smithery-logout`; Smithery shut down its API on October 31, 2026 ([#18822](https://github.com/can1357/oh-my-pi/pull/18822) by [@samettemizer](https://github.com/samettemizer))
+### Fixed
+
+- Approval modes now gate `read` and search URLs on `192.0.0.0/24` and `198.18.0.0/15` like other non-public addresses, matching the sandbox egress proxy ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- On Windows, cancelling a JavaScript eval cell no longer drops the output it printed just before the cancel, and a hung Python interpreter probe no longer delays backend discovery past its timeout ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [18.18.8] - 2026-11-11
 

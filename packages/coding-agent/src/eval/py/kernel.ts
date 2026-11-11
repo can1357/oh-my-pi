@@ -24,7 +24,13 @@ import {
 	type KernelProcess,
 	type KernelStartOptions,
 } from "../kernel-base";
-import { type BackendProbeOptions, type BoundedProbeRunner, DEFAULT_PROBE_TIMEOUT_MS, probeCandidates } from "../probe";
+import {
+	awaitBoundedProbe,
+	type BackendProbeOptions,
+	type BoundedProbeRunner,
+	probeBound,
+	probeCandidates,
+} from "../probe";
 import { stageRunnerScript } from "../runner-cache";
 import type { ShadowPlan } from "../speculation/types";
 import { PYTHON_PRELUDE } from "./prelude";
@@ -521,10 +527,6 @@ async function containedProbeRunner(
 	if (!sandbox.applies("eval")) return undefined;
 	return async (command, { env, signal, timeoutMs }) => {
 		if (signal?.aborted) return { exitCode: null, timedOut: false, aborted: true };
-		const bound = Math.min(
-			timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS,
-			DEFAULT_PROBE_TIMEOUT_MS,
-		);
 		const runtime = runtimes.find(candidate => candidate.pythonPath === command[0]);
 		const child = await sandbox.spawn({
 			argv: command,
@@ -536,24 +538,7 @@ async function containedProbeRunner(
 		child.stdin.end();
 		void new Response(child.stdout).arrayBuffer().catch(() => undefined);
 		void new Response(child.stderr).arrayBuffer().catch(() => undefined);
-		let timedOut = false;
-		let aborted = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			child.kill();
-		}, bound);
-		const onAbort = (): void => {
-			aborted = true;
-			child.kill();
-		};
-		signal?.addEventListener("abort", onAbort, { once: true });
-		try {
-			const exitCode = await child.exited;
-			return { exitCode: timedOut || aborted ? null : exitCode, timedOut, aborted };
-		} finally {
-			clearTimeout(timer);
-			signal?.removeEventListener("abort", onAbort);
-		}
+		return awaitBoundedProbe(child.exited, () => child.kill(), probeBound(timeoutMs), signal);
 	};
 }
 

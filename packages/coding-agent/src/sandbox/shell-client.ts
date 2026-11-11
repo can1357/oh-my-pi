@@ -448,15 +448,7 @@ function acquireHost(runtime: SandboxRuntime, scope: SandboxHostScope): Promise<
 	const key = `${prefix}${runtime.fingerprint()}\n${extra}`;
 	const existing = hostPool.get(key);
 	if (existing) return existing;
-	for (const [other, host] of hostPool) {
-		if (other.startsWith(prefix)) {
-			hostPool.delete(other);
-			void host.then(
-				connection => connection.retire(),
-				() => {},
-			);
-		}
-	}
+	releaseSandboxHosts(scope.agentSessionKey);
 	const started = startSandboxHost(runtime, scope);
 	hostPool.set(key, started);
 	started.then(

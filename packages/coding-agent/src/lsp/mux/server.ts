@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, postmortem, ptree, setProcessName, settleWithin } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
 import { uriToFile } from "../utils";
@@ -693,13 +693,7 @@ export class LspMuxServer {
 		server.pending.set(id, { resolveInternal: resolve });
 		try {
 			await this.#writeServer(server, { jsonrpc: "2.0", id, method: "shutdown", params: null });
-			const timeout = Promise.withResolvers<void>();
-			const timer = setTimeout(timeout.resolve, SHUTDOWN_BUDGET_MS);
-			try {
-				await Promise.race([promise, timeout.promise]);
-			} finally {
-				clearTimeout(timer);
-			}
+			await settleWithin(promise, SHUTDOWN_BUDGET_MS);
 			await this.#writeServer(server, { jsonrpc: "2.0", method: "exit" });
 		} catch (error) {
 			logger.warn("LSP mux graceful server shutdown failed", { server: server.key, error: String(error) });

@@ -786,23 +786,15 @@ export class ExtensionUiController {
 							},
 						},
 					);
-					this.ctx.closeLinkBrowser();
-					this.ctx.editorContainer.clear();
-					this.ctx.editorContainer.addChild(dialog);
-					this.ctx.editorContainer.addChild(editor);
-					this.ctx.ui.setFocus(dialog);
+					this.#mountDialog(dialog, true);
 					// The dialog owns focus but forwards typing: keep the composer's cursor visible.
 					editor.focused = true;
 					// Its submissions steer this (main) session, even from a focused agent's view.
 					this.ctx.approvalOwnsComposer = true;
-					this.ctx.ui.requestRender();
 					return () => {
 						this.ctx.approvalOwnsComposer = false;
 						dialog.dispose();
-						this.ctx.editorContainer.clear();
-						this.ctx.editorContainer.addChild(editor);
-						this.ctx.ui.setFocus(editor);
-						this.ctx.ui.requestRender();
+						this.#restoreComposer();
 					};
 				}),
 			);
@@ -830,18 +822,10 @@ export class ExtensionUiController {
 				onAnswer: settle,
 				initialChoice: drafting ? "deny" : undefined,
 			});
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(dialog);
-			this.ctx.editorContainer.addChild(editor);
-			this.ctx.ui.setFocus(dialog);
-			this.ctx.ui.requestRender();
+			this.#mountDialog(dialog, true);
 			return () => {
 				dialog.dispose();
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(editor);
-				this.ctx.ui.setFocus(editor);
-				this.ctx.ui.requestRender();
+				this.#restoreComposer();
 			};
 		});
 		return answer ?? { decision: "deny" };
@@ -930,6 +914,24 @@ export class ExtensionUiController {
 		};
 	}
 
+	/** Put `dialog` in the composer's slot and focus it; `composerBeneath` keeps the composer mounted under it. */
+	#mountDialog(dialog: Component, composerBeneath: boolean): void {
+		this.ctx.closeLinkBrowser();
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(dialog);
+		if (composerBeneath) this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.ctx.ui.setFocus(dialog);
+		this.ctx.ui.requestRender();
+	}
+
+	/** Put the composer back alone in its slot and focus it. */
+	#restoreComposer(): void {
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.ctx.ui.setFocus(this.ctx.editor);
+		this.ctx.ui.requestRender();
+	}
+
 	#showLocalFormDialog(
 		form: HtmlForm,
 		dialogOptions: ExtensionUIDialogOptions | undefined,
@@ -950,19 +952,11 @@ export class ExtensionUiController {
 				onCancel: () => settle(undefined),
 				inputGuard,
 			});
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(dialog);
 			// The guarded draft stays visible beneath the form while typing edits it.
-			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(dialog);
-			this.ctx.ui.requestRender();
+			this.#mountDialog(dialog, inputGuard !== undefined);
 			return () => {
 				dialog.dispose();
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
-				this.ctx.ui.setFocus(this.ctx.editor);
-				this.ctx.ui.requestRender();
+				this.#restoreComposer();
 			};
 		});
 	}
@@ -1120,15 +1114,11 @@ export class ExtensionUiController {
 
 			const restoreAskDialog = (): void => {
 				if (closed || !askDialog) return;
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(askDialog);
 				// Keep the draft editor mounted beneath the restored ask, matching the
 				// initial presentation: the guard re-blocks whenever the draft is
 				// non-empty (e.g. a failed submit restored its text while a nested
 				// prompt was open), and routed input must land on a visible surface.
-				if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
-				this.ctx.ui.setFocus(askDialog);
-				this.ctx.ui.requestRender();
+				this.#mountDialog(askDialog, inputGuard !== undefined);
 			};
 
 			const finishPrompt = (value: AskDialogPromptValue | AskDialogPromptDraft | undefined): void => {
@@ -1159,11 +1149,7 @@ export class ExtensionUiController {
 					(text, images) => finishPrompt({ draft: { text, images } }),
 					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
-				this.ctx.closeLinkBrowser();
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(promptEditor);
-				this.ctx.ui.setFocus(promptEditor);
-				this.ctx.ui.requestRender();
+				this.#mountDialog(promptEditor, false);
 			};
 
 			const promptForText = (
@@ -1210,12 +1196,7 @@ export class ExtensionUiController {
 					inputGuard,
 				},
 			);
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(askDialog);
-			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(askDialog);
-			this.ctx.ui.requestRender();
+			this.#mountDialog(askDialog, inputGuard !== undefined);
 
 			return () => {
 				closed = true;
@@ -1224,10 +1205,7 @@ export class ExtensionUiController {
 				promptResolve?.(undefined);
 				promptResolve = undefined;
 				promptEditor = undefined;
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
-				this.ctx.ui.setFocus(this.ctx.editor);
-				this.ctx.ui.requestRender();
+				this.#restoreComposer();
 			};
 		});
 	}
@@ -1467,11 +1445,7 @@ export class ExtensionUiController {
 					slider: extra?.slider,
 				},
 			);
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.hookSelector);
-			this.ctx.ui.setFocus(this.ctx.hookSelector);
-			this.ctx.ui.requestRender();
+			this.#mountDialog(this.ctx.hookSelector, false);
 			return () => this.hideHookSelector();
 		});
 	}
@@ -1480,11 +1454,8 @@ export class ExtensionUiController {
 	 */
 	hideHookSelector(): void {
 		this.ctx.hookSelector?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookSelector = undefined;
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
+		this.#restoreComposer();
 	}
 
 	/**
@@ -1522,11 +1493,7 @@ export class ExtensionUiController {
 					tui: this.ctx.ui,
 				},
 			);
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.hookInput);
-			this.ctx.ui.setFocus(this.ctx.hookInput);
-			this.ctx.ui.requestRender();
+			this.#mountDialog(this.ctx.hookInput, false);
 			return () => this.hideHookInput();
 		});
 	}
@@ -1536,11 +1503,8 @@ export class ExtensionUiController {
 	 */
 	hideHookInput(): void {
 		this.ctx.hookInput?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookInput = undefined;
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
+		this.#restoreComposer();
 	}
 
 	/**
@@ -1561,11 +1525,7 @@ export class ExtensionUiController {
 				() => settle(undefined),
 				{ ...editorOptions, externalEditor: editDialogExternally },
 			);
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.hookEditor);
-			this.ctx.ui.setFocus(this.ctx.hookEditor);
-			this.ctx.ui.requestRender();
+			this.#mountDialog(this.ctx.hookEditor, false);
 			return () => this.hideHookEditor();
 		});
 	}
@@ -1575,11 +1535,8 @@ export class ExtensionUiController {
 	 */
 	hideHookEditor(): void {
 		this.ctx.hookEditor?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookEditor = undefined;
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
+		this.#restoreComposer();
 	}
 
 	/**
@@ -1621,9 +1578,9 @@ export class ExtensionUiController {
 			overlayHandle?.hide();
 			overlayHandle = undefined;
 			if (editorReplaced) {
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
 				this.ctx.editor.setText(savedText);
+				this.#restoreComposer();
+				return;
 			}
 			this.ctx.ui.setFocus(this.ctx.editor);
 			this.ctx.ui.requestRender();
@@ -1671,11 +1628,7 @@ export class ExtensionUiController {
 					return;
 				}
 				editorReplaced = true;
-				this.ctx.closeLinkBrowser();
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(component);
-				this.ctx.ui.setFocus(component);
-				this.ctx.ui.requestRender();
+				this.#mountDialog(component, false);
 			})
 			.catch(fail);
 		return promise;

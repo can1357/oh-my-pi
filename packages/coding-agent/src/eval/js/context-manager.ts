@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { sessionSandboxWritableRoots } from "../../internal-urls/context";
 import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:worker_threads";
 import { sandboxSupport } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, Snowflake, settleWithin, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { JS_EVAL_STDIO_WORKER_ARG } from "../../cli/worker-selectors";
 import { containedEnv } from "../../sandbox/env";
 import { type SandboxChild, SandboxRuntime } from "../../sandbox/runtime";
@@ -1094,6 +1094,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 }
 
 function spawnJsProcess(): JsEvalWorkerHandle {
+	if (process.platform === "win32") return spawnStdioJsProcess();
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG),
 		env: workerEnvFromParent(),
@@ -1150,17 +1151,6 @@ async function closeProcessWorker(
 	return await promise;
 }
 
-/** Wait for `promise` to settle, at most `timeoutMs`. */
-async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
-	const bound = Promise.withResolvers<void>();
-	const timer = setTimeout(bound.resolve, timeoutMs);
-	try {
-		await Promise.race([promise.then(undefined, () => undefined), bound.promise]);
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
 /** True when `session`'s worker was started under the sandbox policy that applies to `cwd` now. */
 async function retainedSandboxCurrent(session: JsSession, cwd: string): Promise<boolean> {
 	const fingerprint = (await SandboxRuntime.forScope(cwd, "eval"))?.fingerprint();
@@ -1168,13 +1158,33 @@ async function retainedSandboxCurrent(session: JsSession, cwd: string): Promise<
 }
 
 /**
+ * Windows: Bun queues a child's IPC sends until its event loop runs, so a cell spinning in
+ * synchronous code loses the output it printed last when `terminate()` kills it. Pipe writes land
+ * in the kernel at once, so there the evaluator speaks the stdio-framed transport, as it does
+ * inside the sandbox.
+ */
+function spawnStdioJsProcess(): JsEvalWorkerHandle {
+	const { cmd, cwd } = resolveWorkerSpawnCmd(JS_EVAL_STDIO_WORKER_ARG);
+	return wrapStdioJsProcess(
+		Bun.spawn({
+			cmd,
+			cwd,
+			env: workerEnvFromParent(),
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		}),
+	);
+}
+
+/**
  * Start the evaluator subprocess inside the OS sandbox. Bun's `ipc` channel cannot cross the
  * container boundary, so it speaks the stdio-framed transport (`./stdio-transport`) through the
- * `JS_EVAL_STDIO_WORKER_ARG` selector instead. Mirrors {@link spawnJsProcess}: every exit not
- * caused by `terminate()` (clean exits included) faults the session with the stderr tail.
- * `packageRoot` (the managed package environment, outside the workspace) stays readable and
- * `extraWrite` (the session's `local://` root) writable; `network` overrides the configured mode
- * (the smoke probe uses `deny` to keep the proxy down).
+ * `JS_EVAL_STDIO_WORKER_ARG` selector instead. `packageRoot` (the managed package environment,
+ * outside the workspace) stays readable and `extraWrite` (the session's `local://` root)
+ * writable; `network` overrides the configured mode (the smoke probe uses `deny` to keep the
+ * proxy down).
  */
 async function spawnContainedJsProcess(
 	sandbox: SandboxRuntime,
@@ -1188,6 +1198,15 @@ async function spawnContainedJsProcess(
 		extraWrite: options.extraWrite,
 		network: options.network,
 	});
+	return wrapStdioJsProcess(child);
+}
+
+/**
+ * The worker handle over an evaluator speaking stdio frames. Mirrors {@link spawnJsProcess}:
+ * every exit not caused by `terminate()` (clean exits included) faults the session with the
+ * stderr tail.
+ */
+function wrapStdioJsProcess(child: SandboxChild): JsEvalWorkerHandle {
 	const handlers = new Set<(msg: WorkerOutbound) => void>();
 	const errors = new Set<(error: Error) => void>();
 	const fail = (error: Error): void => {
