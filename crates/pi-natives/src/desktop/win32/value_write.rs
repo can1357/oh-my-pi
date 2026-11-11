@@ -263,10 +263,11 @@ pub(super) fn set_combo(
 			}
 			// A native message can bypass an edit child's read-only policy.
 			// Refuse before clearing the combo's existing selection.
-			// SAFETY: GetWindowLongW only queries the identified edit handle.
+			// SAFETY: IsWindowEnabled only queries the identified edit handle.
 			if unsafe {
 				windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(info.hwndItem)
 			} == 0
+				// SAFETY: GetWindowLongW only queries the identified edit handle.
 				|| unsafe { GetWindowLongW(info.hwndItem, GWL_STYLE) }
 					& windows_sys::Win32::UI::WindowsAndMessaging::ES_READONLY
 					!= 0
