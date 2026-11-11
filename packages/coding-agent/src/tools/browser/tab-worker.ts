@@ -2159,6 +2159,18 @@ export class WorkerCore {
 			failure = { error };
 		} finally {
 			stopPrintCheck?.();
+			// A preview can open after the last poll. Leave room inside the supervisor's 750ms grace for cleanup.
+			if (timeoutSignal.aborted && !ac.signal.aborted && this.#printPreview && this.#page) {
+				const held = await withTimeout(
+					printPreviewHolds(this.#page, this.#relay),
+					500,
+					"Timed out checking print preview before recovery",
+				).catch(() => false);
+				if (held) {
+					printAc.abort(new ToolError(PRINT_PREVIEW_OPEN_MESSAGE));
+					failure = { error: printAc.signal.reason };
+				}
+			}
 			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
 			await Bun.sleep(0);
 			// Detach first: the stop below fails the cancelled requests, and run handlers that see

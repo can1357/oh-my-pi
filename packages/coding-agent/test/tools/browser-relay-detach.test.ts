@@ -843,8 +843,10 @@ describe("relay tabs Chrome detaches omp from", () => {
 			}
 			const failure = await invoke({
 				action: "run",
-				code: ext ? "await tab.keyDown('Shift'); await tab.click('#print');" : "await tab.click('#print');",
-				timeout: 20,
+				code: ext
+					? "await tab.keyDown('Shift'); await tab.click('#print');"
+					: "await page.evaluate(() => { debugger; });",
+				timeout: ext ? 20 : 1,
 			}).catch((error: unknown) => error);
 			expect(String(failure)).toContain("print preview is holding it");
 			await keyUp;
