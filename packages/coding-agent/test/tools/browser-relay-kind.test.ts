@@ -142,7 +142,12 @@ describe("resolveBrowserKind in a subagent", () => {
 			getSessionSpawns: () => "*",
 			settings: Settings.isolated(settings),
 		}) as ToolSession;
-	const pane = { TERN_PANE_SOCKET: "/tmp/tern.sock", TERN_PANE: "1", CMUX_SOCKET_PATH: "/tmp/cmux.sock" };
+	const pane = {
+		TERN_PANE_SOCKET: "/tmp/tern.sock",
+		TERN_PANE: "1",
+		CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+		PI_BROWSER_WEBKIT: "0",
+	};
 
 	it("skips the relay, Tern and cmux the parent would use for an open without app", () => {
 		expect(resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }), pane).kind).toBe("headless");
@@ -165,6 +170,7 @@ describe("resolveBrowserKind in a subagent", () => {
 			resolveBrowserKind({ action: "open" }, subagent({}), {
 				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
 				PI_BROWSER_CMUX: "1",
+				PI_BROWSER_WEBKIT: "0",
 			}).kind,
 		).toBe("headless");
 	});
@@ -175,11 +181,11 @@ describe("resolveBrowserKind in a subagent", () => {
 
 	it("still opens the user's Chrome or Tern when the open asks", () => {
 		const session = subagent({ "browser.relay": true });
-		expect(resolveBrowserKind({ action: "open", app: { relay: true } }, session, pane).kind).toBe("relay");
-		expect(resolveBrowserKind({ action: "open", app: { tern: true } }, session, pane).kind).toBe("tern");
-		expect(resolveBrowserKind({ action: "open", app: { target: "docs" } }, session, pane).kind).toBe("tern");
+		expect(resolveBrowserKind({ action: "open", app: "relay" }, session, pane).kind).toBe("relay");
+		expect(resolveBrowserKind({ action: "open", app: "tern" }, session, pane).kind).toBe("tern");
+		expect(resolveBrowserKind({ action: "open", target: "docs" }, session, pane).kind).toBe("tern");
 		expect(
-			resolveBrowserKind({ action: "open", app: { relay: true } }, session, { ...pane, PI_BROWSER_RELAY: "0" }).kind,
+			resolveBrowserKind({ action: "open", app: "relay" }, session, { ...pane, PI_BROWSER_RELAY: "0" }).kind,
 		).toBe("headless");
 	});
 
