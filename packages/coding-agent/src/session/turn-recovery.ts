@@ -2552,6 +2552,9 @@ export class TurnRecovery {
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
+		// Like any fallback, the base model runs under its own effort ceiling, and is skipped when its floor is above it.
+		const ceiling = this.#host.thinkingLevelCeiling(baseModel);
+		if (ceiling !== undefined && !modelSupportsEffortCeiling(baseModel, ceiling)) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
@@ -2562,6 +2565,10 @@ export class TurnRecovery {
 		await this.#host.setModelWithProviderSessionReset(baseModel);
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
+		const configuredThinkingLevel = this.#host.configuredThinkingLevel();
+		if (configuredThinkingLevel !== AUTO_THINKING) {
+			this.#host.setThinkingLevel(clampThinkingLevelToCeiling(baseModel, configuredThinkingLevel, ceiling));
+		}
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",

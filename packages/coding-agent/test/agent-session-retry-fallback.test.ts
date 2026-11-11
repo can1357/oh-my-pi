@@ -6809,6 +6809,47 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("clamps a Fireworks Fast degrade to the base model's own effort ceiling", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k3");
+		if (!fastModel || !baseModel) throw new Error("Expected the bundled Fireworks Fast and base models to exist");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push(
+					model.id === fastModel.id
+						? { throw: "rate limit exceeded retry-after-ms=200" }
+						: { content: ["the base model did the work"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+		settings.setModelRole("default", `${fastModel.provider}/${fastModel.id}`);
+		const ceilings = { "fireworks/kimi-k3-fast": Effort.High, "fireworks/kimi-k3": Effort.Low };
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+		expect(session.thinkingLevel).toBe(Effort.High);
+
+		await session.prompt("Degrade off Fast under the base model's ceiling");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["fireworks/kimi-k3-fast", "fireworks/kimi-k3"]);
+		expect(session.model?.id).toBe(baseModel.id);
+		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {
 		// Regression for #7952: a cooldown-expiry revert reverts the model at a
 		// turn boundary. The user-prompt path re-checks context after the revert
