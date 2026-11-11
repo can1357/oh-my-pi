@@ -1,7 +1,8 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { AutocompleteItem, ModelMentionCompletion } from "../index";
-import type { ModelBrowserRegistry, ModelBrowserSource } from "../overlays/model-browser";
+import type { ModelBrowserRegistry, ModelBrowserSource, SessionModelScope } from "../overlays/model-browser";
 import { sameItems } from "../native/memo";
 import { subsequenceMatch } from "../autocomplete";
 import { modelMentionDisplayName, modelMentionName } from "./model-mention-syntax";
@@ -156,41 +157,49 @@ export function createModelMentionSource(host: {
 		}
 		return ranker.rank(query);
 	};
-	let roleScope: readonly ModelBrowserItem[] | undefined;
-	let roleItems: ModelMentionItem[] = [];
+	let roleCache:
+		| {
+				scope: SessionModelScope;
+				availableIds: ReadonlySet<string>;
+				items: ReadonlyArray<ModelMentionItem>;
+		  }
+		| undefined;
 	const roles = (): ReadonlyArray<ModelMentionItem> => {
 		const { SessionModelScopeCache } = loadModelBrowser();
 		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
 		const scope = scopeCache.get(host.scopedModels());
-		if (roleScope !== scope.items) {
-			roleScope = scope.items;
-			const models = scope.items.map(item => item.model);
-			const scopedSelectors = new Set<string>();
-			for (const item of scope.items) scopedSelectors.add(item.selector);
-			roleItems = [];
-			for (const role of host.source.knownRoleIds) {
-				const info = host.source.getRoleInfo(role);
-				if (info.hidden || info.section !== "chat") continue;
-				const { model, thinkingLevel } = host.source.resolveRoleValue(`@${role}`, models);
-				if (!model) continue;
-				const selector = `${model.provider}/${model.id}`;
-				if (!scopedSelectors.has(selector)) continue;
-				const effort = getSupportedEfforts(model).find(level => level === thinkingLevel);
-				const value = effort ? `${selector}:${effort}` : selector;
-				if (effort && availableModelIds().has(value)) continue;
-				const name = modelMentionDisplayName(model);
-				const description = effort
-					? modelMentionName(name, effort)
-					: thinkingLevel && thinkingLevel !== "auto"
-						? `${name} · ${thinkingLevel} unsupported; effort omitted`
-						: name;
-				roleItems.push({
-					...mentionRow(`@${role}`, description),
-					modelSelector: value,
-				});
-			}
+		const availableIds = availableModelIds();
+		if (roleCache?.scope === scope && roleCache.availableIds === availableIds) return roleCache.items;
+
+		const scopedSelectors = new Set<string>();
+		for (const item of scope.items) scopedSelectors.add(item.selector);
+		const items: ModelMentionItem[] = [];
+		for (const role of host.source.knownRoleIds) {
+			const info = host.source.getRoleInfo(role);
+			if (info.hidden || info.section !== "chat") continue;
+			const assignment = scope.roles[role];
+			if (!assignment) continue;
+			const { model } = assignment;
+			const thinkingLevel =
+				assignment.thinkingLevel === ThinkingLevel.Inherit ? undefined : assignment.thinkingLevel;
+			const selector = `${model.provider}/${model.id}`;
+			if (!scopedSelectors.has(selector)) continue;
+			const effort = getSupportedEfforts(model).find(level => level === thinkingLevel);
+			const value = effort ? `${selector}:${effort}` : selector;
+			if (effort && availableIds.has(value)) continue;
+			const name = modelMentionDisplayName(model);
+			const description = effort
+				? modelMentionName(name, effort)
+				: thinkingLevel && thinkingLevel !== "auto"
+					? `${name} · ${thinkingLevel} unsupported; effort omitted`
+					: name;
+			items.push({
+				...mentionRow(`@${role}`, description),
+				modelSelector: value,
+			});
 		}
-		return roleItems;
+		roleCache = { scope, availableIds, items };
+		return items;
 	};
 	let availableModels: readonly Model[] | undefined;
 	let availableIds: ReadonlySet<string> = new Set();

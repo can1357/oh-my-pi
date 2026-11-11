@@ -145,6 +145,60 @@ describe("createModelMentionSource", () => {
 		expect(selectors("example")).toContain("c/example-3");
 	});
 
+	test("completes the configured role model independently of picker display ordering", async () => {
+		await initTheme();
+		const first = makeModel("demo", "worker-1");
+		const second = makeModel("demo", "worker-2");
+		const models = [first, second];
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(
+				Settings.isolated({ modelRoles: { default: "demo/worker-2", smol: "worker" } }),
+			),
+			registry: { getError: () => undefined, getAvailable: () => [...models], getAll: () => [...models] },
+			scopedModels: () => [],
+		});
+
+		const completion = getModelMentionSuggestions("^@smol", candidates);
+		if (completion.kind !== "matched") throw new Error("Expected the smol role");
+		const role = completion.suggestions.items.find(item => item.value === "@smol");
+		if (!role) throw new Error("Expected the smol role");
+		expect(applyModelMentionCompletion(["^@smol"], 0, 6, role, "^@smol").lines).toEqual(["^demo/worker-1 "]);
+		expect(role.description).not.toMatch(/inherit|unsupported/);
+	});
+
+	test("refreshes effort-role eligibility when an outside-scope literal model appears or disappears", async () => {
+		await initTheme();
+		const worker = buildModel({
+			...makeModel("demo", "worker"),
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
+		});
+		const literal = makeModel("demo", "worker:high");
+		const all = [worker, literal];
+		let available = [worker];
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(Settings.isolated({ modelRoles: { smol: "demo/worker:high" } })),
+			registry: { getError: () => undefined, getAvailable: () => [...available], getAll: () => [...all] },
+			scopedModels: () => [worker],
+		});
+		const smol = () => {
+			const completion = getModelMentionSuggestions("^@smol", candidates);
+			return completion.kind === "matched"
+				? completion.suggestions.items.find(item => item.value === "@smol")
+				: undefined;
+		};
+
+		const initial = smol();
+		if (!initial) throw new Error("Expected the configured high-effort role");
+		expect(applyModelMentionCompletion(["^@smol"], 0, 6, initial, "^@smol").lines).toEqual(["^demo/worker:high "]);
+		available = [worker, literal];
+		expect(smol()).toBeUndefined();
+		available = [worker];
+		const restored = smol();
+		if (!restored) throw new Error("Expected the role after the literal model disappears");
+		expect(applyModelMentionCompletion(["^@smol"], 0, 6, restored, "^@smol").lines).toEqual(["^demo/worker:high "]);
+	});
+
 	test("offers roles beside models and completes them through the existing model selector flow", async () => {
 		await initTheme();
 		const worker = buildModel({

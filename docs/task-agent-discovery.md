@@ -100,6 +100,8 @@ The popup also lists visible chat model roles, such as `@smol`, with their resol
 
 Roles whose resolved model is outside the mention scope are omitted, including virtual OpenRouter route IDs without a matching scoped model.
 
+Role suggestions reuse the model picker's role assignments, so display ordering does not change the selected model. Their eligibility refreshes when model availability changes, including models outside an explicit `--models` scope.
+
 On submit, each first-mentioned model receives a branch-local pseudonym (`m1`, `m2`, …). The user message carries `<model agent="m1" name="Display Name"/>`; the task description lists its provider/model selector. `task`, eval `agent()`, and `workpool()` accept that pseudonym as their `agent`. These agents use the bundled general-purpose task template, not a specialist template, and are intended only for requests explicitly naming the tagged model.
 
 Tagging a model never rewrites the model-facing `task` description mid-session: the description lists the pseudonyms baked into the current base prompt, and later tags arrive as a hidden `session-agents` system notice on the next user turn. The notice rides the same channel as the eval-prelude and tool-roster deltas, so the provider cache prefix stays byte-stable. The next base-prompt rebuild absorbs the live set into the description.
