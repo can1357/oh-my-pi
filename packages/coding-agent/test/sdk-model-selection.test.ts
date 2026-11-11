@@ -21,6 +21,7 @@ import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-a
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { resolveEffortCeilingForModel } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -172,6 +173,41 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		} finally {
 			await session.dispose();
 		}
+	});
+
+	test("fails startup when the deferred model's lowest effort is above its effort ceiling", async () => {
+		const highOnlyExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "high-only-model",
+						name: "High-only Model",
+						reasoning: true,
+						thinking: { mode: "effort", efforts: [Effort.High] },
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
+		const ceilings = { "*": Effort.High, "runtime-provider/high-only-model": Effort.Low };
+
+		await expect(
+			createAgentSession({
+				...buildSessionOptions("runtime-provider/high-only-model"),
+				extensions: [highOnlyExtension],
+				// Unresolved until the session settles the pattern; the `*` entry would allow it.
+				thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+				thinkingLevelCeilingSetting: "task.maxActualEffort",
+			}),
+		).rejects.toThrow(
+			"runtime-provider/high-only-model has no supported thinking effort at or below task.maxActualEffort=low",
+		);
 	});
 
 	test("lets a child task spawn a model agent inherited from its parent", async () => {

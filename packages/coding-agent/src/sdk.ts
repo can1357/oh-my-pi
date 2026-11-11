@@ -297,6 +297,7 @@ import { isMainThread } from "./thread/identity";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
+	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	newSessionThinkingLevel,
@@ -687,6 +688,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard per-model ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort` entry for each model); retry-fallback recovery re-clamps to it. */
 	thinkingLevelCeiling?: ThinkingLevelCeiling;
+	/** Setting {@link thinkingLevelCeiling} comes from (e.g. `task.maxActualEffort`), named when a model is refused for it. */
+	thinkingLevelCeilingSetting?: string;
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
 	/**
@@ -3839,6 +3842,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				adoptThinkingForModel(refreshedModel);
 			}
 		}
+		// The startup model, resolved here even when the caller deferred it, must run under its
+		// ceiling: one whose lowest effort is above its cap would send above it, so startup fails.
+		const startupCeiling = model ? options.thinkingLevelCeiling?.(model) : undefined;
+		if (model && startupCeiling !== undefined) {
+			assertModelSupportsEffortCeiling(model, startupCeiling, options.thinkingLevelCeilingSetting);
+		}
 
 		// A first-turn user tail has no assistant metadata to copy. Once startup
 		// has selected its final model, use that model to terminate the
@@ -5402,6 +5411,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
+			thinkingLevelCeilingSetting: options.thinkingLevelCeilingSetting,
 			disableModelFallback: options.disableModelFallback,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,

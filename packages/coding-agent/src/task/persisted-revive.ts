@@ -440,6 +440,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			...(assertApprovedModel
 				? {
 						thinkingLevelCeiling: effortCeiling,
+						thinkingLevelCeilingSetting: ceilingSetting.id,
 						disableModelFallback: true,
 						disableServerSideFallback: true,
 						assertDispatchModel: (model: Model) => {
