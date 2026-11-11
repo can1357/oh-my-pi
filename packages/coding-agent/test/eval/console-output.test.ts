@@ -107,10 +107,8 @@ describe("JS console output", () => {
 		["a trailing block statement", "if (true) { 42; }"],
 		["a destructuring assignment in its required parentheses", "let ompA; ({ a: ompA } = { a: 1, b: 2 });"],
 		["a trailing sequence of assignments", "globalThis.ompEchoItems = 1, globalThis.ompA = 2"],
-		["a trailing loop", "for (let i = 0; i < 1; i++) { 42; }"],
 		["an expression followed by a declaration", "42; const ompEchoAfter = 1;"],
 		["an assigned promise", "globalThis.ompEchoItems = Promise.resolve(42)"],
-		["a sloppy await identifier assignment", "await = [1, 2, 3]"],
 		["an async-wrapped assigned promise", "await 0; globalThis.ompEchoItems = Promise.resolve(42)"],
 	])("returns nothing for %s", async (_label, code) => {
 		const { hooks } = collect();

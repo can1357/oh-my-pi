@@ -117,13 +117,12 @@ type ParsedProgram = {
 
 async function tryParseProgram(
 	code: string,
-	sourceType: "module" | "script" = "module",
 ): Promise<{ ast: ParsedProgram; recovered: readonly unknown[] } | { error: unknown }> {
 	const { parse } = await loadBabelParser();
 	try {
 		const file = parse(code, {
-			sourceType,
-			allowAwaitOutsideFunction: sourceType === "module",
+			sourceType: "module",
+			allowAwaitOutsideFunction: true,
 			allowReturnOutsideFunction: true,
 			allowImportExportEverywhere: true,
 			allowNewTargetOutsideFunction: true,
@@ -139,11 +138,8 @@ async function tryParseProgram(
 }
 
 async function parseProgram(code: string): Promise<ParsedProgram | null> {
-	const moduleResult = await tryParseProgram(code);
-	if ("ast" in moduleResult) return moduleResult.ast;
-	// Indirect eval also accepts sloppy scripts, where `await` can be an identifier.
-	const scriptResult = await tryParseProgram(code, "script");
-	return "ast" in scriptResult ? scriptResult.ast : null;
+	const result = await tryParseProgram(code);
+	return "ast" in result ? result.ast : null;
 }
 
 const FRAME_CONTEXT_LINES = 2;
