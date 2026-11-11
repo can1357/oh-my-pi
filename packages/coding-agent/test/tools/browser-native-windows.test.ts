@@ -150,7 +150,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("page-backed native-window candidates", () 
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE || process.platform !== "darwin")("native notices in worker output", () => {
-	test("separates a notice from an unterminated stdout write", async () => {
+	test.each(["success", "failure"] as const)("includes native notices in %s results", async outcome => {
 		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({ headless: true });
 		const begin = vi.spyOn(NativeWindowWatch.prototype, "beginCall").mockImplementation(() => {});
 		const end = vi.spyOn(NativeWindowWatch.prototype, "endCall").mockResolvedValue(["native notice"]);
@@ -191,16 +191,23 @@ describe.skipIf(!CHROMIUM_AVAILABLE || process.platform !== "darwin")("native no
 				type: "run",
 				id: "notice",
 				name: "notice",
-				code: 'process.stdout.write("progress");',
+				code: outcome === "success" ? 'process.stdout.write("progress");' : 'throw new Error("page failed");',
 				timeoutMs: 30_000,
 				session: { cwd: process.cwd() },
 			});
 			const reply = await result.promise;
-			if (!reply.ok) throw new Error(reply.error.message);
-			expect(reply.payload.displays).toEqual([
-				{ type: "text", text: "progress" },
-				{ type: "text", text: "native notice" },
-			]);
+			if (outcome === "failure") {
+				expect(reply.ok).toBe(false);
+				if (reply.ok) throw new Error("Expected the run to fail");
+				expect(reply.error.message).toContain("native notice");
+				expect(reply.error.stack ?? reply.error.message).toContain("native notice");
+			} else {
+				if (!reply.ok) throw new Error(reply.error.message);
+				expect(reply.payload.displays).toEqual([
+					{ type: "text", text: "progress" },
+					{ type: "text", text: "native notice" },
+				]);
+			}
 		} finally {
 			receive({ type: "close" });
 			await closed.promise;

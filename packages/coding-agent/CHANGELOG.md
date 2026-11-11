@@ -178,7 +178,9 @@
 
 ### Fixed
 
+- `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
 - Native-window frame probes cancel their timeout timers when the read completes ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
+- Native-window notices on failed browser calls remain visible when the caller renders the error stack ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.9] - 2026-11-11
 
