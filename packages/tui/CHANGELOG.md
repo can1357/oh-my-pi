@@ -165,7 +165,7 @@
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 ### Added
 
-- The composer's `^` autocomplete lists chat model roles alongside models; choosing a role inserts its resolved model through the existing model-mention flow
+- The composer's `^` autocomplete lists chat model roles alongside models; roles remain independently selectable in Tern even when they resolve to the same model, and choosing one inserts its concrete model selector
 
 ### Fixed
 
