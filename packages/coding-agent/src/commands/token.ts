@@ -106,9 +106,10 @@ export default class Token extends Command {
 
 		// A paused provider keeps its stored logins but resolves no key. Report the
 		// rule's reason as a normal failure instead of letting the key lookup throw
-		// an internal ProviderDisabledError stack trace (#18697).
+		// an internal ProviderDisabledError stack trace (#18697). Listing accounts
+		// does not resolve a credential, so `--list` continues to auth storage.
 		const pauseReason = managedMcpOAuth ? undefined : providerPauseReason(provider);
-		if (pauseReason !== undefined) {
+		if (!flags.list && pauseReason !== undefined) {
 			process.stderr.write(`${chalk.red(`${providerName} is paused: ${pauseReason}`)}\n`);
 			process.exitCode = 1;
 			return;
