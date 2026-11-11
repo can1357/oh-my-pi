@@ -26,6 +26,10 @@
 
 - Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
 
+### Fixed
+
+- Fixed the Linux `computer` tool hanging for the rest of the session, and freezing the app, once a `press()` or `menu.select()` opened a modal dialog in a GTK 3 app such as Audacity: reads of an app that does not answer now fail with `Timeout` after 5 s while screenshots and input keep working ([#18914](https://github.com/can1357/oh-my-pi/pull/18914) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
