@@ -585,6 +585,11 @@ fn newptycmd(
 		z.first_context = Some(BString::from("zpty"));
 		z.ctty = Ctty(Some(slave));
 	}
+	// zsh's zpty child makes the slave its SHTTY (`init_io`): the line
+	// editor there opens it afresh instead of drawing on the shell's.
+	if let Some(z) = child.zle.as_deref_mut() {
+		z.tty = None;
+	}
 	state::store_var(
 		&mut ctx.k.root,
 		ctx.cx.store,
