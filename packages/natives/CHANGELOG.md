@@ -11,6 +11,7 @@
 ### Fixed
 
 - Fixed X11 background typing reporting text typed when the X server lost some of its keys in a stall: every key release is now confirmed in order instead of only the last key, and a run with keys missing fails, which, like a run whose last key went unconfirmed, keeps background input off for the rest of the session
+- Fixed X11 background typing reporting text typed when the X server lost some of its keys in a stall: every key release is now confirmed in order instead of only the last key, and a run with keys missing fails, which, like a run whose last key went unconfirmed, keeps background input off for the rest of the session ([#18828](https://github.com/can1357/oh-my-pi/pull/18828) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
