@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
 
 ## [18.18.7] - 2026-11-10
 
@@ -26,6 +27,8 @@
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
 
+
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed
@@ -43,7 +46,6 @@
 - Fixed newly discovered Anthropic Fable/Mythos models showing as text-only, non-reasoning, and mispriced before models.dev catalogs them
 - Fixed Claude Mythos 5.1 not using thinking prefix-binding controls, which it needs on every account
 
-- Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
 
 
 ## [18.18.4] - 2026-11-09

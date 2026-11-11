@@ -5,6 +5,9 @@
 - Fixed Claude account-wide usage blocks outliving recovery when the account has no running 5-hour window: `/usage` answers `five_hour: null` with no `session` row, and healing and saved-reset clearing treated that as an incomplete report, so a stale block idled a healthy account until its weekly reset and could leave a turn with no account to switch to after a real 429 ([#18801](https://github.com/can1357/oh-my-pi/pull/18801) by [@baekjosh](https://github.com/baekjosh))
 - A usage-limited request now moves to another account whose old block live usage shows has lifted, instead of ending the turn because every other account looked blocked ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
 
+- Devin requests no longer send `temperature: 0`: the catalog's `temperature-floor` raises it to `0.0001`, so session titles and Mnemopi memory extraction work on Devin instead of failing with Cascade's opaque `invalid_argument` and silently falling back to another model ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
+
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
@@ -25,7 +28,6 @@
 ### Fixed
 
 - Chat Completions gateway requests preserve explicit tool strict-mode choices, so Codex tools can omit optional arguments when callers set `strict: false` ([#18672](https://github.com/can1357/oh-my-pi/pull/18672) by [@0xeb](https://github.com/0xeb)).
-- Devin requests no longer send `temperature: 0`: the catalog's `temperature-floor` raises it to `0.0001`, so session titles and Mnemopi memory extraction work on Devin instead of failing with Cascade's opaque `invalid_argument` and silently falling back to another model ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
 
 ## [18.18.4] - 2026-11-09
 
