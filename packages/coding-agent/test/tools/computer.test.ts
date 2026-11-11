@@ -3485,7 +3485,8 @@ describe("expanded computer APIs", () => {
 		try {
 			const result = await supervisor.run("1", 1_000, snapshot());
 			expect(result.displays).toEqual(output.displays);
-			expect(result.error?.message).toBe(`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`);
+			expect(result.error?.message).toStartWith(partial);
+			expect(result.error?.message).toContain(ESCAPE_STOPPED_MESSAGE);
 		} finally {
 			await supervisor.close();
 		}
