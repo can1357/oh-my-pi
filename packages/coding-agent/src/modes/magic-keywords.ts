@@ -30,10 +30,8 @@ export interface MagicKeywordContext {
 	py: boolean;
 	/** `eval.js`: whether the JS eval backend is enabled. */
 	js: boolean;
-	/** `eval.workpool.freshAgents`: whether workpools spawn a new agent per item instead of reusing workers. */
-	freshAgents: boolean;
-	/** `task.perCallModel` admits `model` on eval `agent()`/`workpool()` (`eval` or `on`). */
-	perCallModel: boolean;
+	/** The eval tool's rendered `xd://eval/<topic>` docs; empty when the tool serves none. */
+	evalDocTopics: Readonly<Record<string, string>>;
 }
 
 /** One magic keyword: trigger word, gradient, settings copy, and the notice it injects. */
@@ -70,22 +68,26 @@ export function renderOrchestrateNotice({ tools }: Pick<MagicKeywordContext, "to
 	return prompt.render(orchestrateNotice, { tools }).trim();
 }
 
-/** Hidden notice for "workflowz", shaped by the active task/eval capabilities. */
+/** Eval doc topics the "workflowz" notice embeds as its helper reference, in order. */
+const WORKFLOW_EVAL_TOPICS = ["agents", "judge", "helpers"] as const;
+
+/**
+ * Hidden notice for "workflowz", shaped by the active task/eval capabilities.
+ * Its helper reference is the eval tool's own doc topics, never a second copy.
+ */
 export function renderWorkflowNotice({
+	tools,
 	taskBatch,
 	scoutAvailable,
 	evalTools,
 	py,
 	js,
-	freshAgents,
-	perCallModel,
-}: Pick<
-	MagicKeywordContext,
-	"taskBatch" | "scoutAvailable" | "evalTools" | "py" | "js" | "freshAgents" | "perCallModel"
->): string {
-	return prompt
-		.render(workflowNotice, { taskBatch, scoutAvailable, evalTools, py, js, freshAgents, perCallModel })
-		.trim();
+	evalDocTopics,
+}: MagicKeywordContext): string {
+	const evalDocs = WORKFLOW_EVAL_TOPICS.map(topic => evalDocTopics[topic]?.trim())
+		.filter(Boolean)
+		.join("\n\n");
+	return prompt.render(workflowNotice, { tools, taskBatch, scoutAvailable, evalTools, py, js, evalDocs }).trim();
 }
 
 export const MAGIC_KEYWORDS = [

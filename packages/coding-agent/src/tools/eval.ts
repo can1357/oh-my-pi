@@ -67,8 +67,9 @@ import {
 	cfgEvalAutoBackgroundThresholdMs,
 	cfgEvalAutoProvision,
 	cfgEvalToolsEnabled,
+	cfgEvalWorkpoolFreshAgents,
 } from "../eval/settings";
-import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
+import { cfgTaskIsolationEnabled, cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import { shapeToolResult } from "../spotlight";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
@@ -191,6 +192,10 @@ export interface EvalToolDescriptionOptions {
 	eagerDelegation?: boolean;
 	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
 	waitTool?: boolean;
+	/** `eval.workpool.freshAgents`: describe `workpool()` as one new agent per item instead of keep-alive workers. Default: false. */
+	freshAgents?: boolean;
+	/** Advertise `agent()`'s `isolated`/`apply`/`merge` controls (`task.isolation.enabled`). Default: true. */
+	isolation?: boolean;
 	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
 	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation" | "inlineDocumentation">[];
 	/**
@@ -218,6 +223,8 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		evalTools: options.evalTools ?? true,
 		eagerDelegation: options.eagerDelegation ?? false,
 		waitTool: options.waitTool ?? true,
+		freshAgents: options.freshAgents ?? false,
+		isolation: options.isolation ?? true,
 		autoBackgroundEnabled: options.autoBackgroundEnabled ?? false,
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
@@ -401,6 +408,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			evalTools: cfgEvalToolsEnabled.get(session.settings),
 			eagerDelegation: sessionDelegationBias(session) === "eager",
 			waitTool: hasWaitTool(session),
+			freshAgents: cfgEvalWorkpoolFreshAgents.get(session.settings),
+			isolation: cfgTaskIsolationEnabled.get(session.settings),
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),

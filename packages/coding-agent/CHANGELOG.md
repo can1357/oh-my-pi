@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `workflowz` now shows the eval tool's own `agent()`/`workpool()`/`judge()` reference instead of a separate copy, so the two can no longer disagree
+
+### Fixed
+
+- The eval `workpool()` docs now describe one new agent per item when `eval.workpool.freshAgents` is on, instead of keep-alive workers that reuse a session
+- The eval `agent()` docs no longer offer `isolated`/`apply`/`merge` when `task.isolation.enabled` is off
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

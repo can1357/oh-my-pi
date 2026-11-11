@@ -132,13 +132,13 @@ describe("AgentSession skill prompt keyword steering", () => {
 		expect(observedTurn.texts).toContain(`Skill body\n\n---\n\nSkill: ${skillPath}\nUser: ${details.args}`);
 		expect(observedTurn.texts).toContain(
 			renderWorkflowNotice({
+				tools: session.getEnabledToolNames(),
 				taskBatch: true,
 				scoutAvailable: true,
 				evalTools: true,
 				py: false,
 				js: true,
-				freshAgents: true,
-				perCallModel: false,
+				evalDocTopics: session.getToolByName("eval")?.docTopics?.() ?? {},
 			}),
 		);
 		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });

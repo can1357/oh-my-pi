@@ -50,32 +50,42 @@ describe("orchestrate notice", () => {
 
 describe("workflow notice", () => {
 	const base = {
+		tools: ["task", "eval", "wait"],
 		taskBatch: true,
 		scoutAvailable: true,
 		evalTools: true,
 		py: true,
 		js: true,
-		freshAgents: false,
-		perCallModel: false,
+		evalDocTopics: {},
 	};
 
-	it("defaults to workpools and hides eval-defined tools when disabled", () => {
-		const enabled = renderWorkflowNotice(base);
-		const disabled = renderWorkflowNotice({ ...base, evalTools: false });
-		expect(enabled).toContain("Default to `workpool()`");
-		expect(enabled).toContain("`@tool`");
-		expect(disabled).toContain("Default to `workpool()`");
-		expect(disabled).not.toContain("`@tool`");
-		expect(disabled).not.toContain("tools=None");
+	it("takes its helper reference verbatim from the eval tool's agents, judge, and helpers docs", () => {
+		const notice = renderWorkflowNotice({
+			...base,
+			evalDocTopics: {
+				helpers: "budget → `budget.total`",
+				browser: "browser prelude doc",
+				judge: 'judge(state, { images?: [path] }) → `{id: answer}` & "probabilities"',
+				agents: "agent(prompt) → AgentHandle <dag>",
+			},
+		});
+		// Unescaped, in reference order, and without prelude topics the workflow does not use.
+		expect(notice).toContain(
+			'agent(prompt) → AgentHandle <dag>\n\njudge(state, { images?: [path] }) → `{id: answer}` & "probabilities"\n\nbudget → `budget.total`',
+		);
+		expect(notice).not.toContain("browser prelude doc");
+		expect(renderWorkflowNotice(base)).not.toContain("<helpers>");
 	});
 
-	it("describes the pool dispatch mode the session will actually use", () => {
-		const reused = renderWorkflowNotice(base);
-		const fresh = renderWorkflowNotice({ ...base, freshAgents: true });
-		expect(reused).toContain("keep-alive workers");
-		expect(fresh).toContain("single-item agents");
-		expect(fresh).not.toContain("keep-alive");
-		expect(reused).not.toContain("single-item");
+	it("suggests kernel-defined tools for shared pool state only when eval tools are enabled", () => {
+		expect(renderWorkflowNotice(base)).toContain("`@tool` / `tool(fn)`");
+		expect(renderWorkflowNotice({ ...base, py: false })).not.toContain("@tool");
+		expect(renderWorkflowNotice({ ...base, evalTools: false })).not.toContain("tool(fn)");
+	});
+
+	it("points blocked callers at the wait tool only when the session has it", () => {
+		expect(renderWorkflowNotice(base)).toContain("call the `wait` tool");
+		expect(renderWorkflowNotice({ ...base, tools: ["task", "eval"] })).not.toContain("`wait` tool");
 	});
 
 	it("shows only the active eval runtime's call forms", () => {
@@ -83,36 +93,16 @@ describe("workflow notice", () => {
 		const jsOnly = renderWorkflowNotice({ ...base, py: false });
 		const both = renderWorkflowNotice(base);
 
-		expect(pyOnly).toContain("schema_mode=None");
+		expect(pyOnly).toContain("review.push(*[");
 		expect(pyOnly).not.toContain("```js");
-		expect(pyOnly).not.toContain("raiseErrors");
 		expect(pyOnly).not.toContain("JS:");
 
-		expect(jsOnly).toContain("await workpool(");
-		expect(jsOnly).toContain("schemaMode?");
+		expect(jsOnly).toContain("await review.push(");
 		expect(jsOnly).not.toContain("```python");
-		expect(jsOnly).not.toContain("raise_errors");
-		expect(jsOnly).not.toContain("@tool");
 		expect(jsOnly).not.toContain("JS:");
 
 		expect(both).toContain("```python");
 		expect(both).toContain("```js");
-		expect(both).toContain("JS: `await workpool(");
-		expect(both).toContain("raise_errors");
-		expect(both).toContain("raiseErrors");
-	});
-
-	it("lists the per-call model option only when task.perCallModel admits it for eval", () => {
-		const off = renderWorkflowNotice(base);
-		const on = renderWorkflowNotice({ ...base, perCallModel: true });
-
-		// agent() and workpool(), in both the Python and JS spellings.
-		for (const [text, count] of [
-			[off, 0],
-			[on, 2],
-		] as const) {
-			expect(text.match(/model=None\)/g) ?? []).toHaveLength(count);
-			expect(text.match(/, model \}\)/g) ?? []).toHaveLength(count);
-		}
+		expect(both).toContain("JS: `await` both.");
 	});
 });

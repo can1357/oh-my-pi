@@ -107,6 +107,23 @@ describe("eval tool description", () => {
 		expect(disabled.agents).not.toContain("tools?=None");
 	});
 
+	it("describes the workpool dispatch mode eval.workpool.freshAgents selects", () => {
+		const reused = getEvalDocTopics({ perCallModel: true }).agents;
+		const fresh = getEvalDocTopics({ perCallModel: true, freshAgents: true }).agents;
+		expect(reused).toContain("follow-ups reuse that session");
+		// A fresh-agent pool never reuses a session, so it must not promise worker reuse.
+		expect(fresh).not.toContain("Keep-alive");
+		expect(fresh).not.toContain("reuse that session");
+	});
+
+	it("offers agent() isolation controls only while task.isolation.enabled is on", () => {
+		const on = new EvalTool(makeSession({ settings: { "task.isolation.enabled": true } })).docTopics().agents ?? "";
+		const off = new EvalTool(makeSession({ settings: { "task.isolation.enabled": false } })).docTopics().agents ?? "";
+		expect(on).toContain("isolated?");
+		// A disabled setting rejects `isolated` at preflight, so the controls must not be advertised.
+		for (const control of ["isolated", "apply", "merge"]) expect(off).not.toContain(control);
+	});
+
 	// Advertisement content is covered through the task tool (task-schema.test.ts); this pins the eval gate.
 	it("advertises approved agent()/workpool() selectors only while task.perCallModel is not off", () => {
 		for (const mode of ["off", "on", "eval"] as const) {
