@@ -199,6 +199,7 @@ describe("read URL answered by a bot wall", () => {
 <input-example name="js_challenge"></input-example>
 <input type="hidden" data-name="js_challenge">
 <div data-example='<input type="hidden" name="js_challenge">'></div>
+<template><input type="hidden" name="js_challenge"></template>
 </article></body></html>`;
 		const result = await read(
 			() => new Response(article, { headers: { "content-type": "text/html" } }),
@@ -207,5 +208,20 @@ describe("read URL answered by a bot wall", () => {
 
 		expect(result.method).toBe("native");
 		expect(result.text).toContain("A challenge page carries markers");
+	});
+
+	// A tag cut off by the end of the page is text, not a live challenge field.
+	it("reads an article cut off in the middle of a challenge input", async () => {
+		const article = `<html><head><title>Detecting bot walls</title></head><body><article><h1>Detecting bot walls</h1>
+<p>${"A page cut off mid-tag is still the article, not a challenge interstitial. ".repeat(4)}</p>
+<input type="hidden" name="js_challenge"`;
+		const result = await read(
+			() => new Response(article, { headers: { "content-type": "text/html" } }),
+			`Markdown Content:\n${POST_MARKDOWN}`,
+		);
+
+		expect(result.method).toBe("native");
+		expect(result.text).toContain("A page cut off mid-tag is still the article");
+		expect(result.remoteCalls).toEqual([]);
 	});
 });
