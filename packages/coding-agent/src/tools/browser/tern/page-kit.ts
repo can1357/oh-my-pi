@@ -920,7 +920,10 @@ const kit = {
 			el.selectedIndex = first ? first.index : -1;
 		}
 		fireInputChange(el);
-		return options.filter(option => option.selected).map(option => option.value);
+		// The handlers may have reset the choice or replaced the options.
+		return Array.from(el.options)
+			.filter(option => option.selected)
+			.map(option => option.value);
 	},
 	setFiles: (sel, files) => {
 		const el = requireFirst(sel);

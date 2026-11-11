@@ -1049,10 +1049,12 @@ export async function highlightElement(
 }
 
 /**
- * Select `<select>` options by value, then by visible label, and return the values this call
- * selected. An exact value match always wins over a label, so value-based calls keep their
- * meaning. A single `<select>` takes the first matching value. A value that matches no option
- * throws before the select is touched, so a typo never commits the browser's default option.
+ * Select `<select>` options by value, then by visible label, and return the values selected once
+ * the page's `input` and `change` handlers have run, so a choice the page resets or rejects is
+ * reported as the page left it. An exact value match always wins over a label, so value-based
+ * calls keep their meaning. A single `<select>` takes the first matching value. A value that
+ * matches no option throws before the select is touched, so a typo never commits the browser's
+ * default option.
  */
 export async function selectElementOptions(
 	handle: ElementHandle,
@@ -1092,19 +1094,19 @@ export async function selectElementOptions(
 				else missing.push(value);
 			}
 			if (missing.length > 0) return { missing };
-			let selected: string[];
 			if (wanted.length === 0) {
 				for (const option of options) option.selected = false;
-				selected = [];
 			} else if (select.multiple) {
 				for (const option of options) option.selected = wanted.includes(option);
-				selected = options.filter(option => option.selected).map(option => option.value);
 			} else {
 				select.selectedIndex = wanted[0]!.index;
-				selected = [wanted[0]!.value];
 			}
 			select.dispatchEvent(new page.Event("input", { bubbles: true }));
 			select.dispatchEvent(new page.Event("change", { bubbles: true }));
+			// The handlers ran inside dispatchEvent and may have reset the choice or replaced the options.
+			const selected = Array.from(select.options)
+				.filter(option => option.selected)
+				.map(option => option.value);
 			return { selected };
 		}, values),
 	)) as { missing: string[] } | { selected: string[] } | null;
