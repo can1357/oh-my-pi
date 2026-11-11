@@ -480,7 +480,8 @@ impl AxBackend for Win32Ax {
 
 	fn set_value(&mut self, handle: &AxHandle, text: &str) -> CoreResult<()> {
 		let element = Self::element(handle)?;
-		let secure = element.is_password().unwrap_or(true);
+		let password = element.is_password().ok();
+		let secure = password.unwrap_or(true);
 		let hwnd = native_window(element).map(super::value_write::combo_target);
 		let class = hwnd.map_or_default(window::class_name);
 		match super::value_write::route(&class) {
@@ -519,7 +520,7 @@ impl AxBackend for Win32Ax {
 		if read.is_some_and(|read| super::value_write::rich_edit_holds(&class, text, read)) {
 			return Ok(());
 		}
-		super::value_write::verdict(text, pattern.as_deref(), legacy.as_deref(), secure)
+		super::value_write::verdict(text, pattern.as_deref(), legacy.as_deref(), password)
 	}
 
 	fn focus(&mut self, handle: &AxHandle) -> CoreResult<()> {

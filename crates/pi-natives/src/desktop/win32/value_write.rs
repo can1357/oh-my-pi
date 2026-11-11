@@ -24,15 +24,15 @@ pub(super) fn verdict(
 	expected: &str,
 	pattern: Option<&str>,
 	legacy: Option<&str>,
-	secure: bool,
+	password: Option<bool>,
 ) -> CoreResult<()> {
 	let read = pattern.or(legacy);
-	if read.is_none() || (secure && read == Some("")) {
+	if read.is_none() || password == Some(true) {
 		// A hidden or unavailable value supplies no evidence that the write
 		// failed. Preserve main's success without claiming confirmation.
 		return Ok(());
 	}
-	text_readback(expected, expected, read, secure)
+	text_readback(expected, expected, read, password.unwrap_or(true))
 }
 
 /// Whether a rich edit that reads `actual` holds `expected`: it reports every
@@ -335,35 +335,40 @@ mod tests {
 
 	#[test]
 	fn readback_prefers_empty_pattern_value_and_falls_back_only_when_unavailable() {
-		assert!(verdict("", Some(""), Some("stale"), false).is_ok());
-		assert!(verdict("abc", None, Some("abc"), false).is_ok());
-		assert!(verdict("abc", Some("ABC"), Some("abc"), false).is_err());
-		assert!(verdict("abc", None, None, false).is_ok());
-		assert!(verdict("secret", None, None, true).is_ok());
-		let secure = verdict("secret", Some("different"), None, true).unwrap_err();
+		assert!(verdict("", Some(""), Some("stale"), Some(false)).is_ok());
+		assert!(verdict("abc", None, Some("abc"), Some(false)).is_ok());
+		assert!(verdict("abc", Some("ABC"), Some("abc"), Some(false)).is_err());
+		assert!(verdict("abc", None, None, Some(false)).is_ok());
+		assert!(verdict("secret", None, None, Some(true)).is_ok());
+		let secure = verdict("secret", Some("different"), None, None).unwrap_err();
 		assert!(!secure.message.contains("secret"));
 		assert!(!secure.message.contains("different"));
 	}
 
 	#[test]
 	fn unreadable_password_empty_readback_keeps_main_success() {
-		assert!(verdict("secret", Some(""), None, true).is_ok());
+		assert!(verdict("secret", Some(""), None, Some(true)).is_ok());
 	}
 
 	#[test]
 	fn unreadable_password_missing_readback_keeps_main_success() {
-		assert!(verdict("secret", None, None, true).is_ok());
+		assert!(verdict("secret", None, None, Some(true)).is_ok());
+	}
+
+	#[test]
+	fn unreadable_password_protected_readback_keeps_main_success() {
+		assert!(verdict("secret", Some("protected"), None, Some(true)).is_ok());
 	}
 
 	#[test]
 	fn unreadable_plain_value_keeps_main_success() {
-		assert!(verdict("ordinary", None, None, false).is_ok());
+		assert!(verdict("ordinary", None, None, Some(false)).is_ok());
 	}
 
 	#[test]
 	fn readable_empty_values_still_disprove_a_nonempty_write() {
-		assert!(verdict("ordinary", Some(""), None, false).is_err());
-		assert!(verdict("ordinary", None, Some(""), false).is_err());
+		assert!(verdict("ordinary", Some(""), None, Some(false)).is_err());
+		assert!(verdict("ordinary", None, Some(""), Some(false)).is_err());
 	}
 
 	#[test]
