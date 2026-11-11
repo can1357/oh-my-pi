@@ -36,6 +36,7 @@ import {
 } from "../handle-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import { runWithEvalBridgeSession } from "../bridge-reentrancy";
 import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
@@ -224,7 +225,8 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
-export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+/** Host side of one eval bridge call. Wrapped by {@link callSessionTool} with the re-entrancy marker. */
+async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
@@ -384,4 +386,14 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		});
 		throw error;
 	}
+}
+
+/**
+ * Serve one eval bridge call from a running cell. Marks the owning session for
+ * the call's duration so host code that would round-trip to the same (blocked)
+ * kernel — e.g. `describeEvalTools` resolving `tools` for a spawned subagent —
+ * can fail fast instead of deadlocking (issue #18644).
+ */
+export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+	return runWithEvalBridgeSession(options.session, () => dispatchSessionTool(name, args, options));
 }
