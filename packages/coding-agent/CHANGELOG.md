@@ -21,6 +21,10 @@
 
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
+### Fixed
+
+- A page calling `window.print()` no longer hangs the browser omp launches: its profile starts with printing turned off, so `print()` returns at once and `tab.pdf()` still makes PDFs
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
