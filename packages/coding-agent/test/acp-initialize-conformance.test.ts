@@ -262,13 +262,18 @@ describe("ACP initialize conformance", () => {
 		);
 	});
 
-	it("advertises the steering extension via top-level _meta", async () => {
+	it("advertises the steering and AIR extensions via top-level _meta", async () => {
 		const agent = await createAgent();
 		const response = await agent.initialize(buildInitializeRequest());
 		expectAcpStructure(arkInitializeResponse, response);
 		// Top-level `_meta` (sibling of `agentCapabilities`) is the
 		// claude-agent-acp / codex-acp advertisement that gates clients'
-		// `_session/steering` calls (agent-shell, spec proposal `session/inject`).
-		expect(response._meta).toEqual({ steering: { supported: true } });
+		// `_session/steering` calls (agent-shell, spec proposal `session/inject`),
+		// plus the AIR extension block JetBrains AIR needs to render native
+		// child sessions (`jetbrains.air.capabilities: ["nativeSubagentSessions"]`).
+		expect(response._meta).toEqual({
+			steering: { supported: true },
+			jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } },
+		});
 	});
 });
