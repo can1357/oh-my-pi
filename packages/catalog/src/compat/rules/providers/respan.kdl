@@ -1,0 +1,39 @@
+// Provider-wire compat for "respan": the Respan AI gateway at
+// https://gateway.respan.ai/v1. One OpenAI Chat Completions endpoint serves
+// every catalog model; the gateway translates each request to the upstream's
+// native dialect and maps `reasoning_effort` across providers. Verified live
+// 2026-11-11: `GET https://api.respan.ai/api/v1/models` is public (200 without
+// a key, 401 with a rejected one) and returns standard OpenAI-style rows with
+// `context_length` and per-1M USD `pricing`; the roster is global, so
+// generation bundles it and runtime discovery refreshes it keyless.
+
+provider "respan" {
+	default-model "gpt-5.5"
+	env "RESPAN_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Respan" allow-unauthenticated=#true
+
+	// The gateway maps `reasoning_effort` onto every upstream's native dial;
+	// `off` is the documented disable value, so selection "Off" emits it
+	// instead of collapsing to the lowest supported tier.
+	thinking-mode "effort"
+	reasoning-disable-mode "off-effort"
+
+	// Respan dot-spells Anthropic ids (`claude-opus-4.7`, `claude-sonnet-4.5`),
+	// so same-id reference fills never carry reasoning into these rows; the
+	// gateway's documented reasoning_effort mapping (off, minimal–high) opens
+	// the ladder instead. Every Claude row the roster carries is 4.1+, i.e.
+	// vision-capable, but only unprefixed dot-spelled ids lack a same-id
+	// reference to carry `input` — assert the modalities here.
+	class "anthropic" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "minimal" "low" "medium" "high"
+		input-modalities "text" "image"
+	}
+	// `/models` carries no capability metadata: an id no reference or taxonomy
+	// knows is offered this ladder for the user to opt into.
+	class "unknown" {
+		thinking-unverified #true
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

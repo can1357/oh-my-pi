@@ -182,6 +182,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
 | `scaleway`                       | `SCW_SECRET_KEY`, then `SCW_API_KEY`                                                |
 | `otari`                          | `OTARI_API_KEY`                                                                     |
+| `respan`                         | `RESPAN_API_KEY`                                                                    |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
