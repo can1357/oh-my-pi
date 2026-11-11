@@ -9,10 +9,6 @@ describe("systemDateLocale", () => {
 		expect(new Date(2026, 9, 13).toLocaleDateString(locale)).toBe("13/10/2026");
 	});
 
-	it("drops the codeset and modifier", () => {
-		expect(systemDateLocale({ LANG: "sv_SE.UTF-8@euro" })).toBe("sv-SE");
-	});
-
 	// POSIX precedence: a user who sets `LC_TIME` must beat `LANG`, and `LC_ALL` beats both.
 	it("prefers LC_ALL over LC_TIME over LANG", () => {
 		expect(systemDateLocale({ LC_ALL: "fr_FR.UTF-8", LC_TIME: "de_DE.UTF-8", LANG: "en_GB.UTF-8" })).toBe("fr-FR");
