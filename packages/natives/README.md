@@ -110,9 +110,9 @@ script signals do not start cancellation escalation.
 Repeated cancellation combines live captured identities rather than replacing
 the original snapshot.
 
-Externalized execution frames are build-specific. Layout version 30 includes
-function-trap activation and saved-node flags; restore rejects incompatible
-build/layout images rather than reusing them.
+Externalized execution frames are build-specific. Layout version 31 adds the
+assumed-name origin of local traps and widens the saved-node flags to four bits;
+restore rejects incompatible build/layout images rather than reusing them.
 
 ## Building
 
