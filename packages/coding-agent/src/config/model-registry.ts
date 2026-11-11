@@ -2,10 +2,15 @@ import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import {
+	providerPauseReason,
+	registerOAuthProvider,
+	unregisterOAuthProvider,
+	unregisterOAuthProviders,
+} from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import { getProviderDefinition, PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
@@ -284,6 +289,12 @@ function selectProviderModels<T extends { provider: string }>(models: T[], provi
  */
 export interface ModelRegistryRefreshOptions {
 	refreshCommandCredentials?: boolean;
+}
+
+/** A provider paused by its auth rules (`disabled "<reason>"`), and the reason to show the user. */
+export interface PausedProviderInfo {
+	provider: string;
+	reason: string;
 }
 
 /** Authentication material returned to legacy extensions for one model request. */
@@ -3591,6 +3602,21 @@ export class ModelRegistry {
 			if (state?.error !== undefined) failures.push(state);
 		}
 		return failures;
+	}
+
+	/**
+	 * Providers paused by their auth rules (`disabled "<reason>"`). They keep
+	 * their stored logins but resolve no models or keys, so listing surfaces
+	 * report them — and the reason — instead of dropping them silently
+	 * (issue #18697).
+	 */
+	getPausedProviders(): PausedProviderInfo[] {
+		const paused: PausedProviderInfo[] = [];
+		for (const provider of PROVIDER_REGISTRY) {
+			const reason = providerPauseReason(provider.id);
+			if (reason !== undefined) paused.push({ provider: provider.id, reason });
+		}
+		return paused;
 	}
 
 	/**
