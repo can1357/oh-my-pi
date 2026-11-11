@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import type { ModelsListingSource } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
 import { renderProviderModels } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
 
+const PROVIDER = "google-antigravity";
 const REASON =
 	"Google may restrict accounts that use Antigravity outside its own apps, so this provider is paused for now.";
 
@@ -14,6 +16,12 @@ afterEach(() => {
 
 function stripAnsi(value: string): string {
 	return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function pauseProvider(): void {
+	vi.spyOn(compatAuth, "providerDisabledReason").mockImplementation(provider =>
+		provider === PROVIDER ? REASON : undefined,
+	);
 }
 
 function render(source: ModelsListingSource, pattern: string | undefined, json = false): string {
@@ -30,7 +38,6 @@ function render(source: ModelsListingSource, pattern: string | undefined, json =
 const pausedOnly: ModelsListingSource = {
 	getAvailable: () => [],
 	getError: () => undefined,
-	getPausedProviders: () => [{ provider: "google-antigravity", reason: REASON }],
 };
 
 /** One live model elsewhere, so a filtered miss renders the "no matches" line rather than "no models". */
@@ -50,24 +57,26 @@ const chatModel: Model<Api> = buildModel({
 const mixed: ModelsListingSource = {
 	getAvailable: () => [chatModel],
 	getError: () => undefined,
-	getPausedProviders: () => [{ provider: "google-antigravity", reason: REASON }],
 };
 
 describe("paused providers in `omp models`", () => {
 	it("names the pause instead of reporting no matches when the filter is a paused provider", () => {
-		const output = stripAnsi(render(pausedOnly, "google-antigravity"));
-		expect(output).toContain("google-antigravity");
+		pauseProvider();
+		const output = stripAnsi(render(pausedOnly, PROVIDER));
+		expect(output).toContain(PROVIDER);
 		expect(output).toContain(REASON);
-		expect(output).not.toContain('No models matching "google-antigravity"');
+		expect(output).not.toContain(`No models matching "${PROVIDER}"`);
 	});
 
 	it("keeps the no-match message for unknown providers, without an unrelated pause footer", () => {
+		pauseProvider();
 		const output = stripAnsi(render(mixed, "no-such-provider"));
 		expect(output).toContain('No models matching "no-such-provider"');
 		expect(output).not.toContain("Paused providers");
 	});
 
 	it("keeps a filtered live listing free of movement from other providers", () => {
+		pauseProvider();
 		const output = stripAnsi(render(mixed, "myproxy"));
 		expect(output).toContain("chat-model");
 		expect(output).not.toContain("Paused providers");
@@ -75,6 +84,7 @@ describe("paused providers in `omp models`", () => {
 	});
 
 	it("lists paused providers, and live tables, when nothing is filtered", () => {
+		pauseProvider();
 		const output = stripAnsi(render(mixed, undefined));
 		expect(output).toContain("chat-model");
 		expect(output).toContain("Paused providers");
@@ -82,12 +92,13 @@ describe("paused providers in `omp models`", () => {
 	});
 
 	it("carries paused providers in --json", () => {
-		const parsed = JSON.parse(render(pausedOnly, "google-antigravity", true)) as {
+		pauseProvider();
+		const parsed = JSON.parse(render(pausedOnly, PROVIDER, true)) as {
 			models: unknown[];
 			paused?: { provider: string; reason: string }[];
 		};
 		expect(parsed.models).toEqual([]);
-		expect(parsed.paused).toEqual([{ provider: "google-antigravity", reason: REASON }]);
+		expect(parsed.paused).toEqual([{ provider: PROVIDER, reason: REASON }]);
 	});
 
 	it("omits the paused key from --json when nothing is paused", () => {

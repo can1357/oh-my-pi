@@ -18,8 +18,9 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { pausedProviders, type PausedProviderInfo } from "@oh-my-pi/pi-ai/oauth";
 import type { ConfigError } from "../config/config-file";
-import { ModelRegistry, type PausedProviderInfo } from "../config/model-registry";
+import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
 import { discoverAuthStorage } from "../sdk";
@@ -187,24 +188,14 @@ function boxTable(columns: BoxColumn[], rows: string[][]): string[] {
 }
 
 /**
- * The registry reads the listing performs. Structural so the renderer can be
- * exercised without booting a full {@link ModelRegistry}.
+ * The two registry reads the listing performs. Structural so the renderer can
+ * be exercised without booting a full {@link ModelRegistry}.
  */
 export interface ModelsListingSource {
 	/** Return models available for the selected catalog kind, or every kind for `all`. */
 	getAvailable(kind?: ModelKind | "all"): Model<Api>[];
 	getError(): ConfigError | undefined;
-	/**
-	 * Providers paused by their auth rules (`disabled "<reason>"`). They are
-	 * signed out of availability on purpose, so listing them (with the reason)
-	 * is the only way a vanished provider is distinguishable from an
-	 * unconfigured one.
-	 */
-	getPausedProviders?(): PausedProviderInfo[];
 }
-
-/** One paused provider in a listing: the auth rule's reason is the user-facing explanation. */
-export type { PausedProviderInfo };
 
 function writePausedProviders(paused: readonly PausedProviderInfo[]): void {
 	writeLine(`${chalk.bold("Paused providers")} ${chalk.dim("(sign-in kept, not selectable)")}`);
@@ -250,8 +241,9 @@ export function renderProviderModels(
 
 	const configError = source.getError();
 	// A filter narrows the pause footer too: `omp models anthropic` must not end
-	// with an unrelated provider's pause notice.
-	const allPaused = source.getPausedProviders?.() ?? [];
+	// with an unrelated provider's pause notice. Pauses live in the auth rules,
+	// not the registry, so the renderer reads them directly from `@oh-my-pi/pi-ai/oauth`.
+	const allPaused = pausedProviders();
 	const paused = needle ? allPaused.filter(entry => entry.provider.toLowerCase().includes(needle)) : allPaused;
 
 	if (json) {

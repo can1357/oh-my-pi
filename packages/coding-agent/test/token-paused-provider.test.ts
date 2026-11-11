@@ -1,16 +1,50 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import Token from "@oh-my-pi/pi-coding-agent/commands/token";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 
 const TEST_CONFIG: CliConfig = { bin: "omp", version: "test", commands: new Map() };
 const PROVIDER = "paused-provider";
 const REASON = "paused for testing";
 
+let db: Database;
+let authStorage: AuthStorage;
+let stdout: string;
+let stderr: string;
+
+beforeEach(async () => {
+	db = new Database(":memory:");
+	authStorage = new AuthStorage(new SqliteAuthCredentialStore(db));
+	await authStorage.credentials.reload();
+	// One retained OAuth login: enabled, this is the single account `--list` shows.
+	await authStorage.credentials.set(PROVIDER, [
+		{
+			type: "oauth",
+			access: "access-0",
+			refresh: "refresh-0",
+			expires: Date.now() + 3_600_000,
+			email: "user@example.test",
+		},
+	]);
+	vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+	stdout = "";
+	stderr = "";
+	spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+		stdout += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+		return true;
+	});
+	spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+		stderr += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+		return true;
+	});
+});
+
 afterEach(() => {
 	vi.restoreAllMocks();
+	authStorage.close();
 	process.exitCode = 0;
 });
 
@@ -21,76 +55,48 @@ function pauseProvider(): void {
 }
 
 describe("`omp token` against a paused provider", () => {
-	it("prints the auth rule's reason, exits 1, and never surfaces a stack trace", async () => {
-		pauseProvider();
-		const stderr: string[] = [];
-		spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
-			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-			return true;
-		});
-		spyOn(process.stdout, "write").mockImplementation(() => true);
-
-		await new Token([PROVIDER], TEST_CONFIG).run();
-
-		const output = stderr.join("");
-		expect(output).toContain(`${PROVIDER} is paused: ${REASON}`);
-		expect(output).not.toContain("ProviderDisabledError");
-		expect(output).not.toMatch(/\n\s+at\s/);
-		expect(process.exitCode).toBe(1);
-	});
-
-	it("allows --list to inspect retained OAuth accounts without failing on pause", async () => {
-		pauseProvider();
-		const stdout: string[] = [];
-		const stderr: string[] = [];
-		spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
-			stdout.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-			return true;
-		});
-		spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
-			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-			return true;
-		});
-
-		const fakeAuthStorage = {
-			oauth: {
-				accounts: (provider: string) =>
-					provider === PROVIDER
-						? [
-								{
-									credentialId: 42,
-									position: 0,
-									email: "user@example.test",
-								},
-							]
-						: [],
-			},
-			close: vi.fn(),
-		};
-		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(fakeAuthStorage as unknown as AuthStorage);
+	it("lists the retained account while the provider is enabled", async () => {
+		expect(authStorage.oauth.accounts(PROVIDER)).toHaveLength(1);
 
 		await new Token([PROVIDER, "--list"], TEST_CONFIG).run();
 
-		expect(stderr.join("")).toBe("");
-		expect(stdout.join("")).toContain("1. user@example.test");
+		expect(stderr).toBe("");
+		expect(stdout).toContain("1. user@example.test");
 		expect(process.exitCode).toBe(0);
-		expect(fakeAuthStorage.close).toHaveBeenCalledTimes(1);
+	});
+
+	it("fails with the pause reason instead of the misleading no-accounts message", async () => {
+		pauseProvider();
+
+		await new Token([PROVIDER, "--list"], TEST_CONFIG).run();
+
+		expect(stdout).toBe("");
+		expect(stderr).toContain(`${PROVIDER} is paused: ${REASON}`);
+		expect(stderr).not.toContain("No OAuth accounts found");
+		expect(stderr).not.toContain("ProviderDisabledError");
+		expect(stderr).not.toMatch(/\n\s+at\s/);
+		expect(process.exitCode).toBe(1);
+	});
+	it("blocks the default token path with the pause reason before storage loads", async () => {
+		pauseProvider();
+		const discoverSpy = spyOn(sdkModule, "discoverAuthStorage");
+
+		await new Token([PROVIDER], TEST_CONFIG).run();
+
+		expect(stdout).toBe("");
+		expect(stderr).toContain(`${PROVIDER} is paused: ${REASON}`);
+		expect(process.exitCode).toBe(1);
+		expect(discoverSpy).not.toHaveBeenCalled();
 	});
 
 	it("blocks --account on a paused provider before resolving a credential", async () => {
 		pauseProvider();
-		const stderr: string[] = [];
-		spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
-			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-			return true;
-		});
-		spyOn(process.stdout, "write").mockImplementation(() => true);
-		const discoverSpy = vi.spyOn(sdkModule, "discoverAuthStorage");
+		const discoverSpy = spyOn(sdkModule, "discoverAuthStorage");
 
 		await new Token([PROVIDER, "--account", "1"], TEST_CONFIG).run();
 
-		const output = stderr.join("");
-		expect(output).toContain(`${PROVIDER} is paused: ${REASON}`);
+		expect(stdout).toBe("");
+		expect(stderr).toContain(`${PROVIDER} is paused: ${REASON}`);
 		expect(process.exitCode).toBe(1);
 		expect(discoverSpy).not.toHaveBeenCalled();
 	});
