@@ -1326,10 +1326,9 @@ async function continuationsAfter(
 
 /**
  * The files among `files` whose header names a session in `continuationOf`.
- * Reads only the prefix {@link scanSessionFile} takes the header from; that
- * scan reads on through the file when the prefix holds no prompt or reply,
- * which costs seconds over a directory of large sessions. A file found not to
- * continue anything is cached under its stat identity.
+ * Reads only the prefix {@link scanSessionFile} takes the header from, never
+ * the rest of the file. A file found not to continue anything is cached under
+ * its stat identity.
  */
 async function filterContinuationFiles(files: string[], storage: SessionStorage): Promise<string[]> {
 	const cache = getSessionScanCache(storage);
