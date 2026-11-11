@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [18.18.7] - 2026-11-10
+
+- Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
+- Google Antigravity now lists Gemini 4 Carbon once, with selectable low, medium, and high thinking levels, instead of a separate entry per thinking tier; on the Gemini API, Gemini 4 Carbon now offers the same thinking levels instead of none ([#18734](https://github.com/can1357/oh-my-pi/pull/18734) by [@eggpeat](https://github.com/eggpeat))
+- Factory Droid Fable 5.1, GLM 5.2 Fast and Muse Spark Open now show their list prices in the model browser and count toward session cost instead of $0 ([#18768](https://github.com/can1357/oh-my-pi/pull/18768) by [@will-bogusz](https://github.com/will-bogusz))
+- Factory Droid Gemini 4 Argon now shows Factory's 50%-off credit rate (0.8× instead of 1.6×) in the model browser until 2026-12-01 (midnight US Pacific), then 1.6× again ([#18767](https://github.com/can1357/oh-my-pi/pull/18767) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
+- Added Gemini 4 Carbon pricing on the Gemini API, Vertex AI, Google Antigravity, and Cursor ($2 input / $0.10 cached / $10 output per 1M tokens through 2026-11-30, then $4 / $0.20 / $20), instead of showing $0 ([#18734](https://github.com/can1357/oh-my-pi/pull/18734) by [@eggpeat](https://github.com/eggpeat))
+### Added
+
+- Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
+- Added the `login-warning "<text>"` auth rule, which makes a new login accept the stated account risk first ([#18499](https://github.com/can1357/oh-my-pi/issues/18499))
+
+### Changed
+
+- Resumed Google Antigravity behind a login warning instead of pausing it ([#18499](https://github.com/can1357/oh-my-pi/issues/18499))
+
+### Fixed
+
+- Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
+
+## [18.18.6] - 2026-11-09
+
+### Fixed
+
+- LiteLLM lists only the models the configured key can call (its authenticated `/v1/models`), keeping the proxy's metadata for them; a proxy whose `/v1/models` fails now lists no models instead of every model it serves ([#18601](https://github.com/can1357/oh-my-pi/issues/18601))
+
+## [18.18.5] - 2026-11-09
+
+### Added
+
+- Added Claude Fable 5.2 and Claude Mythos 5.2 ($8/$40 per MTok, $0.20 cache reads, 1M context)
+
+### Fixed
+
+- Fixed newly discovered Anthropic Fable/Mythos models showing as text-only, non-reasoning, and mispriced before models.dev catalogs them
+- Fixed Claude Mythos 5.1 not using thinking prefix-binding controls, which it needs on every account
+
+## [18.18.4] - 2026-11-09
+
+### Added
+
+- Added Otari gateway provider: `/login otari` with `OTARI_API_KEY`, models discovered live per workspace ([#17841](https://github.com/can1357/oh-my-pi/pull/17841) by [@tbille](https://github.com/tbille))
+- Added the `base64SkipThoughtSignature` Google compat flag, which sends the Gemini unsigned-tool-call bypass sentinel base64-encoded for gateways that decode `thoughtSignature` as bytes ([#18586](https://github.com/can1357/oh-my-pi/pull/18586) by [@tuandinh0801](https://github.com/tuandinh0801)).
+- Added a `disabled "<reason>"` auth rule that pauses a provider: no login offers it and nothing calls it, while its code and users' stored logins stay in place ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- Paused Google Antigravity, since Google may restrict accounts that use it outside its own apps ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
+
+## [18.18.3] - 2026-11-09
+
 ### Changed
 
 - Added a `balanced` delegation bias between `eager` and `restrained`; models without a `delegation-bias` rule now resolve to it instead of `eager`

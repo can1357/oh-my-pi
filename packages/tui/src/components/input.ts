@@ -120,10 +120,10 @@ export class Input implements Component, Focusable {
 		};
 	}
 
-	setValue(value: string): void {
+	/** Replace the value; the caret lands at the end unless `cursor: "start"`. */
+	setValue(value: string, options: { cursor?: "start" | "end" } = {}): void {
 		this.#value = value;
-		// Callers seed or replace the value wholesale; typing continues at the end.
-		this.#cursor = value.length;
+		this.#cursor = options.cursor === "start" ? 0 : value.length;
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {

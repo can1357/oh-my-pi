@@ -85,9 +85,9 @@ function appendIdea(currentNotes: string, idea: string): string {
 	if (trimmed.length === 0) {
 		return `${IDEAS_HEADING}\n- ${idea}\n`;
 	}
-	if (trimmed.includes(IDEAS_HEADING)) {
-		const lines = trimmed.split("\n");
-		const ideasIndex = lines.findIndex(line => line.trim() === IDEAS_HEADING);
+	const lines = trimmed.split("\n");
+	const ideasIndex = lines.findIndex(line => line.trim() === IDEAS_HEADING);
+	if (ideasIndex >= 0) {
 		// find end of ideas section (next heading or end of file)
 		let insertAt = lines.length;
 		for (let i = ideasIndex + 1; i < lines.length; i += 1) {

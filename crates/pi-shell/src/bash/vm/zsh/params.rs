@@ -534,6 +534,10 @@ pub const SCANPM_DQUOTED: u32 = 1 << 8;
 pub const SCANPM_ARRONLY: u32 = 1 << 9;
 /// `SCANPM_CHECKING`.
 pub const SCANPM_CHECKING: u32 = 1 << 10;
+/// Not zsh's: a reader that only needs the text of one array element
+/// (`paramsubst`) lets [`fetchvalue`] read just that element of a stored
+/// array instead of the whole array ([`window_elem`]).
+pub const SCANPM_WINDOW: u32 = 1 << 11;
 /// `SCANPM_ISVAR_AT`: every bit from 15 up.
 pub const SCANPM_ISVAR_AT: u32 = !0 << 15;
 
@@ -1583,6 +1587,8 @@ pub fn fetchvalue(
 	bracks: i32,
 	flags: u32,
 ) -> X<Option<Value>> {
+	let window = flags & SCANPM_WINDOW != 0;
+	let flags = flags & !SCANPM_WINDOW;
 	let t = *pos;
 	let mut i = t;
 	let c = s.get(i).copied().unwrap_or(0);
@@ -1638,7 +1644,9 @@ pub fn fetchvalue(
 		// alone; an assignment rewrites the whole value, so it needs it.
 		let keyed =
 			bracks > 0 && flags & SCANPM_ASSIGNING == 0 && matches!(s.get(i), Some(&(b'[' | INBRACK)));
-		let pm = if keyed {
+		let pm = if keyed && window && plain_subscript(s, i) && specials::lookup(lookup).is_none() {
+			getparam_window(ex, lookup)?
+		} else if keyed {
 			getparam_lazy(ex, lookup)?
 		} else {
 			getparam(ex, lookup)?
@@ -1660,6 +1668,9 @@ pub fn fetchvalue(
 		}
 		if bracks > 0 && matches!(s.get(i), Some(&(b'[' | INBRACK))) {
 			subscript::getindex(ex, s, &mut i, &mut v, flags)?;
+			if v.pm.lazy && v.elem.is_none() && v.pm.special.is_none() {
+				window_elem(ex, &mut v)?;
+			}
 			if v.elem.is_none() {
 				v.pm.materialize(ex)?;
 			}
@@ -1683,6 +1694,67 @@ pub fn fetchvalue(
 	}
 	*pos = i;
 	Ok(Some(v))
+}
+
+/// Whether the subscript opening at `s[open]` is a plain one (no `(flags)`,
+/// not `*` or `@`): one that resolves to positions, not by searching or
+/// taking the whole value.
+fn plain_subscript(s: &[u8], open: usize) -> bool {
+	!matches!(
+		s.get(open + 1),
+		Some(&(b'(' | crate::bash::syntax::zsh::tok::INPAR | b'*' | b'@' | STAR))
+	)
+}
+
+/// [`getparam_lazy`] for a [`SCANPM_WINDOW`] read through a plain
+/// subscript: an ordinary stored dense array also comes without its value
+/// ([`Param::lazy`]), for [`window_elem`] to load what the subscript
+/// selects.
+fn getparam_window(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
+	if let Some(mut pm) = getparam_in(ex, name, Defer::Stored)?
+		&& pm.flags.type_bits() == PmFlags::ARRAY
+		&& pm.special.is_none()
+		&& pm.tied.is_none()
+		&& !pm.flags.contains(PmFlags::UNSET)
+		&& matches!(read_var(ex, name)?.0.map(|v| &v.value), Some(VarValue::Indexed(items)) if dense_from_zero(items))
+	{
+		pm.lazy = true;
+		pm.value = PValue::Array(Vec::new());
+		return Ok(Some(pm));
+	}
+	getparam_lazy(ex, name)
+}
+
+/// Load what the subscripted view `v` of a [`getparam_window`] array
+/// reads. A single element (`$a[i]`) is loaded alone, as a one-element
+/// array `v` starts at; an index outside the array leaves it empty, which
+/// `paramsubst` reads as unset, as it does that index of the whole array.
+/// Any other view loads the whole array.
+///
+/// # Errors
+/// A store failure.
+fn window_elem(ex: &mut Expander<'_, '_>, v: &mut Value) -> X<()> {
+	let single = v.isarr == 0 && v.flags & VALFLAG_INV == 0 && v.end == v.start + 1;
+	if !single {
+		return v.pm.materialize(ex);
+	}
+	let name = v.pm.name.clone();
+	let elem = match read_var(ex, &name)?.0.map(|var| &var.value) {
+		Some(VarValue::Indexed(items)) if dense_from_zero(items) => {
+			let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+			let at = if v.start < 0 { v.start + len } else { v.start };
+			usize::try_from(at)
+				.ok()
+				.and_then(|at| items.get(at))
+				.map(|(_, e)| e.clone())
+		},
+		_ => return v.pm.materialize(ex),
+	};
+	v.pm.value = PValue::Array(elem.into_iter().collect());
+	v.pm.lazy = false;
+	v.start = 0;
+	v.end = 1;
+	Ok(())
 }
 
 // ---- writers
@@ -2543,20 +2615,7 @@ fn assign_elem_in_place(
 	val: &[u8],
 ) -> X<InPlace> {
 	let kind = pm.flags.type_bits();
-	let plain = (kind == PmFlags::HASHED
-		|| (kind == PmFlags::ARRAY && !opt(ex, ZshOpt::Ksharrays)?))
-		&& !pm.flags.intersects(
-			PmFlags::UNIQUE
-				.with(PmFlags::LOWER)
-				.with(PmFlags::UPPER)
-				.with(PmFlags::LEFT)
-				.with(PmFlags::RIGHT_B)
-				.with(PmFlags::RIGHT_Z),
-		)
-		&& pm.special.is_none()
-		&& pm.tied.is_none()
-		&& !pm.flags.intersects(PmFlags::UNSET.with(PmFlags::READONLY))
-		&& !pm.attrs.contains(Attrs::INVISIBLE);
+	let plain = (kind == PmFlags::HASHED || kind == PmFlags::ARRAY) && edits_in_place(ex, &pm)?;
 	// A plain subscript: `(flags)`, `*` and `@` read the whole parameter.
 	let body = s.get(name.len() + 1..).unwrap_or_default();
 	let plain_sub = !matches!(
@@ -2600,8 +2659,8 @@ fn assign_elem_in_place(
 				value:  &value,
 				append: false,
 			}
-		} else if let Some(at) = super::assoc_order::insert_position(items, var.attrs, &edit_key) {
-			state::VarEdit::Insert { key: &edit_key, value: &value, at }
+		} else if let Some(buckets) = super::assoc_order::insert_buckets(items.len(), var.attrs) {
+			state::VarEdit::Insert { key: &edit_key, value: &value, buckets }
 		} else {
 			// The table grows: zsh re-adds every entry.
 			let mut h = ZHash::from_stored(items, var.attrs);
@@ -2636,6 +2695,147 @@ fn dense_from_zero(items: &[(i64, BString)]) -> bool {
 			.is_none_or(|(i, _)| usize::try_from(*i).is_ok_and(|i| i + 1 == items.len()))
 }
 
+/// Whether stored array or association `pm` (read without its value) may
+/// be edited in place ([`assign_elem_in_place`], [`append_in_place`]):
+/// nothing about it rewrites the values (`-U`, case or padding flags, an
+/// indexed array under `KSH_ARRAYS`), it is neither special nor tied, and
+/// it is set, writable and visible.
+fn edits_in_place(ex: &mut Expander<'_, '_>, pm: &Param) -> X<bool> {
+	Ok((pm.flags.type_bits() != PmFlags::ARRAY || !opt(ex, ZshOpt::Ksharrays)?)
+		&& !pm.flags.intersects(
+			PmFlags::UNIQUE
+				.with(PmFlags::LOWER)
+				.with(PmFlags::UPPER)
+				.with(PmFlags::LEFT)
+				.with(PmFlags::RIGHT_B)
+				.with(PmFlags::RIGHT_Z),
+		)
+		&& pm.special.is_none()
+		&& pm.tied.is_none()
+		&& !pm.flags.intersects(PmFlags::UNSET.with(PmFlags::READONLY))
+		&& !pm.attrs.contains(Attrs::INVISIBLE))
+}
+
+/// Whether `name` is a plain ASCII identifier (no digits first: not a
+/// positional parameter), which a direct read or write can name.
+fn plain_ident(name: &[u8]) -> bool {
+	matches!(name.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_')
+		&& name.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+}
+
+/// The type of stored variable `v` when a plain-name assignment or
+/// arithmetic may read and write its value directly, as the general path
+/// would leave it: a set scalar, integer or float that nothing rewrites
+/// or redirects (not read-only, tied, hidden or private; no case, padding
+/// or `-U` flags). The caller has checked that no special has its name.
+fn direct_type(v: &Var) -> Option<PmFlags> {
+	const BLOCKING: [Attrs; 13] = [
+		Attrs::INVISIBLE,
+		Attrs::READONLY,
+		Attrs::ZSH_TIED,
+		Attrs::ZSH_HIDE,
+		Attrs::ZSH_PRIVATE,
+		Attrs::LOWER,
+		Attrs::UPPER,
+		Attrs::ZSH_LEFT,
+		Attrs::ZSH_RIGHT_B,
+		Attrs::ZSH_RIGHT_Z,
+		Attrs::ZSH_UNIQUE,
+		Attrs::ASSOC,
+		Attrs::INDEXED,
+	];
+	if !matches!(v.value, VarValue::Str(_)) || BLOCKING.iter().any(|&a| v.attrs.contains(a)) {
+		return None;
+	}
+	let ty = PmFlags::from_var(v).type_bits();
+	matches!(ty, PmFlags::SCALAR | PmFlags::INTEGER | PmFlags::EFLOAT | PmFlags::FFLOAT)
+		.then_some(ty)
+}
+
+/// The direct ([`direct_type`]) variable `name` (raw): its type and its
+/// output base (an integer's `typeset -i N`).
+fn direct_var(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<(PmFlags, u8)>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	Ok(read_var(ex, name)?
+		.0
+		.and_then(|v| direct_type(v).map(|ty| (ty, v.attrs.base()))))
+}
+
+/// The text `$name` substitutes (metafied) when `name` is a direct scalar
+/// or integer ([`direct_var`]: its stored text, as `getstrvalue` gives it
+/// without padding or case flags); `None` for any other parameter.
+///
+/// # Errors
+/// A store failure.
+pub(super) fn direct_text(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Vec<u8>>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	let Some(var) = read_var(ex, name)?.0 else {
+		return Ok(None);
+	};
+	Ok(match (direct_type(var), &var.value) {
+		(Some(PmFlags::SCALAR | PmFlags::INTEGER), VarValue::Str(s)) => Some(metafy(s)),
+		_ => None,
+	})
+}
+
+/// Store `value` (raw) as the value of the direct variable `name`
+/// ([`direct_var`]), keeping its attributes, with what the general path's
+/// store does for such a variable (a scalar naming a directory updates its
+/// named directory). The caller has just read it as a scalar: the store's
+/// change is chosen without reading it again.
+fn store_direct(ex: &mut Expander<'_, '_>, name: &[u8], ty: PmFlags, value: &[u8]) -> X<()> {
+	state::edit_seen(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		name,
+		Level::Dynamic,
+		state::VarEdit::Set { elem: None, value, append: false },
+		Some(state::Seen::Scalar),
+	)?;
+	if ty == PmFlags::SCALAR {
+		super::nameddir::scalar_assigned(ex, name, value)?;
+	}
+	Ok(())
+}
+
+/// zsh `assignaparam` of `name+=(val)` (metafied elements) when `name` is
+/// an ordinary stored array ([`edits_in_place`]): the elements go after
+/// its last one in place, without the copy of the whole array the general
+/// path reads and writes back (a loop appending one element at a time
+/// would cost the square of the array's length). `false`: not such an
+/// array, nothing done.
+fn append_in_place(ex: &mut Expander<'_, '_>, name: &[u8], val: &[Vec<u8>], flags: u32) -> X<bool> {
+	let Some(pm) = getparam_in(ex, name, Defer::Stored)? else {
+		return Ok(false);
+	};
+	if pm.flags.type_bits() != PmFlags::ARRAY || !edits_in_place(ex, &pm)? {
+		return Ok(false);
+	}
+	if !matches!(read_var(ex, name)?.0.map(|v| &v.value), Some(VarValue::Indexed(items)) if dense_from_zero(items))
+	{
+		return Ok(false);
+	}
+	check_restricted(ex, name)?;
+	if flags & ASSPM_WARN != 0 {
+		check_warn_pm(ex, &pm, "array", false, true)?;
+	}
+	let elems = val.iter().map(|e| BString::from(unmetafy(e))).collect();
+	state::edit_var(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		name,
+		Level::Dynamic,
+		state::VarEdit::Push(elems),
+	)?;
+	Ok(true)
+}
+
 /// [`assignsparam`] on metafied text.
 pub(super) fn assignsparam_meta(
 	ex: &mut Expander<'_, '_>,
@@ -2651,6 +2851,16 @@ pub(super) fn assignsparam_meta(
 		return Ok(());
 	}
 	let (name, sub) = split_name(s);
+	// An existing ordinary scalar takes the value directly: no parameter
+	// to build, nothing to create, revive, warn about or keep in step.
+	if !sub
+		&& flags & ASSPM_AUGMENT == 0
+		&& direct_var(ex, name)?.map(|(ty, _)| ty) == Some(PmFlags::SCALAR)
+		&& (flags & ASSPM_WARN == 0 || !opt(ex, ZshOpt::Warnnestedvar)?)
+	{
+		check_restricted(ex, name)?;
+		return store_direct(ex, name, PmFlags::SCALAR, &unmetafy(&val));
+	}
 	revive_special(ex, name)?;
 	let mut flags = flags;
 	let mut created = false;
@@ -2904,6 +3114,13 @@ pub(super) fn assignaparam_meta(
 	}
 	let (name, sub) = split_name(s);
 	revive_special(ex, name)?;
+	if flags & ASSPM_AUGMENT != 0
+		&& flags & ASSPM_KEY_VALUE == 0
+		&& !sub
+		&& append_in_place(ex, name, &val, flags)?
+	{
+		return Ok(());
+	}
 	let mut val = val;
 	let mut created = false;
 	let mut may_warn_nested = true;
@@ -3158,6 +3375,18 @@ pub fn setnparam(
 		return Err(not_ident(&s));
 	}
 	let (name, sub) = split_name(&s);
+	// An existing ordinary number or scalar takes the value directly (see
+	// `assignsparam_meta`); `setnumvalue` reports it as assigned.
+	if !sub
+		&& let Some((ty, base)) = direct_var(ex, name)?
+		&& !opt(ex, ZshOpt::Warnnestedvar)?
+	{
+		let (value, assigned) = match number_text(ex, ty, base, val)? {
+			Some(numeric) => numeric,
+			None => (BString::from(text), Assigned::Other),
+		};
+		return store_number(ex, name, ty, &value).map(|()| assigned);
+	}
 	let mut v = target(ex, &s, 0)?;
 	let was_unset = if let Some(cur) = &v
 		&& cur
@@ -3235,6 +3464,86 @@ pub fn setnparam(
 	};
 	setnumvalue(ex, &mut v, val, Some(text))?;
 	Ok(assigned)
+}
+
+/// [`setnparam`] of a plain name that is a direct integer or float
+/// ([`direct_var`]), stored without the text a scalar target would take
+/// (the evaluator need not format the number first); `None` for any other
+/// target.
+///
+/// # Errors
+/// As [`setnparam`].
+pub fn setnparam_number(
+	ex: &mut Expander<'_, '_>,
+	lval: &[u8],
+	val: Number,
+) -> X<Option<Assigned>> {
+	let Some((ty, base)) = direct_var(ex, lval)? else {
+		return Ok(None);
+	};
+	if opt(ex, ZshOpt::Warnnestedvar)? {
+		return Ok(None);
+	}
+	let Some((value, assigned)) = number_text(ex, ty, base, val)? else {
+		return Ok(None);
+	};
+	store_number(ex, lval, ty, &value)?;
+	Ok(Some(assigned))
+}
+
+/// The stored text of number `val` in a direct variable of type `ty`
+/// (output base `base` for an integer); `None` for a scalar.
+fn number_text(
+	ex: &mut Expander<'_, '_>,
+	ty: PmFlags,
+	base: u8,
+	val: Number,
+) -> X<Option<(BString, Assigned)>> {
+	Ok(Some(match ty {
+		// Decimal needs none of the options `convbase` takes.
+		PmFlags::INTEGER if matches!(base, 0 | 1 | 10) => {
+			(BString::from(val.to_int().to_string()), Assigned::Integer)
+		},
+		PmFlags::INTEGER => {
+			let o = arith::math_options(ex)?;
+			(BString::from(math::convbase(val.to_int(), i32::from(base), o)), Assigned::Integer)
+		},
+		PmFlags::EFLOAT | PmFlags::FFLOAT => (float_store(val.to_float()), Assigned::Float),
+		_ => return Ok(None),
+	}))
+}
+
+/// Store an arithmetic result in direct variable `name` ([`store_direct`])
+/// as `setnumvalue` does: restricted names refused, the assignment
+/// reported.
+fn store_number(ex: &mut Expander<'_, '_>, name: &[u8], ty: PmFlags, value: &[u8]) -> X<()> {
+	check_restricted(ex, name)?;
+	store_direct(ex, name, ty, value)?;
+	super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, name, Level::Dynamic);
+	Ok(())
+}
+
+/// [`getmathparam`] of a plain name when it is a direct variable
+/// ([`direct_var`]): its number, or its text for a scalar, read in place.
+/// `None`: not such a variable (the caller takes the general path).
+///
+/// # Errors
+/// A store failure.
+pub fn direct_math_value(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<math::Param>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	let Some(var) = read_var(ex, name)?.0 else {
+		return Ok(None);
+	};
+	let (Some(ty), VarValue::Str(s)) = (direct_type(var), &var.value) else {
+		return Ok(None);
+	};
+	Ok(Some(match ty {
+		PmFlags::INTEGER => math::Param::Int(parse_int(s)),
+		PmFlags::EFLOAT | PmFlags::FFLOAT => math::Param::Float(parse_float(s)),
+		_ => math::Param::Text(s.clone()),
+	}))
 }
 
 /// The value arithmetic reads for `lval` (zsh `getvalue` +

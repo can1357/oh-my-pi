@@ -148,6 +148,46 @@ describe("AuthStorage OAuth account selection", () => {
 		expect(storage.oauth.identity(PROVIDER, "strict-child")?.email).toBe("b@example.com");
 	});
 
+	test("strict usage-limit handling never probes blocked sibling accounts", async () => {
+		const credentialStore = store;
+		if (!credentialStore) throw new Error("test setup failed");
+		const probed: string[] = [];
+		const storage = new AuthStorage(credentialStore, {
+			usageProviderResolver: provider =>
+				provider === "anthropic"
+					? {
+							id: "anthropic",
+							fetchUsage: async params => {
+								probed.push(
+									params.credential.type === "oauth" ? params.credential.accessToken! : "non-oauth",
+								);
+								return null;
+							},
+						}
+					: undefined,
+		});
+		await storage.credentials.set("anthropic", [oauthCredential("a"), oauthCredential("b")]);
+		const [accountA, accountB] = storage.oauth.accounts("anthropic");
+		if (!accountA || !accountB) throw new Error("expected two OAuth accounts");
+		credentialStore.upsertCredentialBlock({
+			credentialId: accountA.credentialId,
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 60_000,
+		});
+		expect(storage.sessions.pin("anthropic", "strict-probe", accountB.credentialId, { strict: true })).toBe(true);
+
+		const outcome = await storage.limits.markReached("anthropic", "strict-probe", {
+			modelId: "claude-sonnet-5-5",
+			retryAfterMs: 60_000,
+		});
+
+		expect(outcome.switched).toBe(false);
+		expect(outcome.retryAtMs).toBeUndefined();
+		expect(probed).toEqual(["access-b"]);
+		expect(storage.sessions.mode("anthropic", "strict-probe")).toBe("strict");
+	});
+
 	test("release re-ranks within the session's routing mode instead of switching it", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");

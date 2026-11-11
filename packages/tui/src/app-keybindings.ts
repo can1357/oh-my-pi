@@ -38,6 +38,7 @@ interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
 	"app.ask.hide": true;
+	"app.ask.note": true;
 	"app.approval.approve": true;
 	"app.editor.external": true;
 	"app.local.open": true;
@@ -148,6 +149,11 @@ export const KEYBINDINGS = {
 	"app.ask.hide": {
 		defaultKeys: "alt+h",
 		description: "Hide or show a pending ask dialog",
+	},
+	"app.ask.note": {
+		// Dropdowns keep printable keys for type-ahead, so they take the first non-printable key.
+		defaultKeys: ["n", "alt+n"],
+		description: "Add or edit a note on the highlighted ask option",
 	},
 	"app.approval.approve": {
 		// A chord, not Enter: an Enter typed for the composer as the prompt appears must not approve.

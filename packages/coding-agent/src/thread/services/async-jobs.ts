@@ -253,6 +253,8 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		cancelAndReapOwnerJobs: (manager, ownerId, deadlineAt) => manager.cancelAndReapOwnerJobs(ownerId, deadlineAt),
 		drainDeliveries: (manager, options) => manager.drainDeliveries(options),
 		isDeliverySuppressed: (manager, jobId) => manager.isDeliverySuppressed(jobId),
+		isDeliveryPending: (manager, jobId) => manager.isDeliveryPending(jobId),
+		isDeliverySuperseded: (manager, jobId) => manager.isDeliverySuperseded(jobId),
 		whenSettled: async (manager, jobId) => {
 			await manager.getJob(jobId)?.promise;
 		},

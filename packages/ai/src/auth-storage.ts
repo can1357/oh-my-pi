@@ -301,7 +301,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		}
 		const previous = this.#modules;
 		next.pool.adoptSubscribers(previous.pool);
-		next.usage.adoptRuntimeProviders(previous.usage);
+		next.usage.adoptRegistrations(previous.usage);
 		// A broker URL or token change must not lift a strict lock or an automatic opt-out.
 		next.sessions.adoptExplicitRouting(previous.sessions);
 		this.#modules = next;
@@ -347,6 +347,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			usageProviders,
 			fetch: options.usageFetch ?? fetch,
 			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
+			requestKey: provider => keys.peek(provider),
 			logger:
 				options.usageLogger ??
 				({

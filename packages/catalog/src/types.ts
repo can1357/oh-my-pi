@@ -469,7 +469,7 @@ export interface OpenAICompat {
 	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
-	promptCacheSessionHeader?: "x-grok-conv-id";
+	promptCacheSessionHeader?: "x-grok-conv-id" | "x-session-id";
 	/** Request header carrying the conversation session id, independent of prompt caching. Default: unset. */
 	sessionHeader?: "x-litellm-session-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
@@ -1314,6 +1314,11 @@ export interface GoogleCompat {
 	requiresSkipThoughtSignature?: boolean;
 	/** Add the bypass sentinel when a Gemini turn's first function call is unsigned. */
 	requiresSkipThoughtSignatureOnFirstFunctionCall?: boolean;
+	/**
+	 * Send the bypass sentinel base64-encoded. For gateways that decode
+	 * `thoughtSignature` as bytes and reject the raw literal.
+	 */
+	base64SkipThoughtSignature?: boolean;
 	/** Drop unsigned thinking blocks from replayed history (Antigravity Claude). */
 	dropUnsignedThinking?: boolean;
 	/** Cloud Code Assist legacy `parameters` schema field instead of `parametersJsonSchema`. */
@@ -1358,6 +1363,7 @@ export type ResolvedGoogleCompat = Required<
 		| "streamIdleTimeoutMs"
 		| "antigravityUsageLabel"
 		| "supportsSamplingParams"
+		| "base64SkipThoughtSignature"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1366,6 +1372,7 @@ export type ResolvedGoogleCompat = Required<
 	streamIdleTimeoutMs?: number;
 	antigravityUsageLabel?: string;
 	supportsSamplingParams?: boolean;
+	base64SkipThoughtSignature?: boolean;
 	maxImageDimension?: number;
 	maxImagePayloadBytes?: number;
 };

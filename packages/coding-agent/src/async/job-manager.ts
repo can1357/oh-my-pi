@@ -376,6 +376,10 @@ export interface AsyncJobManagerApi {
 	cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number): Promise<AsyncJobReapResult>;
 	drainDeliveries(options?: { timeoutMs?: number; filter?: AsyncJobFilter }): Promise<boolean>;
 	isDeliverySuppressed(jobId: string): boolean;
+	/** True while a settled job's completion is queued or in flight — its push is on the way. */
+	isDeliveryPending(jobId: string): boolean;
+	/** True when a foreground snapshot consumed this job's result while its push was still queued. */
+	isDeliverySuperseded(jobId: string): boolean;
 }
 
 export class AsyncJobManager implements AsyncJobManagerApi {
@@ -400,6 +404,14 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
+	/**
+	 * Settled jobs whose completion push a foreground snapshot superseded: the
+	 * snapshot consumed the result, so the push it raced will not reach the owner
+	 * even though it was queued or in flight when the snapshot read it. Kept apart
+	 * from {@link #deliveries} so the delivery line can say "superseded" instead of
+	 * promising a follow-up that cannot arrive (#16135 review).
+	 */
+	readonly #supersededDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
@@ -774,6 +786,14 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	 */
 	consumeJobResults(jobIds: string[]): number {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
+		// Record the superseded push BEFORE acknowledging: acknowledgement drops
+		// the queued entry, so `isDeliveryPending` is false by the time the
+		// per-job consume below runs, and the delivery line could no longer tell a
+		// push this snapshot superseded from one that was never queued (#16135
+		// review).
+		for (const jobId of uniqueJobIds) {
+			if (this.isDeliveryPending(jobId)) this.#supersededDeliveries.add(jobId);
+		}
 		this.acknowledgeDeliveries(uniqueJobIds);
 		let consumed = 0;
 		for (const jobId of uniqueJobIds) {
@@ -987,6 +1007,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#notifyDeliveryQueueChanged();
 		this.#inFlightDeliveries.length = 0;
 		this.#suppressedDeliveries.clear();
+		this.#supersededDeliveries.clear();
 		this.#watchedJobs.clear();
 		this.#consumedJobResults.clear();
 		this.#releasedForegroundJobs.clear();
@@ -1036,6 +1057,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	#claimJobId(preferredId?: string): string {
 		const id = this.#resolveJobId(preferredId);
 		this.#suppressedDeliveries.delete(id);
+		this.#supersededDeliveries.delete(id);
 		this.#consumedJobResults.delete(id);
 		this.#releasedForegroundJobs.delete(id);
 		return id;
@@ -1162,6 +1184,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		clearTimeout(this.#evictionTimers.get(jobId));
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
+		this.#supersededDeliveries.delete(jobId);
 		this.#watchedJobs.delete(jobId);
 		this.#consumedJobResults.delete(jobId);
 		const job = this.#jobs.get(jobId);
@@ -1262,6 +1285,34 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 
 	isDeliverySuppressed(jobId: string): boolean {
 		return this.#suppressedDeliveries.has(jobId) || this.#watchedJobs.has(jobId);
+	}
+
+	/**
+	 * True while a settled job's completion is queued or in flight — its push
+	 * is on the way rather than lost. A `wait` that returns such a result
+	 * handed it over first; the delivery it raced is not a missed push
+	 * (#16052). Watch suppression is not consulted: `watchJobs` blocks new
+	 * enqueue attempts, but a push already queued or in flight when the watch
+	 * began is still on the way, and treating it as lost mislabels the result
+	 * this snapshot hands over (#18635).
+	 */
+	isDeliveryPending(jobId: string): boolean {
+		return (
+			this.#deliveries.some(delivery => delivery.jobId === jobId) ||
+			this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId)
+		);
+	}
+
+	/**
+	 * True when a foreground snapshot recovered this job's result while its
+	 * completion push was still queued or in flight. That push is superseded —
+	 * the snapshot consumed the result, so the entry it suppressed cannot reach
+	 * the owner. Lets the delivery line report a superseded push rather than
+	 * "still on the way", which would make the model expect a duplicate (#16135
+	 * review).
+	 */
+	isDeliverySuperseded(jobId: string): boolean {
+		return this.#supersededDeliveries.has(jobId);
 	}
 
 	#enqueueDelivery(jobId: string, text: string): void {

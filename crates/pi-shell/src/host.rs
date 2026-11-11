@@ -554,6 +554,14 @@ impl crate::bash::Host for PiHost {
 			.map_or(Resolved::NotFound, Resolved::Native)
 	}
 
+	/// On Windows, a utility written in the syntax of the System32 program it
+	/// shadows (`find /c /v ""`, `sort /r`, `timeout /t 5`, `whoami /all`)
+	/// goes to `PATH`'s program of that name ([`crate::cmd_dialect`]).
+	fn defers_to_path(&mut self, name: &BStr, argv: &[BString]) -> bool {
+		cfg!(windows)
+			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default())
+	}
+
 	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`]),
 	/// or refuses `suspend`.
 	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>> {

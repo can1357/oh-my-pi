@@ -476,6 +476,8 @@ pub struct Kernel {
 	/// The arithmetic this shell evaluated last ([`arith::Recent`]); not
 	/// imaged.
 	pub arith_recent:       arith::Recent,
+	/// [`arith_recent`](Self::arith_recent) for zsh's evaluator.
+	pub zsh_arith_recent:   zsh::math::Recent,
 	/// The last event clock reading while it is still current
 	/// ([`Kernel::stamp`]): set by a reading that ends a duration or starts a
 	/// command, cleared by [`Kernel::clock_stale`] before anything that can
@@ -519,6 +521,10 @@ pub struct Kernel {
 	/// ended though the job runs on. Dropped when the job ends; not imaged
 	/// (a restored shell signals the job's vproc).
 	pub pid_owners:         Vec<(u32, Vpid, Vpid)>,
+	/// The math options ([`zsh::arith::math_options`]) last read for a vproc
+	/// without an overlay, with the [`state::Root::opts_gen`] and mode they
+	/// were read under: every `(( ))` asks.
+	pub math_opts:          Option<(u64, ModeId, zsh::math::Options)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
 	pub deferrals:          Vec<proc::Deferral>,
@@ -615,6 +621,7 @@ impl Kernel {
 			zsh_dumps: parking_lot::Mutex::new(HashMap::new()),
 			spare_tree: crate::bash::syntax::Tree::default(),
 			arith_recent: arith::Recent::default(),
+			zsh_arith_recent: zsh::math::Recent::default(),
 			clock: None,
 			null_input: None,
 			callout_labels: Vec::new(),
@@ -624,6 +631,7 @@ impl Kernel {
 			bangs: Vec::new(),
 			settled: Vec::new(),
 			pid_owners: Vec::new(),
+			math_opts: None,
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}

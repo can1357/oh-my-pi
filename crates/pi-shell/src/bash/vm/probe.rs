@@ -20,7 +20,7 @@ use crate::bash::{
 	diag,
 	event::WaitKey,
 	fd::FdRef,
-	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind},
+	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind, msys_drive_path},
 	host::Deadline,
 	ids::Platform,
 };
@@ -121,14 +121,15 @@ pub fn perform(
 			Poll::Ready(st) => ProbeResult::Stat(st),
 			Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
 		},
-		Probe::StatAll { paths } => loop {
+		Probe::StatAll { paths, ends } => loop {
 			let done = sc.io().zsh().stats.len();
 			let Some(path) = paths.get(done) else {
 				break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
 			};
 			match poll_stat(cx, vp, sc, &mut tcx, path, true) {
 				Poll::Ready(st) => {
-					let file = st.as_ref().is_some_and(|s| s.kind != StatKind::Dir);
+					let file = st.as_ref().is_some_and(|s| s.kind != StatKind::Dir)
+						&& u32::try_from(done).is_ok_and(|d| ends.binary_search(&d).is_ok());
 					sc.io().zsh().stats.push(st);
 					// Later paths are asked only if the search goes on.
 					if file {
@@ -654,9 +655,15 @@ pub fn absolute(cwd: &[u8], name: &[u8]) -> BString {
 	)
 }
 
-/// [`absolute`] for the configured shell platform: the Windows drive and UNC
-/// rule stays testable on any host instead of compiling only on Windows.
+/// [`absolute`] for the configured shell platform: the Windows drive, UNC
+/// and MSYS drive-alias (`/c/x` → `C:/x`) rules stay testable on any host
+/// instead of compiling only on Windows.
 pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
+	if platform == Platform::Windows
+		&& let Some(native) = msys_drive_path(name)
+	{
+		return native;
+	}
 	if name.first() == Some(&b'/') || url_root_len(name).is_some() {
 		return name.into();
 	}
@@ -814,6 +821,11 @@ mod tests {
 			absolute_on(br"C:\project", br"\\server\share\app.exe", Platform::Windows),
 			br"\\server\share\app.exe".as_slice()
 		);
+		assert_eq!(
+			absolute_on(br"C:\project", b"/d/Tools/app.exe", Platform::Windows),
+			b"D:/Tools/app.exe".as_slice()
+		);
+		assert_eq!(absolute_on(b"/", b"/c/x", Platform::Linux), b"/c/x".as_slice());
 	}
 
 	#[test]
