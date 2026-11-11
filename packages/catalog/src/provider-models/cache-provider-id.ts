@@ -145,6 +145,20 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// `/v1`-suffixed one; both must land on one namespace.
 			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
 		}
+		case "respan": {
+			// Discovery is authoritative and the public roster is identical for
+			// every caller and fetched keyless, so the key stays out of the scope
+			// and the namespace follows the configured endpoint: a self-hosted
+			// override must not serve the hosted roster (or vice versa), whose
+			// warm cache would otherwise outlive the switch until expiry.
+			//
+			// Both call paths must land on one namespace: `ModelRegistry` hashes
+			// the provider's configured request base URL while
+			// `respanModelManagerOptions` passes the same value, so the hash
+			// input is the endpoint both see.
+			const baseUrl = (options.baseUrl ?? "https://gateway.respan.ai/v1").trim().replace(/\/+$/, "");
+			return `respan:models-v1:${Bun.hash(baseUrl).toString(36)}`;
+		}
 		case "kimi-code": {
 			// The `/coding/v1/models` roster depends on the subscription plan behind
 			// the credential, and discovery is authoritative: a namespace without the

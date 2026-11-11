@@ -8344,6 +8344,7 @@ export function respanModelManagerOptions(
 	const references = createBundledReferenceMap<"openai-completions">("respan");
 	return {
 		providerId: "respan",
+		cacheProviderId: resolveModelCacheProviderId("respan", { baseUrl }),
 		dynamicModelsAuthoritative: true,
 		dynamicCostAuthoritative: true,
 		fetchDynamicModels: async () => {

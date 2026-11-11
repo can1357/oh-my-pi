@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import { respanModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -75,6 +76,10 @@ describe("Respan discovery", () => {
 				{ id: "whisper-1", object: "model", owned_by: "openai" },
 				{ id: "eleven-v4", object: "model", owned_by: "elevenlabs" },
 				{ id: "seedream-5-0-flash", object: "model", owned_by: "bytedance" },
+				{ id: "hunyuan-image-3", object: "model", owned_by: "tencent" },
+				// Tencent's instruct LLM is chat: kept (regression for the
+				// over-broad `hunyuan` exclusion the live roster caught).
+				{ id: "hunyuan-a13b-instruct", object: "model", owned_by: "tencent" },
 				// Gemini's -image rows stay in: the gateway serves them as chat.
 				{ id: "gemini-3-pro-image", object: "model", owned_by: "google_gemini_ai" },
 			]),
@@ -88,7 +93,19 @@ describe("Respan discovery", () => {
 		expect(byId.get("unpriced-chat-model")).toMatchObject({ cost: { input: 0, output: 0 }, contextWindow: 8192 });
 		// Kept + excluded are exactly what the filter decides.
 		expect(models.map(model => model.id).sort()).toEqual(
-			["gemini-3-pro-image", "gpt-5.5", "some-image-model", "unpriced-chat-model"].sort(),
+			["gemini-3-pro-image", "gpt-5.5", "hunyuan-a13b-instruct", "some-image-model", "unpriced-chat-model"].sort(),
+		);
+	});
+
+	test("a deployment base-URL override resolves to its own cache namespace", () => {
+		const hosted = respanModelManagerOptions();
+		const selfHosted = respanModelManagerOptions({ baseUrl: "https://respan.corp.example/api" });
+		// Hosted and override must not read each other's cached roster.
+		expect(hosted.cacheProviderId).not.toEqual(selfHosted.cacheProviderId);
+		// The factory's namespace matches what ModelRegistry computes from the
+		// same configured request base URL.
+		expect(hosted.cacheProviderId).toEqual(
+			resolveModelCacheProviderId("respan", { baseUrl: "https://gateway.respan.ai/v1" }),
 		);
 	});
 });
