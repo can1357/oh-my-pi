@@ -24,7 +24,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
-import { lastAssistantThroughput, sessionThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { sessionThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -426,7 +426,11 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 					const usage = session.sessionManager.getUsageStatistics();
 					const directCost = usage.cost - usage.subagentCost;
 					const tokensPerSecond = sessionThroughput(session);
-					const historyPatch: { directCost?: number; tokensPerSecond?: number; tokensPerSecondSource?: "park" | "scan" } = {};
+					const historyPatch: {
+						directCost?: number;
+						tokensPerSecond?: number;
+						tokensPerSecondSource?: "park" | "scan";
+					} = {};
 					if (Number.isFinite(directCost) && directCost >= 0) {
 						historyPatch.directCost = directCost;
 					}

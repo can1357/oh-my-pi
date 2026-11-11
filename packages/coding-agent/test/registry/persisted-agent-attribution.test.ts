@@ -331,11 +331,15 @@ describe("persisted agent model attribution", () => {
 			status: "idle",
 		});
 		// First scan sets rate to 75 tok/s:
-		registry.setHistory("Advisor", { tokensPerSecond: 75.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", { isScan: true });
+		registry.setHistory("Advisor", { tokensPerSecond: 75.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", {
+			isScan: true,
+		});
 		expect(ref.history?.tokensPerSecond).toBe(75.0);
 
 		// Subsequent scan after another advisor turn updates rate to 150 tok/s:
-		registry.setHistory("Advisor", { tokensPerSecond: 150.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", { isScan: true });
+		registry.setHistory("Advisor", { tokensPerSecond: 150.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", {
+			isScan: true,
+		});
 		expect(ref.history?.tokensPerSecond).toBe(150.0);
 	});
 

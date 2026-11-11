@@ -100,7 +100,7 @@ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { lastAssistantThroughput, sessionThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { sessionThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import {
 	AUTO_THINKING,
 	assertModelSupportsEffortCeiling,

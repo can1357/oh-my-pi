@@ -1,7 +1,7 @@
 import type { AgentMetricsSummary, AgentRecordLike, AgentStatus } from "./agent-hub-types";
 import { MAIN_AGENT_ID } from "./agent-hub-types";
 import type { ObservableSession } from "./session-observer-registry";
-import { lastAssistantThroughput, sessionThroughput, usageThroughput } from "./usage-row";
+import { lastAssistantThroughput, sessionThroughput } from "./usage-row";
 
 export type AgentMetrics = AgentMetricsSummary;
 
@@ -217,6 +217,12 @@ export function hubFallbackStatsSession<TRecord extends AgentRecordLike>(
 	return session && typeof session.getSessionStats === "function" ? session : undefined;
 }
 
+function tokensPerSecondOf(metrics: object | undefined): number | undefined {
+	return metrics && "tokensPerSecond" in metrics && typeof metrics.tokensPerSecond === "number"
+		? metrics.tokensPerSecond
+		: undefined;
+}
+
 /**
  * Shared row policy for the Agent Hub and the status-line cost total.
  * Non-cost metrics come from live progress, then persisted history, then the retained
@@ -237,15 +243,15 @@ function projectRowMetrics<TMetrics extends AgentCostSnapshot>(
 		: (ref.history?.metrics ?? (!hasLiveSession ? retained : undefined) ?? live);
 	if (!metrics) return undefined;
 	const liveRate = sessionThroughput(ref.session);
-	const liveMetrics = live && "tokensPerSecond" in live ? (live as AgentMetrics) : undefined;
-	const retainedMetrics = retained && "tokensPerSecond" in retained ? (retained as AgentMetrics) : undefined;
+	const liveTps = tokensPerSecondOf(live);
+	const retainedTps = tokensPerSecondOf(retained);
 	const observedTps = observed?.progress ? progressMetrics(observed)?.tokensPerSecond : undefined;
 
 	const tokensPerSecond =
 		liveRate ??
-		(hasLiveSession ? liveMetrics?.tokensPerSecond : undefined) ??
+		(hasLiveSession ? liveTps : undefined) ??
 		observedTps ??
-		retainedMetrics?.tokensPerSecond ??
+		retainedTps ??
 		ref.history?.tokensPerSecond ??
 		ref.history?.metrics?.tokensPerSecond;
 	const result: AgentMetrics = { ...(metrics as AgentMetrics) };

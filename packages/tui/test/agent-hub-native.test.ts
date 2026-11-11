@@ -236,11 +236,21 @@ test("a follow-up turn does not age the previous turn's snapshot across the idle
 
 test("shows Tok/s column and facts when showTokenRate is enabled", () => {
 	const messages = [
-		{ role: "assistant", duration: 2000, content: [], usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } } },
+		{
+			role: "assistant",
+			duration: 2000,
+			content: [],
+			usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } },
+		},
 	];
 	const session = {
 		agent: { state: { messages } },
-		getSessionStats: () => ({ tokens: { input: 10, output: 150, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+		getSessionStats: () => ({
+			tokens: { input: 10, output: 150, cacheWrite: 0 },
+			assistantMessages: 1,
+			toolCalls: 0,
+			cost: 0.01,
+		}),
 	};
 	const worker = agent("Worker", 1_000_000, { session: session as unknown as AgentRecordLike["session"] });
 	const hubEnabled = createHub([worker], [], new SessionObserverRegistry(), () => true);
@@ -261,7 +271,14 @@ test("shows Tok/s column and facts when showTokenRate is enabled", () => {
 });
 
 test("formatMetrics and metricsText only append tok/s when showTokenRate is true", () => {
-	const metrics: AgentMetrics = { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 60.0 };
+	const metrics: AgentMetrics = {
+		tokens: 100,
+		requests: 1,
+		tools: 0,
+		cost: 0.01,
+		durationMs: 1000,
+		tokensPerSecond: 60.0,
+	};
 	expect(metricsText(metrics, false)).not.toContain("tok/s");
 	expect(metricsText(metrics, true)).toContain("60.0 tok/s");
 	expect(formatMetrics(metrics, false)).not.toContain("tok/s");

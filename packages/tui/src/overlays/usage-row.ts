@@ -142,11 +142,16 @@ export function lastAssistantThroughput(messages: readonly unknown[] | undefined
  * Resolves current throughput for a session: live streaming rate when the meter has
  * accumulated enough evidence, falling back to the latest completed assistant turn.
  */
-export function sessionThroughput(session: {
-	isStreaming?: boolean;
-	tokenRate?: { rate: () => number | null };
-	agent?: { state?: { messages?: readonly unknown[] } };
-} | null | undefined): number | undefined {
+export function sessionThroughput(
+	session:
+		| {
+				isStreaming?: boolean;
+				tokenRate?: { rate: () => number | null };
+				agent?: { state?: { messages?: readonly unknown[] } };
+		  }
+		| null
+		| undefined,
+): number | undefined {
 	if (!session) return undefined;
 	if (session.isStreaming && session.tokenRate) {
 		const rate = session.tokenRate.rate();

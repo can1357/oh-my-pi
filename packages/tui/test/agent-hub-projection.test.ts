@@ -269,7 +269,12 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const session = {
 			isStreaming: true,
 			tokenRate: { rate: () => 85.5 },
-			getSessionStats: () => ({ tokens: { input: 10, output: 100, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+			getSessionStats: () => ({
+				tokens: { input: 10, output: 100, cacheWrite: 0 },
+				assistantMessages: 1,
+				toolCalls: 0,
+				cost: 0.01,
+			}),
 		};
 		const ref = { id: "worker", session } as unknown as AgentRecordLike;
 		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
@@ -287,11 +292,21 @@ describe("hubRowMetrics tokensPerSecond", () => {
 
 	it("calculates tokensPerSecond from the last completed assistant turn", () => {
 		const messages = [
-			{ role: "assistant", duration: 2000, content: [], usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } } },
+			{
+				role: "assistant",
+				duration: 2000,
+				content: [],
+				usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } },
+			},
 		];
 		const session = {
 			agent: { state: { messages } },
-			getSessionStats: () => ({ tokens: { input: 10, output: 150, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+			getSessionStats: () => ({
+				tokens: { input: 10, output: 150, cacheWrite: 0 },
+				assistantMessages: 1,
+				toolCalls: 0,
+				cost: 0.01,
+			}),
 		};
 		const ref = { id: "worker", session } as unknown as AgentRecordLike;
 		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
@@ -309,11 +324,21 @@ describe("hubRowMetrics tokensPerSecond", () => {
 
 	it("omits tokensPerSecond when duration is too short to be meaningful", () => {
 		const messages = [
-			{ role: "assistant", duration: 50, content: [], usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } } },
+			{
+				role: "assistant",
+				duration: 50,
+				content: [],
+				usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } },
+			},
 		];
 		const session = {
 			agent: { state: { messages } },
-			getSessionStats: () => ({ tokens: { input: 10, output: 150, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+			getSessionStats: () => ({
+				tokens: { input: 10, output: 150, cacheWrite: 0 },
+				assistantMessages: 1,
+				toolCalls: 0,
+				cost: 0.01,
+			}),
 		};
 		const ref = { id: "worker", session } as unknown as AgentRecordLike;
 		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
@@ -334,7 +359,12 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const session = {
 			isStreaming: true,
 			tokenRate: { rate: () => rate },
-			getSessionStats: () => ({ tokens: { input: 10, output: 100, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+			getSessionStats: () => ({
+				tokens: { input: 10, output: 100, cacheWrite: 0 },
+				assistantMessages: 1,
+				toolCalls: 0,
+				cost: 0.01,
+			}),
 		};
 		const ref = { id: "worker", session } as unknown as AgentRecordLike;
 		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
@@ -365,12 +395,19 @@ describe("hubRowMetrics tokensPerSecond", () => {
 	it("prefers current live completed throughput over persisted historical throughput when live session is attached", () => {
 		const session = {
 			agent: { state: { messages: [] } },
-			getSessionStats: () => ({ tokens: { input: 10, output: 150, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+			getSessionStats: () => ({
+				tokens: { input: 10, output: 150, cacheWrite: 0 },
+				assistantMessages: 1,
+				toolCalls: 0,
+				cost: 0.01,
+			}),
 		};
 		const ref = {
 			id: "worker",
 			session,
-			history: { metrics: { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 50.0 } },
+			history: {
+				metrics: { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 50.0 },
+			},
 		} as unknown as AgentRecordLike;
 		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
 		sessionMetrics.set(session, {
@@ -439,7 +476,12 @@ describe("sessionThroughput", () => {
 
 	it("falls back to completed turn throughput when live meter is null", () => {
 		const messages = [
-			{ role: "assistant", duration: 1000, content: [], usage: { input: 10, output: 80, cacheWrite: 0, cost: { total: 0.01 } } },
+			{
+				role: "assistant",
+				duration: 1000,
+				content: [],
+				usage: { input: 10, output: 80, cacheWrite: 0, cost: { total: 0.01 } },
+			},
 		];
 		const session = { isStreaming: true, tokenRate: { rate: () => null }, agent: { state: { messages } } };
 		expect(sessionThroughput(session)).toBe(80.0);

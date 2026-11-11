@@ -10,7 +10,6 @@ export interface AgentMetricsSummary {
 	tokens: number;
 	requests: number;
 	tools: number;
-	/** NaN when the agent's backend reports no cost (an external TUI); rendered as unknown, never as zero. */
 	cost: number;
 	durationMs: number;
 	durationKind?: "active" | "span" | "unknown";
