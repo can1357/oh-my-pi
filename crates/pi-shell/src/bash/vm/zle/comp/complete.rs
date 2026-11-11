@@ -343,6 +343,20 @@ pub enum Cp {
 	Compstate,
 }
 
+/// The names [`lookup`] knows.
+pub(crate) const NAMES: &[&[u8]] = &[
+	b"words",
+	b"redirections",
+	b"CURRENT",
+	b"PREFIX",
+	b"SUFFIX",
+	b"IPREFIX",
+	b"ISUFFIX",
+	b"QIPREFIX",
+	b"QISUFFIX",
+	b"compstate",
+];
+
 /// The completion special `name` names, if any.
 pub const fn lookup(name: &[u8]) -> Option<Cp> {
 	Some(match name {

@@ -208,8 +208,8 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
-		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
-		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Package-Version"]).toBe("0.128.0");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.12.1");
 		expect(headers["X-Stainless-Timeout"]).toBe("600");
 		expect(headers["anthropic-client-platform"]).toBeUndefined();
 		expect(headers["anthropic-client-version"]).toBeUndefined();
@@ -236,7 +236,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		]);
 		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["anthropic-beta"]).toBe(
-			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(headers["x-client-request-id"]).toBeUndefined();
 	});
@@ -291,7 +291,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(options.defaultHeaders["anthropic-beta"]).toBe(
-			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(options.defaultHeaders["anthropic-beta"]).not.toContain("context-1m-2025-08-07");
 	});
@@ -784,6 +784,51 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(result.stopReason).toBe("error");
 	});
 
+	it("retries every concurrent first request rejected as too old, not just the first", async () => {
+		const pinned = getClaudeCodeVersion();
+		const required = "100.0.0";
+		const pinnedUserAgent = `claude-cli/${pinned} (external, cli)`;
+		const requiredUserAgent = `claude-cli/${required} (external, cli)`;
+		const tooOld = JSON.stringify({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: `Claude Code ${pinned} does not support this model; version ${required} or newer is required.`,
+				details: { error_code: "claude_code_version_too_old" },
+			},
+		});
+		const captured = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } });
+		const concurrency = 3;
+		const requests: string[] = [];
+		let firstAttempts = 0;
+		const { promise: allFirstAttemptsSent, resolve: allFirstAttemptsSentResolve } = Promise.withResolvers<void>();
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			const userAgent = new Headers(init?.headers).get("User-Agent") ?? "";
+			requests.push(userAgent);
+			if (userAgent === pinnedUserAgent) {
+				firstAttempts++;
+				if (firstAttempts === concurrency) allFirstAttemptsSentResolve();
+				// Hold every first rejection until all concurrent requests have sent
+				// theirs, so they race on the adoption instead of serializing.
+				await allFirstAttemptsSent;
+				return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response(captured, { status: 400, headers: { "Content-Type": "application/json" } });
+		}) as typeof fetch;
+		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+		const results = await Promise.all(
+			Array.from({ length: concurrency }, () =>
+				streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result(),
+			),
+		);
+
+		expect(requests).toHaveLength(concurrency * 2);
+		for (const userAgent of requests.slice(0, concurrency)) expect(userAgent).toBe(pinnedUserAgent);
+		for (const userAgent of requests.slice(concurrency)) expect(userAgent).toBe(requiredUserAgent);
+		for (const result of results) expect(result.stopReason).toBe("error");
+	});
+
 	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {
 		let capturedBeta: string | undefined;
 		let capturedBody:
@@ -1080,7 +1125,7 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(headers["anthropic-beta"]).not.toBe("custom-beta-token");
 		expect(headers["x-app"]).toBe("cli");
-		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.12.1");
 	});
 
 	it("suppresses the client-level X-Api-Key when model.headers carries a custom Authorization (#3391)", () => {

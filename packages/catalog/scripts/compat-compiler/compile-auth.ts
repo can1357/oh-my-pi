@@ -741,6 +741,16 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "show-in-login-list":
 				result.showInLoginList = singleBool(child);
 				break;
+			case "disabled":
+				leaf(child, []);
+				result.disabled = singleString(child);
+				if (!result.disabled.trim()) malformed(child);
+				break;
+			case "login-warning":
+				leaf(child, []);
+				result.loginWarning = singleString(child);
+				if (!result.loginWarning.trim()) malformed(child);
+				break;
 			case "store-as":
 				leaf(child, []);
 				result.storeAs = singleString(child);

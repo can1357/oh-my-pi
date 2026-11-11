@@ -515,7 +515,6 @@ function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): Serv
 export interface SessionParserState {
 	version: 1;
 	offset: number;
-	dev: number;
 	ino: number;
 	birthtimeMs: number;
 	size: number;
@@ -553,8 +552,13 @@ async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8
 	return bytes.subarray(0, read);
 }
 
+/**
+ * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
+ * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
+ * `birthtimeMs` (plus size/mtime at call sites) identify the file.
+ */
 export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
-	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
 }
 
 /** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
@@ -700,7 +704,6 @@ export async function parseSessionFile(
 		parserState: {
 			version: 1,
 			offset: newOffset,
-			dev: info.dev,
 			ino: info.ino,
 			birthtimeMs: info.birthtimeMs,
 			size: info.size,

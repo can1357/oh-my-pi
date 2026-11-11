@@ -71,6 +71,7 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
+	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ShowStatusOptions,
 } from "../../modes/types";
@@ -116,11 +117,6 @@ import {
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
-
-interface RenderInitialMessagesOptions {
-	preserveExistingChat?: boolean;
-	clearTerminalHistory?: boolean;
-}
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -271,7 +267,7 @@ export class UiHelpers {
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
-		const notice = { styleFn, toast: options?.toast };
+		const notice = { styleFn, toast: options?.toast, action: options?.action };
 
 		if (last && last === this.ctx.lastStatus) {
 			if (this.ctx.lastStatus.message !== message) {
@@ -1253,6 +1249,7 @@ export class UiHelpers {
 				}
 			}
 			committed = true;
+			options.onCommit?.(context);
 
 			// Show compaction info if session was compacted.
 			const allEntries = this.ctx.viewSession.sessionManager.getEntries();

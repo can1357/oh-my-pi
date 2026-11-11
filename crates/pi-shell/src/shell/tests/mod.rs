@@ -116,6 +116,7 @@ async fn default_session() -> ShellSessionCore {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	create_session(&config).await.expect("create_session")
 }

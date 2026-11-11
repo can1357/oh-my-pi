@@ -281,6 +281,12 @@ pub struct FakeHost {
 	stdin:       Arc<Mutex<(Vec<u8>, usize)>>,
 	tools:       Vec<(BString, ToolFn)>,
 	natives:     Vec<Native>,
+	/// The natives answer only after a `PATH` search found nothing
+	/// ([`FakeHost::natives_as_fallback`]).
+	fallback:    bool,
+	/// [`crate::bash::Host::defers_to_path`]'s answer
+	/// ([`FakeHost::with_path_deferral`]).
+	defer:       Option<fn(&BStr, &[BString]) -> bool>,
 	/// Every event, as JSON, in emission order.
 	pub events:  Vec<serde_json::Value>,
 	/// Gets every event too ([`FakeHost::with_event_sink`]).
@@ -322,6 +328,8 @@ impl FakeHost {
 			stdin:       Arc::new(Mutex::new((Vec::new(), 0))),
 			tools:       Vec::new(),
 			natives:     Vec::new(),
+			fallback:    false,
+			defer:       None,
 			events:      Vec::new(),
 			sink:        None,
 			verdict:     None,
@@ -533,6 +541,20 @@ impl FakeHost {
 		self.native(name, make, Some(restore));
 	}
 
+	/// Offer the registered natives as [`crate::bash::Host::fallback`]s (a
+	/// process shell's stand-ins for missing tools) instead of resolving
+	/// them before `PATH`.
+	pub const fn natives_as_fallback(mut self) -> Self {
+		self.fallback = true;
+		self
+	}
+
+	/// Answer [`crate::bash::Host::defers_to_path`] with `rule`.
+	pub fn with_path_deferral(mut self, rule: fn(&BStr, &[BString]) -> bool) -> Self {
+		self.defer = Some(rule);
+		self
+	}
+
 	/// Decide verdicts per event.
 	pub fn on_event(&mut self, f: VerdictFn) {
 		self.verdict = Some(f);
@@ -588,7 +610,9 @@ impl crate::bash::Host for FakeHost {
 		if let Some(i) = self.tools.iter().position(|(n, _)| n.as_bstr() == name) {
 			return Resolved::Tool(ToolRef(i as u64));
 		}
-		if let Some(i) = self.natives.iter().position(|n| n.name.as_bstr() == name) {
+		if !self.fallback
+			&& let Some(i) = self.natives.iter().position(|n| n.name.as_bstr() == name)
+		{
 			return Resolved::Native(NativeRef(i as u64));
 		}
 		// `bash`/`sh`/`zsh` run in-engine as a nested shell.
@@ -596,6 +620,18 @@ impl crate::bash::Host for FakeHost {
 			return Resolved::SelfShell;
 		}
 		IntrinsicId::lookup(name, mode).map_or(Resolved::NotFound, Resolved::Intrinsic)
+	}
+
+	fn fallback(&mut self, name: &BStr) -> Option<NativeRef> {
+		self
+			.natives
+			.iter()
+			.position(|n| self.fallback && n.name.as_bstr() == name)
+			.map(|i| NativeRef(i as u64))
+	}
+
+	fn defers_to_path(&mut self, name: &BStr, argv: &[BString]) -> bool {
+		self.defer.is_some_and(|rule| rule(name, argv))
 	}
 
 	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>> {

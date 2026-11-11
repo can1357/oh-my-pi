@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getConfigAgentDirName, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildSystemPrompt,
 	discoverSystemPromptOverride,
@@ -43,7 +43,7 @@ async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): 
 		return await fn({
 			cwd: tempDir.join("project"),
 			projectConfig: tempDir.join("project", CONFIG_DIR_NAME),
-			userConfig: path.join(home, getConfigAgentDirName()),
+			userConfig: getAgentDir(),
 		});
 	} finally {
 		homedirSpy.mockRestore();

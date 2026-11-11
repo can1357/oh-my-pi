@@ -196,4 +196,15 @@ describe("shell semantic ANSI views", () => {
 		expect(plain).toContain("×");
 		expect(plain).toContain("exit 7");
 	});
+	it("marks only the running statement, not the script rows that run with it", () => {
+		const presentation = fixture();
+		presentation.running = true;
+		presentation.rows[0].segments[0].active = true;
+		presentation.rows[0].active = true;
+		presentation.rows[1] = { ...row("0:0:1", ""), role: "document", active: true };
+		presentation.rows[1].segments = [{ text: "import", style: "kw" }];
+		const lines = renderShellVisualization(presentation, theme, 100);
+		expect(Bun.stripANSI(lines[0])).toContain("▶");
+		expect(Bun.stripANSI(lines[1])).not.toContain("▶");
+	});
 });

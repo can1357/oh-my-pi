@@ -1634,7 +1634,7 @@ fn finish_pattern(
 			 changes; state edits as *** Find / *** Replace pairs instead."
 		));
 		let located = parse_pattern(&operation.pattern_text, number)
-			.and_then(|pattern| locate(content, &pattern, &operation, number, "", &[], true));
+			.and_then(|pattern| locate(content, &pattern, &operation, number, "", &[]));
 		if located.is_ok() {
 			operations.push(operation);
 			return Ok(());
@@ -1649,7 +1649,7 @@ fn finish_pattern(
 		let mut desired = create_operation_text(&source, &source, all, number, true)?;
 		desired.desired_state = true;
 		if let Ok(pattern) = parse_pattern(&desired.pattern_text, number) {
-			match locate(content, &pattern, &desired, number, "", &[], true) {
+			match locate(content, &pattern, &desired, number, "", &[]) {
 				Ok(located) => {
 					if let Some(matched) = located.first() {
 						let matched_normalized =
@@ -1688,7 +1688,7 @@ fn finish_pattern(
 				Err(ambiguity) if ambiguity.to_string().contains(" is ambiguous: ") => {
 					let mut every = desired.clone();
 					every.all = true;
-					if let Ok(mut matches) = locate(content, &pattern, &every, number, "", &[], true)
+					if let Ok(mut matches) = locate(content, &pattern, &every, number, "", &[])
 						&& matches.len() == 2
 					{
 						matches.sort_by_key(|candidate| candidate.match_start);

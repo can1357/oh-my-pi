@@ -34,7 +34,9 @@ impl X11Backend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
 		let capture = X11Capture::new(display)?;
 		let input = X11Input::new(capture.connection(), capture.root())?;
-		let ax = AtSpiAx::new().ok();
+		let ax = AtSpiAx::new()
+			.ok()
+			.map(|ax| ax.with_native_windows(Box::new(capture.clone())));
 		Ok(Self { capture, input, ax, display_server: std::env::var("DISPLAY").ok() })
 	}
 }
