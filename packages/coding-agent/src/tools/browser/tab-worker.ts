@@ -2159,13 +2159,9 @@ export class WorkerCore {
 			failure = { error };
 		} finally {
 			stopPrintCheck?.();
-			// A preview can open after the last poll. Leave room inside the supervisor's 750ms grace for cleanup.
+			// A preview can open after the last poll; the supervisor reserves time for this bounded final probe.
 			if (timeoutSignal.aborted && !ac.signal.aborted && this.#printPreview && this.#page) {
-				const held = await withTimeout(
-					printPreviewHolds(this.#page, this.#relay),
-					500,
-					"Timed out checking print preview before recovery",
-				).catch(() => false);
+				const held = await printPreviewHolds(this.#page, this.#relay);
 				if (held) {
 					printAc.abort(new ToolError(PRINT_PREVIEW_OPEN_MESSAGE));
 					failure = { error: printAc.signal.reason };

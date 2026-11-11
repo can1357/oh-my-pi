@@ -19,6 +19,9 @@ const ANSWER_MS = 1_000;
 /** How long after its plain answer a page the preview does not hold settles an already resolved promise. */
 const PROMISE_SETTLE_MS = 300;
 
+/** Maximum duration of target discovery, parallel renderer answers, and promise settlement. */
+export const PRINT_PREVIEW_PROBE_TIMEOUT_MS = 2 * ANSWER_MS + PROMISE_SETTLE_MS;
+
 export const PRINT_PREVIEW_OPEN_MESSAGE =
 	"The page called window.print() and Chrome's print preview is holding it, so this call stalled: clicks, typing " +
 	"and most evaluations wait until the preview closes. Ask the user to switch to this tab in Chrome and press Cancel " +

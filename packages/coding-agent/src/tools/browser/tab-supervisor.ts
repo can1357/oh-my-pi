@@ -28,6 +28,7 @@ import {
 	recordSharedTarget,
 	type SharedTargetScope,
 } from "./orphan-registry";
+import { PRINT_PREVIEW_PROBE_TIMEOUT_MS } from "./print-preview";
 import { stopSharedBrowserIfUnreachable } from "./shared-daemon";
 import {
 	acquireBrowser,
@@ -1109,7 +1110,7 @@ async function runInTabWithSnapshot(
 		try {
 			const result = await raceWithTimeout(
 				promise,
-				opts.timeoutMs + GRACE_MS,
+				opts.timeoutMs + GRACE_MS + (tab.kindTag === "headless" ? 0 : PRINT_PREVIEW_PROBE_TIMEOUT_MS),
 				"Browser code execution hung past grace; tab killed",
 				async reason => await forceKillTab(name, reason),
 			);
