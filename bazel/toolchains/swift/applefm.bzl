@@ -16,7 +16,7 @@ re-runs when the selection env vars (tracked through `getenv`) or the watched
 compiler/SDK files change, and on `bazel fetch --configure`.
 """
 
-_ENV = ["OMP_APPLEFM_SWIFTC", "SDKROOT", "DEVELOPER_DIR"]
+_ENV = ["OMP_APPLEFM_SWIFTC", "OMP_APPLEFM_DISABLE", "SDKROOT", "DEVELOPER_DIR"]
 
 _CANDIDATE_SDK_SETTINGS = [
     "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.plist",
