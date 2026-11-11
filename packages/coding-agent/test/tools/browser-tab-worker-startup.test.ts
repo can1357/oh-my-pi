@@ -263,6 +263,44 @@ describe("OMP-owned browser evaluation", () => {
 		},
 		45_000,
 	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"says where run code runs when it reaches for a page global, and not when the page throws",
+		async () => {
+			const browser = headless();
+			const name = `run-page-global-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			const failure = async (code: string): Promise<string> => {
+				try {
+					await runInTab(name, { code, timeoutMs: 10_000, session });
+				} catch (error) {
+					return error instanceof Error ? `${error.stack}` : String(error);
+				}
+				throw new Error(`Expected ${code} to fail`);
+			};
+			try {
+				// The page deletes its own `CSS`, so reading it in the page fails with the same name.
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent("<script>delete window.CSS</script>")}`,
+					timeoutMs: 30_000,
+				});
+				const reached = await failure("return document.title;");
+				expect(reached).toStartWith("ReferenceError: document is not defined: ");
+				expect(reached).toContain("tab.evaluate(");
+				expect(await failure("return await tab.evaluate(() => CSS.escape('a'));")).toStartWith(
+					"ReferenceError: CSS is not defined\n",
+				);
+				expect(await failure("return cellVariable;")).toStartWith("ReferenceError: cellVariable is not defined\n");
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
 });
 
 describe("OMP-owned browser input", () => {

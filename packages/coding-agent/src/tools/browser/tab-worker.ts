@@ -239,6 +239,7 @@ import { type UploadRoute, UploadStaging } from "./upload-files";
 import {
 	type Observation,
 	type ObservationEntry,
+	isMissingPageGlobal,
 	ownsPage,
 	type ReadyInfo,
 	type RunErrorPayload,
@@ -1211,7 +1212,14 @@ function errorPayload(error: unknown): RunErrorPayload {
 		};
 	}
 	if (error instanceof Error) {
-		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
+		return {
+			name: error.name,
+			message: error.message,
+			stack: error.stack,
+			isToolError: false,
+			isAbort: false,
+			missingPageGlobal: isMissingPageGlobal(error) || undefined,
+		};
 	}
 	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
 }

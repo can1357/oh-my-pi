@@ -41,6 +41,7 @@ import {
 } from "./registry";
 import {
 	type AttachPage,
+	isMissingPageGlobal,
 	ownsPage,
 	type ReadyInfo,
 	type RunErrorPayload,
@@ -921,7 +922,11 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
 			excludeWebP: webpExclusionForModel(opts.session.getActiveModel?.()),
 		},
-	);
+	).catch(error => {
+		// A worker's run reports this through its payload; an in-process (cmux, Tern) run throws the original.
+		if (isMissingPageGlobal(error)) addPageGlobalHint(error);
+		throw error;
+	});
 	// A worker that exited with no run in flight left the reset unreported; this call reports it. Runs an open
 	// makes on the tab leave it for the open to report.
 	const tab = tabs.get(name);
@@ -2389,6 +2394,14 @@ async function targetIdForTarget(target: Target): Promise<string> {
 	}
 }
 
+/** Say where `tab.run` code runs, after it failed reaching for a page global. */
+function addPageGlobalHint(error: Error): void {
+	const original = `${error.name}: ${error.message}`;
+	error.message += ": tab.run code runs in omp's Bun runtime, not in the page; run page code with tab.evaluate(...)";
+	if (error.stack?.startsWith(original))
+		error.stack = `${error.name}: ${error.message}${error.stack.slice(original.length)}`;
+}
+
 function errorFromPayload(payload: RunErrorPayload): Error {
 	if (payload.debuggerDetached) {
 		const error = new DebuggerDetachedError(
@@ -2412,6 +2425,7 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 						: new Error(payload.message);
 	error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
+	if (payload.missingPageGlobal) addPageGlobalHint(error);
 	return error;
 }
 
