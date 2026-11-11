@@ -106,6 +106,11 @@
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
 
+### Fixed
+
+- Fixed Cursor turns over HTTP/1 stalling for minutes on long conversations ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed one proxy gateway error ending a Cursor turn over HTTP/1 ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
