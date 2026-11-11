@@ -586,7 +586,7 @@ await Promise.withResolvers().promise;`;
 			const invoke = browserHost();
 			const name = `one-line-${crypto.randomUUID()}`;
 
-			const first = await invoke({ action: "open", name, url: new URL("/requested", server.url).href });
+			const first = await invoke({ action: "open", name, url: server.url.origin });
 			const opened = first.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
 			expect(opened).toMatch(new RegExp(`^Opened tab "${name}" on [^\\n]+, titled "Requested page"$`));
 			expect(opened).not.toContain(", at http");
@@ -597,6 +597,10 @@ await Promise.withResolvers().promise;`;
 			expect(reused).toBe(reused.split("\n")[0]);
 			expect(reused).toStartWith(`Reused tab "${name}" on `);
 			expect(reused).toEndWith(`, at ${landed}, titled "Landed"`);
+
+			const adopted = await invoke({ action: "open", name });
+			const withoutUrl = adopted.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+			expect(withoutUrl).toEndWith(`, at ${landed}, titled "Landed"`);
 		} finally {
 			server.stop(true);
 		}
