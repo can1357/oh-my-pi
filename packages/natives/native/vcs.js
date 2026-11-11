@@ -175,12 +175,15 @@ async function gitPredatesHookRun() {
  * Git before 2.36 has no `git hook run`, so a worktree add whose clone path
  * owes a post-checkout run would fail with "git: 'hook' is not a git command"
  * even though the worktree was created. Execute the hook file directly the way
- * Git would: resolve `core.hooksPath`, falling back to the common dir's
- * `hooks/`, treat an absent or non-executable hook as success like
- * `--ignore-missing` does, and keep the hook's exit status and output.
+ * Git would: resolve `core.hooksPath` with `--path` (expanding `~`/`~user` the
+ * way git_config_pathname does), falling back to the common dir's `hooks/`,
+ * treat an absent or non-executable hook as success like `--ignore-missing`
+ * does, run it with Git's hook environment (GIT_EXEC_PATH, the exec path on
+ * PATH, an empty GIT_PREFIX) and no stdin, and keep the hook's exit status
+ * and output.
  */
 async function runPostCheckoutHookFile(worktreeRoot, nullOid, head) {
-	const configured = (await $`git config core.hooksPath`.cwd(worktreeRoot).quiet().nothrow().text()).trim();
+	const configured = (await $`git config --path --get core.hooksPath`.cwd(worktreeRoot).quiet().nothrow().text()).trim();
 	const commonDir = (await $`git rev-parse --git-common-dir`.cwd(worktreeRoot).quiet().nothrow().text()).trim();
 	const hooksDir = configured || path.join(commonDir || ".git", "hooks");
 	const file = path.resolve(worktreeRoot, hooksDir, "post-checkout");
@@ -188,8 +191,18 @@ async function runPostCheckoutHookFile(worktreeRoot, nullOid, head) {
 		() => true,
 		() => false,
 	);
-	if (!executable) return { exitCode: 0, stdout: "", stderr: "" };
-	const result = await $`${file} ${nullOid} ${head} 1`.cwd(worktreeRoot).quiet().nothrow();
+	if (!executable) return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() };
+	const execPath = (await $`git --exec-path`.quiet().nothrow().text()).trim();
+	const result = await $`${file} ${nullOid} ${head} 1 < /dev/null`
+		.cwd(worktreeRoot)
+		.env({
+			...process.env,
+			GIT_EXEC_PATH: execPath,
+			GIT_PREFIX: "",
+			PATH: execPath ? `${execPath}:${process.env.PATH}` : process.env.PATH,
+		})
+		.quiet()
+		.nothrow();
 	return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
 
