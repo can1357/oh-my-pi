@@ -1,9 +1,18 @@
 import { $which } from "@oh-my-pi/pi-utils";
 
 // The harness's Python helpers need 3.10 or newer (`str | Path` is evaluated at import time).
-const PROBE = "import sys; sys.exit(sys.version_info < (3, 10))";
+const PROBE = 'import sys; print("omp-py", *sys.version_info[:2])';
+const PROBE_OUTPUT = /^omp-py (\d+) (\d+)\s*$/;
 
-/** The first candidate that runs as Python 3.10+. A candidate that is absent, blocked or older is skipped. */
+/** Whether the probe's output names Python 3.10 or newer. A command that exits 0 without printing it is not Python. */
+function isSupported(output: string): boolean {
+	const match = PROBE_OUTPUT.exec(output);
+	if (!match) return false;
+	const [major, minor] = [Number(match[1]), Number(match[2])];
+	return major > 3 || (major === 3 && minor >= 10);
+}
+
+/** The first candidate that runs as Python 3.10+. A candidate that is absent, blocked, not Python or older is skipped. */
 export function findPython(
 	candidates: Array<string | null | undefined> = [Bun.env.PYTHON, $which("python3"), $which("python")],
 ): string | undefined {
@@ -15,11 +24,11 @@ export function findPython(
 			const probe = Bun.spawnSync([candidate, "-c", PROBE], {
 				env,
 				stdin: "ignore",
-				stdout: "ignore",
+				stdout: "pipe",
 				stderr: "ignore",
 				timeout: 2000,
 			});
-			if (probe.exitCode === 0) return candidate;
+			if (probe.exitCode === 0 && isSupported(probe.stdout.toString())) return candidate;
 		} catch {
 			// An absent, blocked or unlaunchable interpreter is an optional test dependency.
 		}

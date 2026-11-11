@@ -22,3 +22,21 @@ it.skipIf(pythonPath === undefined || process.platform === "win32")(
 		expect(findPython([fake39, pythonPath])).toBe(pythonPath);
 	},
 );
+
+// A command that exits 0 without being Python (`true`, a Windows Store alias that prints nothing) must not be taken.
+it.skipIf(pythonPath === undefined || process.platform === "win32")(
+	"skips a candidate that exits 0 without printing the probe sentinel",
+	async () => {
+		using tmp = TempDir.createSync("@omp-memory-eval-python-probe-");
+		const silent = tmp.join("silent");
+		await Bun.write(silent, "#!/bin/sh\nexit 0\n");
+		await fs.chmod(silent, 0o755);
+		const noisy = tmp.join("noisy");
+		await Bun.write(noisy, "#!/bin/sh\necho Python 3.13\nexit 0\n");
+		await fs.chmod(noisy, 0o755);
+
+		expect(findPython([silent])).toBeUndefined();
+		expect(findPython([noisy])).toBeUndefined();
+		expect(findPython([silent, noisy, pythonPath])).toBe(pythonPath);
+	},
+);
