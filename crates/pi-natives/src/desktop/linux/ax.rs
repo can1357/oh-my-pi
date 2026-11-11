@@ -1521,12 +1521,11 @@ mod tests {
 	/// declares it), with the action `action_index` resolves a generic press to.
 	#[test]
 	fn generic_press_takes_each_toolkits_activation() {
-		let cases: [(&str, &[&str], Option<usize>); 11] = [
+		let cases: [(&str, &[&str], Option<usize>); 10] = [
 			("GTK 4 label", &["clipboard.copy", "link.open", "menu.popup"], None),
 			("Qt slider", &["SetFocus", "Increase", "Decrease"], None),
 			("Qt menu bar item", &["ShowMenu"], None),
 			("Chromium ARIA menu item", &["select", "showContextMenu"], Some(0)),
-			("Chromium list option", &["select", "showContextMenu"], Some(0)),
 			("Chromium tab", &["doDefault", "showContextMenu"], Some(0)),
 			("Chromium section", &["clickAncestor", "showContextMenu"], Some(0)),
 			("GTK colour swatch", &["select", "activate", "customize"], Some(1)),
