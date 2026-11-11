@@ -7,6 +7,7 @@
  * (`seedOwnedProfilePreferences`); a profile it does not seed (`app.path`, `app.cdp_url`) and the relay's Chrome
  * can still open the preview, and nothing outside Chrome can close it without navigating the page away.
  */
+import { withTimeout } from "@oh-my-pi/pi-utils";
 import type { CDPSession, Page } from "puppeteer-core";
 
 /** How long a run goes before omp checks whether a print preview holds its page, and the gap between checks. */
@@ -26,13 +27,7 @@ export const PRINT_PREVIEW_OPEN_MESSAGE =
 
 /** `promise`'s value, or `fallback` once `ms` pass first; a rejection counts as `fallback` too. */
 async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-	const { promise: deadline, resolve } = Promise.withResolvers<T>();
-	const timer = setTimeout(() => resolve(fallback), ms);
-	try {
-		return await Promise.race([promise.catch(() => fallback), deadline]);
-	} finally {
-		clearTimeout(timer);
-	}
+	return withTimeout(promise, ms, "Print preview check timed out").catch(() => fallback);
 }
 
 /**
@@ -72,7 +67,8 @@ async function printPreviewOpen(page: Page, relay: boolean): Promise<boolean> {
 async function sessionHeld(session: CDPSession): Promise<boolean> {
 	let settled = false;
 	// Stays pending in Chrome until the preview closes; its late answer only sets `settled`.
-	const promise = session.send("Runtime.evaluate", { expression: "Promise.resolve()", awaitPromise: true }).then(
+	// Async functions return an intrinsic promise even when the page replaces the global Promise.
+	const promise = session.send("Runtime.evaluate", { expression: "(async () => {})()", awaitPromise: true }).then(
 		() => {
 			settled = true;
 		},

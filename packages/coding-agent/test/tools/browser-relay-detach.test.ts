@@ -9,6 +9,7 @@ import {
 	ensureChromiumExecutable,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { printPreviewHolds } from "@oh-my-pi/pi-coding-agent/tools/browser/print-preview";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	PRINT_PREVIEW_PROTOCOL_VERSION,
@@ -810,12 +811,26 @@ describe("relay tabs Chrome detaches omp from", () => {
 		try {
 			let keyUp: Promise<void> | undefined;
 			if (ext) {
-				const promiseCheck = (params: unknown) => isRecord(params) && params.expression === "Promise.resolve()";
+				// A page can replace the global Promise, but an async function still returns an intrinsic promise.
+				await page.mainFrame().client.send("Runtime.evaluate", {
+					expression:
+						"globalThis.originalPromiseResolve = Promise.resolve; Promise.resolve = () => Promise.withResolvers().promise",
+				});
+				expect(await printPreviewHolds(page, false)).toBe(false);
+				await page.mainFrame().client.send("Runtime.evaluate", {
+					expression: "Promise.resolve = globalThis.originalPromiseResolve; delete globalThis.originalPromiseResolve",
+				});
+				const promiseCheck = (params: unknown) => isRecord(params) && params.expression === "(async () => {})()";
 				const firstCheck = ext.nextSend("Runtime.evaluate", promiseCheck);
 				const slow = invoke({
 					action: "run",
 					// omp evaluates in its own world; the page's DOM is what both sides share.
-					code: `return await page.evaluate(() => new Promise(resolve => new MutationObserver(() => resolve(document.documentElement.dataset.release)).observe(document.documentElement, { attributeFilter: ["data-release"] })));`,
+					code: `return await page.evaluate(() => {
+						const { promise, resolve } = Promise.withResolvers();
+						new MutationObserver(() => resolve(document.documentElement.dataset.release))
+							.observe(document.documentElement, { attributeFilter: ["data-release"] });
+						return promise;
+					});`,
 					timeout: 20,
 				});
 				await firstCheck;
