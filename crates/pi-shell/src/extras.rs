@@ -57,7 +57,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{EnvView, FdRef, FileKind, NativeRef, OsHandle, Signal, Task},
-	git::flag_on,
 	tools::ToolConfig,
 };
 
@@ -104,14 +103,14 @@ pub struct ExtrasGate {
 }
 
 impl ExtrasGate {
-	/// The gate pi's switches in `var` (a variable's value by name) set;
-	/// truthy is set and not empty, `0` or `false`.
-	pub fn from_env<'a>(var: impl Fn(&str) -> Option<&'a str>) -> Self {
+	/// The gate pi's switches set; `on` says whether the switch variable it
+	/// names is on ([`flag_on`](crate::git::flag_on) of its value).
+	pub fn from_switches(on: impl Fn(&str) -> bool) -> Self {
 		Self {
-			utilities_off:   flag_on(var("PI_DISABLE_UUTILS_BUILTINS")),
-			destructive_off: flag_on(var("PI_DISABLE_UUTILS_DESTRUCTIVE")),
-			rm_off:          flag_on(var("PI_DISABLE_RM_BUILTIN")),
-			mv_off:          flag_on(var("PI_DISABLE_MV_BUILTIN")),
+			utilities_off:   on("PI_DISABLE_UUTILS_BUILTINS"),
+			destructive_off: on("PI_DISABLE_UUTILS_DESTRUCTIVE"),
+			rm_off:          on("PI_DISABLE_RM_BUILTIN"),
+			mv_off:          on("PI_DISABLE_MV_BUILTIN"),
 		}
 	}
 
@@ -476,11 +475,14 @@ impl Task for Refusal {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::git::flag_on;
 
 	#[test]
 	fn gates_follow_pis_switches() {
 		let gate = |pairs: &'static [(&'static str, &'static str)]| {
-			ExtrasGate::from_env(|name| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v))
+			ExtrasGate::from_switches(|name| {
+				flag_on(pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v))
+			})
 		};
 		let all = ExtrasGate::default();
 		assert!(all.native("sort".into()).is_some());

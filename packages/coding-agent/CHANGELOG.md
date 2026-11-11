@@ -17,6 +17,10 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 
+### Changed
+
+- The `bash` tool description lists the embedded shell's in-process builtins again, straight from the shell, so it follows every `PI_DISABLE_*` switch and the platform
+
 ### Fixed
 
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
