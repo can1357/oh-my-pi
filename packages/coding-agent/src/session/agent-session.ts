@@ -1408,9 +1408,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
-	/** Advances when the transcript is replaced: `/clear`, `/new`, or a switch to a different
-	 *  session file. Reloading the current session keeps it, so prompt content snapshotted from
-	 *  disk (the workspace tree) stays byte-stable for as long as the conversation is the same. */
+	/** Advances when a fresh transcript starts: `/clear` or `/new`. Resuming or reloading an
+	 *  existing session keeps it: that conversation may still have a warm provider cache, so
+	 *  prompt content snapshotted from disk (the workspace tree) must stay byte-stable for it. */
 	#transcriptEpoch = 0;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
@@ -7300,7 +7300,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
 	}
 
-	/** Transcript epoch: advances on `/clear`, `/new`, and a switch to a different session. */
+	/** Transcript epoch: advances on `/clear` and `/new`, never when resuming an existing session. */
 	get transcriptEpoch(): number {
 		return this.#transcriptEpoch;
 	}
@@ -14302,7 +14302,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Refresh the workspace-roots block to match the resumed session's directory set.
 			// Wrapped so a rebuild failure (e.g. a gate that intentionally fails in tests)
 			// doesn't roll back an otherwise-successful session switch.
-			if (switchingToDifferentSession) this.#transcriptEpoch++;
 			try {
 				await this.refreshBaseSystemPrompt();
 			} catch (refreshErr) {

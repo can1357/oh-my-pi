@@ -183,7 +183,7 @@ Loading is automatic — there is no need to instruct the agent to search for `A
 
 When workspace-tree scanning is enabled (`includeWorkspaceTree`), deeper-directory `AGENTS.md` files that were _not_ auto-loaded (for example, ones below the current directory) are surfaced separately in a `<dir-context>` block that lists their paths and tells the agent to read them before editing those directories. Those files are pointers, not full injected content.
 
-The workspace scan behind `<workspace-tree>` and `<dir-context>` is a snapshot: it is taken at startup and retaken after `/move`, `/clear`, `/new`, or switching to another session. Within one conversation it does not follow file edits or branch checkouts, so the prompt prefix stays cacheable.
+The workspace scan behind `<workspace-tree>` and `<dir-context>` is a snapshot: it is taken at startup and retaken when the session's directory changes (`/move`, or resuming a session from another project) or a fresh conversation starts (`/clear`, `/new`). It does not follow file edits or branch checkouts within a conversation, and resuming a session in the same directory keeps it, so an existing conversation's prompt prefix stays cacheable.
 
 ## `@` imports
 

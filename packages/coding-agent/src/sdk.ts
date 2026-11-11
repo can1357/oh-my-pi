@@ -2067,10 +2067,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? scanWorkspaceTree(cwd)
 			: undefined;
 	// Directory and transcript epoch the current tree describes. A rebuild
-	// after `/move`, `/clear`, `/new`, or a switch to another session rescans so
-	// the prompt reflects the tree on disk (e.g. after a branch checkout);
-	// rebuilds within one transcript reuse it so the cached prompt prefix stays
-	// byte-stable.
+	// after the session cwd changes (`/move`, resuming a session from another
+	// project) or a fresh transcript starts (`/clear`, `/new`) rescans so the
+	// prompt reflects the tree on disk (e.g. after a branch checkout). Every
+	// other rebuild, including resuming a session in the same directory, reuses
+	// it so an existing conversation's cached prompt prefix stays byte-stable.
 	let workspaceTreeRoot = path.resolve(cwd);
 	let workspaceTreeEpoch = 0;
 	// Tree from a mid-session scan; supersedes the startup value handed to subagents.

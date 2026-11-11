@@ -194,7 +194,7 @@ describe("workspace tree in the system prompt", () => {
 		});
 	});
 
-	it("rescans the tree after switching to a different session", async () => {
+	it("keeps the tree when resuming another session in the same directory", async () => {
 		await withTreeSession(
 			async (session, tempDir) => {
 				const cwd = session.sessionManager.getCwd();
@@ -207,8 +207,9 @@ describe("workspace tree in the system prompt", () => {
 				if (!targetFile) throw new Error("Expected the target session to be on disk");
 				await Bun.write(path.join(cwd, "checked_out_entry.txt"), "x");
 
+				// The resumed conversation may still be cached under this prefix.
 				expect(await session.switchSession(targetFile)).toBe(true);
-				expect(session.systemPrompt.join("\n")).toContain("checked_out_entry.txt");
+				expect(session.systemPrompt.join("\n")).not.toContain("checked_out_entry.txt");
 			},
 			{ persisted: true },
 		);
