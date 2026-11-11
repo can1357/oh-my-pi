@@ -1,11 +1,13 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import {
 	Agent,
 	type AgentMessage,
 	type AgentTool,
+	type AgentToolContext,
 	type AgentTurnEndContext,
 	type StreamFn,
+	type ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -31,6 +33,8 @@ const zeroUsage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } satisfies AssistantMessage["usage"];
 
+type AdviceArgs = { note: string; severity: "nit" | "concern" | "blocker" };
+
 /** Advisor-visible tool that fails the same way on every call. */
 const failingReadTool: AgentTool = {
 	name: "read",
@@ -47,6 +51,8 @@ describe("advisor tool-call loop guard", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
+	// What the primary's tool context store hands the advisor.
+	let primaryToolContext = (toolCall?: ToolCallContext) => ({ toolCall }) as AgentToolContext;
 
 	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-tool-call-loop-guard-");
@@ -57,6 +63,7 @@ describe("advisor tool-call loop guard", () => {
 	afterEach(async () => {
 		await session?.dispose();
 		session = undefined;
+		primaryToolContext = toolCall => ({ toolCall }) as AgentToolContext;
 	});
 
 	afterAll(async () => {
@@ -75,7 +82,7 @@ describe("advisor tool-call loop guard", () => {
 		primaryToolSteps = 0,
 		advice?: string,
 		adviceSeverity: "nit" | "concern" | "blocker" = "nit",
-		advices?: { note: string; severity: "nit" | "concern" | "blocker" }[],
+		advices?: AdviceArgs[] | ((context: Context) => AdviceArgs | undefined),
 	): { advisor: Agent; contexts: Context[]; reviewStarts: Context[] } {
 		const primaryMock = createMockModel({
 			provider: "anthropic",
@@ -109,8 +116,13 @@ describe("advisor tool-call loop guard", () => {
 			// Deliberately ignore the corrective. The enabled guard must hard-stop
 			// this stream; the finite ceiling keeps the disabled control bounded.
 			// `advices` feeds one note per review start, so several advisors (or
-			// several reviews) can each raise their own note.
-			const queued = isReviewStart ? advices?.shift() : undefined;
+			// several reviews) can each raise their own note; as a function it picks
+			// the note from what the review sees.
+			const queued = !isReviewStart
+				? undefined
+				: typeof advices === "function"
+					? advices(context)
+					: advices?.shift();
 			const advising = queued !== undefined || (advice !== undefined && turn === 0);
 			const repeating = advising || turn < maxRepeatedTurns;
 			turn++;
@@ -174,6 +186,7 @@ describe("advisor tool-call loop guard", () => {
 			modelRegistry,
 			advisorTools: [failingReadTool],
 			advisorStreamFn,
+			advisorGetToolContext: toolCall => primaryToolContext(toolCall),
 			advisorConfigs:
 				advisorConfig === undefined ? undefined : Array.isArray(advisorConfig) ? advisorConfig : [advisorConfig],
 		});
@@ -184,6 +197,103 @@ describe("advisor tool-call loop guard", () => {
 		advisor.setModel(advisorMock);
 		return { advisor, contexts, reviewStarts };
 	}
+
+	it("lets an advisor read observe an earlier shared writer's final state", async () => {
+		const { advisor } = createAdvisor({}, 0);
+		const readStarted = Promise.withResolvers<void>();
+		let bytes = "old";
+		const mock = createMockModel({
+			provider: "anthropic",
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "writer", name: "bash", arguments: {} },
+						{ type: "toolCall", id: "reader", name: "read", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		advisor.streamFn = mock.stream;
+		advisor.setTools([
+			{
+				name: "bash",
+				label: "Bash",
+				description: "Changes bytes",
+				parameters: type({}),
+				approval: "exec",
+				async execute() {
+					await readStarted.promise;
+					for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+					bytes = "new";
+					return { content: [] };
+				},
+			},
+			{
+				name: "read",
+				label: "Read",
+				description: "Reconciles bytes",
+				parameters: type({}),
+				approval: "read",
+				async execute(_id, _args, _signal, _update, context) {
+					let result = bytes;
+					readStarted.resolve();
+					const call = (context as (AgentToolContext & { toolCall?: ToolCallContext }) | undefined)?.toolCall;
+					if (call?.earlierEffectsSettled) {
+						await call.earlierEffectsSettled;
+						result = bytes;
+					}
+					return { content: [{ type: "text", text: result }] };
+				},
+			},
+		]);
+		await advisor.prompt("run the writer and read");
+		const read = advisor.state.messages.find(
+			(message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "reader",
+		);
+		expect(read?.content).toEqual([{ type: "text", text: "new" }]);
+	});
+
+	it("scopes an advisor tool's abort and tool list to the advisor, not the primary", async () => {
+		let primaryAborts = 0;
+		primaryToolContext = toolCall =>
+			({
+				toolCall,
+				abort: () => {
+					primaryAborts++;
+				},
+				toolNames: ["read", "bash"],
+			}) as AgentToolContext;
+		const { advisor } = createAdvisor({}, 0);
+		const advisorAborts = spyOn(advisor, "abort");
+		let seenToolNames: string[] | undefined;
+		const mock = createMockModel({
+			provider: "anthropic",
+			responses: [
+				{ content: [{ type: "toolCall", id: "cancel", name: "ask", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		advisor.streamFn = mock.stream;
+		advisor.setTools([
+			{
+				name: "ask",
+				label: "Ask",
+				description: "Stands in for a dialog the user cancels",
+				parameters: type({}),
+				approval: "read",
+				async execute(_id, _args, _signal, _update, context) {
+					seenToolNames = context?.toolNames;
+					context?.abort();
+					return { content: [{ type: "text", text: "cancelled" }] };
+				},
+			},
+		]);
+		await advisor.prompt("ask the user");
+		expect(primaryAborts).toBe(0);
+		expect(advisorAborts).toHaveBeenCalled();
+		expect(seenToolNames).toEqual(["ask"]);
+	});
 
 	it("redirects the advisor's own repeated tool call and reaches its next request", async () => {
 		const { advisor, contexts } = createAdvisor(
@@ -325,6 +435,41 @@ describe("advisor tool-call loop guard", () => {
 		// the fresh input.
 		expect(delivered).toContain("primary complete");
 		expect(delivered).toContain("second update");
+	});
+
+	it("cancels reviews of the handoff a deferred concern continues and reviews the fix instead", async () => {
+		// The reported session: a concern deferred during the run steers a
+		// continuation at the final boundary while the review of the pre-fix
+		// handoff is still queued (catch-up off). That review would re-raise the
+		// issue as a blocker against the fix in progress; it is cancelled, and the
+		// continuation's final boundary reviews pre- and post-fix work together.
+		const completions = (context: Context) => JSON.stringify(context.messages).split("primary complete").length - 1;
+		const { reviewStarts } = createAdvisor(
+			{ "advisor.syncBacklog": "off" },
+			0,
+			undefined,
+			1,
+			undefined,
+			"nit",
+			context => {
+				const seen = completions(context);
+				if (seen === 0) return { note: "drop the hash pin", severity: "concern" };
+				if (seen === 1) return { note: "hash pin still present", severity: "blocker" };
+				return undefined;
+			},
+		);
+		if (!session) throw new Error("Expected live session");
+
+		await session.prompt("only update");
+		await session.agent.waitForIdle();
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		await session.agent.waitForIdle();
+		const messages = session.agent.state.messages;
+		expect(messages.some(message => JSON.stringify(message).includes("hash pin still present"))).toBe(false);
+		expect(
+			messages.filter(m => m.role === "assistant" && JSON.stringify(m.content).includes("primary complete")),
+		).toHaveLength(2);
+		expect(completions(reviewStarts.at(-1)!)).toBe(2);
 	});
 
 	it("reviews a todo-reminder continuation after a final review", async () => {

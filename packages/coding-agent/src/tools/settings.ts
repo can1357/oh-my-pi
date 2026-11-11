@@ -597,6 +597,16 @@ export const cfgLaunchEnabled = register({
 	},
 });
 
+// A service normally ends with the last omp process in its project: the broker shuts
+// down once no client remains and stops every non-persistent service. Print, RPC and
+// ACP hosts override this on: their caller outlives the omp process and uses the
+// servers a run left running.
+export const cfgLaunchPersist = register({
+	id: "launch.persist",
+	type: "boolean",
+	default: false,
+});
+
 export const cfgSpeechgenEnabled = register({
 	id: "speechgen.enabled",
 	type: "boolean",

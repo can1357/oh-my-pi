@@ -14,6 +14,9 @@
  *   of base64 data URLs when images are supplied, and returns Cloudflare's
  *   `{ result, success, errors }` envelope. The credential is a Cloudflare
  *   API token plus the account id the URL needs.
+ * - `liquid-systemone`: Liquid AI's `POST {baseUrl}/decisions/v1/systemone`.
+ *   Same body, verbatim model, plus a top-level array of base64 data URLs
+ *   when images are supplied.
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
@@ -204,4 +207,23 @@ export const workersAiWire: JudgmentWire = {
 		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
 	}),
 	decode: payload => (isRecord(payload) ? decodeSystemOne(payload.result) : undefined),
+};
+
+/** Liquid AI decision models (`d1.1`, `d1-ultra`). */
+export const liquidWire: JudgmentWire = {
+	...systemOneWire("/decisions/v1/systemone"),
+	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements. The documented 4.5 MB cap covers the
+	// whole JSON body; 3 MB of images is 4 MB as base64, leaving room for state and questions.
+	images: {
+		mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+		maxCount: 8,
+		maxTotalBytes: 3_000_000,
+		maxTotalPatches: 10_000,
+	},
+	encode: (request, model) => ({
+		state: request.state,
+		model,
+		questions: wireQuestions(request.questions),
+		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+	}),
 };

@@ -329,6 +329,13 @@ pub fn flush_hash(
 	Ok(())
 }
 
+/// Whether assigning or unsetting `name` empties the command hash table
+/// ([`flush_hash`]): `PATH`, and on Windows `PATHEXT`, whose extensions
+/// change the same answers.
+pub fn resets_hash(platform: crate::bash::ids::Platform, name: &[u8]) -> bool {
+	name == b"PATH" || (platform == crate::bash::ids::Platform::Windows && name == b"PATHEXT")
+}
+
 /// The `PATH` a lookup of `name` searches: bash's standard path for
 /// `command -p` (`std_path`), else `$PATH`.
 fn search_path(ctx: &mut Ctx<'_, '_>, std_path: bool) -> Result<BString, Need> {

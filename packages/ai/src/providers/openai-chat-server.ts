@@ -407,6 +407,7 @@ function buildTools(tools: OpenAIChatTool[]): Tool[] | undefined {
 			name: t.function.name,
 			description: t.function.description ?? "",
 			parameters: (t.function.parameters ?? {}) as Record<string, unknown> as TSchema,
+			...(typeof t.function.strict === "boolean" ? { strict: t.function.strict } : {}),
 		});
 	}
 	return out;

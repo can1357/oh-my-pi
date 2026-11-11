@@ -1,9 +1,8 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
-import { getSessionOwnersDir } from "@oh-my-pi/pi-utils/dirs";
+import { getSessionOwnersDir, getTestTempDir } from "@oh-my-pi/pi-utils/dirs";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import {
 	type FileLockHandle,
@@ -17,7 +16,6 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { isAssistantMessageLine } from "./session-entries";
 import {
 	overlayTitleSlotContent,
 	parseTitleSlotFromContent,
@@ -212,13 +210,12 @@ export interface SessionStorage {
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
-	 * True when any complete `message` record in the file carries an assistant
-	 * role. Scans line boundaries across the whole file (middle included) so a
-	 * >prefix assistant record before a fixed-size tail window still counts.
-	 * Optional: backends without cheap full scans omit it and callers fall back
-	 * to prefix/suffix marker evidence.
+	 * Feed each line of the file to `visit`, in order, until it returns true or
+	 * the file ends. Lets callers find records that fall between the bounded
+	 * {@link readTextSlices} windows. Optional: backends without cheap full scans
+	 * omit it and callers keep the window evidence.
 	 */
-	hasAssistantTurn?(path: string): Promise<boolean>;
+	scanLines?(path: string, visit: (line: string) => boolean): Promise<void>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
@@ -555,8 +552,7 @@ const TEST_SESSION_OWNERS_DIR_ENV = "PI_TEST_SESSION_OWNERS_DIR";
 function testSessionOwnersDir(): string | undefined {
 	const exported = process.env[TEST_SESSION_OWNERS_DIR_ENV];
 	if (exported || !isBunTestRuntime()) return exported;
-	const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
-	const dir = path.join(os.tmpdir(), `omp-test-session-owners-${uid}`);
+	const dir = getTestTempDir("omp-test-session-owners");
 	process.env[TEST_SESSION_OWNERS_DIR_ENV] = dir;
 	return dir;
 }
@@ -1109,13 +1105,12 @@ export class FileSessionStorage implements SessionStorage {
 		]);
 	}
 
-	async hasAssistantTurn(path: string): Promise<boolean> {
+	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
 		const fileHandle = await fsp.open(path, "r");
 		try {
 			for await (const line of fileHandle.readLines()) {
-				if (isAssistantMessageLine(line)) return true;
+				if (visit(line)) return;
 			}
-			return false;
 		} finally {
 			await fileHandle.close();
 		}
@@ -1734,13 +1729,12 @@ export class MemorySessionStorage implements SessionStorage {
 		return Promise.resolve([sliceChunksHead(entry, prefixBytes), sliceChunksTail(entry, suffixBytes)]);
 	}
 
-	async hasAssistantTurn(path: string): Promise<boolean> {
+	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
 		const entry = this.#files.get(path);
 		if (!entry) throw memoryFileNotFound(path);
 		for (const line of materializeMemoryEntry(entry).split("\n")) {
-			if (isAssistantMessageLine(line)) return true;
+			if (visit(line)) return;
 		}
-		return false;
 	}
 
 	writeText(path: string, content: string): Promise<void> {

@@ -88,7 +88,8 @@ export declare class DesktopSession {
   /**
    * Sets when the current run ends, `remaining_ms` from now; each run sets
    * it before its first call. Input waiting for the user to pause in its app
-   * (macOS) or for a Wayland permission prompt gives up shortly before it.
+   * (macOS), for a Wayland permission prompt or for another session's input
+   * lock gives up shortly before it.
    */
   setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
@@ -620,6 +621,14 @@ export declare class Shell {
    * The options set session-scoped environment variables and a snapshot path.
    */
   constructor(options?: ShellOptions | undefined | null)
+  /**
+   * A new shell with this one's options whose session starts from this
+   * session's state (variables, functions, aliases, options, working
+   * directory) as of its last command boundary: while a command runs, the
+   * state that command started from. What the fork sets stays in the
+   * fork. Never waits for the running command.
+   */
+  fork(): Shell
   /**
    * Run a shell command using the provided options.
    *

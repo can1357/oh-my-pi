@@ -19,6 +19,8 @@ export interface ShakeResult {
 	imagesDropped?: number;
 	/** Thinking blocks dropped (thinking mode only). */
 	thinkingBlocksDropped?: number;
+	/** Thinking blocks the provider replays from its payload, left in place (thinking mode only). */
+	thinkingBlocksKept?: number;
 	/** Estimated context tokens reclaimed. */
 	tokensFreed: number;
 	/** Session artifact holding the dropped originals, when persisted. */
@@ -34,10 +36,15 @@ export function formatShakeSummary(result: ShakeResult): string {
 			: `Dropped ${n} image${n === 1 ? "" : "s"} from this session.`;
 	}
 	if (result.mode === "thinking") {
-		const n = result.thinkingBlocksDropped ?? 0;
-		return n === 0
-			? "No thinking blocks found in this session."
-			: `Dropped ${n} thinking block${n === 1 ? "" : "s"} from this session${result.tokensFreed > 0 ? ` (~${result.tokensFreed} tokens freed)` : ""}.`;
+		const dropped = result.thinkingBlocksDropped ?? 0;
+		const kept = result.thinkingBlocksKept ?? 0;
+		if (dropped === 0 && kept === 0) return "No thinking blocks found in this session.";
+		const keptText = `${kept} thinking block${kept === 1 ? "" : "s"} ${kept === 1 ? "was" : "were"} kept because removing ${
+			kept === 1 ? "it" : "them"
+		} would not change what the model receives`;
+		if (dropped === 0) return `${keptText}.`;
+		const droppedText = `Dropped ${dropped} thinking block${dropped === 1 ? "" : "s"} from this session${result.tokensFreed > 0 ? ` (~${result.tokensFreed} tokens freed)` : ""}`;
+		return kept === 0 ? `${droppedText}.` : `${droppedText}; ${keptText}.`;
 	}
 	const parts: string[] = [];
 	if (result.toolResultsDropped > 0) {

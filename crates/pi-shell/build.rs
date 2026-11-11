@@ -6,14 +6,17 @@ use std::{
 };
 
 fn main() {
-	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+	// Bazel applies these flags to its obash target directly; its build-script
+	// runner does not support Cargo's binary-specific linker directives.
+	let cargo_bin_link_args = env::var_os("OMP_BAZEL_BUILD").is_none();
+	if cargo_bin_link_args && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
 		// A position-dependent obash skips the loader's relative relocations
 		// and the page faults they cost at every start (about a quarter of
 		// a short script's faults).
 		println!("cargo:rustc-link-arg-bin=obash=-no-pie");
 	}
 	generate_minimizer_builtin_filters();
-	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+	if cargo_bin_link_args && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
 		// Dependencies used by the embedded host also bring framework link
 		// directives. Do not load those images in obash if LTO removed every
 		// reference to them.

@@ -44,7 +44,13 @@ import type {
 	SpotlightToolTotals,
 } from "./shared-types";
 import { BOOTSTRAP_MIN_SESSIONS, bootstrapInterval, bootstrapRatio, quantile } from "./spotlight-bootstrap";
-import { artifactIds, parseReadSelection, resolveReadPath, selectedLines } from "./spotlight-ingest";
+import {
+	artifactIds,
+	parseFailureCauses,
+	parseReadSelection,
+	resolveReadPath,
+	selectedLines,
+} from "./spotlight-ingest";
 import {
 	computeAdjusted,
 	computeCoverage,
@@ -125,6 +131,7 @@ interface ResultRow {
 	artifacts: string | null;
 	sp_calls: number | null;
 	sp_failures: number | null;
+	sp_failure_causes: string | null;
 	sp_ms: number | null;
 	sp_cost: number | null;
 	shape_ms: number | null;
@@ -200,6 +207,8 @@ export interface Result {
 	hiddenLines: number;
 	spotlightCalls: number;
 	spotlightFailures: number;
+	/** Failed Spotlight calls by cause; null when none failed or the shape entry predates causes. */
+	spotlightFailureCauses: Record<string, number> | null;
 	spotlightMs: number;
 	spotlightUsd: number;
 	/** Wall time shaping took; null before its shape entry landed. */
@@ -291,6 +300,16 @@ function parseStrings(json: string | null): string[] {
 	}
 }
 
+/** The `sp_failure_causes` column, by ingest's rules; null when empty or unreadable. */
+function failureCausesColumn(json: string | null): Record<string, number> | null {
+	if (!json) return null;
+	try {
+		return parseFailureCauses(JSON.parse(json));
+	} catch {
+		return null;
+	}
+}
+
 function parseRanges(json: string | null): [number, number][] {
 	if (!json) return [];
 	try {
@@ -367,6 +386,7 @@ function toResult(row: ResultRow): Result {
 		hiddenLines: row.hidden_lines,
 		spotlightCalls: row.sp_calls ?? 0,
 		spotlightFailures: row.sp_failures ?? 0,
+		spotlightFailureCauses: failureCausesColumn(row.sp_failure_causes),
 		spotlightMs: row.sp_ms ?? 0,
 		spotlightUsd: row.sp_cost ?? 0,
 		shapeMs: row.shape_ms,
@@ -412,7 +432,7 @@ class SessionLoader {
 		this.#results = database.query<ResultRow, [string]>(
 			`SELECT r.tool_call_id, r.timestamp, r.tool, r.in_chars, r.out_chars, r.in_tokens, r.out_tokens,
 			 r.steps, r.holdout, r.path, r.start_line, r.lines, r.hidden, r.hidden_lines, r.artifacts, r.sp_calls,
-			 r.sp_failures, r.sp_ms, r.sp_cost, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
+			 r.sp_failures, r.sp_failure_causes, r.sp_ms, r.sp_cost, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
 			 r.gated, r.heat, r.kept,
 			 n.reread AS need_reread, n.edit AS need_edit
 			 FROM spotlight_results r
@@ -1612,6 +1632,9 @@ function computeGaps(evaluated: readonly Evaluated[], tools: readonly SpotlightT
 	return tools.flatMap(tool => counts.get(tool) ?? []);
 }
 
+/** The cause of failed results whose shape entry predates journaled causes. */
+const UNRECORDED_CAUSE = "unrecorded";
+
 /** Shaping time, Spotlight latency, failures and bill over every evaluated result. */
 function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 	const shapeMs: number[] = [];
@@ -1620,6 +1643,7 @@ function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 	let failedWaitMs = 0;
 	let called = 0;
 	let spotlightUsd = 0;
+	const causes = new Map<string, number>();
 	for (const { result } of evaluated) {
 		spotlightUsd += result.spotlightUsd;
 		if (result.shapeMs !== null) shapeMs.push(result.shapeMs);
@@ -1629,6 +1653,10 @@ function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 				// A failed call records no Spotlight time; its wait shows in the shaping time instead.
 				failed++;
 				failedWaitMs += result.shapeMs ?? 0;
+				const named = Object.keys(result.spotlightFailureCauses ?? {});
+				for (const cause of named.length > 0 ? named : [UNRECORDED_CAUSE]) {
+					causes.set(cause, (causes.get(cause) ?? 0) + 1);
+				}
 			} else {
 				spotlightMs.push(result.spotlightMs);
 			}
@@ -1644,6 +1672,9 @@ function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 		spotlightMsP50: at(spotlightMs, 0.5),
 		spotlightMsP90: at(spotlightMs, 0.9),
 		failureRate: called > 0 ? failed / called : null,
+		failureCauses: [...causes]
+			.map(([cause, results]) => ({ cause, results, share: results / called }))
+			.sort((a, b) => b.results - a.results || a.cause.localeCompare(b.cause)),
 		failedWaitMs,
 		spotlightUsd,
 	};

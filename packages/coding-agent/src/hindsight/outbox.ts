@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, sanitizeText, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, sanitizeText, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
 import type { MemoryWriteScope } from "../memory-backend/global-scope";
 import { redactMemorySecrets } from "../memory-backend/redact";
 import { writeFileAtomically } from "../utils/atomic-file";
@@ -135,7 +135,8 @@ export class HindsightOutbox {
 
 	/**
 	 * Sends this destination's events and quarantines every destination's expired
-	 * ones. Stops at the first retryable failure; events stay on disk for the next drain.
+	 * ones, then prunes quarantine. Stops at the first retryable failure; events stay
+	 * on disk for the next drain. Pruning is best-effort and never fails delivery.
 	 */
 	async drain(): Promise<DrainResult> {
 		const result: DrainResult = { busy: false, delivered: 0, quarantined: 0, kept: 0 };
@@ -160,6 +161,13 @@ export class HindsightOutbox {
 			} finally {
 				lease.release();
 			}
+		}
+		try {
+			await this.#pruneQuarantine();
+		} catch (error) {
+			logger.warn("Hindsight quarantine cleanup failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 		return result;
 	}
@@ -291,24 +299,44 @@ export class HindsightOutbox {
 		result.quarantined += await this.#quarantine(expired);
 	}
 
-	/** Moves `files` to quarantine, then deletes quarantined events past their review period. */
+	/** Moves `files` to quarantine and starts their review period. */
 	async #quarantine(files: string[]): Promise<number> {
 		if (files.length === 0) return 0;
 		const dir = this.quarantineDir;
 		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-		const now = new Date();
-		for (const file of files) {
-			const target = path.join(dir, path.basename(file));
-			await fs.rename(file, target);
-			// The review period starts now, not at enqueue.
-			await fs.utimes(target, now, now);
-		}
-		const cutoff = now.getTime() - QUARANTINE_TTL_MS;
-		for (const name of await fs.readdir(dir)) {
-			const file = path.join(dir, name);
-			if ((await fs.stat(file)).mtimeMs < cutoff) await fs.rm(file, { force: true });
-		}
-		return files.length;
+		return withFileLock(dir, async () => {
+			const now = new Date();
+			for (const file of files) {
+				const target = path.join(dir, path.basename(file));
+				await fs.rename(file, target);
+				// The review period starts now, not at enqueue.
+				await fs.utimes(target, now, now);
+			}
+			return files.length;
+		});
+	}
+
+	/** Deletes quarantined events past their review period. */
+	async #pruneQuarantine(): Promise<void> {
+		const dir = this.quarantineDir;
+		await withFileLock(dir, async () => {
+			let names: string[];
+			try {
+				names = await fs.readdir(dir);
+			} catch (error) {
+				if (isEnoent(error)) return;
+				throw error;
+			}
+			const cutoff = Date.now() - QUARANTINE_TTL_MS;
+			for (const name of names) {
+				const file = path.join(dir, name);
+				try {
+					if ((await fs.stat(file)).mtimeMs < cutoff) await fs.rm(file, { force: true });
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+				}
+			}
+		});
 	}
 }
 

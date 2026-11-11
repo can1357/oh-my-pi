@@ -16,7 +16,8 @@ use crate::minimizer::{MinimizerCtx, MinimizerOutput, config::OutlineLevel, prim
 /// For `rg`: `-0` / `--null` and `--null-data`.
 fn context_has_nul_output(command: &str, program: &str) -> bool {
 	command.split_whitespace().any(|tok| match program {
-		// -z may be clustered with other short flags (e.g. -zHn); --null-data is long.
+		// -z may be clustered with other short flags (e.g. -zHn); --null-data is
+		// long.
 		"grep" => {
 			tok == "--null-data"
 				|| tok == "--null"

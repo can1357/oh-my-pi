@@ -38,6 +38,7 @@ import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
+import type { PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
 import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
@@ -429,6 +430,13 @@ export interface ToolSession {
 	 * hidden notice. Absent when the embedder has no base-prompt surface.
 	 */
 	advertisedSessionAgents?: () => readonly AgentDefinition[];
+	/**
+	 * Per-call model roles baked into the current base prompt surface. The task
+	 * and eval descriptions list these instead of live settings so another
+	 * instance's role edit does not mutate the provider tool prefix; a real
+	 * rebuild absorbs the delta. Absent when the embedder has no surface.
+	 */
+	advertisedPerCallModel?: () => PerCallModelAdvertisement | undefined;
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */
@@ -979,7 +987,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	return tools;
 }
 
-export type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
+export type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 // Issue #12680: extensions that shadow the built-in ask tool reach the native
 // renderer through the injected pi.pi namespace (the root barrel of this
 // package). Re-export it so the pi-tui renderer migration doesn't drop it.
