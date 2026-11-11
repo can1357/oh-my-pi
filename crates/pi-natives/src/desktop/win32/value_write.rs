@@ -475,7 +475,7 @@ mod tests {
 		static ORIGINAL_COMBO_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
 			= const { std::cell::Cell::new(None) };
 		static ITEM_NAME_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-		static SLEEPING_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+		static POINTER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 		static ORIGINAL_PARENT_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
 			= const { std::cell::Cell::new(None) };
 		static DESTROY_ON_NOTIFICATION: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
@@ -602,7 +602,7 @@ mod tests {
 	}
 
 	#[cfg(target_os = "windows")]
-	unsafe extern "system" fn sleeping_combo(
+	unsafe extern "system" fn recording_combo(
 		hwnd: windows_sys::Win32::Foundation::HWND,
 		message: u32,
 		wparam: usize,
@@ -610,9 +610,8 @@ mod tests {
 	) -> isize {
 		use windows_sys::Win32::UI::WindowsAndMessaging::{CB_FINDSTRINGEXACT, CallWindowProcW};
 		if message == CB_FINDSTRINGEXACT {
-			SLEEPING_CALLS.with(|calls| calls.set(calls.get() + 1));
-			std::thread::sleep(std::time::Duration::from_secs(6));
-			// Do not dereference the caller's message pointer after its timeout.
+			POINTER_CALLS.with(|calls| calls.set(calls.get() + 1));
+			// Count forbidden dispatch without dereferencing its text pointer.
 			return -1;
 		}
 		let original = ORIGINAL_COMBO_PROC.with(|proc| proc.get());
@@ -623,15 +622,11 @@ mod tests {
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn same_process_cross_thread_messages_are_unconfirmed() {
-		use std::sync::{
-			Arc,
-			atomic::{AtomicBool, Ordering},
-			mpsc,
-		};
+		use std::sync::mpsc;
 
 		use windows_sys::Win32::UI::WindowsAndMessaging::{
-			CreateWindowExW, DestroyWindow, DispatchMessageW, GWLP_WNDPROC, MSG, PM_REMOVE,
-			PeekMessageW, SetWindowLongPtrW, WNDPROC, WS_CHILD, WS_OVERLAPPED,
+			CreateWindowExW, DestroyWindow, DispatchMessageW, GWLP_WNDPROC, GetMessageW, MSG,
+			PostThreadMessageW, SetWindowLongPtrW, WM_QUIT, WNDPROC, WS_CHILD, WS_OVERLAPPED,
 		};
 		// Keep the target and sender in one isolated child process, while
 		// their window procedures run on different threads.
@@ -651,8 +646,6 @@ mod tests {
 			print!("{}", String::from_utf8_lossy(&output.stdout));
 			return;
 		}
-		let stop = Arc::new(AtomicBool::new(false));
-		let stopped = Arc::clone(&stop);
 		let (ready, handle) = mpsc::channel();
 		let owner = std::thread::spawn(move || {
 			let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
@@ -689,39 +682,35 @@ mod tests {
 				);
 				assert!(!parent.is_null() && !combo.is_null());
 				let original =
-					SetWindowLongPtrW(combo, GWLP_WNDPROC, sleeping_combo as *const () as isize);
+					SetWindowLongPtrW(combo, GWLP_WNDPROC, recording_combo as *const () as isize);
 				ORIGINAL_COMBO_PROC
 					.with(|proc| proc.set(std::mem::transmute::<isize, WNDPROC>(original)));
-				ready.send(combo as usize).unwrap();
-				while !stopped.load(Ordering::Relaxed) {
-					let mut message = MSG::default();
-					if PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-						DispatchMessageW(&message);
-					}
-					std::thread::sleep(std::time::Duration::from_millis(1));
+				ready
+					.send((combo as usize, windows_sys::Win32::System::Threading::GetCurrentThreadId()))
+					.unwrap();
+				let mut message = MSG::default();
+				while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+					DispatchMessageW(&message);
 				}
 				DestroyWindow(parent);
 				assert_eq!(
-					SLEEPING_CALLS.with(|calls| calls.get()),
+					POINTER_CALLS.with(|calls| calls.get()),
 					0,
 					"pointer-bearing message must not reach the other thread"
 				);
 			}
 		});
-		let hwnd = handle
-			.recv_timeout(std::time::Duration::from_secs(10))
-			.unwrap() as _;
-		let start = std::time::Instant::now();
-		let result = set_combo(hwnd, "green", true, false);
-		let elapsed = start.elapsed();
-		stop.store(true, Ordering::Relaxed);
+		let (hwnd, thread) = handle.recv().unwrap();
+		let result = set_combo(hwnd as _, "green", true, false);
+		// SAFETY: this test created the owner thread and its message queue;
+		// WM_QUIT carries no pointers and wakes GetMessageW for cleanup.
+		assert_ne!(unsafe { PostThreadMessageW(thread, WM_QUIT, 0, 0) }, 0);
 		owner.join().unwrap();
 		let error = result.unwrap_err().to_string();
 		assert!(error.contains("value could not be confirmed safely"), "{error}");
 		assert!(error.contains("another thread in this process"), "{error}");
 		assert!(error.contains("nothing was written"), "{error}");
-		assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
-		println!("same-process cross-thread target: returned in {elapsed:?}: {error}");
+		println!("same-process cross-thread target: refused before dispatch: {error}");
 	}
 
 	#[cfg(target_os = "windows")]
