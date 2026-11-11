@@ -160,25 +160,31 @@ describe("GitHub run-watch renderer", () => {
 		).toBe(true);
 		expect(legacyNodes.some(node => node.key?.startsWith("step:") || node.key?.startsWith("job:"))).toBe(false);
 
+		// The model-facing text names only the step a failed job broke on; per-step rows stay in the UI.
 		const markdownJobs: GhRunJobSnapshot[] = [
 			{
 				id: 5,
 				name: "Checks",
+				conclusion: "failure",
 				steps: [
-					{
-						number: 4,
-						name: "Run checks\twith controls",
-						status: "completed",
-						conclusion: "failure",
-						startedAt: "2026-11-11T10:00:00Z",
-						completedAt: "2026-11-11T10:00:04Z",
-					},
+					{ number: 1, name: "Set up job", status: "completed", conclusion: "success" },
+					{ number: 4, name: "Run checks\nwith controls", status: "completed", conclusion: "failure" },
+					{ number: 5, name: "Upload", status: "completed", conclusion: "skipped" },
 				],
 			},
+			{
+				id: 6,
+				name: "Lint",
+				conclusion: "success",
+				steps: [{ number: 1, name: "Set up job", status: "completed", conclusion: "success" }],
+			},
 		];
-		const markdown = renderJobsSection(markdownJobs).join("\n");
-		expect(markdown).toContain("Step #4 [failure] Run checks with controls");
-		expect(markdown).toContain("Started: 2026-11-11T10:00:00Z");
-		expect(markdown).toContain("Completed: 2026-11-11T10:00:04Z");
+		expect(renderJobsSection(markdownJobs)).toEqual([
+			"## Jobs (2)",
+			"",
+			"- [failure] Checks",
+			"  Failed step: #4 Run checks with controls",
+			"- [success] Lint",
+		]);
 	});
 });

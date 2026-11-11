@@ -10,6 +10,7 @@ import type { RenderResultOptions } from "./renderer";
 import type { Theme, ThemeColor } from "../theme/theme";
 import { outputBlockContentWidth, renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
+import { sanitizeDisplayLine } from "../overlays/extensions/display-text";
 
 import { formatShortSha, pushLine } from "./gh-format";
 import {
@@ -177,12 +178,13 @@ function getJobStateVisual(job: GhRunWatchJobDetails, theme: Theme): { icon: str
 	return { icon: theme.styledSymbol("status.shadowed", "muted"), textColor: "muted" };
 }
 
-function cleanWatchText(value: string): string {
-	return sanitizeDisplayWarning(value).replace(/\s+/g, " ");
+/** First step that concluded in failure; the step a failed job broke on. */
+function findFailedStep<T extends { conclusion?: string }>(steps: readonly T[] | undefined): T | undefined {
+	return steps?.find(step => step.conclusion !== undefined && FAILURE_CONCLUSIONS.has(step.conclusion));
 }
 
 function getStepStateLabel(step: GhRunWatchStepDetails): string {
-	return cleanWatchText((step.conclusion || step.status || "unknown").replaceAll("_", " "));
+	return sanitizeDisplayLine((step.conclusion || step.status || "unknown").replaceAll("_", " "));
 }
 
 function getStepTone(step: GhRunWatchStepDetails): TspTone {
@@ -218,7 +220,7 @@ function getStepProgress(job: GhRunWatchJobDetails): GhRunStepProgress | undefin
 
 	const completed = steps.filter(step => Boolean(step.conclusion) || step.status === "completed").length;
 	const currentIndex = steps.findIndex(step => !step.conclusion && step.status === "in_progress");
-	const failedStep = steps.find(step => FAILURE_CONCLUSIONS.has(step.conclusion ?? step.status ?? ""));
+	const failedStep = findFailedStep(steps);
 	const nextIndex =
 		currentIndex >= 0
 			? currentIndex
@@ -244,10 +246,10 @@ function getStepProgress(job: GhRunWatchJobDetails): GhRunStepProgress | undefin
 
 function getStepProgressLabel(progress: GhRunStepProgress): string {
 	if (progress.currentStep && progress.currentPosition !== undefined) {
-		return `${progress.currentPosition}/${progress.total} #${progress.currentStep.number} ${cleanWatchText(progress.currentStep.name)} · ${getStepStateLabel(progress.currentStep)}`;
+		return `${progress.currentPosition}/${progress.total} #${progress.currentStep.number} ${sanitizeDisplayLine(progress.currentStep.name)} · ${getStepStateLabel(progress.currentStep)}`;
 	}
 	if (progress.failedStep) {
-		return `#${progress.failedStep.number} ${cleanWatchText(progress.failedStep.name)} · ${getStepStateLabel(progress.failedStep)} · ${progress.completed}/${progress.total}`;
+		return `#${progress.failedStep.number} ${sanitizeDisplayLine(progress.failedStep.name)} · ${getStepStateLabel(progress.failedStep)} · ${progress.completed}/${progress.total}`;
 	}
 	return `${progress.completed}/${progress.total} steps complete`;
 }
@@ -258,14 +260,14 @@ function renderJobLine(job: GhRunWatchJobDetails, width: number, theme: Theme): 
 	const durationLabel = job.durationSeconds !== undefined ? `${job.durationSeconds}s` : undefined;
 	const styledDuration = durationLabel ? theme.fg(visual.textColor, durationLabel) : undefined;
 	const reservedWidth = visibleWidth(prefix) + (styledDuration ? 1 + visibleWidth(styledDuration) : 0);
-	const nameWidth = Math.max(1, width - reservedWidth);
-	const jobName = theme.fg(visual.textColor, truncateVisualWidth(cleanWatchText(job.name), nameWidth));
+	const nameWidth = Math.max(8, width - reservedWidth);
+	const jobName = theme.fg(visual.textColor, truncateVisualWidth(sanitizeDisplayLine(job.name), nameWidth));
 	let line = `${prefix}${jobName}`;
 	if (styledDuration) {
 		line += padding(Math.max(1, width - visibleWidth(line) - visibleWidth(styledDuration)));
 		line += styledDuration;
 	}
-	return truncateVisualWidth(line, Math.max(1, width));
+	return line;
 }
 
 function renderStepProgressLine(
@@ -299,7 +301,7 @@ function renderStepLine(step: GhRunWatchStepDetails, width: number, theme: Theme
 	const duration = step.durationSeconds !== undefined ? `  ${theme.fg("muted", `${step.durationSeconds}s`)}` : "";
 	const suffix = `  ${state}${duration}`;
 	const nameWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));
-	const name = theme.fg(visual.textColor, truncateVisualWidth(cleanWatchText(step.name), nameWidth));
+	const name = theme.fg(visual.textColor, truncateVisualWidth(sanitizeDisplayLine(step.name), nameWidth));
 	return truncateVisualWidth(`${prefix}${name}${suffix}`, Math.max(1, width));
 }
 
@@ -525,7 +527,7 @@ function describeStep(step: GhRunWatchStepDetails): NativeNode {
 	const value = [span(getStepStateLabel(step), tone)];
 	if (step.durationSeconds !== undefined) value.push(span(" "), span(`${step.durationSeconds}s`, "muted"));
 	return item(`step:${step.number}`, {
-		label: [span(`#${step.number} `, "muted"), span(plainText(cleanWatchText(step.name)), tone)],
+		label: [span(`#${step.number} `, "muted"), span(plainText(sanitizeDisplayLine(step.name)), tone)],
 		value,
 		tone,
 	});
@@ -535,7 +537,7 @@ function describeJob(job: GhRunWatchJobDetails, expanded: boolean): NativeNode {
 	const tone = jobTone(job);
 	const progress = getStepProgress(job);
 	const summaryStep = progress?.currentStep ?? progress?.failedStep;
-	const head = [span(plainText(cleanWatchText(job.name)), tone)];
+	const head = [span(plainText(sanitizeDisplayLine(job.name)), tone)];
 	if (progress) {
 		const progressTone = summaryStep ? getStepTone(summaryStep) : progress.allSuccessful ? "success" : "muted";
 		head.push(span("  "), span(plainText(getStepProgressLabel(progress)), progressTone));
@@ -881,12 +883,8 @@ export function renderJobsSection(jobs: GhRunJobSnapshot[]): string[] {
 	const lines: string[] = [`## Jobs (${jobs.length})`, ""];
 	for (const job of jobs) {
 		lines.push(`- [${formatJobState(job)}] ${job.name}`);
-		for (const step of job.steps ?? []) {
-			const state = step.conclusion ?? step.status ?? "unknown";
-			lines.push(`  - Step #${step.number} [${state}] ${cleanWatchText(step.name)}`);
-			if (step.startedAt) lines.push(`    Started: ${step.startedAt}`);
-			if (step.completedAt) lines.push(`    Completed: ${step.completedAt}`);
-		}
+		const failedStep = findFailedStep(job.steps);
+		if (failedStep) pushLine(lines, "  Failed step", `#${failedStep.number} ${sanitizeDisplayLine(failedStep.name)}`);
 		if (job.startedAt) {
 			pushLine(lines, "  Started", job.startedAt);
 		}

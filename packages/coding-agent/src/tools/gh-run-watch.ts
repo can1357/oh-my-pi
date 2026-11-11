@@ -99,6 +99,12 @@ export function parseRunReference(value: string | undefined): GhRunReference {
 	};
 }
 
+/** Trimmed GitHub timestamp, absent when unset: steps that have not run report Go's zero time (`0001-01-01T00:00:00Z`). */
+function normalizeGithubTimestamp(value: string | null | undefined): string | undefined {
+	const timestamp = normalizeOptionalString(value);
+	return timestamp !== undefined && (parseTimestampMs(timestamp) ?? 0) > 0 ? timestamp : undefined;
+}
+
 function normalizeRunStep(step: GhActionsStepApi): GhRunStepSnapshot | null {
 	const number = step.number;
 	if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) {
@@ -110,8 +116,8 @@ function normalizeRunStep(step: GhActionsStepApi): GhRunStepSnapshot | null {
 		name: normalizeOptionalString(step.name) ?? `step-${number}`,
 		status: normalizeOptionalString(step.status),
 		conclusion: normalizeOptionalString(step.conclusion),
-		startedAt: normalizeOptionalString(step.started_at),
-		completedAt: normalizeOptionalString(step.completed_at),
+		startedAt: normalizeGithubTimestamp(step.started_at),
+		completedAt: normalizeGithubTimestamp(step.completed_at),
 	};
 }
 
@@ -125,8 +131,8 @@ export function normalizeRunJob(job: GhActionsJobApi): GhRunJobSnapshot | null {
 		name: normalizeOptionalString(job.name) ?? `job-${job.id}`,
 		status: normalizeOptionalString(job.status),
 		conclusion: normalizeOptionalString(job.conclusion),
-		startedAt: normalizeOptionalString(job.started_at),
-		completedAt: normalizeOptionalString(job.completed_at),
+		startedAt: normalizeGithubTimestamp(job.started_at),
+		completedAt: normalizeGithubTimestamp(job.completed_at),
 		url: normalizeOptionalString(job.html_url),
 		...(job.steps == null
 			? {}
@@ -241,16 +247,11 @@ function getDurationSeconds(
 	observedAtMs: number,
 ): number | undefined {
 	const startedAtMs = parseTimestampMs(startedAt);
-	// GitHub returns Go's zero time for timestamps on steps that have not
-	// started yet. It parses as a valid, ancient date, but must not become an
-	// elapsed duration.
-	if (startedAtMs === undefined || startedAtMs <= 0) {
+	if (startedAtMs === undefined) {
 		return undefined;
 	}
 
-	const parsedCompletedAtMs = parseTimestampMs(completedAt);
-	const completedAtMs =
-		parsedCompletedAtMs !== undefined && parsedCompletedAtMs > 0 ? parsedCompletedAtMs : observedAtMs;
+	const completedAtMs = parseTimestampMs(completedAt) ?? observedAtMs;
 	return Math.max(0, Math.floor((completedAtMs - startedAtMs) / 1000));
 }
 

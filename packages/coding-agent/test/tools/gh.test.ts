@@ -1660,6 +1660,11 @@ echo ok
 			expect(finalJob?.steps?.[3]?.durationSeconds).toBeUndefined();
 			expect(getRun(result.details)?.jobs[1]?.steps).toBeUndefined();
 			expect(getRun(result.details)?.jobs[2]?.steps).toEqual([]);
+			// Steps are display data: a passing run's text result lists jobs only.
+			const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+			expect(text).toContain("- [success] build");
+			expect(text).not.toContain("Checkout");
+			expect(text).not.toContain("0001-01-01");
 
 			const jobsCalls = runSpy.mock.calls.filter(([, args]) =>
 				args.includes("/repos/owner/repo/actions/runs/77/jobs"),
