@@ -15,6 +15,7 @@
 
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
 - An extension provider with an `oauth.modifyModels` hook no longer loads the whole model catalog at registration while that provider has no login ([#18821](https://github.com/can1357/oh-my-pi/pull/18821) by [@iliaal](https://github.com/iliaal))
+- Resuming an old session (`--resume`, `/resume`) no longer reads every later session's transcript in its directory to look for a continuation ([#18952](https://github.com/can1357/oh-my-pi/pull/18952) by [@iliaal](https://github.com/iliaal))
 - Saving each session entry no longer blocks the UI for several milliseconds on Windows, where on-access scanning delayed the two re-opens of the session file that every write performed ([#18819](https://github.com/can1357/oh-my-pi/pull/18819))
 
 ## [18.18.9] - 2026-11-11
