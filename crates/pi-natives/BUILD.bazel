@@ -176,9 +176,11 @@ rust_shared_library(
         # nothing — napi-sys v3 imports node.exe via raw-dylib.
         # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
         # x86_64; every shipped darwin addon carries a signature.
+        # -install_name: otherwise the addon's id is its sandbox output path.
         "@platforms//os:macos": [
             "-Clink-arg=-Wl,-undefined,dynamic_lookup",
             "-Clink-arg=-Wl,-adhoc_codesign",
+            "-Clink-arg=-Wl,-install_name,@rpath/libpi_natives.dylib",
         ],
         "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
         "//conditions:default": [],

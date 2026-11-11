@@ -2,14 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Nix builds with `withAppleFm = false` no longer compile the Apple Foundation Models bridge with the host's Xcode ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
+- Apple Silicon Nix builds include Apple Foundation Models support instead of silently building without it ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
+
 ### Removed
 
 - Removed `/mcp smithery-search`, `/mcp smithery-login` and `/mcp smithery-logout`; Smithery shut down its API on October 31, 2026 ([#18822](https://github.com/can1357/oh-my-pi/pull/18822) by [@samettemizer](https://github.com/samettemizer))
 
 ### Added
 
+- Added Sofya as a web search engine (`web/sofya`), using `SOFYA_API_KEY` or a stored `sofya` credential ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - Documented autoresearch mode in [docs/autoresearch.md](https://github.com/can1357/oh-my-pi/blob/main/docs/autoresearch.md): activation and its git gates, the three stop conditions, the per-segment iteration cap that defaults to none, the harness `METRIC`/`ASI` contract, and the on-disk store that `OMP_AUTORESEARCH_DB_DIR` relocates ([#18655](https://github.com/can1357/oh-my-pi/pull/18655) by [@sjawhar](https://github.com/sjawhar))
 - Extensions can import the form theme, the native span helpers (`styledSpans`, `compactText`, `rowsText` and the rest of the ANSI/span conversions), the `xd://` URL helpers (`parseXdUrl` and friends) and the `cfgExtensionTranscriptPresenters` setting handle from `@oh-my-pi/pi-coding-agent` instead of internal module paths, which stop the extension from loading when a file moves ([#18849](https://github.com/can1357/oh-my-pi/pull/18849) by [@materemias](https://github.com/materemias))
+- `/context` shows loaded instruction files and skills in their own categories; System Prompt marks where each one sits without counting it twice, and notes when an extension or SDK callback changed the prompt after it was built ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 ### Changed
 
 - A role edit in another omp instance no longer rewrites the `task` and `eval` tool descriptions of every running session, which was invalidating the Anthropic prompt cache from the tool definitions onward and dropping signed thinking blocks on prefix-bound models; the per-call model advertisement is now frozen into the base prompt surface and changes only when that surface rebuilds ([#18716](https://github.com/can1357/oh-my-pi/issues/18716), [#18732](https://github.com/can1357/oh-my-pi/pull/18732) by [@yuzu-octopus](https://github.com/yuzu-octopus))
@@ -35,9 +42,11 @@
 - When Chrome detaches omp from a relay tab omp opened and omp cannot reattach, the error now says omp tried to close that tab and to open a new one, instead of telling the agent to navigate it in Chrome; a failed close may be deferred until the relay reconnects ([#18832](https://github.com/can1357/oh-my-pi/pull/18832) by [@will-bogusz](https://github.com/will-bogusz))
 - A relay `app.target` that matches no tab now recommends omitting `app.target` to open omp's own tab ([#18833](https://github.com/can1357/oh-my-pi/pull/18833) by [@will-bogusz](https://github.com/will-bogusz))
 - Judgments skip a judge candidate for five minutes after it answers 404 for its model, as they already do after a 401/402/403, instead of re-sending the failing request on every judgment of a `find` call ([#18854](https://github.com/can1357/oh-my-pi/issues/18854))
+- Fixed Tern and other OSC 7501 terminals showing a session as `working`, with no needs-you alert, while a dialog waits on you, such as a `ctx.ui.confirm` an extension's `tool_call` handler opens to gate a command: every dialog the TUI shows (extension and hook dialogs, tool approvals, `ask`, `cfg://` changes, the coding-plan reserve confirm, plan review) now reports `blocked` with what it asks until you answer, and a tool approval reports `working` again as soon as you answer it ([#15107](https://github.com/can1357/oh-my-pi/issues/15107), [#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
 - The shell's built-in `jq` no longer slows down quadratically on repeated updates such as `reduce range(n) as $i ([]; . + [$i])`
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
+- An instruction file that leaves a code fence open has it closed at its end, so the rest of the system prompt is formatted as usual ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
 ### Fixed
 
