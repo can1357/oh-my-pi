@@ -1290,6 +1290,11 @@ mod tests {
 	/// Uses an isolated X server for real keymap planning and XI focus. Only
 	/// the kernel write endpoint and the server's raw-event stream are replaced.
 	fn typing_fixture() -> Mpx {
+		// Xvfb resets when its last client disconnects. Keep one connection
+		// across fixtures so a new case cannot race that reset.
+		static SERVER: std::sync::LazyLock<RustConnection> =
+			std::sync::LazyLock::new(|| x11rb::connect(None).unwrap().0);
+		std::sync::LazyLock::force(&SERVER);
 		let (conn, screen) = x11rb::connect(None).unwrap();
 		let root = conn.setup().roots[screen].root;
 		let atoms = Atoms::intern(&conn).unwrap();
