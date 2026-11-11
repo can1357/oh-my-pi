@@ -1436,6 +1436,9 @@ mod tests {
 			pair,
 			"a free pair remains usable at the cap"
 		);
+		for (pointer, keyboard) in pairs {
+			release_pair(&conn, holder, root, park, pointer, keyboard, &[]);
+		}
 	}
 
 	#[test]
@@ -1470,6 +1473,9 @@ mod tests {
 			),
 			"the pair stays unavailable even after its holder dies"
 		);
+		// The XTEST slave belongs to this disposable fixture, not a real
+		// unplugging device; restore the slot for the other live tests.
+		release_pair(&conn, holder, root, park, pair.0, pair.1, &[]);
 	}
 
 	/// Removing a master crashes running Qt 6.5+ clients, so a session hands
