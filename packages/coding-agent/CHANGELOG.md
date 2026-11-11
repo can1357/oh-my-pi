@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `bash` tool now reports when `exit` or `set -e` stopped a call before later commands ran, while keeping the persistent shell and its options ([#18879](https://github.com/can1357/oh-my-pi/issues/18879)).
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

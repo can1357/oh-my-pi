@@ -449,6 +449,8 @@ impl From<CoreMinimizerResult> for MinimizerResult {
 pub struct ShellRunResult {
 	/// Exit code when the command completes normally.
 	pub exit_code: Option<i32>,
+	/// Whether `exit` or errexit ended the call (the session stays usable).
+	pub exited:    bool,
 	/// Whether the command was cancelled via abort.
 	pub cancelled: bool,
 	/// Whether the command timed out before completion.
@@ -467,6 +469,7 @@ impl From<CoreShellRunResult> for ShellRunResult {
 	fn from(value: CoreShellRunResult) -> Self {
 		Self {
 			exit_code:   value.exit_code,
+			exited:      value.exited,
 			cancelled:   value.cancelled,
 			timed_out:   value.timed_out,
 			minimized:   value.minimized.map(Into::into),
@@ -900,6 +903,7 @@ mod tests {
 		drop(tx);
 		let result = Ok(ShellRunResult {
 			exit_code:   Some(0),
+			exited:      false,
 			cancelled:   false,
 			timed_out:   false,
 			minimized:   None,
@@ -936,6 +940,7 @@ mod tests {
 		drop(tx);
 		let result = Ok(ShellRunResult {
 			exit_code:   None,
+			exited:      false,
 			cancelled:   false,
 			timed_out:   true,
 			minimized:   None,

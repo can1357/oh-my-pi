@@ -533,6 +533,9 @@ const NO_PIDS = (): readonly number[] => [];
 
 /** Shown when a call overlapped another one (parallel or backgrounded) and ran in a fork of the session's shell. */
 const SESSION_SHELL_BUSY_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
+/** `exit` and errexit end this call, not the persistent shell or its options. */
+const SHELL_EXIT_NOTICE =
+	"Shell stopped by exit or errexit; subsequent commands in this call did not run. The session shell stays available with its options intact.";
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
@@ -834,6 +837,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (wallTimeNoticeEmitted) {
 			notices.push(formatWallTimeNotice(wallTimeMs));
 		}
+		if ("exited" in result && result.exited) notices.push(SHELL_EXIT_NOTICE);
 		if (options.notices) {
 			for (const notice of options.notices) {
 				if (notice) notices.push(notice);

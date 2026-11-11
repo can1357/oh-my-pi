@@ -98,6 +98,22 @@ it.skipIf(process.platform === "win32")("keeps state and options after a call th
 	expect((await run(tool, 'printf "%s %s" "$PI_STATE_VAR" "$-"')).text).toMatch(/^kept \S*u\S*$/);
 });
 
+it.skipIf(process.platform === "win32")("reports a truncated call without losing persistent errexit", async () => {
+	const tool = bashTool();
+	await run(tool, "set -e");
+	const stopped = await run(tool, "false; echo not-run");
+	expect(stopped.text).toContain("Shell stopped by exit or errexit");
+	expect(stopped.text).toContain("subsequent commands in this call did not run");
+	expect(stopped.text).toContain("Command exited with code 1");
+	expect((await run(tool, "false; echo still-not-run")).text).toContain("Shell stopped by exit or errexit");
+	expect(stopped.text).not.toContain("not-run");
+	expect((await run(tool, "exit 0; echo not-run")).text).toContain("Shell stopped by exit or errexit");
+	const resumed = await run(tool, "set +e; false; echo resumed");
+	expect(resumed.text.trim()).toBe("resumed");
+	const ordinary = await run(tool, "false");
+	expect(ordinary.text).not.toContain("Shell stopped by exit or errexit");
+});
+
 it.skipIf(process.platform === "win32")(
 	"runs calls that overlap a backgrounded one in a copy of the session shell and leaves it intact",
 	async () => {

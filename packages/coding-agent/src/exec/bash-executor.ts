@@ -141,6 +141,8 @@ export interface BashPtyOptions {
 /** A command's captured output (the sink's summary, column-cap and middle-elision fields included) and how it ended. */
 export interface BashResult extends OutputSummary {
 	exitCode: number | undefined;
+	/** `exit` or errexit stopped the embedded shell's call; the session stays usable. */
+	exited?: boolean;
 	cancelled: boolean;
 	/** True when the command was killed by its timeout deadline (not a user abort). */
 	timedOut?: boolean;
@@ -1011,6 +1013,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		// Normal completion
 		return {
 			exitCode: winner.result.exitCode,
+			exited: winner.result.exited,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),

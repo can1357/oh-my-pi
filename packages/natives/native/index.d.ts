@@ -3891,6 +3891,8 @@ export interface ShellRunOptions {
 export interface ShellRunResult {
   /** Exit code when the command completes normally. */
   exitCode?: number
+  /** Whether `exit` or errexit ended the call (the session stays usable). */
+  exited: boolean
   /** Whether the command was cancelled via abort. */
   cancelled: boolean
   /** Whether the command timed out before completion. */

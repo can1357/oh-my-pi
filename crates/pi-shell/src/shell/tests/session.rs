@@ -901,31 +901,32 @@ async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
 	assert_eq!(waited.exit_code, Some(9), "wait must report the pipeline's last stage");
 }
 
-/// `exit` and errexit end the command, not the session: later runs keep
-/// the variables, functions, and options set before them.
+/// `exit` and errexit end the call, not the session; a plain non-zero status
+/// is distinguishable and later runs keep the state set before the abort.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_and_errexit_keep_session_state() {
 	let _guard = shell_test_lock().lock().await;
 	let shell = Shell::new(None);
-	let exit_code = async |command: &str| {
-		shell
+	let result = async |command: &str| {
+		let result = shell
 			.run(
 				ShellRunOptions { command: command.into(), ..Default::default() },
 				None,
 				CancelToken::default(),
 			)
 			.await
-			.expect("run")
-			.exit_code
+			.expect("run");
+		(result.exit_code, result.exited)
 	};
 	let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
 
-	assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
-	assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
-	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
-	assert_eq!(exit_code("exit 3").await, Some(3));
-	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
-	assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
+	assert_eq!(result("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, (Some(0), false));
+	assert_eq!(result("false; true").await, (Some(1), true), "errexit stops the command");
+	assert_eq!(result(state_intact).await, (Some(0), false), "state lost after errexit");
+	assert_eq!(result("exit 3").await, (Some(3), true));
+	assert_eq!(result(state_intact).await, (Some(0), false), "state lost after exit");
+	assert_eq!(result("false; exit 0").await, (Some(1), true), "errexit option lost");
+	assert_eq!(result("set +e; false").await, (Some(1), false), "plain failure marked as exit");
 }
 
 /// An EXIT trap belongs to one run, while signal traps persist in the session.
@@ -1223,6 +1224,7 @@ async fn segmented_false_and_printf_skips_second_and_returns_nonzero() {
 			.await;
 	let _ = std::fs::remove_dir_all(&root);
 	assert_eq!(result.exit_code, Some(1));
+	assert!(!result.exited, "short-circuit is not a shell exit");
 	assert!(!result.cancelled);
 	assert!(!result.timed_out);
 	assert_eq!(output, "");
@@ -1243,10 +1245,25 @@ async fn segmented_false_semicolon_printf_continues_and_returns_last_code() {
 	let _ = std::fs::remove_dir_all(&root);
 	let minimized = result.minimized.expect("long output should be minimized");
 	assert_eq!(result.exit_code, Some(0));
+	assert!(!result.exited, "ordinary failure before a successful command is not an exit");
 	assert_eq!(output, expected);
 	assert_eq!(minimized.filter, "chain");
 	assert_eq!(minimized.original_text, expected);
 	assert_eq!(minimized.text, "HI\n".repeat(200));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_errexit_reports_abort_and_skips_later_segments() {
+	let root = unique_temp_dir("errexit");
+	let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
+	let command = format!("set -e; false; printf '{}'", "later\\n".repeat(200));
+	let (result, output) =
+		run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
+	let _ = std::fs::remove_dir_all(&root);
+	assert_eq!(result.exit_code, Some(1));
+	assert!(result.exited, "errexit must survive segment aggregation");
+	assert_eq!(output, "");
 }
 
 /// Like jq, the built-in jq reports an input that fails and exits 0 when it

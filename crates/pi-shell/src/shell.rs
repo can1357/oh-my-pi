@@ -194,6 +194,8 @@ pub struct MinimizerResult {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellRunResult {
 	pub exit_code:   Option<i32>,
+	/// Whether `exit` or errexit ended this run (the session stays usable).
+	pub exited:      bool,
 	pub cancelled:   bool,
 	pub timed_out:   bool,
 	pub minimized:   Option<MinimizerResult>,
@@ -456,6 +458,7 @@ const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
 /// What a run reports when it ends normally.
 struct CommandResult {
 	status:      i32,
+	exited:      bool,
 	minimized:   Option<MinimizerResult>,
 	working_dir: String,
 }
@@ -464,6 +467,7 @@ impl CommandResult {
 	fn into_run_result(self) -> ShellRunResult {
 		ShellRunResult {
 			exit_code:   Some(self.status),
+			exited:      self.exited,
 			cancelled:   false,
 			timed_out:   false,
 			minimized:   self.minimized,
@@ -476,6 +480,7 @@ impl CommandResult {
 const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 	ShellRunResult {
 		exit_code:   None,
+		exited:      false,
 		cancelled:   matches!(reason, AbortReason::Signal),
 		timed_out:   matches!(reason, AbortReason::Timeout),
 		minimized:   None,
@@ -1152,7 +1157,7 @@ async fn run_shell_command_in_filesystem(
 		minimizer::engine::MinimizerMode::None
 	};
 
-	let (status, minimized) = match minimizer_mode {
+	let (status, exited, minimized) = match minimizer_mode {
 		minimizer::engine::MinimizerMode::SegmentedChain => {
 			run_shell_command_segmented_chain(session, &scope, cwd, on_chunk).await?
 		},
@@ -1161,7 +1166,12 @@ async fn run_shell_command_in_filesystem(
 		},
 	};
 
-	Ok(CommandResult { status, minimized, working_dir: session.cwd.to_str_lossy().into_owned() })
+	Ok(CommandResult {
+		status,
+		exited,
+		minimized,
+		working_dir: session.cwd.to_str_lossy().into_owned(),
+	})
 }
 
 async fn run_shell_command_single(
@@ -1170,7 +1180,7 @@ async fn run_shell_command_single(
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
 	minimizer_mode: minimizer::engine::MinimizerMode,
-) -> Result<(i32, Option<MinimizerResult>)> {
+) -> Result<(i32, bool, Option<MinimizerResult>)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
 	let options = scope.options;
 
@@ -1239,7 +1249,7 @@ async fn run_shell_command_single(
 		}
 	}
 
-	Ok((status, minimized_out))
+	Ok((status, command_run.outcome.exited, minimized_out))
 }
 
 /// The source of a chain segment whose failure must not trip `set -e`: the
@@ -1255,7 +1265,7 @@ async fn run_shell_command_segmented_chain(
 	scope: &CommandScope<'_>,
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
-) -> Result<(i32, Option<MinimizerResult>)> {
+) -> Result<(i32, bool, Option<MinimizerResult>)> {
 	let options = scope.options;
 	let unsegmented = minimizer::engine::MinimizerMode::None;
 	let Some(config) = options.minimizer.as_ref() else {
@@ -1278,6 +1288,7 @@ async fn run_shell_command_segmented_chain(
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
 	let mut last_status = None;
+	let mut exited = false;
 	let max_capture_bytes = config.max_capture_bytes as usize;
 	for segment in segments {
 		if segment.run_if_previous_succeeded && !previous_succeeded {
@@ -1348,6 +1359,7 @@ async fn run_shell_command_segmented_chain(
 
 		// `exit` and errexit end the command (the session itself stays usable).
 		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
+		exited = command_run.outcome.exited;
 		last_status = Some(exit);
 		if !keep_running {
 			break;
@@ -1386,7 +1398,7 @@ async fn run_shell_command_segmented_chain(
 	// not minimized — `minimized_out` stays `None`, matching the whole-command
 	// path and `apply_shell_minimizer`.
 
-	Ok((status, minimized_out))
+	Ok((status, exited, minimized_out))
 }
 
 /// Run `command` once on the session, its stdout and stderr merged into one
@@ -1672,6 +1684,7 @@ async fn run_shell_command_streams_in_filesystem(
 	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
 	Ok(CommandResult {
 		status:      outcome.status,
+		exited:      outcome.exited,
 		minimized:   None,
 		working_dir: session.cwd.to_str_lossy().into_owned(),
 	})
