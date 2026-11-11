@@ -124,7 +124,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const startedAt = Date.now();
 	// Only macOS can hand the front app back; elsewhere the relay never reads it.
 	if (process.platform === "darwin" && parseFlag(process.env.PI_BROWSER_RELAY_KEEP_FRONT, true)) {
-		bridge.keepFrontAppWith(macOSFrontApp);
+		bridge.keepFrontAppWith(async () => (await macOSFrontApp()) ?? null);
 	}
 
 	const server = Bun.serve({

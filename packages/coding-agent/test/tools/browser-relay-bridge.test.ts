@@ -2574,12 +2574,12 @@ describe("RelayBridge auto-attach gating", () => {
 
 describe("RelayBridge front app on a window omp's input opens", () => {
 	/** A relay reading the front app as `n` (the read count), recording each app it holds in front and for how long. */
-	function frontAppRecorder(): { holds: Array<{ app: number; ms: number }>; frontApp: () => FrontApp } {
+	function frontAppRecorder(): { holds: Array<{ app: number; ms: number }>; frontApp: () => Promise<FrontApp> } {
 		const holds: Array<{ app: number; ms: number }> = [];
 		let reads = 0;
 		return {
 			holds,
-			frontApp: () => {
+			frontApp: async () => {
 				const app = ++reads;
 				return {
 					keepInFront: async ms => {
@@ -2727,12 +2727,63 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(reads).toBe(1);
 	});
 
+	it("stops reading the front app once a read stalls: input still goes out after the bound, and later reads are off", async () => {
+		jest.useFakeTimers();
+		try {
+			let reads = 0;
+			const holds: number[] = [];
+			const late = Promise.withResolvers<FrontApp | null>();
+			const bridge = new RelayBridge();
+			bridge.keepFrontAppWith(() => {
+				reads++;
+				return late.promise;
+			});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+			// Input waits on the stalled read for at most the bound; the command after it keeps its place in line.
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId,
+					method: "Input.dispatchMouseEvent",
+					params: { type: "mousePressed", x: 5, y: 5 },
+				}),
+			);
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.evaluate", params: {} }));
+			await flush();
+			expect(ext.rpcs("send")).toEqual([]);
+			jest.advanceTimersByTime(250);
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Input.dispatchMouseEvent", "Runtime.evaluate"]);
+			// The stalled read answers late: its app is dropped, and no later input reads the front app again.
+			late.resolve({
+				keepInFront: async () => {
+					holds.push(0);
+					return 1;
+				},
+			});
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(reads).toBe(1);
+			expect(holds).toEqual([]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
 	it("reads no front app while a hold runs, so a window opened after it never holds the browser in front", async () => {
 		let reads = 0;
 		const holds: number[] = [];
 		const ends: Array<() => void> = [];
 		const bridge = new RelayBridge();
-		bridge.keepFrontAppWith(() => {
+		bridge.keepFrontAppWith(async () => {
 			const app = ++reads;
 			return {
 				keepInFront: () => {
@@ -2771,7 +2822,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			const holds: number[] = [];
 			const bridge = new RelayBridge();
 			// The native hold is still queued behind other native work: it never settles here.
-			bridge.keepFrontAppWith(() => {
+			bridge.keepFrontAppWith(async () => {
 				const app = ++reads;
 				return {
 					keepInFront: () => {
@@ -2805,7 +2856,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			let reads = 0;
 			const holds: number[] = [];
 			const bridge = new RelayBridge();
-			bridge.keepFrontAppWith(() => {
+			bridge.keepFrontAppWith(async () => {
 				const app = ++reads;
 				return {
 					keepInFront: async () => {

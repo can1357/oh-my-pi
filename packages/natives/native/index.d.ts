@@ -2869,7 +2869,7 @@ export declare function macOSCheckSpelling(text: string): Promise<Array<Spelling
  * The app macOS `WindowServer` has in front. `null` off macOS and when the
  * front-process SPI is unavailable.
  */
-export declare function macOSFrontApp(): MacOSFrontApp | null
+export declare function macOSFrontApp(): Promise<MacOSFrontApp | undefined | null>
 
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean

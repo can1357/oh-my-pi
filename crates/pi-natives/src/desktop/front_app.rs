@@ -58,13 +58,15 @@ impl MacosFrontApp {
 	not(target_os = "macos"),
 	allow(clippy::missing_const_for_fn, reason = "only macOS reads the front app")
 )]
-pub fn macos_front_app() -> Option<MacosFrontApp> {
+pub fn macos_front_app() -> task::Promise<Option<MacosFrontApp>> {
 	#[cfg(target_os = "macos")]
 	{
-		super::macos::front_app().map(|app| MacosFrontApp { app })
+		task::blocking("desktop.frontApp", (), move |_| {
+			Ok(super::macos::front_app().map(|app| MacosFrontApp { app }))
+		})
 	}
 	#[cfg(not(target_os = "macos"))]
 	{
-		None
+		task::blocking("desktop.frontApp", (), |_| Ok(None))
 	}
 }

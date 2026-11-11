@@ -307,6 +307,8 @@ const PAGE_BOUND_RPC_TIMEOUT_MS = BROWSER_PROTOCOL_TIMEOUT_MS + 5_000;
 const POPUP_AFTER_INPUT_MS = 1_000;
 /** How long the user's app is held in front after omp's input opened a window; Chrome activates within milliseconds. */
 const KEEP_FRONT_MS = 500;
+/** Longest omp's input waits for the front-app read; a read past it turns the reads off, and its late result is dropped. */
+const FRONT_READ_MS = 250;
 /**
  * omp's CDP inputs a page can open a window on, by method and event `type`: those that give the page user activation
  * (a button or key going down, a release, a tap). Moves, wheels, key-ups and inserted text never do, so they read no
@@ -385,7 +387,12 @@ export class RelayBridge {
 	/** Each tab switch's last transition, by `tabKey method`; see {@link #serializeSwitches}. */
 	#switchTransitions = new Map<string, Promise<void>>();
 	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
-	#readFrontApp: (() => FrontApp | null) | undefined;
+	#readFrontApp: (() => Promise<FrontApp | null>) | undefined;
+	/**
+	 * The front-app read omp's commands wait behind while it runs: every command forwarded meanwhile queues on it, so
+	 * input reaches Chrome in the order omp sent it; null with none running, and commands then go out at once.
+	 */
+	#frontGate: Promise<void> | null = null;
 	/**
 	 * When the running hold on the user's app ends (`Date.now()` ms), at its deadline or once it settles, whichever is
 	 * first; 0 with none. A window opened meanwhile shares it, and omp's input reads no front app then: the browser may
@@ -1211,8 +1218,11 @@ export class RelayBridge {
 			await this.#handleBrowserCommand(conn, msg, tab);
 			return true;
 		}
-		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
-			tab.frontAtInput = Date.now() < this.#keepingFrontUntil ? null : this.#readFrontAtInput(this.#readFrontApp);
+		if (this.#frontGate || (this.#readFrontApp && canOpenWindow(msg.method, msg.params))) {
+			const gate = this.#frontAfter(this.#frontGate, tab, msg);
+			this.#frontGate = gate;
+			await gate;
+			if (this.#frontGate === gate) this.#frontGate = null;
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);
@@ -1241,24 +1251,46 @@ export class RelayBridge {
 	 * Read the app in front of the user with `read` as omp's input reaches a tab, to put it back when that input opens a
 	 * window and Chrome brings itself forward to show it. Only where the relay can put it back (macOS).
 	 */
-	keepFrontAppWith(read: () => FrontApp | null): void {
+	keepFrontAppWith(read: () => Promise<FrontApp | null>): void {
 		this.#readFrontApp = read;
 	}
 
+	/** After `prior`, read the app in front for `msg` when it is omp's input that can open a window. */
+	async #frontAfter(
+		prior: Promise<void> | null,
+		tab: TabState,
+		msg: { method: string; params?: unknown },
+	): Promise<void> {
+		await prior;
+		if (!this.#readFrontApp || !canOpenWindow(msg.method, msg.params as Record<string, unknown> | undefined)) return;
+		tab.frontAtInput = Date.now() < this.#keepingFrontUntil ? null : await this.#readFrontAtInput(this.#readFrontApp);
+	}
+
 	/**
-	 * The app in front of the user now, for omp's input to a tab. A read that throws (a stale native addon without
-	 * `macOSFrontApp`) turns the reads off for good, so the input itself still goes out.
+	 * The app in front of the user now, for omp's input to a tab, read for at most {@link FRONT_READ_MS}. A timed-out or
+	 * failed read turns the reads off for good, and a late result is dropped, so the input itself still goes out.
 	 */
-	#readFrontAtInput(read: () => FrontApp | null): { app: FrontApp; at: number } | null {
-		try {
-			const app = read();
-			return app && { app, at: Date.now() };
-		} catch (err) {
+	async #readFrontAtInput(read: () => Promise<FrontApp | null>): Promise<{ app: FrontApp; at: number } | null> {
+		const pending = Promise.try(read).then(
+			app => (app ? { app, at: Date.now() } : null),
+			err => {
+				this.#readFrontApp = undefined;
+				this.#log("could not read the app in front; not holding it in front", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return null;
+			},
+		);
+		const timeout = Promise.withResolvers<null>();
+		const timer = setTimeout(() => {
 			this.#readFrontApp = undefined;
-			this.#log("could not read the app in front; not holding it in front", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-			return null;
+			this.#log("could not read the app in front; not holding it in front", { error: "read timed out" });
+			timeout.resolve(null);
+		}, FRONT_READ_MS);
+		try {
+			return await Promise.race([pending, timeout.promise]);
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
