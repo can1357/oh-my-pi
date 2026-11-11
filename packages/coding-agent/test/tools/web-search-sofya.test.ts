@@ -58,7 +58,8 @@ const RESULTS = {
 		{
 			title: "Bun v1.4.3",
 			url: "https://bun.com/blog/bun-v1.4.3",
-			content: "Fixes 166 issues,\n  addressing 122 👍.",
+			description: "Fixes 166 issues,\n  addressing 122 👍.",
+			content: "Fixes 166 issues, addressing 122 👍. Full release notes follow.",
 			published_date: "2026-10-30",
 		},
 		{ title: "", url: "https://bun.com/docs", content: "", published_date: null },
@@ -118,7 +119,7 @@ describe("Sofya web search provider", () => {
 		expect(response.sources[1].publishedDate).toBeUndefined();
 	});
 
-	it("maps site:, -site:, date bounds, phrases, and exclusions onto native fields", async () => {
+	it("maps site:, -site:, an exclusive before: bound, phrases, and exclusions onto native fields", async () => {
 		expect(
 			await bodyFor(
 				'"error handling" rust -unsafe site:github.com -site:reddit.com after:2025-01-01 before:2026-01-01',
@@ -129,7 +130,7 @@ describe("Sofya web search provider", () => {
 			max_results: 10,
 			include_domains: ["github.com"],
 			exclude_domains: ["reddit.com"],
-			freshness: "2025-01-01:2026-01-01",
+			freshness: "2025-01-01:2025-12-31",
 		});
 	});
 
@@ -145,7 +146,15 @@ describe("Sofya web search provider", () => {
 	it("closes an open date bound and prefers it over recency", async () => {
 		const today = new Date().toISOString().slice(0, 10);
 		expect((await bodyFor("bun after:2025-01-01", { recency: "week" })).freshness).toBe(`2025-01-01:${today}`);
-		expect((await bodyFor("bun before:2025-01-01")).freshness).toBe("1970-01-01:2025-01-01");
+		expect((await bodyFor("bun before:2025-01-01")).freshness).toBe("1970-01-01:2024-12-31");
+	});
+
+	it("reports a query Sofya relaxed or corrected", async () => {
+		const search = (payload: unknown) =>
+			searchSofya({ ...makeParams("bun site:bun.com", keyedStorage), fetch: mockFetch([], payload) });
+		expect((await search({ ...RESULTS, relaxed_query: "bun", altered_query: null })).searchQueries).toEqual(["bun"]);
+		expect((await search({ ...RESULTS, altered_query: "bun js" })).searchQueries).toEqual(["bun js"]);
+		expect((await search({ ...RESULTS, relaxed_query: null, altered_query: null })).searchQueries).toBeUndefined();
 	});
 
 	it("passes recency through as freshness and clamps the result count", async () => {

@@ -42,7 +42,7 @@
    - `packages/coding-agent/src/web/search/providers/tavily.ts` — Tavily search adapter.
    - `packages/coding-agent/src/web/search/providers/tinyfish.ts` — TinyFish search adapter.
    - `packages/coding-agent/src/web/search/providers/keenable.ts` — Keenable search adapter (keyed or keyless public endpoint).
-   - `packages/coding-agent/src/web/search/providers/sofya.ts`: Sofya search adapter.
+   - `packages/coding-agent/src/web/search/providers/sofya.ts` — Sofya search adapter.
    - `packages/coding-agent/src/web/search/providers/xai.ts` — xAI Responses web and X search adapter.
    - `packages/coding-agent/src/web/search/providers/zai.ts` — Z.AI remote MCP adapter.
    - `packages/coding-agent/src/web/parallel.ts` — Parallel search/extract HTTP client.
@@ -207,11 +207,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Querying: POST `https://api.keenable.ai/v1/search` with `X-API-Key`, or POST `https://api.keenable.ai/v1/search/public` with `X-Keenable-Title: oh-my-pi` when no key resolves. Body `{ query, max_results }`; a single `site:` host maps to `site`, `after:`/`before:` map to `published_after`/`published_before`, and `recency` becomes a relative `published_after` (`1d`, `7d`, `1mo`, `1y`) unless the query already has an `after:` bound. Quoted phrases are kept; other directives are left to the post-filter. A directives-only query searches its constraint values (site hosts, `intitle:` words) as keywords; a date-only query is rejected.
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..50`, default `10`.
       - Output: `sources` (snippet from `snippet`, `published_at` as `publishedDate`), `authMode: "api_key"` or `"anonymous"`.
-   - **Sofya**: `packages/coding-agent/src/web/search/providers/sofya.ts`
+   - **Sofya** — `packages/coding-agent/src/web/search/providers/sofya.ts`
       - Availability: `SOFYA_API_KEY` or a configured/stored `sofya` credential.
-      - Querying: POST `https://sofya.co/v1/search` with bearer auth. Body `{ query, search_depth: "snippets", max_results }`; `site:` / `-site:` hosts map to `include_domains` / `exclude_domains`, `after:`/`before:` map to a `freshness` range `YYYY-MM-DD:YYYY-MM-DD` (an open side spans to `1970-01-01` or today), and otherwise `recency` passes through as `freshness`. Quoted phrases and `-` exclusions are kept; other directives are left to the post-filter. A directives-only query searches its constraint values as keywords; a date-only query is rejected.
+      - Querying: POST `https://sofya.co/v1/search` with bearer auth. Body `{ query, search_depth: "snippets", max_results }`; `site:` / `-site:` hosts map to `include_domains` / `exclude_domains` (at most 10 each; further exclusions fall to the post-filter), `after:`/`before:` map to an inclusive `freshness` range `YYYY-MM-DD:YYYY-MM-DD` ending the day before `before:` (an open side spans to `1970-01-01` or today), and otherwise `recency` passes through as `freshness`. Quoted phrases and `-` exclusions are kept; other directives are left to the post-filter. A directives-only query searches its constraint values as keywords; a date-only query is rejected.
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
-      - Output: `sources` (snippet from `content`, `published_date` as `publishedDate`), `authMode: "api_key"`.
+      - Output: `sources` (snippet from `description`, else `content`; `published_date` as `publishedDate`), `searchQueries` with Sofya's `relaxed_query` or `altered_query` when it rewrote the query, `authMode: "api_key"`.
    - **Jina** — `packages/coding-agent/src/web/search/providers/jina.ts`
       - Availability: `JINA_API_KEY` or a configured/stored `jina` credential.
       - Querying: GET `https://s.jina.ai/<encoded query>?count=<count>` with bearer auth and JSON/no-content headers. A single `site:` host maps to `X-Site`; multiple sites remain inline.
