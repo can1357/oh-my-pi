@@ -3,6 +3,7 @@ import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { chromiumAvailable } from "./chromium-probe";
+import { rejectionOf } from "../helpers/rejection";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
@@ -27,10 +28,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 			expect(await tab.waitForSelector("#gone", { state: "detached" })).toBeNull();
 			await page.setContent('<div id="hidden" style="display:none">secret</div><div id="shown">shown</div>');
 			expect(await tab.waitForSelector("#hidden", { state: "hidden" })).toBeNull();
-			expect(await tab.waitForSelector("#shown", { state: "visible" })).not.toBeNull();
-			await expect(tab.waitForSelector("#shown", JSON.parse('{"state":"gone"}'))).rejects.toThrow(
-				"waitForSelector() accepts",
-			);
+			expect(await rejectionOf(tab.waitForSelector("#hidden", { state: "detached", timeout: 1 }))).toMatchObject({
+				message: expect.stringContaining("timed out"),
+			});
+			expect(await tab.waitForSelector("#shown", { state: "visible", timeout: Infinity })).not.toBeNull();
+			expect(await rejectionOf(tab.waitForSelector("#shown", JSON.parse('{"state":"gone"}')))).toMatchObject({
+				message: expect.stringContaining("waitForSelector() accepts"),
+			});
 			await page.setContent("<p>Hello <b>page</b></p>");
 			expect(await tab.text()).toBe("Hello page");
 			expect(await tab.html()).toBe("<p>Hello <b>page</b></p>");

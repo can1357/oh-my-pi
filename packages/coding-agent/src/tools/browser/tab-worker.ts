@@ -2687,14 +2687,21 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: opts?.timeout === undefined ? ZERO_MATCH_FAIL_FAST_MS : undefined },
 				);
 			},
-			waitForSelector: (selector, opts) => {
+			waitForSelector: async (selector, opts) => {
 				opts = selectorWaitOptions(opts);
 				const w = waitMs(opts?.timeout);
 				return act(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
-						if (opts?.state === "detached") return await waitForDetached(page, normalizeSelector(selector), sig);
+						if (opts?.state === "detached") {
+							const ref = parseAriaRefSelector(selector);
+							const normalized = normalizeSelector(selector);
+							return await waitForDetached(
+								() => (ref !== null ? resolveAriaRefHandle(page, ref) : page.$(normalized)),
+								sig,
+							);
+						}
 						if (parseAriaRefSelector(selector) !== null) return enrich(await this.#resolveAriaRef(selector));
 						const handle = (await untilAborted(sig, () =>
 							page.waitForSelector(normalizeSelector(selector), {

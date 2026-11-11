@@ -159,30 +159,38 @@ describe("OMP-owned browser evaluation", () => {
 			} as unknown as ToolSession;
 			try {
 				const html =
-					'<div id="visible">shown</div><div id="hidden" style="display:none">hidden</div><iframe name="child" srcdoc="<div id=hidden style=display:none>hidden</div><div id=visible>shown</div>"></iframe>';
+					'<button id="visible">shown</button><div id="hidden" style="display:none">hidden</div><iframe name="child" srcdoc="<div id=hidden style=display:none>hidden</div><div id=visible>shown</div>"></iframe>';
 				await acquireTab(name, headless(), {
 					url: `data:text/html,${encodeURIComponent(html)}`,
 					timeoutMs: 30_000,
 				});
 				const result = await runInTab(name, {
 					code: `
-					const hidden = await tab.waitForSelector("#removed", {state:"hidden", timeout:250});
-					const detached = await tab.waitForSelector("#removed", {state:"detached", timeout:250});
-					const invisible = await tab.waitForSelector("#hidden", {state:"hidden", timeout:250});
-					const attached = await tab.waitForSelector("#hidden", {state:"attached", timeout:250});
-					const visible = await tab.waitForSelector("#visible", {state:"visible", timeout:250});
-					const legacyHidden = await tab.waitForSelector("#removed", {hidden:true, timeout:250});
-					const legacyVisible = await tab.waitForSelector("#visible", {visible:true, timeout:250});
+					const hidden = await tab.waitForSelector("#removed", {state:"hidden"});
+					const detached = await tab.waitForSelector("#removed", {state:"detached"});
+					const invisible = await tab.waitForSelector("#hidden", {state:"hidden"});
+					const attached = await tab.waitForSelector("#hidden", {state:"attached"});
+					const visible = await tab.waitForSelector("#visible", {state:"visible", timeout:Infinity});
+					const legacyHidden = await tab.waitForSelector("#removed", {hidden:true});
+					const legacyVisible = await tab.waitForSelector("#visible", {visible:true});
 					const frame = await tab.frame("child");
-					const frameHidden = await frame.waitForSelector("#removed", {state:"hidden", timeout:250});
-					const frameDetached = await frame.waitForSelector("#removed", {state:"detached", timeout:250});
-					const frameAttached = await frame.waitForSelector("#hidden", {state:"attached", timeout:250});
+					const frameHidden = await frame.waitForSelector("#removed", {state:"hidden"});
+					const frameDetached = await frame.waitForSelector("#removed", {state:"detached"});
+					const frameAttached = await frame.waitForSelector("#hidden", {state:"attached", timeout:Infinity});
 					let stillAttached = "";
 					try { await tab.waitForSelector("#hidden", {state:"detached", timeout:50}); }
 					catch (e) { stillAttached = e.message; }
+					const snapshot = await tab.ariaSnapshot("#visible");
+					const ref = snapshot.match(/ref=(e[0-9]+)/)?.[1];
+					if (!ref) throw new Error("Expected a visible element ref");
+					let attachedRef = "";
+					try { await tab.waitForSelector(ref, {state:"detached", timeout:50}); }
+					catch (e) { attachedRef = e.message; }
+					await tab.evaluate("document.querySelector('#visible').remove()");
+					const detachedRef = await tab.waitForSelector(ref, {state:"detached"});
 					await Promise.all([attached.dispose(), invisible.dispose(), visible.dispose(), legacyVisible.dispose()]);
 					return { hidden, detached, invisible:!!invisible, attached:!!attached, visible:!!visible, legacyHidden,
-						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached };
+						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached, attachedRef, detachedRef };
 				`,
 					timeoutMs: 10_000,
 					session,
@@ -199,6 +207,8 @@ describe("OMP-owned browser evaluation", () => {
 					frameDetached: true,
 					frameAttached: true,
 					stillAttached: expect.stringContaining("timed out"),
+					attachedRef: expect.stringContaining("timed out"),
+					detachedRef: null,
 				});
 			} finally {
 				await releaseTab(name, { kill: true });

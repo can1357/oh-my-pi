@@ -186,7 +186,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 		selector,
 		zeroMatchAfterMs: hooks.zeroMatchAfterMs,
 	});
-	const waitForSelector = (selector: string, options?: FrameWaitOptions): Promise<boolean> => {
+	const waitForSelector = async (selector: string, options?: FrameWaitOptions): Promise<boolean> => {
 		options = selectorWaitOptions(options);
 		const deadline = hooks.waitMs(options?.timeout);
 		return hooks.op(
@@ -194,7 +194,8 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			deadline,
 			async signal => {
 				if (options?.state === "detached") {
-					await waitForDetached(frame, hooks.normalizeSelector(selector), signal);
+					const normalized = hooks.normalizeSelector(selector);
+					await waitForDetached(() => frame.$(normalized), signal);
 					return true;
 				}
 				const handle = await untilAborted(signal, () =>
