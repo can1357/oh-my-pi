@@ -1051,12 +1051,19 @@ fn claim_pair(
 		}
 		pairs += 1;
 		let value = read_holder(conn, holder, info.deviceid);
-		if !is_claimable(value.as_deref(), pointer, owner, process_start)
-			|| devices.iter().any(|slave| {
-				[info.deviceid, info.attachment].contains(&slave.attachment)
-					&& matches!(slave.type_, DeviceType::SLAVE_POINTER | DeviceType::SLAVE_KEYBOARD)
-					&& !is_xtest_slave(conn, xtest, slave.deviceid)
-			}) {
+		if !is_claimable(value.as_deref(), pointer, owner, process_start) {
+			continue;
+		}
+		if devices.iter().any(|slave| {
+			[info.deviceid, info.attachment].contains(&slave.attachment)
+				&& matches!(slave.type_, DeviceType::SLAVE_POINTER | DeviceType::SLAVE_KEYBOARD)
+				&& !is_xtest_slave(conn, xtest, slave.deviceid)
+		}) {
+			// A dead holder's focus must not linger while its slaves unplug,
+			// even though that pair is not safe for the next holder yet.
+			if value.as_deref() != Some(HOLDER_FREE) {
+				unfocus(conn, info.attachment);
+			}
 			continue;
 		}
 		if taken.is_none() {
@@ -1427,8 +1434,11 @@ mod tests {
 		let (conn, root, park) = display();
 		// Killed older omp processes can leave pairs that they may still reap.
 		// They must neither be adopted nor consume the new pool's slots.
-		add_master(&conn, "OMP MPX v1.pool-test-1").unwrap();
-		add_master(&conn, "OMP MPX v1.pool-test-2").unwrap();
+		for name in ["OMP MPX v1.pool-test-1", "OMP MPX v1.pool-test-2"] {
+			if find_masters(&conn, name).is_err() {
+				add_master(&conn, name).unwrap();
+			}
+		}
 		let holder = conn
 			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
 			.unwrap()
@@ -1627,6 +1637,38 @@ mod tests {
 			write_holder(&conn, holder, pointer, dead.master_name(1).as_bytes()).unwrap();
 			warp_master(&conn, root, pointer, (100, 100)).unwrap();
 		}
+		// Model a killed holder whose uinput slave has not disappeared yet.
+		let xtest = conn
+			.intern_atom(true, b"XTEST Device")
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let slave = query_devices(&conn)
+			.unwrap()
+			.into_iter()
+			.find(|info| {
+				info.type_ == DeviceType::SLAVE_KEYBOARD && !is_xtest_slave(&conn, xtest, info.deviceid)
+			})
+			.expect("the isolated server has a non-XTEST keyboard");
+		attach(&conn, slave.deviceid, pairs[0].1).unwrap();
+		conn
+			.xinput_xi_set_focus(root, CURRENT_TIME, pairs[0].1)
+			.unwrap()
+			.check()
+			.unwrap();
+		let other =
+			claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park).unwrap();
+		assert_eq!(other, pairs[1], "the lingering slave still prevents reuse");
+		let focus = conn
+			.xinput_xi_get_focus(pairs[0].1)
+			.unwrap()
+			.reply()
+			.unwrap()
+			.focus;
+		attach(&conn, slave.deviceid, slave.attachment).unwrap();
+		release_pair(&conn, holder, root, park, other.0, other.1, &[]);
+		assert_eq!(focus, NONE, "a dead holder's focus clears before its slave disappears");
 		let session =
 			claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park).unwrap();
 		for (pointer, _) in pairs
