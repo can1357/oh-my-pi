@@ -880,7 +880,7 @@ fn zpixmap_to_rgba(
 #[cfg(test)]
 mod tests {
 	//! The Xvfb tests start their own server and play its window manager:
-	//! `cargo test -p pi-natives -- --ignored covered_window`
+	//! `cargo test -p pi-natives desktop::linux::x11::capture -- --ignored`
 
 	use std::{
 		io::{BufRead, BufReader, IoSlice},
