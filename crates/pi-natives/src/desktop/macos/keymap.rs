@@ -80,13 +80,13 @@ impl Keymap {
 	/// `KEYMAP_TTL`; `None` when the layout publishes no Unicode key layout
 	/// data.
 	pub(super) fn current() -> CoreResult<Option<Arc<Self>>> {
-		cached(&CURRENT, Instant::now(), false, Self::read)
+		cached(&CURRENT, Instant::now(), Self::read)
 	}
 
-	/// Activation can switch the input source for the target document.
-	/// Its map is operation-local; returning focus can switch it back.
-	pub(super) fn fresh() -> CoreResult<Option<Arc<Self>>> {
-		cached(&CURRENT, Instant::now(), true, Self::read)
+	/// Chords use the active input source, never a map from an earlier call.
+	/// Activation, focus restoration and the user can each switch layouts.
+	pub(super) fn for_chord() -> CoreResult<Option<Arc<Self>>> {
+		chord_layout(&CURRENT, Self::read)
 	}
 
 	/// Text Input Sources asserts that it runs on the main queue, which the
@@ -174,16 +174,9 @@ impl Keymap {
 fn cached(
 	slot: &CachedKeymap,
 	now: Instant,
-	fresh: bool,
 	read: impl FnOnce() -> CoreResult<Option<Keymap>>,
 ) -> CoreResult<Option<Arc<Keymap>>> {
 	let mut slot = slot.lock();
-	if fresh {
-		// Discard the map from before activation, but do not cache the
-		// target's map: focus restoration may immediately change it again.
-		*slot = None;
-		return read().map(|keymap| keymap.map(Arc::new));
-	}
 	if let Some((read_at, keymap)) = &*slot
 		&& now.saturating_duration_since(*read_at) < KEYMAP_TTL
 	{
@@ -192,6 +185,16 @@ fn cached(
 	let keymap = read()?.map(Arc::new);
 	*slot = Some((now, keymap.clone()));
 	Ok(keymap)
+}
+
+/// A chord's operation-local map. Forget any map from before a focus change,
+/// and never store this one: the source can change again before the next call.
+fn chord_layout(
+	slot: &CachedKeymap,
+	read: impl FnOnce() -> CoreResult<Option<Keymap>>,
+) -> CoreResult<Option<Arc<Keymap>>> {
+	*slot.lock() = None;
+	read().map(|keymap| keymap.map(Arc::new))
 }
 
 /// The current layout's keyboard type and `uchr` data, read by the helper;
@@ -359,23 +362,22 @@ mod tests {
 			Ok(Some(Keymap::build(translate)))
 		};
 		let start = Instant::now();
-		cached(&slot, start, false, read).unwrap();
-		let reused =
-			cached(&slot, start + KEYMAP_TTL / 2, false, || panic!("read within the TTL")).unwrap();
+		cached(&slot, start, read).unwrap();
+		let reused = cached(&slot, start + KEYMAP_TTL / 2, || panic!("read within the TTL")).unwrap();
 		assert_eq!(
 			reused.unwrap().stroke('q'),
 			Some(Keystroke { code: 0, shift: false, option: false })
 		);
-		cached(&slot, start + KEYMAP_TTL, false, read).unwrap();
+		cached(&slot, start + KEYMAP_TTL, read).unwrap();
 		assert_eq!(reads.get(), 2);
 		// A cancelled read reaches the caller, and the next call reads again.
 		let later = start + KEYMAP_TTL * 2;
-		let cancelled = cached(&slot, later, false, || Err(DesktopError::cancelled("cancelled")));
+		let cancelled = cached(&slot, later, || Err(DesktopError::cancelled("cancelled")));
 		assert_eq!(cancelled.err().map(|error| error.code), Some(ErrorCode::Cancelled));
-		cached(&slot, later, false, read).unwrap();
+		cached(&slot, later, read).unwrap();
 		assert_eq!(reads.get(), 3);
 		// A focus change can select AZERTY even while the old map is fresh.
-		let switched = cached(&slot, later, true, || {
+		let switched = chord_layout(&slot, || {
 			Ok(Some(Keymap::build(|code, _| (code == 12).then_some('a'))))
 		})
 		.unwrap()
@@ -383,8 +385,18 @@ mod tests {
 		assert_eq!(switched.command_key('a'), Some(12));
 		// Returning focus selects the previous layout again. Neither the
 		// pre-activation nor the operation-local map can be reused now.
-		let restored = cached(&slot, later, false, read).unwrap().unwrap();
+		let restored = cached(&slot, later, read).unwrap().unwrap();
 		assert_eq!(restored.command_key('a'), Some(2));
 		assert_eq!(reads.get(), 4);
+		// Desktop/background character chords also read each source anew,
+		// even when the user changes French -> US within the remote-text TTL.
+		for code in [12, 0] {
+			let active = chord_layout(&slot, || {
+				Ok(Some(Keymap::build(|key, _| (key == code).then_some('a'))))
+			})
+			.unwrap()
+			.unwrap();
+			assert_eq!(active.command_key('a'), Some(code));
+		}
 	}
 }
