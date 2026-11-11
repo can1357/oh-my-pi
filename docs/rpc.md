@@ -1325,7 +1325,8 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      `checkedIndices?: number[]` (options currently checked in a checkbox
      list) and `markableCount?: number` (leading options that get a marker;
      the trailing ones, such as the `ask` tool's "Other" and "Done selecting",
-     are actions). The `ask` tool's checkbox fallback re-sends `select` after
+     are actions; absent means every option when `selectionMarker` is set).
+     The `ask` tool's checkbox fallback re-sends `select` after
      every toggle, so `checkedIndices` is the authoritative checked state; a
      host that ignores it cannot show which options are already checked.
    - `input` carries `title: string` and optional `placeholder?: string`,
