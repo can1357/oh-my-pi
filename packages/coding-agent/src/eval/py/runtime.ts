@@ -101,11 +101,18 @@ function resolveManagedPythonEnv(): string {
 	return getPythonEnvDir();
 }
 
+function venvBinDir(venvPath: string): string {
+	return process.platform === "win32" ? path.join(venvPath, "Scripts") : path.join(venvPath, "bin");
+}
+
+/** Interpreter inside a virtualenv: Scripts/python.exe on native Windows, bin/python on POSIX. */
+export function venvPython(venvPath: string): string {
+	return path.join(venvBinDir(venvPath), process.platform === "win32" ? "python.exe" : "python");
+}
+
 function resolveManagedPythonCandidate(): { venvPath: string; pythonPath: string } {
 	const venvPath = resolveManagedPythonEnv();
-	const binDir = process.platform === "win32" ? path.join(venvPath, "Scripts") : path.join(venvPath, "bin");
-	const pythonPath = path.join(binDir, process.platform === "win32" ? "python.exe" : "python");
-	return { venvPath, pythonPath };
+	return { venvPath, pythonPath: venvPython(venvPath) };
 }
 
 export interface PythonRuntime {
@@ -171,10 +178,6 @@ function applyVenvEnv(
 	return env;
 }
 
-function venvBinDir(venvPath: string): string {
-	return process.platform === "win32" ? path.join(venvPath, "Scripts") : path.join(venvPath, "bin");
-}
-
 function detectExplicitVenv(pythonPath: string): { venvPath: string; binDir: string } | undefined {
 	const binDir = path.dirname(pythonPath);
 	const venvPath = path.dirname(binDir);
@@ -238,7 +241,7 @@ export function enumeratePythonRuntimes(cwd: string, baseEnv: Record<string, str
 	const venvPath = baseEnv.VIRTUAL_ENV ?? resolveVenvPath(cwd);
 	if (venvPath) {
 		const binDir = venvBinDir(venvPath);
-		const pythonCandidate = path.join(binDir, process.platform === "win32" ? "python.exe" : "python");
+		const pythonCandidate = venvPython(venvPath);
 		if (fs.existsSync(pythonCandidate)) {
 			push({ pythonPath: pythonCandidate, env: applyVenvEnv(baseEnv, venvPath, binDir), venvPath });
 		}
