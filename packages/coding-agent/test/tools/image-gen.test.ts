@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
@@ -104,6 +104,8 @@ function collectPaths(result: CustomToolResult<{ imagePaths: string[] }>): void 
 }
 
 describe("imageGenTool catalog routing", () => {
+	afterEach(() => vi.restoreAllMocks());
+
 	it("registers without resolving credentials", async () => {
 		const registry = createRegistry([]);
 		expect(await getImageGenTools(registry)).toEqual([imageGenTool]);

@@ -42,6 +42,23 @@ pub fn is_virtual_path(path: &Path) -> bool {
 	url_root_len(path).is_some()
 }
 
+/// The drive letter (uppercased) and drive-relative rest of an MSYS drive
+/// alias that shells on Windows accept: `/c/x/y` and `/mnt/c/x/y` give
+/// `(b'C', b"x/y")`, `/c` gives `(b'C', b"")`. Any other path is `None`.
+pub fn msys_drive(path: &[u8]) -> Option<(u8, &[u8])> {
+	let rest = path.strip_prefix(b"/")?;
+	let rest = match rest.get(..4) {
+		Some(prefix) if prefix.eq_ignore_ascii_case(b"mnt/") => &rest[4..],
+		_ => rest,
+	};
+	let (&letter, tail) = rest.split_first()?;
+	if !letter.is_ascii_alphabetic() || !(tail.is_empty() || tail.starts_with(b"/")) {
+		return None;
+	}
+	let start = tail.iter().position(|&b| b != b'/').unwrap_or(tail.len());
+	Some((letter.to_ascii_uppercase(), &tail[start..]))
+}
+
 /// Borrows `path[start..end]` as a path.
 ///
 /// Callers only split at ASCII `/` boundaries or at a URL root, both of which

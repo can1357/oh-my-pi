@@ -795,6 +795,14 @@ fn undecodable_delete_staged(
 }
 
 /// Stage every parsed hashline section atomically.
+///
+/// A seen-line rejection does not end the walk: later sections are still
+/// checked, so one reply reveals the unseen lines of every file and the
+/// identical resend applies. The reply keeps the `unseen_lines` kind and also
+/// carries any other rejection a later section gets, since that reply may have
+/// recorded provenance too. Other failures after it are left for the resend
+/// to report: a paste fails when its cut sits in a rejected section, which
+/// never reached the clipboard.
 pub fn stage_patch(
 	patch: &Patch,
 	raw_input: &str,
@@ -803,154 +811,178 @@ pub fn stage_patch(
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Result<Vec<StagedFile>, EditError> {
+	let seen_line_guard = enforce_seen_lines.then_some(max_columns);
 	let mut clipboard = store.start_clipboard_batch();
 	let mut staged = Vec::with_capacity(patch.sections.len());
 	let mut canonical_paths = HashMap::<std::path::PathBuf, String>::new();
+	let mut replies = Vec::new();
 	for original in &patch.sections {
-		let parsed = parse_with_range_diagnostics(original, files)?;
-		let tag = original.file_hash.as_deref();
-		let initial = files.resolve(&original.path, false)?;
-		let recovered = recover_target(original, &initial, files, store);
-		let (section, resolved) = recovered
-			.as_ref()
-			.map_or((original, &initial), |(section, resolved)| (section, resolved));
-		// Whole-file delete needs existence, not text, so an undecodable file
-		// stages without its content; anything else still rejects.
-		let undecodable_delete = tag.filter(|_| matches!(parsed.file_op, Some(FileOp::Rem)));
-		let read = match files.try_read(resolved) {
-			Ok(read) => read,
-			Err(err) if err.is_invalid_utf8() && undecodable_delete.is_some() => None,
-			Err(err) => return Err(err),
-		};
-		let Some(read) = read else {
-			if let Some(tag) = undecodable_delete
-				&& files.exists(&resolved.absolute)
-			{
-				staged.push(undecodable_delete_staged(
-					section,
-					resolved,
-					&original.path,
-					tag,
-					parsed.warnings.clone(),
-					&mut canonical_paths,
-					&clipboard.fork(),
-				)?);
-				continue;
-			}
-			return Err(EditError::rejected(
-				Rejection::FileNotFound,
-				format!("File not found: {}. Use the write tool to create new files.", section.path),
-			));
-		};
-		// A section with no tag (missing, or a placeholder like `#AUTO`) never
-		// applies; like an unknown tag, it gets the current tag and context.
-		let Some(tag) = tag else {
-			return Err(mismatch(section, &read.canonical, &read.text, "", store));
-		};
-		if section.path != original.path {
-			// Warning is attached below once parser/apply warnings are collected.
-		}
-		if let Some(previous) = canonical_paths.insert(read.canonical.clone(), original.path.clone())
-		{
-			return Err(EditError::apply(format!(
-				"Multiple hashline sections resolve to the same file ({previous} and {}). Merge their \
-				 ops under one header before applying.",
-				original.path
-			)));
-		}
-		if let Some(FileOp::Move { dest }) = &parsed.file_op {
-			let destination = files.resolve(dest, false)?;
-			if crate::path_policy::canonical_key(&destination.absolute) == read.canonical {
-				return Err(EditError::apply(format!(
-					"MV destination is the same as {}.",
-					section.path
-				)));
-			}
-		}
-		let edits = if matches!(parsed.file_op, Some(FileOp::Rem)) {
-			&[][..]
-		} else {
-			parsed.edits.as_slice()
-		};
-		let apply = apply_with_recovery(
-			section,
-			&read.canonical,
-			&read.text,
-			edits,
-			&mut clipboard,
+		match stage_section(
+			original,
+			seen_line_guard,
+			files,
 			store,
-			enforce_seen_lines.then_some(max_columns),
-		)?;
-		let mut warnings = parsed.warnings.clone();
-		if section.path != original.path {
-			warnings.push(path_recovered_from_tag_message(&original.path, &section.path, tag));
+			&mut clipboard,
+			&mut canonical_paths,
+		) {
+			Ok(item) => staged.push(item),
+			Err(EditError::Rejected { reason: Rejection::UnseenLines, message }) => {
+				replies.push(message);
+			},
+			Err(err) if replies.is_empty() => return Err(err),
+			// Unseen-line replies name their file; `InFile` would repeat its
+			// atomicity trailer once per file.
+			Err(err @ EditError::Rejected { .. }) => {
+				replies.push(format!("[{}]: {err}", original.path));
+			},
+			Err(_) => {},
 		}
-		warnings.extend(apply.warnings.clone());
-		let engine_op = match parsed.file_op {
-			Some(FileOp::Rem) => EngineFileOp::Delete,
-			_ if apply.text == read.text && parsed.file_op.is_none() => EngineFileOp::Noop,
-			_ => EngineFileOp::Update,
-		};
-		let diff = generate_diff_string(&read.text, &apply.text, None, &BlockContextSource {
-			path:      Some(&section.path),
-			lang:      None,
-			streaming: false,
-		});
-		let move_to = if let Some(FileOp::Move { dest }) = &parsed.file_op {
-			Some(files.resolve(dest, false)?)
-		} else {
-			None
-		};
-		let persisted = if matches!(engine_op, EngineFileOp::Delete | EngineFileOp::Noop) {
-			None
-		} else {
-			Some(read.persist(&apply.text)?)
-		};
-		let mut item =
-			StagedFile::new(section.path.clone(), read.resolved.absolute.clone(), engine_op);
-		item.move_to = move_to;
-		item.before_raw = Some(read.raw.clone());
-		item.before.clone_from(&read.text);
-		item.after = apply.text;
-		item.persisted = persisted;
-		item.diff = diff.diff;
-		item.first_changed_line = apply.first_changed_line.or(diff.first_changed_line);
-		item.header = HeaderKind::HashlineTag;
-		item.before_preview = apply
-			.block_resolutions
-			.iter()
-			.map(format_block_resolution)
-			.collect();
-		item.warnings = warnings;
-		item.record_snapshot = true;
-		item.clipboard_after = Some(clipboard.fork());
-		if engine_op == EngineFileOp::Noop && patch.sections.len() == 1 {
-			let (count, escalate) = store.record_noop(&read.canonical, payload_hash(raw_input));
-			if escalate {
-				return Err(EditError::rejected(
-					Rejection::NoChange,
-					no_change_loop_diagnostic(&original.path, count),
-				));
-			}
-			item.text_override = Some(no_change_diagnostic(&original.path));
-		}
-		staged.push(item);
 	}
-	if staged.len() > 1
-		&& let Some(item) = staged.iter().find(|item| item.op == EngineFileOp::Noop)
-	{
+	if !replies.is_empty() {
+		return Err(EditError::rejected(Rejection::UnseenLines, replies.join("\n\n")));
+	}
+	if let Some(item) = staged.iter_mut().find(|item| item.op == EngineFileOp::Noop) {
 		let canonical = crate::path_policy::canonical_key(&item.absolute);
 		let (count, escalate) = store.record_noop(&canonical, payload_hash(raw_input));
-		return Err(EditError::rejected(
-			Rejection::NoChange,
-			if escalate {
-				no_change_loop_diagnostic(&item.display, count)
-			} else {
-				no_change_diagnostic(&item.display)
-			},
-		));
+		let [only] = patch.sections.as_slice() else {
+			return Err(EditError::rejected(
+				Rejection::NoChange,
+				if escalate {
+					no_change_loop_diagnostic(&item.display, count)
+				} else {
+					no_change_diagnostic(&item.display)
+				},
+			));
+		};
+		if escalate {
+			return Err(EditError::rejected(
+				Rejection::NoChange,
+				no_change_loop_diagnostic(&only.path, count),
+			));
+		}
+		item.text_override = Some(no_change_diagnostic(&only.path));
 	}
 	Ok(staged)
+}
+
+/// Stage one section of [`stage_patch`].
+fn stage_section(
+	original: &PatchSection,
+	seen_line_guard: Option<usize>,
+	files: &mut dyn FileSource,
+	store: &EditStore,
+	clipboard: &mut Clipboard,
+	canonical_paths: &mut HashMap<std::path::PathBuf, String>,
+) -> Result<StagedFile, EditError> {
+	let parsed = parse_with_range_diagnostics(original, files)?;
+	let tag = original.file_hash.as_deref();
+	let initial = files.resolve(&original.path, false)?;
+	let recovered = recover_target(original, &initial, files, store);
+	let (section, resolved) = recovered
+		.as_ref()
+		.map_or((original, &initial), |(section, resolved)| (section, resolved));
+	// Whole-file delete needs existence, not text, so an undecodable file
+	// stages without its content; anything else still rejects.
+	let undecodable_delete = tag.filter(|_| matches!(parsed.file_op, Some(FileOp::Rem)));
+	let read = match files.try_read(resolved) {
+		Ok(read) => read,
+		Err(err) if err.is_invalid_utf8() && undecodable_delete.is_some() => None,
+		Err(err) => return Err(err),
+	};
+	let Some(read) = read else {
+		if let Some(tag) = undecodable_delete
+			&& files.exists(&resolved.absolute)
+		{
+			return undecodable_delete_staged(
+				section,
+				resolved,
+				&original.path,
+				tag,
+				parsed.warnings.clone(),
+				canonical_paths,
+				&clipboard.fork(),
+			);
+		}
+		return Err(EditError::rejected(
+			Rejection::FileNotFound,
+			format!("File not found: {}. Use the write tool to create new files.", section.path),
+		));
+	};
+	// A section with no tag (missing, or a placeholder like `#AUTO`) never
+	// applies; like an unknown tag, it gets the current tag and context.
+	let Some(tag) = tag else {
+		return Err(mismatch(section, &read.canonical, &read.text, "", store));
+	};
+	if let Some(previous) = canonical_paths.insert(read.canonical.clone(), original.path.clone()) {
+		return Err(EditError::apply(format!(
+			"Multiple hashline sections resolve to the same file ({previous} and {}). Merge their \
+			 ops under one header before applying.",
+			original.path
+		)));
+	}
+	if let Some(FileOp::Move { dest }) = &parsed.file_op {
+		let destination = files.resolve(dest, false)?;
+		if crate::path_policy::canonical_key(&destination.absolute) == read.canonical {
+			return Err(EditError::apply(format!("MV destination is the same as {}.", section.path)));
+		}
+	}
+	let edits = if matches!(parsed.file_op, Some(FileOp::Rem)) {
+		&[][..]
+	} else {
+		parsed.edits.as_slice()
+	};
+	let apply = apply_with_recovery(
+		section,
+		&read.canonical,
+		&read.text,
+		edits,
+		clipboard,
+		store,
+		seen_line_guard,
+	)?;
+	let mut warnings = parsed.warnings.clone();
+	if section.path != original.path {
+		warnings.push(path_recovered_from_tag_message(&original.path, &section.path, tag));
+	}
+	warnings.extend(apply.warnings.clone());
+	let engine_op = match parsed.file_op {
+		Some(FileOp::Rem) => EngineFileOp::Delete,
+		_ if apply.text == read.text && parsed.file_op.is_none() => EngineFileOp::Noop,
+		_ => EngineFileOp::Update,
+	};
+	let diff = generate_diff_string(&read.text, &apply.text, None, &BlockContextSource {
+		path:      Some(&section.path),
+		lang:      None,
+		streaming: false,
+	});
+	let move_to = if let Some(FileOp::Move { dest }) = &parsed.file_op {
+		Some(files.resolve(dest, false)?)
+	} else {
+		None
+	};
+	let persisted = if matches!(engine_op, EngineFileOp::Delete | EngineFileOp::Noop) {
+		None
+	} else {
+		Some(read.persist(&apply.text)?)
+	};
+	let mut item = StagedFile::new(section.path.clone(), read.resolved.absolute.clone(), engine_op);
+	item.move_to = move_to;
+	item.before_raw = Some(read.raw.clone());
+	item.before.clone_from(&read.text);
+	item.after = apply.text;
+	item.persisted = persisted;
+	item.diff = diff.diff;
+	item.first_changed_line = apply.first_changed_line.or(diff.first_changed_line);
+	item.header = HeaderKind::HashlineTag;
+	item.before_preview = apply
+		.block_resolutions
+		.iter()
+		.map(format_block_resolution)
+		.collect();
+	item.warnings = warnings;
+	item.record_snapshot = true;
+	item.clipboard_after = Some(clipboard.fork());
+	Ok(item)
 }
 
 #[cfg(test)]
@@ -1453,6 +1485,80 @@ mod lifecycle {
 		let text = ctx.text("stale.ts");
 		assert_eq!(text.lines().nth(19), Some("let v0020 = 200;"));
 		assert_eq!(text.lines().nth(20), Some("let v0021 = 210;"));
+	}
+
+	/// A multi-file patch whose files each anchor an unseen line gets one
+	/// rejection that reveals both, and nothing is written; the identical
+	/// resend then applies. An anchor on `two.ts:26`, which neither the reads
+	/// nor that reply displayed, is still rejected.
+	#[tokio::test]
+	async fn multi_file_reveal_lets_the_identical_resend_apply() {
+		let ctx = Lifecycle::new("one.ts", 30);
+		ctx.write_text("two.ts", &ctx.text("one.ts").replace("let ", "var "));
+		let seen: Vec<u32> = (1..=10).collect();
+		let one = ctx.read("one.ts", &seen);
+		let two = ctx.read("two.ts", &seen);
+		let before = (ctx.text("one.ts"), ctx.text("two.ts"));
+		let patch = format!(
+			"[one.ts#{one}]\nPUT 20.=20:\n+let v0020 = 200;\n[two.ts#{two}]\nPUT 25.=25:\n+var v0025 \
+			 = 250;\n"
+		);
+		let err = ctx.edit(&patch).await.unwrap_err();
+		assert!(err.contains("  20:let v0020 = 20;"), "one.ts not revealed: {err}");
+		assert!(err.contains("  25:var v0025 = 25;"), "two.ts not revealed: {err}");
+		assert_eq!((ctx.text("one.ts"), ctx.text("two.ts")), before);
+
+		let err = ctx
+			.edit(&format!("[two.ts#{two}]\nPUT 26.=26:\n+var v0026 = 260;\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("never displayed"), "unexpected error: {err}");
+		assert_eq!(ctx.text("two.ts"), before.1);
+
+		ctx.edit(&patch).await.unwrap();
+		assert_eq!(ctx.text("one.ts").lines().nth(19), Some("let v0020 = 200;"));
+		assert_eq!(ctx.text("two.ts").lines().nth(24), Some("var v0025 = 250;"));
+	}
+
+	/// After a seen-line rejection, a later file's tag rejection joins the same
+	/// reply under its path, and nothing is written.
+	#[tokio::test]
+	async fn multi_file_reveal_carries_a_later_tag_rejection() {
+		let ctx = Lifecycle::new("one.ts", 30);
+		ctx.write_text("two.ts", &ctx.text("one.ts").replace("let ", "var "));
+		let one = ctx.read("one.ts", &(1..=10).collect::<Vec<_>>());
+		let before = (ctx.text("one.ts"), ctx.text("two.ts"));
+		let err = ctx
+			.edit(&format!(
+				"[one.ts#{one}]\nPUT 20.=20:\n+let v0020 = 200;\n[two.ts#BAD0]\nPUT 5.=5:\n+var v0005 \
+				 = 50;\n"
+			))
+			.await
+			.unwrap_err();
+		assert!(err.contains("  20:let v0020 = 20;"), "one.ts not revealed: {err}");
+		assert!(err.contains("[two.ts]: "), "two.ts rejection missing: {err}");
+		assert_eq!((ctx.text("one.ts"), ctx.text("two.ts")), before);
+	}
+
+	/// A paste whose cut sits in a section the guard rejected fails only because
+	/// that cut never ran. The reply reveals the cut lines without an
+	/// empty-paste error about the valid paste, and the identical resend moves
+	/// the line.
+	#[tokio::test]
+	async fn multi_file_reveal_omits_a_paste_of_a_rejected_cut() {
+		let ctx = Lifecycle::new("one.ts", 30);
+		ctx.write_text("two.ts", &ctx.text("one.ts").replace("let ", "var "));
+		let seen: Vec<u32> = (1..=10).collect();
+		let one = ctx.read("one.ts", &seen);
+		let two = ctx.read("two.ts", &seen);
+		let patch = format!("[one.ts#{one}]\nCUT 20.=20\n[two.ts#{two}]\nPUT <1\n");
+		let err = ctx.edit(&patch).await.unwrap_err();
+		assert!(err.contains("  20:let v0020 = 20;"), "one.ts not revealed: {err}");
+		assert!(!err.contains(super::super::messages::EMPTY_PASTE), "bogus paste error: {err}");
+
+		ctx.edit(&patch).await.unwrap();
+		assert_eq!(ctx.text("one.ts").lines().nth(19), Some("let v0021 = 21;"));
+		assert_eq!(ctx.text("two.ts").lines().next(), Some("let v0020 = 20;"));
 	}
 
 	/// The column-cut form: the read cut line 1, so it is not seen, and an edit

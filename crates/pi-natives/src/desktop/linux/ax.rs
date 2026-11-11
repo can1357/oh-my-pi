@@ -1,10 +1,13 @@
+use std::collections::HashMap;
+
 use atspi::{
-	CoordType, ObjectRefOwned, Role, State, proxy::accessible::ObjectRefExt, zbus::names::UniqueName,
+	CoordType, Layer, ObjectRefOwned, Role, State, StateSet, proxy::accessible::ObjectRefExt, zbus,
+	zbus::names::UniqueName,
 };
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, normalize_role_atspi, text_readback},
+	ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	error::{CoreResult, DesktopError},
 	types::DesktopWindow,
@@ -15,6 +18,102 @@ mod menus;
 pub struct AtSpiAx {
 	rt:         Runtime,
 	connection: atspi::AccessibilityConnection,
+	/// The display server's own list of windows, where it knows where each one
+	/// is (X11).
+	native:     Option<Box<dyn NativeWindows>>,
+	frames:     FrameCache,
+}
+
+/// A native top-level window's geometry as the display server reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeGeometry {
+	pub x:      i32,
+	pub y:      i32,
+	pub width:  u32,
+	pub height: u32,
+	/// The shadow a client-side-decorated window draws inside its own surface
+	/// (`_GTK_FRAME_EXTENTS`): left, right, top, bottom.
+	pub shadow: [u32; 4],
+}
+
+/// Where the display server put each top-level window.
+///
+/// GTK4 answers `CoordType::Screen` with `0,0` for every element, on X11 as
+/// on Wayland, while its `CoordType::Window` extents are right. Where the
+/// display server knows the window's position, an element's screen position
+/// is its window position plus that.
+pub(crate) trait NativeWindows: Send + Sync {
+	fn windows(&self) -> CoreResult<Vec<DesktopWindow>>;
+	/// The current geometry of native window `id`; `None` once it is gone or
+	/// off screen (unmapped, minimized).
+	fn geometry(&self, id: &str) -> Option<NativeGeometry>;
+}
+
+/// What a tree walk learns about frames, kept from one `window_root` to the
+/// next so the walk looks each up once.
+#[derive(Default)]
+struct FrameCache {
+	/// Each element's top-level frame; `None` inside a popup, whose window
+	/// extents GTK4 before 4.18 measures from the widget it hangs off rather
+	/// than from where it is drawn.
+	frame_of:  HashMap<ObjectRefOwned, Option<ObjectRefOwned>>,
+	/// Whether each frame's toolkit answers screen coordinates with window
+	/// ones (GTK4).
+	unplaced:  HashMap<ObjectRefOwned, bool>,
+	/// Each frame's native window id, once one matched.
+	native_of: HashMap<ObjectRefOwned, String>,
+	/// Each frame's window geometry as one operation read it; `None` when no
+	/// window shows the frame. Cleared by [`Self::refresh`].
+	geometry:  HashMap<ObjectRefOwned, Option<NativeGeometry>>,
+}
+
+/// Where a frame whose screen position its toolkit cannot report sits on
+/// screen: the origin of its window coordinates and its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Placement {
+	x:      i32,
+	y:      i32,
+	width:  i32,
+	height: i32,
+}
+
+impl Placement {
+	fn contains(self, x: i32, y: i32) -> bool {
+		x >= self.x
+			&& y >= self.y
+			&& i64::from(x) < i64::from(self.x) + i64::from(self.width)
+			&& i64::from(y) < i64::from(self.y) + i64::from(self.height)
+	}
+}
+
+/// Where a frame of `frame_width` x `frame_height` in native window `native`
+/// starts on screen: at the window's origin when the frame fills it, inside
+/// the client-side shadow when the frame fills what the shadow leaves. `None`
+/// when the size fits neither, so the frame's place in the window is unknown.
+fn placement(frame_width: i32, frame_height: i32, native: &NativeGeometry) -> Option<Placement> {
+	let [left, right, top, bottom] = native.shadow.map(i64::from);
+	let (width, height) = (i64::from(native.width), i64::from(native.height));
+	let (frame_width_64, frame_height_64) = (i64::from(frame_width), i64::from(frame_height));
+	let (x, y) = if (frame_width_64, frame_height_64) == (width, height) {
+		(0, 0)
+	} else if (frame_width_64, frame_height_64) == (width - left - right, height - top - bottom) {
+		(left, top)
+	} else {
+		return None;
+	};
+	Some(Placement {
+		x:      i32::try_from(i64::from(native.x) + x).ok()?,
+		y:      i32::try_from(i64::from(native.y) + y).ok()?,
+		width:  frame_width,
+		height: frame_height,
+	})
+}
+
+/// Whether the user can operate an element. GTK4 marks an enabled control
+/// only `Sensitive`, which AT-SPI allows for a control the user can operate;
+/// toolkits drop both states from a greyed-out one.
+fn state_enabled(states: StateSet) -> bool {
+	states.contains(State::Enabled) || states.contains(State::Sensitive)
 }
 
 /// An AT-SPI top-level frame and whether its reported screen position is real.
@@ -88,7 +187,14 @@ impl AtSpiAx {
 		let connection = rt
 			.block_on(atspi::AccessibilityConnection::new())
 			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI connection: {err}")))?;
-		Ok(Self { rt, connection })
+		Ok(Self { rt, connection, native: None, frames: FrameCache::default() })
+	}
+
+	/// Places elements of toolkits that cannot report screen positions by
+	/// where `native` says their window is.
+	pub(crate) fn with_native_windows(mut self, native: Box<dyn NativeWindows>) -> Self {
+		self.native = Some(native);
+		self
 	}
 
 	const fn object(h: &AxHandle) -> &ObjectRefOwned {
@@ -136,7 +242,8 @@ impl AtSpiAx {
 						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI frame: {err}")))?;
 					let title = frame_proxy.name().await.unwrap_or_default();
 					let state = frame_proxy.get_state().await.ok();
-					let Ok(component) = Self::component(&self.connection, &frame).await else {
+					let Ok(component) = Self::component(self.connection.connection(), &frame).await
+					else {
 						continue;
 					};
 					let Ok((x, y, width, height)) = component.get_extents(CoordType::Screen).await
@@ -295,14 +402,14 @@ impl AtSpiAx {
 	}
 
 	async fn component<'a>(
-		connection: &'a atspi::AccessibilityConnection,
+		connection: &'a zbus::Connection,
 		object: &'a ObjectRefOwned,
 	) -> Result<atspi::proxy::component::ComponentProxy<'a>, String> {
 		let name = object
 			.name()
 			.ok_or_else(|| "AT-SPI object has no bus name".to_string())?
 			.clone();
-		atspi::proxy::component::ComponentProxy::builder(connection.connection())
+		atspi::proxy::component::ComponentProxy::builder(connection)
 			.destination(name)
 			.map_err(|err| err.to_string())?
 			.path(object.path().clone())
@@ -410,6 +517,353 @@ impl AtSpiAx {
 		}
 		Ok(None)
 	}
+
+	/// An element's properties, with its bounds when `bounds` asks for them.
+	fn read_props(&mut self, h: &AxHandle, bounds: WalkBounds) -> CoreResult<AxProps> {
+		let object = Self::object(h).clone();
+		let Self { rt, connection, native, frames } = self;
+		rt.block_on(async {
+			let proxy = object
+				.as_accessible_proxy(connection.connection())
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI accessible: {err}")))?;
+			let title = proxy.name().await.ok().filter(|s| !s.is_empty());
+			let description = proxy.description().await.ok().filter(|s| !s.is_empty());
+			let native_role = match proxy.get_role_name().await {
+				Ok(role) => role,
+				Err(_) => proxy
+					.get_localized_role_name()
+					.await
+					.unwrap_or_else(|_| "unknown".to_string()),
+			};
+			let state = proxy.get_state().await.ok();
+			let multiline = state
+				.as_ref()
+				.is_some_and(|states| states.contains(State::MultiLine));
+			let value = if let Some(name) = object.name().cloned() {
+				let builder = atspi::proxy::text::TextProxy::builder(connection.connection())
+					.destination(name)
+					.and_then(|builder| builder.path(object.path().clone()));
+				if let Ok(builder) = builder
+					&& let Ok(text) = builder.build().await
+				{
+					let count = text.character_count().await.unwrap_or(0).min(16_384);
+					text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
+				} else {
+					None
+				}
+			} else {
+				None
+			};
+			let bounds = if bounds == WalkBounds::Read {
+				frames
+					.screen_bounds(connection.connection(), native.as_deref(), &object)
+					.await
+			} else {
+				None
+			};
+			let actions = match Self::action(connection.connection(), &object).await {
+				Ok(action) => action_names(&action).await.unwrap_or_default(),
+				Err(_) => Vec::new(),
+			};
+			let child_count = proxy.child_count().await.unwrap_or(0).max(0) as u32;
+			Ok(AxProps {
+				role: normalize_role_atspi(&native_role, multiline),
+				native_role,
+				title,
+				value,
+				description,
+				enabled: state.is_some_and(state_enabled),
+				focused: state
+					.as_ref()
+					.is_some_and(|states| states.contains(State::Focused)),
+				bounds,
+				actions,
+				child_count,
+				identity: None,
+				partial: false,
+				selected: false,
+				role_name: None,
+			})
+		})
+	}
+
+	/// The deepest element under `root` at screen point (`x`, `y`). A placed
+	/// frame is hit-tested in its window coordinates.
+	async fn descend(
+		connection: &zbus::Connection,
+		root: ObjectRefOwned,
+		placement: Option<Placement>,
+		x: i32,
+		y: i32,
+	) -> CoreResult<Option<AxHandle>> {
+		let (coords, x, y) = match placement {
+			Some(placement) => {
+				(CoordType::Window, x.saturating_sub(placement.x), y.saturating_sub(placement.y))
+			},
+			None => (CoordType::Screen, x, y),
+		};
+		let mut current = root;
+		let mut ancestors = Vec::new();
+		for _ in 0..64 {
+			let has_component = {
+				let accessible = current
+					.as_accessible_proxy(connection)
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI hit-test element: {err}")))?;
+				accessible
+					.get_interfaces()
+					.await
+					.map_err(|err| {
+						DesktopError::ax_failed(format!("AT-SPI hit-test interfaces: {err}"))
+					})?
+					.contains(atspi::Interface::Component)
+			};
+			if !has_component {
+				return Ok(Some(AxHandle::AtSpi(current)));
+			}
+			// GetAccessibleAtPoint returns an immediate child, not
+			// necessarily the leaf that owns the requested pixel.
+			let child = Self::component(connection, &current)
+				.await
+				.map_err(DesktopError::ax_failed)?
+				.get_accessible_at_point(x, y, coords)
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI element at point: {err}")))?;
+			if child.is_null() || child == current {
+				return Ok(Some(AxHandle::AtSpi(current)));
+			}
+			// GTK4 returns the deepest element from the frame, then offsets the
+			// point twice below it and can name a child the point is not in.
+			if placement.is_some() {
+				let inside = Self::component(connection, &child)
+					.await
+					.map_err(DesktopError::ax_failed)?
+					.get_extents(CoordType::Window)
+					.await
+					.is_ok_and(|(left, top, width, height)| {
+						Placement { x: left, y: top, width, height }.contains(x, y)
+					});
+				if !inside {
+					return Ok(Some(AxHandle::AtSpi(current)));
+				}
+			}
+			if ancestors.contains(&child) {
+				return Err(DesktopError::ax_failed("AT-SPI hit-test hierarchy contains a cycle"));
+			}
+			ancestors.push(current);
+			current = child;
+		}
+		Err(DesktopError::ax_failed("AT-SPI hit-test hierarchy exceeds the depth limit"))
+	}
+}
+
+impl FrameCache {
+	/// `object`'s bounds in screen coordinates. A toolkit that cannot place its
+	/// windows (GTK4) reports every element at screen `0,0`; such an element is
+	/// placed by its window extents and where `native` says its frame is, and
+	/// is left as reported where `native` cannot say.
+	async fn screen_bounds(
+		&mut self,
+		connection: &zbus::Connection,
+		native: Option<&dyn NativeWindows>,
+		object: &ObjectRefOwned,
+	) -> Option<AxBounds> {
+		let component = AtSpiAx::component(connection, object).await.ok()?;
+		let (mut x, mut y, width, height) = component.get_extents(CoordType::Screen).await.ok()?;
+		if width < 0 || height < 0 {
+			return None;
+		}
+		if (x, y) == (0, 0)
+			&& let Some(native) = native
+			&& let Some(frame) = self.frame(connection, object).await
+			&& let Some(placement) = self.placement(connection, native, &frame).await
+			&& let Ok((window_x, window_y, ..)) = component.get_extents(CoordType::Window).await
+		{
+			x = placement.x.saturating_add(window_x);
+			y = placement.y.saturating_add(window_y);
+		}
+		Some(AxBounds {
+			x:      f64::from(x),
+			y:      f64::from(y),
+			width:  f64::from(width),
+			height: f64::from(height),
+		})
+	}
+
+	/// Whether `frame` holds screen point (`x`, `y`): `Some` with where it sits
+	/// when its toolkit cannot place it, `Some(None)` when it reports screen
+	/// positions itself. Such a frame `native` cannot place either (minimized,
+	/// another workspace) holds no point.
+	async fn claim(
+		&mut self,
+		connection: &zbus::Connection,
+		native: Option<&dyn NativeWindows>,
+		frame: &ObjectRefOwned,
+		x: i32,
+		y: i32,
+	) -> CoreResult<Option<Option<Placement>>> {
+		if let Some(native) = native
+			&& self.unplaced(connection, frame).await
+		{
+			let placement = self.placement(connection, native, frame).await;
+			return Ok(placement
+				.filter(|placement| placement.contains(x, y))
+				.map(Some));
+		}
+		let contains = AtSpiAx::component(connection, frame)
+			.await
+			.map_err(DesktopError::ax_failed)?
+			.contains(x, y, CoordType::Screen)
+			.await
+			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI frame hit test: {err}")))?;
+		Ok(contains.then_some(None))
+	}
+
+	/// Where `frame` sits on screen, from its native window, when its toolkit
+	/// cannot say; `None` when it can.
+	async fn placement(
+		&mut self,
+		connection: &zbus::Connection,
+		native: &dyn NativeWindows,
+		frame: &ObjectRefOwned,
+	) -> Option<Placement> {
+		if !self.unplaced(connection, frame).await {
+			return None;
+		}
+		let (.., width, height) = AtSpiAx::component(connection, frame)
+			.await
+			.ok()?
+			.get_extents(CoordType::Window)
+			.await
+			.ok()?;
+		let geometry = self.native_geometry(connection, native, frame).await?;
+		placement(width, height, &geometry)
+	}
+
+	/// Whether `frame`'s toolkit answers screen coordinates with window ones.
+	/// GTK4 puts its frames at screen `0,0` and answers `Contains` true even
+	/// for a point above and left of them.
+	async fn unplaced(&mut self, connection: &zbus::Connection, frame: &ObjectRefOwned) -> bool {
+		if let Some(&unplaced) = self.unplaced.get(frame) {
+			return unplaced;
+		}
+		let Ok(component) = AtSpiAx::component(connection, frame).await else {
+			return false;
+		};
+		let unplaced = component
+			.get_extents(CoordType::Screen)
+			.await
+			.is_ok_and(|(x, y, ..)| (x, y) == (0, 0))
+			&& component
+				.contains(-1, -1, CoordType::Screen)
+				.await
+				.unwrap_or(false);
+		self.unplaced.insert(frame.clone(), unplaced);
+		unplaced
+	}
+
+	/// The top-level frame holding `object`: its ancestor that is a child of the
+	/// application, whatever its role. `None` inside a popup.
+	async fn frame(
+		&mut self,
+		connection: &zbus::Connection,
+		object: &ObjectRefOwned,
+	) -> Option<ObjectRefOwned> {
+		let mut chain: Vec<ObjectRefOwned> = Vec::new();
+		// Index in `chain` of the outermost popup met so far.
+		let mut popup = None;
+		let mut current = object.clone();
+		let frame = loop {
+			if let Some(frame) = self.frame_of.get(&current) {
+				break frame.clone();
+			}
+			if chain.len() == 64 {
+				return None;
+			}
+			let proxy = current.as_accessible_proxy(connection).await.ok()?;
+			if proxy.get_role().await.ok()? == Role::Application {
+				break chain.last().cloned();
+			}
+			if let Ok(component) = AtSpiAx::component(connection, &current).await
+				&& component
+					.get_layer()
+					.await
+					.is_ok_and(|layer| layer == Layer::Popup)
+			{
+				popup = Some(chain.len());
+			}
+			let parent = proxy.parent().await.ok()?;
+			if parent.is_null() || parent == current {
+				return None;
+			}
+			drop(proxy);
+			chain.push(std::mem::replace(&mut current, parent));
+		};
+		let outside_popup = |index: usize| popup.is_none_or(|popup| index > popup);
+		let own = frame
+			.clone()
+			.filter(|_| chain.is_empty() || outside_popup(0));
+		for (index, object) in chain.into_iter().enumerate() {
+			self
+				.frame_of
+				.insert(object, frame.clone().filter(|_| outside_popup(index)));
+		}
+		own
+	}
+
+	/// Starts a new operation: windows are read again, so a moved window is
+	/// seen and a frame whose window was hidden is matched again once shown.
+	fn refresh(&mut self) {
+		self.geometry.clear();
+	}
+
+	/// The geometry of the native window showing `frame`, read once per
+	/// operation; its window is matched by process and title until it is gone.
+	async fn native_geometry(
+		&mut self,
+		connection: &zbus::Connection,
+		native: &dyn NativeWindows,
+		frame: &ObjectRefOwned,
+	) -> Option<NativeGeometry> {
+		if let Some(&geometry) = self.geometry.get(frame) {
+			return geometry;
+		}
+		let mut geometry = self.native_of.get(frame).and_then(|id| native.geometry(id));
+		if geometry.is_none() {
+			let id = native_window(connection, native, frame).await;
+			geometry = id.as_deref().and_then(|id| native.geometry(id));
+			match id.filter(|_| geometry.is_some()) {
+				Some(id) => self.native_of.insert(frame.clone(), id),
+				None => self.native_of.remove(frame),
+			};
+		}
+		self.geometry.insert(frame.clone(), geometry);
+		geometry
+	}
+}
+
+/// The native window showing `frame`, the one window of its process with its
+/// title.
+async fn native_window(
+	connection: &zbus::Connection,
+	native: &dyn NativeWindows,
+	frame: &ObjectRefOwned,
+) -> Option<String> {
+	let title = frame
+		.as_accessible_proxy(connection)
+		.await
+		.ok()?
+		.name()
+		.await
+		.ok()?;
+	let pid = zbus::fdo::DBusProxy::new(connection)
+		.await
+		.ok()?
+		.get_connection_unix_process_id(frame.name()?.clone().into())
+		.await
+		.ok()?;
+	native_window_for_frame(&native.windows().ok()?, pid, &title).ok()
 }
 
 fn atspi_window_id(frame: &ObjectRefOwned) -> String {
@@ -628,6 +1082,7 @@ async fn resolve_action(
 
 impl AxBackend for AtSpiAx {
 	fn window_root(&mut self, win: &DesktopWindow) -> CoreResult<AxHandle> {
+		self.frames = FrameCache::default();
 		let result = self.rt.block_on(async {
 			let app = Self::app_for_window(&self.connection, win).await?;
 			let frames = Self::frames(&self.connection, &app).await?;
@@ -690,82 +1145,16 @@ impl AxBackend for AtSpiAx {
 	}
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
-		let object = Self::object(h).clone();
-		self.rt.block_on(async {
-			let proxy = object
-				.as_accessible_proxy(self.connection.connection())
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI accessible: {err}")))?;
-			let title = proxy.name().await.ok().filter(|s| !s.is_empty());
-			let description = proxy.description().await.ok().filter(|s| !s.is_empty());
-			let native_role = match proxy.get_role_name().await {
-				Ok(role) => role,
-				Err(_) => proxy
-					.get_localized_role_name()
-					.await
-					.unwrap_or_else(|_| "unknown".to_string()),
-			};
-			let state = proxy.get_state().await.ok();
-			let multiline = state
-				.as_ref()
-				.is_some_and(|states| states.contains(State::MultiLine));
-			let value = if let Some(name) = object.name().cloned() {
-				let builder = atspi::proxy::text::TextProxy::builder(self.connection.connection())
-					.destination(name)
-					.and_then(|builder| builder.path(object.path().clone()));
-				if let Ok(builder) = builder
-					&& let Ok(text) = builder.build().await
-				{
-					let count = text.character_count().await.unwrap_or(0).min(16_384);
-					text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
-				} else {
-					None
-				}
-			} else {
-				None
-			};
-			let bounds = if let Ok(component) = Self::component(&self.connection, &object).await {
-				component
-					.get_extents(CoordType::Screen)
-					.await
-					.ok()
-					.and_then(|(x, y, width, height)| {
-						(width >= 0 && height >= 0).then_some(AxBounds {
-							x:      f64::from(x),
-							y:      f64::from(y),
-							width:  f64::from(width),
-							height: f64::from(height),
-						})
-					})
-			} else {
-				None
-			};
-			let actions = match Self::action(self.connection.connection(), &object).await {
-				Ok(action) => action_names(&action).await.unwrap_or_default(),
-				Err(_) => Vec::new(),
-			};
-			let child_count = proxy.child_count().await.unwrap_or(0).max(0) as u32;
-			Ok(AxProps {
-				role: normalize_role_atspi(&native_role, multiline),
-				native_role,
-				title,
-				value,
-				description,
-				enabled: state
-					.as_ref()
-					.is_some_and(|states| states.contains(State::Enabled)),
-				focused: state
-					.as_ref()
-					.is_some_and(|states| states.contains(State::Focused)),
-				bounds,
-				actions,
-				child_count,
-				identity: None,
-				partial: false,
-				selected: false,
-				role_name: None,
-			})
-		})
+		self.frames.refresh();
+		self.read_props(h, WalkBounds::Read)
+	}
+
+	fn walk_node(
+		&mut self,
+		h: &AxHandle,
+		bounds: WalkBounds,
+	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
+		Ok((self.read_props(h, bounds)?, self.children(h)?))
 	}
 
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
@@ -868,7 +1257,7 @@ impl AxBackend for AtSpiAx {
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
 		let object = Self::object(h).clone();
 		self.rt.block_on(async {
-			let component = Self::component(&self.connection, &object)
+			let component = Self::component(self.connection.connection(), &object)
 				.await
 				.map_err(DesktopError::ax_failed)?;
 			component
@@ -882,33 +1271,26 @@ impl AxBackend for AtSpiAx {
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
 		let x = x.round() as i32;
 		let y = y.round() as i32;
-		self.rt.block_on(async {
-			let mut root = None;
-			for app in Self::apps(&self.connection)
+		let Self { rt, connection, native, frames: cache } = self;
+		cache.refresh();
+		rt.block_on(async {
+			let bus = connection.connection();
+			let mut root: Option<(ObjectRefOwned, Option<Placement>)> = None;
+			for app in Self::apps(connection)
 				.await
 				.map_err(DesktopError::ax_failed)?
 			{
-				for frame in Self::frames(&self.connection, &app)
+				for frame in Self::frames(connection, &app)
 					.await
 					.map_err(DesktopError::ax_failed)?
 				{
-					let contains = {
-						let component = Self::component(&self.connection, &frame)
-							.await
-							.map_err(DesktopError::ax_failed)?;
-						component
-							.contains(x, y, CoordType::Screen)
-							.await
-							.map_err(|err| {
-								DesktopError::ax_failed(format!("AT-SPI frame hit test: {err}"))
-							})?
-					};
-					if !contains {
+					let Some(placement) = cache.claim(bus, native.as_deref(), &frame, x, y).await?
+					else {
 						continue;
-					}
+					};
 					// AT-SPI enumeration is not stacking order. Never choose an
 					// arbitrary frame when two top-levels contain the point.
-					if let Some(previous) = &root {
+					if let Some((previous, _)) = &root {
 						if previous != &frame {
 							return Err(DesktopError::ax_failed(
 								"multiple AT-SPI windows contain this point; topmost ownership is \
@@ -916,56 +1298,14 @@ impl AxBackend for AtSpiAx {
 							));
 						}
 					} else {
-						root = Some(frame);
+						root = Some((frame, placement));
 					}
 				}
 			}
-			let Some(mut current) = root else {
+			let Some((root, placement)) = root else {
 				return Ok(None);
 			};
-			let mut ancestors = Vec::new();
-			for _ in 0..64 {
-				let has_component = {
-					let accessible = current
-						.as_accessible_proxy(self.connection.connection())
-						.await
-						.map_err(|err| {
-							DesktopError::ax_failed(format!("AT-SPI hit-test element: {err}"))
-						})?;
-					accessible
-						.get_interfaces()
-						.await
-						.map_err(|err| {
-							DesktopError::ax_failed(format!("AT-SPI hit-test interfaces: {err}"))
-						})?
-						.contains(atspi::Interface::Component)
-				};
-				if !has_component {
-					return Ok(Some(AxHandle::AtSpi(current)));
-				}
-				// GetAccessibleAtPoint returns an immediate child, not
-				// necessarily the leaf that owns the requested pixel.
-				let child = {
-					let component = Self::component(&self.connection, &current)
-						.await
-						.map_err(DesktopError::ax_failed)?;
-					component
-						.get_accessible_at_point(x, y, CoordType::Screen)
-						.await
-						.map_err(|err| {
-							DesktopError::ax_failed(format!("AT-SPI element at point: {err}"))
-						})?
-				};
-				if child.is_null() || child == current {
-					return Ok(Some(AxHandle::AtSpi(current)));
-				}
-				if ancestors.contains(&child) {
-					return Err(DesktopError::ax_failed("AT-SPI hit-test hierarchy contains a cycle"));
-				}
-				ancestors.push(current);
-				current = child;
-			}
-			Err(DesktopError::ax_failed("AT-SPI hit-test hierarchy exceeds the depth limit"))
+			Self::descend(bus, root, placement, x, y).await
 		})
 	}
 
@@ -1644,5 +1984,416 @@ mod tests {
 		let expected: Vec<_> = CASES.iter().map(|case| case.6).collect();
 		assert_eq!(results, expected);
 		assert_eq!(huge, MAX_ACTIONS as usize);
+	}
+
+	#[test]
+	fn sensitive_controls_are_enabled() {
+		// GTK4 marks an enabled control only `Sensitive`.
+		assert!(state_enabled(StateSet::new(State::Sensitive | State::Focusable)));
+		assert!(state_enabled(StateSet::new(State::Enabled | State::Sensitive)));
+		// GTK4's Back button with no history, GTK3's Save on a read-only file.
+		assert!(!state_enabled(StateSet::new(State::Focusable | State::Showing)));
+	}
+
+	#[test]
+	fn placement_fits_the_frame_to_its_native_window() {
+		let window =
+			NativeGeometry { x: 300, y: 200, width: 890, height: 550, shadow: [0; 4] };
+		assert_eq!(
+			placement(890, 550, &window),
+			Some(Placement { x: 300, y: 200, width: 890, height: 550 })
+		);
+		// GTK4's window coordinates start inside the shadow it draws.
+		let shadowed = NativeGeometry { width: 942, height: 604, shadow: [26, 26, 23, 31], ..window };
+		assert_eq!(
+			placement(890, 550, &shadowed),
+			Some(Placement { x: 326, y: 223, width: 890, height: 550 })
+		);
+		assert_eq!(placement(400, 300, &shadowed), None);
+		assert!(Placement { x: 300, y: 200, width: 890, height: 550 }.contains(300, 749));
+		assert!(!Placement { x: 300, y: 200, width: 890, height: 550 }.contains(1190, 400));
+	}
+
+	const PEER: &str = ":1.7";
+
+	type Rect = (i32, i32, i32, i32);
+
+	const fn inside((left, top, width, height): Rect, x: i32, y: i32) -> bool {
+		x >= left && y >= top && x < left + width && y < top + height
+	}
+
+	fn object_path(path: &str) -> atspi::zbus::zvariant::OwnedObjectPath {
+		atspi::zbus::zvariant::OwnedObjectPath::try_from(path).unwrap()
+	}
+
+	/// A fake `org.a11y.atspi.Accessible` with its role, name and parent.
+	struct Node {
+		role:   Role,
+		name:   &'static str,
+		parent: &'static str,
+	}
+
+	#[atspi::zbus::interface(name = "org.a11y.atspi.Accessible")]
+	impl Node {
+		fn get_role(&self) -> u32 {
+			self.role as u32
+		}
+
+		#[allow(clippy::unused_self, reason = "every fake node has a Component")]
+		fn get_interfaces(&self) -> Vec<&'static str> {
+			vec!["org.a11y.atspi.Accessible", "org.a11y.atspi.Component"]
+		}
+
+		#[zbus(property)]
+		fn name(&self) -> String {
+			self.name.to_owned()
+		}
+
+		#[zbus(property)]
+		fn parent(&self) -> (String, atspi::zbus::zvariant::OwnedObjectPath) {
+			(PEER.to_owned(), object_path(self.parent))
+		}
+	}
+
+	/// A fake `org.a11y.atspi.Component`. `lies` answers `Contains` true for
+	/// any point, as GTK4 does; `at_point` lists, per coordinate type, where
+	/// `GetAccessibleAtPoint` names which child.
+	struct Extents {
+		screen:   Rect,
+		window:   Rect,
+		lies:     bool,
+		popup:    bool,
+		at_point: Vec<(CoordType, Rect, &'static str)>,
+	}
+
+	impl Extents {
+		/// What GTK4 reports for an element at `window`: screen `0,0`.
+		fn gtk4(window: Rect) -> Self {
+			let (.., width, height) = window;
+			Self { screen: (0, 0, width, height), window, lies: true, popup: false, at_point: vec![] }
+		}
+
+		/// What a toolkit that reports screen positions does.
+		fn placed(screen: Rect, window: Rect) -> Self {
+			Self { screen, window, lies: false, popup: false, at_point: vec![] }
+		}
+
+		fn at(mut self, coords: CoordType, rect: Rect, child: &'static str) -> Self {
+			self.at_point.push((coords, rect, child));
+			self
+		}
+	}
+
+	#[atspi::zbus::interface(name = "org.a11y.atspi.Component")]
+	impl Extents {
+		fn get_extents(&self, coords: u32) -> Rect {
+			if coords == CoordType::Window as u32 {
+				self.window
+			} else {
+				self.screen
+			}
+		}
+
+		fn contains(&self, x: i32, y: i32, coords: u32) -> bool {
+			self.lies || inside(self.get_extents(coords), x, y)
+		}
+
+		fn get_accessible_at_point(
+			&self,
+			x: i32,
+			y: i32,
+			coords: u32,
+		) -> (String, atspi::zbus::zvariant::OwnedObjectPath) {
+			let child = self
+				.at_point
+				.iter()
+				.find(|(at, rect, _)| *at as u32 == coords && inside(*rect, x, y))
+				.map_or("/org/a11y/atspi/null", |(.., child)| child);
+			(PEER.to_owned(), object_path(child))
+		}
+
+		fn get_layer(&self) -> u32 {
+			if self.popup {
+				Layer::Popup as u32
+			} else {
+				Layer::Widget as u32
+			}
+		}
+	}
+
+	/// The bus daemon's process lookup, for the frames' process.
+	struct Bus {
+		pid: u32,
+	}
+
+	#[atspi::zbus::interface(name = "org.freedesktop.DBus")]
+	impl Bus {
+		#[zbus(name = "GetConnectionUnixProcessID")]
+		fn pid(&self, name: String) -> u32 {
+			assert_eq!(name, PEER);
+			self.pid
+		}
+	}
+
+	/// The display server's windows, all 890x550 and of process 7, and how
+	/// many geometry reads it answered.
+	struct Native(std::sync::Mutex<Vec<DesktopWindow>>, std::sync::atomic::AtomicU32);
+
+	impl Native {
+		fn new(windows: &[(&str, &str, i32, i32)]) -> Self {
+			let windows = windows
+				.iter()
+				.map(|&(id, title, x, y)| window(id, title, x, y));
+			Self(std::sync::Mutex::new(windows.collect()), std::sync::atomic::AtomicU32::new(0))
+		}
+
+		fn reads(&self) -> u32 {
+			self.1.load(std::sync::atomic::Ordering::Relaxed)
+		}
+	}
+
+	fn window(id: &str, title: &str, x: i32, y: i32) -> DesktopWindow {
+		DesktopWindow {
+			id: id.into(),
+			pid: Some(7),
+			title: title.into(),
+			app: "app".into(),
+			x,
+			y,
+			width: 890,
+			height: 550,
+			focused: false,
+		}
+	}
+
+	impl NativeWindows for Native {
+		fn windows(&self) -> CoreResult<Vec<DesktopWindow>> {
+			Ok(self.0.lock().unwrap().clone())
+		}
+
+		fn geometry(&self, id: &str) -> Option<NativeGeometry> {
+			self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			let windows = self.0.lock().unwrap();
+			let window = windows.iter().find(|window| window.id == id)?;
+			Some(NativeGeometry {
+				x:      window.x,
+				y:      window.y,
+				width:  window.width,
+				height: window.height,
+				shadow: [0; 4],
+			})
+		}
+	}
+
+	/// Serves `tree` as process 7 and returns the server and a client
+	/// connection to it.
+	async fn serve(
+		tree: Vec<(&'static str, Node, Option<Extents>)>,
+	) -> (atspi::zbus::Connection, atspi::zbus::Connection) {
+		use atspi::zbus::connection::Builder as ConnectionBuilder;
+
+		let (client, server) = tokio::net::UnixStream::pair().unwrap();
+		let mut server = ConnectionBuilder::unix_stream(server)
+			.server(atspi::zbus::Guid::generate())
+			.unwrap()
+			.p2p()
+			.serve_at("/org/freedesktop/DBus", Bus { pid: 7 })
+			.unwrap();
+		for (path, node, extents) in tree {
+			server = server.serve_at(path, node).unwrap();
+			if let Some(extents) = extents {
+				server = server.serve_at(path, extents).unwrap();
+			}
+		}
+		let client = ConnectionBuilder::unix_stream(client).p2p().build();
+		tokio::try_join!(server.build(), client).unwrap()
+	}
+
+	fn node(role: Role, name: &'static str, parent: &'static str) -> Node {
+		Node { role, name, parent }
+	}
+
+	fn object(path: &'static str) -> ObjectRefOwned {
+		ObjectRefOwned::from_static_str_unchecked(PEER, path)
+	}
+
+	async fn read_bounds(
+		cache: &mut FrameCache,
+		client: &atspi::zbus::Connection,
+		native: Option<&dyn NativeWindows>,
+		path: &'static str,
+	) -> Option<(f64, f64, f64, f64)> {
+		let bounds = cache.screen_bounds(client, native, &object(path)).await?;
+		Some((bounds.x, bounds.y, bounds.width, bounds.height))
+	}
+
+	#[test]
+	fn elements_reported_at_the_screen_origin_are_placed_by_their_window() {
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let (bounds, walk_reads) = rt.block_on(async {
+			// What Files (GTK 4.14) reports, with an open popover, and a control
+			// of a toolkit that reports real screen positions.
+			let (server, client) = serve(vec![
+				("/app", node(Role::Application, "org.gnome.Nautilus", "/null"), None),
+				("/frame", node(Role::Frame, "Desktop", "/app"), Some(Extents::gtk4((0, 0, 890, 550)))),
+				("/list", node(Role::List, "", "/frame"), None),
+				(
+					"/downloads",
+					node(Role::ListItem, "Downloads", "/list"),
+					Some(Extents::gtk4((6, 242, 168, 36))),
+				),
+				(
+					"/placed",
+					node(Role::Button, "Open", "/frame"),
+					Some(Extents::placed((280, 75, 67, 46), (15, 3, 67, 46))),
+				),
+				(
+					"/popover",
+					node(Role::Menu, "", "/frame"),
+					Some(Extents { popup: true, ..Extents::gtk4((614, 6, 250, 322)) }),
+				),
+				(
+					"/item",
+					node(Role::MenuItem, "", "/popover"),
+					Some(Extents::gtk4((662, 52, 190, 32))),
+				),
+			])
+			.await;
+			let native = Native::new(&[("42", "Desktop", 300, 200)]);
+			let mut cache = FrameCache::default();
+			let mut bounds = Vec::new();
+			for path in ["/downloads", "/frame", "/placed", "/item"] {
+				bounds.push(read_bounds(&mut cache, &client, Some(&native), path).await);
+			}
+			// One walk reads the frame's window once, whatever it places.
+			let walk_reads = native.reads();
+			// The window was replaced by one elsewhere before the next operation.
+			*native.0.lock().unwrap() = vec![window("43", "Desktop", 500, 100)];
+			cache.refresh();
+			bounds.push(read_bounds(&mut cache, &client, Some(&native), "/downloads").await);
+			// Without a display server that knows (Wayland), as reported.
+			bounds.push(read_bounds(&mut cache, &client, None, "/downloads").await);
+			drop(server);
+			(bounds, walk_reads)
+		});
+		assert_eq!(walk_reads, 1);
+		assert_eq!(bounds, [
+			Some((306.0, 442.0, 168.0, 36.0)),
+			Some((300.0, 200.0, 890.0, 550.0)),
+			Some((280.0, 75.0, 67.0, 46.0)),
+			// GTK 4.14 measures a popover from the widget it hangs off.
+			Some((0.0, 0.0, 190.0, 32.0)),
+			Some((506.0, 342.0, 168.0, 36.0)),
+			Some((0.0, 0.0, 168.0, 36.0)),
+		]);
+	}
+
+	#[test]
+	fn gtk4_frames_are_hit_tested_where_their_window_is() {
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let (claims, found) = rt.block_on(async {
+			let (server, client) = serve(vec![
+				("/app", node(Role::Application, "app", "/null"), None),
+				(
+					"/frame",
+					node(Role::Frame, "Desktop", "/app"),
+					Some(Extents::gtk4((0, 0, 890, 550)).at(
+						CoordType::Window,
+						(6, 242, 168, 36),
+						"/downloads",
+					)),
+				),
+				(
+					"/downloads",
+					node(Role::ListItem, "Downloads", "/frame"),
+					// GTK4 offsets the point again below the frame and names a
+					// child the point is not in.
+					Some(Extents::gtk4((6, 242, 168, 36)).at(
+						CoordType::Window,
+						(0, 0, 890, 550),
+						"/stray",
+					)),
+				),
+				(
+					"/stray",
+					node(Role::Label, "", "/downloads"),
+					Some(Extents::gtk4((700, 500, 10, 10))),
+				),
+				// A GTK4 window the display server does not show (minimized).
+				("/hidden", node(Role::Frame, "Hidden", "/app"), Some(Extents::gtk4((0, 0, 890, 550)))),
+				// A toolkit that reports screen positions, its window at 0,0.
+				(
+					"/editor",
+					node(Role::Frame, "Editor", "/app"),
+					Some(Extents::placed((0, 0, 400, 300), (0, 0, 400, 300)).at(
+						CoordType::Screen,
+						(10, 10, 50, 20),
+						"/open",
+					)),
+				),
+				(
+					"/open",
+					node(Role::Button, "Open", "/editor"),
+					Some(Extents::placed((10, 10, 50, 20), (10, 10, 50, 20))),
+				),
+			])
+			.await;
+			let windows = Native::new(&[("42", "Desktop", 300, 200)]);
+			let native: Option<&dyn NativeWindows> = Some(&windows);
+			let mut cache = FrameCache::default();
+			let mut claims = Vec::new();
+			for (path, x, y, native) in [
+				("/frame", 390, 460, native),
+				("/frame", 1250, 100, native),
+				("/hidden", 390, 460, native),
+				("/editor", 20, 15, native),
+				("/editor", 500, 500, native),
+				// Without a display server that knows (Wayland), as on `main`.
+				("/frame", 1250, 100, None),
+			] {
+				claims.push(
+					cache
+						.claim(&client, native, &object(path), x, y)
+						.await
+						.unwrap(),
+				);
+			}
+			// The hidden window is shown again: the next operation finds it.
+			windows
+				.0
+				.lock()
+				.unwrap()
+				.push(window("44", "Hidden", 100, 50));
+			cache.refresh();
+			claims.push(
+				cache
+					.claim(&client, native, &object("/hidden"), 390, 460)
+					.await
+					.unwrap(),
+			);
+			let mut found = Vec::new();
+			for (path, placement, x, y) in
+				[("/frame", claims[0].flatten(), 390, 460), ("/editor", None, 20, 15)]
+			{
+				let element = AtSpiAx::descend(&client, object(path), placement, x, y)
+					.await
+					.unwrap();
+				found.push(element.map(|element| AtSpiAx::object(&element).path_as_str().to_owned()));
+			}
+			drop(server);
+			(claims, found)
+		});
+		let placed = Placement { x: 300, y: 200, width: 890, height: 550 };
+		let shown = Placement { x: 100, y: 50, width: 890, height: 550 };
+		assert_eq!(claims, [
+			Some(Some(placed)),
+			None,
+			None,
+			Some(None),
+			None,
+			Some(None),
+			Some(Some(shown)),
+		]);
+		assert_eq!(found, [Some("/downloads".to_owned()), Some("/open".to_owned())]);
 	}
 }

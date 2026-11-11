@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+## [18.18.8] - 2026-11-11
+
+- The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#18705](https://github.com/can1357/oh-my-pi/pull/18705) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+### Changed
+
+- Ask forms support notes on options: `n` on radio/checkbox rows and `Alt+n` on select menus (`app.ask.note`), with selected notes shown alongside submitted answers and notes on unchosen options marked as drafts ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+
+### Fixed
+
+- Ask form textareas edited from Tern now restart the inactivity timeout instead of submitting mid-edit
+- Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
+- Fixed terminal Device Attributes replies (such as `^[[?64;1;2;4;6;17;18;21;22c`) leaking into the shell prompt on exit ([#18662](https://github.com/can1357/oh-my-pi/pull/18662) by [@asuffield](https://github.com/asuffield))
+
+## [18.18.7] - 2026-11-10
+
+### Changed
+
+- `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+### Fixed
+
+- Saved-reset messages name the Claude Fable weekly limit as "Claude Fable weekly" instead of its raw id ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+
+## [18.18.6] - 2026-11-09
+
+### Added
+
+- The `wait` result's `JobSnapshot` now carries `settledAtMs` (epoch ms when the run settled, absent while it is still running), so a snapshot can tell a result that finished during the call from one recovered from an earlier, never-delivered completion ([#18635](https://github.com/can1357/oh-my-pi/pull/18635) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added a `thinking.set` composer action so Tern's phone effort menu can pick a thinking level in one tap
+- Added All, Running, Done and Parked status scopes with counts to the agent hub's roster, so Tern's phone can filter agents by status
+- A prompt and a turn's answer list their actions for a phone's long press (`actions.hold`): Copy, Edit & resend (a prompt's), Retry turn, Rewind to here… and Fork from here; the desktop keeps its hover toolbars
+- A click or tap on a turn on the native rewind page picks it, and the rewind selector can open on a given turn (`startAt`)
+- A status notice can carry a button on its native toast (`StatusNoticeAction`), such as the Undo after a rewind
+
+### Fixed
+
+- Fixed streamed rows being clipped above the screen before they reached scrollback while the working row was up, so a scrolled-back terminal saw rows jump at the screen's top edge and the whole screen dropped when a run ended ([#12307](https://github.com/can1357/oh-my-pi/issues/12307), [#16117](https://github.com/can1357/oh-my-pi/pull/16117) by [@galtamam-cmyk](https://github.com/galtamam-cmyk)). `Composer.setRuntimeChildren` takes a `billedChrome` option for roots billed at their current height instead of through the floor.
+- Fixed rows of a streaming reply, and the top rows of a table taller than the screen, going missing from both the screen and scrollback with `tui.completeScrollback` on; such a table now keeps the column widths it had when it outgrew the screen ([#16355](https://github.com/can1357/oh-my-pi/pull/16355) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
+
+## [18.18.4] - 2026-11-09
+
+### Added
+
+- `ask` HTML forms with two or more `<fieldset>`s show one tab per question plus a Review tab in Tern; Next moves on, ←/→ and PgUp/PgDn switch tabs, and Submit lives on Review ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- `ask` HTML forms hide to one row with `app.ask.hide` (`Alt+H`) or the Hide button, as the ask dialog does ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+
+### Fixed
+
+- Prefilled single-line `ask` fields now open at the start of their value instead of scrolling to the end when focused ([#18585](https://github.com/can1357/oh-my-pi/issues/18585)).
+- Fixed the `│` rails of a wrapped box-drawing tree line (`├── **label**: …`) taking the color and weight of the node's leading bold, italic or code span under colorful Markdown; continuation rails now match the first row's rails and the node text keeps its own styling ([#18584](https://github.com/can1357/oh-my-pi/pull/18584) by [@chan1103](https://github.com/chan1103))
+- Fixed relayed Windows terminal events after an event-loop stall so they neither abort the running turn nor type TSP data into the composer ([#18512](https://github.com/can1357/oh-my-pi/issues/18512)).
+- Fixed transcript rows a few turns above the composer disappearing from the screen and from scrollback, at a place that moved with every resize, while a todo list or subagent panel stayed up after a turn ([#18510](https://github.com/can1357/oh-my-pi/pull/18510) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
+- Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
+- Fixed the Agent Hub in Tern freezing itself and the session behind it once hundreds of agents are listed: moving the selection no longer re-sends every roster row, and live roster updates on large hubs are batched (up to once a second) so the terminal keeps up
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
@@ -2508,21 +2565,4 @@
 - Fixed DEC 2048 in-band resize reports (`CSI 48;rows;cols;hpx;wpx t`) leaking into the focused editor as literal text during a rapid resize. When the window is resized quickly the event loop stays busy long enough for the `StdinBuffer` flush timeout to fire mid-report; the `\x1b[48;…` prefix was emitted as one event and the tail (e.g. `8;125;1156;1125t`) arrived as bare printable characters that the editor inserted. `ProcessTerminal` now reassembles a split in-band report (including a split at the bare `\x1b[4` type field) until its terminator and then drives the resize. A reassembled sequence that turns out not to be a resize report — such as a split kitty key like `\x1b[48;5u` (codepoint 48 = `0`) — is forwarded to the input handler as a single escape sequence rather than dropped or leaked.
 - Coalesced terminal-multiplexer SIGWINCH events into a single forced render once the pane stops resizing so closing/dragging a tmux/screen/zellij split no longer flashes the viewport blank before the new geometry repaints ([#2088](https://github.com/can1357/oh-my-pi/issues/2088)).
 
-## [15.10.2] - 2026-06-08
-
-### Added
-
-- Added exported `canonicalKeyId` and `addKeyAliases` keybinding helpers so consumers can share the same canonical shortcut matching semantics as `KeybindingsManager`.
-- Added `super` modifier support to native key parsing/matching and bound `super+alt+backspace` / `super+alt+delete` (and `super+alt+d`) into the word-delete defaults so Ghostty's default macOS Option+Backspace wire (`ESC [127;11u` — kitty modifier 11 = super|alt) deletes a word instead of falling through to single-char delete ([#2064](https://github.com/can1357/oh-my-pi/issues/2064)).
-
-### Fixed
-
-- Fixed focus-changing in-place menus leaving stale Working/menu rows and parking the hardware cursor in the old menu viewport on terminals without a scroll-position oracle.
-- Fixed redundant terminal cursor updates so repeated renders that do not change the cursor row, column, or visibility no longer emit ANSI move/hide sequences
-- Fixed repeated cursor updates during no-op re-renders by reusing the last known cursor state, preventing unnecessary cursor position changes and hide/show sequences
-- Fixed the kitty keyboard progressive-enhancement probe to honor the `CSI ? <flags> u` reply even when the terminal answers the DA1 sentinel first. Previously the kitty reply was discarded once the DA1-driven `modifyOtherKeys` fallback engaged, so terminals like Superset/xterm-on-Electron stayed on the fallback and delivered Shift+Enter as a bare `\r` ([#2042](https://github.com/can1357/oh-my-pi/issues/2042)).
-- Bounded TUI line fitting for oversized raw rows so ANSI-heavy subagent output and zero-width-heavy text cannot grow render buffers independently of the viewport or hide visible suffix text ([#2045](https://github.com/can1357/oh-my-pi/issues/2045)).
-- Fixed tmux offscreen-shrink frames to skip repainting when the visible tail is unchanged, avoiding intermittent blank/refresh flashes in pane terminals ([#2046](https://github.com/can1357/oh-my-pi/issues/2046)).
-- Fixed Windows ConPTY hosts (Windows Terminal, Tabby, Hyper, VS Code) parking the viewport at the top of a full paint after a `/resume` or any long-session repaint. `ProcessTerminal#safeWrite` now splits oversized writes into ≤ 8 KiB pieces at line boundaries on `win32` and inside WSL (where stdout still crosses ConPTY at the `wslhost` boundary) so each underlying `WriteFile` stays below the ~32 KiB threshold where ConPTY stops tracking the cursor; the data was always delivered, but the host UI's scroll position would not follow until any focus event forced a re-query. ([#2034](https://github.com/can1357/oh-my-pi/issues/2034))
-
-Older entries are archived in [packages/tui/CHANGELOG.md@bdbb5c920f69](https://github.com/can1357/oh-my-pi/blob/bdbb5c920f693caff287c50996c116e42e37992b/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@5dfdee6ccd7f](https://github.com/can1357/oh-my-pi/blob/5dfdee6ccd7fd8675a10cf3e354c36f5539328ca/packages/tui/CHANGELOG.md).

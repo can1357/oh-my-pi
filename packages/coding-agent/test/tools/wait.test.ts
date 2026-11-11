@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { type Agent, type AgentMessage, TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
@@ -47,6 +48,11 @@ async function elapse(tool: WaitTool, windowMs: number) {
 /** The progress reminder an elapsed wait appends after its own report, if any. */
 function notice(result: { content: Array<{ type: string; text?: string }> }): string | undefined {
 	return result.content.slice(1).find(block => block.type === "text")?.text;
+}
+
+/** An elapsed wait's own report: the snapshot and its timeout line. */
+function report(result: { content: Array<{ type: string; text?: string }> }): string | undefined {
+	return result.content.find(block => block.type === "text")?.text;
 }
 
 /** Whether `promise` is still pending once already-queued work has run. */
@@ -142,11 +148,16 @@ describe("wait", () => {
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
 		expect(notice(first)).toBeUndefined();
+		expect(report(first)).toContain("within 5.0s");
+		expect(report(first)).toContain("up to 10.0s");
 		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
 		await elapse(tool, 60_000);
 		await elapse(tool, 300_000);
-		expect(notice(await elapse(tool, 300_000))).toContain("11m45s");
+		const capped = await elapse(tool, 300_000);
+		expect(report(capped)).toContain("within 5m");
+		expect(report(capped)).toContain("up to 5m");
+		expect(notice(capped)).toContain("11m45s");
 		build.resolve("done");
 	});
 
@@ -170,6 +181,90 @@ describe("wait", () => {
 		expect((await woke).useless).toBeUndefined();
 		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
 		build.resolve("done");
+	});
+
+	test("labels a job that finished during the wait as delivered by it", async () => {
+		// The job settles mid-wait, so this call is what hands the result over.
+		// The old wording ("not auto-delivered; recovered by this snapshot") read
+		// as a lost completion push and produced delivery-reliability reports
+		// (#16052).
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const { promise, resolve } = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => promise, { ownerId: "Main" });
+		const waiting = new WaitTool(session(manager)).execute("wait-during", {});
+		resolve("build complete");
+		const result = await waiting;
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("Delivery: delivered by this wait");
+		expect(text).not.toContain("not auto-delivered");
+	});
+
+	test("reports a push this snapshot superseded instead of one still on the way", async () => {
+		// The owner is mid-turn: the job settled before this call and its push is
+		// parked on the yield queue. This wait is the result's consumer, so it
+		// supersedes that push — the follow-up cannot arrive, and saying it is
+		// "still on the way" would make the model expect a duplicate (#16135
+		// review). A sink that never resolves pins the queued push.
+		const parked = Promise.withResolvers<void>();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		manager.registerDeliverySink("Main", () => parked.promise);
+		const id = manager.register("bash", "queued", async () => "queued result", { ownerId: "Main" });
+		await manager.getJob(id)?.promise;
+		expect(manager.isDeliveryPending(id)).toBe(true);
+
+		const result = await new WaitTool(session(manager)).execute("wait-pending", {});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("Delivery: handed over by this snapshot");
+		expect(text).toContain("superseded its queued completion push");
+		expect(text).not.toContain("still on the way");
+		expect(text).not.toContain("not auto-delivered");
+		parked.resolve();
+	});
+
+	test("reports a watched job's in-flight push as superseded, not missed", async () => {
+		// A push already in flight when `watchJobs` ran is still on the way:
+		// watching suppresses new enqueue attempts, not a delivery already
+		// queued or in flight. Treating it as lost mislabels the result this
+		// snapshot hands over (#18635).
+		const parked = Promise.withResolvers<void>();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		manager.registerDeliverySink("Main", () => parked.promise);
+		const id = manager.register("bash", "watched", async () => "watched result", { ownerId: "Main" });
+		await manager.getJob(id)?.promise;
+		expect(manager.isDeliveryPending(id)).toBe(true);
+
+		manager.watchJobs([id]);
+		expect(manager.isDeliveryPending(id)).toBe(true);
+
+		const result = buildJobResult(session(manager), manager, "wait", [manager.getJob(id)!], [], [], {
+			startedAtMs: Date.now(),
+			settledAtEntry: new Set([id]),
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("Delivery: handed over by this snapshot");
+		expect(text).toContain("superseded its queued completion push");
+		expect(text).not.toContain("not auto-delivered");
+		parked.resolve();
+	});
+
+	test("keeps the missed-push wording, with the age, for a result that settled before the wait", async () => {
+		// A genuinely late result: it settled before this call began with no push
+		// on the way. The label must stay honest and say how long it had waited.
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const id = manager.register("bash", "earlier", async () => "done earlier", { ownerId: "Main" });
+		await manager.getJob(id)?.promise;
+		const job = manager.getJob(id)!;
+		job.endTime = Date.now() - 5_000;
+
+		const result = await new WaitTool(session(manager)).execute("wait-late", {});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("Delivery: not auto-delivered; recovered by this snapshot");
+		expect(text).toMatch(/already finished \d+(ms|\.\ds) before this call/);
+		expect(text).not.toContain("delivered by this wait");
 	});
 
 	test("finds nothing to wait for in a subagent whose only running work is its parent's job on it", async () => {

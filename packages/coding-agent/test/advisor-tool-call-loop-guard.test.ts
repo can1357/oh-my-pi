@@ -31,6 +31,8 @@ const zeroUsage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } satisfies AssistantMessage["usage"];
 
+type AdviceArgs = { note: string; severity: "nit" | "concern" | "blocker" };
+
 /** Advisor-visible tool that fails the same way on every call. */
 const failingReadTool: AgentTool = {
 	name: "read",
@@ -75,7 +77,7 @@ describe("advisor tool-call loop guard", () => {
 		primaryToolSteps = 0,
 		advice?: string,
 		adviceSeverity: "nit" | "concern" | "blocker" = "nit",
-		advices?: { note: string; severity: "nit" | "concern" | "blocker" }[],
+		advices?: AdviceArgs[] | ((context: Context) => AdviceArgs | undefined),
 	): { advisor: Agent; contexts: Context[]; reviewStarts: Context[] } {
 		const primaryMock = createMockModel({
 			provider: "anthropic",
@@ -109,8 +111,13 @@ describe("advisor tool-call loop guard", () => {
 			// Deliberately ignore the corrective. The enabled guard must hard-stop
 			// this stream; the finite ceiling keeps the disabled control bounded.
 			// `advices` feeds one note per review start, so several advisors (or
-			// several reviews) can each raise their own note.
-			const queued = isReviewStart ? advices?.shift() : undefined;
+			// several reviews) can each raise their own note; as a function it picks
+			// the note from what the review sees.
+			const queued = !isReviewStart
+				? undefined
+				: typeof advices === "function"
+					? advices(context)
+					: advices?.shift();
 			const advising = queued !== undefined || (advice !== undefined && turn === 0);
 			const repeating = advising || turn < maxRepeatedTurns;
 			turn++;
@@ -325,6 +332,41 @@ describe("advisor tool-call loop guard", () => {
 		// the fresh input.
 		expect(delivered).toContain("primary complete");
 		expect(delivered).toContain("second update");
+	});
+
+	it("cancels reviews of the handoff a deferred concern continues and reviews the fix instead", async () => {
+		// The reported session: a concern deferred during the run steers a
+		// continuation at the final boundary while the review of the pre-fix
+		// handoff is still queued (catch-up off). That review would re-raise the
+		// issue as a blocker against the fix in progress; it is cancelled, and the
+		// continuation's final boundary reviews pre- and post-fix work together.
+		const completions = (context: Context) => JSON.stringify(context.messages).split("primary complete").length - 1;
+		const { reviewStarts } = createAdvisor(
+			{ "advisor.syncBacklog": "off" },
+			0,
+			undefined,
+			1,
+			undefined,
+			"nit",
+			context => {
+				const seen = completions(context);
+				if (seen === 0) return { note: "drop the hash pin", severity: "concern" };
+				if (seen === 1) return { note: "hash pin still present", severity: "blocker" };
+				return undefined;
+			},
+		);
+		if (!session) throw new Error("Expected live session");
+
+		await session.prompt("only update");
+		await session.agent.waitForIdle();
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		await session.agent.waitForIdle();
+		const messages = session.agent.state.messages;
+		expect(messages.some(message => JSON.stringify(message).includes("hash pin still present"))).toBe(false);
+		expect(
+			messages.filter(m => m.role === "assistant" && JSON.stringify(m.content).includes("primary complete")),
+		).toHaveLength(2);
+		expect(completions(reviewStarts.at(-1)!)).toBe(2);
 	});
 
 	it("reviews a todo-reminder continuation after a final review", async () => {

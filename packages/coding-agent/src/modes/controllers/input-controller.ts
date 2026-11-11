@@ -18,6 +18,7 @@ import {
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
@@ -42,7 +43,7 @@ import { setCachedImageDimensions } from "@oh-my-pi/pi-tui/prompt/image-referenc
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 import { createModelBrowserSource } from "../model-browser-source";
-import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
+import { formatQueueShorthand, parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
@@ -702,6 +703,14 @@ export class InputController {
 		this.ctx.editor.onCycleThinkingLevel = () => {
 			hintUsage.record("effort");
 			this.cycleThinkingLevel();
+		};
+		this.ctx.editor.onSetThinkingLevel = value => {
+			const level = parseConfiguredThinkingLevel(value);
+			const viewed = this.ctx.viewSession;
+			if (level === undefined || !viewed.getAvailableEffortSelectors().includes(level)) return;
+			viewed.setThinkingLevel(level);
+			this.ctx.statusLine.invalidate();
+			this.ctx.updateEditorBorderColor();
 		};
 		this.ctx.editor.setActionKeys("app.model.cycleForward", this.ctx.keybindings.getKeys("app.model.cycleForward"));
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel("forward");
@@ -2029,34 +2038,46 @@ export class InputController {
 		const startImmediately = !this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount === 0;
 		let queuedCount = 0;
 		try {
-			if (startImmediately && this.ctx.onInputCallback) {
-				const first = messages[0] ?? "";
-				const submission = this.ctx.startPendingSubmission({
-					text: first,
-					images,
-					imageLinks,
-					streamingBehavior: "followUp",
-				});
-				this.ctx.onInputCallback(submission);
-				queuedCount = 1;
+			if (startImmediately) {
+				// The session queues the rest when it admits the first, so nothing can run ahead of it,
+				// and hands the whole list back if the first never reaches the agent.
+				const [first = "", ...rest] = messages;
+				const followUps = rest.length > 0 ? rest : undefined;
+				const disposeRest = rest.map(message => this.ctx.recordLocalSubmission(message));
+				if (this.ctx.onInputCallback) {
+					this.ctx.onInputCallback(
+						this.ctx.startPendingSubmission({
+							text: first,
+							images,
+							imageLinks,
+							streamingBehavior: "followUp",
+							followUps,
+						}),
+					);
+				} else {
+					try {
+						await this.ctx.withLocalSubmission(
+							first,
+							() => this.ctx.session.prompt(first, { images, streamingBehavior: "followUp", followUps }),
+							{ imageCount: images?.length ?? 0 },
+						);
+					} catch (error) {
+						for (const dispose of disposeRest) dispose();
+						if (!followUps) throw error;
+						// The session hands the list back itself if the first item never reached the agent.
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.ui.requestRender();
+						return;
+					}
+				}
+				queuedCount = messages.length;
 			}
 			while (queuedCount < messages.length) {
 				const message = messages[queuedCount] ?? "";
 				const queuedImages = queuedCount === 0 ? images : undefined;
-				await this.ctx.withLocalSubmission(
-					message,
-					async () => {
-						if (startImmediately && queuedCount === 0) {
-							await this.ctx.session.prompt(message, {
-								images: queuedImages,
-								streamingBehavior: "followUp",
-							});
-						} else {
-							await this.ctx.session.followUp(message, queuedImages);
-						}
-					},
-					{ imageCount: queuedImages?.length ?? 0 },
-				);
+				await this.ctx.withLocalSubmission(message, () => this.ctx.session.followUp(message, queuedImages), {
+					imageCount: queuedImages?.length ?? 0,
+				});
 				queuedCount++;
 			}
 		} catch (error) {
@@ -2072,13 +2093,7 @@ export class InputController {
 					}
 				}
 			} else {
-				const remaining = messages.slice(queuedCount);
-				const restored =
-					remaining.length === 1
-						? `=> ${remaining[0]}`
-						: `=>\n${remaining
-								.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`)
-								.join("\n")}`;
+				const restored = formatQueueShorthand(messages.slice(queuedCount));
 				if (options.detachedText !== undefined) restoreDetachedDraft(this.ctx.editor, restored);
 				else this.ctx.editor.setText(restored);
 			}
