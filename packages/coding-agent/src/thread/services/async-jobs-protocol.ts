@@ -138,7 +138,7 @@ export type AsyncJobManagerProtocol = {
 	getRecentJobs: RpcMethod<[limit: number | undefined, filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
 	getAllJobs: RpcMethod<[filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
 	backgroundJob: RpcMethod<[jobId: string], boolean>;
-	releaseForegroundJob: RpcMethod<[jobId: string], void>;
+	releaseForegroundJob: RpcMethod<[jobId: string], boolean>;
 	getDeliveryState: RpcMethod<[filter: AsyncJobFilter | undefined], AsyncJobDeliveryState>;
 	hasPendingDeliveries: RpcMethod<[filter: AsyncJobFilter | undefined], boolean>;
 	watchJobs: RpcMethod<[jobIds: string[]], number>;

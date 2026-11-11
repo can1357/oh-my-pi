@@ -19,6 +19,14 @@ export function attachShellTrace(snapshot: ShellTrace, trace: RunTrace): void {
 	visualizations.set(snapshot, trace);
 }
 
+/** Release a snapshot's live native run once superseded or settled; later paints restore from the snapshot on demand. */
+export function detachShellTrace(snapshot: ShellTrace): void {
+	const current = visualizations.get(snapshot);
+	if (current !== undefined && current !== null && !(current instanceof ShellVisualization)) {
+		visualizations.delete(snapshot);
+	}
+}
+
 /**
  * Historical traces restore their canonical native archive only once per snapshot.
  * `undefined` when the engine rejects the snapshot (e.g. a `tool_result` hook rewrote

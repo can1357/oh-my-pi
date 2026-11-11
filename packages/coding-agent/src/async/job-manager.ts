@@ -359,8 +359,8 @@ export interface AsyncJobManagerApi {
 	getAllJobs(filter?: AsyncJobFilter): AsyncJob[];
 	/** Promote a foreground-backed job to a background job; false for unknown ids. */
 	backgroundJob(jobId: string): boolean;
-	/** Drop a foreground-backed job whose result the foreground call already returned. */
-	releaseForegroundJob(jobId: string): void;
+	/** Drop a foreground-backed job whose result the foreground call already returned; false for unknown or promoted ids. */
+	releaseForegroundJob(jobId: string): boolean;
 	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState;
 	hasPendingDeliveries(filter?: AsyncJobFilter): boolean;
 	watchJobs(jobIds: string[]): number;
@@ -695,7 +695,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	 */
 	backgroundJob(jobId: string): boolean {
 		const job = this.#jobs.get(jobId);
-		if (!job) return false;
+		if (!job || this.#releasedForegroundJobs.has(jobId)) return false;
 		if (!job.foreground) return true;
 		job.foreground = undefined;
 		this.#suppressedDeliveries.delete(jobId);
@@ -708,13 +708,15 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	/**
 	 * Drop a foreground-backed job whose result the foreground call already
 	 * returned (or whose call aborted). The row is discarded as soon as its run
-	 * settles and never surfaces as a background job.
+	 * settles and never surfaces as a background job. Returns false for unknown
+	 * or already-promoted jobs.
 	 */
-	releaseForegroundJob(jobId: string): void {
+	releaseForegroundJob(jobId: string): boolean {
 		const job = this.#jobs.get(jobId);
-		if (!job?.foreground) return;
+		if (!job?.foreground) return false;
 		if (job.endTime !== undefined) this.#discardForegroundJob(jobId);
 		else this.#releasedForegroundJobs.add(jobId);
+		return true;
 	}
 
 	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState {

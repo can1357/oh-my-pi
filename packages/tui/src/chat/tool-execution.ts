@@ -634,6 +634,9 @@ export class ToolExecutionComponent extends Container {
 			};
 		}
 		this.#shellTrace = next;
+		if (next) {
+			this.#shellPendingTrace = undefined;
+		}
 		if (next?.historyTruncated && this.#shellPreferences.cursor === 0 && this.#shellReplayPositioned) {
 			this.#shellReplayNs = Math.max(this.#shellReplayNs, next.history?.[0]?.t_ns ?? 0);
 		}
@@ -651,7 +654,7 @@ export class ToolExecutionComponent extends Container {
 			this.#shellPendingScript = script;
 			this.#shellPresentationKey = undefined;
 		}
-		const key = `${this.#resultVersion}|${this.#displayInputVersion}`;
+		const key = `${this.#resultVersion}|${this.#displayInputVersion}|${this.#shellTrace?.seq ?? ""}`;
 		if (this.#shellPresentation && key === this.#shellPresentationKey) return this.#shellPresentation;
 		const source = this.#shellTrace
 			? shellVisualization(this.#shellTrace)

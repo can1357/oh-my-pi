@@ -26,9 +26,10 @@ import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-gr
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { isShellTrace } from "@oh-my-pi/pi-wire";
+import { isShellTrace, type ShellTrace, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
 
 import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { becomesCollectible } from "../../tui/test/gc";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
@@ -113,23 +114,140 @@ describe("executeBash", () => {
 		}
 	});
 
-	it("publishes the same live native owner before each trace callback", async () => {
-		const snapshots: piNatives.RunTrace[] = [];
-		const result = await executeBash("printf 'attached-native\\n'", {
-			cwd: tempDir,
-			timeout: 5000,
-			onTrace: trace => {
-				const source = shellVisualization(trace);
-				if (!(source instanceof piNatives.RunTrace)) throw new Error("Expected the live native owner");
-				snapshots.push(source);
-				readShellPresentation(source, defaultShellVizPreferences(), trace);
-			},
+	it("publishes the same live native owner during callbacks and detaches it on settle", async () => {
+		let liveRef: WeakRef<piNatives.RunTrace> | undefined;
+		let callbackRuns = 0;
+		let livePresentation: ShellVizPresentation | undefined;
+		const runSettled = async (): Promise<BashResult> => {
+			const snapshots = new Set<piNatives.RunTrace>();
+			const res = await executeBash("label=ok; printf 'attached-%s\\n' \"$label\"", {
+				cwd: tempDir,
+				timeout: 5000,
+				onTrace: trace => {
+					const source = shellVisualization(trace);
+					if (!(source instanceof piNatives.RunTrace)) throw new Error("Expected the live native owner");
+					snapshots.add(source);
+					callbackRuns++;
+					livePresentation = readShellPresentation(source, defaultShellVizPreferences(), trace, "settled-out\n");
+				},
+			});
+			expect(snapshots.size).toBe(1);
+			const [only] = snapshots;
+			if (!only) throw new Error("Expected live RunTrace");
+			liveRef = new WeakRef(only);
+			snapshots.clear();
+			return res;
+		};
+
+		const result = await runSettled();
+		expect(callbackRuns).toBeGreaterThan(0);
+		if (!result.trace || !liveRef) throw new Error("Expected final native trace");
+
+		const settledSource = shellVisualization(result.trace);
+		expect(settledSource).toBeInstanceOf(piNatives.ShellVisualization);
+		if (!settledSource || !livePresentation) throw new Error("Expected restored ShellVisualization");
+		expect(readShellPresentation(settledSource, defaultShellVizPreferences(), result.trace, "settled-out\n")).toEqual(
+			livePresentation,
+		);
+
+		expect(await becomesCollectible(liveRef)).toBe(true);
+		expect(result.trace.status).toBe(0);
+	});
+
+	it("keeps the live trace attached across prompt abort until background native cleanup finalizes it", async () => {
+		const originalRun = piNatives.Shell.prototype.run;
+		const originalAbort = piNatives.Shell.prototype.abort;
+		const gateFile = path.join(tempDir, "abort-teardown.gate");
+		const releaseNativeCancel = Promise.withResolvers<void>();
+		const nativeRunSettled = Promise.withResolvers<void>();
+
+		const runSpy = vi
+			.spyOn(piNatives.Shell.prototype, "run")
+			.mockImplementation(function (this: Shell, options, onChunk) {
+				return originalRun
+					.call(this, { ...options, signal: undefined }, onChunk)
+					.finally(() => nativeRunSettled.resolve());
+			});
+		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockImplementation(async function (this: Shell) {
+			await releaseNativeCancel.promise;
+			fs.writeFileSync(gateFile, "ok");
+			await nativeRunSettled.promise;
+			await originalAbort.call(this);
 		});
-		expect(snapshots.length).toBeGreaterThan(0);
-		expect(new Set(snapshots).size).toBe(1);
-		expect(result.trace).toBeDefined();
-		if (!result.trace) throw new Error("Expected final native trace");
-		expect(shellVisualization(result.trace)).toBe(snapshots[0]);
+
+		let liveRef: WeakRef<piNatives.RunTrace> | undefined;
+		let publishedTrace: ShellTrace | undefined;
+		const runAborted = async (): Promise<BashResult> => {
+			const controller = new AbortController();
+			const ready = Promise.withResolvers<void>();
+			const command = `printf 'ready\\n'; while [ ! -f ${shellQuote(gateFile)} ]; do sleep 0.01; done; false && printf 'after\\n'`;
+			const pending = executeBash(command, {
+				cwd: tempDir,
+				timeout: 5000,
+				signal: controller.signal,
+				onChunk: chunk => {
+					if (chunk.includes("ready")) ready.resolve();
+				},
+				onTrace: trace => {
+					publishedTrace = trace;
+				},
+			});
+			await ready.promise;
+			controller.abort();
+			const aborted = await pending;
+			if (!aborted.trace) throw new Error("Expected interim cancelled trace");
+
+			const interimSource = shellVisualization(aborted.trace);
+			expect(interimSource).toBeInstanceOf(piNatives.RunTrace);
+			if (!(interimSource instanceof piNatives.RunTrace)) throw new Error("Expected live RunTrace during teardown");
+			const interimPresentation = readShellPresentation(interimSource, defaultShellVizPreferences(), aborted.trace);
+			expect(interimPresentation.executing).toBe(true);
+			expect(interimPresentation.running).toBe(true);
+			expect(interimPresentation.rows.some(row => row.state === "running")).toBe(true);
+			liveRef = new WeakRef(interimSource);
+			return aborted;
+		};
+
+		const hasTerminalRunEnd = (trace: ShellTrace | undefined): boolean =>
+			trace?.history?.some(
+				entry => entry.kind === "RunEnd" && (entry.segment === undefined || entry.logicalEnd === true),
+			) ?? false;
+
+		const result = await runAborted();
+		expect(result.cancelled).toBe(true);
+		expect(publishedTrace).toBe(result.trace);
+		expect(result.trace?.status).toBeUndefined();
+		expect(hasTerminalRunEnd(result.trace)).toBe(false);
+
+		releaseNativeCancel.resolve();
+		await nativeRunSettled.promise;
+		await pollUntil(() => result.trace?.status !== undefined, Date.now() + 4000);
+		runSpy.mockRestore();
+		abortSpy.mockRestore();
+
+		if (!result.trace || !liveRef) throw new Error("Expected finalized trace");
+		expect(result.trace.status).toBe(1);
+		expect(hasTerminalRunEnd(result.trace)).toBe(true);
+		expect(result.trace.history?.at(-1)?.kind).toBe("RunEnd");
+
+		const settledSource = shellVisualization(result.trace);
+		expect(settledSource).toBeInstanceOf(piNatives.ShellVisualization);
+		if (!settledSource) throw new Error("Expected restored ShellVisualization");
+		const settledPresentation = readShellPresentation(settledSource, defaultShellVizPreferences(), result.trace);
+		expect(settledPresentation.executing).toBe(false);
+		expect(settledPresentation.running).toBe(false);
+		expect(settledPresentation.rows.every(row => row.state !== "running")).toBe(true);
+		expect(settledPresentation.rows.some(row => row.state === "skipped")).toBe(true);
+
+		const reloaded: unknown = JSON.parse(JSON.stringify(result.trace));
+		if (!isShellTrace(reloaded)) throw new Error("Expected finalized trace JSON to validate");
+		const reloadedSource = shellVisualization(reloaded);
+		if (!reloadedSource) throw new Error("Expected reloaded trace to restore");
+		expect(readShellPresentation(reloadedSource, defaultShellVizPreferences(), reloaded)).toEqual(
+			settledPresentation,
+		);
+
+		expect(await becomesCollectible(liveRef)).toBe(true);
 	});
 
 	it("keeps tracing and restores a run whose values are not UTF-8", async () => {

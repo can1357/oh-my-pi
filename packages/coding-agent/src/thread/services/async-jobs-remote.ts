@@ -2,8 +2,7 @@
  * Worker-side {@link AsyncJobManagerApi} over the root's main-thread manager.
  *
  * Every query and command runs on main: synchronous methods through
- * `callSync` (`releaseForegroundJob`, which returns nothing, as an ordered
- * notification), async ones through `call`. Job rows come back as
+ * `callSync`, async ones through `call`. Job rows come back as
  * {@link RemoteAsyncJob}s built from {@link AsyncJobWire} projections, with
  * local equivalents of the live fields:
  *
@@ -64,9 +63,16 @@ interface LocalInputs {
 	readonly widgetInputs?: JobWidgetInputs;
 }
 
+interface LocalEntry {
+	inputs: LocalInputs | undefined;
+	readonly feed: WorkerJobFeed;
+	released: boolean;
+	timer?: NodeJS.Timeout;
+}
+
 /** Reads a worker job's live inputs as {@link JobFeedDelta}s: each source's text since the last read. */
 class WorkerJobFeed {
-	readonly #inputs: LocalInputs;
+	#inputs: LocalInputs | undefined;
 	readonly #offsets = new Map<string, { source: JobTextSource; end: number; open: boolean }>();
 
 	constructor(inputs: LocalInputs) {
@@ -74,7 +80,7 @@ class WorkerJobFeed {
 	}
 
 	wire(): WireJobFeed {
-		const { process, widgetInputs } = this.#inputs;
+		const { process, widgetInputs } = this.#inputs ?? {};
 		return {
 			process: process ? { command: process.command, cwd: process.cwd } : undefined,
 			brief: widgetInputs?.brief(),
@@ -83,7 +89,9 @@ class WorkerJobFeed {
 	}
 
 	delta(): JobFeedDelta {
-		const { process, widgetInputs } = this.#inputs;
+		const inputs = this.#inputs;
+		if (!inputs) return {};
+		const { process, widgetInputs } = inputs;
 		if (!widgetInputs) return { pids: process ? [...process.pids()] : undefined };
 		const sources: JobFeedSource[] = [];
 		for (const source of widgetInputs.sources()) {
@@ -102,6 +110,11 @@ class WorkerJobFeed {
 			});
 		}
 		return { pids: process ? [...process.pids()] : undefined, brief: widgetInputs.brief(), sources };
+	}
+
+	clear(): void {
+		this.#inputs = undefined;
+		this.#offsets.clear();
 	}
 }
 
@@ -211,7 +224,7 @@ class RemoteJobWidgets implements JobWidgetRegistry {
 /** Worker-side root job manager; see the module doc. */
 export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 	readonly #remote: Remote;
-	readonly #local = new Map<string, LocalInputs>();
+	readonly #local = new Map<string, LocalEntry>();
 	readonly #settled = new Map<string, Promise<void>>();
 	readonly #controllers = new Map<string, AbortController>();
 	#widgets: RemoteJobWidgets | null | undefined;
@@ -236,11 +249,13 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
-		const local: LocalInputs | undefined =
+		const inputs: LocalInputs | undefined =
 			options?.process || options?.widgetInputs
 				? { process: options.process, widgetInputs: options.widgetInputs }
 				: undefined;
-		const feed = local ? new WorkerJobFeed(local) : undefined;
+		const entry: LocalEntry | undefined = inputs
+			? { inputs, feed: new WorkerJobFeed(inputs), released: false }
+			: undefined;
 		const wired: WireJobRun = async ctx => {
 			try {
 				return await run({
@@ -250,9 +265,14 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 					markRunning: () => ignoreSettle(ctx.markRunning()),
 				});
 			} finally {
-				// Sent ahead of the result, so main's final widget read sees the job's last output.
-				if (feed && ctx.pushFeed) ignoreSettle(ctx.pushFeed(feed.delta()));
-				if (local) this.#expireLocal(ctx.jobId, local);
+				if (entry && !entry.released) {
+					// Sent ahead of the result, so main's final widget read sees the job's last output.
+					if (ctx.pushFeed) {
+						ignoreSettle(ctx.pushFeed(entry.feed.delta()));
+						entry.feed.clear();
+					}
+					this.#expireLocal(ctx.jobId, entry);
+				}
 			}
 		};
 		const wireOptions: WireRegisterOptions = {
@@ -263,10 +283,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 			queued: options?.queued,
 			foreground: options?.foreground,
 			intent: options?.intent,
-			feed: feed?.wire(),
+			feed: entry?.feed.wire(),
 		};
 		const id = this.#remote.callSync("register", type, label, wired, wireOptions);
-		if (local) this.#local.set(id, local);
+		if (entry && !entry.released) this.#local.set(id, entry);
 		return id;
 	}
 
@@ -286,7 +306,7 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 	getJob(id: string): AsyncJob | undefined {
 		const wire = this.#remote.callSync("getJob", id);
 		if (!wire) {
-			this.#local.delete(id);
+			this.#dropLocal(id);
 			return undefined;
 		}
 		return this.#row(wire);
@@ -308,9 +328,15 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("backgroundJob", jobId);
 	}
 
-	/** A notification: nothing to wait for, and every later call reaches main after it. */
-	releaseForegroundJob(jobId: string): void {
-		this.#remote.notify("releaseForegroundJob", jobId);
+	releaseForegroundJob(jobId: string): boolean {
+		if (this.#remote.callSync("releaseForegroundJob", jobId)) {
+			this.#dropLocal(jobId);
+			return true;
+		}
+		if (this.#local.has(jobId) && !this.#remote.callSync("getJob", jobId)) {
+			this.#dropLocal(jobId);
+		}
+		return false;
 	}
 
 	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState {
@@ -428,18 +454,34 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	#row(wire: AsyncJobWire): RemoteAsyncJob {
-		return new RemoteAsyncJob(this, wire, this.#local.get(wire.id));
+		return new RemoteAsyncJob(this, wire, this.#local.get(wire.id)?.inputs);
 	}
 
 	#rows(wires: AsyncJobWire[]): AsyncJob[] {
 		return wires.map(wire => this.#row(wire));
 	}
 
+	#dropLocal(jobId: string): void {
+		const entry = this.#local.get(jobId);
+		if (!entry) return;
+		entry.released = true;
+		entry.inputs = undefined;
+		entry.feed.clear();
+		clearTimeout(entry.timer);
+		entry.timer = undefined;
+		this.#local.delete(jobId);
+	}
+
 	/** Drop a settled job's live inputs once main's row is certainly gone. */
-	#expireLocal(jobId: string, local: LocalInputs): void {
+	#expireLocal(jobId: string, entry: LocalEntry): void {
 		const timer = setTimeout(() => {
-			if (this.#local.get(jobId) === local) this.#local.delete(jobId);
+			if (this.#local.get(jobId) === entry) {
+				entry.inputs = undefined;
+				entry.feed.clear();
+				this.#local.delete(jobId);
+			}
 		}, LOCAL_INPUTS_RETENTION_MS);
 		timer.unref();
+		entry.timer = timer;
 	}
 }

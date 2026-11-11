@@ -1,15 +1,39 @@
 import { describe, expect, it } from "bun:test";
-import { RunTrace, Shell } from "@oh-my-pi/pi-natives";
+import { RunTrace, Shell, ShellVisualization } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import {
 	attachShellTrace,
 	decodeShellPresentation,
 	defaultShellVizPreferences,
+	detachShellTrace,
 	readShellPresentation,
 	shellVisualization,
 } from "../src/tools/shell-viz";
 import { renderShellVisualization } from "../src/tools/shell-viz-render";
 import { getThemeByName } from "../src/theme";
+import { becomesCollectible } from "./gc";
+
+async function runAndAttachSettled(command: string): Promise<{
+	settled: ShellTrace;
+	liveDefault: ShellVizPresentation;
+	liveReplay: ShellVizPresentation;
+	liveRef: WeakRef<RunTrace>;
+}> {
+	const trace = new RunTrace(command);
+	await new Shell().run({ command, trace });
+	const settled = snapshot(trace);
+	attachShellTrace(settled, trace);
+	const prefs = defaultShellVizPreferences();
+	const replayPrefs = { ...prefs, cursor: settled.history?.length ?? 0 };
+	const liveSource = shellVisualization(settled);
+	if (!(liveSource instanceof RunTrace)) throw new Error("Expected attached RunTrace");
+	return {
+		settled,
+		liveDefault: readShellPresentation(liveSource, prefs, settled, "sink output\n"),
+		liveReplay: readShellPresentation(liveSource, replayPrefs, settled),
+		liveRef: new WeakRef(trace),
+	};
+}
 
 function snapshot(trace: RunTrace): ShellTrace {
 	const value: unknown = JSON.parse(trace.snapshot());
@@ -90,5 +114,25 @@ describe("native shell presentation boundary", () => {
 		const restored = shellVisualization(stored);
 		if (!restored) throw new Error("Expected the stored trace to restore");
 		expect(readShellPresentation(restored, replay, stored).output).toBe("native-boundary\n");
+	});
+
+	it("detaches a settled live RunTrace while restoring identical presentation from the snapshot", async () => {
+		const { settled, liveDefault, liveReplay, liveRef } = await runAndAttachSettled(
+			"count=3\nprintf 'item-%s\\n' \"$count\"\nfalse || printf 'done\\n'",
+		);
+		detachShellTrace(settled);
+		expect(await becomesCollectible(liveRef)).toBe(true);
+
+		const restored = shellVisualization(settled);
+		expect(restored).toBeInstanceOf(ShellVisualization);
+		if (!restored) throw new Error("Expected restored ShellVisualization");
+		expect(shellVisualization(settled)).toBe(restored);
+		detachShellTrace(settled);
+		expect(shellVisualization(settled)).toBe(restored);
+
+		const prefs = defaultShellVizPreferences();
+		const replayPrefs = { ...prefs, cursor: settled.history?.length ?? 0 };
+		expect(readShellPresentation(restored, prefs, settled, "sink output\n")).toEqual(liveDefault);
+		expect(readShellPresentation(restored, replayPrefs, settled)).toEqual(liveReplay);
 	});
 });

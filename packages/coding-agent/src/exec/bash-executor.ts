@@ -21,7 +21,7 @@ import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/p
 import { Settings } from "../config/settings";
 import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import { attachShellTrace, detachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -164,38 +164,82 @@ const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 /** Cadence of the `onTrace` poll while an embedded run is in flight. */
 const TRACE_POLL_MS = 80;
 
+function syncShellTrace(target: ShellTrace, source: ShellTrace): void {
+	delete target.status;
+	delete target.rootVpid;
+	delete target.history;
+	delete target.historyTruncated;
+	delete target.diags;
+	Object.assign(target, source);
+}
+
+interface ActiveTracePoll {
+	stop: (detach?: boolean) => ShellTrace | undefined;
+	finalize: () => void;
+}
+
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
- * forwards each changed snapshot; `stop()` takes the final one.
+ * forwards each changed snapshot; `stop()` takes the final one, and `finalize()`
+ * refreshes that snapshot in place once deferred native cancellation settles
+ * before releasing the live owner.
  *
  * An invalid snapshot is logged once and skipped: the poll runs from a timer,
  * where a throw would escape as an uncaught exception and end the session,
  * and the trace is only a visualization of the run.
  */
-function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
+function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): ActiveTracePoll {
 	let last = -1;
 	let latest: ShellTrace | undefined;
 	let warned = false;
-	const poll = () => {
+	let stopped = false;
+	let finalized = false;
+	const readSnapshot = (): ShellTrace | undefined => {
 		const version = trace.version();
-		if (version === last) return;
+		if (version === last) return undefined;
 		last = version;
 		const snapshot: unknown = JSON.parse(trace.snapshot());
 		if (!isShellTrace(snapshot)) {
 			if (!warned) logger.warn("Native shell returned an invalid execution trace", { version });
 			warned = true;
-			return;
+			return undefined;
 		}
+		return snapshot;
+	};
+	const poll = () => {
+		const snapshot = readSnapshot();
+		if (!snapshot) return;
+		if (latest) detachShellTrace(latest);
 		latest = snapshot;
 		attachShellTrace(latest, trace);
 		onTrace(latest);
 	};
 	const timer = setInterval(poll, TRACE_POLL_MS);
 	return {
-		stop: () => {
-			clearInterval(timer);
-			poll();
+		stop: (detach = true) => {
+			if (!stopped) {
+				stopped = true;
+				clearInterval(timer);
+				poll();
+			}
+			if (detach && !finalized) {
+				finalized = true;
+				if (latest) detachShellTrace(latest);
+			}
 			return latest;
+		},
+		finalize: () => {
+			if (finalized) return;
+			finalized = true;
+			if (!stopped) {
+				stopped = true;
+				clearInterval(timer);
+				poll();
+			} else if (latest) {
+				const snapshot = readSnapshot();
+				if (snapshot) syncShellTrace(latest, snapshot);
+			}
+			if (latest) detachShellTrace(latest);
 		},
 	};
 }
@@ -358,29 +402,32 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 }
 
 /**
- * A timer promise that resolves after {@link QUARANTINE_CLEANUP_TIMEOUT_MS}.
- * Used to bound quarantine cleanup; the timer is unref'd so it never keeps the
- * process alive on its own.
+ * Wait for a cancelled/timed-out native run and its abort call to settle,
+ * bounded by {@link QUARANTINE_CLEANUP_TIMEOUT_MS} so a permanently wedged
+ * native run cannot pin session quarantine or live trace state for the life of
+ * the process (#10308). The backing timer is unref'd and cleared on settle.
  */
-function quarantineCleanupDeadline(): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
+function waitForBackgroundSettlement(
+	runPromise: Promise<ShellRunResult>,
+	abortCleanupPromise: Promise<void> | undefined,
+): Promise<void> {
+	const settled = abortCleanupPromise
+		? Promise.allSettled([runPromise, abortCleanupPromise])
+		: Promise.allSettled([runPromise]);
+	const { promise: deadline, resolve } = Promise.withResolvers<void>();
 	const timer = setTimeout(resolve, QUARANTINE_CLEANUP_TIMEOUT_MS);
 	timer.unref?.();
-	return promise;
+	return Promise.race([settled.then(() => undefined), deadline]).finally(() => clearTimeout(timer));
 }
 
 function quarantineShellSession(
 	sessionKey: string,
 	runPromise: Promise<ShellRunResult>,
 	abortCleanupPromise: Promise<void> | undefined,
+	settled?: Promise<void>,
 ): void {
 	brokenShellSessions.add(sessionKey);
-	const settled = abortCleanupPromise
-		? Promise.allSettled([runPromise, abortCleanupPromise])
-		: Promise.allSettled([runPromise]);
-	// Defensive bound: a never-settling `runPromise` must not pin the quarantine
-	// record for the life of the process (#10308).
-	const cleanup = Promise.race([settled, quarantineCleanupDeadline()]);
+	const cleanup = settled ?? waitForBackgroundSettlement(runPromise, abortCleanupPromise);
 	shellSessionQuarantines.set(sessionKey, cleanup);
 	void cleanup
 		.finally(() => {
@@ -874,9 +921,16 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const tracePoll = runTrace && options?.onTrace ? pollRunTrace(runTrace, options.onTrace) : undefined;
 	// The last snapshot once the run settled (any outcome); `stop()` is idempotent past the first call.
 	let finalTrace: ShellTrace | undefined;
-	const settleTrace = (): { trace: ShellTrace } | Record<string, never> => {
-		if (tracePoll) {
-			finalTrace ??= tracePoll.stop();
+	let traceSettled = false;
+	const settleTrace = (backgroundSettled?: Promise<void>): { trace: ShellTrace } | Record<string, never> => {
+		if (tracePoll && !traceSettled) {
+			traceSettled = true;
+			if (backgroundSettled) {
+				finalTrace = tracePoll.stop(false);
+				void backgroundSettled.finally(() => tracePoll.finalize());
+			} else {
+				finalTrace = tracePoll.stop(true);
+			}
 		}
 		return finalTrace ? { trace: finalTrace } : {};
 	};
@@ -912,10 +966,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		if (winner.kind === "timeout" || winner.kind === "abort") {
 			acceptingChunks = false;
 			const cleanupPromise = abortShell();
+			const backgroundSettled =
+				shellSession || tracePoll ? waitForBackgroundSettlement(runPromise, cleanupPromise) : undefined;
 			if (shellSession) {
 				resetSession = true;
-				quarantineShellSession(sessionKey, runPromise, cleanupPromise);
-			} else {
+				quarantineShellSession(sessionKey, runPromise, cleanupPromise, backgroundSettled);
+			} else if (!backgroundSettled) {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
 			if (winner.kind === "abort") {
@@ -936,7 +992,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
-				...settleTrace(),
+				...settleTrace(backgroundSettled),
 				...(await dump(notice)),
 			};
 		}
