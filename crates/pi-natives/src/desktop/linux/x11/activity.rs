@@ -106,16 +106,21 @@ impl UserActivity {
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
 	) -> CoreResult<u64> {
 		loop {
-			self.sync()?;
+			let held = self.inputs_held()?;
 			let count = self.presses.count.load(Ordering::Acquire);
-			let last = self.presses.last.lock().unwrap_or(self.started);
-			match admission(last, now(), limit) {
+			let now = now();
+			let last = if held {
+				now
+			} else {
+				self.presses.last.lock().unwrap_or(self.started)
+			};
+			match admission(last, now, limit) {
 				Admission::Start => return Ok(count),
 				Admission::Wait(duration) => wait(duration)?,
 				Admission::Refuse(idle) => {
 					return Err(DesktopError::user_intervened(format!(
-						"the user is still typing or clicking (last press {:.1} s ago), so no takeover \
-						 started; nothing was sent; try again once they pause",
+						"the user is still typing, clicking or holding input (last activity {:.1} s \
+						 ago), so no takeover started; nothing was sent; try again once they pause",
 						idle.as_secs_f64(),
 					)));
 				},
@@ -127,6 +132,22 @@ impl UserActivity {
 	pub(super) fn check(&self, baseline: u64) -> CoreResult<()> {
 		self.sync()?;
 		check_presses(baseline, self.presses.count.load(Ordering::Acquire))
+	}
+
+	pub(super) fn check_admission(&self, baseline: u64) -> CoreResult<()> {
+		if self.inputs_held()? {
+			return Err(DesktopError::user_intervened(
+				"the user is holding a key or button, so no takeover started; nothing was sent",
+			));
+		}
+		check_presses(baseline, self.presses.count.load(Ordering::Acquire))
+	}
+
+	fn inputs_held(&self) -> CoreResult<bool> {
+		self
+			.listener
+			.as_ref()
+			.map_or(Ok(false), Listener::inputs_held)
 	}
 
 	pub(super) fn sync(&self) -> CoreResult<()> {

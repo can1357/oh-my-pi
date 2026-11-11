@@ -13,13 +13,17 @@ use x11rb::{
 	protocol::{
 		Event,
 		xinput::{ConnectionExt as _, Device, DeviceType, EventMask, XIEventMask},
+		xproto::ConnectionExt as _,
 	},
 	rust_connection::RustConnection,
 	wrapper::ConnectionExt as _,
 };
 
-use super::mpx::DEVICE_PREFIX;
 use crate::desktop::error::{CoreResult, DesktopError};
+
+const DEVICE_PREFIX: &str = "OMP MPX ";
+const DRAIN: u8 = 1;
+const HELD: u8 = 2;
 
 pub(crate) struct Listener {
 	stop:    Option<Mutex<UnixStream>>,
@@ -112,12 +116,23 @@ impl Listener {
 	/// Orders a server round trip and drains its preceding events on the
 	/// listener thread before the caller reads the activity counter.
 	pub(crate) fn sync(&self) -> CoreResult<()> {
+		self.request(DRAIN).map(drop)
+	}
+
+	/// Reads the server's current core-device state, including holds that
+	/// predate observation, without maintaining another down/up model.
+	pub(crate) fn inputs_held(&self) -> CoreResult<bool> {
+		self.request(HELD).map(|held| held != 0)
+	}
+
+	fn request(&self, command: u8) -> CoreResult<u8> {
 		self.check()?;
 		let mut pipe = self.stop.as_ref().expect("live listener").lock();
-		pipe.write_all(&[1]).map_err(failed)?;
+		pipe.write_all(&[command]).map_err(failed)?;
 		let mut reply = [0];
 		pipe.read_exact(&mut reply).map_err(failed)?;
-		self.check()
+		self.check()?;
+		Ok(reply[0])
 	}
 
 	#[cfg(test)]
@@ -178,10 +193,11 @@ fn run(
 				return Ok(());
 			}
 			conn.sync().map_err(failed)?;
+			let held = command[0] == HELD && inputs_held(conn)?;
 			while let Some(next) = conn.poll_for_event().map_err(failed)? {
 				event(next)?;
 			}
-			stopped.write_all(&[1]).map_err(failed)?;
+			stopped.write_all(&[u8::from(held)]).map_err(failed)?;
 		} else if descriptors[0].revents != 0 {
 			return Ok(());
 		}
@@ -189,6 +205,32 @@ fn run(
 			return Err(failed("the X11 connection closed"));
 		}
 	}
+}
+
+fn inputs_held(conn: &RustConnection) -> CoreResult<bool> {
+	let keys = conn
+		.query_keymap()
+		.map_err(failed)?
+		.reply()
+		.map_err(failed)?;
+	if keys.keys.iter().any(|byte| *byte != 0) {
+		return Ok(true);
+	}
+	let root = conn.setup().roots[0].root;
+	let pointer = conn
+		.xinput_xi_get_client_pointer(root)
+		.map_err(failed)?
+		.reply()
+		.map_err(failed)?;
+	if !pointer.set {
+		return Err(failed("the core pointer is unavailable"));
+	}
+	let pointer = conn
+		.xinput_xi_query_pointer(root, pointer.deviceid)
+		.map_err(failed)?
+		.reply()
+		.map_err(failed)?;
+	Ok(pointer.buttons.iter().any(|mask| *mask != 0))
 }
 
 fn failed(error: impl std::fmt::Display) -> DesktopError {

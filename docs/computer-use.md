@@ -265,6 +265,8 @@ X11 takeover requires a working XI2.2 listener, which observes raw presses even 
 
 A listener started by the takeover itself observes the first 5 s quiet interval before activation; no previous presses being recorded is not proof of idleness. Intervention tracking remains active through the final settle and focus hand-back, and queued events are drained before success. Core-XTEST repeats are ambiguous with a remote user's duplicate press of a key held by this session, so they conservatively count as user activity; a long repeating key hold can therefore stop with `UserIntervened`.
 
+Admission also checks the server's current core keyboard and pointer-button state, including holds that predate the listener. Every key and button must be released before a takeover starts; a quiet non-repeating modifier or a long drag is not idle.
+
 - Prefer direct inspection helpers, and use `read_only: true` for `computer.run` whenever no mutation is required.
 - Prefer AX actions because they target a semantic element and do not depend on a stale screenshot.
 - Confirm the exact destination and payload before send, publish, purchase, delete, permission, security, or other consequential actions unless the user's direct request already authorized that exact action.

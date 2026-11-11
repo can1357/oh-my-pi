@@ -320,7 +320,7 @@ impl X11Input {
 		let Some(baseline) = self.admitted else {
 			return Ok(false);
 		};
-		match self.watch_user()?.check(baseline) {
+		match self.watch_user()?.check_admission(baseline) {
 			Ok(()) => Ok(true),
 			Err(error) if error.code == ErrorCode::UserIntervened => Ok(false),
 			Err(error) => Err(error),
@@ -439,7 +439,7 @@ impl X11Input {
 	) -> CoreResult<T> {
 		let presses = match self.admitted {
 			Some(baseline) => {
-				self.watch_user()?.check(baseline)?;
+				self.watch_user()?.check_admission(baseline)?;
 				baseline
 			},
 			None => self.watch_user()?.admit()?,
@@ -1498,7 +1498,35 @@ mod tests {
 		};
 		let conn = Arc::new(connect());
 		let mut input = X11Input::new(Arc::clone(&conn), root, Some(display.clone())).expect("input");
-		input.watch_user().expect("watching");
+		let user = connect();
+		let modifier = input
+			.keymap
+			.plan_chord(&[parse_key("shift").expect("modifier")])
+			.expect("modifier plan")[0]
+			.keycode;
+		// Both holds predate observation; the button is beyond the five
+		// buttons exposed in the core QueryPointer mask.
+		for (event, detail) in [(KEY_PRESS_EVENT, modifier), (BUTTON_PRESS_EVENT, 8)] {
+			user
+				.xtest_fake_input(event, detail, CURRENT_TIME, root, 0, 0, 0)
+				.expect("hold before watching")
+				.check()
+				.expect("held");
+		}
+		let activity = input.watch_user().expect("watching");
+		assert_eq!(activity.check_admission(0).unwrap_err().code, ErrorCode::UserIntervened);
+		user
+			.xtest_fake_input(KEY_RELEASE_EVENT, modifier, CURRENT_TIME, root, 0, 0, 0)
+			.expect("release modifier")
+			.check()
+			.expect("released");
+		assert_eq!(activity.check_admission(0).unwrap_err().code, ErrorCode::UserIntervened);
+		user
+			.xtest_fake_input(BUTTON_RELEASE_EVENT, 8, CURRENT_TIME, root, 0, 0, 0)
+			.expect("release button")
+			.check()
+			.expect("released");
+		activity.check_admission(0).expect("all inputs released");
 		let id = Target::Window(target.to_string());
 		let key = [parse_key("a").expect("key")];
 
@@ -1508,7 +1536,6 @@ mod tests {
 		assert!(keys_received() >= 1, "the takeover's key reached the target");
 		// The user types through another XTEST client, as x11vnc does, while
 		// it holds a grab: XI 2.0 listeners miss precisely these presses.
-		let user = connect();
 		let code = input.keymap.plan_chord(&key).expect("plan")[0].keycode;
 		let error = input
 			.with_foreground(target, Duration::from_secs(2), |input| {
