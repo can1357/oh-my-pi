@@ -31,6 +31,7 @@ import type {
 	CheckCredentialsOptions,
 	ClientUsageReport,
 	ClientUsageSummary,
+	ConfigValueResolver,
 	CredentialDisabledEvent,
 	CredentialHealthResult,
 	CredentialRotation,
@@ -344,7 +345,7 @@ class RemoteKeys implements KeysApi {
 		this.invalidate();
 		this.#remote.notify("keys.clearConfig");
 	}
-	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
+	setResolver(resolver: ConfigValueResolver): void {
 		this.#remote.notify("keys.setResolver", resolver);
 	}
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {

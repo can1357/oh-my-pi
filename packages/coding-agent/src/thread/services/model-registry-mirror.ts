@@ -269,8 +269,20 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		this.#remote = remote;
 	}
 
-	invalidateCommandConfigs(provider?: string): void {
-		this.#remote.notify("invalidateCommandConfigs", provider);
+	invalidateCommandConfigs(provider?: string, preserveConfig?: string): void {
+		this.#remote.notify("invalidateCommandConfigs", provider, preserveConfig);
+	}
+
+	remintCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void> {
+		return this.#remote.call("remintCommandConfigs", provider, rejectedGeneration);
+	}
+
+	refuseCommandGeneration(provider: string, generation: number): Promise<void> {
+		return this.#remote.call("refuseCommandGeneration", provider, generation);
+	}
+
+	hasUnrefusedCommandCredential(provider: string): Promise<boolean> {
+		return this.#remote.call("hasUnrefusedCommandCredential", provider);
 	}
 
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void> {

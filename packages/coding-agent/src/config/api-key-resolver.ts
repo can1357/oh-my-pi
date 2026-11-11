@@ -2,12 +2,15 @@ import {
 	type ApiKeyResolution,
 	type ApiKeyResolver,
 	createOAuthProvenance,
+	markAfterRemint,
 	markAfterSiblingWait,
+	resolvedCredentialGeneration,
 } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { CommandConfigGeneration } from "@oh-my-pi/pi-catalog/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
@@ -21,6 +24,12 @@ export interface ApiKeyResolverOptions {
 	modelId?: string;
 }
 
+/** Registry-only command policy; never forwarded to the durable credential store. */
+export interface ApiKeyResolverRequestOptions extends AuthApiKeyOptions {
+	/** Positive local header observations, or null when unavailable; absent before refresh-same. */
+	rejectedHeaderCommands?: readonly CommandConfigGeneration[] | null;
+}
+
 /**
  * Minimal slice of `ModelRegistry` the resolver needs. Typed structurally so
  * narrower registry shells (e.g. the commit pipeline's `CommitModelRegistry`)
@@ -32,7 +41,7 @@ export interface ApiKeyResolverRegistry {
 	getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: AuthApiKeyOptions,
+		options?: ApiKeyResolverRequestOptions,
 	): Promise<ApiKeyResolution>;
 	authStorage: Pick<AuthStorage, "limits">;
 	/**
@@ -65,26 +74,27 @@ export function createApiKeyResolver(
 	const provenance = createOAuthProvenance();
 	const resolveKey = async (
 		forceRefresh: boolean | undefined,
-		signal?: AbortSignal,
-		refreshReason?: AuthApiKeyOptions["refreshReason"],
-		rejectedAccessToken?: string,
+		recovery?: Pick<
+			ApiKeyResolverRequestOptions,
+			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration" | "rejectedHeaderCommands"
+		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
 			forceRefresh,
-			signal,
-			refreshReason,
-			rejectedAccessToken,
+			...recovery,
 		});
 		provenance.record(resolved);
 		return resolved;
 	};
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return async ({ lastChance, error, signal, previousKey, previousGeneration, previousHeaderCommands }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
 		}
+		const verdict = AIError.credentialRejectionVerdict(error);
+		const credentialRefused = AIError.isCredentialRejection(verdict);
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor the failed account's retry-after
@@ -106,9 +116,42 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			const resolved = await resolveKey(undefined);
+			// Record the exhausted attempt without spending a mint it cannot use.
+			const resolved = await resolveKey(undefined, {
+				rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
+				rejectedHeaderCommands: previousHeaderCommands,
+			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined, rejectedAccessToken);
+		// Step (b) refreshes provider credentials as upstream does, regardless of
+		// error-body taxonomy — the selected API-key command included. A 401 whose
+		// body names a non-authentication class is still a refusal of the request
+		// this credential carried, and the trade is asymmetric: an unnecessary
+		// re-mint costs one issuer call, a missed one costs the whole turn. Reading
+		// a provider's own error taxonomy to decide a credential's fate makes
+		// recovery depend on a vocabulary no provider owes us; measured against
+		// base, gating here lost the recovery on every `invalid_request_error`,
+		// `budget_exceeded` and `policy_blocked` 401 that base recovers from.
+		const resolved = await resolveKey(true, {
+			signal,
+			refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+			rejectedAccessToken,
+			// The generation of the credential this request sent. A `!command`
+			// credential's re-mint reads it to tell a refusal of the mint it has
+			// cached from a refusal of an older one, which that mint answers.
+			rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
+		});
+		// A credential was actually minted for this refusal — the slot's
+		// generation advanced past the one the request sent. The retry is worth
+		// making even when the mint handed back the same bytes: what the request
+		// has not tried is a credential minted after that refusal, and the bytes
+		// do not say whether the issuer renewed it. An explicit refusal can also
+		// retry a command-backed resolution without a prior generation. Static
+		// keys get no same-byte exemption: invalidating caches did not mint them.
+		const generation = resolvedCredentialGeneration(resolved);
+		const minted = previousGeneration !== undefined && (generation ?? previousGeneration) > previousGeneration;
+		return minted || (generation !== undefined && AIError.statesCredentialRejection(verdict))
+			? markAfterRemint(resolved)
+			: resolved;
 	};
 }

@@ -15,6 +15,8 @@ import type {
 	AuthCredential,
 	AuthSource,
 	AuthSourceOptions,
+	ConfigValueResolution,
+	ConfigValueResolver,
 	KeysApi,
 	LimitsApi,
 	OAuthRequestIdentity,
@@ -29,14 +31,24 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 	return envValue || config;
 }
 
+/** Hand a resolved config credential's generation to the caller, and its bytes to the cascade. */
+function reportGeneration(
+	resolved: ConfigValueResolution | undefined,
+	onCredentialGeneration: ((generation: number) => void) | undefined,
+): string | undefined {
+	if (resolved === undefined) return undefined;
+	if (resolved.generation !== undefined) onCredentialGeneration?.(resolved.generation);
+	return resolved.value;
+}
+
 /** Runtime (--api-key) and config (models.yml) key overrides plus the config-value resolver. */
 export class KeyOverrides {
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
 	#configFallbacks: Map<string, string> = new Map();
-	#configValueResolver: (config: string) => Promise<string | undefined>;
+	#configValueResolver: ConfigValueResolver;
 
-	constructor(resolver?: (config: string) => Promise<string | undefined>) {
+	constructor(resolver?: ConfigValueResolver) {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
 	}
 
@@ -69,8 +81,19 @@ export class KeyOverrides {
 	}
 
 	/** Resolve a config value (env var name, "!command", literal) to the secret. */
-	resolve(config: string): Promise<string | undefined> {
-		return this.#configValueResolver(config);
+	async resolve(config: string): Promise<string | undefined> {
+		return (await this.resolveCredential(config))?.value;
+	}
+
+	/**
+	 * Resolve a config value together with the generation of the credential
+	 * slot that produced it, when the host's resolver reports one. See
+	 * {@link ConfigValueResolution}.
+	 */
+	async resolveCredential(config: string): Promise<ConfigValueResolution | undefined> {
+		const resolved = await this.#configValueResolver(config);
+		if (resolved === undefined) return undefined;
+		return typeof resolved === "string" ? { value: resolved } : resolved;
 	}
 
 	/**
@@ -136,7 +159,7 @@ export class KeyOverrides {
 	 * failure backoff, and process hardening even when AuthStorage was created
 	 * independently and later attached to a registry.
 	 */
-	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
+	setResolver(resolver: ConfigValueResolver): void {
 		this.#configValueResolver = resolver;
 	}
 }
@@ -337,17 +360,27 @@ export class KeyCascade implements KeysApi {
 		let credentialId: number | undefined;
 		let oauthIdentity: OAuthRequestIdentity | undefined;
 		let oauthAccess: string | undefined;
-		const apiKey = await this.#resolve(provider, sessionId, options, (id, identity, access) => {
-			credentialId = id;
-			oauthIdentity = identity;
-			oauthAccess = access;
-		});
+		let credentialGeneration: number | undefined;
+		const apiKey = await this.#resolve(
+			provider,
+			sessionId,
+			options,
+			(id, identity, access) => {
+				credentialId = id;
+				oauthIdentity = identity;
+				oauthAccess = access;
+			},
+			generation => {
+				credentialGeneration = generation;
+			},
+		);
 		if (apiKey === undefined) return undefined;
 		return {
 			apiKey,
 			credentialId,
 			...(oauthAccess ? { oauthAccess } : {}),
 			...(oauthIdentity ? { oauthIdentity } : {}),
+			...(credentialGeneration !== undefined ? { credentialGeneration } : {}),
 		};
 	}
 
@@ -385,6 +418,9 @@ export class KeyCascade implements KeysApi {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 		onCredentialId?: (id: number, identity?: OAuthRequestIdentity, oauthAccess?: string) => void,
+		// Only the models.yml legs report one: they are the legs a `!command`
+		// backs, and the only ones whose refusal re-mints anything.
+		onCredentialGeneration?: (generation: number) => void,
 	): Promise<string | undefined> {
 		// A provider turned off in its auth rules is reached by no key source:
 		// runtime, models.yml, stored, env or broker.
@@ -409,7 +445,7 @@ export class KeyCascade implements KeysApi {
 		}
 		const configKey = restricted ? undefined : this.#deps.overrides.configKey(provider);
 		if (configKey !== undefined) {
-			return this.#deps.overrides.resolve(configKey);
+			return reportGeneration(await this.#deps.overrides.resolveCredential(configKey), onCredentialGeneration);
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
@@ -463,7 +499,9 @@ export class KeyCascade implements KeysApi {
 		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
 
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
+		if (fallbackKey !== undefined) {
+			return reportGeneration(await this.#deps.overrides.resolveCredential(fallbackKey), onCredentialGeneration);
+		}
 
 		const envKey = getEnvApiKey(provider);
 		if (envKey) return envKey;
@@ -623,7 +661,7 @@ export class KeyCascade implements KeysApi {
 		this.#deps.overrides.clearConfig();
 	}
 
-	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
+	setResolver(resolver: ConfigValueResolver): void {
 		this.#deps.overrides.setResolver(resolver);
 	}
 }

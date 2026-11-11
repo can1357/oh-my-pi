@@ -329,17 +329,17 @@ function formatCapturedHttpErrorParts(
 	const stringError = errorPayload === payload ? getStringProperty(payload, "error") : undefined;
 	const core =
 		getStringProperty(errorPayload, "message") ?? getStringProperty(payload, "message") ?? stringError ?? bodyText;
+	// Each field keeps its own label: filtering first and labelling by position
+	// renamed a field whenever an earlier one was absent, so an OpenAI rejected
+	// key (`type=invalid_request_error`, no `param`, `code=invalid_api_key`)
+	// reached every reader of this text as `param=invalid_api_key`.
 	const extras = [
-		getStringProperty(errorPayload, "type") ?? getStringProperty(payload, "type"),
-		getStringProperty(errorPayload, "param") ?? getStringProperty(payload, "param"),
-		getStringProperty(errorPayload, "code") ?? getStringProperty(payload, "code"),
+		["type", getStringProperty(errorPayload, "type") ?? getStringProperty(payload, "type")],
+		["param", getStringProperty(errorPayload, "param") ?? getStringProperty(payload, "param")],
+		["code", getStringProperty(errorPayload, "code") ?? getStringProperty(payload, "code")],
 	]
-		.filter(Boolean)
-		.map((value, index) => {
-			if (index === 0) return `type=${value}`;
-			if (index === 1) return `param=${value}`;
-			return `code=${value}`;
-		});
+		.filter((entry): entry is [string, string] => Boolean(entry[1]))
+		.map(([label, value]) => `${label}=${value}`);
 	if (extras.length === 0) return { core, text: core };
 	const suffix = ` (${extras.join(" ")})`;
 	return { core, text: `${core}${suffix}`, suffix };

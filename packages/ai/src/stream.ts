@@ -13,13 +13,21 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
+import {
+	type CommandConfigGeneration,
+	type ModelApiKeyCredential,
+	modelApiKeyCredential,
+	modelHeaderCommandGenerations,
+} from "@oh-my-pi/pi-catalog/types";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
+	type AuthRetryKeyState,
 	createAuthRetryKeyState,
 	isApiKeyResolver,
 	preferAuthRetryError,
 	resolvedApiKeyBearer,
+	resolvedCredentialGeneration,
 	resolveNextAuthRetryKey,
 } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
@@ -828,7 +836,12 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 function withResolvedModelHeaders<TApi extends Api>(
 	model: Model<TApi>,
 	signal: AbortSignal | undefined,
-	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
+	run: (
+		resolvedModel: Model<TApi>,
+		apiKey?: ModelApiKeyCredential,
+		headerCommands?: readonly CommandConfigGeneration[],
+	) => AssistantMessageEventStream,
+	requestHeaders?: Record<string, string>,
 ): AssistantMessageEventStream {
 	const resolveHeaders = model.resolveHeaders;
 	if (!resolveHeaders) return run(model);
@@ -838,7 +851,48 @@ function withResolvedModelHeaders<TApi extends Api>(
 		try {
 			const headers = await untilAborted(signal, () => resolveHeaders(signal));
 			signal?.throwIfAborted();
-			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			let derivedKey = headers?.[modelApiKeyCredential];
+			if (derivedKey && requestHeaders) {
+				for (const key in requestHeaders) {
+					if (Object.hasOwn(requestHeaders, key) && key.toLowerCase() === "authorization") {
+						derivedKey = undefined;
+						break;
+					}
+				}
+			}
+			let headerCommands: CommandConfigGeneration[] | undefined;
+			const commands = headers?.[modelHeaderCommandGenerations];
+			if (commands && headers) {
+				const materializedNames = new Map<string, number>();
+				let ambiguous = false;
+				for (const key in headers) {
+					if (!Object.hasOwn(headers, key)) continue;
+					const name = key.toLowerCase();
+					if (!Object.hasOwn(commands, key) && !(name === "authorization" && derivedKey)) ambiguous = true;
+					materializedNames.set(name, (materializedNames.get(name) ?? 0) + 1);
+				}
+				if (requestHeaders) {
+					for (const key in requestHeaders) {
+						// Provider merge rules differ: a colliding caller name leaves no positive observation.
+						if (Object.hasOwn(requestHeaders, key)) materializedNames.set(key.toLowerCase(), 2);
+					}
+				}
+				for (const key in commands) {
+					if (!Object.hasOwn(commands, key)) continue;
+					if (!Object.hasOwn(headers, key) || materializedNames.get(key.toLowerCase()) !== 1) {
+						ambiguous = true;
+						continue;
+					}
+					(headerCommands ??= []).push(commands[key]);
+				}
+				// An unobserved field may have sent another generation of an observed command.
+				if (ambiguous) headerCommands = undefined;
+			}
+			const inner = run(
+				{ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined },
+				derivedKey,
+				headerCommands,
+			);
 			for await (const event of inner) {
 				outer.push(event);
 				if (outer.done) return;
@@ -1259,10 +1313,12 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
+		let retryState: AuthRetryKeyState | undefined;
 		const runAttempt = async (
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			keyWasSent = false,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1272,8 +1328,34 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
-				const inner = streamSimpleRequest(model, context, attemptOptions);
+				// Failed materialization must not inherit another attempt's observations.
+				if (retryState) retryState.lastHeaderCommands = undefined;
+				const inner = withResolvedModelHeaders(
+					model,
+					signal,
+					(resolvedModel, derivedKey, headerCommands) => {
+						if (retryState) retryState.lastHeaderCommands = headerCommands;
+						// The lazy derivation carries the API-key value and mint provenance
+						// together. Record that exact pair, not a second read of live cache state.
+						// Runtime overrides and noncommand siblings have no command generation.
+						// Keep their selected credential authoritative; header composition stays upstream's.
+						if (retryState?.lastGeneration === undefined) derivedKey = undefined;
+						if (retryState && derivedKey) {
+							if (!keyWasSent && apiKey !== undefined) retryState.attemptedKeys.delete(apiKey);
+							retryState.attemptedKeys.add(derivedKey.apiKey);
+							retryState.lastKey = derivedKey.apiKey;
+							retryState.lastGeneration = derivedKey.credentialGeneration;
+						}
+						const attemptOptions = {
+							...requestOptions,
+							apiKey: derivedKey?.apiKey ?? apiKey,
+							credentialId,
+							oauthIdentity,
+						};
+						return streamSimpleRequest(resolvedModel, context, attemptOptions);
+					},
+					requestOptions.headers,
+				);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
 						if ("partial" in event) event.partial.credentialId = credentialId;
@@ -1341,11 +1423,13 @@ function streamSimpleRequest<TApi extends Api>(
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
+			let credentialGeneration: number | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				credentialGeneration = resolvedCredentialGeneration(resolved);
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1366,7 +1450,8 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			const retryState = createAuthRetryKeyState(lastKey);
+			const state = createAuthRetryKeyState(lastKey, credentialGeneration);
+			retryState = state;
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			let reportedFailure = failure;
@@ -1376,18 +1461,15 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				const nextKey = await resolveNextAuthRetryKey(
-					retryState,
-					apiKeyResolver,
-					failure.error,
-					signal,
-					resolved => {
-						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
-					},
-				);
+				let nextKeyWasSent = false;
+				const nextKey = await resolveNextAuthRetryKey(state, apiKeyResolver, failure.error, signal, resolved => {
+					const key = resolvedApiKeyBearer(resolved);
+					nextKeyWasSent = key !== undefined && state.attemptedKeys.has(key);
+					nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+					nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				});
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextKeyWasSent);
 				if (!next) return;
 				reportedFailure =
 					preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error
