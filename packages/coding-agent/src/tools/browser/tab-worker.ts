@@ -2117,7 +2117,7 @@ export class WorkerCore {
 			// Only a browser that draws its windows on the user's screen raises native ones.
 			if (payload.showsWindows && process.platform === "darwin") {
 				const page = this.#page;
-				this.#nativeWindows = new NativeWindowWatch(() => readTabFrame(page));
+				this.#nativeWindows = new NativeWindowWatch(() => readTabFrame(page), undefined, payload.browserPid);
 			}
 			await installVitalsObservers(this.#page);
 			await installCancelledReleaseGuard(this.#page);
@@ -2505,7 +2505,7 @@ export class WorkerCore {
 			return;
 		}
 		if (completed) {
-			for (const notice of nativeNotices) output.pushText(`${notice}\n`);
+			for (const notice of nativeNotices) output.push({ type: "text", text: notice });
 			await this.#postReadyInfo();
 			if (this.#unanswered !== active) return;
 			this.#unanswered = null;

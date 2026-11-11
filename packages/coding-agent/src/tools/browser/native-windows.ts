@@ -29,8 +29,10 @@ interface TabView extends Frame {
 }
 
 /** Where the tab's window is on screen, in the points the window server reports; undefined if the page cannot say. */
-export async function readTabFrame(page: Pick<Page, "evaluate">): Promise<TabView | undefined> {
+export async function readTabFrame(page: Pick<Page, "mainFrame">): Promise<TabView | undefined> {
 	const read = page
+		.mainFrame()
+		.isolatedRealm()
 		.evaluate(() => {
 			const view = globalThis as unknown as {
 				screenX: number;
@@ -64,6 +66,7 @@ export async function readTabFrame(page: Pick<Page, "evaluate">): Promise<TabVie
 export class NativeWindowWatch {
 	readonly #readFrame: () => Promise<TabView | undefined>;
 	readonly #readRoster: () => DesktopRosterWindow[] | undefined;
+	readonly #browserPid: number | undefined;
 	/** The tab's own window, once its frame named exactly one while the page showed. */
 	#tab: DesktopRosterWindow | undefined;
 	/** Whether the page showed in its window at the last read; a dialog-stopped page keeps the previous answer. */
@@ -72,7 +75,8 @@ export class NativeWindowWatch {
 	#seen = new Set<string>();
 	/** On-screen windows when the call began. */
 	#before: DesktopRosterWindow[] | undefined;
-	#frame: Promise<TabView | undefined> | undefined;
+	#pageStopped = false;
+	#catchingUp: Promise<void> | undefined;
 	/** Windows that showed within the tail after the previous call returned, for this call to name. */
 	#late: DesktopRosterWindow[] = [];
 	#tailTimer: NodeJS.Timeout | undefined;
@@ -80,18 +84,19 @@ export class NativeWindowWatch {
 	constructor(
 		readFrame: () => Promise<TabView | undefined>,
 		roster: () => DesktopRosterWindow[] | undefined = readRoster,
+		browserPid?: number,
 	) {
 		this.#readFrame = readFrame;
 		this.#readRoster = roster;
+		this.#browserPid = browserPid;
 	}
 
 	/** Remembers what is on screen; `pageStopped` skips reading the page, which a dialog keeps from answering. */
 	beginCall(pageStopped: boolean): void {
+		this.#pageStopped = pageStopped;
 		const roster = this.#readRoster();
-		if (this.#tailTimer) this.#catchUp(roster);
+		if (this.#tailTimer) this.#catchingUp = this.#catchUp(roster);
 		this.#before = roster;
-		this.#remember(roster);
-		this.#frame = pageStopped ? undefined : this.#readFrame();
 	}
 
 	/**
@@ -100,19 +105,22 @@ export class NativeWindowWatch {
 	 * tab, and the page-waiting report already names it, so ordinary windows are left out while it is open.
 	 */
 	async endCall(pageDialog = false): Promise<string[]> {
+		await this.#catchingUp;
+		this.#catchingUp = undefined;
 		const before = this.#before;
-		const frame = await this.#frame;
+		this.#remember(before);
+		this.#pageStopped = pageDialog;
+		const frame = pageDialog ? undefined : await this.#readFrame();
 		const late = this.#late;
 		this.#before = undefined;
-		this.#frame = undefined;
 		this.#late = [];
 		const after = this.#readRoster();
 		if (!before || !after) {
 			this.#remember(after);
 			return [];
 		}
-		if (frame) this.#visible = frame.visible;
-		this.#findTab(before, frame);
+		if (!pageDialog) this.#visible = frame?.visible ?? false;
+		this.#findTab(after, frame);
 		const lines: string[] = [];
 		const onScreen = new Set(after.map(window => window.id));
 		for (const window of late) {
@@ -124,16 +132,22 @@ export class NativeWindowWatch {
 			if (!(pageDialog && window.layer === 0)) lines.push(this.#line(window, "during this call"));
 		}
 		this.#remember(after);
-		this.#tailTimer = setTimeout(() => this.#catchUp(this.#readRoster()), TAIL_MS);
+		this.#tailTimer = setTimeout(() => {
+			this.#catchingUp = this.#catchUp(this.#readRoster());
+		}, TAIL_MS);
 		this.#tailTimer.unref();
 		return lines;
 	}
 
 	/** Takes the windows that showed since the previous call returned, while that is within the tail. */
-	#catchUp(roster: DesktopRosterWindow[] | undefined): void {
+	async #catchUp(roster: DesktopRosterWindow[] | undefined): Promise<void> {
 		clearTimeout(this.#tailTimer);
 		this.#tailTimer = undefined;
 		if (!roster) return;
+		const stopped = this.#pageStopped;
+		const frame = stopped ? undefined : await this.#readFrame();
+		if (!stopped) this.#visible = frame?.visible ?? false;
+		this.#findTab(roster, frame);
 		this.#late.push(...this.#raised(roster));
 		this.#remember(roster);
 	}
@@ -145,26 +159,25 @@ export class NativeWindowWatch {
 	}
 
 	/**
-	 * The tab's window: the one ordinary window at the frame the page reports while it shows there, so the browser's
-	 * window is on screen and among the matches. Kept while it stays on screen, since another app's window may come to
-	 * share its frame; when two windows match, none is taken.
+	 * The tab's window: one ordinary window at its current visible frame. A retained window must still match that
+	 * frame, since the user can drag a tab into another window. Without a frame, only a retained on-screen id survives.
 	 */
 	#findTab(roster: DesktopRosterWindow[], frame: TabView | undefined): void {
 		const kept = this.#tab && roster.find(window => window.id === this.#tab?.id);
-		if (kept) {
+		if (!frame?.visible) {
 			this.#tab = kept;
 			return;
 		}
-		if (!frame?.visible) return;
 		const matches = roster.filter(
 			window =>
 				window.layer === 0 &&
+				(this.#browserPid === undefined || window.pid === this.#browserPid) &&
 				Math.abs(window.x - frame.x) <= 2 &&
 				Math.abs(window.y - frame.y) <= 2 &&
 				Math.abs(window.width - frame.width) <= 2 &&
 				Math.abs(window.height - frame.height) <= 2,
 		);
-		if (matches.length === 1) this.#tab = matches[0];
+		this.#tab = matches.length === 1 ? matches[0] : undefined;
 	}
 
 	/** The windows in `roster` never seen before that the tab's browser raised over the tab while the page showed. */
@@ -181,7 +194,17 @@ export class NativeWindowWatch {
 				window.height >= 2 &&
 				(window.layer >= FLOATING_LAYER
 					? intersects(window, current)
-					: window.layer === 0 && within(window, current)),
+					: window.layer === 0 && within(window, current)) &&
+				// A popup shared by overlapping browser windows cannot be tied to this tab.
+				!roster.some(
+					other =>
+						other.id !== current.id &&
+						other.id !== window.id &&
+						other.pid === tab.pid &&
+						other.layer === 0 &&
+						other.alpha > 0 &&
+						intersects(window, other),
+				),
 		);
 	}
 

@@ -96,6 +96,8 @@ export type WorkerInitPayload =
 			insecure?: boolean;
 			/** The browser draws its windows on the user's screen (a visible launch), so a call can raise native ones. */
 			showsWindows?: boolean;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  }
 	| {
 			mode: "attach";
@@ -137,6 +139,8 @@ export type WorkerInitPayload =
 			 * browser, whose recycled tabs attach too.
 			 */
 			showsWindows?: boolean;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */

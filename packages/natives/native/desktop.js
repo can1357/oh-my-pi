@@ -36,5 +36,5 @@ export function closeDesktopEventTaps() {
  * loading the native addon on first use. Needs no desktop session.
  */
 export function desktopWindowRoster() {
-	return loadNative().desktopWindowRoster();
+	return (loadNative().desktopWindowRoster ?? missingNativeExport("desktopWindowRoster"))();
 }
