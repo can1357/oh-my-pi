@@ -11,7 +11,7 @@ import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
+import { resolveConfiguredModelPatterns, resolveModelRoleValue, revisionSpellingKey } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
 import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
@@ -109,10 +109,16 @@ export function parseRetryFallbackSelector(
 		isLiteralModelId: (provider, id) => modelLookup?.find(provider, id) !== undefined,
 	});
 	if (!parsed) return undefined;
-	// Compare models by catalog id: the lookup accepts alternate spellings
-	// (`claude-sonnet-5.5` for `claude-sonnet-5-5`), so a key or entry it
-	// validates must also match the live model it names.
-	const id = modelLookup?.find(parsed.provider, parsed.id)?.id ?? parsed.id;
+	// Adopt the catalog id for a dotted revision spelling (`claude-sonnet-5.5` for
+	// `claude-sonnet-5-5`): the lookup that validated the key accepts it, so the
+	// key must match the live model too. Other lookup aliases (effort-tier
+	// variants, wire-route ids) carry an effort the parsed level lacks, so they
+	// keep their own id.
+	const found = modelLookup?.find(parsed.provider, parsed.id);
+	const id =
+		found && found.id !== parsed.id && revisionSpellingKey(found.id) === revisionSpellingKey(parsed.id)
+			? found.id
+			: parsed.id;
 	return {
 		raw: trimmed,
 		provider: parsed.provider,

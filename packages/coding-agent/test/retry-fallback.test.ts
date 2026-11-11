@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model, ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -106,6 +108,54 @@ describe("retry fallback selector resolution", () => {
 				candidate => candidate.raw,
 			),
 		).toEqual(["openai/gpt-4o-mini"]);
+	});
+
+	it("keeps effort-routed wire ids distinct from their logical model", () => {
+		const mythos = buildModel({
+			id: "claude-mythos-9",
+			name: "claude-mythos-9",
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			requestModelId: "claude-mythos-9-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.High],
+				effortRouting: { [Effort.Medium]: "claude-mythos-9-medium", [Effort.High]: "claude-mythos-9-high" },
+				requiresEffort: true,
+			},
+		});
+		const models = [mythos];
+		const lookup = {
+			find: (provider: string, id: string) => resolveProviderModelReference(provider, id, models),
+			hasProvider: (provider: string) => provider === "devin",
+		};
+		expect(lookup.find("devin", "claude-mythos-9-high")?.id).toBe("claude-mythos-9");
+
+		// An effort-downgrade chain keeps its lower tier as a fallback.
+		const downgrade: RetryFallbackResolutionContext = {
+			chains: { default: ["devin/claude-mythos-9-high", "devin/claude-mythos-9-medium"] },
+			getModelRole: () => undefined,
+			modelLookup: lookup,
+		};
+		expect(
+			findRetryFallbackCandidates(downgrade, "default", "devin/claude-mythos-9-high", mythos).map(
+				candidate => candidate.raw,
+			),
+		).toEqual(["devin/claude-mythos-9-medium"]);
+
+		// A key naming the high tier does not capture medium-effort turns.
+		const tierKey: RetryFallbackResolutionContext = {
+			chains: { "devin/claude-mythos-9-high": ["openai/gpt-4o-mini"], "devin/*": ["openai/gpt-4o-mini:high"] },
+			getModelRole: () => undefined,
+			modelLookup: lookup,
+		};
+		expect(resolveRetryFallbackChainKey(tierKey, "devin/claude-mythos-9:medium", mythos)).toBe("devin/*");
 	});
 
 	it("does not let a later shared-assignment role steal the default chain", () => {

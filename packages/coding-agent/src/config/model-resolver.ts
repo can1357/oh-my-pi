@@ -368,7 +368,7 @@ type ModelsWithProviderIndex = readonly Model<Api>[] & {
  * `gpt-4-1`). Only digit-bounded dots are separators; anything else stays
  * verbatim so unrelated punctuation never coalesces.
  */
-function revisionSpellingKey(id: string): string {
+export function revisionSpellingKey(id: string): string {
 	return id.toLowerCase().replace(/(?<=\d)\.(?=\d)/g, "-");
 }
 
