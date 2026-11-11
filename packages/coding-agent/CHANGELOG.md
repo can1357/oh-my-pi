@@ -236,6 +236,9 @@
 - Fixed session saving on Windows to avoid UI stalls caused by repeated session-file access.
 - Fixed automatic chart selection so generated charts use compatible data and chart types.
 - Fixed `bash` previews for `env -i` commands so they display the requested command rather than generated shell setup code.
+### Fixed
+
+- Collab guest prompts retain user attribution and now apply configured magic keywords (for example `orchestrate`). In auto-thinking mode, idle guest prompts and queued user follow-ups are classified for effort unless enabled `ultrathink` selects the highest supported level within the session ceiling. Queued steers keep the current effort without classification unless they contain enabled `ultrathink`, which selects that level for the next model request ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech))
 
 ## [18.18.9] - 2026-11-11
 
@@ -750,8 +753,6 @@
 - `models.yml` accepts `tokenizer: cl100k` on a custom model or override ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Claude no longer receives the reasoning kept in a snapcompact archive whose summary an extension wrote without the reasoning legend, with or without image input, and reads that summary's own words instead of a generic one ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `~/.omp/agent/agent.db` getting corrupted (wiping stored logins) on Linux when grep, `read`, the bash tool, extensions or eval read it while omp has it open; `write` and `tts` now refuse to overwrite a database omp holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
-- Collab guest prompts now apply the configured magic keywords (for example `orchestrate`) and their auto-thinking behavior, matching prompts typed in the TUI ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech))
-- Collab guest prompts retain user attribution and now apply configured magic keywords (for example `orchestrate`). In auto-thinking mode, idle guest prompts and queued user follow-ups are classified for effort unless enabled `ultrathink` selects the highest supported level within the session ceiling. Queued steers keep the current effort without classification unless they contain enabled `ultrathink`, which selects that level for the next model request ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech))
 
 ## [18.15.0] - 2026-11-01
 

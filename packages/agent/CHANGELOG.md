@@ -7,6 +7,9 @@
 ### Changed
 
 - `prepareCompaction()` runs as the `compaction.prepare` loop phase, so a `ui.loop-blocked` stall from a cold token walk over a long branch names compaction instead of "unknown" ([#15027](https://github.com/can1357/oh-my-pi/issues/15027), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
+### Added
+
+- Added `QueuedMessagePreparation.onDelivered(signal?, batch?)` to apply staged effects after the original queued messages are appended to agent state and before listeners are notified. `Agent.appendMessage(message, signal?, deliveryBatch?)` passes the optional abort signal and batch token to the callback. The internal `hasPendingQueuedDeliveryCallbacks` loop configuration enables input delivery acknowledgement before the next model call when callbacks are pending, unless aborted ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech)).
 
 ## [18.18.9] - 2026-11-11
 
@@ -38,9 +41,6 @@
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
 
 ## [18.16.0] - 2026-11-02
-### Added
-
-- Added `QueuedMessagePreparation.onDelivered(signal?, batch?)` to apply staged effects after the original queued messages are appended to agent state and before listeners are notified. `Agent.appendMessage(message, signal?, deliveryBatch?)` passes the optional abort signal and batch token to the callback. The internal `hasPendingQueuedDeliveryCallbacks` loop configuration enables input delivery acknowledgement before the next model call when callbacks are pending, unless aborted ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech)).
 
 ### Changed
 
