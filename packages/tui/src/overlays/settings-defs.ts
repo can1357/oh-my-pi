@@ -152,6 +152,8 @@ export interface SettingsHost {
 	 * variable, that configures the setting still applies; otherwise the default does.
 	 */
 	unset(path: string): void;
+	/** True when a layer above the global config sets `path`, so a value saved here would not take effect. */
+	isReadOnly?(path: string): boolean;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
 }

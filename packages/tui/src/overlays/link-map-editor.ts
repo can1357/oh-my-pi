@@ -85,6 +85,8 @@ export class LinkMapSubmenu extends Container {
 		this.clear();
 		this.#afterInput = undefined;
 		const entries = this.#entries();
+		// A `--config` file or a runtime override outranks the global config this editor writes.
+		const readOnly = this.#settings.isReadOnly?.(LINK_MAP_PATH) === true;
 		const keys = Object.keys(entries).sort((a, b) => a.localeCompare(b));
 		const items: SelectItem[] = keys.map(key => ({
 			value: `entry:${key}`,
@@ -94,11 +96,19 @@ export class LinkMapSubmenu extends Container {
 					? `→ ${entries[key]}`
 					: `→ ${entries[key]} (ignored: not a valid entry)`,
 		}));
-		items.push(
-			{ value: "__add", label: "Add entry…", description: "A path prefix and the URI prefix its links go to" },
-			{ value: "__test", label: "Test a path…", description: "Show which entry a path matches and its link" },
-		);
-		if (keys.length > 0) {
+		if (!readOnly) {
+			items.push({
+				value: "__add",
+				label: "Add entry…",
+				description: "A path prefix and the URI prefix its links go to",
+			});
+		}
+		items.push({
+			value: "__test",
+			label: "Test a path…",
+			description: "Show which entry a path matches and its link",
+		});
+		if (keys.length > 0 && !readOnly) {
 			items.push({
 				value: "__clear_all",
 				label: "Clear all entries",
@@ -109,9 +119,11 @@ export class LinkMapSubmenu extends Container {
 			theme: formTheme,
 			label: "Link Map",
 			description:
-				note === undefined
-					? "Each entry sends file links under a path prefix to a URI prefix; the longest matching prefix wins."
-					: sanitizeDisplayLine(note),
+				note !== undefined
+					? sanitizeDisplayLine(note)
+					: readOnly
+						? "Set by a --config file or a runtime override, so it is shown here but edited there."
+						: "Each entry sends file links under a path prefix to a URI prefix; the longest matching prefix wins.",
 			items,
 			maxVisible: 12,
 			selectTheme: getSelectListTheme(),
@@ -124,7 +136,7 @@ export class LinkMapSubmenu extends Container {
 					this.#showPrefix();
 				} else if (value === "__test") {
 					this.#showTest();
-				} else if (value.startsWith("entry:")) {
+				} else if (value.startsWith("entry:") && !readOnly) {
 					this.#showTarget(value.slice("entry:".length));
 				}
 				this.#requestRender?.();
@@ -190,7 +202,9 @@ export class LinkMapSubmenu extends Container {
 				description: "An absolute path, ~ or ~/... for your home; <user> stands for your login name.",
 				hint: `  ${editorKey("tui.input.submit")} to continue · ${editorKey("tui.select.cancel")} to cancel`,
 				validate: value =>
-					isLinkMapKey(value.trim()) ? undefined : "Start with / or ~, for example /mnt/projects or ~/src",
+					isLinkMapKey(value.trim())
+						? undefined
+						: "Start with / or ~ and use no . or .. segment, for example /mnt/projects or ~/src",
 				onSubmit: value => {
 					this.#showTarget(value.trim());
 					this.#requestRender?.();

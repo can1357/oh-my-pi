@@ -61,8 +61,10 @@ export function parseLinkTarget(value: unknown): string | undefined {
 	return href.endsWith("/") ? href : `${href}/`;
 }
 
+/** An absolute path, `~` or `~/...`, with no `.` or `..` segment: a key is compared as written, never resolved. */
 export function isLinkMapKey(key: string): boolean {
-	return key === "~" || key.startsWith("~/") || key.startsWith("/");
+	if (key !== "~" && !key.startsWith("~/") && !key.startsWith("/")) return false;
+	return !key.split("/").some(segment => segment === "." || segment === "..");
 }
 
 /**

@@ -47,7 +47,7 @@ export async function resolveMarkdownLinkHrefs(
 				}
 				const stat = await fs.stat(sourcePath);
 				if (!stat.isFile() && !stat.isDirectory()) return;
-				const target = fileUriForTerminal(sourcePath, undefined, TERMINAL.id);
+				const target = fileUriForTerminal(sourcePath, { directory: stat.isDirectory() }, TERMINAL.id);
 				if (!target) return;
 				targets.set(href, target + suffix);
 			} catch {

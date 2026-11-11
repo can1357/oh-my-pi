@@ -51,6 +51,7 @@ import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { formatLinkMapValue, LinkMapSubmenu } from "./link-map-editor";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { themePickerOptions } from "./theme-selector";
 import type { SelectPickerOptions } from "../native/picker";
@@ -987,6 +988,8 @@ export class SettingsSelectorComponent implements Component {
 				return this.#formatMultiSelectValue(def, value);
 			case "text":
 				return def.secret ? "" : this.#formatTextInputEditValue(def.path, value);
+			case "linkMap":
+				return formatLinkMapValue(value);
 			default:
 				return value === undefined || value === null ? "" : String(value);
 		}
@@ -1556,6 +1559,14 @@ export class SettingsSelectorComponent implements Component {
 			return (
 				currentValue.length !== defaultValue.length ||
 				currentValue.some((entry, index) => entry !== defaultValue[index])
+			);
+		}
+		// Each read of a record default is a fresh object, so identity would mark every record row changed.
+		if (isRecord(currentValue) && isRecord(defaultValue)) {
+			const keys = Object.keys(currentValue);
+			return (
+				keys.length !== Object.keys(defaultValue).length ||
+				keys.some(key => !Object.is(currentValue[key], defaultValue[key]))
 			);
 		}
 		return !Object.is(currentValue, defaultValue);

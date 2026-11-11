@@ -10,6 +10,7 @@ import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { plainText, styledSpans } from "../native/spans";
+import { fileLinkSpan } from "../render/hyperlink";
 import type { ContextUsage } from "../status-line/types";
 const PANEL_CHROME_ROWS = 4;
 
@@ -234,7 +235,8 @@ export class SessionInfoOverlay implements Component {
 							href !== undefined || path.includes("/")
 								? identityField(
 										"File",
-										[span(path, "path", href ? { href } : undefined)],
+										// Without OSC 8 the report text carries no link; the native field still gets one.
+										[href ? span(path, "path", { href }) : fileLinkSpan(path, path)],
 										"file",
 										`Copy ${path}`,
 									)

@@ -91,6 +91,13 @@ export function createSettingsHost(): SettingsHost {
 		get: path => lookup(path)?.layered(path === cfgTuiLinkMap.id ? settings.grantAuthority() : settings),
 		set: (path, value) => resolve(path).set(settings, value),
 		unset: path => resolve(path).unset(settings),
+		// A `--config` file or a runtime override outranks the global config the Link Map editor writes: a
+		// save would report success, leave links unchanged and copy that layer's entries into the global config.
+		isReadOnly: path => {
+			if (path !== cfgTuiLinkMap.id) return false;
+			const from = cfgTuiLinkMap.provenance(settings);
+			return from === "overlay" || from === "runtime";
+		},
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
 		validateProviderLimits: validateProviderMaxInFlightRequests,
 	};

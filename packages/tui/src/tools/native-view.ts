@@ -24,8 +24,8 @@ export function displayPath(filePath: string): string {
 }
 
 /** Configured file link for a head's path target, when the path is absolute. */
-export function fileHref(filePath: string | undefined): string | undefined {
-	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
+export function fileHref(filePath: string | undefined, opts?: { directory?: boolean }): string | undefined {
+	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath, opts) : undefined;
 }
 
 /** Link for a head target that is a web URL (`www.` gains `https://`), else undefined. */
