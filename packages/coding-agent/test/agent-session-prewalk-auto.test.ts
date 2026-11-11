@@ -508,6 +508,131 @@ describe("AgentSession auto-prewalk", () => {
 	});
 
 	describe("one task at a time", () => {
+		it("a model pick while handoff metadata loads keeps the pick without a handoff or checklist", async () => {
+			stubJudge([PREWALK, DIRECT]);
+			const f = createFixture([...cycle(), done("two")], { auto: "on" });
+			const loading = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			vi.spyOn(f.session.modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+				if (model.id === f.target.id) {
+					loading.resolve();
+					await release.promise;
+				}
+				return model;
+			});
+			const task = f.session.prompt(TASK);
+			await loading.promise;
+			const manual = modelOrThrow("claude-opus-4-6");
+			try {
+				await f.session.setModel(manual);
+			} finally {
+				release.resolve();
+			}
+			await task;
+
+			expect(f.session.model?.id).toBe(manual.id);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
+			expect(f.notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+			expect(f.session.sessionManager.getSessionLocalModelChange()?.role).not.toBe("prewalk");
+			await f.session.prompt("task two");
+			expect(f.requested.at(-1)).toBe(manual.id);
+		});
+
+		it("a manual arm survives an older handoff metadata load and switches on a later implementation action", async () => {
+			stubJudge([PREWALK]);
+			const f = createFixture([...cycle(), done("still planning"), ...cycle()], { auto: "on" });
+			const loading = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			vi.spyOn(f.session.modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+				if (model.id === f.target.id) {
+					loading.resolve();
+					await release.promise;
+				}
+				return model;
+			});
+			const task = f.session.prompt(TASK);
+			await loading.promise;
+			const manual = modelOrThrow("claude-opus-4-6");
+			try {
+				await f.session.setModel(manual);
+				expect(f.session.armPrewalk(f.target, Effort.Low)).toBe(true);
+			} finally {
+				release.resolve();
+			}
+			await task;
+
+			expect(f.session.model?.id).toBe(manual.id);
+			expect(f.session.getPrewalkState()).toEqual({ target: f.target, thinkingLevel: Effort.Low });
+			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
+			expect(f.notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+			expect(f.session.sessionManager.getSessionLocalModelChange()?.role).not.toBe("prewalk");
+
+			await f.session.prompt("implement task two");
+
+			expect(f.session.model?.id).toBe(f.target.id);
+			expect(f.requested.at(-1)).toBe(f.target.id);
+			expect(f.efforts.at(-1)).toBe(Effort.Low);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			expect(f.nudges.at(-1)).toContain("prewalk-checklist");
+			expect(f.notices.filter(message => message.startsWith("Prewalk: switched"))).toHaveLength(1);
+		});
+
+		it("an effort pick as the handoff model switches survives reconciliation and the next task", async () => {
+			stubJudge([PREWALK, DIRECT]);
+			const f = createFixture([...cycle(), done("two")], { auto: "on" });
+			f.session.subscribe(event => {
+				if (event.type === "model_changed" && f.session.model?.id === f.target.id) {
+					f.session.setThinkingLevel(Effort.Medium);
+				}
+			});
+
+			await f.session.prompt(TASK);
+
+			expect(f.session.configuredThinkingLevel()).toBe(Effort.Medium);
+			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
+			expect(f.notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+			await f.session.prompt("task two");
+			expect(f.requested.at(-1)).toBe(f.target.id);
+			expect(f.efforts.at(-1)).toBe(Effort.Medium);
+		});
+
+		it("turning auto mode off after a handoff still restores the planning model on the next task", async () => {
+			const calls = stubJudge([PREWALK]);
+			const f = createFixture([...cycle(), done("two")], { auto: "on" });
+			await f.session.prompt(TASK);
+			expect(f.session.model?.id).toBe(f.target.id);
+			cfgPrewalkAuto.override(f.settings, "off");
+
+			await f.session.prompt("task two");
+
+			expect(asked(calls)).toHaveLength(1);
+			expect(f.requested.at(-1)).toBe(f.primary.id);
+			expect(f.efforts.at(-1)).toBe(Effort.High);
+		});
+
+		it("a model pick cancels a pending auto arm before its first write can switch models", async () => {
+			stubJudge([PREWALK]);
+			const manual = modelOrThrow("claude-opus-4-6");
+			const f = createFixture([{ content: ["plan only"] }, { content: ["still planning"] }, ...cycle()], {
+				auto: "on",
+			});
+			await f.session.prompt(TASK);
+			expect(f.session.getPrewalkState()?.target.id).toBe(f.target.id);
+			await f.session.setModel(manual);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			const boundary = f.requested.length;
+
+			// Continue the same task so beginAutoTask cannot discard or replace the pending arm.
+			await f.session.prompt("implement the plan", { synthetic: true });
+
+			expect(f.requested.slice(boundary)).toEqual([manual.id, manual.id, manual.id]);
+			expect(f.session.model?.id).toBe(manual.id);
+			expect(f.nudges.slice(boundary).flat()).not.toContain("prewalk-plan");
+			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
+			expect(f.notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+		});
+
 		it.each([
 			["primary", PRIMARY],
 			["direct", DIRECT],
@@ -599,6 +724,7 @@ describe("AgentSession auto-prewalk", () => {
 			const f = createFixture(cycle(), { auto: "on" });
 			await f.session.prompt(TASK);
 			expect(f.session.model?.id).toBe(f.target.id);
+			cfgPrewalkAuto.override(f.settings, "off");
 
 			expect(await f.session.newSession()).toBe(true);
 
@@ -606,7 +732,7 @@ describe("AgentSession auto-prewalk", () => {
 			expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
 		});
 
-		it("suggest never moves models, even over an earlier auto handoff", async () => {
+		it("suggest restores an earlier auto handoff before reporting the next decision", async () => {
 			stubJudge([PREWALK, PRIMARY]);
 			const f = createFixture([...cycle(), done("two")], { auto: "on" });
 			await f.session.prompt(TASK);
@@ -615,7 +741,7 @@ describe("AgentSession auto-prewalk", () => {
 			cfgPrewalkAuto.override(f.settings, "suggest");
 			await f.session.prompt("what races in the cache layer?");
 
-			expect(f.requested.at(-1)).toBe(f.target.id);
+			expect(f.requested.at(-1)).toBe(f.primary.id);
 			expect(f.notices.at(-1)).toBe("Auto-prewalk: primary (prewalk 0.10)");
 		});
 	});

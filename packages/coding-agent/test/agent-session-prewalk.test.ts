@@ -133,6 +133,7 @@ describe("AgentSession prewalk", () => {
 			armed?: boolean;
 			agentKind?: "main" | "sub";
 			sessionManager?: SessionManager;
+			extendedContext?: boolean;
 			target?: Model;
 			startupTarget?: Model;
 			tools?: AgentTool[];
@@ -143,6 +144,7 @@ describe("AgentSession prewalk", () => {
 		const target = options.target ?? modelOrThrow("claude-sonnet-4-6");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
+			extendedContext: options.extendedContext ?? false,
 			"prewalk.enabled": options.enabled ?? true,
 		});
 		// Resolution must honor role fallback lists and the target effort suffix.
@@ -217,6 +219,38 @@ describe("AgentSession prewalk", () => {
 			created.target.id,
 		]);
 		expect(created.nudges[boundary]).not.toContain("prewalk-checklist");
+	});
+
+	it("journals a session-fitted prewalk target and restores its source and effort on /new", async () => {
+		const row = modelRegistry.find("openai", "gpt-5.6-terra");
+		if (!row) throw new Error("Expected bundled gpt-5.6-terra");
+		const target = { ...row, baseUrl: "https://prewalk.example/v1", requestModelId: "routed-terra" };
+		authStorage.keys.setRuntime("openai", "test-key");
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ target, extendedContext: true },
+		);
+		// Match the SDK's adoption path rather than mocking or copying a fitted model.
+		created.session.agent.setModelResolver(model => modelRegistry.fitContextWindow(model, created.settings));
+		const fitted = modelRegistry.fitContextWindow(target, created.settings);
+		expect(fitted).not.toBe(target);
+		expect(fitted.contextWindow).toBeGreaterThan(target.contextWindow ?? 0);
+
+		await created.session.prompt("task");
+
+		expect(created.session.model).toBe(fitted);
+		expect(created.session.model?.baseUrl).toBe(target.baseUrl);
+		expect(created.session.model?.requestModelId).toBe(target.requestModelId);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+		expect(created.session.sessionManager.getSessionLocalModelChange()).toMatchObject({
+			model: `${target.provider}/${target.id}`,
+			role: "prewalk",
+		});
+		expect(created.nudges.at(-1)).toContain("prewalk-checklist");
+
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
 	});
 
 	it("resumes on the handoff target while retry-role lookup keeps the assigned role", async () => {

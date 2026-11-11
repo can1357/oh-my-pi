@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Explicit model and effort selections take precedence over an in-progress prewalk handoff ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Explicit selections cancel pending auto-prewalk arms without cancelling manual or configured arms ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Auto-prewalk restores the planning model on the next task or new session even after auto mode is turned off ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
