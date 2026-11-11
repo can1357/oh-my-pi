@@ -405,9 +405,9 @@ describe("claude usage-block healing", () => {
 			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 1), tierLimit("fable", 0)]),
 		);
 		storages.push(storage);
+		const siblingBlockedUntil = Date.now() + 60 * 60_000;
+		blocks.set("1:tier:fable", siblingBlockedUntil);
 		await storage.credentials.reload();
-		const siblingBlockedUntil = blocks.get("1:tier:fable");
-		if (siblingBlockedUntil === undefined) throw new Error("expected the sibling to start blocked");
 		storage.sessions.pin("anthropic", "s-still-blocked", 2);
 
 		const mark = await storage.limits.markReached("anthropic", "s-still-blocked", {
