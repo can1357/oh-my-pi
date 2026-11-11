@@ -39,7 +39,18 @@ fn normalized(label: &str) -> &str {
 
 /// Exact case-insensitive labels win over ellipsis-normalized matches. Every
 /// tier must have exactly one match: order and enabled state never break ties.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn match_index(items: &[DesktopMenuItem], label: &str) -> CoreResult<usize> {
+	match_with_missing(items, label, || {
+		DesktopError::ax_failed(format!("menu item '{label}' was not found"))
+	})
+}
+
+fn match_with_missing(
+	items: &[DesktopMenuItem],
+	label: &str,
+	missing: impl FnOnce() -> DesktopError,
+) -> CoreResult<usize> {
 	let folded = label.trim().to_lowercase();
 	let mut exact = items
 		.iter()
@@ -59,7 +70,7 @@ pub(crate) fn match_index(items: &[DesktopMenuItem], label: &str) -> CoreResult<
 		.filter(|(_, item)| normalized(&item.title).to_lowercase() == folded);
 	match (matches.next(), matches.next()) {
 		(Some((index, _)), None) => Ok(index),
-		(None, _) => Err(DesktopError::ax_failed(format!("menu item '{label}' was not found"))),
+		(None, _) => Err(missing()),
 		_ => Err(DesktopError::ax_failed(format!(
 			"menu label '{label}' is ambiguous after ellipsis normalization"
 		))),
@@ -71,38 +82,26 @@ pub(crate) fn match_index(items: &[DesktopMenuItem], label: &str) -> CoreResult<
 const MAX_OFFERED_LABELS: usize = 40;
 const MAX_OFFERED_CHARS: usize = 80;
 
-/// [`match_index`] for one level of a menu bar path. A label no item has is
+/// Matches one level of a menu bar path. A label no item has is
 /// refused naming the labels the level offers, so the next call can choose
 /// one without reading the menu first; an open menu's refusal lists them
 /// apart.
 pub(crate) fn match_offered(items: &[DesktopMenuItem], label: &str) -> CoreResult<usize> {
-	match_index(items, label).map_err(|mut error| {
-		let wanted = normalized(label).to_lowercase();
-		if items
-			.iter()
-			.any(|item| normalized(&item.title).to_lowercase() == wanted)
-		{
-			// Ambiguous, not missing.
-			return error;
-		}
+	match_with_missing(items, label, || {
+		let message = format!("menu item '{label}' was not found");
 		let named: Vec<_> = items
 			.iter()
-			.map(|item| item.title.trim())
-			.filter(|title| !title.is_empty())
+			.filter(|item| !item.title.trim().is_empty())
 			.collect();
 		if named.is_empty() {
-			return error;
+			return DesktopError::ax_failed(message);
 		}
 		let shown = named
 			.iter()
 			.take(MAX_OFFERED_LABELS)
-			.map(|title| {
-				if title.chars().count() > MAX_OFFERED_CHARS {
-					let cut: String = title.chars().take(MAX_OFFERED_CHARS - 1).collect();
-					format!("'{cut}…'")
-				} else {
-					format!("'{title}'")
-				}
+			.map(|item| {
+				let title = super::ax::truncate_chars(item.title.trim().to_owned(), MAX_OFFERED_CHARS);
+				format_menu_item(&title, item.enabled, item.has_submenu)
 			})
 			.collect::<Vec<_>>()
 			.join(", ");
@@ -110,9 +109,19 @@ pub(crate) fn match_offered(items: &[DesktopMenuItem], label: &str) -> CoreResul
 			0 => String::new(),
 			more => format!(" and {more} more"),
 		};
-		error.message = format!("{}; this menu has {shown}{more}", error.message);
-		error
+		DesktopError::ax_failed(format!("{message}; this menu has {shown}{more}"))
 	})
+}
+
+pub(crate) fn format_menu_item(title: &str, enabled: bool, has_submenu: bool) -> String {
+	let mut part = format!("\"{title}\"");
+	if !enabled {
+		part.push_str(" (disabled)");
+	}
+	if has_submenu {
+		part.push_str(" ▸");
+	}
+	part
 }
 
 pub(crate) fn require_enabled(item: &DesktopMenuItem) -> CoreResult<()> {
@@ -164,27 +173,34 @@ mod tests {
 
 	#[test]
 	fn a_menu_bar_miss_names_the_labels_on_offer() {
-		let items = [item("New"), item("Open…"), item(""), item("Save")];
+		let mut disabled = item("Save");
+		disabled.enabled = false;
+		let mut submenu = item("Open Recent");
+		submenu.has_submenu = true;
+		let items = [item("New"), item("Open…"), item(""), disabled, submenu];
 		let error = match_offered(&items, "Nope").unwrap_err();
 		assert_eq!(
 			error.message,
-			"menu item 'Nope' was not found; this menu has 'New', 'Open…', 'Save'"
+			"menu item 'Nope' was not found; this menu has \"New\", \"Open…\", \"Save\" (disabled), \
+			 \"Open Recent\" ▸"
 		);
 		assert_eq!(match_offered(&items, "open...").unwrap(), 1);
 		// An ambiguous label is no miss: the labels it matched are its answer.
 		let error = match_offered(&[item("Save"), item("SAVE")], "save").unwrap_err();
 		assert_eq!(error.message, "menu label 'save' is ambiguous");
+		let error = match_offered(&[item("Save…"), item("Save...")], "save").unwrap_err();
+		assert_eq!(error.message, "menu label 'save' is ambiguous after ellipsis normalization");
 		let many: Vec<_> = (0..MAX_OFFERED_LABELS + 2)
 			.map(|n| item(&format!("Item {n}")))
 			.collect();
 		let error = match_offered(&many, "Nope").unwrap_err();
-		assert!(error.message.ends_with("'Item 39' and 2 more"), "{}", error.message);
+		assert!(error.message.ends_with("\"Item 39\" and 2 more"), "{}", error.message);
 		// A History menu's page titles are cut, each to its own budget.
-		let long = "x".repeat(MAX_OFFERED_CHARS + 20);
+		let long = "界".repeat(MAX_OFFERED_CHARS + 20);
 		let error = match_offered(&[item(&long), item("Show All History")], "Nope").unwrap_err();
-		let cut = format!("'{}…'", "x".repeat(MAX_OFFERED_CHARS - 1));
+		let cut = format!("\"{}…\"", "界".repeat(MAX_OFFERED_CHARS - 1));
 		assert!(error.message.contains(&cut), "{}", error.message);
-		assert!(error.message.ends_with(", 'Show All History'"), "{}", error.message);
+		assert!(error.message.ends_with(", \"Show All History\""), "{}", error.message);
 	}
 
 	#[test]

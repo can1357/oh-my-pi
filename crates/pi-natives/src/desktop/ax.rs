@@ -1230,7 +1230,6 @@ pub(crate) fn text_readback(
 }
 
 /// `value` cut to `max` characters, the last one an ellipsis when cut.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn truncate_chars(value: String, max: usize) -> String {
 	if value.chars().count() <= max {
 		return value;
