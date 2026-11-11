@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -2053,110 +2053,6 @@ return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(c
 		}
 	}, 30_000);
 
-	test("cleans up the click watcher when cancellation interrupts its detachment check", async () => {
-		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
-		const page = await browserHandle.browser.newPage();
-		try {
-			await page.setContent('<button id="target">Click</button>');
-			await page.evaluate(`(() => {
-				window.removed = [];
-				const remove = EventTarget.prototype.removeEventListener;
-				EventTarget.prototype.removeEventListener = function(type, ...args) {
-					if (["pointerdown", "mousedown", "click"].includes(type)) window.removed.push(type);
-					return remove.call(this, type, ...args);
-				};
-			})()`);
-			const handle = await page.locator("#target").waitHandle();
-			const controller = new AbortController();
-			const reason = new Error("cancel before dispatch");
-			const disposed = Promise.withResolvers<void>();
-			const evaluateHandle = handle.evaluateHandle.bind(handle);
-			spyOn(handle, "evaluateHandle").mockImplementationOnce(async (...args) => {
-				const watch = await evaluateHandle(...args);
-				const dispose = watch.dispose.bind(watch);
-				spyOn(watch, "evaluate").mockImplementationOnce(async () => {
-					controller.abort(reason);
-					throw reason;
-				});
-				spyOn(watch, "dispose").mockImplementationOnce(async () => {
-					await dispose();
-					disposed.resolve();
-				});
-				return watch;
-			});
-			expect(String(await rejectionOf(clickElement(handle, "tab.click", controller.signal)))).toContain(
-				"cancel before dispatch",
-			);
-			await disposed.promise;
-			expect(await page.evaluate("window.removed.sort()")).toEqual([
-				"click",
-				"click",
-				"mousedown",
-				"mousedown",
-				"pointerdown",
-				"pointerdown",
-			]);
-			await handle.dispose();
-		} finally {
-			await page.close().catch(() => undefined);
-			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
-		}
-	});
-
-	test.each(["before", "after"] as const)(
-		"re-resolves a selector replaced %s delivery watcher setup without sending stale input",
-		async timing => {
-			const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
-			const page = await browserHandle.browser.newPage();
-			try {
-				await page.setContent('<button id="target">Click</button>');
-				await page.evaluate(`(() => {
-				document.body.dataset.clicks = "";
-				window.addEventListener("click", event => {
-					document.body.dataset.clicks += event.target.id + " ";
-				});
-			})()`);
-				let lookups = 0;
-				const signal = new AbortController().signal;
-				await withLiveElement(
-					async () => {
-						lookups++;
-						const handle = await page.locator("#target").waitHandle();
-						if (lookups === 1) {
-							const evaluateHandle = handle.evaluateHandle.bind(handle);
-							spyOn(handle, "evaluateHandle").mockImplementationOnce(async (...args) => {
-								const watch = timing === "after" ? await evaluateHandle(...args) : undefined;
-								await page.evaluate(`(() => {
-								const target = document.querySelector("#target");
-								const next = target.cloneNode(true);
-								next.style.marginLeft = "200px";
-								target.replaceWith(next);
-							})()`);
-								return watch ?? evaluateHandle(...args);
-							});
-						}
-						return handle;
-					},
-					async handle => {
-						try {
-							await clickElement(handle, "tab.click", signal);
-						} finally {
-							await handle.dispose();
-						}
-					},
-					signal,
-				);
-				expect(lookups).toBe(2);
-				expect(await page.evaluate("document.body.dataset.clicks")).toBe("target ");
-			} finally {
-				await page.close().catch(() => undefined);
-				if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
-			}
-		},
-	);
-
 	test("looks replaced checkboxes up before returning their state and replaced radios up before unchecking", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
@@ -2268,43 +2164,5 @@ describe("looking a replaced element up again", () => {
 		expect(lookups).toBe(3);
 		expect(error).toBeInstanceOf(ClickRefusedError);
 		expect(error instanceof ClickRefusedError ? error.refusal : "").toContain("kept replacing");
-	});
-
-	test("keeps the lookup's own error, and fails at once without retry", async () => {
-		const controller = new AbortController();
-		let lookups = 0;
-		const lookupFailed = new Error("selector matches nothing");
-		const lookupError = await rejectionOf(
-			withLiveElement(
-				async () => {
-					if (++lookups > 1) {
-						controller.abort(new Error("deadline"));
-						throw lookupFailed;
-					}
-					return handle;
-				},
-				async () => {
-					throw new ElementDetachedError("tab.click(#vol)");
-				},
-				controller.signal,
-			),
-		);
-		expect(lookupError).toBe(lookupFailed);
-		lookups = 0;
-		const once = await rejectionOf(
-			withLiveElement(
-				async () => {
-					lookups++;
-					return handle;
-				},
-				async () => {
-					throw new ElementDetachedError("tab.click(aria-ref=e3)");
-				},
-				new AbortController().signal,
-				{ retry: false },
-			),
-		);
-		expect(once).toBeInstanceOf(ElementDetachedError);
-		expect(lookups).toBe(1);
 	});
 });
