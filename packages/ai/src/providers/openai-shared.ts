@@ -134,7 +134,7 @@ import {
 	resolveOpenCodeGoCacheAffinity,
 	setHeaderIfAbsent,
 } from "./inference-headers";
-import { isValidToolCallId, transformMessages } from "./transform-messages";
+import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -1573,6 +1573,46 @@ export function collectKnownCallIds(messages: ResponseInput): Set<string> {
 	return knownCallIds;
 }
 
+/**
+ * Recover executable tool-call blocks omitted from a turn's stored native Responses items.
+ *
+ * Only calls in the final pairing window count as recorded: `call_id` is not unique across a
+ * `dt: false` snapshot, so an earlier round that reused the id must not hide this turn's cut call.
+ */
+export function pickUnrecordedResponsesToolCalls(
+	assistantMsg: AssistantMessage,
+	historyItems: readonly Record<string, unknown>[],
+): ToolCall[] {
+	let hasToolCalls = false;
+	for (const block of assistantMsg.content) {
+		if (block.type !== "toolCall") continue;
+		hasToolCalls = true;
+		break;
+	}
+	if (!hasToolCalls) return [];
+	const recordedIds = new Set<string>();
+	for (let index = historyItems.length - 1; index >= 0; index--) {
+		const item = historyItems[index];
+		if (responsesToolOutputKind(item.type) !== undefined) break;
+		const role = item.role;
+		if ((item.type === "message" || item.type === undefined) && typeof role === "string" && role !== "assistant") {
+			break;
+		}
+		if (responsesToolCallKind(item.type) === undefined || typeof item.call_id !== "string") continue;
+		recordedIds.add(sanitizeCodexCallId(item.call_id));
+	}
+	const missing: ToolCall[] = [];
+	for (const block of assistantMsg.content) {
+		if (block.type !== "toolCall") continue;
+		if (recordedIds.has(sanitizeCodexCallId(block.id))) continue;
+		if (block.providerMetadata?.type !== "computer" && isMalformedToolCallName(block.customWireName ?? block.name)) {
+			continue;
+		}
+		missing.push(block);
+	}
+	return missing;
+}
+
 /** Scan replay items for call_ids that were originally custom tool calls. */
 export function collectCustomCallIds(messages: ResponseInput): Set<string> {
 	const customCallIds = new Set<string>();
@@ -2139,6 +2179,73 @@ export function isColdReplayableResponsesTurn(items: ResponseInput): boolean {
 	return hasReasoning;
 }
 
+/**
+ * The native Responses history items a request for `model` would replay from
+ * this assistant turn, or `undefined` when the turn was produced by another
+ * api, model or provider and its payload cannot go back on the wire at all.
+ */
+export function getNativeResponsesHistoryItems(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+): Array<Record<string, unknown>> | undefined {
+	if (!model || message.api !== model.api || message.model !== model.id) return undefined;
+	return getOpenAIResponsesHistoryItems(message.providerPayload, model.provider, message.provider);
+}
+
+/**
+ * The history items a request for `model` puts back on the wire for this turn,
+ * after the payload sanitizer keeps the replayable output in them, or
+ * `undefined` when the turn is rebuilt from `content` instead: another api,
+ * model or provider, no payload at all, or a payload the sanitizer empties.
+ *
+ * This is the request builder's own input to the replay decision. It asks only
+ * that replayable assistant output survives ({@link
+ * sanitizeOpenAIResponsesAssistantHistoryItemsForReplay} returns `undefined`
+ * for a hidden-empty turn), never for the reasoning the tokenizer prices: an
+ * answer-only payload replays natively with no reasoning item in it.
+ */
+export function getReplayableNativeResponsesHistoryItems(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+): ResponseInput | undefined {
+	const items = getNativeResponsesHistoryItems(message, model);
+	if (!items) return undefined;
+	return sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(items);
+}
+
+/**
+ * Whether a request puts those items on the wire: a warm provider session
+ * always does, a cold one (`nativeHistoryReplay` false) only when nothing in
+ * them is bound to one connection ({@link isColdReplayableResponsesTurn}).
+ */
+export function replaysNativeResponsesTurn(replay: ResponseInput, nativeHistoryReplay: boolean): boolean {
+	return nativeHistoryReplay || isColdReplayableResponsesTurn(replay);
+}
+
+/**
+ * Whether a request for `model` replays this assistant turn's native Responses
+ * history, so the turn reaches the wire as `providerPayload` items and its
+ * `content` blocks are not sent at all. The one replay decision shared by
+ * request accounting (the tokenizer's local count) and context maintenance
+ * (`/shake`), mirroring `buildResponsesInput`'s assistant branch.
+ *
+ * How many tokens that replay costs is a separate question the tokenizer
+ * answers from the same items: a payload without a reasoning item replays
+ * without any reasoning to price.
+ *
+ * `buildResponsesInput` decides this inline; it can adopt these helpers once
+ * its extra concerns (rebuilding calls cut by the output limit, hidden-empty
+ * suppression) move with them.
+ */
+export function replaysNativeResponsesHistory(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+	options: { nativeHistoryReplay?: boolean } = {},
+): boolean {
+	const replay = getReplayableNativeResponsesHistoryItems(message, model);
+	return replay !== undefined && replaysNativeResponsesTurn(replay, options.nativeHistoryReplay ?? true);
+}
+
 export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInputOptions<TApi>): ResponseInput {
 	const messages: ResponseInput = [];
 	const systemPrompts = options.systemRole ? normalizeSystemPrompts(options.context.systemPrompt) : [];
@@ -2283,25 +2390,49 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 						supportsComputerUse: options.model.supportsComputerUse === true,
 					},
 				);
-				const sanitizedHistoryItems = rawSanitizedHistoryItems
-					? ensureRequiredResponsesReasoningReplay(
-							adaptResponsesReplayItemsForModel(
-								rawSanitizedHistoryItems,
-								supportsCustomToolCalls,
-								customToolWireNameMap,
-								options.model.supportsComputerUse === true,
-							),
-							assistantMsg.stopReason,
-							options.requiresReasoningReplayForAllTurns ?? false,
-							options.requiresReasoningReplayForToolCalls ?? false,
-						)
-					: undefined;
 				const replayNativeItems =
 					nativeReplayEnabled ||
 					(options.nativeHistory !== undefined &&
 						rawSanitizedHistoryItems !== undefined &&
 						isColdReplayableResponsesTurn(rawSanitizedHistoryItems));
-				if (replayNativeItems && sanitizedHistoryItems) {
+				if (replayNativeItems && rawSanitizedHistoryItems) {
+					const nativeItems = adaptResponsesReplayItemsForModel(
+						rawSanitizedHistoryItems,
+						supportsCustomToolCalls,
+						customToolWireNameMap,
+						options.model.supportsComputerUse === true,
+					);
+					// Calls cut by the output limit have no native item: rebuild them the way the cold path
+					// encodes calls (wire tool names included), and before the required-reasoning repair, so a
+					// turn whose only call was cut still counts as one that calls a tool.
+					const missingCalls = pickUnrecordedResponsesToolCalls(assistantMsg, historyItems);
+					const turnItems =
+						missingCalls.length > 0
+							? [
+									...nativeItems,
+									...convertResponsesAssistantMessage(
+										{ ...assistantMsg, content: missingCalls },
+										options.model,
+										msgIndex,
+										knownCallIds,
+										false,
+										customCallIds,
+										false,
+										supportsCustomToolCalls,
+										customToolWireNameMap,
+										computerCallIds,
+										false,
+										false,
+										options.toolNaming,
+									),
+								]
+							: nativeItems;
+					const sanitizedHistoryItems = ensureRequiredResponsesReasoningReplay(
+						turnItems,
+						assistantMsg.stopReason,
+						options.requiresReasoningReplayForAllTurns ?? false,
+						options.requiresReasoningReplayForToolCalls ?? false,
+					);
 					// Model-owned replay items can carry reserved control-token
 					// spellings as data (the model writing *about* Harmony); escape the
 					// transport copy just like client turns.
@@ -2322,7 +2453,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 					msgIndex++;
 					continue;
 				}
-				if (!sanitizedHistoryItems) suppressHiddenEmptyFallback = true;
+				if (!rawSanitizedHistoryItems) suppressHiddenEmptyFallback = true;
 			}
 
 			const convertedOutputItems = convertResponsesAssistantMessage(
@@ -2645,6 +2776,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				...(itemId ? { id: itemId } : {}),
 				call_id: normalized.callId,
 				name: block.customWireName,
+				...(block.namespace ? { namespace: block.namespace } : {}),
 				input: rawInput,
 			} as ResponseInput[number]);
 			continue;
@@ -2658,6 +2790,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
 			name: encodeResponsesToolName(functionName, toolNaming),
+			...(block.namespace ? { namespace: block.namespace } : {}),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
@@ -3550,6 +3683,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: encodeResponsesToolCallId(item.call_id, item.id),
 					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: {},
+					...(item.namespace ? { namespace: item.namespace } : {}),
 					[kStreamingPartialJson]: item.arguments || "",
 				};
 				pushContentBlock(block);
@@ -3584,6 +3718,7 @@ export async function processResponsesStream<TApi extends Api>(
 					name: item.name,
 					arguments: { input: item.input ?? "" },
 					customWireName: item.name,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 					// Custom tools stream a raw string, but we reuse `partialJson` as the
 					// accumulation buffer so later code that inspects the field still works.
 					[kStreamingPartialJson]: item.input ?? "",
@@ -3774,6 +3909,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: encodeResponsesToolCallId(item.call_id, item.id),
 					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: args,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 				};
 				let contentIndex: number;
 				if (block) {
@@ -3782,6 +3918,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// leaving block.arguments stale (often `{}`); the emitted toolCall
 					// and the persisted block must agree.
 					block.arguments = args;
+					if (item.namespace) block.namespace = item.namespace;
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
@@ -3839,12 +3976,14 @@ export async function processResponsesStream<TApi extends Api>(
 					name: item.name,
 					arguments: { input: rawInput },
 					customWireName: item.name,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 				};
 				let contentIndex: number;
 				if (block) {
 					// Persist the final input on the stored block and drop the transient
 					// accumulation buffer, mirroring the function_call branch above.
 					block.arguments = { input: rawInput };
+					if (item.namespace) block.namespace = item.namespace;
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {

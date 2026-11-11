@@ -518,9 +518,49 @@ mod tests {
 			compositor_pid:    None,
 		}
 	}
+	/// Holds `LIBEI_ENV_LOCK` with `LIBEI_SOCKET` set to a test's value (removed
+	/// for `None`) and puts the previous value back when dropped, also while a
+	/// failing test unwinds, so no later test sees a leaked value.
+	struct LibeiSocket {
+		previous: Option<std::ffi::OsString>,
+		_lock:    std::sync::MutexGuard<'static, ()>,
+	}
+
+	impl LibeiSocket {
+		fn set(value: Option<&std::ffi::OsStr>) -> Self {
+			let lock = LIBEI_ENV_LOCK
+				.lock()
+				.unwrap_or_else(std::sync::PoisonError::into_inner);
+			let previous = std::env::var_os("LIBEI_SOCKET");
+			// SAFETY: LIBEI_ENV_LOCK is held, and every test that writes
+			// LIBEI_SOCKET or asserts on what it reads takes it first; std
+			// serializes the other env reads.
+			unsafe {
+				match value {
+					Some(value) => std::env::set_var("LIBEI_SOCKET", value),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+			Self { previous, _lock: lock }
+		}
+	}
+
+	impl Drop for LibeiSocket {
+		fn drop(&mut self) {
+			// SAFETY: as in `set`; the lock field is released only after this
+			// body.
+			unsafe {
+				match self.previous.take() {
+					Some(previous) => std::env::set_var("LIBEI_SOCKET", previous),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+		}
+	}
+
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
-		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
 		let socket = std::env::temp_dir().join(format!("omp-libei-test-{}", std::process::id()));
+		let _env = LibeiSocket::set(Some(socket.as_os_str()));
 		let _ = std::fs::remove_file(&socket);
 		let listener = UnixListener::bind(&socket).expect("bind fake libei socket");
 		listener
@@ -543,16 +583,9 @@ mod tests {
 				}
 			}
 		});
-		let previous = std::env::var_os("LIBEI_SOCKET");
-		unsafe { std::env::set_var("LIBEI_SOCKET", &socket) };
 		let mut backend = WaylandBackend::new(DisplaySelector::All);
 		action(&mut backend);
 		let _ = stop_tx.send(());
-		if let Some(previous) = previous {
-			unsafe { std::env::set_var("LIBEI_SOCKET", previous) };
-		} else {
-			unsafe { std::env::remove_var("LIBEI_SOCKET") };
-		}
 		let connected = accepted.join().expect("fake libei listener");
 		let _ = std::fs::remove_file(socket);
 		connected
@@ -568,21 +601,32 @@ mod tests {
 		assert_eq!(capabilities.input_permission, "prompt-or-granted");
 	}
 
+	/// Runs `action` with `LIBEI_SOCKET` unset, under the same lock as
+	/// `with_fake_libei`: `input_unavailable` reads the variable on every call,
+	/// so a fake socket from a test on another thread would otherwise report
+	/// input as reachable.
+	fn without_libei_socket(action: impl FnOnce()) {
+		let _env = LibeiSocket::set(None);
+		action();
+	}
+
 	#[test]
 	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
-		let mut backend = backend_without_services();
-		backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
-		let capabilities = backend.capabilities();
-		assert!(!capabilities.input);
-		assert!(!capabilities.held_input);
-		assert_eq!(capabilities.input_permission, "unavailable");
-		let source = control::CancellationSource::default();
-		let error = backend
-			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
-			.unwrap_err();
-		assert_eq!(error.code.as_str(), "PermissionDenied");
-		assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
-		assert!(backend.input.is_none());
+		without_libei_socket(|| {
+			let mut backend = backend_without_services();
+			backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+			let capabilities = backend.capabilities();
+			assert!(!capabilities.input);
+			assert!(!capabilities.held_input);
+			assert_eq!(capabilities.input_permission, "unavailable");
+			let source = control::CancellationSource::default();
+			let error = backend
+				.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
+				.unwrap_err();
+			assert_eq!(error.code.as_str(), "PermissionDenied");
+			assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
+			assert!(backend.input.is_none());
+		});
 	}
 
 	#[test]

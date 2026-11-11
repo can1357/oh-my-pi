@@ -99,7 +99,7 @@ import {
 	readReactTree,
 } from "./react/tree";
 import { collectVitals, installVitalsObservers, type VitalsOptions, type VitalsResult } from "./react/vitals";
-import { registerSemanticQueryHandlers } from "./query-handlers";
+import { parseRoleSelector, registerSemanticQueryHandlers } from "./query-handlers";
 import {
 	type ElementQueryHelpers,
 	enrichElementQueries,
@@ -543,6 +543,15 @@ export function normalizeSelector(selector: string): string {
 		const name = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
 		if (name) return `aria/${name.trim()}`;
 		return `aria/${rest}`;
+	}
+	if (selector.startsWith("role/")) {
+		// The role/ handler refuses a selector it cannot fully read. Parsing it here surfaces that as a tool error before
+		// the op, so a wait fails at once instead of at its timeout.
+		try {
+			parseRoleSelector(selector.slice(5));
+		} catch (error) {
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		}
 	}
 	return selector;
 }
@@ -1800,10 +1809,13 @@ export class WorkerCore {
 			client.on("Page.javascriptDialogClosed", this.#onDialogClosed);
 			client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
 			this.#page.on("error", this.#onPageCrashed);
-			if (this.#ownsPage) {
+			if (this.#ownsPage || (payload.mode === "attach" && payload.userDriven)) {
 				// Background Chromium tabs stop producing frames, stalling rAF,
-				// IntersectionObserver, and input acknowledgements. Keep owned tabs
-				// interactive without raising a window; explicit settle-freeze still applies.
+				// IntersectionObserver, and input acknowledgements; in a visible browser a tab
+				// that was never selected drops trusted input outright. Keep the page
+				// interactive without selecting its tab or raising a window, including a user's
+				// page in a background tab; explicit settle-freeze still applies. It ends with
+				// this connection's session (on the relay, with the bridge's last session).
 				await this.#page.emulateFocusedPage(true);
 			}
 			this.#webmcp = new WebMcpController(this.#page);
@@ -1817,8 +1829,9 @@ export class WorkerCore {
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
 			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
 				perTab: !this.#userDriven,
+				pageEvents: payload.mode === "attach" && payload.relay === true,
 			});
-			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
+			await this.#downloads.start(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
 			this.#emulation = new BrowserEmulationController(
 				this.#page,
@@ -1830,6 +1843,15 @@ export class WorkerCore {
 			this.#tracing = new BrowserTracingController(this.#page);
 			this.#network = new BrowserNetworkManager(this.#page, payload.allowedDomains);
 			await this.#network.start();
+			// A window omp does not size (visible, attached, relay) takes a viewport only when the open asks for one,
+			// after the steps that can fail, so a failed open leaves a borrowed tab at its own size. Without `scale` it
+			// keeps the window's own device scale (0).
+			if (payload.viewport && (payload.mode === "attach" || payload.emulateViewport === false)) {
+				await this.#page.setViewport({
+					...payload.viewport,
+					deviceScaleFactor: payload.viewport.deviceScaleFactor ?? 0,
+				});
+			}
 			const info = await this.#currentReadyInfo();
 			this.#started = true;
 			this.#transport.send({ type: "ready", info });
@@ -1884,9 +1906,10 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Tell the omp browser relay this worker drives the adopted page, so the
-	 * relay adds it to the per-window "omp" tab group. Best-effort: plain CDP
-	 * backends (real Chrome, cmux) reject the relay-private method.
+	 * Tell the omp browser relay this worker drives the adopted page, so the relay adds it to the per-window "omp"
+	 * tab group. The supervisor's connect URL claims it already (`?claim=`); an older relay still serving this
+	 * machine ignores that and learns of the claim only here. Best-effort: plain CDP backends (real Chrome, cmux)
+	 * reject the relay-private method.
 	 */
 	async #claimRelayTarget(page: Page): Promise<void> {
 		let session: CDPSession | undefined;

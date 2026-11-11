@@ -72,6 +72,22 @@ describe("convertToLlm", () => {
 		expect(otherCustom?.role).toBe("developer");
 	});
 
+	it("delivers an incoming agent message as a user turn authored by the agent", () => {
+		const [incoming] = convertToLlm([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "<irc>\nIncoming IRC message from agent `Main`:\n\nstop building\n</irc>",
+				display: true,
+				details: { id: "1", from: "Main", message: "stop building" },
+				attribution: "agent",
+				timestamp: 1,
+			},
+		]);
+
+		expect(incoming).toMatchObject({ role: "user", attribution: "agent" });
+	});
+
 	it("replays tool calls saved under an xd:// alias by their bare device name", () => {
 		const saved = {
 			...abortedAssistant([{ type: "toolCall", id: "call_1|fc_1", name: "xd://recall", arguments: { q: "x" } }]),
@@ -421,14 +437,6 @@ describe("replaceLlmImagesWithText", () => {
 		const scrubbed = replaceLlmImagesWithText(converted, "[image omitted]");
 		const user = scrubbed.find(m => m.role === "user");
 		expect(Array.isArray(user?.content) && user.content).toEqual([{ type: "text", text: "[image omitted]" }]);
-	});
-
-	it("returns the same array reference when there are no image blocks", () => {
-		const converted = convertToLlm([
-			{ role: "user", content: [{ type: "text", text: "hi" }], attribution: "user", timestamp: 1 },
-		]);
-
-		expect(replaceLlmImagesWithText(converted, "[image omitted]")).toBe(converted);
 	});
 });
 

@@ -24,6 +24,7 @@ import {
 	runEvalJudgmentBatch,
 } from "../judgment-batch-bridge";
 import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } from "../judgment-bridge";
+import { EVAL_SHELL_BRIDGE_NAME, type EvalShellResult, runEvalShell } from "../shell-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
 	type EvalHandleSnapshot,
@@ -65,6 +66,7 @@ export interface ToolBridgeOptions {
 type ToolValue =
 	| string
 	| EvalBudgetResult
+	| EvalShellResult
 	| EvalAgentHandleResult
 	| EvalCompletionHandleResult
 	| EvalJudgmentResult
@@ -266,6 +268,9 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	if (name === EVAL_BUDGET_BRIDGE_NAME) {
 		return await runEvalBudget(args, options);
+	}
+	if (name === EVAL_SHELL_BRIDGE_NAME) {
+		return await runEvalShell(args, options);
 	}
 	if (name === EVAL_WAIT_BRIDGE_NAME) {
 		return await runEvalWait(args, options);

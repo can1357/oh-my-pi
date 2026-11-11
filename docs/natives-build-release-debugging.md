@@ -83,6 +83,8 @@ Rust toolchains are nightly (pinned in `MODULE.bazel`), with repo-local musl re-
 
 The darwin-arm64 addon embeds the Apple Foundation Models bridge (`crates/pi-natives/src/applefm/bridge.swift`, Swift 6.4 against the macOS 27 SDK), built by the `applefm_bridge` rule with the `//bazel/toolchains/swift` toolchain: on mac exec hosts the host-detected Xcode/Command Line Tools Swift (`@applefm_swift`), on linux exec hosts the pinned swift.org Swift 6.4.0 for Ubuntu 22.04 (`@swift_linux`) against `@macos_sdk`, linked by `@llvm_darwin_tools`' ld64.lld. The open-source compiler reads the SDK's `.swiftinterface`s as long as the versions match; it needs `-resource-dir` pointed away from the Linux corelibs module maps and `-I <sdk>/usr/lib/swift/shims` (see `bazel/toolchains/swift/linux.bzl`). Without a toolchain (x86_64, or a mac without Swift 6.4 + SDK 27) the bridge is an empty file the addon reports as not built. The AppKit/ScreenCaptureKit helpers (`darwin_helper`) compile with whichever darwin cc toolchain resolved.
 
+Linux-hosted Darwin Rust links receive `SDKROOT` from `//bazel/toolchains/darwin:rustc_sdk_env`; native macOS links retain Xcode discovery. Swift's `@swift_darwin_resources` overlay exposes the compiler's Clang headers and the SDK's real Swift runtime directory without Linux module maps. Only this small cross-repository symlink overlay is uncached; the compiler and SDK downloads remain independently cached.
+
 ### 4) Third-party crates (`crate_universe`)
 
 `@crates//...` is generated from the workspace `Cargo.toml`/`Cargo.lock`, restricted to exactly the eight Bazel triples (including `aarch64-pc-windows-msvc`). Crate-specific build fixes live as `crate.annotation`s in `MODULE.bazel` (see the debugging playbook below).

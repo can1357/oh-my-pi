@@ -285,7 +285,7 @@ impl RunTrace {
 	/// instead of an invented primary producer. Decoding ends at capture EOF.
 	/// Segmented minimizer submissions share one epoch and final status;
 	/// their history carries `segment`, with `logicalEnd`/`logicalStatus`
-	/// finalizing the last actual root RunEnd after output draining.
+	/// finalizing the last actual root `RunEnd` after output draining.
 	/// Serialization borrows the locked model rather than cloning its history.
 	#[napi]
 	pub fn snapshot(&self) -> String {
@@ -491,6 +491,16 @@ impl Shell {
 		Self { inner: Arc::new(CoreShell::new(options.map(Into::into))) }
 	}
 
+	/// A new shell with this one's options whose session starts from this
+	/// session's state (variables, functions, aliases, options, working
+	/// directory) as of its last command boundary: while a command runs, the
+	/// state that command started from. What the fork sets stays in the
+	/// fork. Never waits for the running command.
+	#[napi]
+	pub fn fork(&self) -> Self {
+		Self { inner: Arc::new(self.inner.fork()) }
+	}
+
 	/// Run a shell command using the provided options.
 	///
 	/// The `on_chunk` callback receives streamed stdout/stderr output. Returns
@@ -558,7 +568,9 @@ impl Shell {
 }
 
 /// Run the pi-shell engine as a process shell in this process (`omp zsh`,
-/// `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+/// `omp bash`, `omp sh`).
+///
+/// `argv` is the shell's whole command line,
 /// `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
 /// shell gets it. Synchronous: blocks the calling thread until the shell
 /// exits and returns the status the process should exit with (0–255; 101

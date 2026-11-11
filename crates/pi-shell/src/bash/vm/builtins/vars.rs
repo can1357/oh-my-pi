@@ -8,12 +8,13 @@ use bstr::{BStr, BString, ByteSlice};
 use super::{Ctx, Need, R, done, number, opts};
 use crate::bash::{
 	diag::Diag,
-	event::{AssignScope, EventData, EventKind},
+	event::{ASSIGN_PREVIEW_BYTES, AssignScope, EventData, EventKind, assign_preview},
 	ids::IntrinsicId,
 	ir::{self, FuncIr},
 	store::{
 		Attrs, Elem, Key, KeyBuf, MiscKey, OptId, OptKind, Record, StoreError, Table, VarValue,
 	},
+	text,
 	vm::{
 		Cx, Kernel,
 		exec::{self, Flow},
@@ -94,7 +95,7 @@ pub fn emit_assignment_at(
 			return Ok(None);
 		};
 		let (value, full_len) = match &var.value {
-			VarValue::Str(value) => (BString::from(&value[..value.len().min(256)]), value.len()),
+			VarValue::Str(value) => (BString::from(assign_preview(value)), value.len()),
 			VarValue::Indexed(values) => {
 				assignment_preview(values.iter().map(|(_, value)| value.as_slice()))
 			},
@@ -120,19 +121,23 @@ pub fn emit_assignment_at(
 
 /// The engine's array assignment display, bounded before any copying.
 fn assignment_preview<'a>(values: impl Iterator<Item = &'a [u8]>) -> (BString, usize) {
+	// One byte past the preview tells `text::cut` whether the join was cut.
+	const KEEP: usize = ASSIGN_PREVIEW_BYTES + 1;
 	let mut shown = BString::default();
 	let mut full_len = 0usize;
 	for (index, value) in values.enumerate() {
 		if index != 0 {
 			full_len = full_len.saturating_add(1);
-			if shown.len() < 256 {
+			if shown.len() < KEEP {
 				shown.push(b' ');
 			}
 		}
 		full_len = full_len.saturating_add(value.len());
-		let kept = value.len().min(256 - shown.len());
+		let kept = value.len().min(KEEP - shown.len());
 		shown.extend_from_slice(&value[..kept]);
 	}
+	let end = text::cut(&shown, ASSIGN_PREVIEW_BYTES).len();
+	shown.truncate(end);
 	(shown, full_len)
 }
 
@@ -803,7 +808,7 @@ fn set_value_plain(
 	}
 	state::store_var(&mut k.root, cx.store, vp, name, Some(var), level);
 	emit_assignment(k, cx, vp, name, level);
-	if name == b"PATH"
+	if super::names::resets_hash(k.engine.config().platform, name)
 		&& let Err(e) = super::names::flush_hash(&mut k.root, cx.store, vp)
 	{
 		k.fail(e);
@@ -914,7 +919,13 @@ fn assign_in_place(
 		.with(Attrs::NAMEREF)
 		.with(Attrs::ZSH_ONLY);
 	let name = lhs.name;
-	if name == b"BASH_ARGV0" || name == b"BASH_XTRACEFD" || is_posix_var(name) {
+	// A name whose assignment flushes the command hash table takes the
+	// general path, which does.
+	if name == b"BASH_ARGV0"
+		|| name == b"BASH_XTRACEFD"
+		|| is_posix_var(name)
+		|| super::names::resets_hash(k.engine.config().platform, name)
+	{
 		return Ok(Some(value));
 	}
 	match state::option(&mut k.root, cx.store, vp, OptId::Allexport) {
@@ -2895,7 +2906,7 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			None => {
 				let keep = ctx.option(OptId::LocalvarUnset)?;
 				state::unset_var(&mut ctx.k.root, ctx.cx.store, ctx.vp, name, keep);
-				if name == b"PATH" {
+				if super::names::resets_hash(ctx.k.engine.config().platform, name) {
 					super::names::flush_hash(&mut ctx.k.root, ctx.cx.store, ctx.vp)?;
 				}
 				if is_posix_var(name) {

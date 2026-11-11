@@ -87,6 +87,7 @@ import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 import {
 	cfgLspDiagnosticsDeduplicate,
 	cfgLspDiagnosticsOnWrite,
+	cfgLspEnabled,
 	cfgLspFormatOnWrite,
 	cfgLspRequestTimeout,
 } from "../lsp/settings";
@@ -645,7 +646,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	/** Resolves the LSP writethrough from the current `lsp.*` settings so changes apply to the next write. */
 	#lspWritethrough(): { writethrough: WritethroughCallback; deferred: DeferredDiagnostics | undefined } {
-		if (!(this.session.enableLsp ?? true)) return { writethrough: writethroughNoop, deferred: undefined };
+		if (!(this.session.enableLsp ?? true) || !cfgLspEnabled.get(this.session.settings)) {
+			return { writethrough: writethroughNoop, deferred: undefined };
+		}
 		const { settings } = this.session;
 		const enableDiagnostics = cfgLspDiagnosticsOnWrite.get(settings);
 		const dedup = enableDiagnostics && cfgLspDiagnosticsDeduplicate.get(settings);
@@ -1002,8 +1005,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					// Device payloads are dispatch arguments, not resource text, so only
 					// non-device text writes are checked against a truncated read projection.
 					if (!verbatim && target.spec.backing !== "device" && endsWithReadTruncationNotice(content)) {
-						const currentResource = await router.resolve(path, sessionResolveContext(this.session, { signal }));
-						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
+						let currentContent: string | undefined;
+						try {
+							currentContent = (await router.resolve(path, sessionResolveContext(this.session, { signal })))
+								.content;
+						} catch (error) {
+							// A missing target has no source to discard, as for a new disk file (readCurrentWriteSource).
+							if (!isEnoent(error)) throw error;
+						}
+						assertNotShorterReadProjection(path, content, currentContent, cleanContent);
 					}
 					// Handler-owned writes mutate state outside the sandbox unless they touch no
 					// files (peer messages, replies, background-work cancellation) or dispatch a
@@ -1022,10 +1032,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 							toolCall: { id: _toolCallId, onUpdate, context },
 						}),
 					);
+					// The flag tells the prewalk gate this write was not implementation work.
+					const fileFreeDetails: WriteToolDetails = touchesNoFiles ? { touchesNoFiles: true } : {};
 					if (handlerResult) {
 						const result: AgentToolResult<WriteToolDetails> = {
 							content: handlerResult.content,
-							details: handlerResult.details ?? {},
+							details: { ...handlerResult.details, ...fileFreeDetails },
 							isError: handlerResult.isError,
 							useless: handlerResult.useless,
 						};
@@ -1036,7 +1048,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					if (stripped) {
 						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 					}
-					return { content: [{ type: "text", text: resultText }], details: {} };
+					return { content: [{ type: "text", text: resultText }], details: fileFreeDetails };
 				}
 				// Read-only scheme: the router rejects the write with its uniform error.
 				if (!policy) await router.write(path, cleanContent);

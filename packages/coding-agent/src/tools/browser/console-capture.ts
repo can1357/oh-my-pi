@@ -184,6 +184,14 @@ async function serializeRemoteObject(session: CDPSession, object: Protocol.Runti
 	return boundedText(object.description ?? object.className ?? object.type, MAX_ARG_CHARS);
 }
 
+/**
+ * Text for a thrown or rejected non-Error value serialized by {@link serializeRemoteObject}.
+ * Mirrored page-side by `reasonText` in {@link CMUX_CONSOLE_CAPTURE_SCRIPT}.
+ */
+function exceptionValueText(value: unknown): string {
+	return typeof value === "string" ? value : (JSON.stringify(value) ?? consoleArgumentText(value));
+}
+
 function protocolConsoleLevel(type: Protocol.Runtime.ConsoleAPICalledEvent["type"]): BrowserConsoleLevel {
 	if (type === "warning") return "warn";
 	if (type === "debug" || type === "info" || type === "error" || type === "log") return type;
@@ -314,7 +322,28 @@ export class PageConsoleCapture {
 			};
 			this.#protocolExceptionHandler = event => {
 				const details = event.exceptionDetails;
-				const description = details.exception?.description;
+				const exception = details.exception;
+				if (exception && exception.subtype !== "error") {
+					// A non-Error value's description is only its class ("Object"); keep its fields instead,
+					// bounded like console arguments.
+					const seq = this.#allocateSequence();
+					const location = protocolExceptionLocation(details, page.url());
+					const value = serializeRemoteObject(activeSession, exception);
+					this.#pending = this.#pending.then(async () => {
+						const text = exceptionValueText(await value);
+						if (this.#generation !== generation) return;
+						this.#push({
+							seq,
+							ts: event.timestamp,
+							type: "pageerror",
+							level: "error",
+							text: boundedText(text, MAX_TEXT_CHARS),
+							location,
+						});
+					});
+					return;
+				}
+				const description = exception?.description;
 				const stack = description?.includes("\n") ? description : undefined;
 				const text = description?.split("\n", 1)[0] ?? details.text;
 				this.#push({
@@ -488,6 +517,11 @@ export const CMUX_CONSOLE_CAPTURE_SCRIPT = String.raw`(() => {
 			return json && json.length > 8192 ? json.slice(0, 8192) + "…" : value;
 		} catch { return text(value); }
 	};
+	const reasonText = value => {
+		if (value instanceof Error) return text(value.message || value);
+		const bounded = safe(value);
+		return typeof bounded === "string" ? bounded : (JSON.stringify(bounded) ?? text(value));
+	};
 	for (const level of ["log", "info", "warn", "error", "debug"]) {
 		const original = console[level].bind(console);
 		console[level] = (...args) => {
@@ -502,7 +536,7 @@ export const CMUX_CONSOLE_CAPTURE_SCRIPT = String.raw`(() => {
 	}));
 	addEventListener("unhandledrejection", event => {
 		const reason = event.reason;
-		push({ type: "pageerror", level: "error", text: String(reason && reason.message || reason).slice(0, 16384), stack: reason && reason.stack ? String(reason.stack).slice(0, 32768) : undefined });
+		push({ type: "pageerror", level: "error", text: reasonText(reason).slice(0, 16384), stack: reason && reason.stack ? String(reason.stack).slice(0, 32768) : undefined });
 	});
 	globalThis.__ompConsoleCapture = state;
 	return true;

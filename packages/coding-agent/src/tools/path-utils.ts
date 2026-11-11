@@ -317,19 +317,28 @@ function isInternalUrlPath(filePath: string): boolean {
  *
  * A bare root slash is treated as a workspace-root alias for tool inputs. Users
  * often pass `/` to mean “search from here”, and letting tools escape to the
- * filesystem root is almost never what they intended.
+ * filesystem root is almost never what they intended. A shell `cd` target is
+ * not a tool input: use {@link resolveShellDirectory}.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, true);
+}
+
+/**
+ * Resolve a directory a shell command named (`cd <path>`), relative to `cwd`.
+ *
+ * Same expansion as {@link resolveToCwd}, except a bare root (`/`, `//`, `///`)
+ * is the filesystem root. Explicit tool path inputs keep the workspace alias.
+ */
+export function resolveShellDirectory(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, false);
+}
+
+function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boolean): string {
 	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
-
 	assertNotInternalUrl(expanded, filePath);
-
-	if (/^\/+$/.test(expanded)) {
-		return cwd;
-	}
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
+	if (aliasWorkspaceRoot && /^\/+$/.test(expanded)) return cwd;
+	if (path.isAbsolute(expanded)) return expanded;
 	return path.resolve(cwd, expanded);
 }
 
@@ -702,6 +711,12 @@ export async function splitDelimitedPathEntry(
 		routedUrlPredicate?: (entry: string) => boolean;
 		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
 		exclusionParts?: boolean;
+		/**
+		 * Split a `;` list that starts with an internal URL and also names existing
+		 * local paths (`artifact://1;notes.txt`). Search tools opt in. Rewrite tools
+		 * leave this off so a `;` inside one internal URL cannot select an extra file.
+		 */
+		mixedLocalPaths?: boolean;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -713,6 +728,18 @@ export async function splitDelimitedPathEntry(
 		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
 			? parts
 			: null;
+	}
+	if (options.mixedLocalPaths === true && isInternalUrlPath(normalizedEntry)) {
+		// Before the all-internal branch, which keeps the whole string when any
+		// part is not itself an internal URL. `splitMixedUrlPathList` declines
+		// unless every non-URL part is an existing literal path, so a URL whose
+		// own path contains `;` (`local://report;`) stays one resource.
+		const mixed = await splitMixedUrlPathList(
+			normalizedEntry,
+			cwd,
+			part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)),
+		);
+		if (mixed && mixed.length > 1) return mixed;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
@@ -791,7 +818,7 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean } = {},
+	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean; mixedLocalPaths?: boolean } = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {

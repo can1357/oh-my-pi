@@ -140,7 +140,7 @@ enum Phase {
 
 impl Reader {
 	/// Whether a line is being read (a `SIGINT` abandons it).
-	pub fn reading(&self) -> bool {
+	pub const fn reading(&self) -> bool {
 		matches!(self.phase, Phase::Edit | Phase::Plain)
 	}
 }
@@ -193,11 +193,8 @@ fn with_reader<T>(
 	vp: &mut Vproc,
 	f: impl FnOnce(&mut Reader, &mut Kernel, &mut Cx<'_>, &mut Vproc) -> T,
 ) -> T {
-	let z = zle_mut(k, cx, vp);
-	let mut r = z.reader.take().unwrap_or_default();
-	if z.tty.is_none() {
-		z.tty = Tty::open(k);
-	}
+	let mut r = zle_mut(k, cx, vp).reader.take().unwrap_or_default();
+	Tty::attach(k, cx, vp);
 	let out = f(&mut r, k, cx, vp);
 	if let Some(z) = vp.zle.as_deref_mut() {
 		z.reader = Some(r);
@@ -251,8 +248,8 @@ pub fn before_run(
 				}
 			}
 		}
-		if let Some(key) = r.run_queue(k, cx, vp) {
-			return key;
+		if r.run_queue(k, cx, vp) {
+			return None;
 		}
 		r.phase = Phase::Idle;
 		r.gate = Some(pos);
@@ -370,7 +367,7 @@ fn zhist(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 }
 
 /// Wall-clock seconds.
-fn now_secs(cx: &mut Cx<'_>) -> i64 {
+fn now_secs(cx: &Cx<'_>) -> i64 {
 	cx.host.wall().secs
 }
 
@@ -454,21 +451,18 @@ impl Reader {
 		}
 	}
 
-	/// Make the queued hook calls one at a time: `Some(None)` after
-	/// pushing a frame (come back when it has returned), `None` when the
-	/// queue is done.
-	fn run_queue(
-		&mut self,
-		k: &mut Kernel,
-		_cx: &mut Cx<'_>,
-		vp: &mut Vproc,
-	) -> Option<Option<WaitKey>> {
+	/// Make the queued hook calls one at a time: `true` after pushing a
+	/// frame (come back when it has returned), `false` when the queue is
+	/// done.
+	fn run_queue(&mut self, k: &mut Kernel, _cx: &mut Cx<'_>, vp: &mut Vproc) -> bool {
 		if let Some((_, status)) = self.running.take() {
 			vp.status = status;
 		}
-		let (name, args) = self.queue.pop_front()?;
+		let Some((name, args)) = self.queue.pop_front() else {
+			return false;
+		};
 		self.running = Some(push_call(k, vp, &name, &args, false));
-		Some(None)
+		true
 	}
 
 	/// One go of the reader (see [`read_line`]).
@@ -508,7 +502,7 @@ impl Reader {
 					}
 					self.began = true;
 					self.cont = cont;
-					self.cmdstack = cmdstack.clone();
+					self.cmdstack.clone_from(&cmdstack);
 					self.status = vp.status;
 					self.queue.clear();
 					self.running = None;
@@ -533,8 +527,8 @@ impl Reader {
 					}
 				},
 				Phase::Precmd => {
-					if let Some(key) = self.run_queue(k, cx, vp) {
-						return key;
+					if self.run_queue(k, cx, vp) {
+						return None;
 					}
 					self.phase = Phase::Periodic;
 					if vp.mode.dialect() == Dialect::Zsh {
@@ -549,8 +543,8 @@ impl Reader {
 					}
 				},
 				Phase::Periodic => {
-					if let Some(key) = self.run_queue(k, cx, vp) {
-						return key;
+					if self.run_queue(k, cx, vp) {
+						return None;
 					}
 					self.phase = Phase::Mail;
 				},
@@ -657,7 +651,7 @@ impl Reader {
 		if let Some(job) = jobctl::announce_wait(k) {
 			return Some(WaitKey::Proc(job));
 		}
-		adjust_winsize(k, cx, vp, std::mem::take(&mut self.winch) || !self.size_known(vp));
+		adjust_winsize(k, cx, vp, std::mem::take(&mut self.winch) || !Self::size_known(vp));
 		// Job lines first: zsh prints `[n] pid` at the fork, before the
 		// next prompt's `PROMPT_SP`.
 		jobctl::notices_before_prompt(k, cx, vp);
@@ -676,7 +670,7 @@ impl Reader {
 	}
 
 	/// Whether the terminal size was read once.
-	fn size_known(&self, vp: &Vproc) -> bool {
+	fn size_known(vp: &Vproc) -> bool {
 		vp.zle
 			.as_ref()
 			.and_then(|z| z.tty.as_ref())
@@ -685,7 +679,7 @@ impl Reader {
 
 	/// zsh's `PROMPT_SP` heuristic: `PROMPT_EOL_MARK` (default
 	/// `%B%S%#%s%b`), padding to the last column, then back to column 0.
-	fn prompt_sp(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+	fn prompt_sp(&self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 		let mark =
 			scalar(k, cx, vp, b"PROMPT_EOL_MARK").unwrap_or_else(|| BString::from("%B%S%#%s%b"));
 		let mut log = Vec::new();
@@ -717,12 +711,11 @@ impl Reader {
 
 	/// bash `PROMPT_COMMAND`: each element (or the scalar) run as a
 	/// command before the prompt.
-	fn prompt_command(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+	fn prompt_command(&mut self, k: &Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 		let cmds: Vec<BString> = state::lookup(&k.root, cx.store, vp, b"PROMPT_COMMAND")
 			.ok()
 			.flatten()
-			.map(state::Var::values)
-			.unwrap_or_default();
+			.map_or_default(state::Var::values);
 		let mut src = Vec::new();
 		for c in cmds.into_iter().filter(|c| !c.is_empty()) {
 			src.extend_from_slice(&c);
@@ -759,8 +752,7 @@ impl Reader {
 					.ok()
 					.flatten()
 					.filter(|m| !m.is_empty())
-					.map(|m| vec![m])
-					.unwrap_or_default(),
+					.map_or_default(|m| vec![m]),
 			}
 		};
 		let mut out = Vec::new();
@@ -870,7 +862,7 @@ impl Reader {
 
 	/// The prompt for a line read without ZLE, on standard error (zsh
 	/// `inputline`'s `promptexpand(…, 0)`).
-	fn print_plain_prompt(&mut self, vp: &mut Vproc) {
+	fn print_plain_prompt(&self, vp: &mut Vproc) {
 		let Some(p) = self.prompts.as_ref() else {
 			return;
 		};
@@ -1065,12 +1057,7 @@ impl Reader {
 	}
 
 	/// Read a line without ZLE.
-	fn read_plain(
-		&mut self,
-		k: &mut Kernel,
-		cx: &mut Cx<'_>,
-		vp: &mut Vproc,
-	) -> Result<Line, WaitKey> {
+	fn read_plain(&mut self, k: &Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Result<Line, WaitKey> {
 		if std::mem::take(&mut self.interrupted) {
 			self.sc.recycle();
 			vp.status = 130;
@@ -1134,7 +1121,7 @@ impl Reader {
 			}
 			return None;
 		}
-		self.abandon_editor(k, cx, vp);
+		Self::abandon_editor(k, cx, vp);
 		k.diag(cx, vp, 0, crate::bash::diag::Diag::Usage { msg: "timeout".into() });
 		vp.status = 128 + 14;
 		end_input(vp);
@@ -1142,7 +1129,7 @@ impl Reader {
 	}
 
 	/// Drop the line being edited (the display given up first).
-	fn abandon_editor(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+	fn abandon_editor(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 		let Some(mut z) = vp.zle.take() else {
 			return;
 		};
@@ -1234,11 +1221,10 @@ impl Reader {
 					if let Some(FrameKind::Script { src, pos, aux, .. }) =
 						vp.frames.last_mut().map(|f| &mut f.kind)
 					{
-						let skipped = src[(pos.0 as usize).min(src.len())..]
-							.iter()
-							.filter(|&&c| c == b'\n')
+						let lines = src[(pos.0 as usize).min(src.len())..]
+							.split(|&c| c == b'\n')
 							.count();
-						*pos = (src.len() as u32, pos.1 + skipped as u32 + 1);
+						*pos = (src.len() as u32, pos.1 + lines as u32);
 						if let Some(a) = aux {
 							a.pending = None;
 						}
@@ -1454,7 +1440,7 @@ fn end_input(vp: &mut Vproc) {
 /// error without one. Behind output the shell still has queued, they wait
 /// their turn there (`exec::flush_out`): zsh's writes block, so nothing
 /// reaches the terminal out of order.
-fn put_tty(k: &mut Kernel, vp: &mut Vproc, bytes: &[u8]) {
+fn put_tty(k: &Kernel, vp: &mut Vproc, bytes: &[u8]) {
 	if bytes.is_empty() {
 		return;
 	}

@@ -15,6 +15,7 @@ import {
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
+import { logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -66,6 +67,8 @@ export interface BashExecutorOptions {
 	 * enforced by the embedded shell's `git` builtin.
 	 */
 	gitGuard?: boolean;
+	/** ovnfs command for the git guard's separate-checkout guidance. */
+	ovnfs?: string;
 	/**
 	 * Filesystem for `scheme://` paths in this run of the embedded shell (a URL
 	 * `cwd` included). External shells and processes never see it.
@@ -90,8 +93,9 @@ export interface BashExecutorOptions {
 	onStart?: (pids: () => readonly number[]) => void;
 	/**
 	 * Invoked before the run when the session's persistent shell is busy with
-	 * another command, so this one runs in a one-shot shell instead: it sees
-	 * none of the session's shell state, and the state it sets is discarded.
+	 * another command, so this one runs in a fork of it instead: it sees the
+	 * session's shell state as of before that command, and the state it sets
+	 * is discarded.
 	 */
 	onSessionShellBusy?: () => void;
 	/**
@@ -163,16 +167,25 @@ const TRACE_POLL_MS = 80;
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
  * forwards each changed snapshot; `stop()` takes the final one.
+ *
+ * An invalid snapshot is logged once and skipped: the poll runs from a timer,
+ * where a throw would escape as an uncaught exception and end the session,
+ * and the trace is only a visualization of the run.
  */
 function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
 	let last = -1;
 	let latest: ShellTrace | undefined;
+	let warned = false;
 	const poll = () => {
 		const version = trace.version();
 		if (version === last) return;
-		const snapshot: unknown = JSON.parse(trace.snapshot());
-		if (!isShellTrace(snapshot)) throw new Error("Native shell returned an invalid execution trace");
 		last = version;
+		const snapshot: unknown = JSON.parse(trace.snapshot());
+		if (!isShellTrace(snapshot)) {
+			if (!warned) logger.warn("Native shell returned an invalid execution trace", { version });
+			warned = true;
+			return;
+		}
 		latest = snapshot;
 		attachShellTrace(latest, trace);
 		onTrace(latest);
@@ -280,6 +293,44 @@ const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 // leaking the session key in `brokenShellSessions`/`shellSessionQuarantines`
 // (#10308). The backing timer is unref'd so it never keeps the process alive.
 const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
+// Native cancellation drops externals with TERM, then sends KILL from a
+// background thread after the one-second grace. Keep a shutdown barrier even
+// after the bash result has returned, so process exit cannot cut off that KILL.
+const abortedShells = new Map<string, Set<Promise<void>>>();
+const ABORT_KILL_GRACE_MS = 1_250;
+const ABORT_CLEANUP_LIMIT_MS = 5_000;
+
+function trackAbortedShell(
+	agentSessionKey: string | undefined,
+	runPromise: Promise<ShellRunResult>,
+	abortPromise: Promise<void>,
+): void {
+	if (!agentSessionKey) return;
+	const pending = abortedShells.get(agentSessionKey) ?? new Set<Promise<void>>();
+	abortedShells.set(agentSessionKey, pending);
+	const deadline = Promise.withResolvers<void>();
+	const timer = setTimeout(deadline.resolve, ABORT_CLEANUP_LIMIT_MS);
+	timer.unref?.();
+	const cleanup = Promise.race([
+		Promise.allSettled([runPromise, abortPromise]).then(() => Bun.sleep(ABORT_KILL_GRACE_MS)),
+		deadline.promise,
+	]).finally(() => clearTimeout(timer));
+	pending.add(cleanup);
+	void cleanup.then(() => {
+		pending.delete(cleanup);
+		if (pending.size === 0 && abortedShells.get(agentSessionKey) === pending) abortedShells.delete(agentSessionKey);
+	});
+}
+
+/** Wait for an agent session's cancelled commands to finish native TERM→KILL escalation before exit. */
+export async function drainAbortedShells(agentSessionKey: string | undefined): Promise<void> {
+	if (!agentSessionKey) return;
+	const pending = [...(abortedShells.get(agentSessionKey) ?? [])];
+	for (const [key, cleanups] of abortedShells) {
+		if (key.startsWith(`${agentSessionKey}:async:`)) pending.push(...cleanups);
+	}
+	await Promise.all(pending);
+}
 
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
@@ -341,19 +392,40 @@ function quarantineShellSession(
 		.catch(() => undefined);
 }
 
+/** A surface label as it appears in a namespaced shell key (`loop-condition`). */
+const SHELL_SESSION_LABEL = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
 /**
- * Drops every persistent Shell owned by an agent session (keys built with
- * `agentSessionKey` as the {@link BashExecutorOptions.sessionKey}). The map is
- * process-global, so without this each disposed session keeps its native shell
- * for the life of the process. A Shell with live background jobs is retained
- * until they exit, matching the `:async:` teardown; an in-flight run keeps its
- * own reference and drops the Shell when it settles.
+ * Whether a shell cache key belongs to `agentSessionKey`, matching the session
+ * key the shell was cached under: the id itself (the bash tool's own shells) or
+ * one namespace of it, `<label>:<id>` (a `/loop` condition uses
+ * `loop-condition:<id>`). A per-job `<id>:async:<jobId>` key names no session,
+ * and a label must read like one, so a key whose prefix is
+ * a path (`/work/repo:main`) is another session's, not a namespace.
+ * The id itself is matched before any colon is read, so a session whose own id
+ * contains one (a cwd-derived `/work/repo:main`) still releases its shells.
+ */
+function isShellSessionOwnedBy(key: string, agentSessionKey: string): boolean {
+	const sessionField = key.split("\n", 1)[0];
+	if (sessionField === agentSessionKey) return true;
+	const separator = sessionField.indexOf(":");
+	if (separator === -1) return false;
+	if (!SHELL_SESSION_LABEL.test(sessionField.slice(0, separator))) return false;
+	return sessionField.slice(separator + 1) === agentSessionKey;
+}
+
+/**
+ * Drops every persistent Shell owned by an agent session (see
+ * {@link isShellSessionOwnedBy}: the id itself or one namespace of it). The map
+ * is process-global, so without this each disposed session keeps its native
+ * shell for the life of the process. A Shell with live background jobs is
+ * retained until they exit, matching the `:async:` teardown; an in-flight run
+ * keeps its own reference and retains live background jobs when it settles.
  */
 export function releaseShellSessions(agentSessionKey: string | undefined): void {
 	if (!agentSessionKey) return;
-	const prefix = `${agentSessionKey}\n`;
 	for (const [key, shell] of shellSessions) {
-		if (!key.startsWith(prefix)) continue;
+		if (!isShellSessionOwnedBy(key, agentSessionKey)) continue;
 		shellSessions.delete(key);
 		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
 	}
@@ -637,7 +709,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			commandPrefix: prefix,
 		}),
 	]);
-	const commandEnv = buildNonInteractiveEnv(preflight.env);
+	const commandEnv = buildNonInteractiveEnv(preflight.env, { inheritLocale: options?.useUserShell === true });
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
 	// paths, and the embedded shell runs the POSIX line better directly.
@@ -721,7 +793,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// The embedded shell reads its builtin switches from the session env; a
 	// different env also keys a separate persistent session.
-	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
+	const sessionEnv = options?.gitGuard
+		? { ...shellEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
+		: shellEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
@@ -736,15 +810,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// A persistent Shell runs one command at a time (the native session is a
 	// mutex-guarded queue and `abort()` kills every in-flight run on it). When
 	// parallel bash calls overlap on the same key, the first one owns the
-	// persistent session; the rest degrade to isolated one-shot shells — the
-	// same path quarantined sessions take.
+	// persistent session; the rest run in one-shot forks of it, which start
+	// from the session's state before the owner's command. A quarantined
+	// session gets a fresh one-shot shell.
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
 	let shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
 	}
-	const executionShell = shellSession ?? new Shell(shellOptions);
+	const busyShell = sessionBusy ? shellSessions.get(sessionKey) : undefined;
+	const executionShell = shellSession ?? busyShell?.fork() ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
 	if (ownsPersistentSession) {
 		shellSessionsInUse.add(sessionKey);
@@ -841,6 +917,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				quarantineShellSession(sessionKey, runPromise, cleanupPromise);
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
+			}
+			if (winner.kind === "abort") {
+				trackAbortedShell(options?.sessionKey, runPromise, cleanupPromise);
 			}
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
@@ -952,16 +1031,27 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 		if (ownsPersistentSession) {
 			shellSessionsInUse.delete(sessionKey);
-			if (resetSession || options?.sessionKey?.includes(":async:") || options?.isSessionCurrent?.() === false) {
+			const releasedWhileInUse = shellSessions.get(sessionKey) !== shellSession;
+			if (
+				resetSession ||
+				releasedWhileInUse ||
+				options?.sessionKey?.includes(":async:") ||
+				options?.isSessionCurrent?.() === false
+			) {
 				// `:async:` keys are per-job (jobId is unique), and a left session is
 				// never asked for again, so the Shell would otherwise stay in the
-				// process-global map forever after completion.
-				shellSessions.delete(sessionKey);
-				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
-				// any `nohup`/`&` children (kill-on-drop). If the command left a live
-				// background job, retain the Shell so the process survives across
-				// turns; it is reaped once its last job exits and still dies with the
-				// harness. Skip on resetSession (cancel/error) — those tear down.
+				// process-global map forever after completion. A session removed by
+				// `releaseShellSessions()` while in use deferred background-job
+				// retention until its in-flight command settled here.
+				if (!releasedWhileInUse) {
+					shellSessions.delete(sessionKey);
+				}
+				// Dropping the only reference to a per-call `:async:` or released
+				// Shell SIGKILLs any `nohup`/`&` children (kill-on-drop). If the
+				// command left a live background job, retain the Shell so the process
+				// survives across turns; it is reaped once its last job exits and
+				// still dies with the harness. Skip on resetSession (cancel/error) —
+				// those tear down.
 				if (!resetSession && shellSession) {
 					await retainShellWithLiveBackgroundJobs(shellSession);
 				}

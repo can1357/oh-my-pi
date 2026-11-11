@@ -73,8 +73,8 @@ fn render_frame(
 	if share < MIN_SHARE {
 		return;
 	}
-	let scale = (IMAGE_WIDTH - 2.0 * PADDING) / total as f64;
-	let x = PADDING + start as f64 * scale;
+	let scale = 2.0f64.mul_add(-PADDING, IMAGE_WIDTH) / total as f64;
+	let x = (start as f64).mul_add(scale, PADDING);
 	let width = frame.samples as f64 * scale;
 	let y = 40 + (max_depth - depth) * FRAME_HEIGHT;
 	let (red, green, blue) = color(name);

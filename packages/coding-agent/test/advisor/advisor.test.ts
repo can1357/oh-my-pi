@@ -336,13 +336,7 @@ describe("advisor", () => {
 					id: "ask-1",
 					name: "ask",
 					arguments: {
-						questions: [
-							{
-								id: "deploy",
-								question: "Authorize deployment?",
-								options: [{ label: "Yes" }, { label: "No" }],
-							},
-						],
+						html: '<form><p>Authorize deployment?</p><label><input type="radio" name="deploy" value="yes"> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
 					},
 				},
 			],
@@ -352,8 +346,8 @@ describe("advisor", () => {
 			role: "toolResult",
 			toolCallId: "ask-1",
 			toolName: "ask",
-			content: [{ type: "text", text: "User selected: Yes" }],
-			details: { selectedOptions: ["Yes"] },
+			content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+			details: { answers: [{ name: "deploy", question: "Authorize deployment?", answer: "Yes" }] },
 			isError: false,
 			timestamp: 2,
 		} as unknown as AgentMessage;
@@ -365,28 +359,22 @@ describe("advisor", () => {
 				expandToolIO: true,
 			});
 
-			expect(compact).not.toContain("User selected: Yes");
-			expect(expanded).toContain('"question": "Authorize deployment?"');
-			expect(expanded).toContain('"label": "Yes"');
-			expect(expanded).toContain("User selected: Yes");
+			expect(compact).not.toContain('"deploy": "yes"');
+			expect(expanded).toContain("<p>Authorize deployment?</p>");
+			expect(expanded).toContain('value="no"> No</label>');
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
-		it("bounds long ask questions and custom answers with visible head and tail context", () => {
+		it("bounds long ask forms and answers with visible head and tail context", () => {
 			const questionEnd = "question-at-end";
 			const answerEnd = "answer-at-end";
 			const longQuestion = {
-				...(askCall as unknown as { content: { arguments: { questions: unknown[] } }[] }),
+				...(askCall as unknown as Record<string, unknown>),
 				content: [
 					{
 						...(askCall as unknown as { content: Record<string, unknown>[] }).content[0],
 						arguments: {
-							questions: [
-								{
-									id: "deploy",
-									question: `question-start ${"context ".repeat(1200)}${questionEnd}`,
-									options: [{ label: "Custom" }],
-								},
-							],
+							html: `<form><p>question-start ${"context\n".repeat(1200)}${questionEnd}</p><textarea name="answer"></textarea></form>`,
 						},
 					},
 				],
@@ -411,18 +399,8 @@ describe("advisor", () => {
 				role: "toolResult",
 				toolCallId: "ask-orphan",
 				toolName: "ask",
-				content: [{ type: "text", text: "deploy: Yes" }],
-				details: {
-					results: [
-						{
-							id: "deploy",
-							question: "Authorize production deployment?",
-							options: ["Yes", "No"],
-							multi: false,
-							selectedOptions: ["Yes"],
-						},
-					],
-				},
+				content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+				details: { answers: [{ name: "deploy", question: "Authorize production deployment?", answer: "Yes" }] },
 				isError: false,
 				timestamp: 2,
 			} as unknown as AgentMessage;
@@ -430,7 +408,7 @@ describe("advisor", () => {
 			const expanded = formatSessionHistoryMarkdown([orphan], { expandToolIO: true });
 
 			expect(expanded).toContain("Authorize production deployment?");
-			expect(expanded).toContain("deploy: Yes");
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
 		it("bounds expanded tool results with visible head and tail context", () => {
@@ -1126,6 +1104,19 @@ describe("advisor", () => {
 			// The guard's dedupe memory is gone too: the same note admits again.
 			await tool.execute("q-1", { note: "Queued but never flushed.", severity: "concern" });
 			expect(delivered).toEqual(["Queued but never flushed."]);
+		});
+
+		it("emits nothing from a cancelled review", async () => {
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note));
+			const cancelled = new AbortController();
+			cancelled.abort();
+			tool.beginUpdate(false);
+			await tool.execute("x-0", { note: "Stale finding.", severity: "blocker" }, cancelled.signal);
+			expect(delivered).toEqual([]);
+			// Nothing was admitted either: a later review may raise it.
+			await tool.execute("x-1", { note: "Stale finding.", severity: "blocker" });
+			expect(delivered).toEqual(["Stale finding."]);
 		});
 
 		it("validates parameters using ArkType", () => {
@@ -2112,6 +2103,43 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).toContain("### Session update\n");
 			expect(promptText(promptInputs[0])).not.toContain("[in progress");
 			expect(updateStates).toEqual([false]);
+		});
+
+		it("supersede cancels the review in flight and holds its update for the next dispatch", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const firstStarted = Promise.withResolvers<void>();
+			const firstRelease = Promise.withResolvers<void>();
+			const secondStarted = Promise.withResolvers<void>();
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					if (promptInputs.length === 1) {
+						firstStarted.resolve();
+						await firstRelease.promise;
+					} else {
+						secondStarted.resolve();
+					}
+				},
+				abort: () => firstRelease.resolve(),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "handoff", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages });
+
+			runtime.onTurnEnd(messages);
+			await firstStarted.promise;
+			expect(runtime.supersede()).toBe(true);
+			// The cancelled review no longer counts as backlog.
+			expect(await runtime.waitForCatchup(1_000, 1)).toBe(true);
+			expect(promptInputs).toHaveLength(1);
+
+			messages.push({ role: "user", content: "fix", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await secondStarted.promise;
+			const second = promptText(promptInputs[1]!);
+			expect(second).toContain("handoff");
+			expect(second).toContain("fix");
 		});
 
 		it("sends the batch when context maintenance fails", async () => {

@@ -163,6 +163,31 @@ pub fn batch_command_line<A: AsRef<[u8]>>(
 	Ok(out)
 }
 
+/// The command line for System32's `find.exe`, which parses its own command
+/// line rather than `argv`.
+///
+/// Its search string must be quoted (`FIND /C "x"`), with `""` for a literal
+/// `"`. Its switches (`/C`) stay bare and every other argument is quoted, as
+/// `cmd.exe` passes them: a bare `/api` would be refused as a switch.
+pub fn find_command_line<A: AsRef<[u8]>>(argv: &[A]) -> Result<Vec<u16>, CmdlineError> {
+	let Some((program, args)) = argv.split_first() else {
+		return Ok(Vec::new());
+	};
+	let mut out = command_line(std::slice::from_ref(program))?;
+	for arg in args {
+		let arg = text(arg.as_ref().as_bstr())?;
+		out.push(u16::from(b' '));
+		if crate::cmd_dialect::is_switch(b"find", arg.as_bytes()) {
+			push_str(&mut out, arg);
+		} else {
+			out.push(u16::from(b'"'));
+			push_str(&mut out, &arg.replace('"', "\"\""));
+			out.push(u16::from(b'"'));
+		}
+	}
+	Ok(out)
+}
+
 /// Whether `path` names a batch file (`.bat`/`.cmd`, any case), which
 /// `CreateProcessW` runs through `cmd.exe`.
 pub fn is_batch(path: &[u8]) -> bool {
@@ -176,6 +201,18 @@ mod tests {
 
 	fn line(argv: &[&str]) -> String {
 		String::from_utf16(&command_line(argv).unwrap()).unwrap()
+	}
+
+	#[test]
+	fn find_lines_quote_the_string_and_files_but_not_switches() {
+		let find = |argv: &[&str]| String::from_utf16(&find_command_line(argv).unwrap()).unwrap();
+		assert_eq!(find(&["find", "/c", "/v", ""]), r#""find" /c /v """#);
+		assert_eq!(
+			find(&["find", "/I", "say \"hi\"", "a b.txt"]),
+			r#""find" /I "say ""hi""" "a b.txt""#
+		);
+		// A search string or file that starts with `/` is quoted, not a switch.
+		assert_eq!(find(&["find", "/i", "/api", "log.txt"]), r#""find" /i "/api" "log.txt""#);
 	}
 
 	/// The post-2008 MSVCRT/UCRT rules (what `CommandLineToArgvW` and the C

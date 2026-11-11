@@ -39,6 +39,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	startpage: () => import("./providers/startpage").then(m => new m.StartpageProvider()),
 	mojeek: () => import("./providers/mojeek").then(m => new m.MojeekProvider()),
 	public: () => import("./providers/public").then(m => new m.PublicWebProvider()),
+	hackernews: () => import("./providers/hackernews").then(m => new m.HackerNewsProvider()),
 };
 
 const GROUNDED_PROVIDER_LOADERS: ProviderRegistry<WebSearchGrounding> = {

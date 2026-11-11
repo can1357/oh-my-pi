@@ -2,15 +2,44 @@
 
 ## [Unreleased]
 
-### Fixed
+## [18.18.8] - 2026-11-11
 
-- `ptree` commands spawned with `subreaper: true` no longer leave a descendant that ignores SIGTERM running after a graceful stop (an `AbortSignal`, `kill()` without a hard grace, or dispose); the subreaper stays alive through the grace period and the hard sweep then ends every descendant ([#18018](https://github.com/can1357/oh-my-pi/pull/18018) by [@sjawhar](https://github.com/sjawhar))
+### Removed
+
+- Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
+
+## [18.18.2] - 2026-11-08
 
 ### Added
 
-- Added `getUpdateStateDir()` (`~/.omp/update`), holding the auto-update status file, its worker log, and the update install lock
-- Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
-- Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+- Added utilities for reading OpenTelemetry configuration from omp-managed `.env` files, including `$otelEnv` and `withOmpOtelEnv`.
+- Added filesystem path utilities for checking paths through symlinked roots, including paths that do not yet exist, and for optionally propagating filesystem errors in directory checks.
+
+### Fixed
+
+- Fixed relaxed JSON parsing so `__proto__` is preserved as a regular own property rather than modifying the parsed object's prototype.
+- Fixed SIGHUP handling so stopped terminal sessions display recovery hints, including the `--resume` command.
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed abort signals leaving command output reads blocked when a descendant keeps stdout or stderr open after the root process exits. ([#18309](https://github.com/can1357/oh-my-pi/pull/18309) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.17.0] - 2026-11-06
+
+### Added
+
+- Added `getUpdateStateDir()`, returning the auto-update state directory (`~/.omp/update`).
+- Added `logger.setLogForwarder()` and `logger.emitForeign()` to forward log records across threads, preserving context and timestamps.
+- Added `expandTilde()` to expand a leading `~` to the home directory.
+
+### Fixed
+
+- Fixed `spawn`/`exec` timeouts never firing when the command's root exited before `spawn()` returned, which let a descendant holding stdout or stderr stall output reads until it exited.
+- `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
+- `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
+- Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
 
 ## [18.16.0] - 2026-11-02
 

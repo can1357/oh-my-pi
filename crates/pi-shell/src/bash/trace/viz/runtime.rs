@@ -33,6 +33,8 @@ pub(crate) struct SourceUnit<'a> {
 	pub syntax:     Option<&'a UnitSyntax>,
 	pub projection: u32,
 	pub nodes:      &'a [trace::Node],
+	/// See [`trace::Unit::callout`].
+	pub callout:    bool,
 }
 #[derive(Debug)]
 pub(crate) struct Observation<'a> {
@@ -352,7 +354,8 @@ impl<'a> Runtime<'a> {
 						AssignScope::Global | AssignScope::Subshell => {
 							vpid.map(|pid| Binding::Process(*scope, pid))
 						},
-						// Assign reports a category, not the dynamic-scope binding owner.
+						// Assign reports a category, not the dynamic-scope binding
+						// owner.
 						AssignScope::Local => {
 							Some(vpid.map_or(Binding::UnlocatedLocal, |pid| Binding::Process(*scope, pid)))
 						},

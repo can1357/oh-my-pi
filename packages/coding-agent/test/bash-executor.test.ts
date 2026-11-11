@@ -11,8 +11,10 @@ import {
 	buildMinimizerOptions,
 	executeBash,
 	isPersistentShellCdCommand,
+	releaseShellSessions,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
+import { evaluateLoopCondition } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	defaultShellVizPreferences,
@@ -24,6 +26,7 @@ import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-gr
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { isShellTrace } from "@oh-my-pi/pi-wire";
 
 import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
@@ -117,8 +120,8 @@ describe("executeBash", () => {
 			timeout: 5000,
 			onTrace: trace => {
 				const source = shellVisualization(trace);
-				expect(source).toBeInstanceOf(piNatives.RunTrace);
-				if (source instanceof piNatives.RunTrace) snapshots.push(source);
+				if (!(source instanceof piNatives.RunTrace)) throw new Error("Expected the live native owner");
+				snapshots.push(source);
 				readShellPresentation(source, defaultShellVizPreferences(), trace);
 			},
 		});
@@ -127,6 +130,31 @@ describe("executeBash", () => {
 		expect(result.trace).toBeDefined();
 		if (!result.trace) throw new Error("Expected final native trace");
 		expect(shellVisualization(result.trace)).toBe(snapshots[0]);
+	});
+
+	it("keeps tracing and restores a run whose values are not UTF-8", async () => {
+		const result = await executeBash("v=$(printf '\\377'); : \"$v\"; echo done", {
+			cwd: tempDir,
+			timeout: 5000,
+			onTrace: () => {},
+		});
+		expect(result.output.trim()).toBe("done");
+		// The snapshot taken after the run ended still validated, byte values included.
+		expect(result.trace?.status).toBe(0);
+		const history = result.trace?.history ?? [];
+		expect(history.find(event => event.kind === "Assign" && event.name === "v")?.value).toEqual([255]);
+		expect(history.find(event => event.kind === "CmdExpanded" && event.argv?.[0] === ":")?.argv).toEqual([
+			":",
+			[255],
+		]);
+
+		// A persisted copy restores through the native owner and shows the variable.
+		const restored: unknown = JSON.parse(JSON.stringify(result.trace));
+		if (!isShellTrace(restored)) throw new Error("Expected the persisted trace to validate");
+		const source = shellVisualization(restored);
+		if (!source) throw new Error("Expected the persisted trace to restore");
+		const presentation = readShellPresentation(source, defaultShellVizPreferences(), restored);
+		expect(presentation.watches?.some(watch => watch.name === "v")).toBe(true);
 	});
 
 	it("omits minimizer options when the feature is disabled", () => {
@@ -889,6 +917,122 @@ exit 64
 		});
 		expect(next.output.trim()).toBe("still_persistent");
 	});
+
+	it("releases a session's own and namespaced shells, leaving other sessions alone", async () => {
+		// A session's shells are cached under the session key itself (the bash tool's
+		// own) or under one namespace of it, `<label>:<session id>` (a /loop
+		// condition uses `loop-condition:<id>`). Release must collect both, or a
+		// disposed session keeps a native shell for the life of the process; another
+		// session's namespaced shell is not its to drop.
+		const id = crypto.randomUUID();
+		const other = crypto.randomUUID();
+		const colonId = `/work/repo:${crypto.randomUUID()}`;
+		const run = (sessionKey: string, command: string) =>
+			executeBash(command, { cwd: tempDir, timeout: 5000, sessionKey });
+		const runLoop = (sessionId: string, command: string) =>
+			evaluateLoopCondition({ command, until: false }, { cwd: tempDir, timeoutMs: 5000, sessionId });
+		try {
+			await run(id, "PI_PLAIN=kept");
+			expect(await runLoop(id, "PI_LOOP=kept")).toEqual({ kind: "continue" });
+			await run(other, "PI_OTHER=kept");
+			expect(await runLoop(other, "PI_OTHER_LOOP=kept")).toEqual({ kind: "continue" });
+			// A key whose front part is a path, not a surface label, is no namespace of
+			// `id` even though its tail reads like one.
+			const pathLike = `/work/repo:${id}`;
+			await run(pathLike, "PI_PATH_KEY=kept");
+			// A session id may itself contain a colon (a cwd-derived session name);
+			// that session's own shells are still its to release.
+			await run(colonId, "PI_COLON=kept");
+			expect(await runLoop(colonId, "PI_COLON_LOOP=kept")).toEqual({ kind: "continue" });
+
+			releaseShellSessions(id);
+			releaseShellSessions(colonId);
+
+			expect((await run(id, 'printf "[%s]" "$PI_PLAIN"')).output).toBe("[]");
+			expect(await runLoop(id, 'test -z "$PI_LOOP"')).toEqual({ kind: "continue" });
+			expect((await run(colonId, 'printf "[%s]" "$PI_COLON"')).output).toBe("[]");
+			expect(await runLoop(colonId, 'test -z "$PI_COLON_LOOP"')).toEqual({ kind: "continue" });
+			// A key that is neither the id nor a namespace of it survives the other
+			// session's release, and another session's shells survive both.
+			expect((await run(pathLike, 'printf "[%s]" "$PI_PATH_KEY"')).output).toBe("[kept]");
+			expect((await run(other, 'printf "[%s]" "$PI_OTHER"')).output).toBe("[kept]");
+			expect(await runLoop(other, 'test "$PI_OTHER_LOOP" = kept')).toEqual({ kind: "continue" });
+		} finally {
+			releaseShellSessions(id);
+			releaseShellSessions(other);
+			releaseShellSessions(colonId);
+			releaseShellSessions(`/work/repo:${id}`);
+		}
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"retains live background jobs when an in-use namespaced shell is released before settling",
+		async () => {
+			const id = crypto.randomUUID();
+			const pidFile = path.join(tempDir, "in-use-release-pid");
+			const gateFile = path.join(tempDir, "in-use-release-gate");
+			const sleepBin = $which("sleep");
+			if (!sleepBin) throw new Error("sleep executable not found");
+			const liveJobsSpy = vi.spyOn(piNatives.Shell.prototype, "liveBackgroundJobCount");
+			let pid: number | undefined;
+			try {
+				const pending = evaluateLoopCondition(
+					{
+						command: `PI_IN_USE_LOOP=kept; ${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}; while [ ! -f ${shellQuote(gateFile)} ]; do ${shellQuote(sleepBin)} 0.02; done`,
+						until: false,
+					},
+					{ cwd: tempDir, timeoutMs: 5000, sessionId: id },
+				);
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					const parsed = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					if (!Number.isInteger(parsed)) return false;
+					pid = parsed;
+					return true;
+				}, Date.now() + 4000);
+				if (pid === undefined) throw new Error("Timed out waiting for background job PID");
+
+				// Release the session while the condition shell is still in flight.
+				// `releaseShellSessions` removes the cached key immediately, but cannot
+				// retain the shell yet because `shellSessionsInUse` still holds it.
+				releaseShellSessions(id);
+				expect(liveJobsSpy).not.toHaveBeenCalled();
+
+				fs.writeFileSync(gateFile, "ok");
+				expect(await pending).toEqual({ kind: "continue" });
+				expect(liveJobsSpy).toHaveBeenCalledTimes(1);
+				// Drop `liveJobsSpy.mock.contexts` so the spy does not keep the released
+				// `Shell` alive across `Bun.gc(true)` below.
+				liveJobsSpy.mockRestore();
+
+				// A follow-up condition starts a fresh shell while the released one stays
+				// retained until its background child exits.
+				expect(
+					await evaluateLoopCondition(
+						{ command: 'test -z "$PI_IN_USE_LOOP"', until: false },
+						{ cwd: tempDir, timeoutMs: 5000, sessionId: id },
+					),
+				).toEqual({ kind: "continue" });
+
+				Bun.gc(true);
+				await Bun.sleep(50);
+				let alive = true;
+				try {
+					process.kill(pid, 0);
+				} catch {
+					alive = false;
+				}
+				expect(alive).toBe(true);
+			} finally {
+				if (pid !== undefined) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {}
+				}
+				releaseShellSessions(id);
+			}
+		},
+	);
 
 	it("aborts the shell without aborting its native signal when the JavaScript timeout fallback wins", async () => {
 		// Compress the JS-side fallback timer (floored at 1000ms in the source) so
