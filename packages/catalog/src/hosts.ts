@@ -74,6 +74,7 @@ export const KNOWN_HOSTS = {
 	chutes: { urlMarkers: ["chutes.ai"] },
 	/** Morph (`api.morphllm.com`). Reached only through custom providers, so the URL is its sole identity. */
 	morph: { urlMarkers: ["api.morphllm.com"] },
+	cohere: { providers: ["cohere"], urlMarkers: ["api.cohere.com", "api.cohere.ai", "cohere.com", "cohere.ai"] },
 } as const satisfies Record<string, HostClassSpec>;
 
 export type KnownHost = keyof typeof KNOWN_HOSTS;

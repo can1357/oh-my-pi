@@ -1,10 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
-import { type ApiKey, NO_AUTH_SENTINEL, withAuth } from "../auth-retry";
+import type { ApiKey } from "../auth-retry";
 import * as AIError from "../error";
 import { modelHeaders } from "../images/shared";
 import { mergeHeaders } from "../providers/anthropic-headers";
+import { postRerankRequest } from "./transport";
 import type { RerankRequest, RerankResult } from "./types";
 
 export interface RerankOptions {
@@ -96,27 +97,17 @@ export async function rerankOpenRouter(
 		...(request.topN !== undefined && { top_n: request.topN }),
 		...(request.returnDocuments !== undefined && { return_documents: request.returnDocuments }),
 	});
-	const fetchImpl = options.fetch ?? fetch;
-	const response = await withAuth(
-		options.apiKey,
-		async key => {
-			const attempt = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}/rerank`, {
-				method: "POST",
-				// A configured Authorization (any case) replaces the bearer, and a
-				// keyless provider's sentinel is never sent as one.
-				headers: mergeHeaders(
-					key === NO_AUTH_SENTINEL ? undefined : { Authorization: `Bearer ${key}` },
-					await modelHeaders(model, options.signal),
-					{ Accept: "application/json", "Content-Type": "application/json" },
-				),
-				body,
-				signal: options.signal,
-			});
-			if (!attempt.ok) throw await responseError(attempt, model);
-			return attempt;
-		},
-		{ signal: options.signal },
-	);
+	const response = await postRerankRequest(`${model.baseUrl.replace(/\/+$/, "")}/rerank`, body, {
+		apiKey: options.apiKey,
+		signal: options.signal,
+		fetch: options.fetch,
+		headers: async () =>
+			mergeHeaders(await modelHeaders(model, options.signal), {
+				Accept: "application/json",
+				"Content-Type": "application/json",
+			}),
+		onHttpError: response => responseError(response, model),
+	});
 
 	const payload: unknown = await response.json();
 	const parsed = upstreamResponseSchema(payload);

@@ -490,6 +490,12 @@ async function loadMnemopiConfigWithProviders(
 	usageLedger: Partial<JudgmentUsageLedger>,
 ): Promise<MnemopiBackendConfig> {
 	const config = loadMnemopiConfig(settings, agentDir);
+	const { createReranker } = await loadMnemopi();
+	const rerank = config.rerank;
+	const apiUrl = rerank?.apiUrl ?? process.env.MNEMOPI_RERANK_API_URL;
+	const apiKey =
+		rerank?.apiKey ?? (apiUrl ? await openrouterKeyResolver(modelRegistry, sessionId, apiUrl) : undefined);
+	config.reranker = createReranker({ ...rerank, apiUrl, apiKey });
 	config.providerOptions = await resolveMnemopiProviderOptions(
 		config,
 		settings,

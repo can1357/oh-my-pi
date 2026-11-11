@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Mnemopi recall supports optional cross-encoder reranking through `mnemopi.rerank*` settings ([#18747](https://github.com/can1357/oh-my-pi/pull/18747) by [@anagnorisis2peripeteia](https://github.com/anagnorisis2peripeteia))
+
 ### Fixed
 
 - Nix builds with `withAppleFm = false` no longer compile the Apple Foundation Models bridge with the host's Xcode ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))

@@ -1,4 +1,5 @@
 import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
+import type { Reranker } from "../rerank";
 import {
 	importedWeight,
 	inferredWeight,
@@ -21,6 +22,7 @@ import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
+import { clipToWindow } from "../text-window";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
@@ -46,6 +48,8 @@ type RecallOptionsInternal = RecallOptions & {
 	ignoreSessionScope?: boolean;
 	currentSensitive?: boolean;
 	updateRecallCounts?: boolean;
+	signal?: AbortSignal;
+	firstStageOnly?: boolean;
 };
 
 type CandidateSignals = {
@@ -979,7 +983,7 @@ export async function recall(
 		}
 		scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
 		let finalResults = dedupCrossTierSummaryLinks(beam, dedupeResults(scored));
-		if (query.length > 0 && tokens.length >= 4 && finalResults.length > topK)
+		if (!options.firstStageOnly && query.length > 0 && tokens.length >= 4 && finalResults.length > topK)
 			finalResults = diversifyByCoverage(finalResults, tokens, topK);
 		if (options.useMmr === true && finalResults.length > 1) {
 			finalResults = rerankRecallResults(finalResults, options.mmrLambda ?? 0.7, topK);
@@ -1050,24 +1054,135 @@ export async function recallEnhanced(
 	topK = 40,
 	options: RecallEnhancedOptions & RecallOptionsInternal = {},
 ): Promise<RecallResult[]> {
+	if (topK <= 0) return [];
+	if (!beam.config.reranker) return recallWithoutReranker(beam, query, topK, options);
+	const reranker = beam.config.reranker;
+	const pool = Math.max(topK, reranker.candidates);
+	const candidates = await gatherCandidates(beam, query, pool, options);
+	const results = await finalizeRecall(query, candidates, topK, reranker, options);
+	if (options.updateRecallCounts !== false) countRecallResults(beam, results, options);
+	return results;
+}
+
+/** Preserve the pre-reranker per-bank selection and preview semantics. */
+async function recallWithoutReranker(
+	beam: BeamMemoryState,
+	query: string,
+	topK: number,
+	options: RecallEnhancedOptions & RecallOptionsInternal,
+): Promise<RecallResult[]> {
 	const polyphonic = polyphonicRecallEnabled(process.env, beam.config?.polyphonicRecall);
 	const cacheEnabled = isQueryCacheEnabled(options.useCache !== false, process.env, beam.config?.enhancedRecall);
-	if (!polyphonic && !cacheEnabled) return linearRecallEnhanced(beam, query, topK, options);
+	if (!polyphonic && !cacheEnabled) return linearRecallWithoutReranker(beam, query, topK, options);
 
-	// Derive the query embedding once: it feeds the cache's semantic tiers, the linear
-	// ranking and the polyphonic vector voice. Same three-state contract as `recall()`.
 	let queryEmbedding = options.queryEmbedding;
 	if (queryEmbedding === undefined) {
 		const derived = query.length > 0 ? await embedQuery(query) : null;
 		queryEmbedding = derived === null ? null : Array.from(derived);
 	}
-	const runOptions: RecallEnhancedOptions & RecallOptionsInternal = {
-		...options,
-		queryEmbedding,
-		updateRecallCounts: false,
-	};
-	const countRecalls = options.updateRecallCounts !== false;
+	const runOptions = { ...options, queryEmbedding, updateRecallCounts: false };
+	let cache: QueryCache<RecallResult> | null = null;
+	let token = "";
+	let scope = "";
+	if (cacheEnabled) {
+		beam.caches.queryCache ??= new QueryCache<RecallResult>({
+			maxSize: ENHANCED_RECALL_CACHE_MAX_ENTRIES,
+			ttlSeconds: ENHANCED_RECALL_CACHE_TTL_SECONDS,
+		});
+		cache = beam.caches.queryCache;
+		token = databaseWriteToken(beam);
+		if (beam.caches.queryCacheToken !== token) {
+			cache.invalidate();
+			beam.caches.queryCacheToken = token;
+		}
+		scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
+		const cached = cache.get(query, queryEmbedding, scope);
+		if (cached !== null) {
+			const results = structuredClone(cached) as RecallResult[];
+			if (options.updateRecallCounts !== false) countRecallsKeepingCache(beam, results, runOptions, token);
+			return results;
+		}
+	}
 
+	const pool = Math.max(topK * 2, topK);
+	let results: RecallResult[];
+	if (polyphonic) {
+		const baseline = await linearRecallWithoutReranker(beam, query, pool, runOptions);
+		const fused = await orchestrateRecall(beam, query, pool, {
+			...runOptions,
+			includeFacts: options.includeFacts === true,
+			baseline,
+			forcePolyphonic: true,
+			contextBudget: Number.POSITIVE_INFINITY,
+		});
+		results = [];
+		for (const result of fused) {
+			if (results.length >= topK) break;
+			if (!matchesRecallFilters(result, options)) continue;
+			const mapped: RecallResult = {
+				...result,
+				score: round4((result.combined_score ?? 0) / POLYPHONIC_MAX_COMBINED_SCORE),
+			};
+			if (typeof mapped.truncated !== "boolean") {
+				const preview = clipRecallContent(
+					mapped.content,
+					options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS,
+				);
+				mapped.content = preview.content;
+				mapped.truncated = preview.truncated;
+				mapped.full_length = preview.fullLength;
+			}
+			results.push(mapped);
+		}
+	} else {
+		results = await linearRecallWithoutReranker(beam, query, topK, runOptions);
+	}
+	const cacheable = cache !== null && databaseWriteToken(beam) === token && !options.signal?.aborted;
+	if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
+	if (options.updateRecallCounts !== false)
+		countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
+	return results;
+}
+
+async function linearRecallWithoutReranker(
+	beam: BeamMemoryState,
+	query: string,
+	topK: number,
+	options: RecallEnhancedOptions & RecallOptionsInternal,
+): Promise<RecallResult[]> {
+	const enhancedOptions = {
+		...options,
+		useSynonyms: options.useSynonyms !== false,
+		useIntent: options.useIntent !== false,
+		useMmr: options.useMmr !== false,
+	};
+	const results = await recall(beam, query, Math.max(topK * 2, topK), {
+		...enhancedOptions,
+		updateRecallCounts: false,
+	});
+	if (options.includeFacts === true) results.push(...factRecall(beam, query, factRecallLimit(topK)));
+	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+	const selected = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
+	if (options.updateRecallCounts !== false) updateRecallCounts(beam, selected, enhancedOptions);
+	return selected;
+}
+
+/** Retrieve first-stage candidates without reranking, final MMR, clipping or counting. */
+export async function gatherCandidates(
+	beam: BeamMemoryState,
+	query: string,
+	pool: number,
+	options: RecallEnhancedOptions & RecallOptionsInternal = {},
+): Promise<RecallResult[]> {
+	if (pool <= 0) return [];
+	const polyphonic = polyphonicRecallEnabled(process.env, beam.config?.polyphonicRecall);
+	const cacheEnabled = isQueryCacheEnabled(options.useCache !== false, process.env, beam.config?.enhancedRecall);
+	let queryEmbedding = options.queryEmbedding;
+	if (queryEmbedding === undefined) {
+		const derived = query.length > 0 ? await embedQuery(query) : null;
+		queryEmbedding = derived === null ? null : Array.from(derived);
+	}
+	const runOptions = { ...options, queryEmbedding, contentPreviewChars: 0, updateRecallCounts: false };
 	let cache: QueryCache<RecallResult> | null = null;
 	let token = "";
 	let scope = "";
@@ -1079,110 +1194,101 @@ export async function recallEnhanced(
 				ttlSeconds: ENHANCED_RECALL_CACHE_TTL_SECONDS,
 			});
 			cache = beam.caches.queryCache;
-			// Explicit hooks invalidate on this beam's own writes; the token also catches writes
-			// no hook covers (sleep, graph ingest) and commits from other connections.
 			token = databaseWriteToken(beam);
 			if (beam.caches.queryCacheToken !== token) {
 				cache.invalidate();
 				beam.caches.queryCacheToken = token;
 			}
-			scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
+			scope = enhancedRecallCacheScope(beam, pool, options, polyphonic);
 			const cached = cache.get(query, queryEmbedding, scope);
-			if (cached !== null) {
-				const results = structuredClone(cached) as RecallResult[];
-				if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, token);
-				return results;
-			}
+			if (cached !== null) return structuredClone(cached) as RecallResult[];
 		}
 	} finally {
 		popLoopPhase();
 	}
-
-	const results = polyphonic
-		? await polyphonicRecallEnhanced(beam, query, topK, runOptions)
-		: await linearRecallEnhanced(beam, query, topK, runOptions);
-	return withLoopPhase("mnemopi.recall", () => {
-		// A write committed while recall awaited may be missing from this ranking: skip the
-		// put and keep the stale token so the next lookup starts from an empty cache.
-		const cacheable = cache !== null && databaseWriteToken(beam) === token;
-		if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
-		if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
-		return results;
-	});
-}
-
-async function linearRecallEnhanced(
-	beam: BeamMemoryState,
-	query: string,
-	topK: number,
-	options: RecallEnhancedOptions & RecallOptionsInternal,
-): Promise<RecallResult[]> {
-	const useSynonyms = options.useSynonyms !== false;
-	const enhancedOptions: RecallOptionsInternal = {
-		...options,
-		useSynonyms,
+	const baseline = await recall(beam, query, pool, {
+		...runOptions,
+		useSynonyms: options.useSynonyms !== false,
 		useIntent: options.useIntent !== false,
-		useMmr: options.useMmr !== false,
-	};
-	const results = await recall(beam, query, Math.max(topK * 2, topK), {
-		...enhancedOptions,
-		updateRecallCounts: false,
+		useMmr: false,
+		firstStageOnly: true,
 	});
-	return withLoopPhase("mnemopi.recall", () => {
-		if (options.includeFacts === true) {
-			const facts = factRecall(beam, query, factRecallLimit(topK));
-			results.push(...facts);
-		}
-		results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-		const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
-		if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
-		return finalResults;
-	});
-}
-
-/**
- * Polyphonic recall: the linear enhanced ranking becomes the `hybrid` voice and is
- * fused by reciprocal rank with the vector, graph, fact and temporal voices. Scores
- * are rescaled to 0..1 (1 = ranked first by every voice) so they stay comparable
- * across banks; the raw fusion score stays in `combined_score`.
- */
-async function polyphonicRecallEnhanced(
-	beam: BeamMemoryState,
-	query: string,
-	topK: number,
-	options: RecallEnhancedOptions & RecallOptionsInternal,
-): Promise<RecallResult[]> {
-	if (topK <= 0) return [];
-	// A wider pool than requested so filters applied below still leave `topK` rows.
-	const pool = Math.max(topK * 2, topK);
-	const baseline = await linearRecallEnhanced(beam, query, pool, options);
-	const fused = await orchestrateRecall(beam, query, pool, {
-		...options,
-		includeFacts: options.includeFacts === true,
-		baseline,
-		forcePolyphonic: true,
-		// `recallEnhanced` promises `topK` rows, not a token budget.
-		contextBudget: Number.POSITIVE_INFINITY,
-	});
-	const previewChars = options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS;
-	const results: RecallResult[] = [];
-	for (const result of fused) {
-		if (results.length >= topK) break;
-		if (!matchesRecallFilters(result, options)) continue;
-		const mapped: RecallResult = {
-			...result,
-			score: round4((result.combined_score ?? 0) / POLYPHONIC_MAX_COMBINED_SCORE),
-		};
-		// Rows reached only through the graph/fact/temporal/vector voices are hydrated in full.
-		if (typeof mapped.truncated !== "boolean") {
-			const preview = clipRecallContent(mapped.content, previewChars);
-			mapped.content = preview.content;
-			mapped.truncated = preview.truncated;
-			mapped.full_length = preview.fullLength;
-		}
-		results.push(mapped);
+	if (options.includeFacts === true) baseline.push(...factRecall(beam, query, factRecallLimit(pool)));
+	baseline.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+	let results = baseline;
+	if (polyphonic) {
+		const fused = await orchestrateRecall(beam, query, pool, {
+			...runOptions,
+			includeFacts: options.includeFacts === true,
+			baseline,
+			forcePolyphonic: true,
+			deferDiversity: true,
+			contextBudget: Number.POSITIVE_INFINITY,
+		});
+		results = fused
+			.filter(result => matchesRecallFilters(result, options))
+			.map(result => ({
+				...result,
+				score: (result.combined_score ?? 0) / POLYPHONIC_MAX_COMBINED_SCORE,
+			}));
+	}
+	if (cache && databaseWriteToken(beam) === token && !options.signal?.aborted) {
+		cache.put(query, structuredClone(results), queryEmbedding, scope);
 	}
 	return results;
+}
+
+const MAX_RERANK_INPUT_CHARS = 4096;
+
+/** Apply the optional cross-encoder once to the merged shortlist, then select and clip. */
+export async function finalizeRecall(
+	query: string,
+	candidates: readonly RecallResult[],
+	topK: number,
+	reranker?: Reranker,
+	options: RecallEnhancedOptions = {},
+): Promise<RecallResult[]> {
+	if (topK <= 0) return [];
+	let ranked = [...candidates].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+	if (reranker && ranked.length && query.trim() && !options.signal?.aborted) {
+		ranked = ranked.slice(0, Math.max(topK, reranker.candidates));
+		const documents = ranked.map(candidate =>
+			clipToWindow(
+				candidate.tier_label === "fact" && candidate.subject && candidate.predicate
+					? factSearchableText(String(candidate.subject), String(candidate.predicate), candidate.content)
+					: candidate.content,
+				MAX_RERANK_INPUT_CHARS,
+			),
+		);
+		const scores = await reranker.score(query, documents, options.signal);
+		if (scores) {
+			const scoreMap = new Map(scores.map(item => [item.index, item.relevanceScore]));
+			ranked = ranked.map((candidate, index) => ({
+				...candidate,
+				score: candidate.veracity === "false" ? Number.NEGATIVE_INFINITY : scoreMap.get(index)!,
+			}));
+			ranked.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+		}
+	}
+	return rerankRecallResults(ranked, options.mmrLambda ?? 0.7, topK).map(result => {
+		const preview = clipRecallContent(result.content, options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS);
+		return {
+			...result,
+			content: preview.content,
+			truncated: preview.truncated,
+			full_length: preview.fullLength,
+			score: round4(result.score ?? 0),
+		};
+	});
+}
+
+/** Count only selected rows while preserving a still-valid gather cache. */
+export function countRecallResults(
+	beam: BeamMemoryState,
+	results: readonly RecallResult[],
+	options: RecallOptionsInternal = {},
+): void {
+	countRecallsKeepingCache(beam, results, options, beam.caches.queryCacheToken ?? null);
 }
 
 /**

@@ -20,6 +20,8 @@ import {
 	resolveEmbeddingProvider,
 	withMnemopiRuntimeOptions,
 } from "./runtime-options";
+import type { Reranker, RerankFunction } from "./rerank";
+import { countRecallResults, gatherCandidates } from "./beam/recall";
 
 export interface MnemopiOptions {
 	readonly db?: Database;
@@ -44,6 +46,13 @@ export interface MnemopiOptions {
 	readonly llmApiKey?: ApiKey;
 	readonly llmModel?: string | Model<Api>;
 	readonly llm?: false | MnemopiLlmRuntimeOptions | Model<Api> | MnemopiLlmCompletion;
+	readonly reranker?: Reranker;
+	readonly rerankModel?: string;
+	readonly rerankApiUrl?: string;
+	readonly rerankApiKey?: ApiKey;
+	readonly rerankCandidates?: number;
+	readonly rerankScoreMode?: "auto" | "logit" | "probability";
+	readonly rerankFn?: RerankFunction;
 	readonly proactiveLinking?: boolean;
 	/**
 	 * Route `recallEnhanced` through polyphonic recall for this instance. Unset
@@ -336,6 +345,7 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 		ftsWeight: options.ftsWeight ?? options.fts_weight ?? undefined,
 		importanceWeight: options.importanceWeight ?? options.importance_weight ?? undefined,
 		contentPreviewChars: options.contentPreviewChars,
+		signal: options.signal,
 	};
 	// Preserve the three-state semantics (`undefined` = auto-derive, `null` = explicitly
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s
@@ -430,6 +440,13 @@ export class Mnemopi {
 				proactiveLinking: options.proactiveLinking,
 				polyphonicRecall: options.polyphonicRecall,
 				enhancedRecall: options.enhancedRecall,
+				reranker: options.reranker,
+				rerankModel: options.rerankModel,
+				rerankApiUrl: options.rerankApiUrl,
+				rerankApiKey: options.rerankApiKey,
+				rerankCandidates: options.rerankCandidates,
+				rerankScoreMode: options.rerankScoreMode,
+				rerankFn: options.rerankFn,
 			});
 			this.#ownsDb = options.db === undefined;
 			if (options.db !== undefined) {
@@ -493,8 +510,24 @@ export class Mnemopi {
 				...toRecallOptions(options),
 				useCache: options.useCache,
 				includeFacts: options.includeFacts,
+				updateRecallCounts: options.updateRecallCounts,
+				signal: options.signal,
 			}),
 		);
+	}
+
+	gatherCandidates(
+		query: string,
+		pool: number,
+		options: RecallFacadeOptions & RecallEnhancedOptions = {},
+	): Promise<RecallResult[]> {
+		return this.#withRuntimeOptions("mnemopi.recall", () =>
+			gatherCandidates(this.beam, query, pool, { ...toRecallOptions(options), ...options }),
+		);
+	}
+
+	countRecallResults(results: readonly RecallResult[], options: RecallOptions = {}): void {
+		countRecallResults(this.beam, results, options);
 	}
 
 	getContext(limit = 10): unknown[] {

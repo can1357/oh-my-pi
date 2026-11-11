@@ -10,6 +10,7 @@ export {
 	setLocalModelInitializer,
 } from "./embeddings";
 export * from "./memory";
+export * from "./rerank";
 export {
 	addMemory,
 	forget,

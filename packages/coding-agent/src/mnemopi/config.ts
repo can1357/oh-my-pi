@@ -28,6 +28,11 @@ import {
 	cfgMnemopiRecallContextTurns,
 	cfgMnemopiRecallLimit,
 	cfgMnemopiRecallMaxQueryChars,
+	cfgMnemopiRerankApiKey,
+	cfgMnemopiRerankApiUrl,
+	cfgMnemopiRerankCandidates,
+	cfgMnemopiRerankScoreMode,
+	cfgMnemopiRerankModel,
 	cfgMnemopiRetainEveryNTurns,
 	cfgMnemopiScoping,
 } from "./settings";
@@ -61,6 +66,14 @@ export interface MnemopiBackendConfig {
 	injectionTokenLimit: number;
 	debug: boolean;
 	providerOptions: MnemopiProviderOptions;
+	rerank?: {
+		apiUrl?: string;
+		model?: string;
+		apiKey?: string;
+		candidates: number;
+		scoreMode: "auto" | "logit" | "probability";
+	};
+	reranker?: MnemopiOptions["reranker"];
 	llmMode: MnemopiLlmMode;
 	llmBaseUrl?: string;
 	llmApiKey?: string;
@@ -105,6 +118,13 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		recallMaxQueryChars: Math.max(256, Math.floor(cfgMnemopiRecallMaxQueryChars.get(settings))),
 		injectionTokenLimit: Math.max(256, Math.floor(cfgMnemopiInjectionTokenLimit.get(settings))),
 		debug: cfgMnemopiDebug.get(settings),
+		rerank: {
+			model: cfgMnemopiRerankModel.get(settings),
+			apiUrl: cfgMnemopiRerankApiUrl.get(settings),
+			apiKey: cfgMnemopiRerankApiKey.get(settings),
+			candidates: Math.max(1, Math.floor(cfgMnemopiRerankCandidates.get(settings))),
+			scoreMode: cfgMnemopiRerankScoreMode.get(settings),
+		},
 		providerOptions: {
 			noEmbeddings: cfgMnemopiNoEmbeddings.get(settings),
 			debug: cfgMnemopiDebug.get(settings),

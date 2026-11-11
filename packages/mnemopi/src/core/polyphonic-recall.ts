@@ -50,6 +50,8 @@ export interface PolyphonicCallOptions {
 	 * the `hybrid` voice and are reused verbatim when a fused hit is one of them.
 	 */
 	readonly baseline?: readonly RecallResult[];
+	/** Defer final diversity selection until after candidate scoring. */
+	readonly deferDiversity?: boolean;
 }
 
 export interface PolyphonicRecallOptions extends PolyphonicCallOptions {
@@ -309,8 +311,11 @@ export class PolyphonicRecallEngine {
 		);
 		const baselineById = new Map<string, RecallResult>();
 		for (const result of baseline) if (!baselineById.has(result.id)) baselineById.set(result.id, result);
-		const reranked = this.diversityRerank(combined, topK, candidate =>
-			this.#hydrate(candidate, baselineById, options),
+		const reranked = this.diversityRerank(
+			combined,
+			topK,
+			candidate => this.#hydrate(candidate, baselineById, options),
+			options.deferDiversity,
 		);
 		return this.assembleContext(reranked, contextBudget);
 	}
@@ -572,6 +577,7 @@ export class PolyphonicRecallEngine {
 		results: ReadonlyMap<string, PolyphonicResult>,
 		topK: number,
 		hydrate: (candidate: PolyphonicResult) => PolyphonicMemoryResult | null,
+		deferDiversity = false,
 	): PolyphonicMemoryResult[] {
 		const sorted = [...results.values()].sort(
 			(a, b) => b.combinedScore - a.combinedScore || a.memoryId.localeCompare(b.memoryId),
@@ -584,7 +590,8 @@ export class PolyphonicRecallEngine {
 			const hydrated = hydrate(candidate);
 			if (hydrated === null) continue;
 			const tokens = contentTokens(hydrated.content);
-			if (selectedTokens.some(prior => tokenJaccard(tokens, prior) > NEAR_DUPLICATE_JACCARD)) continue;
+			if (!deferDiversity && selectedTokens.some(prior => tokenJaccard(tokens, prior) > NEAR_DUPLICATE_JACCARD))
+				continue;
 			selected.push(hydrated);
 			selectedTokens.push(tokens);
 		}

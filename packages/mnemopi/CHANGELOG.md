@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Mnemopi recall supports optional cross-encoder reranking through `mnemopi.rerank*` settings and `MNEMOPI_RERANK_*` variables ([#18747](https://github.com/can1357/oh-my-pi/pull/18747) by [@anagnorisis2peripeteia](https://github.com/anagnorisis2peripeteia))
+
 ## [18.18.4] - 2026-11-09
 
 ### Fixed

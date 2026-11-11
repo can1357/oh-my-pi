@@ -6,6 +6,7 @@ import { AnnotationStore } from "../annotations";
 import { EpisodicGraph } from "../episodic-graph";
 import type { VeracityConsolidator } from "../veracity-consolidation";
 import { hasPendingMigration, migrate as migrateTriplestoreSplit } from "../migrations/e6-triplestore-split";
+import { createReranker } from "../rerank";
 import {
 	consolidateToEpisodic,
 	degradeEpisodic,
@@ -57,7 +58,7 @@ import type {
 	SleepResult,
 } from "./types";
 
-export { clipRecallContent } from "./recall";
+export { clipRecallContent, finalizeRecall } from "./recall";
 export { initBeam } from "./schema";
 export type * from "./types";
 
@@ -93,6 +94,17 @@ function normalizeConfig(options: BeamMemoryOptions): BeamConfig {
 		// is consulted at recall time; the env vars still win over both.
 		polyphonicRecall: options.polyphonicRecall ?? configured.polyphonicRecall,
 		enhancedRecall: options.enhancedRecall ?? configured.enhancedRecall,
+		reranker:
+			options.reranker ??
+			configured.reranker ??
+			createReranker({
+				apiUrl: options.rerankApiUrl,
+				model: options.rerankModel,
+				apiKey: options.rerankApiKey,
+				candidates: options.rerankCandidates,
+				scoreMode: options.rerankScoreMode,
+				fn: options.rerankFn,
+			}),
 	};
 }
 function autoMigrateAnnotations(db: Database, dbPath: string | undefined): void {

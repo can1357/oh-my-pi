@@ -302,8 +302,8 @@ export interface MnemopiSessionStateApi {
 		id: string,
 		options?: MnemopiMemoryEditOptions,
 	): MnemopiMemoryEditResult;
-	collectScopedRecallResults(query: string): Promise<RecallResult[]>;
-	recallResultsScoped(query: string): Promise<RecallResult[]>;
+	collectScopedRecallResults(query: string, signal?: AbortSignal): Promise<RecallResult[]>;
+	recallResultsScoped(query: string, signal?: AbortSignal): Promise<RecallResult[]>;
 	formatScopedRecallContext(results: readonly RecallResult[], format?: "bullet" | "json"): string | undefined;
 	rememberScoped(memory: MnemopiRememberInput, options?: MnemopiRememberOptions, target?: MnemopiBankTarget): string;
 	getScopedStats(): MnemopiBankStats[];
@@ -547,29 +547,38 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		});
 	}
 
-	async collectScopedRecallResults(query: string): Promise<RecallResult[]> {
+	async collectScopedRecallResults(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
 		const parent = this.#remoteParent();
-		if (parent) return await parent.collectScopedRecallResults(query);
+		if (parent) return await parent.collectScopedRecallResults(query, signal);
 		const scoped = this.#local();
 		const merged: RecallResult[] = [];
 		const byId = new Map<string, number>();
 		const byContent = new Map<string, number>();
+		const origins = new Map<RecallResult, { memory: Mnemopi; bank: string }>();
 		const failures: Array<{ bank: string; error: Error }> = [];
 		let successfulTargets = 0;
 		const sharedFallbackQuery = deriveSharedRecallFallbackQuery(query, scoped.retain.bank, scoped.global?.bank);
+		const reranker = this.config.reranker ?? scoped.recall[0]?.memory.beam.config.reranker;
 		for (const target of scoped.recall) {
+			if (signal?.aborted) break;
 			const queries =
 				target.bank === scoped.global?.bank && sharedFallbackQuery ? [query, sharedFallbackQuery] : [query];
 			let targetSucceeded = false;
 			try {
 				for (const recallQuery of queries) {
-					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
-						includeFacts: true,
-						channelId: target.bank,
-					});
+					if (signal?.aborted) break;
+					const options = { includeFacts: true, channelId: target.bank, signal, updateRecallCounts: false };
+					const results = reranker
+						? await target.memory.gatherCandidates(
+								recallQuery,
+								Math.max(this.config.recallLimit, reranker.candidates),
+								options,
+							)
+						: await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, options);
 					targetSucceeded = true;
 					withLoopPhase("mnemopi.recall", () => {
 						for (const result of results) {
+							origins.set(result, target);
 							mergeRecallResult(merged, byId, byContent, result);
 						}
 					});
@@ -584,6 +593,17 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 			}
 			if (targetSucceeded) successfulTargets++;
 		}
+		merged.sort(compareRecallResults);
+		const finalized = reranker
+			? await requireMnemopi().finalizeRecall(query, merged, this.config.recallLimit, reranker, { signal })
+			: merged.slice(0, this.config.recallLimit);
+		for (const target of scoped.recall) {
+			const selected = finalized.filter(result => {
+				const original = merged.find(candidate => candidate.id === result.id);
+				return original !== undefined && origins.get(original)?.memory === target.memory;
+			});
+			target.memory.countRecallResults(selected, { channelId: target.bank });
+		}
 		return withLoopPhase("mnemopi.recall", () => {
 			if (successfulTargets === 0 && failures.length > 0) {
 				if (failures.length === 1) throw failures[0].error;
@@ -593,14 +613,12 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 					`Mnemopi recall failed for all scoped targets (${details})`,
 				);
 			}
-			merged.sort(compareRecallResults);
-			if (merged.length > this.config.recallLimit) merged.length = this.config.recallLimit;
-			return merged;
+			return finalized;
 		});
 	}
 
-	recallResultsScoped(query: string): Promise<RecallResult[]> {
-		return this.collectScopedRecallResults(query);
+	recallResultsScoped(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
+		return this.collectScopedRecallResults(query, signal);
 	}
 
 	formatScopedRecallContext(
@@ -656,7 +674,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 
 	/** Recalls `query` into a prompt block plus the memories it holds; undefined when aborted. */
 	async #recallBlock(query: string, signal?: AbortSignal): Promise<RecallBlock | undefined> {
-		const results = await this.collectScopedRecallResults(query);
+		const results = await this.collectScopedRecallResults(query, signal);
 		if (signal?.aborted) return undefined;
 		if (results.length === 0) return { text: "", memories: [] };
 		const { text, offsets } = formatRecallBlock(results);
@@ -1256,6 +1274,8 @@ function createMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
 		authorType: "agent",
 		channelId: bank,
 		...providerOptions,
+		reranker: config.reranker,
+		rerankApiUrl: config.rerank?.apiUrl ?? "",
 		proactiveLinking: config.proactiveLinking,
 		polyphonicRecall: config.polyphonicRecall,
 		enhancedRecall: config.enhancedRecall,
