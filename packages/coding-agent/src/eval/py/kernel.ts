@@ -54,7 +54,9 @@ const STARTUP_TIMEOUT_MS = 10_000;
 const INTERRUPT_ESCALATION_MS = 5_000;
 /** Bounds interrupt escalation plus the three shutdown grace windows before ACP abandons a session. */
 export const PYTHON_KERNEL_CANCEL_BUDGET_MS = INTERRUPT_ESCALATION_MS + 3 * SHUTDOWN_GRACE_MS;
-
+/** Why {@link PythonKernel.invokeTool} refuses a tool request behind a running cell on Windows. */
+const WINDOWS_BUSY_KERNEL_TOOL_ERROR =
+	"Python kernel-defined tools cannot be served while a Python cell is running on Windows: the runner reads requests only between cells. Pass `tools` from the model-facing `task` tool instead of from a cell, and do not `wait()` in a cell on subagents that call Python kernel tools.";
 const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
 	__omp_tools__: true,
 	_omp_prelude: true,
@@ -231,8 +233,24 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		});
 	}
 
-	/** Describe or invoke a tool defined in this retained Python kernel; cancelling it cancels an async tool's coroutine. */
+	/**
+	 * Describe or invoke a tool defined in this retained Python kernel; cancelling it cancels an async tool's coroutine.
+	 *
+	 * On Windows the runner reads its control channel only between requests (`_serve_windows` in runner.py), so a
+	 * tool request written behind a running cell is not read until that cell settles. When the cell is itself waiting
+	 * on the request — `task`/`agent()`/`workpool()` with `tools` resolving names, or `wait()` on a subagent calling a
+	 * kernel tool — it never settles. Such requests fail immediately instead of deadlocking (issue #18644).
+	 */
 	async invokeTool(request: PythonToolRequest, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
+		if (process.platform === "win32" && this.hasRunningCell()) {
+			return {
+				status: "error",
+				error: { name: "PythonKernelBusyError", value: WINDOWS_BUSY_KERNEL_TOOL_ERROR, traceback: [] },
+				cancelled: false,
+				timedOut: false,
+				stdinRequested: false,
+			};
+		}
 		const id = options?.id ?? Snowflake.next();
 		return await this.submitRequest(
 			id,

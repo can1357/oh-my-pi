@@ -12,8 +12,6 @@ import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 
-import { getActiveEvalBridgeSession } from "../eval/bridge-reentrancy";
-import { normalizeKernelSessionCwd } from "../eval/kernel-session-registry";
 import { cfgEvalToolsEnabled } from "../eval/settings";
 
 interface EvalToolQueryResult {
@@ -80,38 +78,6 @@ export function evalToolsEnabled(session: ToolSession): boolean {
 	return cfgEvalToolsEnabled.get(session.settings) !== false;
 }
 
-/**
- * Whether `session` owns the kernel currently blocked serving a bridge call.
- * Resolving that cell's `tools` would round-trip to a kernel that cannot answer
- * until the bridge replies, which deadlocks serial runners (Windows) and stalls
- * concurrent ones (issue #18644).
- */
-function isBridgeBlockedKernel(session: ToolSession): boolean {
-	const bridge = getActiveEvalBridgeSession();
-	if (!bridge) return false;
-	if (bridge === session) return true;
-	// Sessions aliasing the same retained kernel (forks, wrappers) re-enter the
-	// same way; kernel slots are keyed by this identity, so equal keys mean the
-	// same blocked kernel.
-	try {
-		const left = resolvePythonKernelIdentity(bridge);
-		const right = resolvePythonKernelIdentity(session);
-		if (
-			left.sessionId === right.sessionId &&
-			normalizeKernelSessionCwd(left.cwd) === normalizeKernelSessionCwd(right.cwd) &&
-			left.interpreter === right.interpreter &&
-			left.kernelOwnerId === right.kernelOwnerId
-		) {
-			return true;
-		}
-		const leftJs = resolveJsKernelIdentity(bridge);
-		const rightJs = resolveJsKernelIdentity(session);
-		return leftJs.sessionKey === rightJs.sessionKey && leftJs.ownerId === rightJs.ownerId;
-	} catch {
-		return false;
-	}
-}
-
 /** Resolve named kernel-defined tools for a child session. */
 export async function describeEvalTools(
 	session: ToolSession,
@@ -120,11 +86,6 @@ export async function describeEvalTools(
 ): Promise<EvalToolDescriptor[]> {
 	const requested = [...new Set(names.filter(name => name.length > 0))];
 	if (requested.length === 0) return [];
-	if (isBridgeBlockedKernel(session)) {
-		throw new ToolError(
-			`Eval-defined tools (${requested.join(", ")}) cannot be resolved from the running eval cell that defines them: its kernel is blocked waiting for this spawn call. Issue the task/agent()/workpool() call from the host instead, or drop tools here.`,
-		);
-	}
 	if (!evalToolsEnabled(session)) {
 		throw new ToolError("Eval-defined tools are disabled; set eval.tools.enabled=true to expose them to subagents.");
 	}
