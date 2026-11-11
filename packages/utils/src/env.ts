@@ -134,6 +134,9 @@ function readLaunchEnv(): ReadonlyMap<string, string> | undefined {
 }
 
 const launchEnvValues = readLaunchEnv();
+// Where Bun and the loop below loaded the project's dotenv files: a later `setProjectDir()` moves
+// the project directory but not what was already loaded.
+const launchProjectDir = getProjectDir();
 const projectEnvNamesLoadedByOmp = new Set<string>();
 
 function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
@@ -247,6 +250,34 @@ export function filterChildShellEnv(
 	cwd: string = getProjectDir(),
 ): Record<string, string> {
 	return filterChildShellEnvInternal(env, cwd);
+}
+
+/** {@link filterLauncherEnv} options (test seams). */
+export interface LauncherEnvOptions {
+	/** The working directory; {@link getProjectDir} by default. */
+	cwd?: string;
+	/** The directory whose dotenv files were loaded at startup; the launch directory by default. */
+	launchDir?: string;
+}
+
+/**
+ * `env` as the launcher set it, without what a dotenv file added after exec. For the live
+ * environment with a launch snapshot (Linux procfs, or `--no-env-file`), only the snapshot's names
+ * remain, with its values. Otherwise the dotenv files of the launch directory and of `cwd` are
+ * filtered out, so a later `setProjectDir()` cannot readmit what the launch directory's `.env`
+ * defined.
+ */
+export function filterLauncherEnv(
+	env: Record<string, string | undefined>,
+	options: LauncherEnvOptions = {},
+): Record<string, string> {
+	if (launchEnvValues && (env === Bun.env || env === process.env)) {
+		return filterProcessEnv(Object.fromEntries(launchEnvValues));
+	}
+	const cwd = options.cwd ?? getProjectDir();
+	const launchDir = options.launchDir ?? launchProjectDir;
+	const result = filterChildShellEnvInternal(env, launchDir);
+	return cwd === launchDir ? result : filterChildShellEnvInternal(result, cwd);
 }
 
 /** Return every value defined by `cwd`'s dotenv files, plus environment values that came from them. */

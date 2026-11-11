@@ -56,6 +56,7 @@ import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor"
 import type { PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorOptions } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import type { ReportSectionsInput } from "@oh-my-pi/pi-tui/overlays/sections-report";
 import type { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import type { ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -720,9 +721,11 @@ export interface InteractiveModeContext {
 	/**
 	 * Show a read-only command report outside the transcript: above the editor
 	 * like `/btw` (a full-screen page when taller) in text mode, a `/usage`-style
-	 * sheet natively. Replaces the report already shown.
+	 * sheet natively. Replaces the report already shown. With `sections` the
+	 * report is that summary over a list of sections to step through, and
+	 * `body` is not drawn.
 	 */
-	showCommandReport(options: { title: string; head?: TspText; body: Component }): void;
+	showCommandReport(options: { title: string; head?: TspText; body: Component; sections?: ReportSectionsInput }): void;
 	/** The live background-jobs sheet (the jobs pill's). */
 	showJobsSheet(): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */

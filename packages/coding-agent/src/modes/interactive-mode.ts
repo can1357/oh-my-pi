@@ -302,6 +302,7 @@ import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-executio
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import type { ReportSectionsInput } from "@oh-my-pi/pi-tui/overlays/sections-report";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
@@ -9867,7 +9868,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#cleanseController.handleEscape();
 	}
 
-	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+	showCommandReport(options: {
+		title: string;
+		head?: TspText;
+		body: Component;
+		sections?: ReportSectionsInput;
+	}): void {
 		this.#commandController.showCommandReport(options);
 	}
 

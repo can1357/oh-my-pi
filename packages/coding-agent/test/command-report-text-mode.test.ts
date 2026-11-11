@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -11,6 +11,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as sandbox from "@oh-my-pi/pi-utils/sandbox";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 const ROWS = 32;
@@ -109,6 +110,62 @@ describe("text-mode command reports on a real terminal core", () => {
 		term.sendInput("\x1b");
 		await term.waitForRender(() => !screen(term).some(row => row.includes("Available Tools")));
 		expect(screen(term).indexOf(last)).toBe(lastRow);
+	});
+
+	it("steps through the sections of `/sandbox` on a full-screen page, and opens a named section directly", async () => {
+		const detected: sandbox.SandboxStatus = {
+			platform: "linux",
+			layers: [
+				{
+					id: "devbox",
+					basis: "declared",
+					restrictions: [],
+					details: [{ title: "Allowed hosts", markdown: "- registry.contoso.example" }],
+					evidence: ["/run/devbox/policy.json present"],
+				},
+			],
+			facts: {
+				namespaces: {
+					mnt: "unknown",
+					net: "unknown",
+					user: "initial",
+					pid: "initial",
+					uts: "initial",
+					ipc: "initial",
+					cgroup: "initial",
+					time: "initial",
+				},
+				rootListing: "unknown",
+			},
+			evidence: ["devbox: declared"],
+		};
+		const inspect = vi.spyOn(sandbox, "inspectSandbox").mockResolvedValue(detected);
+		const shows = (text: string) => screen(term).some(row => row.includes(text));
+		try {
+			const last = await mountTranscript(5);
+			const before = screen(term);
+			await runCommand("/sandbox", "Sandbox ─ devbox");
+			// The summary rows sit above the list, and the title is drawn once, in the border.
+			expect(shows("devbox (declared)")).toBe(true);
+			expect(screen(term).filter(row => row.includes("Sandbox ─ devbox"))).toHaveLength(1);
+			expect(shows("Allowed hosts")).toBe(true);
+			expect(shows("registry.contoso.example")).toBe(false);
+
+			// The layer's own section is first; the section its probe published follows it.
+			term.sendInput("\x1b[B");
+			term.sendInput("\r");
+			await term.waitForRender(() => shows("registry.contoso.example"));
+			term.sendInput("\x1b");
+			await term.waitForRender(() => !shows("registry.contoso.example"));
+			expect(shows("Sandbox ─ devbox")).toBe(true);
+			term.sendInput("\x1b");
+			await term.waitForRender(() => !shows("Sandbox ─ devbox"));
+			expect(screen(term).indexOf(last)).toBe(before.indexOf(last));
+
+			await runCommand("/sandbox allowed-hosts", "registry.contoso.example");
+		} finally {
+			inspect.mockRestore();
+		}
 	});
 
 	it.each([
