@@ -6851,6 +6851,68 @@ describe("AgentSession retry fallback", () => {
 		expect(session.thinkingLevel).toBe(Effort.Low);
 	});
 
+	it("restores the primary at its requested effort after a chain fallback degrades off Fireworks Fast", async () => {
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k3");
+		if (!primaryModel || !fastModel || !baseModel) throw new Error("Expected bundled test models to exist");
+
+		let primaryDown = true;
+		const requests: Array<[string, ConfiguredThinkingLevel | undefined]> = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requests.push([model.id, session?.thinkingLevel]);
+				const fails = model.id === fastModel.id || (model.id === primaryModel.id && primaryDown);
+				mock.push(
+					fails ? { throw: "rate limit exceeded retry-after-ms=200" } : { content: [`served by ${model.id}`] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fastModel.provider}/${fastModel.id}`] },
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const ceilings = {
+			"openai-codex/gpt-5.6-sol": Effort.High,
+			"fireworks/kimi-k3-fast": Effort.High,
+			"fireworks/kimi-k3": Effort.Low,
+		};
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("Primary fails, then Fast fails");
+		await session.waitForIdle();
+		expect(requests).toEqual([
+			[primaryModel.id, Effort.High],
+			[fastModel.id, Effort.High],
+			[baseModel.id, Effort.Low],
+		]);
+
+		primaryDown = false;
+		now += 240;
+		await session.prompt("Cooldown expired: revert to the primary");
+		await session.waitForIdle();
+
+		// The Standard tier's `low` was the chain's own clamp, not a user override.
+		expect(requests.at(-1)).toEqual([primaryModel.id, Effort.High]);
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("holds an `auto` turn's resolved level to the base model's ceiling on a Fireworks Fast degrade", async () => {
 		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
 		const baseModel = getBundledModel("fireworks", "kimi-k3");

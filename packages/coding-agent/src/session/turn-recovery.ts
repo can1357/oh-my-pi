@@ -2568,9 +2568,16 @@ export class TurnRecovery {
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		const configuredThinkingLevel = this.#host.configuredThinkingLevel();
+		// A level the chain itself applied stays automatic after this clamp, so a primary restore still
+		// recovers the requested effort instead of keeping the base model's cap as a user override.
+		const activeFallback = this.#activeRetryFallback;
+		const levelWasApplied = activeFallback?.lastAppliedFallbackThinkingLevel === configuredThinkingLevel;
 		// The retry does not reclassify `auto`: hold this turn's resolved level to the base model's ceiling.
 		if (configuredThinkingLevel === AUTO_THINKING) this.#host.clampAutoThinkingToCeiling();
 		else this.#host.setThinkingLevel(clampThinkingLevelToCeiling(baseModel, configuredThinkingLevel, ceiling));
+		if (activeFallback && levelWasApplied) {
+			activeFallback.lastAppliedFallbackThinkingLevel = this.#host.configuredThinkingLevel();
+		}
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
