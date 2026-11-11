@@ -313,10 +313,10 @@ crate.annotation(
     },
     crate = "ring",
 )
-# psm (via wasmtime and stacker) assembles windows-aarch64 from
-# its GAS source when no Windows `armasm64` exists, but only preprocesses that
-# source for GNU-style compilers; under clang-cl its GLOBL/FUNCTION macros stay
-# unexpanded. Hand it @msvc_cc_arm64's GNU-driver clang (see the ring note).
+# psm (via wasmtime and stacker) assembles windows-aarch64 from its GAS source
+# off a Windows host, but preprocesses that source only for GNU-style
+# compilers; under clang-cl its GLOBL/FUNCTION macros stay unexpanded. Hand it
+# @msvc_cc_arm64's GNU-driver clang (see the ring note). Absent elsewhere.
 crate.annotation(
     build_script_env = {
         "CC_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/bin/clang",

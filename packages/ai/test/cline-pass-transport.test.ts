@@ -32,9 +32,9 @@ const freeTierDeepseek = buildModel({
 }) as Model<"openai-completions">;
 
 /**
- * Qwen 3.7 ClinePass rows as Cline published them before the gateway retired
- * them: one effort-ladder model and one budget-mode model. Synthetic so the
- * Qwen wire contract survives roster changes.
+ * Shaped like the retired ClinePass Qwen 3.7 rows: one effort-ladder model and
+ * one budget-mode model. Synthetic so the Qwen wire contract survives roster
+ * changes.
  */
 function clinePassQwen(id: string, name: string, thinking: ThinkingConfig): Model<"openai-completions"> {
 	return buildModel({
@@ -338,7 +338,7 @@ describe("ClinePass OpenAI transport", () => {
 			reasoning: Effort.High,
 		}).result();
 		const { payload } = await capturePayload({
-			model: qwenMax,
+			model,
 			context: {
 				...context,
 				messages: [

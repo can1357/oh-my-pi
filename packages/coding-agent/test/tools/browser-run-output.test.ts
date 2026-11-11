@@ -116,7 +116,7 @@ describe("browser handle enrichment — guarded actions", () => {
 			evaluate: async () => ({ ok: true, x: 20, y: 20 }),
 			evaluateHandle: async () => ({
 				evaluate: async (fn: (state: unknown) => unknown) =>
-					fn({ detached: false, reached: true, delivered: () => true, stop: () => {} }),
+					fn({ detached: false, delivered: () => true, stop: () => {} }),
 				dispose: async () => {},
 			}),
 			frame: { page: () => ({ mouse: { move: async () => {}, down: mousePress, up: async () => {} } }) },
