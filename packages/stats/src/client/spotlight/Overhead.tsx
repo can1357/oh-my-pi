@@ -1,4 +1,5 @@
 import { TriangleAlert } from "lucide-react";
+import { Fragment } from "react";
 import { formatCost, formatDurationMs, formatInteger } from "../data/formatters";
 import type { SpotlightDashboardStats, SpotlightFailureCause, SpotlightOverhead } from "../types";
 import { Badge, Card, type Column, errorRateTone, Table } from "../ui";
@@ -37,10 +38,12 @@ function FailureCauses({ causes }: { causes: readonly SpotlightFailureCause[] })
 	return (
 		<span>
 			{causes.map(({ cause, results, share }, i) => (
-				<span key={cause} className="spot-nowrap" title={`${formatInteger(results)} results`}>
+				<Fragment key={cause}>
 					{i > 0 && <span className="dim"> · </span>}
-					{causeLabel(cause)} <span className="num">{formatShare(share)}</span>
-				</span>
+					<span className="spot-nowrap" title={`${formatInteger(results)} results`}>
+						{causeLabel(cause)} <span className="num">{formatShare(share)}</span>
+					</span>
+				</Fragment>
 			))}
 		</span>
 	);
@@ -67,6 +70,7 @@ const COLUMNS: Column<SpotlightOverhead>[] = [
 		header: "Failure causes",
 		align: "right",
 		sort: row => row.failureCauses[0]?.share ?? -1,
+		wrap: true,
 		title: "Why the calls failed, as shares of the results that called Spotlight. A result whose calls failed two ways counts under both; unrecorded results were journaled before pi recorded causes",
 		render: row => <FailureCauses causes={row.failureCauses} />,
 	},
