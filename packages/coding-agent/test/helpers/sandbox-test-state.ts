@@ -7,10 +7,10 @@ export const SANDBOX_SUPPORTED = { supported: true, backend: "seatbelt" as const
 /** Backend probe of a host without a usable backend. */
 export const SANDBOX_UNAVAILABLE = { supported: false, reason: "test: no backend", proxy: false, warnings: [] };
 /**
- * Whether a contained child can load omp from this source checkout. On Windows the processcontainer
- * grants read-only roots without directory listing, so Bun cannot resolve the TypeScript sources a
- * contained shell host or evaluator re-enters (docs/sandbox.md, "Windows"); there only the compiled
- * binary runs contained, which `omp --smoke-test` covers.
+ * Whether a contained child can load omp from this source checkout. On Windows, Bun cannot list
+ * directories under the processcontainer's read-only roots, so it cannot resolve the TypeScript
+ * sources a contained shell host or evaluator re-enters (docs/sandbox.md, "Windows"); there only
+ * the compiled binary runs contained, which `omp --smoke-test` covers.
  */
 export const CONTAINED_SOURCE_RUNS = process.platform !== "win32";
 

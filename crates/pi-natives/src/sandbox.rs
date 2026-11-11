@@ -19,9 +19,11 @@ use std::{
 };
 
 use mxc_sdk::v1::{
-	self, BackendCapability, ClipboardPolicy, ContainerRequest, Containment, FilesystemPolicy, MxcProcess,
-	NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, NetworkRuntimeConfig,
-	ProxyEnforcement, RunOptions, SpawnOptions, TelemetryConfig, UiPolicy, WaitResult,
+	self, BackendCapability, ClipboardPolicy, ContainerRequest, Containment, FilesystemPolicy,
+	MxcProcess, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy,
+	NetworkRuntimeConfig, ProxyEnforcement, RunOptions, SpawnOptions, TelemetryConfig, UiPolicy,
+	WaitResult,
+	configs::{ProcessContainerConfig, ProcessContainerFilesystem},
 	policy::filesystem::{
 		FilesystemPolicyResult, ToolsPolicyOptions, available_tools_policy, temporary_files_policy,
 		user_profile_policy,
@@ -105,6 +107,8 @@ struct HostSupport {
 	/// `network.ingress.hostLoopback = allow` (the `AppContainer` fallback tiers
 	/// reject it).
 	host_loopback_allow: bool,
+	/// processcontainer only: the native tier enforces `enumeratePaths`.
+	enumerate_paths:     bool,
 }
 
 impl HostSupport {
@@ -136,6 +140,7 @@ fn probe_host_support() -> HostSupport {
 	let mut warnings = Vec::new();
 	let mut proxy = false;
 	let mut host_loopback_allow = false;
+	let mut enumerate_paths = false;
 	let mut unavailable = None;
 	match listed {
 		Some(Backend::Seatbelt) => proxy = true,
@@ -165,7 +170,7 @@ fn probe_host_support() -> HostSupport {
 					host_loopback_allow = entry
 						.capabilities
 						.contains(&BackendCapability::IngressHostLoopbackAllow);
-					warnings.extend(entry.warnings);
+					enumerate_paths = process_container_enumerates();
 				},
 				None => {
 					unavailable = Some("MXC reported no processcontainer backend".to_owned());
@@ -202,7 +207,72 @@ fn probe_host_support() -> HostSupport {
 		},
 		backend,
 		host_loopback_allow,
+		enumerate_paths,
 	}
+}
+
+/// Whether the processcontainer's native tier enforces `enumeratePaths`. Only
+/// then is it requested: MXC would otherwise push the request to a fallback
+/// tier omp refuses.
+#[cfg(target_os = "windows")]
+fn process_container_enumerates() -> bool {
+	v1::probe(None).is_ok_and(|output| output.probes.base_container_supports_enumerate_paths)
+}
+
+#[cfg(not(target_os = "windows"))]
+const fn process_container_enumerates() -> bool {
+	false
+}
+
+/// The volume root (`C:\`, `\\server\share\`) of a Windows path, if it has one.
+fn windows_volume_root(path: &str) -> Option<String> {
+	let bytes = path.as_bytes();
+	if bytes.len() >= 3
+		&& bytes[0].is_ascii_alphabetic()
+		&& bytes[1] == b':'
+		&& matches!(bytes[2], b'\\' | b'/')
+	{
+		return Some(format!("{}:\\", char::from(bytes[0].to_ascii_uppercase())));
+	}
+	let unc = path
+		.strip_prefix(r"\\")
+		.or_else(|| path.strip_prefix("//"))?;
+	let mut parts = unc.split(['\\', '/']).filter(|part| !part.is_empty());
+	let (server, share) = (parts.next()?, parts.next()?);
+	if server == "?" || server == "." {
+		return None;
+	}
+	Some(format!(r"\\{server}\{share}\"))
+}
+
+/// processcontainer: the volume roots of every granted path, as query-only
+/// `enumeratePaths`. The OS grants neither read nor query on a root no policy
+/// path names, so `lstat("C:\")` fails, and with it every realpath that walks
+/// from the root (Node runs no script file without one). Enumeration is
+/// query-only and grants no file reads below the root; the roots themselves
+/// are never in the read or write lists (a path in both lists would lose its
+/// file reads).
+fn volume_root_enumeration(policy: &SandboxPolicy, cwd: Option<&str>) -> Containment {
+	let mut roots: Vec<String> = Vec::new();
+	let paths = policy
+		.readwrite_paths
+		.iter()
+		.chain(&policy.readonly_paths)
+		.map(String::as_str)
+		.chain(cwd);
+	for root in paths.filter_map(windows_volume_root) {
+		if !roots.iter().any(|known| known.eq_ignore_ascii_case(&root)) {
+			roots.push(root);
+		}
+	}
+	if roots.is_empty() {
+		return Containment::Process;
+	}
+	let mut filesystem = ProcessContainerFilesystem::default();
+	filesystem.enumerate_paths = roots;
+	let mut config = ProcessContainerConfig::default();
+	config.filesystem = Some(filesystem);
+	Containment::ProcessContainer(config)
 }
 
 /// Native processcontainer containment needs the `BaseContainer` tier; the
@@ -527,6 +597,7 @@ fn build_request(
 	backend: Backend,
 	host_loopback_allow: bool,
 	windows: bool,
+	enumerate_paths: bool,
 ) -> std::result::Result<ContainerRequest, String> {
 	let SandboxSpawnOptions { argv, cwd, env, policy } = options;
 	let command = if windows {
@@ -536,6 +607,11 @@ fn build_request(
 	};
 	let mode = NetworkMode::parse(&policy.network)?;
 	let network = network_policy(mode, policy.proxy_url.as_deref(), backend, host_loopback_allow)?;
+	let containment = if windows && enumerate_paths {
+		volume_root_enumeration(&policy, cwd.as_deref())
+	} else {
+		Containment::Process
+	};
 	Ok(ContainerRequest {
 		filesystem: Some(FilesystemPolicy {
 			readwrite_paths:      policy.readwrite_paths,
@@ -548,12 +624,12 @@ fn build_request(
 		// that links user32 (git, powershell, Git's bash, the pi_natives addon)
 		// then dies in DLL init with STATUS_DLL_INIT_FAILED. Keep Win32k; the
 		// job object still denies clipboard access and input injection.
-		ui: windows.then(|| UiPolicy {
+		ui: windows.then_some(UiPolicy {
 			disable:               false,
 			clipboard:             ClipboardPolicy::None,
 			allow_input_injection: false,
 		}),
-		containment: Containment::Process,
+		containment,
 		working_directory: cwd,
 		environment: Some(env.into_iter().collect()),
 		inherit_default_environment: Some(false),
@@ -628,7 +704,13 @@ impl SandboxProcess {
 		let host = &*HOST_SUPPORT;
 		// Every failure, including an invalid request, rejects the Promise.
 		let request = host.usable_backend().and_then(|backend| {
-			build_request(options, backend, host.host_loopback_allow, cfg!(target_os = "windows"))
+			build_request(
+				options,
+				backend,
+				host.host_loopback_allow,
+				cfg!(target_os = "windows"),
+				host.enumerate_paths,
+			)
 		});
 		task::future(env, "sandbox.spawn", async move {
 			let request = request.map_err(Error::from_reason)?;
@@ -1088,7 +1170,7 @@ mod tests {
 				proxy_url:       None,
 			},
 		};
-		let request = build_request(options, Backend::Seatbelt, false, false).unwrap();
+		let request = build_request(options, Backend::Seatbelt, false, false, false).unwrap();
 		assert_eq!(request.working_directory.as_deref(), Some("/work"));
 		assert_eq!(request.environment, Some(vec![("PATH".to_owned(), "/bin".to_owned())]));
 		// `Some(true)` would overlay MXC's default PATH/HOME/TERM block onto the
@@ -1114,14 +1196,44 @@ mod tests {
 				proxy_url:       None,
 			},
 		};
-		let request = build_request(options, Backend::ProcessContainer, false, true).unwrap();
+		let request = build_request(options, Backend::ProcessContainer, false, true, false).unwrap();
 		assert_eq!(request.command, r#""node.exe" "a b""#);
 		// MXC's default disables Win32k, which kills every user32 client (git,
 		// powershell) in DLL init; clipboard and input injection stay denied.
-		let ui = request.ui.expect("Windows requests carry an explicit UI policy");
+		let ui = request
+			.ui
+			.expect("Windows requests carry an explicit UI policy");
 		assert!(!ui.disable);
 		assert!(matches!(ui.clipboard, ClipboardPolicy::None));
 		assert!(!ui.allow_input_injection);
+	}
+
+	#[test]
+	fn windows_requests_make_the_volume_roots_of_granted_paths_queryable() {
+		let options = || SandboxSpawnOptions {
+			argv:   args(&["node.exe", "app.js"]),
+			cwd:    Some("D:\\work\\sub".to_owned()),
+			env:    HashMap::new(),
+			policy: SandboxPolicy {
+				readwrite_paths: args(&["D:\\work", "C:\\Users\\u\\AppData\\Local\\Temp\\omp-sb-1"]),
+				readonly_paths:  args(&["c:\\Users\\u", "\\\\server\\share\\tools"]),
+				denied_paths:    args(&["C:\\Users\\u\\.ssh"]),
+				network:         "deny".to_owned(),
+				proxy_url:       None,
+			},
+		};
+		let request = build_request(options(), Backend::ProcessContainer, false, true, true).unwrap();
+		let Containment::ProcessContainer(config) = &request.containment else {
+			panic!("expected explicit processcontainer containment, got {:?}", request.containment);
+		};
+		let filesystem = config.filesystem.as_ref().expect("enumerate paths");
+		assert_eq!(filesystem.enumerate_paths, args(&["D:\\", "C:\\", "\\\\server\\share\\"]));
+
+		// Requesting enumeration where PSEC cannot enforce it would push MXC to a
+		// fallback tier that rewrites host ACLs.
+		let request =
+			build_request(options(), Backend::ProcessContainer, false, true, false).unwrap();
+		assert_eq!(request.containment, Containment::Process);
 	}
 
 	#[test]
@@ -1145,6 +1257,7 @@ mod tests {
 			},
 			backend,
 			host_loopback_allow: false,
+			enumerate_paths: false,
 		};
 		assert_eq!(
 			host(Some(Backend::ProcessContainer), None).usable_backend(),
