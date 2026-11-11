@@ -452,6 +452,20 @@ export function $envExact(name: string, env: Record<string, string | undefined> 
 }
 
 /**
+ * Read `name` whatever the key's casing, as Windows does; a copied env object keeps the original casing (`Path`).
+ * POSIX env names are case-sensitive, so callers that also run on POSIX use this only on Windows.
+ */
+export function $envAnyCase(name: string, env: Record<string, string | undefined>): string | undefined {
+	const direct = env[name];
+	if (direct !== undefined) return direct;
+	const normalized = name.toLowerCase();
+	for (const [key, value] of Object.entries(env)) {
+		if (key.toLowerCase() === normalized) return value;
+	}
+	return undefined;
+}
+
+/**
  * Parses a positive decimal integer from `$env[name]`.
  * Empty, invalid, NaN, zero, or negative values return `defaultValue`.
  */

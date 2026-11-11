@@ -74,9 +74,9 @@ import {
 } from "../../session/runtime-identity";
 import type { NewSessionOptions } from "../../session/session-entries";
 import {
-	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
+	finishSessionWorktree,
 	formatSessionWorktreeSummary,
 	type SessionWorktree,
 } from "../../session/session-worktree";
@@ -136,6 +136,9 @@ const TERN_FORK_UNCONFIRMED: Partial<Record<TernErrorKind, true>> = { closed: tr
 
 /** Rows `/session` spends on the builds that wrote the session, including the elision row. */
 const MAX_LISTED_BUILDS = 5;
+
+/** How long the `/wt` post-checkout hook runs before its Esc loader takes the editor slot, so a repo without a hook never flashes it. */
+const HOOK_LOADER_DELAY_MS = 200;
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -1788,18 +1791,22 @@ export class CommandController {
 					error: worktree.cloneError,
 				});
 			}
-			if (!(await this.#relocateSession(worktree.path))) return false;
+			const relocated = await this.#relocateSession(worktree.path);
+			const finished = await finishSessionWorktree(worktree, this.ctx.settings, {
+				moved: relocated,
+				// A failed move whose rollback failed too can leave the session in the worktree, or end it.
+				inWorktree:
+					!this.ctx.session.isDisposed && path.resolve(this.ctx.sessionManager.getCwd()) === worktree.path,
+				withHookSignal: run => this.#withHookLoader(run),
+				rescan: () => this.ctx.session.refreshSkillsAndCommands(),
+			});
+			for (const warning of finished.warnings) this.ctx.showWarning(warning);
+			if (!relocated) return false;
 			created = worktree;
-			const cleanup = worktree.keptChanges
-				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
-				: { cleaned: false, errorMessage: undefined };
-			if (cleanup.errorMessage !== undefined) {
-				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
-			}
 			this.ctx.present([
 				new Spacer(1),
 				new Text(
-					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, cleanup.cleaned)}`)}`,
+					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, finished.sourceCleaned)}`)}`,
 					1,
 					1,
 				),
@@ -1807,6 +1814,38 @@ export class CommandController {
 			return true;
 		});
 		return created;
+	}
+
+	/**
+	 * Runs `run` with a signal Esc aborts. Past {@link HOOK_LOADER_DELAY_MS} a loader takes the editor slot as a
+	 * selector does; closing it gives the slot back through `showSelector`, which also covers a selector opened over
+	 * it (Ctrl+R) and a dialog that replaced it.
+	 */
+	async #withHookLoader<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+		const abort = new AbortController();
+		let closeLoader: (() => void) | undefined;
+		const timer = setTimeout(() => {
+			// A selector, dialog or overlay opened while the checkout ran keeps the keyboard; the hook then runs
+			// without a loader, as one shorter than the delay does.
+			if (this.ctx.ui.getFocused() !== this.ctx.editor) return;
+			this.ctx.showSelector(done => {
+				const loader = new BorderedLoader(this.ctx.ui, theme, "Running post-checkout hook…");
+				loader.onAbort = () => abort.abort();
+				closeLoader = () => {
+					loader.dispose();
+					done();
+					// The disposed loader no longer repaints, and the command may show nothing more after it.
+					this.ctx.ui.requestRender();
+				};
+				return { component: loader, focus: loader };
+			});
+		}, HOOK_LOADER_DELAY_MS);
+		try {
+			return await run(abort.signal);
+		} finally {
+			clearTimeout(timer);
+			closeLoader?.();
+		}
 	}
 
 	/** Save source settings before acquiring the gate for a complete relocation operation. */

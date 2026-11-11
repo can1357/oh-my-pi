@@ -12,11 +12,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, logger } from "@oh-my-pi/pi-utils";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { getWorktreeDir, hashPath, logger, procmgr } from "@oh-my-pi/pi-utils";
+import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Settings } from "../config/settings";
+import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
+import { formatPostCheckoutHookWarning, runPostCheckoutHook } from "../utils/worktree-hook";
 
 import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
 
@@ -109,6 +111,55 @@ export async function cleanSourceCheckoutIfConfigured(
 		};
 	}
 }
+
+/**
+ * Finishes `/wt` after the session's move into `worktree` succeeded or failed (`moved`): cleans the source
+ * (`worktree.cleanSource`, only after a move that carried changes), runs the worktree's hook under the signal
+ * `withHookSignal` gives it, and `rescan`s a session that lives in the worktree (`inWorktree`: after the move, or
+ * after a failed move whose rollback failed too) so it sees the skills and commands the hook added.
+ * The cleanup runs before the hook so a save into the source during the hook survives; the hook's env is taken
+ * first because the cleanup can delete an untracked `.env` the dotenv filter reads. Returns warnings in order.
+ */
+export async function finishSessionWorktree(
+	worktree: SessionWorktree,
+	settings: Settings,
+	options: {
+		moved: boolean;
+		inWorktree: boolean;
+		withHookSignal: <T>(run: (signal?: AbortSignal) => Promise<T>) => Promise<T>;
+		rescan: () => Promise<void>;
+	},
+): Promise<{ sourceCleaned: boolean; warnings: string[] }> {
+	const env = procmgr.getChildShellEnv();
+	const cleanup =
+		options.moved && worktree.keptChanges
+			? await cleanSourceCheckoutIfConfigured(worktree.sourceCwd, settings)
+			: { cleaned: false, errorMessage: undefined };
+	const hook = await options.withHookSignal(signal =>
+		runPostCheckoutHook(worktree.path, worktree.baseCommit, { signal, env }),
+	);
+	const warnings: string[] = [];
+	const hookWarning = formatPostCheckoutHookWarning(hook);
+	if (hookWarning) warnings.push(hookWarning);
+	if (options.inWorktree) {
+		try {
+			clearClaudePluginRootsCache();
+			await options.rescan();
+		} catch (err) {
+			// A loader error can quote a whole source line: strip controls, shorten home, bound the warning.
+			warnings.push(
+				...sanitizeDisplayWarnings([
+					`Worktree created, but skill and command rescan failed: ${err instanceof Error ? err.message : String(err)}`,
+				]),
+			);
+		}
+	}
+	if (cleanup.errorMessage !== undefined) {
+		warnings.push(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
+	}
+	return { sourceCleaned: cleanup.cleaned, warnings };
+}
+
 /**
  * Create the worktree for `/wt`. Throws with a user-facing message when `cwd`
  * is not a git checkout, `branch` already exists, or git refuses.

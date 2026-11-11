@@ -1,14 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { $which, isPidAlive, postmortem, procmgr, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import {
 	canAutoCreateWorktree,
 	createSessionWorktree,
 	decideWorktreeExit,
+	finishSessionWorktree,
 	inspectSessionWorktree,
 	planWorktreeExit,
 	removeExitWorktrees,
@@ -16,6 +17,8 @@ import {
 	type SessionWorktreeState,
 	type WorktreeExitAction,
 } from "../../src/session/session-worktree";
+import { formatPostCheckoutHookWarning, runPostCheckoutHook } from "../../src/utils/worktree-hook";
+import { restoreEnvValue } from "../helpers/settings-test-state";
 
 const clean: SessionWorktreeState = { dirty: false, moved: false, offBranch: false };
 
@@ -287,5 +290,221 @@ describe("session worktree helpers (real git)", () => {
 		const messages = await removeExitWorktrees(plan);
 		expect(messages).toEqual([`Failed to remove worktree ${wt.path}; branch '${branch}' kept.`]);
 		expect(branchSha(repo, branch)).toBe(wt.baseCommit);
+	});
+
+	describe.skipIf(process.platform === "win32")("post-checkout hook", () => {
+		const savedHookEnv: Record<string, string | undefined> = {};
+		const envKeys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "HOME", "XDG_CONFIG_HOME"];
+		/** Pid files a test's background process writes; afterEach kills them even when the test failed or timed out. */
+		const pidFilesToKill: string[] = [];
+		const readPid = async (file: string) => {
+			const text = await Bun.file(file)
+				.text()
+				.catch(() => "");
+			return Number.parseInt(text, 10);
+		};
+		const writeScript = async (file: string, script: string) => {
+			await Bun.write(file, `#!/bin/sh\n${script}\n`);
+			await fs.chmod(file, 0o755);
+		};
+		const installHook = (script: string) => writeScript(path.join(repo, ".git", "hooks", "post-checkout"), script);
+		/** `/wt`'s worktree steps: create the checkout, then finish it as a moved session. */
+		const createAndFinish = async (signal?: AbortSignal) => {
+			const wt = await create();
+			const { warnings } = await finishSessionWorktree(wt, Settings.isolated(), {
+				moved: true,
+				inWorktree: true,
+				withHookSignal: run => run(signal),
+				rescan: async () => {},
+			});
+			return { ...wt, hookWarning: warnings[0] };
+		};
+		const headSha = () => git(repo, "rev-parse", "HEAD");
+		/** The hook environment with PATH replaced, passed as `env` so the test never mutates `process.env`. */
+		const envWithPath = (value: string): Record<string, string> => ({ ...procmgr.getChildShellEnv(), PATH: value });
+		/** Writes an executable `git` running `script` into its own bin dir; returns the dir, a hook env whose PATH is only that dir, and HEAD. */
+		const fakeGit = async (script: string) => {
+			const dir = path.join(root, "fakegit");
+			await writeScript(path.join(dir, "git"), script);
+			return { dir, env: envWithPath(dir), head: headSha() };
+		};
+
+		beforeEach(() => {
+			for (const key of envKeys) savedHookEnv[key] = process.env[key];
+			// Isolate from the developer's global git config (core.hooksPath) and `~/.config/git`.
+			process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+			process.env.GIT_CONFIG_NOSYSTEM = "1";
+			process.env.HOME = root;
+			delete process.env.XDG_CONFIG_HOME;
+			// An earlier test file's shell-env capture would hand the hook the host's git config.
+			procmgr.__resetShellConfigCacheForTests();
+		});
+
+		afterEach(async () => {
+			for (const file of pidFilesToKill.splice(0)) {
+				const pid = await readPid(file);
+				try {
+					if (pid > 0) process.kill(pid, "SIGKILL");
+				} catch {}
+			}
+			for (const key of envKeys) restoreEnvValue(key, savedHookEnv[key]);
+			procmgr.__resetShellConfigCacheForTests();
+			vi.restoreAllMocks();
+		});
+
+		it("runs the hook in the new worktree with git's new-worktree arguments", async () => {
+			await installHook('{ pwd -P; printf "%s\\n" "$@"; } > hook.out');
+			const wt = await createAndFinish();
+			expect(wt.hookWarning).toBeUndefined();
+			const lines = (await Bun.file(path.join(wt.path, "hook.out")).text()).trim().split("\n");
+			expect(lines).toEqual([wt.path, "0".repeat(wt.baseCommit.length), wt.baseCommit, "1"]);
+		});
+
+		it.each([
+			{
+				what: "the exit status and cleaned last line",
+				script: `printf 'earlier\\n'; printf '\\033[31mboom\\033[0m\\tbad in %s/x\\n' '${os.homedir()}' >&2; exit 7`,
+				expected: "Worktree created, but post-checkout hook exited with 7: boom   bad in ~/x",
+			},
+			{
+				what: "the last carriage-return progress frame rather than gluing frames together",
+				script: "printf 'copy 10 percent\\rcopy 55 percent\\rcopy 100 percent\\r' >&2; exit 4",
+				expected: "Worktree created, but post-checkout hook exited with 4: copy 100 percent",
+			},
+		])("keeps the worktree and warns with $what when the hook fails", async ({ script, expected }) => {
+			await installHook(script);
+			const wt = await createAndFinish();
+			expect(worktreePaths(repo)).toContain(wt.path);
+			expect(wt.hookWarning).toBe(expected);
+		});
+
+		it("runs the hook with the git the lookup resolves when that git is not on the hook's PATH", async () => {
+			// Models $which's macOS fallback to Xcode/CLT git, which a bare `git` spawn on this PATH cannot find.
+			// $which calls Bun.which on every lookup, so spying on Bun.which is its test seam.
+			const realGit = $which("git");
+			const realWhich = Bun.which;
+			const bunDir = path.join(root, "bin");
+			await fs.mkdir(bunDir);
+			await fs.symlink(process.execPath, path.join(bunDir, "bun"));
+			await installHook("pwd -P > hook.out");
+			vi.spyOn(Bun, "which").mockImplementation((command, options) =>
+				command === "git" ? realGit : realWhich(command, options),
+			);
+			expect(await runPostCheckoutHook(repo, headSha(), { env: envWithPath(bunDir) })).toEqual({ status: "ok" });
+			expect((await Bun.file(path.join(repo, "hook.out")).text()).trim()).toBe(repo);
+		});
+
+		it("resolves a relative PATH entry against the worktree, as a bare git spawn there would", async () => {
+			await writeScript(path.join(repo, "hookbin", "git"), `exec '${$which("git")}' "$@"`);
+			await installHook("pwd -P > hook.out");
+			expect(await runPostCheckoutHook(repo, headSha(), { env: envWithPath("hookbin") })).toEqual({ status: "ok" });
+			expect((await Bun.file(path.join(repo, "hook.out")).text()).trim()).toBe(repo);
+		});
+
+		it("does not take a lowercase `path` for PATH, since POSIX env names are case-sensitive", async () => {
+			const ran = path.join(root, "fake-git-ran");
+			const { dir, head } = await fakeGit(`: > '${ran}'\necho "git version 2.99.0"`);
+			const env: Record<string, string> = { ...procmgr.getChildShellEnv(), path: dir };
+			delete env.PATH;
+			await runPostCheckoutHook(repo, head, { env });
+			expect(await Bun.file(ran).exists()).toBe(false);
+		});
+
+		it.each([
+			{
+				why: "older than 2.36 (no `git hook run`)",
+				script: `[ "$1" = version ] && { echo "git version 2.34.1"; exit 0; }\necho "git: 'hook' is not a git command." >&2\nexit 1`,
+				reason: "git 2.34",
+			},
+			{
+				why: "a stub that runs nothing (macOS without the Command Line Tools)",
+				script: `echo "xcrun: error: invalid active developer path" >&2\nexit 1`,
+				reason: "`git version` failed",
+			},
+			// On macOS `$which` falls back to the Command Line Tools' git, which a PATH without git does not hide.
+			...(process.platform === "darwin"
+				? []
+				: [{ why: "missing from PATH", script: undefined, reason: "git executable not found" }]),
+		])("reports nothing for /wt when git is $why", async ({ script, reason }) => {
+			const env = script === undefined ? envWithPath(path.join(root, "no-git")) : (await fakeGit(script)).env;
+			const result = await runPostCheckoutHook(repo, headSha(), { env });
+			expect(result).toEqual({ status: "unavailable", reason: expect.stringContaining(reason) });
+			expect(formatPostCheckoutHookWarning(result)).toBeUndefined();
+		});
+
+		// A real stuck git process: the poll waits on OS state, which fake timers cannot drive.
+		it("cancels while `git version` is stuck, without running the hook", async () => {
+			const started = path.join(root, "version-started");
+			const { env, head } = await fakeGit(`[ "$1" = version ] && { : > '${started}'; exec /bin/sleep 30; }\nexit 1`);
+			const controller = new AbortController();
+			const pending = runPostCheckoutHook(repo, head, { env, signal: controller.signal });
+			for (let i = 0; i < 200 && !(await Bun.file(started).exists()); i++) await Bun.sleep(25);
+			controller.abort();
+			expect(await pending).toEqual({ status: "cancelled" });
+		});
+
+		it("returns promptly when `git version` leaves a background process holding its output", async () => {
+			const bgPid = path.join(root, "version-bg.pid");
+			pidFilesToKill.push(bgPid);
+			const { env, head } = await fakeGit(
+				`if [ "$1" = version ]; then echo "git version 2.99.0"; /bin/sleep 30 & echo $! > '${bgPid}'; fi\nexit 0`,
+			);
+			const started = Date.now();
+			expect(await runPostCheckoutHook(repo, head, { env })).toEqual({ status: "ok" });
+			expect(Date.now() - started).toBeLessThan(10_000);
+		});
+
+		it("reports an error, not a missing git, when the hook's cwd is missing but git is on PATH", async () => {
+			const result = await runPostCheckoutHook(path.join(root, "does-not-exist"), "a".repeat(40), {
+				env: procmgr.getChildShellEnv(),
+			});
+			expect(result.status).toBe("error");
+			expect(formatPostCheckoutHookWarning(result)).toContain("post-checkout hook could not run: ");
+		});
+
+		it("returns promptly when the hook leaves a background process holding its output", async () => {
+			const bgPid = path.join(root, "hook-bg.pid");
+			pidFilesToKill.push(bgPid);
+			await installHook(`sleep 30 &\necho $! > '${bgPid}'`);
+			const started = Date.now();
+			const wt = await createAndFinish();
+			expect(Date.now() - started).toBeLessThan(10_000);
+			expect(wt.hookWarning).toBeUndefined();
+		});
+
+		// Real processes: the polls wait on OS state (the hook's child starting, then dying), which fake timers cannot drive.
+		it.each([
+			{ trigger: "the signal aborts", onExit: false },
+			// A detached hook would otherwise outlive omp.
+			{ trigger: "omp exits", onExit: true },
+		])("stops the hook's process tree and warns when $trigger", async ({ onExit }) => {
+			const pidFile = path.join(root, "child.pid");
+			const gitPidFile = path.join(root, "git.pid");
+			pidFilesToKill.push(pidFile);
+			await installHook(`echo $PPID > '${gitPidFile}'\nsleep 30 &\necho $! > '${pidFile}'\nwait`);
+			const exitCallbacks: Array<() => unknown> = [];
+			vi.spyOn(postmortem, "register").mockImplementation((id, callback) => {
+				if (id === "post-checkout-hook") exitCallbacks.push(() => callback(postmortem.Reason.SIGTERM));
+				return () => {};
+			});
+			const controller = new AbortController();
+			const pending = createAndFinish(controller.signal);
+			let pid = Number.NaN;
+			for (let i = 0; i < 200 && !(pid > 0); i++) {
+				await Bun.sleep(50);
+				pid = await readPid(pidFile);
+			}
+			if (!(pid > 0)) throw new Error("hook never started");
+			if (onExit) {
+				// The exit pass awaits the callback and then exits at once: by then git must be gone.
+				await Promise.all(exitCallbacks.map(exit => exit()));
+				expect(isPidAlive(await readPid(gitPidFile))).toBe(false);
+			} else controller.abort();
+			const wt = await pending;
+			expect(wt.hookWarning).toBe("Worktree created, but post-checkout hook cancelled");
+			expect(worktreePaths(repo)).toContain(wt.path);
+			for (let i = 0; i < 100 && isPidAlive(pid); i++) await Bun.sleep(50);
+			expect(isPidAlive(pid)).toBe(false);
+		});
 	});
 });

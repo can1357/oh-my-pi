@@ -639,6 +639,12 @@ export interface InteractiveModeContext {
 	applyCwdChange(newCwd: string): Promise<boolean>;
 
 	// Selector handling
+	/**
+	 * Puts a component in the editor slot until its `done` runs, which restores the slot's contents and focus. A
+	 * `done` while another selector covers it hands that restore to the selector above; one whose component left the
+	 * slot some other way (a dialog replaced it) leaves the slot alone.
+	 */
+	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
 	showSettingsSelector(): void;
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
 	showUsageDashboard(reports: UsageReport[]): void;
