@@ -28,11 +28,14 @@ pub(super) struct KeyStep {
 const XTEST_KEYBOARD: &[u8] = b"Virtual core XTEST keyboard";
 
 pub(super) struct Keymap {
-	min_keycode:         u8,
-	keysyms_per_keycode: u8,
-	keysyms:             Vec<u32>,
+	pub(super) min_keycode:         u8,
+	pub(super) keysyms_per_keycode: u8,
+	pub(super) keysyms:             Vec<u32>,
 	/// Core modifier mask bit each modifier keycode sets while held.
-	modifier_masks:      Vec<(u8, u16)>,
+	modifier_masks:                 Vec<(u8, u16)>,
+	pub(super) device:              Option<u8>,
+	pub(super) core_mapping:        bool,
+	pub(super) master:              Option<u8>,
 }
 
 impl Keymap {
@@ -89,7 +92,19 @@ impl Keymap {
 			.map_err(keymap_failed)?
 			.reply()
 			.map_err(keymap_failed)?;
-		Ok(Self::new(min_keycode, mapping.keysyms_per_keycode, mapping.keysyms, Vec::new()))
+		let mut map =
+			Self::new(min_keycode, mapping.keysyms_per_keycode, mapping.keysyms, Vec::new());
+		map.device = Some(device_id);
+		map.core_mapping = false;
+		Ok(map)
+	}
+
+	pub(super) fn mpx(conn: &RustConnection, slave: u16, master: u16) -> CoreResult<Self> {
+		let mut map = Self::device(conn, slave)?;
+		map.master = Some(u8::try_from(master).map_err(|_| {
+			DesktopError::input_failed(format!("XInput device id {master} exceeds XI1 range"))
+		})?);
+		Ok(map)
 	}
 
 	/// The core keyboard's `XTest` device map, plus the core modifier map.
@@ -113,7 +128,11 @@ impl Keymap {
 		else {
 			return Ok(core);
 		};
-		Ok(Self { modifier_masks: core.modifier_masks, ..Self::device(conn, device.into())? })
+		Ok(Self {
+			modifier_masks: core.modifier_masks,
+			core_mapping: true,
+			..Self::device(conn, device.into())?
+		})
 	}
 
 	const fn new(
@@ -122,12 +141,20 @@ impl Keymap {
 		keysyms: Vec<u32>,
 		modifier_masks: Vec<(u8, u16)>,
 	) -> Self {
-		Self { min_keycode, keysyms_per_keycode, keysyms, modifier_masks }
+		Self {
+			min_keycode,
+			keysyms_per_keycode,
+			keysyms,
+			modifier_masks,
+			device: None,
+			core_mapping: true,
+			master: None,
+		}
 	}
 
 	/// Keycode emitting `keysym` and whether Shift must be held for it. The
 	/// unshifted level wins when a keysym appears on both.
-	fn lookup(&self, keysym: u32) -> Option<(u8, bool)> {
+	pub(super) fn lookup(&self, keysym: u32) -> Option<(u8, bool)> {
 		let width = usize::from(self.keysyms_per_keycode);
 		if width == 0 {
 			return None;
@@ -158,6 +185,32 @@ impl Keymap {
 			.or_else(|| self.lookup(Keysym::Shift_R.raw()))
 			.map(|(keycode, _)| keycode)
 			.ok_or_else(|| DesktopError::input_failed("X11 keymap has no Shift key"))
+	}
+
+	pub(super) fn empty_row(&self, code: u8) -> bool {
+		let width = usize::from(self.keysyms_per_keycode);
+		let Some(index) = code.checked_sub(self.min_keycode).map(usize::from) else {
+			return false;
+		};
+		width != 0
+			&& self
+				.keysyms
+				.get(index * width..(index + 1) * width)
+				.is_some_and(|row| row.iter().all(|&symbol| symbol == 0))
+	}
+
+	pub(super) fn refresh(&self, conn: &RustConnection) -> CoreResult<Self> {
+		if self.core_mapping {
+			if self.device.is_some() {
+				Self::xtest(conn)
+			} else {
+				Self::core(conn)
+			}
+		} else if let Some(master) = self.master {
+			Self::mpx(conn, self.device.expect("device map").into(), master.into())
+		} else {
+			Self::device(conn, self.device.expect("device map").into())
+		}
 	}
 
 	/// Press/release steps typing `text`; shifted glyphs are wrapped in Shift.

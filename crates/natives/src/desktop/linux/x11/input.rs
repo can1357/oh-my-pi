@@ -38,6 +38,7 @@ use super::{
 	keyboard_state::NeutralKeyboard,
 	keymap::{self, KeyStep, Keymap},
 	mpx::Mpx,
+	text_mapping::TextMapping,
 	toolkit, uinput,
 	wm::{Atoms, FocusSnapshot, Wm},
 };
@@ -76,6 +77,7 @@ pub struct X11Input {
 	root:             Window,
 	atoms:            Atoms,
 	keymap:           Keymap,
+	text_mapping:     TextMapping,
 	takeover_target:  Option<Window>,
 	takeover_pointer: Cell<Option<(i16, i16)>>,
 	/// The user's press count a takeover in progress started from.
@@ -107,6 +109,11 @@ enum Keys<'a> {
 	Text(&'a str),
 	Chord(&'a [KeyName]),
 	Hold(&'a [KeyName], Duration),
+}
+
+struct PlannedKeys<'a> {
+	steps:     Vec<KeyStep>,
+	remaining: Vec<&'a str>,
 }
 
 impl Keys<'_> {
@@ -154,6 +161,7 @@ impl X11Input {
 			.ok()
 			.and_then(|cookie| cookie.reply().ok())
 			.is_some_and(|reply| reply.supported);
+		let text_mapping = TextMapping::new(Arc::clone(&conn));
 		Ok(Self {
 			conn,
 			root,
@@ -169,6 +177,7 @@ impl X11Input {
 			mpx: None,
 			mpx_unavailable,
 			xkb,
+			text_mapping,
 		})
 	}
 
@@ -287,17 +296,18 @@ impl X11Input {
 		input: &ElementInput,
 		prepare: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		self.keymap = Keymap::core(&self.conn)?;
+		self.keymap = Keymap::xtest(&self.conn)?;
 		let keys = match input {
 			ElementInput::Text(text) => Keys::Text(text),
 			ElementInput::Chord(keys) => Keys::Chord(keys),
 		};
-		let steps = keys.plan(&self.keymap)?;
-		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
-			this.check_user()?;
-			prepare()?;
-			this.check_keyboard_grab(window)?;
-			this.xtest_steps(&steps, keys)
+		self.with_planned_keys(keys, |this, plan| {
+			this.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+				this.check_user()?;
+				prepare()?;
+				this.check_keyboard_grab(window)?;
+				this.deliver_planned(plan, keys, None)
+			})
 		})
 	}
 
@@ -398,16 +408,14 @@ impl X11Input {
 			Keymap::xtest(&self.conn)?
 		};
 		match (target, mode) {
-			(Target::Desktop | Target::Display(_), _) => {
-				let steps = keys.plan(&self.keymap)?;
-				self.xtest_steps(&steps, keys)
-			},
+			(Target::Desktop | Target::Display(_), _) => self.xtest_keys(keys),
 			(Target::Window(id), DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus) => {
 				let window = parse_window(id)?;
-				let steps = keys.plan(&self.keymap)?;
-				self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
-					this.check_keyboard_grab(window)?;
-					this.xtest_steps(&steps, keys)
+				self.with_planned_keys(keys, |this, plan| {
+					this.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+						this.check_keyboard_grab(window)?;
+						this.deliver_planned(plan, keys, None)
+					})
 				})
 			},
 			(Target::Window(id), DeliveryMode::Background) => {
@@ -426,8 +434,7 @@ impl X11Input {
 					"its toolkit needs core input, which cannot preserve MPX focus isolation",
 				));
 			}
-			let steps = keys.plan(&self.keymap)?;
-			return self.send_key_steps(window, &steps, keys.duration());
+			return self.send_keys(window, keys);
 		}
 		let pid = self.wm().owning_pid(window);
 		// Empty text plans no keys, so it stays the no-op it is everywhere.
@@ -479,8 +486,7 @@ impl X11Input {
 				),
 			));
 		}
-		let steps = keys.plan(&self.keymap)?;
-		self.send_key_steps(window, &steps, keys.duration())
+		self.send_keys(window, keys)
 	}
 
 	/// Starts from the worker's admission ([`Self::admit_takeover`]), failing
@@ -859,6 +865,62 @@ impl X11Input {
 		}
 	}
 
+	fn with_planned_keys<'a>(
+		&mut self,
+		keys: Keys<'a>,
+		body: impl FnOnce(&mut Self, PlannedKeys<'a>) -> CoreResult<()>,
+	) -> CoreResult<()> {
+		let plan = if let Keys::Text(text) = keys {
+			let mut segments = self.text_mapping.plan(&mut self.keymap, text)?.into_iter();
+			let steps = if let Some(first) = segments.next() {
+				self.text_mapping.bind(&mut self.keymap, first)?;
+				self.keymap.plan_text(first)?
+			} else {
+				Vec::new()
+			};
+			PlannedKeys { steps, remaining: segments.collect() }
+		} else {
+			self.text_mapping.hide(&mut self.keymap);
+			PlannedKeys { steps: keys.plan(&self.keymap)?, remaining: Vec::new() }
+		};
+		let before = self.text_mapping.presses();
+		body(self, plan).map_err(|mut error| {
+			if matches!(keys, Keys::Text(_)) && self.text_mapping.presses() != before {
+				error
+					.message
+					.push_str("; part of the text was sent before this error");
+			}
+			error
+		})
+	}
+
+	fn deliver_planned(
+		&mut self,
+		plan: PlannedKeys<'_>,
+		keys: Keys<'_>,
+		window: Option<Window>,
+	) -> CoreResult<()> {
+		let deliver = |this: &Self, steps: &[KeyStep]| match window {
+			Some(window) => this.send_key_steps(window, steps, keys.duration()),
+			None => this.xtest_steps(steps, keys),
+		};
+		deliver(self, &plan.steps)?;
+		for segment in plan.remaining {
+			self.text_mapping.bind(&mut self.keymap, segment)?;
+			let steps = self.keymap.plan_text(segment)?;
+			deliver(self, &steps)?;
+		}
+		Ok(())
+	}
+
+	fn xtest_keys(&mut self, keys: Keys<'_>) -> CoreResult<()> {
+		self.with_planned_keys(keys, |this, plan| this.deliver_planned(plan, keys, None))
+	}
+
+	fn send_keys(&mut self, window: Window, keys: Keys<'_>) -> CoreResult<()> {
+		self.with_planned_keys(keys, |this, plan| this.deliver_planned(plan, keys, Some(window)))
+	}
+
 	/// Sends `steps` through `XTest`. A `text` run is typed through a
 	/// [`NeutralKeyboard`], so the user's locks, latches and layout group do not
 	/// change the characters; chords and holds keep them, so a Caps Lock or
@@ -970,7 +1032,7 @@ impl X11Input {
 			self.check_takeover_focus()?;
 		}
 		self.send_xtest(press, || {
-			self
+			let cookie = self
 				.conn
 				.xtest_fake_input(
 					if press {
@@ -985,9 +1047,11 @@ impl X11Input {
 					0,
 					0,
 				)
-				.map_err(input_failed)?
-				.check()
-				.map_err(input_failed)
+				.map_err(input_failed)?;
+			if press {
+				self.text_mapping.pressed(keycode);
+			}
+			cookie.check().map_err(input_failed)
 		})
 	}
 
@@ -1036,7 +1100,7 @@ impl X11Input {
 			state,
 			same_screen: true,
 		};
-		self
+		let result = self
 			.conn
 			.send_event(
 				false,
@@ -1050,7 +1114,11 @@ impl X11Input {
 			)
 			.map_err(input_failed)?
 			.check()
-			.map_err(input_failed)
+			.map_err(input_failed);
+		if press {
+			self.text_mapping.pressed(keycode);
+		}
+		result
 	}
 
 	fn coordinates(&self, window: Window, x: f64, y: f64) -> CoreResult<(i16, i16, i16, i16)> {
@@ -2270,3 +2338,7 @@ mod tests {
 
 #[cfg(test)]
 pub(super) mod named_change_tests;
+
+#[cfg(test)]
+#[path = "remap_tests.rs"]
+mod remap_tests;

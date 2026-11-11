@@ -23,7 +23,10 @@
 
 use std::{
 	fs, io,
-	sync::atomic::{AtomicU16, Ordering},
+	sync::{
+		Arc,
+		atomic::{AtomicU16, Ordering},
+	},
 	time::{Duration, Instant},
 };
 
@@ -46,6 +49,7 @@ use x11rb::{
 use super::{
 	input::button_detail,
 	keymap::{self, KeyStep, Keymap},
+	text_mapping::TextMapping,
 	uinput::{UInputDevice, X_KEYCODE_OFFSET},
 	wm::{Atoms, Wm, refusal},
 };
@@ -102,7 +106,7 @@ static NONCE: AtomicU16 = AtomicU16::new(1);
 type ReleaseEvents = std::cell::RefCell<Box<dyn FnMut() -> Option<Event> + Send>>;
 
 pub(super) struct Mpx {
-	conn:            RustConnection,
+	conn:            Arc<RustConnection>,
 	root:            Window,
 	atoms:           Atoms,
 	/// Bottom-right screen corner: the virtual cursor rests there between
@@ -114,6 +118,7 @@ pub(super) struct Mpx {
 	pointer:         UInputDevice,
 	pointer_slave:   u16,
 	keyboard:        Option<VirtualKeyboard>,
+	text_mapping:    TextMapping,
 	/// A timeout can leave kernel events in flight. Never retarget that pair
 	/// to another window after an uncertain dispatch.
 	uncertain:       bool,
@@ -215,6 +220,7 @@ impl<'a> ReleaseOrder<'a> {
 impl Mpx {
 	pub(super) fn create() -> CoreResult<Self> {
 		let (conn, screen) = x11rb::connect(None).map_err(mpx_failed)?;
+		let conn = Arc::new(conn);
 		let (root, park) = {
 			let info = &conn.setup().roots[screen];
 			let corner = |size: u16| i16::try_from(size.saturating_sub(1)).unwrap_or(i16::MAX);
@@ -264,6 +270,7 @@ impl Mpx {
 			return Err(error);
 		}
 		set_flat_acceleration(&conn, pointer_slave);
+		let text_mapping = TextMapping::new(Arc::clone(&conn));
 		let mpx = Self {
 			conn,
 			root,
@@ -279,6 +286,7 @@ impl Mpx {
 			sent: false,
 			#[cfg(test)]
 			release_events: None,
+			text_mapping,
 		};
 		mpx.park();
 		Ok(mpx)
@@ -452,8 +460,25 @@ impl Mpx {
 
 	pub(super) fn type_text(&mut self, target: Window, text: &str) -> CoreResult<()> {
 		self.begin(false)?;
-		let steps = self.keyboard_keymap()?.plan_text(text)?;
-		self.deliver_keys(target, &steps)
+		let mut keymap = self.keyboard_keymap()?;
+		let segments = self.text_mapping.plan(&mut keymap, text)?;
+		let before = self.text_mapping.presses();
+		let result = (|| {
+			for segment in segments {
+				self.text_mapping.bind(&mut keymap, segment)?;
+				let steps = keymap.plan_text(segment)?;
+				self.deliver_keys(target, &steps)?;
+			}
+			Ok(())
+		})();
+		result.map_err(|mut error: DesktopError| {
+			if self.text_mapping.presses() != before {
+				error
+					.message
+					.push_str("; part of the text was sent before this error");
+			}
+			error
+		})
 	}
 
 	pub(super) fn key_chord(&mut self, target: Window, keys: &[KeyName]) -> CoreResult<()> {
@@ -614,7 +639,11 @@ impl Mpx {
 				}
 			}
 			index += 1;
-			keyboard.device.key(step.keycode, step.press)
+			keyboard.device.key_written(step.keycode, step.press, || {
+				if step.press {
+					self.text_mapping.pressed(step.keycode);
+				}
+			})
 		})?;
 		let releases = steps.iter().filter(|step| !step.press).count();
 		if releases == 0 {
@@ -914,7 +943,9 @@ impl Mpx {
 	fn keyboard_keymap(&mut self) -> CoreResult<Keymap> {
 		let slave = self.ensure_keyboard()?.slave;
 		// The desktop can reconfigure a hot-plugged device between actions.
-		Keymap::device(&self.conn, slave)
+		let mut map = Keymap::mpx(&self.conn, slave, self.master_keyboard)?;
+		self.text_mapping.hide(&mut map);
+		Ok(map)
 	}
 
 	fn ensure_keyboard(&mut self) -> CoreResult<&mut VirtualKeyboard> {
@@ -1022,6 +1053,7 @@ impl Mpx {
 
 impl Drop for Mpx {
 	fn drop(&mut self) {
+		let _ = self.text_mapping.finish();
 		// A cancelled or timed-out call can leave events of the slaves in flight;
 		// park and free the pair only once the server has dropped them, so a late
 		// motion or release never lands at the park corner or under the next
@@ -2336,7 +2368,9 @@ mod tests {
 			.find(|info| info.type_ == DeviceType::MASTER_KEYBOARD)
 			.unwrap()
 			.deviceid;
+		let conn = Arc::new(conn);
 		Mpx {
+			text_mapping: TextMapping::new(Arc::clone(&conn)),
 			conn,
 			root,
 			atoms,
