@@ -2,7 +2,6 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { EvalPreludeDefinition } from "../../eval/preludes";
 import { redactUrlForLog } from "../../mcp/json-rpc";
-import browserGuidance from "../../prompts/system/browser-guidance.md" with { type: "text" };
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
 import userSessionGuidance from "../../prompts/system/browser-user-session.md" with { type: "text" };
 import x11Guidance from "../../prompts/system/browser-x11.md" with { type: "text" };
@@ -56,11 +55,7 @@ export function createBrowserPreludeDefinition(
 						cmux: fallback.kind === "cmux",
 					})
 				: undefined;
-			return prompt.render(browserGuidance, {
-				userSession: userSessionGuidance.trim(),
-				relay,
-				x11: browserX11Guidance(session.settings),
-			}).trim();
+			return [userSessionGuidance.trim(), relay, browserX11Guidance(session.settings)].filter(Boolean).join("\n\n");
 		},
 		javascript: browserJavascript,
 		python: browserPython,
