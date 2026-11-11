@@ -2,7 +2,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
-import { runSharpshooterConsolidation } from "./consolidate";
+import { runSharpshooterConsolidation, sharpshooterNextConsolidationAt } from "./consolidate";
 import { readSharpshooterState, sharpshooterBankDir } from "./paths";
 import { sharpshooterQueueDepth } from "./queue";
 
@@ -38,7 +38,7 @@ export function startSharpshooterScheduler(options: {
 				readSharpshooterState(options.agentDir, options.cwd),
 			]);
 			const intervalMinutes = cfgSharpshooterIntervalMinutes.get(options.settings);
-			const due = Date.now() - state.lastConsolidatedAt >= intervalMinutes * 60_000;
+			const due = Date.now() >= sharpshooterNextConsolidationAt(state, intervalMinutes);
 			if (depth === 0 && !due) return;
 			await runSharpshooterConsolidation(options);
 		} catch (error) {

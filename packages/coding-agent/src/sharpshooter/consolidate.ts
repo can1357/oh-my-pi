@@ -31,6 +31,16 @@ import { cfgSharpshooterIntervalMinutes } from "./settings";
 
 const PROJECT_DOC_TOKEN_LIMIT = 6000;
 
+/**
+ * Output budget for one consolidation reply: complete rewrites of all three files at the
+ * {@link SHARPSHOOTER_MAX_FILE_LINES} ceiling plus medium reasoning over the whole backlog.
+ */
+const CONSOLIDATION_MAX_TOKENS = 32_768;
+
+/** Floor and ceiling of the retry delay after a failed consolidation pass. */
+const MIN_RETRY_BACKOFF_MS = 60_000;
+const MAX_RETRY_BACKOFF_MS = 6 * 60 * 60_000;
+
 const replaceMemoryFilesTool = {
 	name: "replace_memory_files",
 	description: "Replace complete sharpshooter memory files after consolidating queued decision deltas.",
@@ -111,6 +121,30 @@ export async function runSharpshooterConsolidation(options: {
 	}
 }
 
+/**
+ * Earliest wall-clock ms at which a non-forced consolidation may run.
+ *
+ * One interval after the last completed pass; after consecutive failures the next attempt
+ * waits `interval × 2^(failures-1)` (clamped to [1 min, 6 h]) past the last failure, so a
+ * bank that keeps failing does not re-send its full input on every scheduler tick.
+ * Shared by the consolidation gate, the scheduler, and `/memory diagnose`.
+ */
+export function sharpshooterNextConsolidationAt(state: SharpshooterState, intervalMinutes: number): number {
+	const intervalMs = Math.max(0, intervalMinutes) * 60_000;
+	const next = state.lastConsolidatedAt + intervalMs;
+	const failures = consecutiveFailures(state);
+	if (failures === 0 || !state.lastError) return next;
+	const backoffMs = Math.min(MAX_RETRY_BACKOFF_MS, Math.max(MIN_RETRY_BACKOFF_MS, intervalMs) * 2 ** (failures - 1));
+	return Math.max(next, state.lastError.at + backoffMs);
+}
+
+/** Failures recorded since the last completed pass; an error older than that pass is stale. */
+function consecutiveFailures(state: SharpshooterState): number {
+	const error = state.lastError;
+	if (!error || error.at < state.lastConsolidatedAt) return 0;
+	return error.failures ?? 1;
+}
+
 async function consolidateLocked(
 	options: {
 		agentDir: string;
@@ -125,7 +159,7 @@ async function consolidateLocked(
 	const state = await readSharpshooterState(options.agentDir, options.cwd);
 	try {
 		const intervalMinutes = cfgSharpshooterIntervalMinutes.get(options.settings);
-		if (!options.force && Date.now() - state.lastConsolidatedAt < intervalMinutes * 60_000) {
+		if (!options.force && Date.now() < sharpshooterNextConsolidationAt(state, intervalMinutes)) {
 			return { ran: false, reason: "not_due" };
 		}
 
@@ -155,6 +189,10 @@ async function consolidateLocked(
 			maxFileLines: SHARPSHOOTER_MAX_FILE_LINES,
 		});
 
+		const maxTokens =
+			model.maxTokens !== null && model.maxTokens > 0
+				? Math.min(CONSOLIDATION_MAX_TOKENS, model.maxTokens)
+				: CONSOLIDATION_MAX_TOKENS;
 		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(
@@ -167,7 +205,7 @@ async function consolidateLocked(
 					{
 						apiKey: options.modelRegistry.resolver(model, options.sessionId),
 						sessionId: options.sessionId,
-						maxTokens: 8192,
+						maxTokens,
 						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 						toolChoice: "required",
 					},
@@ -176,6 +214,11 @@ async function consolidateLocked(
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
+		}
+		if (response.stopReason === "length") {
+			throw new Error(
+				`sharpshooter consolidation response truncated at the ${maxTokens}-token output limit before replace_memory_files completed`,
+			);
 		}
 
 		const files = parseReplacementFiles(response.content, currentFiles);
@@ -303,7 +346,7 @@ async function recordConsolidationError(
 	try {
 		await writeSharpshooterState(agentDir, cwd, {
 			...state,
-			lastError: { at: Date.now(), message },
+			lastError: { at: Date.now(), message, failures: consecutiveFailures(state) + 1 },
 		});
 	} catch {
 		// The original consolidation error is more actionable than a secondary state-write failure.
