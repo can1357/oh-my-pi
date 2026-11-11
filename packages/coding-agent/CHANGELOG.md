@@ -39,6 +39,7 @@
 - The shell's built-in `jq` no longer slows down quadratically on repeated updates such as `reduce range(n) as $i ([]; . + [$i])`
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
+- `read` returns a timestamped transcript of audio files and of a video's soundtrack (`clip.mp4:transcript`) when you're logged in to a model that hears audio, such as Gemini through a Google login or an audio model on OpenRouter; its times are video frame selectors. Without one, an audio read shows its duration and codec instead of refusing it as binary ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

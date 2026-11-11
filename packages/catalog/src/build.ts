@@ -24,6 +24,8 @@ import {
 	type AntigravityModelWireProfile,
 	type Api,
 	type EffectiveTokenCost,
+	type InputModality,
+	isInputModality,
 	MODEL_KINDS,
 	type Model,
 	type ModelAccountAccess,
@@ -43,8 +45,8 @@ function objectPayload(value: unknown): object | undefined {
 }
 
 /** Narrow a compiled `input-modalities` axis value to the model input union. */
-function isInputModalities(value: unknown): value is ("text" | "image")[] {
-	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
+function isInputModalities(value: unknown): value is InputModality[] {
+	return Array.isArray(value) && value.every(isInputModality);
 }
 
 /**

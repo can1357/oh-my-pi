@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Devin requests no longer send `temperature: 0`: the catalog's `temperature-floor` raises it to `0.0001`, so session titles and Mnemopi memory extraction work on Devin instead of failing with Cascade's opaque `invalid_argument` and silently falling back to another model ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))

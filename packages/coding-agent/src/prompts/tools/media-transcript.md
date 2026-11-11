@@ -1,0 +1,1 @@
+Transcribe all speech in this recording verbatim, without skipping or summarizing anything. Write one line per sentence (split a sentence longer than about 10 seconds at a clause), never one line per word, formatted exactly as `[m:ss.s] text` where the time is when that line starts in this recording. Output only those lines; if there is no speech, output only `(no speech)`.
