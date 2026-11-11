@@ -21,6 +21,10 @@
 
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
+### Fixed
+
+- A relay `app.target` that matches no tab now says to omit `target` to open omp's own tab, instead of "omit it to use the active tab", which relay opens stopped doing when they began opening their own tab
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
@@ -33,7 +37,6 @@
 
 ### Fixed
 
-- A relay `app.target` that matches no tab now says to omit `target` to open omp's own background tab (`browser.open({ name, url, app: { relay: true } })`), instead of "omit it to use the active tab", which relay opens stopped doing when they began opening their own tab
 - Claude auto-redeem now spends a full saved reset on an account blocked by its weekly limit when the reset also clears the Fable cap; such resets were treated as Fable-only and skipped while Fable usage had room ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
 - Fixed agents showing as idle in the Agent Hub while still running after a failed streaming edit preview (`edit.streamingAbort`) auto-recovered the turn ([#18790](https://github.com/can1357/oh-my-pi/pull/18790) by [@H4vC](https://github.com/H4vC))
 - A browser call on a tab that is not open now says to open it with `await browser.open({ name })` (Python: `await browser.open(name=…)`) and the url and app it was opened with, instead of pointing at the removed `action:"open"` ([#18739](https://github.com/can1357/oh-my-pi/pull/18739) by [@will-bogusz](https://github.com/will-bogusz))
