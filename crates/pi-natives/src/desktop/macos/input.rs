@@ -486,29 +486,27 @@ fn require_phone_screen(window: &DesktopWindow, remote: Option<RemoteScreen>) ->
 /// The current keyboard layout's lookup from character to key in `layer`;
 /// `None` when the layout has no Unicode key layout data to look keys up in.
 fn layout_strokes(layer: KeyLayer) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
-	Ok(map_layout_strokes(layer, Keymap::current()?))
+	Ok(Keymap::current()?.map(|keymap| layout_lookup(layer, keymap)))
 }
 
 /// Read after the takeover target and its element have keyboard focus:
 /// macOS may select that document's remembered input source on activation.
 fn fresh_layout_strokes(layer: KeyLayer) -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
-	Ok(map_layout_strokes(layer, Keymap::fresh()?))
+	Ok(Keymap::fresh()?.map(|keymap| layout_lookup(layer, keymap)))
 }
 
-fn map_layout_strokes(
+fn layout_lookup(
 	layer: KeyLayer,
-	keymap: Option<std::sync::Arc<Keymap>>,
-) -> Option<impl Fn(char) -> Option<Keystroke>> {
-	keymap.map(|keymap| {
-		move |character| match layer {
-			KeyLayer::Typing => keymap.stroke(character),
-			KeyLayer::Command => keymap.command_key(character).map(|code| Keystroke {
-				code,
-				shift: false,
-				option: false,
-			}),
-		}
-	})
+	keymap: std::sync::Arc<Keymap>,
+) -> impl Fn(char) -> Option<Keystroke> {
+	move |character| match layer {
+		KeyLayer::Typing => keymap.stroke(character),
+		KeyLayer::Command => keymap.command_key(character).map(|code| Keystroke {
+			code,
+			shift: false,
+			option: false,
+		}),
+	}
 }
 
 /// [`physical_modifier_check`] for `window` when `remote` forwards the
