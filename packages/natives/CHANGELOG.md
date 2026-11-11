@@ -63,6 +63,13 @@
 - Fixed X11 clicks, holds, drags and scrolls on a window, in the background and in takeover, reporting success while that app had a popup menu open, such as one an earlier session opened and left: the menu took the press and closed, and nothing reached the window. Such a call now fails with nothing sent, naming the popup (`BackgroundUnavailable` in the background, `InputFailed` in takeover); a press inside the popup or its submenus still goes through ([#19044](https://github.com/can1357/oh-my-pi/pull/19044) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Linux X11 background keys and clicks going into the window you were using, while reported delivered, after a screen lock or a switch to another virtual terminal and back ([#19023](https://github.com/can1357/oh-my-pi/pull/19023) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Windows takeover typing handing the foreground back before the target had read the typed keys, which sent the end of the text to the user's window while reporting success (a Chrome field kept 218 to 237 of 2,000 characters); typing now waits up to 5 s for the focused control's thread to read them, and `unconfirmed` says why when it could not see that ([#19037](https://github.com/can1357/oh-my-pi/pull/19037) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows computer keys and shortcuts typing the wrong characters when the receiving app uses a different keyboard layout from omp.
+### Added
+
+- `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
+- `DirectoryWatcher` changes say whether their entry is a directory, and `close()` returns without waiting for the watcher thread to cancel its reads (a network round trip on shares)
+### Fixed
+
 - Fixed `setValue` errors on macOS and Linux repeating the written text, which could expose a password typed into a field that did not report itself as a password field ([#18989](https://github.com/can1357/oh-my-pi/pull/18989) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed clicking an element of a macOS suggestion list, such as a row of Safari's password autofill dropdown, failing with `AxFailed: AX element has no identifiable owning window` ([#19004](https://github.com/can1357/oh-my-pi/pull/19004) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS desktop capabilities claiming `globalEscape` while Secure Event Input is on (a focused password field, an authentication dialog, a terminal's secure keyboard entry), when macOS hides every key from the Escape and user-input monitors; capabilities now report `secureInput` and the holding app in `secureInputApp` ([#18982](https://github.com/can1357/oh-my-pi/pull/18982) by [@will-bogusz](https://github.com/will-bogusz))
@@ -107,10 +114,6 @@
 - Fixed macOS window screenshots drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; windows spanning displays or partly off screen are captured whole at their on-screen size, except while a sheet larger than the window is open ([#17757](https://github.com/can1357/oh-my-pi/pull/17757) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed Windows computer keys and shortcuts typing the wrong characters when the receiving app uses a different keyboard layout from omp.
 
 ## [18.18.8] - 2026-11-11
 

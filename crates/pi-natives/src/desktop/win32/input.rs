@@ -83,8 +83,13 @@ fn keyboard_layout(target: Option<HWND>) -> HKL {
 		|| unsafe { GetForegroundWindow() },
 		|hwnd| {
 			// SAFETY: Both calls accept scalar window/thread identifiers.
-			unsafe { GetKeyboardLayout(GetWindowThreadProcessId(hwnd, std::ptr::null_mut())) }
+			let layout =
+				unsafe { GetKeyboardLayout(GetWindowThreadProcessId(hwnd, std::ptr::null_mut())) };
+			(!layout.is_null()).then_some(layout)
 		},
+		// Console window threads expose no layout; retain the worker's mapping.
+		// SAFETY: Thread ID zero requests this thread's current layout.
+		|| unsafe { GetKeyboardLayout(0) },
 	)
 }
 
@@ -236,8 +241,7 @@ mod background {
 		ax::Win32Ax,
 		delivery::{
 			EventKind, TargetTraits, TextUnit, is_chromium_class, non_client_drag_region,
-			posted_modifiers_dropped, posts_double_click, text_input_unsupported, text_units,
-			would_be_silently_dropped,
+			posts_double_click, text_input_unsupported, text_units, would_be_silently_dropped,
 		},
 		window,
 	};
@@ -615,7 +619,7 @@ mod background {
 				let mapped = unsafe { VkKeyScanExW(units[0], layout) };
 				if mapped == -1 {
 					return Err(DesktopError::input_failed(format!(
-						"{character:?} is absent from the active keyboard layout"
+						"{character:?} is absent from the receiving keyboard layout"
 					)));
 				}
 				let bytes = mapped.to_ne_bytes();
@@ -686,7 +690,8 @@ mod background {
 		/// ([`ensure_unmodified`]), so Alt is never down and no transition is a
 		/// `WM_SYSKEY*` message.
 		fn transition(&self, vk: u16, down: bool) -> CoreResult<()> {
-			// SAFETY: MapVirtualKeyExW is a pure scalar lookup in the receiving layout.
+			// SAFETY: MapVirtualKeyExW is a pure scalar lookup in the receiving
+			// layout.
 			let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, self.layout) } & 0xff;
 			let mut bits = 1u32 | (scan << 16);
 			if is_extended(vk) {
@@ -716,16 +721,17 @@ mod background {
 	}
 
 	/// Refuses background input holding a modifier before anything is posted:
-	/// see [`posted_modifiers_dropped`]. Every key was already resolved.
+	/// see [`super::super::keyboard::posted_keys_dropped`]. Every key was
+	/// already resolved.
 	fn ensure_unmodified(
 		hwnd: HWND,
 		layout: super::HKL,
 		keys: impl IntoIterator<Item = KeyName>,
 	) -> CoreResult<()> {
-		let keys = keys
-			.into_iter()
-			.map(|key| (key, virtual_key(key, layout).map_or(0, |(_, implicit)| implicit)));
-		posted_modifiers_dropped(keys).map_or(Ok(()), |reason| {
+		super::super::keyboard::posted_keys_dropped(keys, layout, |key, layout| {
+			virtual_key(key, layout).map_or(0, |(_, implicit)| implicit)
+		})
+		.map_or(Ok(()), |reason| {
 			// Name the top-level window the caller selected, not the control.
 			let root = window::root(hwnd);
 			let class = window::class_name(root);
@@ -742,8 +748,9 @@ mod background {
 		keys: &[KeyName],
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
+		let mut emitter = KeyEmitter { hwnd, layout: super::keyboard_layout(Some(hwnd)) };
 		for &key in keys {
-			virtual_key(key, super::keyboard_layout(Some(hwnd)))?;
+			virtual_key(key, emitter.layout)?;
 		}
 		if !keys.is_empty() {
 			let class = window::class_name(hwnd);
@@ -761,9 +768,7 @@ mod background {
 				)));
 			}
 		}
-		let layout = super::keyboard_layout(Some(hwnd));
-		ensure_unmodified(hwnd, layout, keys.iter().copied())?;
-		let mut emitter = KeyEmitter { hwnd, layout };
+		ensure_unmodified(hwnd, emitter.layout, keys.iter().copied())?;
 		with_held_keys(
 			&mut emitter,
 			keys.iter().copied(),
