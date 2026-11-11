@@ -617,9 +617,13 @@ export class SpeculativeOperationCoordinator {
 		tool: AgentTool | undefined,
 		toolCall: AgentToolCall,
 		args: Record<string, unknown>,
+		earlierEffectsSettled?: Promise<void>,
 	): Promise<SpeculativeRawOutcome | undefined> {
 		const candidate = this.#candidates.get(toolCall.id);
 		if (candidate?.source !== "direct") return undefined;
+		// Final assistant order can differ from admission order. Validate only
+		// after the earlier shared writers have exposed their final effects.
+		await earlierEffectsSettled;
 		return this.#commitCandidate(candidate, tool, toolCall, args);
 	}
 
