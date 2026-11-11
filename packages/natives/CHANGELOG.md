@@ -8,6 +8,10 @@
 - Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- macOS input from a second omp process no longer refuses with `UserIntervened` after the first process takes over a click in the same app; hardware clicks still pause input in that app
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

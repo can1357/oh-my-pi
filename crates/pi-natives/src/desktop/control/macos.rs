@@ -11,6 +11,7 @@ use std::{
 	time::Instant,
 };
 
+use objc2_core_foundation::CGPoint;
 use parking_lot::Mutex;
 
 use super::{CoreResult, DesktopError, EmergencyStop, intervention::UserInputs};
@@ -26,6 +27,7 @@ const SOURCE_UNIX_PID: u32 = 41;
 const TARGET_UNIX_PID: u32 = 40;
 const KEYBOARD_KEYCODE: u32 = 9;
 const LEFT_MOUSE_DOWN: u32 = 1;
+const LEFT_MOUSE_UP: u32 = 2;
 const RIGHT_MOUSE_DOWN: u32 = 3;
 const KEY_DOWN: u32 = 10;
 const OTHER_MOUSE_DOWN: u32 = 25;
@@ -60,6 +62,7 @@ unsafe extern "C" {
 		user: Ref,
 	) -> Ref;
 	fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
+	fn CGEventGetLocation(event: Ref) -> CGPoint;
 	fn CGEventGetFlags(event: Ref) -> u64;
 	fn CGEventTapEnable(tap: Ref, enable: bool);
 }
@@ -408,8 +411,15 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 /// Whether an event came from someone other than this process: the user's
 /// hardware, or a tool such as dictation that posts for them under its own
 /// process id.
-const fn foreign(tag: i64, source_pid: i64, own_pid: i64) -> bool {
-	tag != SYNTHETIC_EVENT_TAG && source_pid != own_pid
+const fn foreign(tag: i64, source_pid: i64, own_pid: i64, kind: u32, point: CGPoint) -> bool {
+	// Raw make-key records have no tag; another omp process posts them as
+	// left clicks at the origin. Hardware input still has source pid zero.
+	let make_key = tag == 0
+		&& source_pid != 0
+		&& matches!(kind, LEFT_MOUSE_DOWN | LEFT_MOUSE_UP)
+		&& point.x == 0.0
+		&& point.y == 0.0;
+	tag != SYNTHETIC_EVENT_TAG && source_pid != own_pid && !make_key
 }
 
 /// The event types the user-input monitor's tap listens to: key presses and
@@ -484,14 +494,15 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 	}
 	if !event.is_null() {
 		// SAFETY: documented read-only CGEvent fields.
-		let (tag, source, target) = unsafe {
+		let (tag, source, target, point) = unsafe {
 			(
 				CGEventGetIntegerValueField(event, SOURCE_USER_DATA),
 				CGEventGetIntegerValueField(event, SOURCE_UNIX_PID),
 				CGEventGetIntegerValueField(event, TARGET_UNIX_PID),
+				CGEventGetLocation(event),
 			)
 		};
-		if foreign(tag, source, i64::from(std::process::id()))
+		if foreign(tag, source, i64::from(std::process::id()), kind, point)
 			&& let Some(pid) = input_target(kind, target, front_pid)
 		{
 			context.inner.record(pid, Instant::now());
@@ -772,14 +783,21 @@ mod tests {
 	fn the_users_and_their_tools_input_is_foreign_and_this_processs_is_not() {
 		let own = 900;
 		// Hardware input carries no source process.
-		assert!(foreign(0, 0, own));
+		assert!(foreign(0, 0, own, LEFT_MOUSE_DOWN, CGPoint::ZERO));
 		// A dictation tool posts under its own process id.
-		assert!(foreign(0, 4242, own));
+		assert!(foreign(0, 4242, own, KEY_DOWN, CGPoint::ZERO));
 		// Anything this process posts carries its tag, whoever relays it.
-		assert!(!foreign(SYNTHETIC_EVENT_TAG, 0, own));
-		assert!(!foreign(SYNTHETIC_EVENT_TAG, 4242, own));
+		assert!(!foreign(SYNTHETIC_EVENT_TAG, 0, own, LEFT_MOUSE_DOWN, CGPoint::ZERO));
+		assert!(!foreign(SYNTHETIC_EVENT_TAG, 4242, own, LEFT_MOUSE_DOWN, CGPoint::ZERO));
 		// An untagged event this process posted is still its own.
-		assert!(!foreign(0, own, own));
+		assert!(!foreign(0, own, own, LEFT_MOUSE_DOWN, CGPoint::ZERO));
+		// Another omp process's raw make-key records cannot carry the tag.
+		assert!(!foreign(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::ZERO));
+		assert!(!foreign(0, 4242, own, LEFT_MOUSE_UP, CGPoint::ZERO));
+		assert!(foreign(0, 0, own, LEFT_MOUSE_UP, CGPoint::ZERO));
+		assert!(foreign(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::new(0.0, 1.0)));
+		assert!(foreign(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::new(1.0, 0.0)));
+		assert!(foreign(0, 4242, own, RIGHT_MOUSE_DOWN, CGPoint::ZERO));
 	}
 
 	#[test]
