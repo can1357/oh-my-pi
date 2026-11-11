@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import {
+	applyModelMentionCompletion,
 	createModelMentionSource,
 	getModelMentionSuggestions,
 } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
@@ -141,6 +142,47 @@ describe("createModelMentionSource", () => {
 
 		available.push(makeModel("c", "example-3"));
 		expect(selectors("example")).toContain("c/example-3");
+	});
+
+	test("offers roles beside models and completes them through the existing model selector flow", async () => {
+		await initTheme();
+		const worker = buildModel({
+			...makeModel("demo", "worker"),
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
+		});
+		const other = makeModel("demo", "other");
+		const image = makeModel("demo", "image", { kind: "image" });
+		const settings = Settings.isolated({ modelRoles: { smol: "demo/worker:high", image: "demo/image" } });
+		let scoped: Model[] = [];
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(settings),
+			registry: {
+				getError: () => undefined,
+				getAvailable: () => [worker, other, image],
+				getAll: () => [worker, other, image],
+			},
+			scopedModels: () => scoped,
+		});
+		const suggestions = (query: string) => {
+			const completion = getModelMentionSuggestions(`^${query}`, candidates);
+			return completion.kind === "matched" ? completion.suggestions.items : [];
+		};
+		const all = suggestions("");
+		const role = all.find(item => item.label === "@smol");
+		expect(role).toMatchObject({ label: "@smol", value: "demo/worker:high" });
+		expect(all.map(item => item.value)).toContain("demo/worker");
+		expect(all.map(item => item.label)).not.toContain("@image");
+		expect(suggestions("smol")).toContainEqual(role!);
+
+		const draft = "use ^@sm";
+		const completed = applyModelMentionCompletion([draft], 0, draft.length, role!, "^@sm");
+		expect(completed.lines).toEqual(["use ^demo/worker:high "]);
+
+		settings.setModelRole("smol", "demo/other");
+		expect(suggestions("@smol")).toEqual([expect.objectContaining({ value: "demo/other" })]);
+		scoped = [worker];
+		expect(suggestions("@smol")).toEqual([]);
 	});
 
 	test("hides an effort row whose selector names an available model outside the picker scope", async () => {
