@@ -28,11 +28,12 @@ pub(in super::super) fn screen_state(
 	let session = session_state();
 	let mut name = [0_u16; 256];
 	let mut needed = 0;
-	// Request only the access needed to read the input desktop's name.
+	// SAFETY: no borrowed pointers; the returned desktop is closed below.
 	let desktop = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
 	let desktop_name = if desktop.is_null() {
 		None
 	} else {
+		// SAFETY: the desktop is open and name is writable for the supplied size.
 		let read = unsafe {
 			GetUserObjectInformationW(
 				desktop,
@@ -42,6 +43,7 @@ pub(in super::super) fn screen_state(
 				&mut needed,
 			)
 		};
+		// SAFETY: this function owns the open desktop and no longer uses it.
 		unsafe { CloseDesktop(desktop) };
 		if read == 0 {
 			None
@@ -50,7 +52,7 @@ pub(in super::super) fn screen_state(
 		}
 	};
 	super::super::types::ScreenState {
-		locked: screen_locked(session, desktop_name),
+		locked:         screen_locked(session, desktop_name),
 		display_asleep: false,
 	}
 }
@@ -64,6 +66,7 @@ fn session_state() -> Option<SessionState> {
 
 	let mut buffer = std::ptr::null_mut();
 	let mut bytes = 0;
+	// SAFETY: both output pointers are valid; WTS owns the returned allocation.
 	let queried = unsafe {
 		WTSQuerySessionInformationW(
 			WTS_CURRENT_SERVER_HANDLE,
@@ -75,8 +78,10 @@ fn session_state() -> Option<SessionState> {
 	};
 	if queried != 0 {
 		let result = if bytes as usize >= size_of::<WTSINFOEXW>() && !buffer.is_null() {
+			// SAFETY: the successful query returned enough bytes for WTSINFOEXW.
 			let info = unsafe { &*buffer.cast::<WTSINFOEXW>() };
 			(info.Level == 1).then(|| {
+				// SAFETY: Level selects the level-one member of the union.
 				let state = unsafe { info.Data.WTSInfoExLevel1 };
 				SessionState {
 					active: state.SessionState == WTSActive,
@@ -86,12 +91,15 @@ fn session_state() -> Option<SessionState> {
 		} else {
 			None
 		};
+		// SAFETY: buffer came from the successful WTS query and is no longer
+		// read.
 		unsafe { WTSFreeMemory(buffer.cast()) };
 		if result.is_some() {
 			return result;
 		}
 	}
 	// A failed extended query can still leave the connection state available.
+	// SAFETY: both output pointers are valid; WTS owns the returned allocation.
 	let queried = unsafe {
 		WTSQuerySessionInformationW(
 			WTS_CURRENT_SERVER_HANDLE,
@@ -105,10 +113,13 @@ fn session_state() -> Option<SessionState> {
 		return None;
 	}
 	let result = if bytes as usize >= size_of::<i32>() && !buffer.is_null() {
-		Some(SessionState { active: unsafe { *buffer.cast::<i32>() } == WTSActive, locked: false })
+		// SAFETY: the successful query returned enough bytes for the state.
+		let active = unsafe { *buffer.cast::<i32>() } == WTSActive;
+		Some(SessionState { active, locked: false })
 	} else {
 		None
 	};
+	// SAFETY: buffer came from the successful WTS query and is no longer read.
 	unsafe { WTSFreeMemory(buffer.cast()) };
 	result
 }
