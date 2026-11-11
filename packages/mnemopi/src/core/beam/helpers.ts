@@ -795,7 +795,11 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 				insertLiveEmbeddings(beam.db, rows, model),
 			);
 			const committed = insertMany(staged);
-			if (committed > 0) forgetCachedEmbeddings(beam.db, staged.map(row => row.memoryId));
+			if (committed > 0)
+				forgetCachedEmbeddings(
+					beam.db,
+					staged.map(row => row.memoryId),
+				);
 			// A recall taken while these vectors were still generating cached an FTS-only ranking, and
 			// committing vectors changes what recall returns -- so that cache must be dropped, or the
 			// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
