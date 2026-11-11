@@ -100,6 +100,10 @@ pub(super) struct Mpx {
 	/// Whether the current call already sent a key, button, wheel or motion
 	/// event, which turns a later refusal into a partial delivery.
 	sent:            bool,
+	/// Replaces only raw-event polling in typing regressions; emission, keymap,
+	/// focus, error mapping and the session gate still run normally.
+	#[cfg(test)]
+	release_events: Option<std::cell::RefCell<Box<dyn FnMut() -> Option<Event>>>>,
 }
 
 /// The uinput keyboard slave, created on the first keyboard or modifier use
@@ -219,6 +223,8 @@ impl Mpx {
 			keyboard: None,
 			uncertain: false,
 			sent: false,
+			#[cfg(test)]
+			release_events: None,
 		};
 		mpx.park();
 		Ok(mpx)
@@ -583,17 +589,31 @@ impl Mpx {
 		let deadline = Instant::now() + KEY_CONFIRM_TIMEOUT;
 		let mut order = ReleaseOrder::new(steps);
 		while !order.done() {
-			match self.conn.poll_for_event() {
+			if Instant::now() >= deadline {
+				break;
+			}
+			#[cfg(test)]
+			let event = if let Some(events) = &self.release_events {
+				events.borrow_mut()().ok_or(x11rb::errors::ConnectionError::UnknownError).map(Some)
+			} else {
+				self.conn.poll_for_event()
+			};
+			#[cfg(not(test))]
+			let event = self.conn.poll_for_event();
+			if Instant::now() >= deadline {
+				break;
+			}
+			match event {
 				Ok(Some(Event::XinputRawKeyRelease(raw)))
 					if raw.deviceid == device || raw.sourceid == device =>
 				{
 					order.observe(raw.detail);
 				},
 				Ok(Some(_)) => {},
-				Ok(None) if Instant::now() < deadline => {
+				Ok(None) => {
 					std::thread::sleep(Duration::from_millis(2));
 				},
-				Ok(None) | Err(_) => break,
+				Err(_) => break,
 			}
 		}
 		order.matched
@@ -1262,29 +1282,116 @@ mod tests {
 		assert_eq!(end, (58, 22));
 	}
 
+	/// Uses an isolated X server for real keymap planning and XI focus. Only
+	/// the kernel write endpoint and the server's raw-event stream are replaced.
+	fn typing_fixture() -> Mpx {
+		let (conn, screen) = x11rb::connect(None).unwrap();
+		let root = conn.setup().roots[screen].root;
+		let atoms = Atoms::intern(&conn).unwrap();
+		let keyboard = conn
+			.xinput_xi_query_device(Device::ALL_MASTER)
+			.unwrap()
+			.reply()
+			.unwrap()
+			.infos
+			.into_iter()
+			.find(|info| info.type_ == DeviceType::MASTER_KEYBOARD)
+			.unwrap()
+			.deviceid;
+		Mpx {
+			conn,
+			root,
+			atoms,
+			park: (0, 0),
+			name: String::new(),
+			master_pointer: 0,
+			master_keyboard: keyboard,
+			pointer: UInputDevice::test_sink(),
+			pointer_slave: 0,
+			keyboard: Some(VirtualKeyboard { device: UInputDevice::test_sink(), slave: keyboard }),
+			uncertain: false,
+			sent: false,
+			release_events: None,
+		}
+	}
+
+	fn release(deviceid: u16, sourceid: u16, detail: u32) -> Event {
+		Event::XinputRawKeyRelease(xinput::RawKeyReleaseEvent {
+			deviceid,
+			sourceid,
+			detail,
+			..Default::default()
+		})
+	}
+
 	#[test]
-	fn a_lost_key_stops_the_release_count_however_many_keys_follow() {
-		let count = |expected: &[u8], reported: &[u32]| {
-			// Each key pressed then released, as text plans it.
-			let steps: Vec<KeyStep> = expected
-				.iter()
-				.flat_map(|&keycode| {
-					[KeyStep { keycode, press: true }, KeyStep { keycode, press: false }]
-				})
-				.collect();
-			let mut order = ReleaseOrder::new(&steps);
-			for &keycode in reported {
-				order.observe(keycode);
+	#[ignore = "requires an isolated X11 display (run under xvfb-run)"]
+	fn typing_loss_fails_and_inhibits_the_next_call() {
+		use crate::desktop::error::ErrorCode;
+		// Complete delivery, resync noise, lost repeat, middle/first loss, and
+		// another slave's matching release must all reach the caller correctly.
+		for (text, indices, foreign, succeeds) in [
+			("abc", vec![0, 1, 2], false, true),
+			("abc", vec![0, 0, 1, 2], false, true),
+			("aa", vec![0], false, false),
+			("abc", vec![0, 2], false, false),
+			("abc", vec![1, 2], false, false),
+			("abc", vec![0, 1, 2], true, false),
+		] {
+			let mut mpx = typing_fixture();
+			let codes: Vec<u32> = mpx.keyboard_keymap().unwrap().plan_text(text).unwrap()
+				.iter().filter(|step| !step.press).map(|step| u32::from(step.keycode)).collect();
+			let device = mpx.master_keyboard;
+			let mut events: std::collections::VecDeque<_> = indices.into_iter()
+				.enumerate().map(|(at, index)| {
+					if foreign && at == 1 {
+						release(device + 100, device + 100, codes[index])
+					} else if at % 2 == 0 {
+						release(device, device + 100, codes[index])
+					} else {
+						release(device + 100, device, codes[index])
+					}
+				}).collect();
+			mpx.release_events = Some(std::cell::RefCell::new(Box::new(move || events.pop_front())));
+			let result = mpx.type_text(mpx.root, text);
+			if succeeds {
+				result.unwrap();
+				assert!(!mpx.uncertain);
+			} else {
+				let error = result.unwrap_err();
+				assert_eq!(error.code, ErrorCode::InputFailed);
+				assert!(error.message.contains("key releases"));
+				assert!(mpx.uncertain);
+				assert_eq!(mpx.type_text(mpx.root, text).unwrap_err().code,
+					ErrorCode::BackgroundUnavailable);
 			}
-			(order.matched, order.done())
-		};
-		assert_eq!(count(&[38, 56, 54], &[38, 56, 54]), (3, true));
-		// A release the server added on resync, between the run's own.
-		assert_eq!(count(&[38, 56, 54], &[38, 50, 56, 54]), (3, true));
-		// "aa" with one `a` lost: the last key alone confirmed it on `main`.
-		assert_eq!(count(&[38, 38], &[38]), (1, false));
-		assert_eq!(count(&[38, 56, 54], &[38, 54]), (1, false));
-		assert_eq!(count(&[38, 56, 54], &[56, 54]), (0, false));
+		}
+	}
+
+	#[test]
+	#[ignore = "requires an isolated X11 display (run under xvfb-run)"]
+	fn typing_deadline_bounds_busy_events_and_rejects_late_releases() {
+		use crate::desktop::error::ErrorCode;
+		let mut mpx = typing_fixture();
+		let code = mpx.keyboard_keymap().unwrap().plan_text("a").unwrap()
+			.into_iter().find(|step| !step.press).unwrap().keycode;
+		let device = mpx.master_keyboard;
+		let mut started = None;
+		mpx.release_events = Some(std::cell::RefCell::new(Box::new(move || {
+			let started = started.get_or_insert_with(Instant::now);
+			// Never an empty queue: even the right key from another slave
+			// must not extend the deadline. The real release arrives too late.
+			let source = if started.elapsed() < KEY_CONFIRM_TIMEOUT + Duration::from_millis(100) {
+				device + 100
+			} else {
+				device
+			};
+			Some(release(source, source, u32::from(code)))
+		})));
+		let started = Instant::now();
+		assert_eq!(mpx.type_text(mpx.root, "a").unwrap_err().code, ErrorCode::InputFailed);
+		assert!(started.elapsed() < KEY_CONFIRM_TIMEOUT + Duration::from_secs(1));
+		assert_eq!(mpx.type_text(mpx.root, "a").unwrap_err().code, ErrorCode::BackgroundUnavailable);
 	}
 
 	#[test]
