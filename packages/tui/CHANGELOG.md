@@ -166,6 +166,7 @@
 
 ### Added
 
+- `TaskToolDetails.dispatchOutcome` optionally identifies task calls rejected before dispatch.
 - Colorful Markdown, on by default (`setMarkdownColorful`): headings by level, bold/italic, inline code and table headers take distinct hues from the theme's `terminal.ansi` palette. `MarkdownTheme` gains optional `strong`, `emphasis` and `tableHeader` roles; `Theme.ansiFg()` paints a palette slot, falling back to the terminal's own palette.
 - Bash cards show incremental Python-like pseudocode with a Raw toggle, failure marks and variable values; the inspector adds layers, split source and timestamp replay. Native hosts draw an inline segmented run box (`shell` = command, `omp.tool.bash.output` = output).
 - `VersionUpdate`, `WelcomeComponent.setVersionUpdate()` and `ComposerWelcomeUpdate.versionUpdate`: the welcome banner shows background self-update progress, readiness or failure.

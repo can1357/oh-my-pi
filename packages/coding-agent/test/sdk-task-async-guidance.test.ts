@@ -13,7 +13,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -81,7 +81,7 @@ async function harness(options: Partial<CreateAgentSessionOptions> = {}, inline 
 		agents: [{ name: "task", description: "Task worker", systemPrompt: "Worker", source: "bundled" }],
 		projectAgentsDir: null,
 	});
-	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+	const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 		await gate.promise;
 		return {
 			index: 0,
@@ -149,10 +149,107 @@ async function harness(options: Partial<CreateAgentSessionOptions> = {}, inline 
 		});
 		return mock.stream(model, context, streamOptions);
 	};
-	return { session, requests, mock };
+	return { session, requests, mock, runSubprocess };
 }
 
 describe("SDK async task guidance", () => {
+	it.each([false, true])("reports atomic preflight rejection through the SDK (batch=%s)", async batch => {
+		const { session } = await harness({
+			settings: Settings.isolated({ "async.enabled": true, "task.batch": batch }),
+		});
+		const task = session.getToolByName("task")!;
+		const register = vi.spyOn(session.asyncJobManager!, "register");
+		const result = await task.execute(
+			"sdk-rejected",
+			batch
+				? {
+						context: "Shared",
+						tasks: [
+							{ agent: "task", name: "valid", task: "Work" },
+							{ agent: "missing", name: "invalid", task: "Work" },
+						],
+					}
+				: { agent: "missing", name: "invalid", task: "Work" },
+		);
+		expect(result.isError).toBe(true);
+		expect((result.details as TaskToolDetails).dispatchOutcome).toBe("rejected-before-dispatch");
+		expect(register).not.toHaveBeenCalled();
+		expect(executorModule.runSubprocess).not.toHaveBeenCalled();
+	});
+
+	it("leaves a successfully scheduled task unclassified", async () => {
+		const { session } = await harness();
+		const result = await session.getToolByName("task")!.execute("sdk-accepted", {
+			agent: "task",
+			name: "worker",
+			task: "Work",
+		});
+		expect((result.details as TaskToolDetails).dispatchOutcome).toBeUndefined();
+		expect((result.details as TaskToolDetails).async?.state).toBe("running");
+	});
+
+	it("keeps reused non-speculative call IDs unknown after another dispatch", async () => {
+		const { session } = await harness();
+		const task = session.getToolByName("task")!;
+		await task.execute("reused", { agent: "task", name: "worker", task: "Work" });
+		const rejected = await task.execute("reused", { agent: "missing", name: "invalid", task: "Work" });
+		expect(rejected.isError).toBe(true);
+		expect((rejected.details as TaskToolDetails).dispatchOutcome).toBeUndefined();
+	});
+
+	it("keeps concurrent executions with the same call ID unknown", async () => {
+		const { session } = await harness();
+		const task = session.getToolByName("task")!;
+		const running = task.execute("concurrent", { agent: "task", name: "worker", task: "Work" });
+		const rejected = await task.execute("concurrent", { agent: "missing", name: "invalid", task: "Work" });
+		expect(rejected.isError).toBe(true);
+		expect((rejected.details as TaskToolDetails).dispatchOutcome).toBeUndefined();
+		await running;
+	});
+
+	it("does not classify a job registration failure as a pre-dispatch rejection", async () => {
+		const { session } = await harness();
+		vi.spyOn(session.asyncJobManager!, "register").mockImplementation(() => {
+			throw new Error("registration failed");
+		});
+		const result = await session.getToolByName("task")!.execute("sdk-registration-error", {
+			agent: "task",
+			name: "worker",
+			task: "Work",
+		});
+		expect((result.details as TaskToolDetails).dispatchOutcome).toBeUndefined();
+		expect(result.content.some(part => part.type === "text" && part.text.includes("registration failed"))).toBe(true);
+	});
+
+	it("does not classify a settled child failure as a pre-dispatch rejection", async () => {
+		const { session, runSubprocess } = await harness({
+			settings: Settings.isolated({ "async.enabled": false, "task.batch": false }),
+		});
+		runSubprocess.mockResolvedValue({
+			index: 0,
+			id: "worker",
+			agent: "task",
+			agentSource: "bundled",
+			task: "Work",
+			assignment: "Work",
+			exitCode: 1,
+			error: "child failed",
+			output: "",
+			stderr: "",
+			truncated: false,
+			durationMs: 1,
+			tokens: 0,
+			requests: 1,
+		});
+		const result = await session.getToolByName("task")!.execute("sdk-child-error", {
+			agent: "task",
+			name: "worker",
+			task: "Work",
+		});
+		expect((result.details as TaskToolDetails).dispatchOutcome).toBeUndefined();
+		expect((result.details as TaskToolDetails).results[0]?.error).toBe("child failed");
+	});
+
 	it("preserves the native lifecycle contract through a wrapper with its own input schema", async () => {
 		const { session, requests } = await harness({
 			systemPrompt: "Inspect the requested files.",

@@ -186,6 +186,46 @@ describe("task speculative launch", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
+	it("retains dispatch evidence when the task tool is recreated for the same session", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(manager);
+		const toolSession = createSession(manager);
+		const original = await TaskTool.create(toolSession);
+		const replacement = await TaskTool.create(toolSession);
+		const invalid = { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] };
+		const running = original.execute("recreated", args);
+		const concurrent = await replacement.execute("recreated", invalid);
+		expect(concurrent.isError).toBe(true);
+		expect(concurrent.details?.dispatchOutcome).toBeUndefined();
+		await running;
+		await Promise.all([spawn("Alpha").started.promise, spawn("Beta").started.promise]);
+		const afterDispatch = await replacement.execute("recreated", invalid);
+		expect(afterDispatch.isError).toBe(true);
+		expect(afterDispatch.details?.dispatchOutcome).toBeUndefined();
+		for (const events of spawns.values()) events.release.resolve();
+		await Promise.all(manager.getAllJobs().map(job => job.promise));
+		const afterCompletion = await replacement.execute("recreated", invalid);
+		expect(afterCompletion.details?.dispatchOutcome).toBeUndefined();
+		const independent = await replacement.execute("independent", invalid);
+		expect(independent.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+	});
+
+	it("retains pending speculative session evidence across tool recreation", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(manager);
+		const toolSession = createSession(manager);
+		const original = await TaskTool.create(toolSession);
+		const session = await original.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
+		if (!session) throw new Error("expected a task launch session");
+		const replacement = await TaskTool.create(toolSession);
+		const invalid = { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] };
+		const result = await replacement.execute(toolCall.id, invalid);
+		expect(result.details?.dispatchOutcome).toBeUndefined();
+		(session as TaskLaunchSession).discard("test complete");
+		const later = await replacement.execute(toolCall.id, invalid);
+		expect(later.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+	});
+
 	it("starts each item as it closes and dispatch adopts the running agents", async () => {
 		const { tool, manager, session } = await openSession();
 
@@ -228,7 +268,7 @@ describe("task speculative launch", () => {
 	});
 
 	it("aborts launched agents when the finished call is invalid", async () => {
-		const { session } = await openSession();
+		const { tool, session } = await openSession();
 		session.update(toolCall, alphaClosed);
 		await spawn("Alpha").started.promise;
 
@@ -245,6 +285,75 @@ describe("task speculative launch", () => {
 
 		await spawn("Alpha").aborted.promise;
 		expect([...startedIds]).toEqual(["Alpha"]);
+		const result = await tool.execute(toolCall.id, {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", task: "Do A." },
+				{ name: "alpha", task: "dup" },
+			],
+		});
+		expect(result.isError).toBe(true);
+		expect(result.details?.dispatchOutcome).toBeUndefined();
+		const later = await tool.execute("independent-call", {
+			context: "ctx",
+			tasks: [{ name: "Missing", agent: "missing", task: "Work." }],
+		});
+		expect(later.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+		const reused = await Promise.all([
+			tool.execute(toolCall.id, { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] }),
+			tool.execute(toolCall.id, { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] }),
+		]);
+		expect(reused.map(result => result.details?.dispatchOutcome)).toEqual([undefined, undefined]);
+	});
+
+	it("reports rejection when a streamed session never starts a run", async () => {
+		const { tool, session } = await openSession();
+		const invalid = { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] };
+		session.update(toolCall, JSON.stringify(invalid));
+		const result = await tool.execute(toolCall.id, invalid);
+		expect(result.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+		expect(executorModule.runSubprocess).not.toHaveBeenCalled();
+	});
+
+	it("keeps a duplicate live session conservative until it closes", async () => {
+		const { tool, session } = await openSession();
+		const second = await tool.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
+		if (!second) throw new Error("expected a second task launch session");
+		const invalid = { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] };
+		const result = await tool.execute(toolCall.id, invalid);
+		expect(result.details?.dispatchOutcome).toBeUndefined();
+		session.discard("test complete");
+		const later = await tool.execute(toolCall.id, invalid);
+		expect(later.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+	});
+
+	it("cancels a pending authorization before reporting rejection", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(manager);
+		const tool = await TaskTool.create(createSession(manager));
+		const entered = Promise.withResolvers<void>();
+		const authorization = Promise.withResolvers<{ allowed: true }>();
+		const session = await tool.speculation.stream?.open({
+			coordinator: {
+				...sink,
+				authorizeLaunch: () => {
+					entered.resolve();
+					return authorization.promise;
+				},
+			},
+			parentToolCallId: toolCall.id,
+		});
+		if (!session) throw new Error("expected a task launch session");
+		session.update(toolCall, alphaClosed);
+		await entered.promise;
+		const result = await tool.execute(toolCall.id, {
+			context: "ctx",
+			tasks: [{ name: "Missing", agent: "missing", task: "Work." }],
+		});
+		expect(result.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+		authorization.resolve({ allowed: true });
+		await authorization.promise;
+		expect(executorModule.runSubprocess).not.toHaveBeenCalled();
 	});
 
 	it("aborts launched agents when finished items differ from what launched", async () => {
