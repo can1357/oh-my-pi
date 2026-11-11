@@ -248,6 +248,22 @@ describe("LspMuxServer", () => {
 		expect((await state(client)).notifications).toContain("workspace/didChangeWorkspaceFolders");
 	});
 
+	it("answers a server's workspaceFolders request with the root and the folders sessions added", async () => {
+		const { client } = await link();
+		await initialize(client);
+		const checkout = path.join(tmpDir, "other-checkout");
+		await fs.mkdir(checkout);
+		const added = { uri: Bun.pathToFileURL(checkout).href, name: "other-checkout" };
+		client.notify("workspace/didChangeWorkspaceFolders", { event: { added: [added], removed: [] } });
+		expect((await state(client)).workspaceFolders).toEqual([added.uri]);
+
+		const response = await client.request("test/serverRequest", { method: "workspace/workspaceFolders" });
+		expect(response).toEqual({
+			error: null,
+			result: [{ uri: Bun.pathToFileURL(tmpDir).href, name: path.basename(tmpDir) }, added],
+		});
+	});
+
 	it("disconnects a malformed link without terminating other sessions", async () => {
 		const healthy = await link();
 		await initialize(healthy.client);

@@ -254,8 +254,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			throw new ToolAbortError();
 		};
 
+		// A real path may contain glob characters (e.g. Next.js `app/[slug]/page.tsx`).
+		const candidatePath = file && file !== "*" ? resolveToCwd(file, this.session.cwd) : undefined;
 		const targetPath =
-			file && file !== "*" && !hasGlobPattern(file) ? resolveToCwd(file, this.session.cwd) : undefined;
+			file && candidatePath && (!hasGlobPattern(file) || fs.existsSync(candidatePath)) ? candidatePath : undefined;
 		let workspaceRoot: string;
 		try {
 			workspaceRoot = resolveLspRoot(this.session.cwd, targetPath);

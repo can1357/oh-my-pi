@@ -555,6 +555,18 @@ describe("lsp regressions", () => {
 			expect(text).not.toContain(`"rootPath": "${os.tmpdir()}"`);
 		});
 
+		it("roots an existing file whose path holds glob characters at its project when cwd is a shared root", async () => {
+			const nestedProject = path.join(project, "nested");
+			fs.mkdirSync(path.join(nestedProject, "app", "[slug]"), { recursive: true });
+			fs.writeFileSync(path.join(nestedProject, "package.json"), "{}");
+			const file = path.join(nestedProject, "app", "[slug]", "page.omp-root-probe");
+			fs.writeFileSync(file, "probe\n");
+			const tool = new LspTool(makeLspSession(os.tmpdir()));
+			const result = await tool.execute("glob-char-file-root", { action: "request", file, query: "test/state" });
+			expect(result.details?.success).toBe(true);
+			expect(textResult(result)).toContain(`"rootPath": "${nestedProject}"`);
+		});
+
 		it.each(["project", "temporary-root"])(
 			"keeps lexical workspace and document paths through a %s symlink",
 			async kind => {

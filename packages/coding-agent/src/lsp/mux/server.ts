@@ -496,10 +496,15 @@ export class LspMuxServer {
 	async #handleServerRequest(server: ServerInstance, message: LspJsonRpcRequest): Promise<void> {
 		if (message.method === "workspace/workspaceFolders") {
 			const root = assertSafeLspRoot(server.cwd);
-			await this.#writeServer(
-				server,
-				rpcResult(message.id, [{ uri: Bun.pathToFileURL(root).href, name: path.basename(root) || "workspace" }]),
-			);
+			const rootUri = Bun.pathToFileURL(root).href;
+			const folders = new Map<string, unknown>([
+				[rootUri, { uri: rootUri, name: path.basename(root) || "workspace" }],
+			]);
+			// Checkouts sessions added through didChangeWorkspaceFolders stay part of the workspace.
+			for (const session of server.sessions) {
+				for (const [uri, folder] of session.workspaceFolders) if (!folders.has(uri)) folders.set(uri, folder);
+			}
+			await this.#writeServer(server, rpcResult(message.id, [...folders.values()]));
 			return;
 		}
 		if (
