@@ -109,10 +109,14 @@ export function parseRetryFallbackSelector(
 		isLiteralModelId: (provider, id) => modelLookup?.find(provider, id) !== undefined,
 	});
 	if (!parsed) return undefined;
+	// Compare models by catalog id: the lookup accepts alternate spellings
+	// (`claude-sonnet-5.5` for `claude-sonnet-5-5`), so a key or entry it
+	// validates must also match the live model it names.
+	const id = modelLookup?.find(parsed.provider, parsed.id)?.id ?? parsed.id;
 	return {
 		raw: trimmed,
 		provider: parsed.provider,
-		id: parsed.id,
+		id,
 		thinkingLevel: parsed.thinkingLevel,
 	};
 }
@@ -589,31 +593,34 @@ function getRetryFallbackEffectiveChain(
 					context.modelLookup,
 				)
 			: undefined);
+	// Keyed by catalog identity, so a respelled entry for a model already in the chain is dropped.
 	const seen = new Set<string>();
+	const identity = (selector: RetryFallbackSelector) =>
+		`${formatRetryFallbackBaseSelector(selector)}:${selector.thinkingLevel ?? ""}`;
 	const chain: RetryFallbackSelector[] = [];
 	if (isRetryFallbackWildcardKey(chainKey)) {
 		// A wildcard key has no fixed primary: the active model is the
 		// primary, followed by the configured provider-level fallbacks.
 		if (parsedCurrent) {
 			chain.push(parsedCurrent);
-			seen.add(parsedCurrent.raw);
+			seen.add(identity(parsedCurrent));
 		}
 	} else {
 		const primarySelector = getRetryFallbackPrimarySelector(context, chainKey);
 		if (primarySelector) {
 			chain.push(primarySelector);
-			seen.add(primarySelector.raw);
+			seen.add(identity(primarySelector));
 		} else if ((chainKey === "default" || allowMissingPrimary) && parsedCurrent) {
 			chain.push(parsedCurrent);
-			seen.add(parsedCurrent.raw);
+			seen.add(identity(parsedCurrent));
 		} else if (!allowMissingPrimary) {
 			return [];
 		}
 	}
 	for (const selector of context.chains[chainKey] ?? []) {
 		const parsed = parseRetryFallbackChainEntry(context, selector, parsedCurrent);
-		if (!parsed || seen.has(parsed.raw)) continue;
-		seen.add(parsed.raw);
+		if (!parsed || seen.has(identity(parsed))) continue;
+		seen.add(identity(parsed));
 		chain.push(parsed);
 	}
 	return chain;

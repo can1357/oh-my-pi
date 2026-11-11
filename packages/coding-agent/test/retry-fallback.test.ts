@@ -10,6 +10,7 @@ import {
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 function createContext(
@@ -67,6 +68,44 @@ describe("retry fallback selector resolution", () => {
 
 		const defaultContext = createContext({ default: ["openai/gpt-4o-mini"] });
 		expect(resolveRetryFallbackChainKey(defaultContext, selector)).toBe("default");
+	});
+
+	it("matches keys and entries by catalog identity across dotted and dashed spellings", () => {
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-5-5");
+		const models = [sonnet, getBundledModel("openai", "gpt-4o-mini")].filter(model => model !== undefined);
+		expect(models).toHaveLength(2);
+		const lookup = {
+			find: (provider: string, id: string) => resolveProviderModelReference(provider, id, models),
+			hasProvider: (provider: string) => models.some(model => model.provider === provider),
+		};
+		const live = "anthropic/claude-sonnet-5-5";
+
+		// The registry accepts the dotted key, so it must outrank the provider wildcard.
+		const keyed: RetryFallbackResolutionContext = {
+			chains: {
+				"anthropic/*": ["openai/gpt-4o-mini:high"],
+				"anthropic/claude-sonnet-5.5": ["openai/gpt-4o-mini"],
+			},
+			getModelRole: () => undefined,
+			modelLookup: lookup,
+		};
+		const key = resolveRetryFallbackChainKey(keyed, live, sonnet);
+		expect(key).toBe("anthropic/claude-sonnet-5.5");
+		expect(findRetryFallbackCandidates(keyed, key!, live, sonnet).map(candidate => candidate.raw)).toEqual([
+			"openai/gpt-4o-mini",
+		]);
+
+		// A dotted entry naming the live model is the live model: never a candidate for itself.
+		const listed: RetryFallbackResolutionContext = {
+			chains: { default: ["anthropic/claude-sonnet-5.5", "openai/gpt-4o-mini"] },
+			getModelRole: () => undefined,
+			modelLookup: lookup,
+		};
+		expect(
+			findRetryFallbackCandidates(listed, "default", live, sonnet, { allowMissingPrimary: true }).map(
+				candidate => candidate.raw,
+			),
+		).toEqual(["openai/gpt-4o-mini"]);
 	});
 
 	it("does not let a later shared-assignment role steal the default chain", () => {
