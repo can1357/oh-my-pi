@@ -85,7 +85,7 @@ describe("MCP lazy lifecycle", () => {
 
 	it("advertises cached tools without starting the process", async () => {
 		const config = fixtureConfig("lazy");
-		await cache.set(SERVER, config, cachedTools);
+		await cache.set(SERVER, config, cachedTools, workDir);
 
 		await manager.connectServers({ [SERVER]: config }, {});
 
@@ -101,7 +101,7 @@ describe("MCP lazy lifecycle", () => {
 
 	it("does not report a deferred server as a startup failure", async () => {
 		const config = fixtureConfig("lazy");
-		await cache.set(SERVER, config, cachedTools);
+		await cache.set(SERVER, config, cachedTools, workDir);
 
 		await manager.connectServers({ [SERVER]: config }, {});
 		const status = await manager.waitForStartup(0);
@@ -113,7 +113,7 @@ describe("MCP lazy lifecycle", () => {
 
 	it("starts the process on the first tool call", async () => {
 		const config = fixtureConfig("lazy");
-		await cache.set(SERVER, config, cachedTools);
+		await cache.set(SERVER, config, cachedTools, workDir);
 		await manager.connectServers({ [SERVER]: config }, {});
 		const tool = manager.getTools().find(entry => entry.name === expectedToolNames[0]);
 		if (!tool) throw new Error("cached tool was not registered");
@@ -135,11 +135,25 @@ describe("MCP lazy lifecycle", () => {
 
 	it("keeps eager servers unchanged", async () => {
 		const config = fixtureConfig("eager");
-		await cache.set(SERVER, config, cachedTools);
+		await cache.set(SERVER, config, cachedTools, workDir);
 
 		await manager.connectServers({ [SERVER]: config }, {});
 
 		expect(await waitFor(() => manager.getConnectionStatus(SERVER) === "connected")).toBe(true);
 		expect(manager.getTools()).toHaveLength(MANY_TOOL_COUNT);
+	}, 20_000);
+
+	it("keeps caches apart per project when the config leaves cwd unset", async () => {
+		const config = fixtureConfig("lazy");
+		await cache.set(SERVER, config, cachedTools, "/project-a");
+
+		expect(await cache.get(SERVER, config, "/project-a")).toHaveLength(MANY_TOOL_COUNT);
+		// Two projects with the same name and command must not share one catalog.
+		expect(await cache.get(SERVER, config, "/project-b")).toBeNull();
+
+		// An explicit cwd is part of the config, so it does not fork per scope.
+		const explicit = { ...config, cwd: "/shared" };
+		await cache.set(SERVER, explicit, cachedTools, "/project-a");
+		expect(await cache.get(SERVER, explicit, "/project-b")).toHaveLength(MANY_TOOL_COUNT);
 	}, 20_000);
 });

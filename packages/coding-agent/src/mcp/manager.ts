@@ -970,7 +970,7 @@ export class MCPManager implements MCPManagerApi {
 			if (!options?.forceEager && config.lifecycle === "lazy" && this.toolCache) {
 				const lazyValidationErrors = validateServerConfig(name, config);
 				if (lazyValidationErrors.length === 0) {
-					const cached = await this.toolCache.get(name, config);
+					const cached = await this.toolCache.get(name, config, this.cwd);
 					if (cached && cached.length > 0) {
 						this.#forgetLostServer(name);
 						this.#serverConfigs.set(name, config);
@@ -1095,7 +1095,7 @@ export class MCPManager implements MCPManagerApi {
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name));
 					this.#replaceServerTools(name, customTools);
 					await this.#notifyOwnerToolsChanged();
-					void this.toolCache?.set(name, config, serverTools);
+					void this.toolCache?.set(name, config, serverTools, this.cwd);
 
 					notify({ type: "connected", serverName: name });
 					void this.#loadServerResourcesAndPrompts(name, connection);
@@ -1150,7 +1150,7 @@ export class MCPManager implements MCPManagerApi {
 			if (pendingTasks.length > 0 && this.toolCache) {
 				await Promise.all(
 					pendingTasks.map(async task => {
-						const cached = await this.toolCache?.get(task.name, task.config);
+						const cached = await this.toolCache?.get(task.name, task.config, this.cwd);
 						if (cached) {
 							cachedTools.set(task.name, cached);
 						}
@@ -2010,7 +2010,7 @@ export class MCPManager implements MCPManagerApi {
 			const serverTools = await listTools(connection);
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name));
-			void this.toolCache?.set(name, config, serverTools);
+			void this.toolCache?.set(name, config, serverTools, this.cwd);
 			this.#replaceServerTools(name, customTools);
 			this.#notifyOwnerToolsChanged().catch(error => logger.debug("MCP tools-changed handler failed", { error }));
 			void this.#loadServerResourcesAndPrompts(name, connection);
@@ -2108,7 +2108,7 @@ export class MCPManager implements MCPManagerApi {
 		const reconnect = () => this.reconnectServer(name);
 		const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name));
 		if (callProvoked) this.#scopeAddedTools(name, customTools);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		void this.toolCache?.set(name, connection.config, serverTools, this.cwd);
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);

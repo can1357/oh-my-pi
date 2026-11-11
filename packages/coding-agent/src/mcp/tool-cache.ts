@@ -17,19 +17,29 @@ type MCPToolCachePayload = {
 	tools: MCPToolDefinition[];
 };
 
-function hashConfig(config: MCPServerConfig): string {
-	return Bun.SHA256.hash(stableStringifyJson(config), "hex");
+/**
+ * A stdio server without an explicit `cwd` runs in the session's project
+ * directory, so two projects can configure the same name and command yet
+ * expose different tools. The cache therefore keys and hashes the effective
+ * working directory whenever the config leaves `cwd` unset.
+ */
+function hashConfig(config: MCPServerConfig, scope?: string): string {
+	const scoped = "cwd" in config ? undefined : scope;
+	const effective = scoped === undefined ? config : { ...config, cwd: scoped };
+	return Bun.SHA256.hash(stableStringifyJson(effective), "hex");
 }
 
-function cacheKey(serverName: string): string {
-	return `${CACHE_PREFIX}${serverName}`;
+function cacheKey(serverName: string, config: MCPServerConfig, scope?: string): string {
+	const scoped = "cwd" in config ? undefined : scope;
+	if (scoped === undefined) return `${CACHE_PREFIX}${serverName}`;
+	return `${CACHE_PREFIX}${serverName}@${Bun.SHA256.hash(scoped, "hex").slice(0, 16)}`;
 }
 
 export class MCPToolCache {
 	constructor(private storage: AgentStorageApi) {}
 
-	async get(serverName: string, config: MCPServerConfig): Promise<MCPToolDefinition[] | null> {
-		const key = cacheKey(serverName);
+	async get(serverName: string, config: MCPServerConfig, scope?: string): Promise<MCPToolDefinition[] | null> {
+		const key = cacheKey(serverName, config, scope);
 		const raw = this.storage.getCache(key);
 		if (!raw) return null;
 
@@ -48,7 +58,7 @@ export class MCPToolCache {
 
 		let currentHash: string;
 		try {
-			currentHash = hashConfig(config);
+			currentHash = hashConfig(config, scope);
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return null;
@@ -59,10 +69,10 @@ export class MCPToolCache {
 		return parsed.tools as MCPToolDefinition[];
 	}
 
-	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
+	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[], scope?: string): Promise<void> {
 		let configHash: string;
 		try {
-			configHash = hashConfig(config);
+			configHash = hashConfig(config, scope);
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;
@@ -83,6 +93,6 @@ export class MCPToolCache {
 		}
 
 		const expiresAtSec = Math.floor((Date.now() + CACHE_TTL_MS) / 1000);
-		this.storage.setCache(cacheKey(serverName), serialized, expiresAtSec);
+		this.storage.setCache(cacheKey(serverName, config, scope), serialized, expiresAtSec);
 	}
 }
