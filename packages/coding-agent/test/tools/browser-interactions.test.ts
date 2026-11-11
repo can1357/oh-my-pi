@@ -543,7 +543,17 @@ return { during, after };`,
 		const selectHtml = `<!doctype html>
 <select id="country"><option value="">Choose…</option><option value="us">United States</option><option value="ca">Canada</option></select>
 <select id="size"><option value="m">Large</option><option value="Large">Extra large</option></select>
-<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option></select>`;
+<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option></select>
+<select id="jump"><option value="">Jump to…</option><option value="docs">Docs</option></select>
+<select id="swap"></select>
+<script>
+// A jump menu acts on the choice and resets itself, as "add filter" and "go to" menus do.
+document.querySelector("#jump").addEventListener("change", event => { event.target.value = ""; });
+// A cascading menu replaces its own options on a change.
+window.resetSwap = () => { document.querySelector("#swap").innerHTML = '<option value="a">A</option><option value="b">B</option>'; };
+resetSwap();
+document.querySelector("#swap").addEventListener("change", event => { event.target.innerHTML = '<option value="z" selected>Z</option>'; });
+</script>`;
 		await prelude.invoke(
 			{ action: "open", name: SELECT_TAB_NAME, url: `data:text/html,${encodeURIComponent(selectHtml)}` },
 			context,
@@ -560,6 +570,8 @@ const handle = await tab.waitFor("#country");
 const handleByLabel = await handle.select("United States");
 const afterHandle = await tab.value("#country");
 const valueWins = await tab.select("#size", "Large");
+const cleared = await tab.select("#size");
+const afterCleared = await tab.value("#size");
 const firstOnSingle = await tab.select("#country", "Canada", "us");
 const handleFirstOnSingle = await handle.select("us", "ca");
 const afterFirst = await tab.value("#country");
@@ -567,7 +579,15 @@ const noMatch = await tab.select("#country", "Mexico").catch(error => error.mess
 const handleNoMatch = await handle.select("ca", "Mexico").catch(error => error.message);
 const afterNoMatch = await tab.value("#country");
 const multiple = await tab.select("#extras", "Cheese", "olives");
-return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple };`,
+const reset = await tab.select("#jump", "Docs");
+const handleReset = await (await tab.waitFor("#jump")).select("docs");
+const afterReset = await tab.value("#jump");
+await tab.evaluate(() => resetSwap());
+const swapped = await tab.select("#swap", "b");
+await tab.evaluate(() => resetSwap());
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const ternSwapped = await tab.evaluate(() => globalThis.__ompTernKit.select({ engine: "css", query: "#swap" }, ["b"]));
+return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cleared, afterCleared, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple, reset, handleReset, afterReset, swapped, ternSwapped };`,
 					timeout: 20,
 				},
 				context,
@@ -579,6 +599,9 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, fi
 				handleByLabel: ["us"],
 				afterHandle: "us",
 				valueWins: ["Large"],
+				// A drop-down select with nothing selected selects its first option again.
+				cleared: ["m"],
+				afterCleared: "m",
 				firstOnSingle: ["ca"],
 				handleFirstOnSingle: ["us"],
 				afterFirst: "us",
@@ -586,6 +609,11 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, fi
 				handleNoMatch: expect.stringContaining('No <select> option matches "Mexico"'),
 				afterNoMatch: "us",
 				multiple: ["cheese", "olives"],
+				reset: [""],
+				handleReset: [""],
+				afterReset: "",
+				swapped: ["z"],
+				ternSwapped: ["z"],
 			});
 
 			// cmux tabs run the same rules in their injected page script; replay it in this page.
@@ -602,11 +630,16 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, fi
 				} as never,
 				surfaceId: "select",
 			});
+			await prelude.invoke(
+				{ action: "call", name: SELECT_TAB_NAME, chain: [{ method: "evaluate", args: ["resetSwap()"] }] },
+				context,
+			);
 			expect({
 				byLabel: await cmux.select("#country", "United States"),
 				firstOnSingle: await cmux.select("#country", "Canada", "us"),
 				multiple: await cmux.select("#extras", "Ham", "olives"),
-			}).toEqual({ byLabel: ["us"], firstOnSingle: ["ca"], multiple: ["ham", "olives"] });
+				swapped: await cmux.select("#swap", "b"),
+			}).toEqual({ byLabel: ["us"], firstOnSingle: ["ca"], multiple: ["ham", "olives"], swapped: ["z"] });
 			const noMatch = await cmux.select("#country", "Mexico").catch((error: Error) => error.message);
 			expect(noMatch).toContain('No <select> option matches "Mexico"');
 			expect(await cmux.value("#country")).toBe("ca");
