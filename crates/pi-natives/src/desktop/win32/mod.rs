@@ -274,7 +274,10 @@ mod tests {
 				.map_while(Result::ok)
 				.find(|line| line.starts_with("windows "))
 				.expect("the window host printed its windows");
-			let mut handles = line.split(' ').skip(1).map(|handle| handle.parse::<usize>().unwrap());
+			let mut handles = line
+				.split(' ')
+				.skip(1)
+				.map(|handle| handle.parse::<usize>().unwrap());
 			let (user, target) = (handles.next().unwrap(), handles.next().unwrap());
 			Self { user: user as HWND, target: target as HWND, host }
 		}
