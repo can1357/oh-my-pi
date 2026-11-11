@@ -161,14 +161,6 @@ export class InMemoryRelay {
 	}
 }
 
-export interface InstallInMemoryRelayOptions {
-	/**
-	 * Redirect an unmocked `os.homedir()` into a temporary directory until
-	 * {@link uninstallInMemoryRelay}. Defaults to `true`.
-	 */
-	isolateHome?: boolean;
-}
-
 /**
  * Redirect an unmocked `os.homedir()` / `getConfigRootDir()` into a temporary
  * directory. Suites that stand up a real `Bun.serve` relay instead of
@@ -201,20 +193,12 @@ export function uninstallTestCollabHome(): void {
 
 /**
  * Create a fresh relay, isolate `os.homedir()` / `getConfigRootDir()` into a
- * temporary directory when `options.isolateHome` is not `false` and the caller
- * has not already redirected `os.homedir()`, and route `new WebSocket(...)`
- * through the relay.
+ * temporary directory unless the caller already redirected `os.homedir()`, and
+ * route `new WebSocket(...)` through the relay.
  * Pair with {@link uninstallInMemoryRelay} in the matching after-hook.
  */
-export function installInMemoryRelay(): InMemoryRelay;
-export function installInMemoryRelay(options?: InstallInMemoryRelayOptions): InMemoryRelay;
-export function installInMemoryRelay(options: InstallInMemoryRelayOptions = {}): InMemoryRelay {
-	const isolateHome = typeof options === "object" && options !== null ? options.isolateHome : undefined;
-	if (isolateHome === false) {
-		uninstallTestCollabHome();
-	} else {
-		installTestCollabHome();
-	}
+export function installInMemoryRelay(): InMemoryRelay {
+	installTestCollabHome();
 	activeRelay = new InMemoryRelay();
 	globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 	return activeRelay;
