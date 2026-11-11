@@ -319,6 +319,9 @@ describe("bash shortcut command", () => {
 		executeBash.mockImplementationOnce(async (_command, _onChunk, options) => {
 			onStdin = options?.pty?.onStdin;
 			onStdin?.(data => written.push(data));
+			// Until the command prints something, the composer keeps the keyboard.
+			expect(editor.nativeKeyPassthrough).toBe(false);
+			options?.pty?.onChunk("Choose [Y/n]: ");
 			expect(editor.nativeKeyPassthrough).toBe(true);
 			// The command is blocked on `read` while the user types in the composer.
 			pressed.answer = press("y");
@@ -365,6 +368,65 @@ describe("bash shortcut command", () => {
 		onStdin?.(data => written.push(data));
 		expect(editor.nativeKeyPassthrough).toBe(false);
 		expect(listeners.size).toBe(1);
+	});
+
+	it("leaves the composer editable until a `!` command prints an unfinished line", async () => {
+		const { ctx, executeBash } = createCwdContext("/tmp");
+		type Listener = (data: string) => { consume?: boolean } | undefined;
+		let listeners = new Set<Listener>();
+		const editor = { nativeKeyPassthrough: false };
+		const focused: unknown = editor;
+		Object.assign(ctx, {
+			editor,
+			keybindings: { matches: (data: string, id: string) => id === "app.interrupt" && data === "\x1b" },
+			ui: {
+				requestRender: vi.fn(),
+				requestComponentRender: vi.fn(),
+				getFocused: () => focused,
+				addInputListener: (listener: Listener, options?: { prepend?: boolean }) => {
+					if (options?.prepend) listeners = new Set([listener, ...listeners]);
+					else listeners.add(listener);
+					return () => listeners.delete(listener);
+				},
+			},
+		});
+		const press = (data: string) => [...listeners].some(listener => listener(data)?.consume === true);
+		const written: string[] = [];
+		const pressed: Record<string, boolean> = {};
+		executeBash.mockImplementationOnce(async (_command, _onChunk, options) => {
+			options?.pty?.onStdin?.(data => written.push(data));
+			// A command that reports progress never reads stdin: complete lines,
+			// including a color reset after the newline, leave the draft alone.
+			options?.pty?.onChunk("Connecting to knot...\r\nfatal: repository not found\n\x1b[0m");
+			expect(editor.nativeKeyPassthrough).toBe(false);
+			pressed.draftWhileWorking = press("a");
+			// A prompt is what an unfinished line looks like, colors or not.
+			options?.pty?.onChunk("\x1b[1mPassword: \x1b[0m");
+			expect(editor.nativeKeyPassthrough).toBe(true);
+			pressed.answer = press("s");
+			// The answer is echoed and the command resumes, closing the line.
+			options?.pty?.onChunk("s\r\n");
+			expect(editor.nativeKeyPassthrough).toBe(false);
+			pressed.draftAfter = press("b");
+			return {
+				output: "ok",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 1,
+				totalBytes: 2,
+				outputLines: 1,
+				outputBytes: 2,
+			};
+		});
+		const controller = new CommandController(ctx);
+
+		await controller.handleBashCommand("grit push");
+		expect(editor.nativeKeyPassthrough).toBe(false);
+
+		expect(written).toEqual(["s"]);
+		expect(pressed).toEqual({ draftWhileWorking: false, answer: true, draftAfter: false });
+		expect(listeners.size).toBe(0);
 	});
 
 	it("finalizes successful output before reporting a standalone cd refresh failure", async () => {

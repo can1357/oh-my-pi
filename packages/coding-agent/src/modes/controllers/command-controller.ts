@@ -137,6 +137,29 @@ const TERN_FORK_UNCONFIRMED: Partial<Record<TernErrorKind, true>> = { closed: tr
 /** Rows `/session` spends on the builds that wrote the session, including the elision row. */
 const MAX_LISTED_BUILDS = 5;
 
+/**
+ * Raw `!` PTY bytes kept to read the current line state. A prompt fits well
+ * inside this even when it wraps and ends with color resets.
+ */
+const PTY_INPUT_TAIL = 256;
+
+/** Escape sequences (CSI, OSC, two-byte) that colorized output leaves at the end of a chunk. */
+const TRAILING_ESCAPES = /(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_])+$/u;
+
+/**
+ * Whether a `!` command's last output ended mid-line, which is what a command
+ * waiting for input looks like: `Password: ` and `Choose [Y/n]: ` leave the
+ * line open, while finished output ends with a newline or with the carriage
+ * return a progress meter rewrites. Trailing escape sequences are what a
+ * colored line ends with, so they are dropped rather than read as content.
+ */
+function ptyAwaitsInput(tail: string): boolean {
+	const text = tail.replace(TRAILING_ESCAPES, "");
+	if (!text) return false;
+	const last = text.at(-1);
+	return last !== "\n" && last !== "\r";
+}
+
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
@@ -1920,6 +1943,18 @@ export class CommandController {
 		block.setExpanded(this.ctx.toolOutputExpanded);
 		let detachInput: (() => void) | undefined;
 		let finished = false;
+		// The `!` PTY owns the keyboard only while the command has printed an
+		// unfinished line. A command that is merely working (`git push`, a build)
+		// ends its output lines and must leave the composer editable, while a
+		// prompt (`Password: `, `Choose [Y/n]: `) leaves one open.
+		let ptyTail = "";
+		let ptyOwnsKeys = false;
+		const setPtyKeys = (owns: boolean) => {
+			if (finished || ptyOwnsKeys === owns) return;
+			ptyOwnsKeys = owns;
+			this.ctx.editor.nativeKeyPassthrough = owns;
+			this.ctx.ui.requestRender();
+		};
 
 		if (isDeferred) {
 			this.ctx.pendingShellContainer.addChild(block);
@@ -1945,14 +1980,17 @@ export class CommandController {
 					// bytes render through the component's vterm replay (color-safe).
 					pty: {
 						...bashPtyViewport(this.ctx.ui),
-						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
+						onChunk: chunk => {
+							this.ctx.bashComponent?.appendPtyChunk(chunk);
+							ptyTail = (ptyTail + chunk).slice(-PTY_INPUT_TAIL);
+							setPtyKeys(ptyAwaitsInput(ptyTail));
+						},
 						onStdin: write => {
 							if (finished) return;
 							// A TSP field without a mode handles printable keys itself and sends
 							// `edit` packets instead of raw input. Label it while the PTY owns
 							// the keyboard so Tern delivers those keys to the input listener.
-							detachInput = this.#forwardKeysToPty(component, write);
-							this.ctx.editor.nativeKeyPassthrough = true;
+							detachInput = this.#forwardKeysToPty(component, write, () => ptyOwnsKeys);
 							this.ctx.ui.requestRender();
 						},
 					},
@@ -1986,7 +2024,7 @@ export class CommandController {
 		} finally {
 			finished = true;
 			detachInput?.();
-			if (detachInput) this.ctx.editor.nativeKeyPassthrough = false;
+			if (ptyOwnsKeys) this.ctx.editor.nativeKeyPassthrough = false;
 			this.ctx.bashComponent = undefined;
 			this.ctx.ui.requestRender();
 		}
@@ -1996,12 +2034,19 @@ export class CommandController {
 	/**
 	 * Routes composer keystrokes to a running `!` command's PTY so it can answer
 	 * its own prompts (`read`, shell-startup questions), like a foreground job.
+	 * Keys are forwarded only while `ownsKeys` reports the PTY at an unfinished
+	 * line, so a command that never asks for input leaves the composer alone.
 	 * The interrupt key still cancels; focused dialogs and mouse reports keep
 	 * their input. Returns the detach function.
 	 */
-	#forwardKeysToPty(component: BashExecutionComponent, write: (data: string) => void): () => void {
+	#forwardKeysToPty(
+		component: BashExecutionComponent,
+		write: (data: string) => void,
+		ownsKeys: () => boolean,
+	): () => void {
 		return this.ctx.ui.addInputListener(
 			data => {
+				if (!ownsKeys()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
 				const bytes = component.encodePtyInput(data);
