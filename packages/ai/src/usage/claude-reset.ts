@@ -1,7 +1,7 @@
 import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { UsageReport, UsageResetCredit, UsageResetCredits } from "../usage";
 import { isUsageLimitReached } from "../auth/usage-report";
-import { claudeRankingStrategy, parseClaudeUsagePayload } from "./claude";
+import { claudeRankingStrategy, claudeReportCoversSharedGates, parseClaudeUsagePayload } from "./claude";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 import {
@@ -31,8 +31,7 @@ const CLAUDE_RESET_WINDOW_IDS: Readonly<Record<string, string>> = {
 
 /** Return the block scopes healed by a partial Claude reset, without mutating stored blocks. */
 export function claudeResetClearedBlockScopes(cleared: readonly string[], report: UsageReport): (string | undefined)[] {
-	const shared = report.limits.filter(limit => limit.scope.shared);
-	if (!["anthropic:5h", "anthropic:7d"].every(id => shared.some(limit => limit.id === id))) return [];
+	if (!claudeReportCoversSharedGates(report)) return [];
 	const unscoped = report.limits.filter(limit => {
 		if (limit.scope.shared) return true;
 		if (!limit.scope.tier) return false;

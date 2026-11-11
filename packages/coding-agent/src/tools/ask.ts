@@ -21,6 +21,7 @@ import {
 	fieldError,
 	formAnswers,
 	type HtmlFormData,
+	type OptionNote,
 	OTHER_LABEL,
 	textValue,
 } from "@oh-my-pi/pi-tui/html-form/data";
@@ -40,6 +41,7 @@ import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectIte
 import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
+import askResultTemplate from "../prompts/tools/ask-result.md" with { type: "text" };
 import { cfgSpeechEnabled } from "../tts/settings";
 import { vocalizer } from "../tts/vocalizer";
 import type { ToolSession } from ".";
@@ -443,7 +445,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			vocalizer.speak(named.map(field => questions.get(field) ?? field.name).join("\n"));
 		}
 
-		let answered: { data: HtmlFormData; timedOut?: boolean } | undefined;
+		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
 		try {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
@@ -459,17 +461,17 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		}
 		if (!answered) return cancelAsk();
 
-		const json = JSON.stringify(answered.data, null, 2);
-		const details: AskToolDetails = { answers: formAnswers(form, answered.data) };
-		if (answered.timedOut) {
-			details.timedOut = true;
-			return {
-				content: [
-					{ type: "text", text: `No answer before the timeout; submitted the form's current values:\n${json}` },
-				],
-				details,
-			};
-		}
-		return { content: [{ type: "text", text: `User answers:\n${json}` }], details };
+		const notes = answered.notes?.length ? answered.notes : undefined;
+		const details: AskToolDetails = {
+			answers: formAnswers(form, answered.data),
+			...(notes ? { notes } : {}),
+			...(answered.timedOut ? { timedOut: true } : {}),
+		};
+		const text = prompt.render(askResultTemplate, {
+			timedOut: answered.timedOut,
+			json: JSON.stringify(answered.data, null, 2),
+			notes: notes?.map(note => ({ ...note, text: note.text.replace(/\s+/g, " ").trim() })),
+		});
+		return { content: [{ type: "text", text }], details };
 	}
 }

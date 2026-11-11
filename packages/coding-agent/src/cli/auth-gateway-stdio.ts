@@ -11,6 +11,7 @@
  * ends when stdin does.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
@@ -23,21 +24,47 @@ import { expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
 
+/** Model kind each non-chat route serves; other paths are chat routes. */
+const ROUTE_KINDS: Record<string, ModelKind> = {
+	"/v1/systemone": "judge",
+	"/alpha/decisions": "judge",
+	"/v1/images/generations": "image",
+	"/v1/images": "image",
+	"/v1/images/edits": "image",
+	"/v1/audio/speech": "tts",
+	"/v1/audio/transcriptions": "stt",
+	"/v1/embeddings": "embedding",
+	"/v1/rerank": "rerank",
+	"/v1/videos": "video",
+};
+
+/**
+ * Catalog kinds the gateway has a route for. Other kinds (tiny, search) have no
+ * wire, so `/v1/models` never advertises them.
+ */
+export const GATEWAY_MODEL_KINDS: readonly ModelKind[] = ["chat", ...new Set(Object.values(ROUTE_KINDS))];
+
 /**
  * The models a request naming `selector` may run on, in order: the model
- * `--model` would pick (the first entry of a comma list that resolves), then
- * that model's configured `retry.fallbackChains` (its role's chain when the
- * entry named a role; never the role's built-in priority list). Empty when no
- * entry resolves.
+ * `--model` would pick among models of `kind` (the first entry of a comma
+ * list that resolves), then that model's configured `retry.fallbackChains`
+ * (its role's chain when the entry named a role; never the role's built-in
+ * priority list). Empty when no entry resolves.
  */
 export function selectorCandidates(
 	selector: string,
 	settings: Settings,
-	registry: Pick<ModelRegistry, "getAll" | "getAvailable">,
+	registry: Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>,
+	kind: ModelKind = "chat",
 ): Model<Api>[] {
-	const available = registry.getAvailable();
+	const available = registry.getAvailable(kind);
+	const scoped = {
+		getAll: () => registry.getAll(kind),
+		getAvailable: () => available,
+		hasProvider: registry.hasProvider?.bind(registry),
+	};
 	for (const pattern of normalizeModelPatternList(selector)) {
-		const { model, configuredRole } = resolveCliModel({ cliModel: pattern, modelRegistry: registry, settings });
+		const { model, configuredRole } = resolveCliModel({ cliModel: pattern, modelRegistry: scoped, settings });
 		if (!model) continue;
 		const chain = expandOnlineTinyModelFallbacks(model, settings, available, configuredRole);
 		const seen = new Set<string>();
@@ -49,6 +76,18 @@ export function selectorCandidates(
 		});
 	}
 	return [];
+}
+
+/**
+ * The gateway router's model lookup: the model this process picked for the
+ * request, or for a video poll or download (a bodiless GET whose stateless job
+ * id names the model) the available video model it names.
+ */
+export function stdioModelResolver(
+	routed: ReadonlyMap<string, Model<Api>>,
+	registry: Pick<ModelRegistry, "getAvailable">,
+): (id: string) => Model<Api> | undefined {
+	return id => routed.get(id) ?? registry.getAvailable("video").find(model => `${model.provider}/${model.id}` === id);
 }
 
 /** Serves the gateway on stdin/stdout until stdin ends, then exits. */
@@ -67,8 +106,8 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const routed = new Map<string, Model<Api>>();
 	const router = createAuthGatewayRouter({
 		storage,
-		resolveModel: id => routed.get(id),
-		listModels: () => registry.getAvailable(),
+		resolveModel: stdioModelResolver(routed, registry),
+		listModels: () => GATEWAY_MODEL_KINDS.flatMap(kind => registry.getAvailable(kind)),
 	});
 	const route = async (req: Request): Promise<Response> => {
 		// Unparseable bodies pass through for the route to reject in its own wire format.
@@ -80,7 +119,8 @@ export async function runAuthGatewayStdio(): Promise<void> {
 			: undefined;
 		if (!isRecord(body) || typeof body.model !== "string") return router.route(req, STDIO_PEER);
 		const selector = body.model;
-		const candidates = selectorCandidates(selector, settings, registry);
+		const kind = ROUTE_KINDS[new URL(req.url).pathname] ?? "chat";
+		const candidates = selectorCandidates(selector, settings, registry, kind);
 		let response = Response.json(
 			{ error: { message: `No available model matches "${selector}"`, type: "invalid_request_error" } },
 			{ status: 404 },
@@ -101,11 +141,22 @@ export async function runAuthGatewayStdio(): Promise<void> {
 		return response;
 	};
 
+	// Flushable, unlike `process.stdout`: quitting before a pipe drains truncates responses.
+	const stdout = Bun.stdout.writer();
 	try {
-		await serveAuthGatewayStdio({ input, write: line => process.stdout.write(line), route, version: VERSION });
+		await serveAuthGatewayStdio({
+			input,
+			write: line => {
+				stdout.write(line);
+				void stdout.flush();
+			},
+			route,
+			version: VERSION,
+		});
 	} finally {
 		router.close();
 		storage.close();
+		await stdout.flush();
 	}
 	// Idle provider sockets and settings timers would otherwise keep the process alive past stdin's end.
 	await postmortem.quit(0);

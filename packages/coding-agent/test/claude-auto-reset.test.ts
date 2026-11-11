@@ -147,6 +147,27 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		]);
 	});
 
+	it("restores a weekly-blocked account with a full reset that also clears the Fable cap", () => {
+		// A full reset clears both caps; healthy Fable headroom must not mark it a Fable-only grant.
+		const plan = planClaudeResetRedemptions(
+			input({
+				reports: [report({ fableUsed: 0.48 })],
+				statuses: [
+					status({
+						credit: {
+							clears: ["anthropic:7d", "anthropic:7d:fable"],
+							blocking: [],
+							usedFractions: { "anthropic:7d": 1, "anthropic:7d:fable": 0.48 },
+						},
+					}),
+				],
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", window: "weekly", blockedWindows: ["anthropic:7d"] },
+		]);
+	});
+
 	it("uses quota evidence from live reset discovery when broker reports are unavailable or stale", () => {
 		const live = status();
 		live.report = report();
