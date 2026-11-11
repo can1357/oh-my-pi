@@ -5239,6 +5239,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			accountPoolScope,
 			providerPromptCacheKeySource,
 			advisorTools,
+			advisorCreateReadTool: () => {
+				const read: Tool = new ReadTool(advisorToolSession);
+				return new ExtensionToolWrapper(wrapToolWithMetaNotice(read), extensionRunner, advisorAgent);
+			},
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.

@@ -927,29 +927,23 @@ function readDetailsLinkPath(details: ReadToolDetails | undefined): string | nul
 
 /** Identical reads tolerated before the loop hint is appended. */
 const REPEAT_READ_HINT_THRESHOLD = 3;
-/** Per-session cap on tracked read keys; the map resets when exceeded. */
+/** Per-reader cap on tracked read keys; the map resets when exceeded. */
 const REPEAT_READ_TRACKER_CAP = 64;
 
 const kRepeatReadTracker = Symbol("read.repeatTracker");
-
-interface SessionWithRepeatReadTracker extends ToolSession {
-	[kRepeatReadTracker]?: Map<string, { hash: bigint; count: number }>;
-}
 
 /**
  * Append a loop-breaking hint when the same read selector returns
  * byte-identical output repeatedly. Weak models re-issue an unchanged read
  * dozens of times (observed: 29 bare re-reads of one file, ~645k tokens);
  * naming the repetition breaks the loop the same way the edit no-op guard
- * does. Tracking is per session and resets whenever the output changes.
+ * does. Tracking is per reader and resets whenever the output changes.
  */
-function appendRepeatReadHint(session: ToolSession, path: string, result: AgentToolResult<ReadToolDetails>): void {
+function appendRepeatReadHint(reader: ReadTool, path: string, result: AgentToolResult<ReadToolDetails>): void {
 	const block = result.content?.find(entry => entry.type === "text");
 	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
 
-	const holder = session as SessionWithRepeatReadTracker;
-	holder[kRepeatReadTracker] ??= new Map();
-	const tracker = holder[kRepeatReadTracker];
+	const tracker = (reader[kRepeatReadTracker] ??= new Map());
 	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
 
 	let hash = BigInt(result.content.length);
@@ -1100,6 +1094,7 @@ async function assessLocalReadSpeculation(
  * Directories return a formatted listing with modification times.
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+	[kRepeatReadTracker]?: Map<string, { hash: bigint; count: number }>;
 	readonly name = "read";
 	readonly readsSkillUris = true;
 	readonly approval = (args: unknown): ToolTier => {
@@ -1287,7 +1282,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					getEditStore(this.session).recordSnapshot(staged.absolutePath, snapshotText, seenLines);
 				}
 			}
-			appendRepeatReadHint(this.session, staged?.path ?? (context.args as ReadParams).path, result);
+			appendRepeatReadHint(this, staged?.path ?? (context.args as ReadParams).path, result);
 			return await postProcessToolResult(result, this.name, this.session as unknown as AgentToolContext);
 		} finally {
 			this.#speculativeReads.delete(context.toolCall.id);
@@ -1890,7 +1885,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		);
 		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
-		appendRepeatReadHint(this.session, params.path, result);
+		appendRepeatReadHint(this, params.path, result);
 		return result;
 	}
 

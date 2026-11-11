@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Independent advisors no longer receive repeat-read warnings because another advisor read the same output first ([#18834](https://github.com/can1357/oh-my-pi/issues/18834)).
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
