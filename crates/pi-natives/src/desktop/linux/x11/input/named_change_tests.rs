@@ -269,9 +269,12 @@ fn late_wm(
 	}
 }
 
-#[test]
-#[ignore = "starts Xvfb"]
-fn named_change_handback_undoes_an_activation_the_wm_takes_after_a_post_send_press() {
+/// Runs a takeover against [`late_wm`], with `between` run after the forward
+/// request is sent and before the WM acts on it. Asserts the user's window
+/// holds focus once the WM has had time to act; returns the takeover's error.
+fn takeover_before_late_wm(
+	between: impl FnOnce(Arc<RustConnection>, Window, control::CancellationSource) + 'static,
+) -> ErrorCode {
 	let mut f = Fixture::new();
 	let root = f.input.root;
 	let active = f.input.atoms.net_active_window;
@@ -279,7 +282,6 @@ fn named_change_handback_undoes_an_activation_the_wm_takes_after_a_post_send_pre
 		.change_property32(PropMode::REPLACE, root, active, AtomEnum::WINDOW, &[f.previous])
 		.expect("user's window active");
 	f.user.sync().expect("EWMH state");
-	// The WM consumes the forward request only after the user's press.
 	let wm = x11rb::connect(Some(&f.display)).expect("WM connection").0;
 	wm.change_window_attributes(
 		root,
@@ -293,18 +295,20 @@ fn named_change_handback_undoes_an_activation_the_wm_takes_after_a_post_send_pre
 	let stop = Arc::new(AtomicBool::new(false));
 	let wm_stop = Arc::clone(&stop);
 	let wm_thread = thread::spawn(move || late_wm(wm, root, active, &wm_stop, &user_pressed));
+	let source = control::CancellationSource::default();
 	let user = Arc::clone(&f.user);
+	let hook_source = source.clone();
 	AFTER_SEND.with(|hook| {
 		*hook.borrow_mut() = Some(Box::new(move || {
-			Fixture::press(&user, root, true);
+			between(user, root, hook_source);
 			pressed.send(()).expect("WM waiting");
 		}));
 	});
-	let error = f
-		.input
-		.with_foreground(f.target, Duration::from_secs(1), |_| Ok(()))
-		.expect_err("press after the request is sent stops the takeover");
-	assert_eq!(error.code, ErrorCode::UserIntervened);
+	let error = control::with_token_for_test(&source.token(), || {
+		f.input
+			.with_foreground(f.target, Duration::from_secs(1), |_| Ok(()))
+			.expect_err("the user's press or Escape after the request is sent stops the takeover")
+	});
 	thread::sleep(Duration::from_millis(500));
 	stop.store(true, Ordering::Release);
 	wm_thread.join().expect("WM thread");
@@ -315,4 +319,33 @@ fn named_change_handback_undoes_an_activation_the_wm_takes_after_a_post_send_pre
 		"the WM's late activation must be handed back"
 	);
 	assert_eq!(wm_state.active_window(), Some(f.previous));
+	error.code
+}
+
+#[test]
+#[ignore = "starts Xvfb"]
+fn named_change_handback_undoes_an_activation_the_wm_takes_after_a_post_send_press() {
+	let code = takeover_before_late_wm(|user, root, _| Fixture::press(&user, root, true));
+	assert_eq!(code, ErrorCode::UserIntervened);
+}
+
+#[test]
+#[ignore = "starts Xvfb"]
+fn named_change_handback_undoes_a_late_activation_after_escape_cancels_the_wait() {
+	// The press starts the wait for the WM; the cancel lands during it.
+	let code = takeover_before_late_wm(|user, root, source| {
+		Fixture::press(&user, root, true);
+		thread::spawn(move || {
+			thread::sleep(Duration::from_millis(20));
+			source.cancel();
+		});
+	});
+	assert_eq!(code, ErrorCode::UserIntervened);
+}
+
+#[test]
+#[ignore = "starts Xvfb"]
+fn named_change_handback_undoes_a_late_activation_after_escape_cancels_before_the_user_check() {
+	let code = takeover_before_late_wm(|_, _, source| source.cancel());
+	assert_eq!(code, ErrorCode::Cancelled);
 }
