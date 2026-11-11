@@ -92,5 +92,6 @@ export type KnownProvider =
 	| "xiaomi-token-plan-sgp"
 	| "yolo-auto"
 	| "zai"
+	| "zed-hosted"
 	| "zenmux"
 	| "zhipu-coding-plan";

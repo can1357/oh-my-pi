@@ -17,6 +17,7 @@ import type {
 export * from "./anthropic";
 export * from "./device-code";
 export type * from "./types";
+export * from "./zed-hosted";
 
 // A provider turned off in its auth rules (`disabled "<reason>"`) is no login choice;
 // one whose login carries an account risk (`login-warning`) says so in its label.
@@ -178,6 +179,7 @@ export async function getOAuthApiKey(
 					expiresAt: creds.expires,
 					email: creds.email,
 					accountId: creds.accountId,
+					orgId: creds.orgId,
 				})
 			: creds.access;
 	return { newCredentials: creds, apiKey };

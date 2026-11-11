@@ -23,7 +23,8 @@ export type KnownApi =
 	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent"
-	| "apple-foundation-models";
+	| "apple-foundation-models"
+	| "zed-hosted";
 export type Api = KnownApi | (string & {});
 
 /** Catalog kinds used to isolate role-specific runners from session chat models. */

@@ -1,0 +1,127 @@
+// Provider-wire compat for "zed-hosted"
+
+provider "zed-hosted" {
+	default-model "claude-opus-4-6"
+	env "ZED_ACCESS_TOKEN"
+	discovery label="Zed Hosted" oauth-provider="zed-hosted" {
+		env "ZED_ACCESS_TOKEN"
+	}
+
+	seed api="zed-hosted" base-url="https://cloud.zed.dev" bundle="always" {
+		model "claude-opus-4-6" name="Claude Opus 4.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=5.5 output=27.5 cache-read=0.55 cache-write=6.875
+			limits context=1000000 max-tokens=64000
+			supports-tools #true
+		}
+		model "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=3.3 output=16.5 cache-read=0.33 cache-write=4.125
+			limits context=1000000 max-tokens=64000
+			supports-tools #true
+		}
+		model "claude-haiku-4-5" name="Claude Haiku 4.5" {
+			reasoning #false
+			input "text" "image"
+			cost input=1.1 output=5.5 cache-read=0.11 cache-write=1.375
+			limits context=200000 max-tokens=8192
+			supports-tools #true
+		}
+		model "gemini-3-1-pro" name="Gemini 3.1 Pro" {
+			reasoning #true
+			input "text" "image"
+			cost input=2.2 output=13.2 cache-read=0 cache-write=0
+			limits context=200000 max-tokens=65536
+			supports-tools #true
+		}
+		model "gemini-3-flash" name="Gemini 3 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.55 output=3.3 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+			supports-tools #true
+		}
+		model "gpt-5-2" name="GPT-5.2" {
+			reasoning #false
+			input "text" "image"
+			cost input=1.925 output=15.4 cache-read=0.1925 cache-write=0
+			limits context=400000 max-tokens=64000
+			supports-tools #true
+		}
+		model "gpt-6-luna" name="GPT-6 Luna" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.11 output=0.55 cache-read=0.011 cache-write=0.1375
+			limits context=400000 max-tokens=64000
+			supports-tools #true
+		}
+	}
+
+	// Zed Hosted published rates for discovered models
+	models "claude-opus-4-6" "claude-opus-4-7" "claude-opus-4-8" {
+		cost-fallback {
+			input 5.5
+			output 27.5
+			cache-read 0.55
+			cache-write 6.875
+		}
+	}
+	models "claude-sonnet-4-6" "claude-sonnet-4-5" {
+		cost-fallback {
+			input 3.3
+			output 16.5
+			cache-read 0.33
+			cache-write 4.125
+		}
+	}
+	models "claude-haiku-4-5" {
+		cost-fallback {
+			input 1.1
+			output 5.5
+			cache-read 0.11
+			cache-write 1.375
+		}
+	}
+	models "gemini-3-1-pro" {
+		cost-fallback {
+			input 2.2
+			output 13.2
+			cache-read 0
+			cache-write 0
+		}
+	}
+	models "gemini-3-flash" {
+		cost-fallback {
+			input 0.55
+			output 3.3
+			cache-read 0
+			cache-write 0
+		}
+	}
+	models "gemini-3-5-flash" {
+		cost-fallback {
+			input 1.65
+			output 9.9
+			cache-read 0
+			cache-write 0
+		}
+	}
+	models "gpt-5-2" "gpt-5-2-codex" {
+		cost-fallback {
+			input 1.925
+			output 15.4
+			cache-read 0.1925
+			cache-write 0
+		}
+	}
+	models "gpt-6-luna" {
+		cost-fallback {
+			input 0.11
+			output 0.55
+			cache-read 0.011
+			cache-write 0.1375
+		}
+	}
+}
