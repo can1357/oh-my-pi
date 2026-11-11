@@ -56,6 +56,10 @@
 - macOS input from a second omp process no longer refuses with `UserIntervened` after the first process takes over a click in the same app; hardware clicks still pause input in that app ([#18896](https://github.com/can1357/oh-my-pi/pull/18896) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp worktree add` — and the bash tool's `git worktree add` rewrite — exiting 1 with `git: 'hook' is not a git command` on Git older than 2.36 (such as Git 2.34 on Ubuntu 22.04) after the worktree had already been created ([#18935](https://github.com/can1357/oh-my-pi/pull/18935) by [@Bensonluo](https://github.com/Bensonluo))
 
+### Fixed
+
+- Windows `setValue()` now confirms the value read back and notifies your app when selecting a native combo-box item, instead of reporting success for text the app did not accept.
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
@@ -65,7 +69,6 @@
 
 ### Fixed
 
-- Windows `setValue()` now confirms the value read back and notifies your app when selecting a native combo-box item, instead of reporting success for text the app did not accept.
 - Fixed a crash when parsing Markdown with very deeply nested lists or block quotes, such as a line of several hundred `- ` markers, which made editing such files kill the process ([#18707](https://github.com/can1357/oh-my-pi/issues/18707))
 - Fixed the shell's `git` builtin on Windows with `bash.gitGuard` (or smart git) on failing every allowed command with exit 127 (`…\Git\cmd\git: No such file or directory`); it now runs `git.exe` ([#18722](https://github.com/can1357/oh-my-pi/issues/18722))
 - Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles ([#18745](https://github.com/can1357/oh-my-pi/pull/18745) by [@will-bogusz](https://github.com/will-bogusz))
