@@ -3,6 +3,7 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { AutocompleteItem, ModelMentionCompletion } from "../index";
 import type { ModelBrowserRegistry, ModelBrowserSource } from "../overlays/model-browser";
 import { sameItems } from "../native/memo";
+import { subsequenceMatch } from "../autocomplete";
 import { modelMentionDisplayName, modelMentionName } from "./model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
@@ -24,6 +25,7 @@ const MAX_EFFORT_CANDIDATE_MODELS = 3;
 export type ModelMentionCandidateSource = ((query: string) => ReadonlyArray<ModelBrowserItem>) & {
 	availableModelIds?: () => ReadonlySet<string>;
 	retryDiscovery?: () => Promise<void> | undefined;
+	roles?: () => ReadonlyArray<AutocompleteItem>;
 };
 
 /** Model catalog that can retry provider discovery which failed earlier in the session. */
@@ -101,7 +103,11 @@ export function getModelMentionSuggestions(
 	if (!prefix) return { kind: "unhandled" };
 	// Started even without a match: the next keystroke reads whatever the retry recovers.
 	const pending = candidates.retryDiscovery?.();
-	const items = mentionRows(prefix.slice(1), candidates).slice(0, MAX_MODEL_MENTION_SUGGESTIONS);
+	const query = prefix.slice(1);
+	const roleRows = (candidates.roles?.() ?? []).filter(item =>
+		subsequenceMatch(query.toLowerCase(), item.label.toLowerCase()),
+	);
+	const items = [...roleRows, ...mentionRows(query, candidates)].slice(0, MAX_MODEL_MENTION_SUGGESTIONS);
 	return items.length > 0 ? { kind: "matched", suggestions: { items, prefix }, pending } : { kind: "no-match" };
 }
 
@@ -156,6 +162,35 @@ export function createModelMentionSource(host: {
 		}
 		return ranker.rank(query);
 	};
+	let roleScope: readonly ModelBrowserItem[] | undefined;
+	let roleItems: AutocompleteItem[] = [];
+	const roles = (): ReadonlyArray<AutocompleteItem> => {
+		const { SessionModelScopeCache } = loadModelBrowser();
+		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
+		const scope = scopeCache.get(host.scopedModels());
+		if (roleScope !== scope.items) {
+			roleScope = scope.items;
+			const models = scope.items.map(item => item.model);
+			roleItems = [];
+			for (const role of host.source.knownRoleIds) {
+				const info = host.source.getRoleInfo(role);
+				if (info.hidden || info.section !== "chat") continue;
+				const { model, thinkingLevel } = host.source.resolveRoleValue(`@${role}`, models);
+				if (!model) continue;
+				const selector = `${model.provider}/${model.id}`;
+				const effort = getSupportedEfforts(model).find(level => level === thinkingLevel);
+				if (thinkingLevel && thinkingLevel !== "auto" && !effort) continue;
+				const value = effort ? `${selector}:${effort}` : selector;
+				if (effort && availableModelIds().has(value)) continue;
+				const name = modelMentionDisplayName(model);
+				roleItems.push({
+					...mentionRow(value, effort ? modelMentionName(name, effort) : name),
+					label: `@${role}`,
+				});
+			}
+		}
+		return roleItems;
+	};
 	let availableModels: readonly Model[] | undefined;
 	let availableIds: ReadonlySet<string> = new Set();
 	const availableModelIds = (): ReadonlySet<string> => {
@@ -168,6 +203,7 @@ export function createModelMentionSource(host: {
 	};
 	return Object.assign(rank, {
 		availableModelIds,
+		roles,
 		retryDiscovery: () => host.registry.retryUnavailableDiscovery(),
 	});
 }
