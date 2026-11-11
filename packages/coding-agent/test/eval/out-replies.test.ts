@@ -11,7 +11,8 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
-import { $which, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { TEST_PYTHON } from "../helpers/python";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 let temp: TempDir;
@@ -47,7 +48,7 @@ function makeSession(): ToolSession {
 			"eval.autoProvision": false,
 			"bash.autoBackground.enabled": false,
 			"bashInterceptor.enabled": false,
-			"python.interpreter": Bun.env.PYTHON ?? $which("python3") ?? $which("python") ?? "",
+			"python.interpreter": TEST_PYTHON ?? "",
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",

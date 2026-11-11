@@ -2,11 +2,12 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, acquireFileLock } from "@oh-my-pi/pi-utils";
+import { acquireFileLock } from "@oh-my-pi/pi-utils";
 import type { IdbLocation } from "../../src/ida/store";
 import { IdaWorker } from "../../src/ida/supervisor";
+import { TEST_PYTHON } from "../helpers/python";
 
-const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
+const pythonPath = TEST_PYTHON ?? "python";
 
 /** Permissive stand-ins for idalib's modules so `worker.py` runs its real protocol loop without IDA. */
 const STUB = `

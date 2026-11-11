@@ -8,7 +8,8 @@ import { disposePyToolBridge } from "@oh-my-pi/pi-coding-agent/eval/py/tool-brid
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { $which, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { TEST_PYTHON } from "../helpers/python";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 let temp: TempDir;
@@ -41,7 +42,7 @@ function makeSession(): ToolSession {
 			"eval.autoProvision": false,
 			"bash.autoBackground.enabled": true,
 			"bash.autoBackground.thresholdMs": 10,
-			"python.interpreter": Bun.env.PYTHON ?? $which("python3") ?? $which("python") ?? "",
+			"python.interpreter": TEST_PYTHON ?? "",
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",

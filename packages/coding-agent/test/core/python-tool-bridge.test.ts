@@ -8,8 +8,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { $which, isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { TEST_PYTHON } from "../helpers/python";
 
 interface FakeCall {
 	id: string;
@@ -143,7 +144,7 @@ async def check_intent():
 asyncio.run(check_intent())
 `;
 			// Feed the script over stdin: the inlined prelude exceeds Windows spawn limits via `-c`.
-			const child = Bun.spawn([Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python"), "-"], {
+			const child = Bun.spawn([TEST_PYTHON ?? "python", "-"], {
 				stdin: new Response(script),
 				stdout: "pipe",
 				stderr: "pipe",
@@ -335,7 +336,7 @@ async def check_identity():
     print(await __omp_with_call_site__("py:0", tool.read, {"path": "foo.txt"}))
 asyncio.run(check_identity())
 `;
-			const child = Bun.spawn([Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python"), "-"], {
+			const child = Bun.spawn([TEST_PYTHON ?? "python", "-"], {
 				stdin: new Response(script),
 				stdout: "pipe",
 				stderr: "pipe",
