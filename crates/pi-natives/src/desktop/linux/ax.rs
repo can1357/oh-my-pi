@@ -13,6 +13,8 @@ use crate::desktop::{
 	types::DesktopWindow,
 };
 
+#[cfg(test)]
+mod getall_tests;
 mod menus;
 
 pub struct AtSpiAx {
@@ -420,8 +422,8 @@ impl AtSpiAx {
 	}
 
 	/// `object`'s `Action` proxy, without zbus's property cache: the cache
-	/// reads properties with `GetAll`, which Qt refuses, so `NActions` would
-	/// fail on every Qt element.
+	/// fills itself with `GetAll`, which Qt 5 crashes on and newer Qt refuses,
+	/// so `NActions` is read with `Get`.
 	async fn action<'a>(
 		connection: &'a atspi::zbus::Connection,
 		object: &'a ObjectRefOwned,
@@ -544,14 +546,7 @@ impl AtSpiAx {
 				let builder = atspi::proxy::text::TextProxy::builder(connection.connection())
 					.destination(name)
 					.and_then(|builder| builder.path(object.path().clone()));
-				if let Ok(builder) = builder
-					&& let Ok(text) = builder.build().await
-				{
-					let count = text.character_count().await.unwrap_or(0).min(16_384);
-					text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
-				} else {
-					None
-				}
+				text_value(builder).await
 			} else {
 				None
 			};
@@ -971,6 +966,23 @@ async fn text_contents(
 		.await?;
 	let count = text.character_count().await?;
 	text.get_text(0, count).await
+}
+
+/// The text of an element with the `Text` interface, up to 16,384 characters.
+/// The proxy keeps no property cache: zbus fills one with `GetAll`, which
+/// crashes Qt 5 and Qt 6 before 6.9.2, and GTK 3 and Firefox apps on
+/// at-spi2-core before 2.45; newer Qt refuses it.
+async fn text_value(
+	builder: zbus::Result<zbus::proxy::Builder<'_, atspi::proxy::text::TextProxy<'_>>>,
+) -> Option<String> {
+	let text = builder
+		.ok()?
+		.cache_properties(zbus::proxy::CacheProperties::No)
+		.build()
+		.await
+		.ok()?;
+	let count = text.character_count().await.unwrap_or(0).min(16_384);
+	text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
 }
 
 fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> CoreResult<String> {
@@ -1908,8 +1920,8 @@ mod tests {
 		];
 		const PEER: &str = ":1.7";
 
-		/// Answers like the apps, `GetAll` refused as Qt refuses it, so a proxy
-		/// that caches properties cannot read `NActions`.
+		/// Rejects `GetAll` rather than emulating Qt 5's crash. A proxy that
+		/// caches properties therefore cannot read `NActions`.
 		async fn app(server: atspi::zbus::Connection) {
 			let mut stream = MessageStream::from(&server);
 			while let Some(Ok(message)) = stream.next().await {
