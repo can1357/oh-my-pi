@@ -897,6 +897,15 @@ export class ExtensionRunner {
 	}
 
 	/**
+	 * Writer for the records the approval gate keeps in this session's file. The gate scopes its
+	 * grants to this runner's session, so its records belong to that same file; the tool context
+	 * only carries a read-only view.
+	 */
+	get approvalRecords(): Pick<SessionManager, "appendCustomEntry"> {
+		return this.sessionManager;
+	}
+
+	/**
 	 * Session settings this runner was constructed with. Used when a direct
 	 * `tool.execute()` omits execute-time context so approval still sees the
 	 * user's configured mode (schema default `yolo`) instead of fail-closed.
