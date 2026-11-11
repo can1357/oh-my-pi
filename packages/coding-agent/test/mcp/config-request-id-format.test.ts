@@ -156,6 +156,46 @@ for (const [provider, file] of [
 	});
 }
 
+for (const [provider, file] of [
+	["native", ".omp/mcp.json"],
+	["standalone", ".mcp.json"],
+	["plugin", "plugin/.mcp.json"],
+] as const) {
+	test(provider + " config keeps lifecycle and warns about an invalid value", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		await Bun.write(
+			path.join(tempCwd, file),
+			JSON.stringify({
+				mcpServers: {
+					deferred: { command: "/bin/echo", args: ["deferred"], lifecycle: "lazy" },
+					eager: { command: "/bin/echo", args: ["eager"], lifecycle: "eager" },
+					unset: { command: "/bin/echo", args: ["unset"] },
+					typo: { command: "/bin/echo", args: ["typo"], lifecycle: "sometimes" },
+				},
+			}),
+		);
+		const { configs } = await loadAllMCPConfigs(tempCwd, {
+			extensionRoots: {
+				explicit: provider === "plugin" ? [path.join(tempCwd, "plugin")] : [],
+				mode: "explicit-only",
+				configured: [],
+				configuredLevel: "project",
+			},
+		});
+		expect(Object.keys(configs).sort()).toEqual(["deferred", "eager", "typo", "unset"]);
+		expect(configs.deferred?.lifecycle).toBe("lazy");
+		expect(configs.eager?.lifecycle).toBe("eager");
+		expect(configs.unset?.lifecycle).toBeUndefined();
+		// A typo falls back to eager with a warning instead of silently changing
+		// when the server starts.
+		expect(configs.typo?.lifecycle).toBeUndefined();
+		const warnings = warn.mock.calls.map(args =>
+			args.map(arg => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "),
+		);
+		expect(warnings.filter(text => text.includes("typo") && text.includes("lifecycle"))).toHaveLength(1);
+	});
+}
+
 test("instructions does not split one endpoint into two connections", async () => {
 	const configs = await loadFrom(".omp/mcp.json", {
 		quiet: { command: "/bin/echo", instructions: false },
