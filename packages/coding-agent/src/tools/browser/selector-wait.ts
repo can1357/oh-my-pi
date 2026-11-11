@@ -28,6 +28,9 @@ export function selectorWaitOptions(options: unknown): SelectorWaitOptions {
 		(opts.hidden !== undefined && typeof opts.hidden !== "boolean")
 	)
 		throw new ToolError(FORMS);
+	if (opts.visible && opts.hidden) {
+		throw new ToolError(`waitForSelector(): visible and hidden cannot both be true. ${FORMS}`);
+	}
 	if (opts.state !== undefined) {
 		const visible = opts.state === "visible";
 		const hidden = opts.state === "hidden";

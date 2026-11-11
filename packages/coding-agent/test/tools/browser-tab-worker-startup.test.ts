@@ -277,7 +277,7 @@ describe("OMP-owned browser evaluation", () => {
 				const result = await runInTab(name, {
 					code: `
 					const errors = [];
-					for (const opts of [{state:"gone"}, {visble:true}, {visible:"true"}, {hidden:1}, {timeout:"250"}]) {
+					for (const opts of [{state:"gone"}, {visble:true}, {visible:"true"}, {hidden:1}, {timeout:"250"}, {visible:true, hidden:true}]) {
 						try { await tab.waitForSelector("#present", opts); errors.push("accepted"); }
 						catch (e) { errors.push(e.message); }
 					}
@@ -287,7 +287,7 @@ describe("OMP-owned browser evaluation", () => {
 					session,
 				});
 				expect(result.returnValue).toEqual(
-					Array.from({ length: 5 }, () => expect.stringContaining("waitForSelector() accepts")),
+					Array.from({ length: 6 }, () => expect.stringContaining("waitForSelector() accepts")),
 				);
 			} finally {
 				await releaseTab(name, { kill: true });
