@@ -28,6 +28,12 @@ const TREE_WALK_LIMIT: usize = 32;
 /// processes click-to-focus asynchronously).
 const FOCUS_SETTLE_WATCH: Duration = Duration::from_millis(150);
 const FOCUS_POLL: Duration = Duration::from_millis(25);
+/// How long a sent activation is given to move the focus after the user
+/// intervened, so the caller's hand-back can undo it: the shortest budget a
+/// takeover gives the WM to act on the same request.
+const QUEUED_ACTIVATION_WAIT: Duration = Duration::from_millis(800);
+/// Poll for that move; the user's keys reach the target until it is undone.
+const QUEUED_ACTIVATION_POLL: Duration = Duration::from_millis(2);
 
 pub(super) struct Atoms {
 	pub net_active_window:   Atom,
@@ -395,12 +401,28 @@ impl Wm<'_> {
 		{
 			return Ok(());
 		}
+		if let Err(error) = check_user() {
+			// The WM holds the request and can move the focus once the caller
+			// has looked; let it, so the hand-back sees the move and undoes it.
+			self.await_activation(window);
+			return Err(error);
+		}
 		// BadMatch on a not-yet-viewable window is expected; callers confirm.
-		check_user()?;
 		if let Ok(cookie) = self.conn.set_input_focus(InputFocus::PARENT, window, time) {
 			let _ = cookie.check();
 		}
 		self.conn.flush().map_err(wm_failed)
+	}
+
+	/// Waits, bounded, for core focus to reach `window` after its activation
+	/// was sent; a WM that declines the request leaves it at the bound.
+	fn await_activation(&self, window: Window) {
+		let deadline = Instant::now() + QUEUED_ACTIVATION_WAIT;
+		while Instant::now() < deadline && !self.is_focused(window, false) {
+			if control::wait(QUEUED_ACTIVATION_POLL).is_err() {
+				break;
+			}
+		}
 	}
 
 	/// Whether `window` is the active window (when an EWMH WM tracks one) and
