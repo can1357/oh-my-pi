@@ -4426,56 +4426,6 @@
 			],
 			"description": "Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."
 		},
-		"UserWaitStartEvent": {
-			"type": "object",
-			"properties": {
-				"type": {
-					"const": "user_wait_start"
-				},
-				"id": {
-					"type": "integer"
-				},
-				"kind": {
-					"enum": [
-						"permission",
-						"question",
-						"auth"
-					],
-					"type": "string",
-					"description": "An approval to grant, a question to answer, or a sign-in to complete."
-				},
-				"msg": {
-					"type": "string",
-					"description": "What the dialog asks, in a line."
-				},
-				"deadline": {
-					"type": "boolean",
-					"description": "The dialog settles on its own when its deadline passes (`ask.timeout`) and the agent goes on."
-				}
-			},
-			"required": [
-				"type",
-				"id",
-				"kind"
-			],
-			"description": "The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it."
-		},
-		"UserWaitEndEvent": {
-			"type": "object",
-			"properties": {
-				"type": {
-					"const": "user_wait_end"
-				},
-				"id": {
-					"type": "integer"
-				}
-			},
-			"required": [
-				"type",
-				"id"
-			],
-			"description": "The dialog of the `user_wait_start` with the same `id` settled."
-		},
 		"RpcAgentEvent": {
 			"anyOf": [
 				{
@@ -4576,12 +4526,6 @@
 				},
 				{
 					"$ref": "#/$defs/QueueUpdateEvent"
-				},
-				{
-					"$ref": "#/$defs/UserWaitStartEvent"
-				},
-				{
-					"$ref": "#/$defs/UserWaitEndEvent"
 				}
 			],
 			"description": "A session event, discriminated by `type`; `set_event_filter` selects which are sent."

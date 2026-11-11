@@ -156,12 +156,6 @@ export function fieldQuestions(form: HtmlForm): Map<FormField, string> {
 	return questions;
 }
 
-/** The question the form's first named field answers ({@link fieldQuestions}): what the form asks, in one line. */
-export function firstFieldQuestion(form: HtmlForm): string | undefined {
-	const field = form.fields.find(candidate => candidate.name);
-	return field && fieldQuestions(form).get(field);
-}
-
 /** Answers of every named field, in form order, with option values shown as their labels. */
 export function formAnswers(form: HtmlForm, data: HtmlFormData): FormAnswer[] {
 	const questions = fieldQuestions(form);

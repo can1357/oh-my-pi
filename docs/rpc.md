@@ -895,7 +895,6 @@ Common event types:
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
 - `queue_update`
-- `user_wait_start`, `user_wait_end`
 
 ### `queue_update` event
 
@@ -915,25 +914,6 @@ is still pending. Live-steered messages stay listed until recorded in the
 transcript, even after they cease to be removable. Render the queue from this
 event rather than tracking chips independently, and treat removal replies as
 confirmation of a change rather than independent queue state.
-
-### `user_wait_start` / `user_wait_end` events
-
-```json
-{ "type": "user_wait_start", "id": 3, "kind": "permission", "msg": "Allow gh pr merge?" }
-{ "type": "user_wait_end", "id": 3 }
-```
-
-The session is waiting on the user's answer: a tool approval, `ask`, an
-extension's `confirm`/`select`/`input`/`editor`/`custom`/ask/form dialog, a
-`cfg://` change, an MCP sign-in, a coding-plan reserve confirmation, or a plan
-review. Every such wait is reported, whoever opened it: whether it needs the
-user's attention is the client's call. One wait is one pair, however many
-dialogs it shows: an `ask` answered field by field, or an approval shown as a
-`select`. `kind` is `permission` for an approval, `auth` for a sign-in, and
-`question` otherwise; `msg` is what it asks, in a line. `deadline: true` marks
-a wait that settles on its own when `ask.timeout` passes. The end with the same
-`id` follows when the wait settles. omp's own menus (selectors, the paste
-picker, built-in command confirmations) are not waits and send neither.
 
 Extension runner errors are emitted separately as:
 

@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import {
-	closeUserWait,
 	disposeProgramStatus,
+	holdBlockedStatus,
 	initProgramStatus,
-	openUserWait,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	setRunStatus,
@@ -58,8 +57,7 @@ describe("run status OSC 7501 reporting", () => {
 	it("writes each transition as a whole root record, once, with kind only when blocked and msg as one clean line", () => {
 		setRunStatus({ state: "working" });
 		setRunStatus({ state: "working" });
-		openUserWait(1, { state: "blocked", kind: "question", msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?" });
-		closeUserWait(1);
+		holdBlockedStatus({ state: "blocked", kind: "question", msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?" })();
 		setRunStatus({ state: "done" });
 		setRunStatus({ state: "error", msg: "boom" });
 		setRunStatus({ state: "error", msg: " \n " });
@@ -106,7 +104,7 @@ describe("run status OSC 7501 reporting", () => {
 		writes.length = 0;
 
 		setProgramStatusEnabled(false);
-		openUserWait(1, { state: "blocked", kind: "permission" });
+		holdBlockedStatus({ state: "blocked", kind: "permission" });
 		setProgramStatusEnabled(true);
 
 		expect(writes).toEqual([CLEAR, report("state=blocked:kind=permission:app=omp")]);
@@ -115,9 +113,9 @@ describe("run status OSC 7501 reporting", () => {
 	it("re-sends prompt-invalidated working and blocked records but never repeats a done result", () => {
 		setRunStatus({ state: "working" });
 		resendProgramStatus();
-		openUserWait(1, { state: "blocked", kind: "permission", msg: "Approve the command?" });
+		const release = holdBlockedStatus({ state: "blocked", kind: "permission", msg: "Approve the command?" });
 		resendProgramStatus();
-		closeUserWait(1);
+		release();
 		setRunStatus({ state: "done" });
 		resendProgramStatus();
 
@@ -135,12 +133,12 @@ describe("run status OSC 7501 reporting", () => {
 		const blocked = (msg: string) =>
 			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from(msg).toString("base64")}`);
 		setRunStatus({ state: "working" });
-		openUserWait(1, { state: "blocked", kind: "question", msg: "Use Postgres?" });
+		const first = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Use Postgres?" });
 		// The run ends under the open wait: the user is still being asked.
 		setRunStatus({ state: "done" });
-		openUserWait(2, { state: "blocked", kind: "question", msg: "Deploy now?" });
-		closeUserWait(2);
-		closeUserWait(1);
+		const second = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Deploy now?" });
+		second();
+		first();
 
 		expect(writes).toEqual([
 			report("state=working:app=omp"),

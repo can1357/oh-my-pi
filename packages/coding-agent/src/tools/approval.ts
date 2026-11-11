@@ -20,7 +20,6 @@ import type {
 	ExtensionApprovalPrompt,
 	ExtensionUIContext,
 } from "../extensibility/extensions/types";
-import { askUser } from "../extensibility/extensions/user-wait";
 
 import {
 	type ApprovalGrantStore,
@@ -880,12 +879,7 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	// Shown as a select, it is still a permission wait.
-	const choice = await askUser(ui, () => ui.select(full, approvalChoiceLabels(choices)), {
-		kind: "permission",
-		msg: header.join(" "),
-	});
-	return approvalAnswerForChoice(choices, choice);
+	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices)));
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

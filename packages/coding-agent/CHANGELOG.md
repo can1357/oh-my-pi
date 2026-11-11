@@ -2,16 +2,9 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed Tern and other OSC 7501 terminals showing a session as `working` or `done`, with no needs-you alert, while it waits on you: an extension or hook dialog (`ctx.ui.confirm`, `select`, `input`, `editor`, `custom`, `askDialog`, `formDialog`, `approve`) such as one a `tool_call` handler opens to gate a command, a `cfg://` change, an MCP sign-in, the coding-plan reserve confirm, or a plan waiting for review. The session reports `blocked` (approvals as `permission`, sign-ins as `auth`, the rest as `question`) with what it asks until you answer, also while you view a subagent; the terminal decides whether to alert, so a focused pane stays quiet ([#15107](https://github.com/can1357/oh-my-pi/issues/15107), [#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
-- Fixed a session staying `blocked` after you answer a tool approval until the tool finishes; it now reports `working` as soon as you answer ([#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
-
 ### Added
 
 - Extensions can import the form theme, the native span helpers (`styledSpans`, `compactText`, `rowsText` and the rest of the ANSI/span conversions), the `xd://` URL helpers (`parseXdUrl` and friends) and the `cfgExtensionTranscriptPresenters` setting handle from `@oh-my-pi/pi-coding-agent` instead of internal module paths, which stop the extension from loading when a file moves ([#18849](https://github.com/can1357/oh-my-pi/pull/18849) by [@materemias](https://github.com/materemias))
-- RPC and SDK sessions emit `user_wait_start`/`user_wait_end` while the session waits on the user's answer (an approval, `ask`, an extension dialog, a plan review, a sign-in), with its kind (`permission`, `question` or `auth`), what it asks, and whether it has an `ask.timeout` deadline ([#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
-
 ### Changed
 
 - Agent-to-agent messages now always reach the recipient as user turns: one that ends a `wait` arrives right after it instead of inside the `wait` tool result, and none is sent with developer or system authority
@@ -20,6 +13,7 @@
 
 ### Fixed
 
+- Fixed Tern and other OSC 7501 terminals showing a session as `working`, with no needs-you alert, while a dialog waits on you, such as a `ctx.ui.confirm` an extension's `tool_call` handler opens to gate a command: every dialog the TUI shows (extension and hook dialogs, tool approvals, `ask`, `cfg://` changes, the coding-plan reserve confirm, plan review) now reports `blocked` with what it asks until you answer, and a tool approval reports `working` again as soon as you answer it ([#15107](https://github.com/can1357/oh-my-pi/issues/15107), [#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
 - The shell's built-in `jq` no longer slows down quadratically on repeated updates such as `reduce range(n) as $i ([]; . + [$i])`
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal

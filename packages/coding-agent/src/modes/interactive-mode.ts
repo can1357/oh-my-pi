@@ -255,10 +255,9 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/them
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
 import {
-	closeUserWait,
 	disposeProgramStatus,
+	holdBlockedStatus,
 	initProgramStatus,
-	openUserWait,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	settleStartupRun,
@@ -2156,10 +2155,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// An MCP sign-in can wait for the user mid-turn; like the auto-QA and cfg:// prompts below, it runs as a wait for
 		// the user (AgentSession.waitForUser).
 		this.mcpManager?.setAuthHandler((serverName, challenge) =>
-			this.session.waitForUser(() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge), {
-				kind: "auth",
-				msg: `Sign in to MCP server ${serverName}`,
-			}),
+			this.session.waitForUser(() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge)),
 		);
 		this.#eventBus = eventBus;
 		this.#subagentEventBus = subagentEventBus;
@@ -2515,28 +2511,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `Settings.instance` is the disk-backed singleton; passing it explicitly
 		// guarantees the decision persists even when the prompt is triggered
 		// from a subagent whose own `Settings` is an in-memory snapshot.
-		setAutoQaConsentHandler(
-			() =>
-				this.session.waitForUser(() => this.#promptAutoQaConsent(), {
-					kind: "permission",
-					msg: "Report a tool issue?",
-				}),
-			Settings.instance,
-		);
+		setAutoQaConsentHandler(() => this.session.waitForUser(() => this.#promptAutoQaConsent()), Settings.instance);
 		// Same wiring for cfg:// writes: every settings change the agent makes is
 		// confirmed here, and `/save` persists to disk. Subagents and headless
 		// sessions are refused by the handler before reaching this host. Changes
 		// to this session's settings get the settings panel's in-process side
 		// effects (a `defaultThinkingLevel` change also switches the live session).
 		setCfgApprovalHost({
-			// With `ask.timeout` set the prompt settles on its own and the turn goes on: a wait with a deadline, like a
-			// timed `ask`.
+			// With `ask.timeout` set the prompt settles on its own and the turn goes on, so it stays agent time,
+			// like a timed `ask`.
 			approve: (request, options) =>
-				this.session.waitForUser(
-					() => this.#promptCfgChange(request, options?.signal),
-					{ kind: "permission", msg: `${request.save ? "Save" : "Change"} ${request.path}?` },
-					{ deadline: askTimeoutMs(this.session.settings) !== undefined },
-				),
+				askTimeoutMs(this.session.settings) === undefined
+					? this.session.waitForUser(() => this.#promptCfgChange(request, options?.signal))
+					: this.#promptCfgChange(request, options?.signal),
 			applied: change => {
 				if (change.settings !== this.session.settings) return;
 				this.#selectorController.handleSettingChange(change.path, change.value);
@@ -2942,12 +2929,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				// A turn the TUI did not submit (an extension message, a background job) leaves
 				// getUserInput pending, so arm the loop's next iteration here instead.
 				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
-				// The root session's waits for the user, whichever session the view shows (subagents have no UI).
-				if (event.type === "user_wait_start") {
-					openUserWait(event.id, { state: "blocked", kind: event.kind, msg: event.msg });
-				} else if (event.type === "user_wait_end") {
-					closeUserWait(event.id);
-				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -7996,11 +7977,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			() => requestDelivered.resolve(),
 			() => requestDelivered.resolve(),
 		);
-		// The plan waits on the user's approval after the turn that proposed it has ended.
-		const choice = await this.session.waitForUser(() => choicePromise, {
-			kind: "permission",
-			msg: `Review plan: ${details.title}`,
-		});
+		// The plan waits on the user's approval, after the turn that proposed it has ended.
+		const release = holdBlockedStatus({ state: "blocked", kind: "permission", msg: `Review plan: ${details.title}` });
+		const choice = await choicePromise.finally(release);
 		if (this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
 		const remote = pending.remote;
 		const closePlanReview = (): void => {

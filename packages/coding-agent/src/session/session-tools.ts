@@ -16,7 +16,6 @@ import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/ext
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import type { UserWaitTracker } from "../extensibility/extensions/user-wait";
 import {
 	getActiveSkills,
 	type LoadSkillsResult,
@@ -146,7 +145,7 @@ export interface SessionToolsHost {
 	/** Live user-tagged model agents; candidates for the next base rebuild's advertised snapshot. */
 	sessionAgents(): readonly AgentDefinition[];
 	/** Runs a wait for the user's answer, such as an ACP client's permission request. */
-	waitForUser: UserWaitTracker;
+	waitForUser<T>(dialog: () => Promise<T>): Promise<T>;
 }
 
 /** Registry delta applied by the SDK's settings-gated tool reconcile. */
@@ -1338,7 +1337,7 @@ export class SessionTools {
 					}
 					let raced: PermissionRaceResult;
 					try {
-						const askClient = () => {
+						raced = await this.#host.waitForUser(() => {
 							const permissionPromise = bridge.requestPermission!(
 								{
 									toolCallId,
@@ -1365,8 +1364,7 @@ export class SessionTools {
 								userSteering.signal,
 							).then(outcome => ({ kind: "permission" as const, outcome }));
 							return Promise.race([permissionPromise, abortPromise, steerPromise]);
-						};
-						raced = await this.#host.waitForUser(askClient, { kind: "permission", msg: permissionIntent.title });
+						});
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
 						steeringSignal.removeEventListener("abort", onLoopSteer);

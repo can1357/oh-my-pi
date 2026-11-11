@@ -38,7 +38,6 @@ import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectItem } from "../extensibility/extensions";
-import { askUser } from "../extensibility/extensions/user-wait";
 import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
@@ -454,13 +453,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					formDialog(params.html, { timeout, signal: dialogSignal }),
 				);
 			} else {
-				// Asked field by field, the form is still one question.
-				answered = await askUser(
-					extensionUi,
-					() => askFieldByField(extensionUi, form, timeout, dialogSignal),
-					{ kind: "question", msg: questions.get(named[0]!) },
-					{ deadline: timeout !== undefined },
-				);
+				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
 			}
 		} catch (error) {
 			if (error instanceof Error && error.name === "AbortError") throw abortError();

@@ -69,8 +69,6 @@ describe("AgentSession computer display hold per turn", () => {
 	let asked = Promise.withResolvers<void>();
 	let answered = Promise.withResolvers<string>();
 	const questionSchema = type({});
-	/** What the test dialogs ask. */
-	const asksQuestion = { kind: "question" } as const;
 	/** A tool that waits for the user's answer, as `ask` and approvals do. */
 	const questionTool: AgentTool<typeof questionSchema, undefined> = {
 		name: "question",
@@ -81,7 +79,7 @@ describe("AgentSession computer display hold per turn", () => {
 			const answer = await session!.waitForUser(() => {
 				asked.resolve();
 				return answered.promise;
-			}, asksQuestion);
+			});
 			return { content: [{ type: "text", text: answer }], details: undefined };
 		},
 	};
@@ -256,8 +254,8 @@ describe("AgentSession computer display hold per turn", () => {
 		await streaming.promise;
 		const first = Promise.withResolvers<void>();
 		const second = Promise.withResolvers<void>();
-		const firstWait = target.waitForUser(() => first.promise, asksQuestion);
-		const secondWait = target.waitForUser(() => second.promise, asksQuestion);
+		const firstWait = target.waitForUser(() => first.promise);
+		const secondWait = target.waitForUser(() => second.promise);
 		expect(releases).toEqual([1]);
 		first.resolve();
 		await firstWait;
@@ -269,7 +267,7 @@ describe("AgentSession computer display hold per turn", () => {
 
 		// A dialog still open when the user interrupts the turn settles with no prompt in flight.
 		const third = Promise.withResolvers<void>();
-		const thirdWait = target.waitForUser(() => third.promise, asksQuestion);
+		const thirdWait = target.waitForUser(() => third.promise);
 		expect(releases).toEqual([1, 2]);
 		await target.abort();
 		await running;
@@ -284,7 +282,7 @@ describe("AgentSession computer display hold per turn", () => {
 		const target = createSession([{ content: ["done"] }, { content: ["slow"], delayMs: 5_000 }]);
 		await target.prompt("first");
 		const open = Promise.withResolvers<void>();
-		const wait = target.waitForUser(() => open.promise, asksQuestion);
+		const wait = target.waitForUser(() => open.promise);
 		streaming = Promise.withResolvers<void>();
 		const running = target.prompt("go").catch(() => undefined);
 		await streaming.promise;

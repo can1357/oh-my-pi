@@ -25,7 +25,6 @@ import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autos
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -321,39 +320,6 @@ describe("InteractiveMode plan review rendering", () => {
 		// Each approval shows the current plan in the overlay, not a stale one.
 		expect(review.mock.calls[1]?.[0]).toContain("Second plan");
 		expect(review.mock.calls[1]?.[0]).not.toContain("First plan");
-	});
-
-	it("reports the open review as a wait for the user's approval until it is answered", async () => {
-		const planFilePath = "local://PLAN.md";
-		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
-			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-			getSessionId: () => session.sessionManager.getSessionId(),
-		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nalpha");
-		mode.planModeEnabled = true;
-		mode.planModePlanFilePath = planFilePath;
-		const answer = Promise.withResolvers<string | undefined>();
-		const opened = Promise.withResolvers<void>();
-		vi.spyOn(mode, "showPlanReview").mockImplementation(() => {
-			opened.resolve();
-			return answer.promise;
-		});
-		const waits: AgentSessionEvent[] = [];
-		const unsubscribe = session.subscribe(event => {
-			if (event.type === "user_wait_start" || event.type === "user_wait_end") waits.push(event);
-		});
-
-		// Opened by the turn that proposed the plan, which has ended: no user action, no prompt in flight.
-		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
-		await opened.promise;
-		expect(waits).toEqual([
-			{ type: "user_wait_start", id: expect.any(Number), kind: "permission", msg: "Review plan: PLAN" },
-		]);
-		answer.resolve(undefined);
-		await approval;
-		unsubscribe();
-		expect(waits).toHaveLength(2);
-		expect(waits[1]).toMatchObject({ type: "user_wait_end" });
 	});
 
 	it("lets an extension approve the open review through the same execute path", async () => {

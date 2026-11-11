@@ -166,12 +166,6 @@ import { extensionEventFromSessionEvent } from "../extensibility/extensions/life
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
-import {
-	enterUserWait,
-	insideUserWait,
-	type UserPrompt,
-	type UserWaitOptions,
-} from "../extensibility/extensions/user-wait";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
@@ -1381,8 +1375,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#clientPromptInFlightCount = 0;
 	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
 	#userWaitCount = 0;
-	/** Ids of the reported `user_wait_start`/`user_wait_end` pairs. */
-	#userWaitSeq = 0;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
 	#inFlightEpoch = 0;
@@ -1560,40 +1552,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Runs `dialog`, which waits for the user's answer (`ask`, a tool approval, an extension prompt), as one wait for
-	 * the user. Every dialog that waits on the user runs through here, so this is where a run is known to be blocked.
-	 *
-	 * Every wait is reported as a `user_wait_start`/`user_wait_end` pair asking `prompt`, whoever opened it:
-	 * the session cannot go on with it until the user answers. Whether that needs the user's attention is the
-	 * consumer's call (a terminal knows whether its pane has focus). Dialogs `dialog` opens through a tracked UI belong
-	 * to this wait ({@link enterUserWait}).
-	 *
-	 * Without a deadline, the computer turn ends while it is open, so an unattended Mac sleeps and locks on its own
-	 * timer rather than showing the pending question; once the last open wait settles, if a prompt is still in
-	 * flight, the turn goes on (the run still active in it, since a dialog can be that run's control confirmation, and
-	 * later runs hold the display again). The agent meanwhile counts as blocked on the user ({@link USER_AWAIT_ID}),
-	 * so a peer's wait for its reply ends. A dialog with a deadline settles on its own and the agent goes on, so its
-	 * time stays the agent's.
+	 * Runs `dialog`, which waits for the user's answer (`ask`, a tool approval, an extension prompt), with the
+	 * computer turn ended, so an unattended Mac sleeps and locks on its own timer rather than showing the pending
+	 * question. Once the last open dialog settles, if a prompt is still in flight, the turn goes on: the run still active
+	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again. While it is open,
+	 * the agent counts as blocked on the user ({@link USER_AWAIT_ID}), so a peer's wait for its reply ends.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>, prompt: UserPrompt, options?: UserWaitOptions): Promise<T> {
-		if (insideUserWait()) return dialog();
-		const held = options?.deadline !== true;
-		if (held && this.#userWaitCount++ === 0) {
+	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+		if (this.#userWaitCount++ === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
 		}
-		const releaseUserHold =
-			held && this.#agentId
-				? this.#agentRegistry?.awaits.hold(this.#agentId, [USER_AWAIT_ID], { interruptible: false })
-				: undefined;
-		const waitId = ++this.#userWaitSeq;
-		this.#emit({ type: "user_wait_start", id: waitId, ...prompt, ...(held ? {} : { deadline: true }) });
+		const releaseUserHold = this.#agentId
+			? this.#agentRegistry?.awaits.hold(this.#agentId, [USER_AWAIT_ID], { interruptible: false })
+			: undefined;
 		try {
-			return await enterUserWait(dialog);
+			return await dialog();
 		} finally {
-			this.#emit({ type: "user_wait_end", id: waitId });
 			releaseUserHold?.();
-			if (held && --this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
+			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
 				else this.#resumeComputerTurn();
 			}
@@ -2681,7 +2658,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
-			waitForUser: (dialog, prompt, options) => this.waitForUser(dialog, prompt, options),
+			waitForUser: dialog => this.waitForUser(dialog),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -3453,9 +3430,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
-		this.#planProposalHandler = handler
-			? title => this.waitForUser(() => handler(title), { kind: "permission", msg: title })
-			: undefined;
+		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title)) : undefined;
 	}
 
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
@@ -7218,11 +7193,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
 		this.#usageFallbackConfirmer = confirmer
-			? (confirmation, signal) =>
-					this.waitForUser(() => confirmer(confirmation, signal), {
-						kind: "permission",
-						msg: `Switch to ${confirmation.to}?`,
-					})
+			? (confirmation, signal) => this.waitForUser(() => confirmer(confirmation, signal))
 			: undefined;
 	}
 

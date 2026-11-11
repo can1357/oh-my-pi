@@ -9,7 +9,6 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { CustomMessage } from "./messages";
 import type { CacheWarmingRefreshEnd, CacheWarmingRefreshStart } from "./cache-warmer";
-import type { UserPrompt } from "../extensibility/extensions/user-wait";
 
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
@@ -100,11 +99,6 @@ export type AgentSessionEvent =
 			resolved?: Effort;
 	  }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
-	// One pair per wait for the user's answer (AgentSession.waitForUser: a tool approval, `ask`, an extension dialog,
-	// a plan review, a sign-in): the session cannot go on with it until the matching end. `deadline` marks a dialog
-	// that settles on its own (`ask.timeout`).
-	| ({ type: "user_wait_start"; id: number; deadline?: boolean } & UserPrompt)
-	| { type: "user_wait_end"; id: number }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
 	// whenever it differs from the last `queue_update` (enqueue, dequeue on
 	// delivery, remove, clear/restore, live-steering adoption/withdrawal, or

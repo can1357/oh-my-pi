@@ -1265,26 +1265,6 @@ class QueueUpdateEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
-class UserWaitStartEvent:
-    """The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it."""
-    type: Literal["user_wait_start"] = "user_wait_start"
-    id: int
-    kind: Literal["permission", "question", "auth"]
-    """An approval to grant, a question to answer, or a sign-in to complete."""
-    msg: str | None = None
-    """What the dialog asks, in a line."""
-    deadline: bool | None = None
-    """The dialog settles on its own when its deadline passes (`ask.timeout`) and the agent goes on."""
-
-
-@dataclass(slots=True, frozen=True, kw_only=True)
-class UserWaitEndEvent:
-    """The dialog of the `user_wait_start` with the same `id` settled."""
-    type: Literal["user_wait_end"] = "user_wait_end"
-    id: int
-
-
-@dataclass(slots=True, frozen=True, kw_only=True)
 class ReadyEvent:
     """First frame after startup; transport fields are absent on servers without protocol v2."""
     type: Literal["ready"] = "ready"
@@ -1731,7 +1711,7 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent | UserWaitStartEvent | UserWaitEndEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -2737,25 +2717,6 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
     )
 
 
-def parse_user_wait_start_event(value: object, path: str = "UserWaitStartEvent") -> UserWaitStartEvent:
-    payload = expect_object(value, path)
-    required(payload, "type", cast('Decoder[Literal["user_wait_start"]]', literal(frozenset({"user_wait_start"}))), path)
-    return UserWaitStartEvent(
-        id=required(payload, "id", decode_int, path),
-        kind=required(payload, "kind", cast('Decoder[Literal["permission", "question", "auth"]]', literal(frozenset({"permission", "question", "auth"}))), path),
-        msg=optional(payload, "msg", decode_str, path),
-        deadline=optional(payload, "deadline", decode_bool, path),
-    )
-
-
-def parse_user_wait_end_event(value: object, path: str = "UserWaitEndEvent") -> UserWaitEndEvent:
-    payload = expect_object(value, path)
-    required(payload, "type", cast('Decoder[Literal["user_wait_end"]]', literal(frozenset({"user_wait_end"}))), path)
-    return UserWaitEndEvent(
-        id=required(payload, "id", decode_int, path),
-    )
-
-
 def parse_ready_event(value: object, path: str = "ReadyEvent") -> ReadyEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["ready"]]', literal(frozenset({"ready"}))), path)
@@ -3302,8 +3263,6 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "thinking_level_changed": parse_thinking_level_changed_event,
         "goal_updated": parse_goal_updated_event,
         "queue_update": parse_queue_update_event,
-        "user_wait_start": parse_user_wait_start_event,
-        "user_wait_end": parse_user_wait_end_event,
 }
 
 
@@ -3363,8 +3322,6 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "thinking_level_changed": parse_rpc_agent_event,
         "goal_updated": parse_rpc_agent_event,
         "queue_update": parse_rpc_agent_event,
-        "user_wait_start": parse_rpc_agent_event,
-        "user_wait_end": parse_rpc_agent_event,
 }
 
 
@@ -4041,14 +3998,6 @@ class WireClient:
         """Subscribe to `queue_update`: Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."""
         return self._listen("queue_update", listener)
 
-    def on_user_wait_start(self, listener: Callable[[UserWaitStartEvent], None]) -> Callable[[], None]:
-        """Subscribe to `user_wait_start`: The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it."""
-        return self._listen("user_wait_start", listener)
-
-    def on_user_wait_end(self, listener: Callable[[UserWaitEndEvent], None]) -> Callable[[], None]:
-        """Subscribe to `user_wait_end`: The dialog of the `user_wait_start` with the same `id` settled."""
-        return self._listen("user_wait_end", listener)
-
 
 __all__ = [
     "AbortAndRestoreQueueResult",
@@ -4252,8 +4201,6 @@ __all__ = [
     "UsageLimitWrapUp",
     "UserContent",
     "UserMessage",
-    "UserWaitEndEvent",
-    "UserWaitStartEvent",
     "WidgetPlacement",
     "parse_abort_and_restore_queue_result",
     "parse_advisor_cost_changed_event",
@@ -4424,6 +4371,4 @@ __all__ = [
     "parse_usage_limit_wrap_up",
     "parse_user_content",
     "parse_user_message",
-    "parse_user_wait_end_event",
-    "parse_user_wait_start_event",
 ]

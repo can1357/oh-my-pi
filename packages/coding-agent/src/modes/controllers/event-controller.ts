@@ -483,10 +483,6 @@ export class EventController {
 			queue_update: async () => {
 				this.ctx.updatePendingMessagesDisplay();
 			},
-			// InteractiveMode reports the root session's waits whichever session is viewed; a viewed subagent
-			// has no UI to wait on the user with.
-			user_wait_start: async () => {},
-			user_wait_end: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 

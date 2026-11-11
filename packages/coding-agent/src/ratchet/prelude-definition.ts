@@ -5,7 +5,6 @@ import type { ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dia
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
-import { askUser } from "../extensibility/extensions/user-wait";
 import { cfgRatchetEnabled } from "../tools/settings";
 import ratchetDocumentation from "../prompts/tools/ratchet.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -228,12 +227,7 @@ async function invokeRatchet(
 			if (reviewed.approvals[params.stage]?.sha === sha) {
 				return result("", { approved: true, already: true });
 			}
-			// One permission wait for the review, its follow-up input included.
-			const outcome = await askUser(
-				context.context?.ui,
-				() => askApproval(context, params.stage, params.question, params.preview),
-				{ kind: "permission", msg: `ratchet · ${params.stage}: ${params.question}` },
-			);
+			const outcome = await askApproval(context, params.stage, params.question, params.preview);
 			if (!outcome.approved) return result("", outcome);
 			// Record against freshly loaded state so approvals made meanwhile survive, and only
 			// if the material is still what the user just reviewed.
