@@ -7,7 +7,7 @@ set -e
 #
 # Options:
 #   --source       Install via bun (installs bun if needed)
-#   --binary       Always install prebuilt binary
+#   --binary       Install the prebuilt binary (default)
 #   --ref <ref>    Install specific tag/commit/branch (source mode); binary
 #                  mode takes a release tag (v<version>)
 #   -r <ref>       Shorthand for --ref
@@ -70,9 +70,15 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# If a ref is provided, default to source install
-if [ -n "$REF" ] && [ -z "$MODE" ]; then
-    MODE="source"
+# The prebuilt binary is the default: it updates itself with delta patches,
+# which a bun package install cannot. A ref can name a branch or commit, which
+# only a source install can build, so a bare --ref selects source.
+if [ -z "$MODE" ]; then
+    if [ -n "$REF" ]; then
+        MODE="source"
+    else
+        MODE="binary"
+    fi
 fi
 
 # Check if bun is available
@@ -347,6 +353,14 @@ install_binary() {
     echo ""
     echo "✓ Installed omp to ${INSTALL_DIR}/omp"
 
+    # An omp earlier on PATH (a previous `bun install -g`, Homebrew, ...) keeps
+    # winning over this install until it is removed or INSTALL_DIR moves ahead.
+    ACTIVE_OMP="$(command -v omp 2>/dev/null || true)"
+    if [ -n "$ACTIVE_OMP" ] && ! [ "$ACTIVE_OMP" -ef "${INSTALL_DIR}/omp" ]; then
+        echo "'omp' still resolves to ${ACTIVE_OMP}; remove that install or put ${INSTALL_DIR} ahead of it on PATH."
+        return
+    fi
+
     # Check if in PATH
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) echo "Run 'omp' to get started!" ;;
@@ -372,18 +386,5 @@ case "$MODE" in
         ;;
     binary)
         install_binary
-        ;;
-    *)
-        # Default: use bun only when it matches the host architecture, otherwise
-        # fall back to the prebuilt binary so Rosetta bun can't force an x86_64 build.
-        if has_bun && bun_arch_matches_host; then
-            require_bun_version
-            install_via_bun
-        else
-            if has_bun; then
-                echo "Detected bun with architecture '$(bun_arch)' on a '$(host_arch)' host; using the prebuilt binary instead."
-            fi
-            install_binary
-        fi
         ;;
 esac

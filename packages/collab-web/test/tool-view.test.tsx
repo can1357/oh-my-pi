@@ -227,6 +227,33 @@ describe("ToolView ask renderer", () => {
 		expect(html).toContain("auto-selected after timeout");
 	});
 
+	it("renders selected option notes under the matching answer", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="ask"
+				defaultOpen
+				args={{ html: form }}
+				result={{
+					content: [],
+					details: {
+						answers: [
+							{ name: "notes", question: "Notes & caveats", answer: "none" },
+							{ name: "db", question: "Storage backend", answer: "SQLite, Postgres, managed" },
+						],
+						notes: [
+							{ name: "db", question: "Storage backend", option: "Postgres, managed", text: "Team standard" },
+							{ name: "db", question: "Storage backend", option: 12, text: "ignored malformed note" },
+						],
+					},
+				}}
+			/>,
+		);
+
+		expect(html).toContain("✎ Postgres, managed: Team standard");
+		expect(html.indexOf("Team standard")).toBeGreaterThan(html.lastIndexOf("Storage backend"));
+		expect(html).not.toContain("ignored malformed note");
+	});
+
 	it("falls back to the result text when details carry no answers", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
