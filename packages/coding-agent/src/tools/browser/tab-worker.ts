@@ -47,12 +47,7 @@ import {
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
-import {
-	resolveOpTimeouts,
-	resolveWaitTimeout,
-	ZERO_MATCH_FAIL_FAST_MS,
-	ZERO_MATCH_POLL_MS,
-} from "./op-timeouts";
+import { resolveOpTimeouts, resolveWaitTimeout, ZERO_MATCH_FAIL_FAST_MS, ZERO_MATCH_POLL_MS } from "./op-timeouts";
 import { type BrowserA11yOptions, type BrowserA11yResult, formatA11ySummary, runA11yAudit } from "./a11y/audit";
 import {
 	applyUserAgentOverride,

@@ -376,7 +376,8 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			hooks.op("frame.ariaSnapshot()", hooks.quickOpMs, async signal => {
 				const root = selector ? await untilAborted(signal, () => frame.$(hooks.normalizeSelector(selector))) : null;
 				try {
-					if (selector && !root) throw new ToolError(`frame.ariaSnapshot: selector ${selector} matched no element`);
+					if (selector && !root)
+						throw new ToolError(`frame.ariaSnapshot: selector ${selector} matched no element`);
 					return await untilAborted(signal, () => captureAriaSnapshot(frame, root, options));
 				} finally {
 					await root?.dispose().catch(() => undefined);

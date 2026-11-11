@@ -148,21 +148,23 @@ describe("browser tab worker startup", () => {
 });
 
 describe("OMP-owned browser evaluation", () => {
-	it.skipIf(!CHROMIUM_AVAILABLE)("keeps delayed-caught frame selector timeouts inside the run", async () => {
-		const name = `frame-delayed-catch-${process.pid}`;
-		const session = {
-			cwd: process.cwd(),
-			hasUI: false,
-			settings: Settings.isolated(),
-			getSessionFile: () => null,
-		} as unknown as ToolSession;
-		try {
-			await acquireTab(name, headless(), {
-				url: 'data:text/html,<iframe name="child" srcdoc="<button>frame</button>"></iframe>',
-				timeoutMs: 30_000,
-			});
-			const result = await runInTab(name, {
-				code: `
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps delayed-caught frame selector timeouts inside the run",
+		async () => {
+			const name = `frame-delayed-catch-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: 'data:text/html,<iframe name="child" srcdoc="<button>frame</button>"></iframe>',
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
 					const frame = await tab.frame("child");
 					const pending = frame.waitForSelector("#missing", {timeout:50});
 					// This integration case requires the real Chromium timeout before attaching its catch.
@@ -170,74 +172,87 @@ describe("OMP-owned browser evaluation", () => {
 					try { await pending; } catch (error) { return error.message.includes("timed out"); }
 					return false;
 				`,
-				timeoutMs: 10_000,
-				session,
-			});
-			expect(result.returnValue).toBe(true);
-		} finally {
-			await releaseTab(name, { kill: true });
-		}
-	}, 45_000);
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toBe(true);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
 
-	it.skipIf(!CHROMIUM_AVAILABLE)("completes public detached waits when navigation removes the element", async () => {
-		const name = `selector-navigation-${process.pid}`;
-		const session = {
-			cwd: process.cwd(),
-			hasUI: false,
-			settings: Settings.isolated(),
-			getSessionFile: () => null,
-		} as unknown as ToolSession;
-		try {
-			await acquireTab(name, headless(), {
-				url: "data:text/html,<button id=present>old document</button>",
-				timeoutMs: 30_000,
-			});
-			const result = await runInTab(name, {
-				code: `
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"completes public detached waits when navigation removes the element",
+		async () => {
+			const name = `selector-navigation-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: "data:text/html,<button id=present>old document</button>",
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
 					const pending = tab.waitForSelector("#present", {state:"detached", timeout:2000});
 					await tab.evaluate("document.querySelector('#present').isConnected");
 					await page.goto("data:text/html,replacement-document");
 					return (await pending) === null;
 				`,
-				timeoutMs: 10_000,
-				session,
-			});
-			expect(result.returnValue).toBe(true);
-		} finally {
-			await releaseTab(name, { kill: true });
-		}
-	}, 45_000);
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toBe(true);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
 
-	it.skipIf(!CHROMIUM_AVAILABLE)("continues detached polling after a real document context replacement", async () => {
-		const page = await headless().browser.newPage();
-		const queried = Promise.withResolvers<void>();
-		const replaced = Promise.withResolvers<void>();
-		let first = true;
-		try {
-			await page.setContent('<button id="present">old document</button>');
-			const frame = page.mainFrame();
-			const pending = waitForDetached(async () => {
-				if (!first) return frame.$("#present");
-				first = false;
-				const stale = await frame.$("#present");
-				if (!stale) throw new Error("Expected an old-document handle");
-				queried.resolve();
-				await replaced.promise;
-				try {
-					return (await stale.evaluateHandle(element => element)).asElement();
-				} finally {
-					await stale.dispose().catch(() => undefined);
-				}
-			}, new AbortController().signal).then(value => ({ value }), error => ({ error }));
-			await queried.promise;
-			await page.goto("data:text/html,new-document");
-			replaced.resolve();
-			expect(await pending).toEqual({ value: null });
-		} finally {
-			replaced.resolve();
-			await page.close().catch(() => undefined);
-		}
-	}, 30_000);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"continues detached polling after a real document context replacement",
+		async () => {
+			const page = await headless().browser.newPage();
+			const queried = Promise.withResolvers<void>();
+			const replaced = Promise.withResolvers<void>();
+			let first = true;
+			try {
+				await page.setContent('<button id="present">old document</button>');
+				const frame = page.mainFrame();
+				const pending = waitForDetached(async () => {
+					if (!first) return frame.$("#present");
+					first = false;
+					const stale = await frame.$("#present");
+					if (!stale) throw new Error("Expected an old-document handle");
+					queried.resolve();
+					await replaced.promise;
+					try {
+						return (await stale.evaluateHandle(element => element)).asElement();
+					} finally {
+						await stale.dispose().catch(() => undefined);
+					}
+				}, new AbortController().signal).then(
+					value => ({ value }),
+					error => ({ error }),
+				);
+				await queried.promise;
+				await page.goto("data:text/html,new-document");
+				replaced.resolve();
+				expect(await pending).toEqual({ value: null });
+			} finally {
+				replaced.resolve();
+				await page.close().catch(() => undefined);
+			}
+		},
+		30_000,
+	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"accepts selector wait states on tabs and frames",
