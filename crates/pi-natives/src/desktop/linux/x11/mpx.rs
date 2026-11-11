@@ -1064,7 +1064,7 @@ fn claim_pair(
 		pair
 	} else {
 		if pairs >= MAX_PAIRS {
-			return Err(DesktopError::input_failed(format!(
+			return Err(DesktopError::input_busy(format!(
 				"XI2-MPX pair limit ({MAX_PAIRS}) reached; no reusable pair is free"
 			)));
 		}
@@ -1389,7 +1389,7 @@ mod tests {
 		}
 		let before = query_devices(&conn).unwrap().len();
 		let refused = claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park);
-		assert!(refused.is_err(), "a burst must not permanently consume more device slots");
+		assert_eq!(refused.unwrap_err().code, crate::desktop::error::ErrorCode::InputBusy);
 		assert_eq!(query_devices(&conn).unwrap().len(), before, "refusal adds no devices");
 		let pair = pairs[0];
 		release_pair(&conn, holder, root, park, pair.0, pair.1, &[]);

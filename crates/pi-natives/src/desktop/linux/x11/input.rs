@@ -1071,7 +1071,7 @@ impl X11Input {
 }
 
 /// The session's MPX pair, created on first use; `Err` carries why the route
-/// is unavailable. A creation failure is remembered for the session.
+/// is unavailable. Capability failures, but not contention, are remembered.
 fn ensure_mpx<'a>(
 	slot: &'a mut Option<Mpx>,
 	unavailable: &mut Option<String>,
@@ -1081,15 +1081,17 @@ fn ensure_mpx<'a>(
 	}
 	let mpx = match slot.take() {
 		Some(mpx) => mpx,
-		None => Mpx::create().map_err(|error| {
-			if control::check().is_err() {
-				error.message
-			} else {
-				unavailable.insert(error.message).clone()
-			}
-		})?,
+		None => Mpx::create().map_err(|error| remember_mpx_failure(error, unavailable))?,
 	};
 	Ok(slot.insert(mpx))
+}
+
+fn remember_mpx_failure(error: DesktopError, unavailable: &mut Option<String>) -> String {
+	if error.code == ErrorCode::InputBusy || control::check().is_err() {
+		error.message
+	} else {
+		unavailable.insert(error.message).clone()
+	}
 }
 
 /// Delivers a background pointer event through the virtual master pointer,
@@ -1283,6 +1285,15 @@ const fn event_kind(event: &PointerEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn temporary_pair_contention_does_not_disable_mpx_for_the_session() {
+		let mut unavailable = None;
+		remember_mpx_failure(DesktopError::input_busy("all pairs held"), &mut unavailable);
+		assert!(unavailable.is_none(), "the next action must retry pair acquisition");
+		remember_mpx_failure(DesktopError::input_failed("no uinput access"), &mut unavailable);
+		assert!(unavailable.is_some(), "permanent capability failures stay cached");
+	}
 
 	#[test]
 	fn a_refusal_that_disturbed_focus_is_not_rerunnable() {
