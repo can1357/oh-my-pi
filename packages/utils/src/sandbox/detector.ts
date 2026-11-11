@@ -1,7 +1,7 @@
 import { sanitizeText } from "../sanitize-text";
 import { readSandboxFacts, SANDBOX_NAMESPACES } from "./facts";
 import { createSandboxHost } from "./host";
-import { BUILTIN_SANDBOX_PROBES } from "./probes";
+import { BUILTIN_SANDBOX_PROBES } from "./probes/builtin";
 import type {
 	SandboxDetail,
 	SandboxFacts,

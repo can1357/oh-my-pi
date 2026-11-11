@@ -1,5 +1,5 @@
-import { tryParseJson } from "../json";
-import { isRecord } from "../type-guards";
+import { tryParseJson } from "../../json";
+import { isRecord } from "../../type-guards";
 import type {
 	SandboxDetail,
 	SandboxLayer,
@@ -7,7 +7,7 @@ import type {
 	SandboxPolicyFile,
 	SandboxProbe,
 	SandboxWriteAccess,
-} from "./types";
+} from "../types";
 
 const MAX_LISTED = 6;
 
@@ -115,45 +115,3 @@ export const nonoProbe: SandboxProbe = {
 		return layer;
 	},
 };
-
-function declared(id: string, evidence: string): SandboxLayer {
-	return { id, basis: "declared", restrictions: [], evidence: [evidence] };
-}
-
-/** A Kubernetes pod: the service env and the mounted service account. Declared. */
-export const k8sProbe: SandboxProbe = {
-	id: "k8s",
-	detect(host) {
-		if (host.platform !== "linux" || !host.env.KUBERNETES_SERVICE_HOST) return undefined;
-		if (!host.exists("/var/run/secrets/kubernetes.io/serviceaccount")) return undefined;
-		return declared("k8s", "KUBERNETES_SERVICE_HOST set and a service account mounted");
-	},
-};
-
-/**
- * A Docker container: `/.dockerenv`, or PID 1's cgroup path names docker. Containerd and CRI containers (most
- * Kubernetes pods) have neither marker, so they are not called docker. Declared.
- */
-export const dockerProbe: SandboxProbe = {
-	id: "docker",
-	detect(host) {
-		if (host.platform !== "linux") return undefined;
-		if (host.exists("/.dockerenv")) return declared("docker", "/.dockerenv present");
-		if (/\bdocker\b/.test(host.readFile("/proc/1/cgroup") ?? "")) {
-			return declared("docker", "/proc/1/cgroup names docker");
-		}
-		return undefined;
-	},
-};
-
-/** A Podman container: `/run/.containerenv`. Declared. */
-export const podmanProbe: SandboxProbe = {
-	id: "podman",
-	detect(host) {
-		if (host.platform !== "linux" || !host.exists("/run/.containerenv")) return undefined;
-		return declared("podman", "/run/.containerenv present");
-	},
-};
-
-/** Outermost first: a pod wraps a container, which may run nono. */
-export const BUILTIN_SANDBOX_PROBES: readonly SandboxProbe[] = [k8sProbe, dockerProbe, podmanProbe, nonoProbe];
