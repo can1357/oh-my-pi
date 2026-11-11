@@ -271,7 +271,12 @@ llvm_msvc_tools(name = "llvm_msvc_tools")
 
 xwin_sysroot = use_repo_rule("//bazel/toolchains/msvc:sysroot.bzl", "xwin_sysroot_repository")
 
-xwin_sysroot(name = "xwin_sysroot")
+# Pinned like the arm64 splat below: the manifest's latest SDK (10.0.26100)
+# no longer resolves x86_64 headers ("unable to find x86_64 headers").
+xwin_sysroot(
+    name = "xwin_sysroot",
+    sdk_version = "10.0.22621",
+)
 
 xwin_sysroot(
     name = "xwin_sysroot_arm64",
