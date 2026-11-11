@@ -92,6 +92,7 @@
 
 - A printed browser `tab.observe()` result, or one left as a JavaScript Eval cell's last value, shows every element, one line each, instead of the first 100 followed by `... N more items` ([#18772](https://github.com/can1357/oh-my-pi/pull/18772) by [@will-bogusz](https://github.com/will-bogusz))
 - A printed browser `tab.observe()` result, or one left as a JavaScript Eval cell's last value, shows every element, one line each, instead of the first 100 followed by `... N more items`; BigInt or circular annotations remain printable ([#18772](https://github.com/can1357/oh-my-pi/pull/18772) by [@will-bogusz](https://github.com/will-bogusz))
+- A printed browser `tab.observe()` result, or one left as a JavaScript Eval cell's last value, shows every element, one line each, instead of the first 100 followed by `... N more items`; BigInt, circular, or accessor annotations remain printable without invoking annotated getters ([#18772](https://github.com/can1357/oh-my-pi/pull/18772) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

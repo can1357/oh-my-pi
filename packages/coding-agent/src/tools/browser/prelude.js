@@ -50,6 +50,11 @@
 			return inspect(value, { customInspect: false, depth: null, compact: true, breakLength: Infinity });
 		}
 	};
+	const showProperty = (descriptor, inspect) => {
+		if (!descriptor.enumerable) return undefined;
+		if ("value" in descriptor) return descriptor.value === undefined ? undefined : showField(descriptor.value, inspect);
+		return descriptor.get ? (descriptor.set ? "[Getter/Setter]" : "[Getter]") : "[Setter]";
+	};
 	const printedAtTop = (depth, options) => Number.isFinite(depth) && depth === options.depth;
 	const elementLine = (element, inspect) => {
 		if (element === null || typeof element !== "object") return showField(element, inspect);
@@ -60,8 +65,10 @@
 		for (const key of ["value", "description", "keyshortcuts"]) {
 			if (element[key] !== undefined) line += ` ${key}=${showField(element[key], inspect)}`;
 		}
-		for (const [key, value] of Object.entries(element)) {
-			if (!knownElementKeys.has(key) && value !== undefined) line += ` ${key}=${showField(value, inspect)}`;
+		for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(element))) {
+			if (knownElementKeys.has(key)) continue;
+			const shown = showProperty(descriptor, inspect);
+			if (shown !== undefined) line += ` ${key}=${shown}`;
 		}
 		if (Array.isArray(element.states) && element.states.length > 0) line += ` ${element.states.join(" ")}`;
 		return line;
@@ -84,8 +91,10 @@
 			value: (depth, options, inspect) => {
 				if (!Array.isArray(observation.elements)) return observation;
 				const lines = [];
-				for (const [key, value] of Object.entries(observation)) {
-					if (key !== "elements" && value !== undefined) lines.push(`${key}: ${showField(value, inspect)}`);
+				for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(observation))) {
+					if (key === "elements") continue;
+					const shown = showProperty(descriptor, inspect);
+					if (shown !== undefined) lines.push(`${key}: ${shown}`);
 				}
 				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
 				for (const element of observation.elements) lines.push(elementLine(element, inspect));

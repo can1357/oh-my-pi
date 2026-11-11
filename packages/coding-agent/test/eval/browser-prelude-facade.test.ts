@@ -405,6 +405,16 @@ describe("browser facade in real Eval runtimes", () => {
 		["element BigInt", "o.elements[0].extra = 1n", "extra=1n"],
 		["element cycle", "o.elements[0].self = o.elements[0]", "[Circular"],
 		["throwing toJSON", 'o.extra = { toJSON() { throw new Error("not JSON"); } }', "extra:"],
+		[
+			"observation getter",
+			'Object.defineProperty(o, "extra", { enumerable: true, get() { throw new Error("getter ran"); } })',
+			"extra: [Getter]",
+		],
+		[
+			"element getter",
+			'Object.defineProperty(o.elements[0], "extra", { enumerable: true, get() { throw new Error("getter ran"); } })',
+			"extra=[Getter]",
+		],
 	])("prints non-JSON annotations: %s", async (_name, annotation, expected) => {
 		let definitions: readonly EvalPreludeDefinition[] = [];
 		const session = makeSession(() => definitions);
