@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049), [#18648](https://github.com/can1357/oh-my-pi/pull/18648) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ### Fixed
 
@@ -22,7 +26,6 @@
 - Ask form textareas edited from Tern now restart the inactivity timeout instead of submitting mid-edit
 - Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 - Fixed terminal Device Attributes replies (such as `^[[?64;1;2;4;6;17;18;21;22c`) leaking into the shell prompt on exit ([#18662](https://github.com/can1357/oh-my-pi/pull/18662) by [@asuffield](https://github.com/asuffield))
-- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049), [#18648](https://github.com/can1357/oh-my-pi/pull/18648) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.7] - 2026-11-10
 
