@@ -18,12 +18,17 @@ import { claudeResetClearedBlockScopes } from "@oh-my-pi/pi-ai/usage/claude-rese
  * only when every limit gating that scope has headroom: the shared 5-hour wall
  * blocks Fable too, so a spent 5h window must keep the block alive.
  */
-function sharedLimit(id: string, windowId: string, usedFraction: number): UsageLimit {
+function sharedLimit(
+	id: string,
+	windowId: string,
+	usedFraction: number,
+	resetsAt = Date.now() + 60 * 60_000,
+): UsageLimit {
 	return {
 		id: `anthropic:${id}`,
 		label: id,
 		scope: { provider: "anthropic", shared: true, windowId },
-		window: { id: windowId, label: windowId, resetsAt: Date.now() + 60 * 60_000 },
+		window: { id: windowId, label: windowId, resetsAt },
 		amount: { usedFraction, unit: "percent" },
 		status: usedFraction >= 1 ? "exhausted" : "ok",
 	};
@@ -114,11 +119,15 @@ interface HealHarness {
 	blocks: Map<string, number>;
 }
 
-function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarness {
+function makeHarness(
+	report: UsageReport,
+	blockScope = "tier:fable",
+	blockedUntilMs = Date.now() + 3 * 24 * 60 * 60_000,
+): HealHarness {
 	const rows = [oauthRow(1), oauthRow(2)];
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
 	const blocks = new Map<string, number>();
-	blocks.set(`1:${blockScope}`, Date.now() + 3 * 24 * 60 * 60_000);
+	blocks.set(`1:${blockScope}`, blockedUntilMs);
 	const clearedScopes: string[] = [];
 	let probes = 0;
 	const store: AuthCredentialStore = {
@@ -248,6 +257,126 @@ describe("claude usage-block healing", () => {
 		expect(clearedScopes).not.toContain("tier:fable");
 		expect(await storage.keys.get("anthropic", "s-partial", { modelId: "claude-fable-5-1" })).toBe("access-2");
 	});
+
+	it("heals a global block from a healthy partial report only when its reset matches the block deadline", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const { storage, clearedScopes } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", resetAt);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		expect(await storage.keys.get("anthropic", "s-global-reset-match", { modelId: "claude-opus-5-5" })).toBe(
+			"access-1",
+		);
+		expect(clearedScopes).toContain("");
+	});
+
+	it("treats a reset within 60 seconds of the block deadline as a match", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
+			"",
+			resetAt + 59_000,
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).toContain("");
+	});
+
+	it("keeps a global block when the partial report's reset is more than 60 seconds off", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const { storage, clearedScopes, blocks } = makeHarness(
+			claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
+			"",
+			resetAt + 61_000,
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).not.toContain("");
+		expect(blocks.has("1:")).toBe(true);
+	});
+
+	it("keeps a global block when a healthy partial report has a different reset", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const blockedUntil = resetAt + 60 * 60_000;
+		const { storage, clearedScopes, blocks } = makeHarness(
+			claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
+			"",
+			blockedUntil,
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).not.toContain("");
+		expect(blocks.has("1:")).toBe(true);
+	});
+
+	it("keeps a global block when a healthy partial report has no reset", async () => {
+		const blockedUntil = Date.now() + 60 * 60_000;
+		const limit = sharedLimit("7d", "7d", 0);
+		const noReset: UsageLimit = { ...limit, window: { id: "7d", label: "7d" } };
+		const { storage, clearedScopes, blocks } = makeHarness(claudeReport([noReset]), "", blockedUntil);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).not.toContain("");
+		expect(blocks.has("1:")).toBe(true);
+	});
+
+	it("heals a global block from a healthy 5-hour-only report with a matching reset", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.2, resetAt)]),
+			"",
+			resetAt,
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).toContain("");
+	});
+
+	const partialKeepCases: { name: string; report: (resetAt: number) => UsageReport }[] = [
+		{
+			name: "its only window is exhausted",
+			report: resetAt => claudeReport([sharedLimit("7d", "7d", 1, resetAt)]),
+		},
+		{
+			name: "it comes from rate-limit headers",
+			report: resetAt => ({
+				...claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
+				metadata: { accountId: "account-1", source: "ratelimit-headers" },
+			}),
+		},
+		{
+			name: "a model-family weekly limit is exhausted",
+			report: resetAt => claudeReport([sharedLimit("7d", "7d", 0, resetAt), tierLimit("opus", 1)]),
+		},
+	];
+	for (const { name, report } of partialKeepCases) {
+		it(`keeps a global block from a reset-matching partial report when ${name}`, async () => {
+			const resetAt = Date.now() + 60 * 60_000;
+			const { storage, clearedScopes, blocks } = makeHarness(report(resetAt), "", resetAt);
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+			expect(clearedScopes).not.toContain("");
+			expect(blocks.has("1:")).toBe(true);
+		});
+	}
 
 	it("heals a stale account-wide block without claiming to clear an absent tier row", async () => {
 		const { storage, clearedScopes, probeCount } = makeHarness(

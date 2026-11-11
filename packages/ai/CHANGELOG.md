@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Claude accounts staying blocked after recovery when `/usage` reports only one shared usage window
+
 ## [18.18.8] - 2026-11-11
 
 - Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))

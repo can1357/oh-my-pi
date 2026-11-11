@@ -542,7 +542,20 @@ export class CredentialBlocks implements BlocksApi {
 		// last-good report for hours after `/usage` starts failing, and those
 		// healthy limits describe the account before the 429 that blocked it.
 		if (!Number.isFinite(report.fetchedAt) || Date.now() - report.fetchedAt > USAGE_REPORT_TTL_MS) return;
-		for (const { blockScope, limits, healthy } of strategy?.healableBlockScopes?.(report) ?? []) {
+		for (const { blockScope, limits, healthy, resetMatchRequired } of strategy?.healableBlockScopes?.(report) ?? []) {
+			if (resetMatchRequired) {
+				const blockedUntilMs = this.#exactBlockedUntil(credentialId, providerKey, blockScope);
+				const resetMatchesBlock = limits.some(resetLimit => {
+					if (resetLimit.scope.shared !== true) return false;
+					const resetsAt = resetLimit.window?.resetsAt;
+					return (
+						Number.isFinite(resetsAt) &&
+						blockedUntilMs !== undefined &&
+						Math.abs(resetsAt! - blockedUntilMs) <= 60_000
+					);
+				});
+				if (!resetMatchesBlock) continue;
+			}
 			if (healthy === false || isUsageLimitReached(limits) || (healthy === undefined && limits.length === 0))
 				continue;
 			this.#clearHealedBlockScope(provider, providerKey, credentialId, blockScope, report.fetchedAt);
