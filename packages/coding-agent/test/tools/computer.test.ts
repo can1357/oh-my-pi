@@ -487,14 +487,27 @@ describe("computer prelude", () => {
 	it("keeps partial failure evidence through JavaScript Eval", async () => {
 		let definitions: readonly EvalPreludeDefinition[] = [];
 		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
-		const supervisor = new ComputerSupervisor(session, () => liveWorker(new FakeNativeSession()), undefined, undefined, { read: () => 0, forget: () => {} });
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
 		const prelude = createComputerPrelude(session, () => supervisor);
 		definitions = [prelude];
 		const statuses: unknown[] = [];
 		try {
 			const result = await executeJs(
 				`await computer.run("console.log('MARK'); await desktop.screenshot(); throw new TypeError('stop after act')");`,
-				{ session, sessionId: crypto.randomUUID(), cwd: process.cwd(), onStatus: event => { statuses.push(event); } },
+				{
+					session,
+					sessionId: crypto.randomUUID(),
+					cwd: process.cwd(),
+					onStatus: event => {
+						statuses.push(event);
+					},
+				},
 			);
 			expect(result.exitCode).not.toBe(0);
 			expect(result.output).toContain("MARK");
@@ -509,7 +522,13 @@ describe("computer prelude", () => {
 	it("keeps partial failure evidence through Python Eval", async () => {
 		let definitions: readonly EvalPreludeDefinition[] = [];
 		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
-		const supervisor = new ComputerSupervisor(session, () => liveWorker(new FakeNativeSession()), undefined, undefined, { read: () => 0, forget: () => {} });
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
 		definitions = [createComputerPrelude(session, () => supervisor)];
 		try {
 			const result = await executePython(
@@ -1638,13 +1657,20 @@ describe("computer worker round trips", () => {
 	it("keeps partial failure evidence in a worker result", async () => {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => new FakeNativeSession());
-		const result = await runWorker(transport, "partial-failure", "console.log('MARK'); await desktop.screenshot(); throw new Error('stop after act')");
+		const result = await runWorker(
+			transport,
+			"partial-failure",
+			"console.log('MARK'); await desktop.screenshot(); throw new Error('stop after act')",
+		);
 		expect(result.ok).toBe(false);
 		if (result.ok) throw new Error("Expected failed run");
 		expect(result.error.message).toBe("stop after act");
 		expect(result).toMatchObject({
 			output: {
-				displays: expect.arrayContaining([{ type: "text", text: expect.stringContaining("MARK") }, expect.objectContaining({ type: "image" })]),
+				displays: expect.arrayContaining([
+					{ type: "text", text: expect.stringContaining("MARK") },
+					expect.objectContaining({ type: "image" }),
+				]),
 				screenshots: [expect.objectContaining({ width: 64, height: 32 })],
 			},
 		});

@@ -1579,14 +1579,12 @@ export class ComputerWorkerCore {
 				this.#confirmControl(active, reason, deadline - Math.min(CONTROL_ANSWER_RESERVE_MS, message.timeoutMs / 4)),
 		};
 		let returnValue: unknown;
-		let capabilities: DesktopCapabilities | undefined;
 		let failure: { error: unknown } | undefined;
 		let completed = false;
 		try {
 			throwIfAborted(signal);
 			await this.#ensureSession(message.session, message.escape);
 			const session = this.#guarded!;
-			capabilities = session.capabilities;
 			throwIfAborted(signal);
 			// An Escape after the host's check still ends the run before the script starts.
 			this.#checkEscape();
@@ -1668,7 +1666,7 @@ export class ComputerWorkerCore {
 				id: message.id,
 				ok: false,
 				error: this.#withScreenState(errorPayload(failure.error)),
-				output: { displays: output.finish(), screenshots, returnValue: undefined, capabilities },
+				output: { displays: output.finish(), screenshots, returnValue: undefined },
 			});
 			return;
 		}

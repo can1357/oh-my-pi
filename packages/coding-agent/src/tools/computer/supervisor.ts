@@ -323,12 +323,15 @@ export class ComputerSupervisor implements ComputerController {
 			// The stop landed after the script finished, its input out: keep what it did, led by the user's stop.
 			if (this.#escapeStopped()) {
 				if (result.error) {
-					const reported = result.error.message.includes(ESCAPE_STOPPED_MESSAGE) ||
+					const reported =
+						result.error.message.includes(ESCAPE_STOPPED_MESSAGE) ||
 						result.error.message.includes(ESCAPE_AFTER_CALL_MESSAGE);
-					return reported ? result : {
-						...result,
-						error: { ...result.error, message: `${result.error.message}\n\n${ESCAPE_STOPPED_MESSAGE}` },
-					};
+					return reported
+						? result
+						: {
+								...result,
+								error: { ...result.error, message: `${result.error.message}\n\n${ESCAPE_STOPPED_MESSAGE}` },
+							};
 				}
 				return { ...result, displays: [{ type: "text", text: ESCAPE_AFTER_CALL_MESSAGE }, ...result.displays] };
 			}
