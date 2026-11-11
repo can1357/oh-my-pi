@@ -37,7 +37,8 @@ use x11rb::{
 			HierarchyChangeData, HierarchyChangeDataAddMaster, HierarchyChangeDataAttachSlave,
 			XIChangePropertyAux, XIDeviceInfo, XIEventMask, XIGetPropertyItems,
 		},
-		xproto::{Atom, AtomEnum, ConnectionExt as _, PropMode, Window},
+		xkb::{self, ConnectionExt as _},
+		xproto::{Atom, AtomEnum, ConnectionExt as _, ModMask, PropMode, Window},
 	},
 	rust_connection::RustConnection,
 };
@@ -92,8 +93,6 @@ const MAX_PAIRS: usize = 2;
 const HOLDER_PROPERTY: &str = "_OMP_MPX_HOLDER";
 /// How long a session's end waits for the server to drop its unplugged slaves.
 const UNPLUG_TIMEOUT: Duration = Duration::from_secs(1);
-/// Every master this module adds, with or without an owner incarnation.
-const MASTER_PREFIX: &str = "OMP MPX ";
 /// Holder property value of a pair no session holds.
 const HOLDER_FREE: &[u8] = b"free";
 
@@ -185,7 +184,10 @@ impl Mpx {
 			)
 		}) {
 			pointer.destroy();
-			release_pair(&conn, holder, root, park, master_pointer, master_keyboard, &[pointer_slave]);
+			release_pair(&conn, holder, root, park, master_pointer, master_keyboard, &[(
+				pointer_slave,
+				&pointer_name,
+			)]);
 			return Err(error);
 		}
 		set_flat_acceleration(&conn, pointer_slave);
@@ -759,10 +761,12 @@ impl Drop for Mpx {
 		// park and free the pair only once the server has dropped them, so a late
 		// motion or release never lands at the park corner or under the next
 		// holder.
-		let mut slaves = vec![self.pointer_slave];
+		let pointer_name = format!("{} uinput pointer", self.name);
+		let keyboard_name = format!("{} uinput keyboard", self.name);
+		let mut slaves = vec![(self.pointer_slave, pointer_name.as_str())];
 		if let Some(mut keyboard) = self.keyboard.take() {
 			keyboard.device.destroy();
-			slaves.push(keyboard.slave);
+			slaves.push((keyboard.slave, keyboard_name.as_str()));
 		}
 		self.pointer.destroy();
 		release_pair(
@@ -1039,7 +1043,10 @@ fn claim_pair(
 		let Ok(pointer) = std::str::from_utf8(&info.name) else {
 			continue;
 		};
-		if !pointer.starts_with(MASTER_PREFIX) {
+		// `v1.` pairs belong to older omp releases, which may still remove them:
+		// never taken, and not counted, or two left by killed old processes
+		// would use up the cap until the X server exits.
+		if !pointer.starts_with(OWNER_PREFIX) {
 			continue;
 		}
 		pairs += 1;
@@ -1070,6 +1077,31 @@ fn claim_pair(
 		add_master(conn, name)?;
 		find_masters(conn, name)?
 	};
+	// Locks and sticky-key latches belong to the previous holder, not this
+	// session. Address the pair's keyboard explicitly, never the core one.
+	if !conn
+		.xkb_use_extension(1, 0)
+		.map_err(mpx_failed)?
+		.reply()
+		.map_err(mpx_failed)?
+		.supported
+	{
+		return Err(mpx_failed("XKB 1.0 is unavailable"));
+	}
+	conn
+		.xkb_latch_lock_state(
+			pair.1,
+			255u8.into(),
+			ModMask::default(),
+			true,
+			xkb::Group::M1,
+			255u8.into(),
+			true,
+			0,
+		)
+		.map_err(mpx_failed)?
+		.check()
+		.map_err(mpx_failed)?;
 	write_holder(conn, holder, pair.0, name.as_bytes())?;
 	Ok(pair)
 }
@@ -1097,7 +1129,7 @@ fn release_pair(
 	park: (i16, i16),
 	master_pointer: u16,
 	master_keyboard: u16,
-	slaves: &[u16],
+	slaves: &[(u16, &str)],
 ) {
 	if !wait_unplugged(conn, slaves) {
 		// A timed-out teardown must never be reclaimed, even after its holder
@@ -1142,14 +1174,20 @@ fn warp_master(
 }
 
 /// Waits, bounded, until the server no longer lists `slaves`: kernel hot-unplug
-/// is asynchronous, and events written before it may still be delivered.
-fn wait_unplugged(conn: &RustConnection, slaves: &[u16]) -> bool {
+/// is asynchronous, and events written before it may still be delivered. A
+/// slave is the device listed under both its id and its name: the server
+/// gives a freed id to the next device plugged in.
+fn wait_unplugged(conn: &RustConnection, slaves: &[(u16, &str)]) -> bool {
 	let deadline = Instant::now() + UNPLUG_TIMEOUT;
 	loop {
 		let Ok(devices) = query_devices(conn) else {
 			return false;
 		};
-		if !devices.iter().any(|info| slaves.contains(&info.deviceid)) {
+		if !devices.iter().any(|info| {
+			slaves
+				.iter()
+				.any(|&(id, name)| info.deviceid == id && info.name == name.as_bytes())
+		}) {
 			return true;
 		}
 		if Instant::now() >= deadline {
@@ -1387,6 +1425,10 @@ mod tests {
 	#[ignore = "needs an isolated X server"]
 	fn the_pair_pool_refuses_growth_at_its_limit_but_reuses_a_released_pair() {
 		let (conn, root, park) = display();
+		// Killed older omp processes can leave pairs that they may still reap.
+		// They must neither be adopted nor consume the new pool's slots.
+		add_master(&conn, "OMP MPX v1.pool-test-1").unwrap();
+		add_master(&conn, "OMP MPX v1.pool-test-2").unwrap();
 		let holder = conn
 			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
 			.unwrap()
@@ -1454,14 +1496,18 @@ mod tests {
 			.unwrap()
 			.into_iter()
 			.find(|info| info.type_ == DeviceType::SLAVE_POINTER && info.attachment == pair.0)
-			.unwrap()
-			.deviceid;
+			.unwrap();
+		let slave_name = String::from_utf8(slave.name.clone()).unwrap();
+		assert!(
+			wait_unplugged(&conn, &[(slave.deviceid, "a device that previously used this id")]),
+			"a replacement with the same id is not the unplugged slave"
+		);
 		conn
 			.xinput_xi_set_focus(root, CURRENT_TIME, pair.1)
 			.unwrap()
 			.check()
 			.unwrap();
-		release_pair(&conn, holder, root, park, pair.0, pair.1, &[slave]);
+		release_pair(&conn, holder, root, park, pair.0, pair.1, &[(slave.deviceid, &slave_name)]);
 		assert_eq!(
 			conn
 				.xinput_xi_get_focus(pair.1)
@@ -1503,12 +1549,59 @@ mod tests {
 		};
 		let first = Mpx::create().unwrap();
 		let (pair, slave) = (first.master_pointer, first.pointer_slave);
+		assert!(
+			conn
+				.xkb_use_extension(1, 0)
+				.unwrap()
+				.reply()
+				.unwrap()
+				.supported
+		);
+		let core_before = conn
+			.xkb_get_state(xkb::ID::USE_CORE_KBD.into())
+			.unwrap()
+			.reply()
+			.unwrap();
+		conn
+			.xkb_latch_lock_state(
+				first.master_keyboard,
+				255u8.into(),
+				ModMask::LOCK,
+				true,
+				xkb::Group::M1,
+				255u8.into(),
+				true,
+				0,
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+		let locked = conn
+			.xkb_get_state(first.master_keyboard)
+			.unwrap()
+			.reply()
+			.unwrap();
+		assert_eq!(locked.locked_mods, ModMask::LOCK);
 		drop(first);
 		let after = devices();
 		assert!(after.contains(&pair), "the pair outlives its session");
 		assert!(!after.contains(&slave), "its slave is gone before the pair is free");
 		let second = Mpx::create().unwrap();
 		assert_eq!(second.master_pointer, pair, "the next session takes the free pair");
+		let state = conn
+			.xkb_get_state(second.master_keyboard)
+			.unwrap()
+			.reply()
+			.unwrap();
+		assert_eq!(state.locked_mods, ModMask::default());
+		assert_eq!(state.latched_mods, ModMask::default());
+		let core_after = conn
+			.xkb_get_state(xkb::ID::USE_CORE_KBD.into())
+			.unwrap()
+			.reply()
+			.unwrap();
+		assert_eq!(core_after.locked_mods, core_before.locked_mods, "core keyboard is untouched");
+		assert_eq!(core_after.latched_mods, core_before.latched_mods, "core latches are untouched");
 	}
 
 	/// Pairs whose holders were killed get parked and freed by the next claim,
