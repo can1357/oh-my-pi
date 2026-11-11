@@ -7,6 +7,7 @@ import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgPublishBackends } from "../publish/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 
@@ -1146,6 +1147,7 @@ export const cfgBuiltinToolGates = combine({
 	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
+	publish: cfgPublishBackends,
 	security: cfgSecurityEnabled,
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,

@@ -1,7 +1,7 @@
 import { type AwsCredentials, type SignedHeaders, signRequest } from "@oh-my-pi/pi-ai/providers/aws-sigv4";
 import { asStrictBytes } from "@oh-my-pi/pi-utils";
 import type { BlobDestinationId } from "./destinations";
-import type { BlobUploader, RemoteDeleteAction } from "./publication";
+import type { BlobUploader, BlobUploadRequest, RemoteDeleteAction } from "./publication";
 import {
 	credentialString,
 	type DestinationRuntimeConfig,
@@ -77,9 +77,19 @@ function configuredPrefix(config: DestinationRuntimeConfig): string | undefined 
 	return optionString(config, "keyPrefix") ?? optionString(config, "prefix") ?? optionString(config, "path");
 }
 
-function objectKey(prefix: string | undefined, filename: string): string {
-	const cleanPrefix = prefix?.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
-	return cleanPrefix ? `${cleanPrefix}/${filename}` : filename;
+function objectKey(prefix: string | undefined, request: BlobUploadRequest): string {
+	const parts: string[] = [];
+	for (const segment of [prefix, request.folder]) {
+		for (const part of segment?.replaceAll("\\", "/").split("/") ?? []) {
+			if (!part || part === ".") continue;
+			if (part === ".." || part.includes("\0")) {
+				throw new Error("Object keys cannot contain parent traversal or NUL bytes");
+			}
+			parts.push(part);
+		}
+	}
+	parts.push(fileNameFor(request));
+	return parts.join("/");
 }
 
 function encodePath(path: string): string {
@@ -210,7 +220,7 @@ function createS3Uploader(destination: BlobDestinationId, config: DestinationRun
 	return {
 		destination,
 		async upload(uploadRequest) {
-			const key = objectKey(settings.keyPrefix, fileNameFor(uploadRequest));
+			const key = objectKey(settings.keyPrefix, uploadRequest);
 			const target = requestObjectUrl(settings, key);
 			const requestHeaders: Record<string, string> = { "content-type": uploadRequest.mimeType };
 			if (settings.cacheControl) requestHeaders["cache-control"] = settings.cacheControl;
@@ -252,6 +262,24 @@ function createS3Uploader(destination: BlobDestinationId, config: DestinationRun
 				: target.url.toString();
 			return publication(destination, uploadRequest, publicUrl, { delete: deleteAction, remoteId: key });
 		},
+		async remove(published) {
+			if (!published.remoteId) throw new Error(`${destination} publication has no object key`);
+			const target = requestObjectUrl(settings, published.remoteId);
+			const signed = await signRequest({
+				method: "DELETE",
+				host: target.url.host,
+				path: target.signingPath,
+				body: EMPTY_BYTES,
+				region: settings.region,
+				service: "s3",
+				credentials,
+			});
+			const response = await request(target.url, { method: "DELETE", headers: toSignedHeaderRecord(signed) });
+			// S3 answers 204 for a deleted or already-absent key.
+			if (!response.ok && response.status !== 404) {
+				throw new Error(`${destination} delete failed with HTTP ${response.status}`);
+			}
+		},
 	};
 }
 
@@ -279,7 +307,7 @@ function createGcsUploader(config: DestinationRuntimeConfig): BlobUploader {
 	return {
 		destination,
 		async upload(uploadRequest) {
-			const key = objectKey(prefix, fileNameFor(uploadRequest));
+			const key = objectKey(prefix, uploadRequest);
 			const boundary = `omp-${crypto.randomUUID()}`;
 			const metadata: Record<string, string> = { name: key, contentType: uploadRequest.mimeType };
 			if (cacheControl) metadata.cacheControl = cacheControl;
@@ -396,7 +424,7 @@ function createAzureUploader(config: DestinationRuntimeConfig): BlobUploader {
 	return {
 		destination,
 		async upload(uploadRequest) {
-			const key = objectKey(prefix, fileNameFor(uploadRequest));
+			const key = objectKey(prefix, uploadRequest);
 			const url = new URL(endpoint);
 			const resourcePath = joinPath(decodedPathname(url), container, key);
 			url.pathname = encodePath(resourcePath);
@@ -554,7 +582,7 @@ function createNativeB2Uploader(config: DestinationRuntimeConfig): BlobUploader 
 	return {
 		destination,
 		async upload(uploadRequest) {
-			const key = objectKey(prefix, fileNameFor(uploadRequest));
+			const key = objectKey(prefix, uploadRequest);
 			const authorization = await authorizeB2(config);
 			const bucket = await findB2Bucket(config, authorization, bucketName);
 			const uploadTarget = await b2UploadTarget(config, authorization, bucket.bucketId);

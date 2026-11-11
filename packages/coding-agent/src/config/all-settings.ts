@@ -31,6 +31,7 @@ import * as toolsBrowserSettings from "../tools/browser/settings";
 import * as idaSettings from "../ida/settings";
 import * as mcpSettings from "../mcp/settings";
 import * as blobBrokerSettings from "../blob-broker/settings";
+import * as publishSettings from "../publish/settings";
 import * as secretsSettings from "../secrets/settings";
 import * as ttsSettings from "../tts/settings";
 import * as sttSettings from "../stt/settings";
@@ -72,6 +73,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	idaSettings,
 	mcpSettings,
 	blobBrokerSettings,
+	publishSettings,
 	secretsSettings,
 	sttSettings,
 	collabSettings,

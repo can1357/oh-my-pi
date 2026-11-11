@@ -38,6 +38,12 @@ export interface BlobUploadRequest {
 	extension: string;
 	/** Preferred remote filename when a backend supports naming. */
 	filename?: string;
+	/**
+	 * Relative remote folder (slash-separated) for backends with hierarchical
+	 * keys; together with `filename` it makes repeat uploads overwrite one
+	 * stable object. Flat backends ignore it.
+	 */
+	folder?: string;
 }
 
 /** A configured destination capable of publishing blobs. */
@@ -46,4 +52,10 @@ export interface BlobUploader {
 	readonly destination: BlobDestinationId;
 	/** Publish one blob and return its durable publication metadata. */
 	upload(request: BlobUploadRequest): Promise<BlobPublication>;
+	/**
+	 * Delete a publication this destination produced, signing with live
+	 * credentials. Preferred over replaying {@link BlobPublication.delete},
+	 * whose captured signature may have expired.
+	 */
+	remove?(publication: BlobPublication): Promise<void>;
 }
