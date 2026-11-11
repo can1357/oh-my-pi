@@ -39,6 +39,7 @@ import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" wit
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import {
+	type ApprovalMode,
 	approvalRestrictions,
 	denyError,
 	resolveApproval,
@@ -845,6 +846,11 @@ export class SessionTools {
 	/** Whether the edit tool is registered. */
 	get hasEditTool(): boolean {
 		return this.#toolRegistry.has("edit");
+	}
+
+	/** The approval mode tool calls resolve: `tools.approvalMode`, or `yolo` when the session was started auto-approved. */
+	get approvalMode(): ApprovalMode {
+		return resolveApprovalFromContext({ autoApprove: this.#autoApprove, settings: this.#host.settings }).approvalMode;
 	}
 
 	/**

@@ -17,8 +17,7 @@ import type { ReportSectionsInput } from "@oh-my-pi/pi-tui/overlays/sections-rep
 import { fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { PREVIEW_LIMITS, shortenEmbeddedPaths } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getMarkdownTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { Settings } from "../../config/settings";
-import { type ApprovalMode, resolveApprovalFromContext } from "../../tools/approval";
+import type { ApprovalMode } from "../../tools/approval";
 import { cfgToolsApprovalMode } from "../../tools/settings";
 
 /** The mode's name as `/settings` shows it. */
@@ -110,7 +109,7 @@ function onOff(value: boolean | undefined, on: string, off: string): string {
 }
 
 const ROOT_LISTING_TEXT: Record<SandboxFacts["rootListing"], string> = {
-	refused: "listing / refused by an LSM",
+	refused: "listing / refused",
 	allowed: "listing / allowed",
 	unknown: "listing / unknown",
 };
@@ -335,10 +334,9 @@ export function buildSandboxReport(status: SandboxStatus, context: SandboxReport
 }
 
 /** The `/sandbox` report for a session, with what only a report asks for: probe reports and the policy files on disk. */
-export async function loadSandboxReport(settings: Settings): Promise<SandboxReport> {
+export async function loadSandboxReport(approvalMode: ApprovalMode): Promise<SandboxReport> {
 	const status = await inspectSandbox();
 	const policyFiles = await resolvePolicyFiles(status);
-	const { approvalMode } = resolveApprovalFromContext({ settings });
 	return buildSandboxReport(status, { approvalMode, policyFiles });
 }
 

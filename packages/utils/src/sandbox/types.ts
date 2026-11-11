@@ -109,8 +109,9 @@ export interface SandboxFacts {
 	/** Present only in the status `inspectSandbox()` returns: the query needs a child process. */
 	landlock?: SandboxLandlock;
 	/**
-	 * Listing `/` when `/` is root-owned, world-readable and on a local filesystem. `refused`: only a Linux
-	 * security module (Landlock, AppArmor, SELinux) refuses that. `allowed` proves nothing either way.
+	 * Listing `/` when `/` is root-owned, world-readable and on a local filesystem. `refused`: a Linux security
+	 * module (Landlock, AppArmor, SELinux) refuses that, and so does an ACL entry on `/` that names the user, which
+	 * the mode bits do not show. `allowed` proves nothing either way.
 	 */
 	rootListing: "refused" | "allowed" | "unknown";
 	/** macOS: `sandbox_check(getpid(), NULL, 0)` reports a Seatbelt profile. */

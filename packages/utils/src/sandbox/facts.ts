@@ -23,7 +23,7 @@ export const SANDBOX_NAMESPACES: SandboxNamespaceName[] = ["mnt", "net", "user",
 
 const SECCOMP_MODES: Record<string, SandboxSeccompMode> = { "0": "disabled", "1": "strict", "2": "filter" };
 
-/** Filesystems where a refused read of a root-owned, world-readable directory can only come from an LSM. */
+/** Local filesystems: no server decides a read of a root-owned, world-readable directory, only an LSM or an ACL. */
 const LOCAL_FS_TYPES = new Set(["ext4", "xfs", "btrfs", "tmpfs", "overlay", "zfs", "f2fs"]);
 
 /** /proc/self/status as key -> value. */
@@ -105,8 +105,9 @@ function attempt<T>(read: () => T): T | undefined {
 }
 
 /**
- * Only a root-owned, world-readable `/` on a local filesystem counts: there a refused listing can only come from
- * an LSM, and an allowed one proves nothing, since an LSM policy may grant `/`.
+ * Only a root-owned, world-readable `/` on a local filesystem counts: there a refused listing comes from an LSM,
+ * or from an ACL entry on `/` naming the user, which the mode bits cannot tell apart. An allowed one proves
+ * nothing, since an LSM policy may grant `/`.
  */
 export function classifyRootListing(
 	root: SandboxRootListing | undefined,

@@ -34,6 +34,7 @@ class SectionsBody implements Component {
 	readonly #sections: readonly ReportSection[];
 	readonly #list: SelectList;
 	#open: Component | undefined;
+	#selectedRow: number | undefined;
 
 	constructor({ summary, sections }: ReportSectionsInput) {
 		this.#summary = typeof summary === "string" ? new Markdown(summary.trim(), 0, 0, getMarkdownTheme()) : summary;
@@ -59,7 +60,8 @@ class SectionsBody implements Component {
 			}
 			return false;
 		}
-		if (this.#sections.length === 0) return false;
+		// Cancel goes to the panel first: bound to a printable key, the list would take it as filter text.
+		if (this.#sections.length === 0 || matchesSelectCancel(data)) return false;
 		const typed = extractPrintableText(data) !== undefined;
 		if (
 			typed ||
@@ -77,6 +79,10 @@ class SectionsBody implements Component {
 		return false;
 	}
 
+	get open(): boolean {
+		return this.#open !== undefined;
+	}
+
 	/** The footer hint for the current view: back from a section, choose/open on the summary. */
 	hint(closeHint: string): string {
 		if (this.#open) return `${editorKey("tui.select.cancel")} or Backspace: back`;
@@ -85,10 +91,21 @@ class SectionsBody implements Component {
 		return `${choose}: choose · ${editorKey("tui.select.confirm")}: open · Type: filter · ${closeHint}`;
 	}
 
+	/** The rendered row of the selected section; `undefined` while a section is open or nothing is selected. */
+	get selectedRow(): number | undefined {
+		return this.#open ? undefined : this.#selectedRow;
+	}
+
 	render(width: number): readonly string[] {
 		if (this.#open) return this.#open.render(width);
 		if (this.#sections.length === 0) return this.#summary.render(width);
-		return [...this.#summary.render(width), "", ...this.#list.render(width)];
+		const summary = this.#summary.render(width);
+		const list = this.#list.render(width);
+		const { items, selected } = this.#list.pickerView();
+		const index = items.findIndex(item => item.value === selected);
+		const row = list.findIndex((_, line) => this.#list.hitTest(line) === index);
+		this.#selectedRow = row < 0 ? undefined : summary.length + 1 + row;
+		return [...summary, "", ...list];
 	}
 
 	invalidate(): void {
@@ -111,12 +128,21 @@ export class SectionsReport extends ReportPanel {
 	override handleInput(data: string): void {
 		if (this.#body.handleInput(data)) {
 			this.invalidate();
+			this.revealActiveRow();
 			return;
 		}
 		super.handleInput(data);
 	}
 
+	override activeRow(): number | undefined {
+		return this.#body.selectedRow;
+	}
+
 	override footerHint(closeHint: string): string {
 		return this.#body.hint(closeHint);
+	}
+
+	override escapeCloses(): boolean {
+		return !this.#body.open;
 	}
 }

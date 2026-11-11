@@ -31,7 +31,8 @@ function measuredPhrases(facts: SandboxFacts): string[] {
 /**
  * The generic layer for a sandbox no probe names: kernel confinement measured on this process. It needs seccomp
  * with no_new_privs (how bubblewrap, Flatpak and systemd sandboxing confine), a refused listing of `/` (a
- * Landlock, AppArmor or SELinux policy), or a Seatbelt profile; namespaces alone are not a sandbox.
+ * Landlock, AppArmor or SELinux policy; an ACL entry on `/` reads the same), or a Seatbelt profile; namespaces
+ * alone are not a sandbox.
  */
 function confinedLayer(facts: SandboxFacts): SandboxLayer | undefined {
 	const seccomp = facts.seccomp !== undefined && facts.seccomp !== "disabled";
@@ -247,15 +248,23 @@ export class SandboxDetector {
 	#running: Promise<SandboxStatus> | undefined;
 
 	constructor(options: SandboxDetectorOptions = {}) {
-		for (const probe of options.probes ?? BUILTIN_SANDBOX_PROBES) this.#probes.set(probe.id, probe);
+		for (const probe of options.probes ?? BUILTIN_SANDBOX_PROBES) this.#add(probe);
 		this.#host = options.host ?? (() => createSandboxHost());
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	}
 
 	/** Adds a probe; one with the same id replaces the earlier one in its place. */
 	register(probe: SandboxProbe): void {
-		this.#probes.set(probe.id, probe);
+		this.#add(probe);
 		if (this.#status || this.#running) this.#start();
+	}
+
+	/** Throws on an id that is not one clean line: the id names the layer in every report line, shown as it is. */
+	#add(probe: SandboxProbe): void {
+		if (typeof probe.id !== "string" || !probe.id || oneLine(probe.id) !== probe.id) {
+			throw new Error(`Invalid sandbox probe id: ${JSON.stringify(probe.id)}`);
+		}
+		this.#probes.set(probe.id, probe);
 	}
 
 	/** The latest status, running detection first when none has run; waits for a re-run a registration started. */

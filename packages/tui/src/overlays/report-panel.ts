@@ -68,6 +68,7 @@ export class ReportPanel extends OverlayPanel {
 	readonly #footer: Text;
 	#closeHint: string;
 	#bodyRows = 0;
+	#reveal = false;
 	#scroll: NativeScroll | undefined;
 	#native: { scroll: NativeScroll | undefined; node: NativeNode } | undefined;
 
@@ -118,16 +119,40 @@ export class ReportPanel extends OverlayPanel {
 		const overflows = rows > bodyMax;
 		this.#bodyRows = Math.min(rows, bodyMax);
 		this.#view.setHeight(this.#bodyRows);
+		const reveal = this.#reveal;
+		this.#reveal = false;
+		if (reveal) {
+			const row = this.activeRow();
+			if (row === undefined) this.#view.scrollToTop();
+			else this.#view.setActiveRow(row);
+		}
 		const scrollHint = `${editorKey("tui.select.pageUp")}/${editorKey("tui.select.pageDown")} scroll · `;
 		const hint = this.footerHint(this.#closeHint);
 		this.#footer.setText(theme.fg("muted", overflows ? scrollHint + hint : hint));
 		const lines = super.render(width);
+		// Once only: a row left active would pull the view back on every render and undo manual scrolling.
+		if (reveal) this.#view.setActiveRow(undefined);
 		return cap !== undefined && lines.length > cap ? lines.slice(0, Math.max(0, cap)) : lines;
+	}
+
+	/** Text mode: on the next render, scroll once so {@link activeRow} shows, or to the top when there is none. */
+	revealActiveRow(): void {
+		this.#reveal = true;
+	}
+
+	/** The body row a subclass keeps in view, such as its selection. */
+	activeRow(): number | undefined {
+		return undefined;
 	}
 
 	/** The footer's key hint; a subclass with keys of its own builds on `closeHint`. */
 	footerHint(closeHint: string): string {
 		return closeHint;
+	}
+
+	/** False while Esc does something else first (a subclass stepping back): the native Close then drops its Esc keycap. */
+	escapeCloses(): boolean {
+		return true;
 	}
 
 	/** Text mode: rows the whole box takes at `width` when nothing caps it. */
@@ -144,7 +169,8 @@ export class ReportPanel extends OverlayPanel {
 		const scroll = this.#scroll;
 		if (this.#native && this.#native.scroll === scroll) return this.#native.node;
 		const body: NativeNode = { ...col([this.#body], { role: "omp.report.body" }), key: "body", scroll };
-		const node = col([body, actionBar([null, actionButton("Close", "close", { keys: "escape" })])], { gap: "md" });
+		const close = actionButton("Close", "close", this.escapeCloses() ? { keys: "escape" } : {});
+		const node = col([body, actionBar([null, close])], { gap: "md" });
 		this.#native = { scroll, node };
 		return node;
 	}

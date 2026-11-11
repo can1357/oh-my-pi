@@ -238,7 +238,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
 import type { ImageAttachmentEntry, ToolSession } from "../tools";
-import { resolveApproval } from "../tools/approval";
+import { type ApprovalMode, resolveApproval } from "../tools/approval";
 import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { recoverAskHtml } from "../tools/ask";
@@ -16376,6 +16376,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Whether the user approved approval scope `key` for the rest of this session (see {@link ExtensionRunner.hasSessionApproval}). */
 	hasSessionApproval(key: string): boolean {
 		return this.#extensionRunner?.hasSessionApproval(key) ?? false;
+	}
+
+	/** The approval mode this session's tool calls resolve, auto-approve included; see {@link SessionTools.approvalMode}. */
+	get approvalMode(): ApprovalMode {
+		return this.#tools.approvalMode;
 	}
 
 	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */
