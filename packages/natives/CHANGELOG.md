@@ -58,6 +58,7 @@
 ### Fixed
 
 - Fixed `computer.apps.open` on macOS returning `window: null` for an HTML file with its own `<title>`, or a page's window still titled with the previous tab: it now returns the browser window once it shows the page, with the page's title ([#18743](https://github.com/can1357/oh-my-pi/pull/18743) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `computer.apps.open` on macOS returning `window: null` for an HTML file with its own `<title>`, or a page's window still titled with the previous tab: it now returns the browser window once it shows the page, with the page's title, including without Accessibility permission; a hidden file-extension display name no longer selects an unchanged unrelated window ([#18743](https://github.com/can1357/oh-my-pi/pull/18743) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

@@ -604,21 +604,21 @@ fn item_names(path: &Path) -> Vec<String> {
 }
 
 /// The window of the application that opened a file or URL which shows it,
-/// given until `timeout`. A window titled with one of the file's `names`
-/// shows it at once, as do the frontmost window when no title can be read
-/// (without Screen Recording other apps' titles are empty). A browser shows
-/// a page in an existing window whose title changes, or a new standard
-/// document window (not an Open dialog), so either is a candidate. Return it
-/// once its title has held for [`SETTLE_POLLS`] polls, or at `timeout` whatever
-/// it changed to. For a URL (no `names`) the frontmost window is returned at
-/// `timeout` if none changed, as for a page that kept the old tab's title;
-/// for a file, none is.
+/// given until `timeout`. A window titled with the file name shows it at
+/// once; a display-name alias must belong to a new or changed window. The
+/// frontmost window is returned when no title can be read. A browser shows
+/// a page in an existing window whose title changes, or a new document
+/// window (not an Open dialog when AX can classify it), so either is a
+/// candidate. once its title has held for [`SETTLE_POLLS`] polls, or at
+/// `timeout` whatever it changed to. For a URL (no `names`) the frontmost
+/// window is returned at `timeout` if none changed, as for a page that kept the
+/// old tab's title; for a file, none is.
 fn shown_window(
 	timeout: Duration,
 	names: &[String],
 	before: &HashMap<String, String>,
 	mut windows: impl FnMut() -> Option<Vec<DesktopWindow>>,
-	mut is_document: impl FnMut(&DesktopWindow) -> bool,
+	mut is_document: impl FnMut(&DesktopWindow) -> Option<bool>,
 	mut wait: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<Option<DesktopWindow>> {
 	let deadline = Instant::now() + timeout;
@@ -633,10 +633,12 @@ fn shown_window(
 		if !shown.is_empty() && shown.iter().all(|window| window.title.is_empty()) {
 			return Ok(shown.into_iter().next());
 		}
-		if let Some(window) = shown
-			.iter()
-			.find(|window| names.iter().any(|name| title_names(&window.title, name)))
-		{
+		if let Some(window) = shown.iter().find(|window| {
+			names.iter().enumerate().any(|(index, name)| {
+				title_names(&window.title, name)
+					&& (index == 0 || before.get(&window.id) != Some(&window.title))
+			})
+		}) {
 			return Ok(Some(window.clone()));
 		}
 		changed = match (
@@ -665,21 +667,22 @@ fn shown_window(
 	}
 }
 
-/// The first window whose title changed, or a new URL or standard document
-/// window. Other new windows must change title: an unchanged Open dialog
-/// does not prove the file opened.
+/// The first window whose title changed, or a new URL or document window.
+/// Without Accessibility, a new identity is the available evidence; otherwise
+/// other new windows must change title, so an unchanged Open dialog does not
+/// count.
 fn changed_window(
 	windows: &[DesktopWindow],
 	url: bool,
 	before: &HashMap<String, String>,
 	first_titles: &mut HashMap<String, String>,
-	is_document: &mut impl FnMut(&DesktopWindow) -> bool,
+	is_document: &mut impl FnMut(&DesktopWindow) -> Option<bool>,
 ) -> Option<DesktopWindow> {
 	let mut changed = None;
 	for window in windows {
 		let was: Option<&str> = match before.get(&window.id) {
 			Some(title) => Some(title),
-			None if url || is_document(window) => None,
+			None if url || is_document(window).unwrap_or(true) => None,
 			None => Some(
 				first_titles
 					.entry(window.id.clone())
@@ -1114,7 +1117,7 @@ mod tests {
 				let listed = polls[poll.get().min(polls.len() - 1)];
 				Some(listed.iter().map(|(id, title)| titled(id, title)).collect())
 			},
-			|window| window.title != "Open",
+			|window| Some(window.title != "Open"),
 			|| {
 				poll.set(poll.get() + 1);
 				assert!(poll.get() < 100, "the window never settled");
@@ -1123,6 +1126,41 @@ mod tests {
 		)
 		.expect("no failure")
 		.map(|window| (window.id, window.title))
+	}
+
+	#[test]
+	fn a_new_file_window_settles_without_accessibility_even_with_its_final_first_title() {
+		let polls = Cell::new(0);
+		let found = shown_window(
+			Duration::from_secs(60),
+			&["page.html".to_owned()],
+			&titles(&[]),
+			|| Some(vec![titled("7", "The page title")]),
+			|_| None,
+			|| {
+				polls.set(polls.get() + 1);
+				assert!(polls.get() <= SETTLE_POLLS, "the new window never settled");
+				Ok(())
+			},
+		)
+		.expect("no failure");
+		assert_eq!(id(found).as_deref(), Some("7"));
+		assert_eq!(polls.get(), SETTLE_POLLS);
+	}
+
+	#[test]
+	fn a_display_name_in_an_unchanged_window_waits_for_the_opened_file() {
+		assert_eq!(
+			shown_after(&["Budget.pages", "Budget"], &[("1", "Annual Budget")], &[
+				&[("1", "Annual Budget")],
+				&[("1", "Annual Budget"), ("2", "Budget")],
+			],),
+			shown("2", "Budget")
+		);
+		assert_eq!(
+			shown_after(&["Budget.pages", "Budget"], &[("1", "Annual Budget")], &[&[("1", "Budget")]],),
+			shown("1", "Budget")
+		);
 	}
 
 	#[allow(clippy::unnecessary_wraps, reason = "compared with what `shown_after` returns")]
@@ -1186,7 +1224,7 @@ mod tests {
 			&names,
 			&titles(&[]),
 			|| Some(vec![titled("7", "Budget")]),
-			|_| true,
+			|_| Some(true),
 			no_wait,
 		);
 		assert_eq!(
@@ -1208,7 +1246,7 @@ mod tests {
 			&["notes.txt".to_owned()],
 			&titles(&[]),
 			|| Some(vec![titled("1", "Open")]),
-			|_| false,
+			|_| Some(false),
 			|| Ok(()),
 		);
 		assert!(panel.expect("no failure").is_none());
@@ -1219,7 +1257,7 @@ mod tests {
 			&["notes.txt".to_owned()],
 			&titles(&[("3", ""), ("4", "")]),
 			|| Some(vec![window("3"), window("4")]),
-			|_| false,
+			|_| Some(false),
 			no_wait,
 		);
 		assert_eq!(
@@ -1239,7 +1277,7 @@ mod tests {
 				names,
 				&titles(&[("53", "Alpha")]),
 				|| Some(listed.clone()),
-				|_| true,
+				|_| Some(true),
 				|| Ok(()),
 			)
 			.expect("no failure")
@@ -1252,7 +1290,8 @@ mod tests {
 		// A file nothing shows: none.
 		assert_eq!(at_deadline(&["d.html".to_owned()], vec![titled("53", "Alpha")]), None);
 		// Without a window list there is nothing to return.
-		let unlisted = shown_window(Duration::ZERO, &[], &titles(&[]), || None, |_| false, || Ok(()));
+		let unlisted =
+			shown_window(Duration::ZERO, &[], &titles(&[]), || None, |_| Some(false), || Ok(()));
 		assert!(unlisted.expect("no failure").is_none());
 	}
 
