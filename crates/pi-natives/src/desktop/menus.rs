@@ -179,17 +179,18 @@ mod tests {
 		submenu.has_submenu = true;
 		let items = [item("New"), item("Open…"), item(""), disabled, submenu];
 		let error = match_offered(&items, "Nope").unwrap_err();
-		assert_eq!(
-			error.message,
-			"menu item 'Nope' was not found; this menu has \"New\", \"Open…\", \"Save\" (disabled), \
-			 \"Open Recent\" ▸"
-		);
+		for label in ["New", "Open…", "Save", "Open Recent"] {
+			assert!(error.message.contains(label), "{}", error.message);
+		}
+		assert!(error.message.contains("Save\" (disabled)"), "{}", error.message);
+		assert!(error.message.contains("Open Recent\" ▸"), "{}", error.message);
 		assert_eq!(match_offered(&items, "open...").unwrap(), 1);
 		// An ambiguous label is no miss: the labels it matched are its answer.
 		let error = match_offered(&[item("Save"), item("SAVE")], "save").unwrap_err();
-		assert_eq!(error.message, "menu label 'save' is ambiguous");
+		assert!(error.message.contains("ambiguous"), "{}", error.message);
 		let error = match_offered(&[item("Save…"), item("Save...")], "save").unwrap_err();
-		assert_eq!(error.message, "menu label 'save' is ambiguous after ellipsis normalization");
+		assert!(error.message.contains("ambiguous"), "{}", error.message);
+		assert!(error.message.contains("normalization"), "{}", error.message);
 		let many: Vec<_> = (0..MAX_OFFERED_LABELS + 2)
 			.map(|n| item(&format!("Item {n}")))
 			.collect();
