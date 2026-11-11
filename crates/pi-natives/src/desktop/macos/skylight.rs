@@ -27,7 +27,7 @@ use super::{
 		types::DesktopFocusReturn,
 	},
 	ax, capture,
-	clicks::ClickJournal,
+	clicks::{ClickJournal, Reading},
 	key_reroute::KeyReroute,
 	permission, process,
 	release::Route,
@@ -691,24 +691,33 @@ impl SwitchSignals {
 		Self { elsewhere: true, ..self }
 	}
 
+	/// The signals of `reading`, with `hid_click` when the HID state last saw a
+	/// mouse button go down or up. A click the HID counters skipped, such as
+	/// a remote tool's post to the session tap, is dated by its delivery.
+	fn of(
+		reading: Reading,
+		hid_click: Option<Instant>,
+		flags: u64,
+		key_focus: Option<ProcessSerialNumber>,
+	) -> Self {
+		let mut signals =
+			Self::new(reading.buttons, hid_click.max(reading.skipped), flags, key_focus);
+		signals.in_user_app = reading.placed == Some(true);
+		signals.elsewhere = reading.placed == Some(false);
+		signals
+	}
+
 	/// Reads the signals at `now`, with where `placement` has the latest click
 	/// land. Nothing here waits on another app.
 	fn read(spi: &ForegroundSpi, now: Instant, placement: Placement<'_>) -> Self {
-		let (buttons, placed, skipped) = match placement {
-			Placement::Tap(clicks, user, target) => {
-				let reading = clicks.place(user, target);
-				(reading.buttons, reading.placed, reading.skipped)
-			},
+		let reading = match placement {
+			Placement::Tap(clicks, user, target) => clicks.place(user, target),
 			Placement::HitTest(placer) => {
 				let buttons = hid_buttons();
-				(buttons, placer.in_user_app(buttons).then_some(true), None)
+				Reading { buttons, placed: placer.in_user_app(buttons).then_some(true), skipped: None }
 			},
 		};
-		// A click the HID counters skipped, such as a remote tool's post to
-		// the session tap, is dated by its delivery.
-		let last_click = since_last_click()
-			.and_then(|since| now.checked_sub(since))
-			.max(skipped);
+		let hid_click = since_last_click().and_then(|since| now.checked_sub(since));
 		// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only
 		// query.
 		let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
@@ -719,9 +728,7 @@ impl SwitchSignals {
 			// which writes the 8-byte PSN and one status byte.
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
-		let mut signals = Self::new(buttons, last_click, flags, key_focus);
-		signals.in_user_app = placed == Some(true);
-		signals.elsewhere = placed == Some(false);
+		let signals = Self::of(reading, hid_click, flags, key_focus);
 		let last_send = *LAST_SEND.lock();
 		match last_send {
 			Some(at) => signals.sent_at(at),
@@ -4562,27 +4569,27 @@ mod tests {
 	fn a_target_pick_the_hid_counters_skip_still_picks_it() {
 		// A remote tool posts the user's click on the target to the session
 		// tap: the tap delivers it, the HID counters never count it, and the
-		// target comes forward because of it.
-		let signals = |reading: super::super::clicks::Reading| {
-			let signals = SwitchSignals::new(reading.buttons, reading.skipped, NO_MODIFIERS, None);
-			if reading.placed == Some(false) {
-				signals.placed_elsewhere()
-			} else {
-				signals
-			}
-		};
+		// target comes forward because of it. The HID state dates the user's
+		// last click of their own seconds before.
 		let t0 = Instant::now();
-		let clicks = ClickJournal::default();
-		clicks.start();
-		let mut guard = lease_at(t0, None);
-		assert_eq!(
-			guard.observe(PREVIOUS, Some(42), signals(clicks.place(7, 8)), t0 + ms(1)),
-			FocusDecision::Observe
-		);
-		clicks.record(1, 8, 0);
-		let now = Instant::now();
-		let pressed = signals(clicks.place(7, 8));
-		assert_eq!(guard.observe(PREVIOUS, Some(42), pressed, now), FocusDecision::Observe);
-		assert_eq!(guard.observe(TARGET, None, pressed, now + ms(40)), FocusDecision::Disarm);
+		let signals = |reading| SwitchSignals::of(reading, Some(t0 - ms(5000)), NO_MODIFIERS, None);
+		let pick = |came: Duration| {
+			let clicks = ClickJournal::default();
+			clicks.start();
+			let mut guard = lease_at(t0, None);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), signals(clicks.place(7, 8)), t0 + ms(1)),
+				FocusDecision::Observe
+			);
+			clicks.record(1, 8, 0);
+			let now = Instant::now();
+			let pressed = signals(clicks.place(7, 8));
+			assert_eq!(guard.observe(PREVIOUS, Some(42), pressed, now), FocusDecision::Observe);
+			guard.observe(TARGET, None, pressed, now + came)
+		};
+		assert_eq!(pick(ms(40)), FocusDecision::Disarm);
+		// The target coming forward on its own once that click is past the
+		// switch window is still sent back.
+		assert_eq!(pick(ms(300)), FocusDecision::Restore);
 	}
 }
