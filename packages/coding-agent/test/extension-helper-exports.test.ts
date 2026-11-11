@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as PiCodingAgent from "@oh-my-pi/pi-coding-agent";
 
 /**
@@ -8,26 +8,15 @@ import * as PiCodingAgent from "@oh-my-pi/pi-coding-agent";
  */
 const rootHelpers: [name: string, kind: "function" | "object"][] = [
 	["formTheme", "object"],
-	["editorKey", "function"],
-	["editorKeys", "function"],
-	["formatKeyHint", "function"],
-	["getSettingsListTheme", "function"],
-	["theme", "object"],
 	["compactText", "function"],
 	["rowsText", "function"],
 	["styledSpans", "function"],
 	["parseXdUrl", "function"],
 	["cfgExtensionTranscriptPresenters", "object"],
-	["unwrapHashlineHeaderPath", "function"],
 ];
 
 describe("extension helpers exported from the package root", () => {
 	const root = PiCodingAgent as Record<string, unknown>;
-
-	// `theme` is a live binding that stays undefined until the host initializes it.
-	beforeAll(async () => {
-		await PiCodingAgent.initTheme();
-	});
 
 	it.each(rootHelpers)("exports %s as a %s", (name, kind) => {
 		expect(root[name]).not.toBeNull();

@@ -84,4 +84,4 @@ export {
 export * from "@oh-my-pi/pi-tui/chrome/form-theme";
 export * from "@oh-my-pi/pi-tui/native/spans";
 export * from "@oh-my-pi/pi-tui/tools/xd-url";
-export * from "./extensibility/settings";
+export { cfgExtensionTranscriptPresenters, type SkillsSettings } from "./extensibility/settings";
