@@ -373,6 +373,7 @@ type AcpSubagentStatus = "pending" | "running" | "completed" | "failed" | "abort
 type AcpSubagent = {
 	id: string;
 	agent: string;
+	parentToolCallId: string | null;
 	description: string | null;
 	status: AcpSubagentStatus;
 	async: boolean;
@@ -1094,13 +1095,13 @@ export class AcpAgent implements Agent {
 					resume: {},
 					close: {},
 				},
+				...(supportsSubagents ? { _meta: { "omp/subagents": true } } : {}),
 			},
 			// Top-level `_meta` (sibling of `agentCapabilities`) is where
 			// claude-agent-acp and codex-acp advertise steering; clients such as
 			// agent-shell gate `_session/steering` on it.
 			_meta: {
 				steering: { supported: true },
-				...(supportsSubagents ? { "omp/subagents": true } : {}),
 			},
 		};
 	}
@@ -2060,19 +2061,19 @@ export class AcpAgent implements Agent {
 			id: event.id,
 			agent: event.agent,
 			description: event.description ?? previous?.description ?? null,
+			parentToolCallId: event.parentToolCallId ?? previous?.parentToolCallId ?? null,
 			status,
 			async: event.detached ?? previous?.async ?? false,
 			updatedAt: Date.now(),
 		});
-		if (record.lifetimeUpdatesReady) this.#emitSubagentSnapshot(record, event.parentToolCallId ?? null);
+		if (record.lifetimeUpdatesReady) this.#emitSubagentSnapshot(record);
 	}
 
-	#emitSubagentSnapshot(record: ManagedSessionRecord, parentToolCallId: string | null): void {
+	#emitSubagentSnapshot(record: ManagedSessionRecord): void {
 		const terminal = new Set(["completed", "failed", "aborted"]);
 		const children = Array.from(record.subagents.values());
 		const params = {
 			sessionId: record.protocolSessionId,
-			parentToolCallId,
 			seq: ++record.subagentSeq,
 			children,
 		};
@@ -2127,7 +2128,7 @@ export class AcpAgent implements Agent {
 	#activateLifetimeUpdates(record: ManagedSessionRecord): void {
 		if (record.lifetimeUpdatesReady) return;
 		record.lifetimeUpdatesReady = true;
-		if (record.subagents.size > 0) this.#emitSubagentSnapshot(record, null);
+		if (record.subagents.size > 0) this.#emitSubagentSnapshot(record);
 		const pending = record.pendingCompactionNotifications;
 		record.pendingCompactionNotifications = undefined;
 		for (const notification of pending ?? []) this.#deliverCompactionNotification(record, notification);

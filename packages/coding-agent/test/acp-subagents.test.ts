@@ -8,15 +8,15 @@ import { AcpAgent, ACP_BOOTSTRAP_RACE_GUARD_MS } from "@oh-my-pi/pi-coding-agent
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentSideConnection, ClientCapabilities } from "@oh-my-pi/pi-utils/acp";
-import { setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, setAgentDir } from "@oh-my-pi/pi-utils";
 
 type SubagentParams = {
 	sessionId: string;
-	parentToolCallId: string | null;
 	seq: number;
 	children: Array<{
 		id: string;
 		agent: string;
+		parentToolCallId: string | null;
 		description: string | null;
 		status: string;
 		async: boolean;
@@ -25,10 +25,22 @@ type SubagentParams = {
 };
 
 const cleanupRoots: string[] = [];
-const SUBAGENT_CAPS: ClientCapabilities = { _meta: { "omp/subagents": true } } as unknown as ClientCapabilities;
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const originalPiProfile = process.env.PI_PROFILE;
+const originalOmpProfile = process.env.OMP_PROFILE;
+const SUBAGENT_CAPS: ClientCapabilities = { _meta: { "omp/subagents": true } };
+
+function restoreEnv(key: string, value: string | undefined): void {
+	if (value === undefined) delete process.env[key];
+	else process.env[key] = value;
+}
 
 afterEach(async () => {
 	resetSettingsForTest();
+	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
+	restoreEnv("PI_PROFILE", originalPiProfile);
+	restoreEnv("OMP_PROFILE", originalOmpProfile);
+	__resetDirsFromEnvForTests();
 	for (const root of cleanupRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -140,7 +152,7 @@ async function createSubagentHarness(clientCapabilities: ClientCapabilities | un
 		return { session: session as unknown as AgentSession, setToolUIContext: () => {}, subagentEventBus };
 	});
 	if (clientCapabilities) {
-		await agent.initialize({ protocolVersion: 1, clientCapabilities } as Parameters<typeof agent.initialize>[0]);
+		await agent.initialize({ protocolVersion: 1, clientCapabilities });
 	}
 	const created = await agent.newSession({ cwd, mcpServers: [] });
 	const session = sessions[0]!;
@@ -178,13 +190,13 @@ describe("ACP _omp/subagents snapshots", () => {
 		const declared = await new AcpAgent(connection, createSession).initialize({
 			protocolVersion: 1,
 			clientCapabilities: SUBAGENT_CAPS,
-		} as Parameters<AcpAgent["initialize"]>[0]);
-		expect(declared._meta).toMatchObject({ "omp/subagents": true });
+		});
+		expect(declared.agentCapabilities?._meta).toMatchObject({ "omp/subagents": true });
 		const bare = await new AcpAgent(connection, createSession).initialize({
 			protocolVersion: 1,
 			clientCapabilities: {},
-		} as Parameters<AcpAgent["initialize"]>[0]);
-		expect(bare._meta).not.toHaveProperty("omp/subagents");
+		});
+		expect(bare.agentCapabilities?._meta).not.toHaveProperty("omp/subagents");
 	});
 
 	it("emits full snapshots with monotonic seq, including terminal states and async completion after tool return", async () => {
@@ -213,15 +225,14 @@ describe("ACP _omp/subagents snapshots", () => {
 		const snapshots = subagentNotifications(harness);
 		expect(snapshots.map(s => s.seq)).toEqual([1, 2, 3, 4]);
 		expect(snapshots.every(s => s.sessionId === harness.sessionId)).toBe(true);
-		expect(snapshots.every(s => s.parentToolCallId === "tool-1")).toBe(true);
 
 		const last = snapshots[3]!;
-		expect(snapshots[2]!.children.map(c => [c.id, c.status, c.async, c.description])).toEqual([
-			["0-A", "running", true, "first"],
-			["1-B", "completed", false, null],
+		expect(snapshots[2]!.children.map(c => [c.id, c.parentToolCallId, c.status, c.async, c.description])).toEqual([
+			["0-A", "tool-1", "running", true, "first"],
+			["1-B", "tool-1", "completed", false, null],
 		]);
-		expect(last.children.map(c => [c.id, c.status, c.async, c.description])).toEqual([
-			["0-A", "failed", true, "first"],
+		expect(last.children.map(c => [c.id, c.parentToolCallId, c.status, c.async, c.description])).toEqual([
+			["0-A", "tool-1", "failed", true, "first"],
 		]);
 		expect(last.children.every(c => typeof c.updatedAt === "number")).toBe(true);
 		// Second snapshot carries the first child still running (full state, not a delta).
@@ -232,6 +243,25 @@ describe("ACP _omp/subagents snapshots", () => {
 				snapshots.map(snapshot => JSON.stringify(snapshot)).join("\n") + "\n",
 			);
 		}
+	});
+
+	it("keeps each child's parent tool call when overlapping parent calls share a roster", async () => {
+		const harness = await createSubagentHarness();
+		await harness.openDelivery();
+		harness.subagentEventBus.emit(
+			TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+			lifecycle({ id: "0-A", status: "started", parentToolCallId: "tool-1", detached: true }),
+		);
+		harness.subagentEventBus.emit(
+			TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+			lifecycle({ id: "1-B", status: "started", parentToolCallId: "tool-2", index: 1 }),
+		);
+		await Promise.resolve();
+		const last = subagentNotifications(harness).at(-1)!;
+		expect(last.children.map(c => [c.id, c.parentToolCallId])).toEqual([
+			["0-A", "tool-1"],
+			["1-B", "tool-2"],
+		]);
 	});
 
 	it("flushes one roster snapshot with the latest seq when lifetime delivery opens", async () => {
@@ -247,9 +277,9 @@ describe("ACP _omp/subagents snapshots", () => {
 		const flushed = subagentNotifications(harness);
 		expect(flushed).toHaveLength(1);
 		expect(flushed[0]!.seq).toBe(1);
-		expect(flushed[0]!.children.map(c => [c.id, c.status])).toEqual([
-			["0-A", "running"],
-			["1-B", "running"],
+		expect(flushed[0]!.children.map(c => [c.id, c.parentToolCallId, c.status])).toEqual([
+			["0-A", null, "running"],
+			["1-B", null, "running"],
 		]);
 	});
 
