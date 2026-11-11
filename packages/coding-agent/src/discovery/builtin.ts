@@ -34,6 +34,7 @@ import {
 	isForeignUserConfigRoot,
 	isUserConfigRoot,
 	loadFilesFromDir,
+	parseLifecycle,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -192,6 +193,13 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					`MCP server "${serverName}": invalid instructions ${JSON.stringify(serverConfig.instructions)}, ignoring`,
 				);
 			}
+			// Validate lifecycle: a typo must not silently change when the server starts
+			const lifecycle = parseLifecycle(serverConfig.lifecycle);
+			if (lifecycle === undefined && serverConfig.lifecycle != null) {
+				logger.warn(
+					`MCP server "${serverName}": invalid lifecycle ${JSON.stringify(serverConfig.lifecycle)}, ignoring`,
+				);
+			}
 
 			result.push({
 				name: serverName,
@@ -199,6 +207,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				timeout,
 				requestIdFormat,
 				instructions,
+				lifecycle,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,

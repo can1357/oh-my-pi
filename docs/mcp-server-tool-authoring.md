@@ -22,13 +22,15 @@ Config sources (.omp/.claude/.cursor/.vscode/mcp.json, mcp.json, etc.)
 - `stdio` (writer default when `type` missing): requires `command`, optional `args`, `env`, `cwd`
 - `http`: requires `url`, optional `headers`
 - `sse`: requires `url`, optional `headers` (legacy HTTP+SSE transport)
-- shared fields: `enabled`, `timeout`, `requestIdFormat` (`"number"` or `"string"`), `instructions` (`boolean`, default `true`), `auth`, `oauth`
+- shared fields: `enabled`, `timeout`, `requestIdFormat` (`"number"` or `"string"`), `instructions` (`boolean`, default `true`), `lifecycle` (`"eager"` or `"lazy"`, default `"eager"`), `auth`, `oauth`
 
 `timeout` is in milliseconds, defaults to 30,000, and accepts `0` to disable
 client-side timeouts. A valid `OMP_MCP_TIMEOUT_MS` environment value overrides
-the per-server timeout. `requestIdFormat` and `instructions` are OMP-specific;
-native configs, standalone MCP JSON, and OMP plugins parse them, while foreign
-tool-format providers generally do not.
+the per-server timeout. `requestIdFormat`, `instructions`, and `lifecycle` are
+OMP-specific; native configs, standalone MCP JSON, and OMP plugins parse them,
+while foreign tool-format providers generally do not. A `"lazy"` server starts
+on its first tool call, so its instructions, prompts, and resources are absent
+until then; the print-mode readiness barrier does not count it as failed.
 
 `validateServerConfig()` (`src/mcp/config.ts`) enforces transport basics:
 

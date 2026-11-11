@@ -52,6 +52,8 @@ function buildResult(method: string): Record<string, unknown> {
 					inputSchema: { type: "object", properties: {}, additionalProperties: false },
 				})),
 			};
+		case "tools/call":
+			return { content: [{ type: "text", text: "ok" }] };
 		default:
 			return {};
 	}

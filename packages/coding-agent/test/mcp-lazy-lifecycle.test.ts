@@ -11,8 +11,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
-import type { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
+import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPStdioServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { AgentStorageApi } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { MANY_TOOL_COUNT, manyToolName } from "./fixtures/many-tools-mcp";
 
@@ -23,24 +24,28 @@ function fixtureConfig(lifecycle: "eager" | "lazy"): MCPStdioServerConfig {
 	return { type: "stdio", command: process.execPath, args: [FIXTURE_PATH], lifecycle };
 }
 
-/** Stand-in for the agent.db-backed cache: only `get` matters here. */
-class StubToolCache {
-	tools: MCPToolDefinition[] | null = null;
-	async get(): Promise<MCPToolDefinition[] | null> {
-		return this.tools;
-	}
-	async set(): Promise<void> {}
+/** In-memory `agent.db` cache surface, so the real `MCPToolCache` is exercised. */
+function createStorage(): AgentStorageApi {
+	const entries = new Map<string, string>();
+	const stub = {
+		getCache: (key: string) => entries.get(key) ?? null,
+		setCache: (key: string, value: string) => {
+			entries.set(key, value);
+		},
+	};
+	return stub as unknown as AgentStorageApi;
 }
 
 const cachedTools: MCPToolDefinition[] = Array.from({ length: MANY_TOOL_COUNT }, (_, index) => ({
 	name: manyToolName(index),
-	inputSchema: { type: "object" as const },
+	description: `Fixture tool #${index}`,
+	inputSchema: { type: "object", properties: {} },
 }));
 
 const expectedToolNames = cachedTools.map(tool => `mcp__${SERVER}_${tool.name}`).sort();
+
 // The fixture is a real subprocess, so its handshake has no event to await
 // through the manager's API; polling the observable state is the only signal.
-
 async function waitFor(predicate: () => boolean): Promise<boolean> {
 	const deadline = Date.now() + 10_000;
 	while (true) {
@@ -53,26 +58,36 @@ async function waitFor(predicate: () => boolean): Promise<boolean> {
 
 describe("MCP lazy lifecycle", () => {
 	let workDir: string;
-	let cache: StubToolCache;
+	let cache: MCPToolCache;
 	let manager: MCPManager;
+	let savedEnv: Record<string, string | undefined>;
 
 	beforeEach(() => {
+		savedEnv = {
+			OMP_MCP_STARTUP_TIMEOUT_MS: Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS,
+			OMP_MCP_TIMEOUT_MS: Bun.env.OMP_MCP_TIMEOUT_MS,
+		};
 		delete Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
 		delete Bun.env.OMP_MCP_TIMEOUT_MS;
 		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-lazy-"));
-		cache = new StubToolCache();
-		manager = new MCPManager(workDir, cache as unknown as MCPToolCache);
+		cache = new MCPToolCache(createStorage());
+		manager = new MCPManager(workDir, cache);
 	});
 
 	afterEach(async () => {
 		await manager.disconnectAll();
 		removeSyncWithRetries(workDir);
+		for (const [key, value] of Object.entries(savedEnv)) {
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
 	});
 
 	it("advertises cached tools without starting the process", async () => {
-		cache.tools = cachedTools;
+		const config = fixtureConfig("lazy");
+		await cache.set(SERVER, config, cachedTools);
 
-		await manager.connectServers({ [SERVER]: fixtureConfig("lazy") }, {});
+		await manager.connectServers({ [SERVER]: config }, {});
 
 		expect(
 			manager
@@ -84,15 +99,29 @@ describe("MCP lazy lifecycle", () => {
 		expect(manager.getConnectedServers()).toEqual([]);
 	}, 20_000);
 
+	it("does not report a deferred server as a startup failure", async () => {
+		const config = fixtureConfig("lazy");
+		await cache.set(SERVER, config, cachedTools);
+
+		await manager.connectServers({ [SERVER]: config }, {});
+		const status = await manager.waitForStartup(0);
+
+		expect(status.failed).toEqual([]);
+		expect(status.connected).not.toContain(SERVER);
+		expect(manager.getTools()).toHaveLength(MANY_TOOL_COUNT);
+	}, 20_000);
+
 	it("starts the process on the first tool call", async () => {
-		cache.tools = cachedTools;
-		await manager.connectServers({ [SERVER]: fixtureConfig("lazy") }, {});
+		const config = fixtureConfig("lazy");
+		await cache.set(SERVER, config, cachedTools);
+		await manager.connectServers({ [SERVER]: config }, {});
 		const tool = manager.getTools().find(entry => entry.name === expectedToolNames[0]);
 		if (!tool) throw new Error("cached tool was not registered");
 
 		const ctx = { sessionManager: { getCwd: () => workDir } } as unknown as CustomToolContext;
-		await tool.execute("call-1", {}, undefined, ctx, undefined);
+		const result = await tool.execute("call-1", {}, undefined, ctx, undefined);
 
+		expect(result.isError).not.toBe(true);
 		expect(await waitFor(() => manager.getConnectionStatus(SERVER) === "connected")).toBe(true);
 		expect(manager.getConnectedServers()).toEqual([SERVER]);
 	}, 20_000);
@@ -105,9 +134,10 @@ describe("MCP lazy lifecycle", () => {
 	}, 20_000);
 
 	it("keeps eager servers unchanged", async () => {
-		cache.tools = cachedTools;
+		const config = fixtureConfig("eager");
+		await cache.set(SERVER, config, cachedTools);
 
-		await manager.connectServers({ [SERVER]: fixtureConfig("eager") }, {});
+		await manager.connectServers({ [SERVER]: config }, {});
 
 		expect(await waitFor(() => manager.getConnectionStatus(SERVER) === "connected")).toBe(true);
 		expect(manager.getTools()).toHaveLength(MANY_TOOL_COUNT);

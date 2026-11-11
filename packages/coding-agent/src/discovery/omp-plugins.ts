@@ -34,6 +34,7 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
+	parseLifecycle,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -279,6 +280,7 @@ interface RawMcpServer {
 	enabled?: boolean;
 	timeout?: number;
 	requestIdFormat?: unknown;
+	lifecycle?: unknown;
 	instructions?: unknown;
 	command?: string;
 	args?: string[];
@@ -346,12 +348,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid instructions ${JSON.stringify(cfg.instructions)}, ignoring`,
 				);
 			}
+			const lifecycle = parseLifecycle(cfg.lifecycle);
+			if (lifecycle === undefined && cfg.lifecycle != null) {
+				logger.warn(
+					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid lifecycle ${JSON.stringify(cfg.lifecycle)}, ignoring`,
+				);
+			}
 			items.push({
 				name: serverName,
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
 				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...(instructions !== undefined && { instructions }),
+				...(lifecycle !== undefined && { lifecycle }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(cfg.args !== undefined && { args: cfg.args }),
 				...(cfg.env !== undefined && { env: cfg.env }),

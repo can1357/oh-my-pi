@@ -898,7 +898,9 @@ export class MCPCommandController {
 	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<void> {
 		if (!this.ctx.mcpManager) return;
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
-		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
+		// Explicit user action: a lazy server must actually start here, not fall
+		// back to its cached tool list and stay "disconnected".
+		await this.ctx.mcpManager.connectServers({ [name]: config }, {}, undefined, undefined, { forceEager: true });
 		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
@@ -1699,7 +1701,16 @@ export class MCPCommandController {
 		}
 
 		const source = sources[name];
-		const result = await this.ctx.mcpManager.connectServers({ [name]: config }, source ? { [name]: source } : {});
+		// `/mcp enable` is an explicit start request: a lazy server must spawn,
+		// otherwise the caller reports "could not connect" while tools were only
+		// advertised from cache.
+		const result = await this.ctx.mcpManager.connectServers(
+			{ [name]: config },
+			source ? { [name]: source } : {},
+			undefined,
+			undefined,
+			{ forceEager: true },
+		);
 		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		this.#showMCPConnectionErrors(result.errors);
 	}

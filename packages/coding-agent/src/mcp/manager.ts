@@ -985,6 +985,11 @@ export class MCPManager implements MCPManagerApi {
 								this.#observeToolCall(name),
 							),
 						);
+						// Nothing was started, so readiness must not wait on this name:
+						// `waitForStartup()` classifies an untracked server as failed,
+						// and print mode then warns (or refuses the run under
+						// `OMP_MCP_REQUIRE_READY`) about tools that are callable.
+						this.#startupServers.delete(name);
 						continue;
 					}
 				}
@@ -1542,7 +1547,8 @@ export class MCPManager implements MCPManagerApi {
 	 * Connect a server on demand — the first tool call of a {@link
 	 * MCPServerConfig.lifecycle} `"lazy"` server lands here before its process
 	 * exists. Idempotent: shares an existing or in-flight connection, and forces
-	 * the eager path so a lazy config cannot re-enter this method's cache branch.
+	 * the eager path so {@link connectServers} cannot take its cache branch
+	 * again.
 	 */
 	async #ensureConnected(name: string): Promise<MCPServerConnection> {
 		const connection = this.#connections.get(name);
@@ -1556,9 +1562,14 @@ export class MCPManager implements MCPManagerApi {
 		const config = this.#serverConfigs.get(name);
 		if (!config) throw new Error(`MCP server not configured: ${name}`);
 		const source = this.#sources.get(name);
-		await this.connectServers({ [name]: config }, source ? { [name]: source } : {}, undefined, 0, {
+		const result = await this.connectServers({ [name]: config }, source ? { [name]: source } : {}, undefined, 0, {
 			forceEager: true,
 		});
+		// `waitForConnection` only knows the server is not connected; the spawn
+		// error (bad command, auth, handshake) lives in the load result, and the
+		// caller surfaces it to the model.
+		const failure = result.errors.get(name);
+		if (failure) throw new Error(failure);
 		return this.waitForConnection(name);
 	}
 
