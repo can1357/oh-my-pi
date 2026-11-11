@@ -4,7 +4,7 @@
 
 ### Added
 
-- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that run beside them and may write files (their approval, asked with their arguments, is not `read`) have finished; speculative results wait for those effects before validation ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
+- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that run beside them and may write files (their approval, asked with their arguments, is not `read`) have finished; speculative results wait for those effects before validation, and cancellation while waiting prevents their commit ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

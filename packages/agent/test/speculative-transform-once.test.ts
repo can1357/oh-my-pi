@@ -179,6 +179,85 @@ describe("speculative transform reuse", () => {
 		expect(resultText).toBe("new");
 	});
 
+	it("does not commit a speculative read cancelled while waiting for an earlier writer", async () => {
+		const schema = type({});
+		const controller = new AbortController();
+		const readStarted = Promise.withResolvers<void>();
+		let commits = 0;
+		const read: AgentTool<typeof schema> = {
+			name: "read",
+			label: "Read",
+			description: "Reads speculatively",
+			parameters: schema,
+			approval: "read",
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						return {
+							kind: "result",
+							result: { content: [{ type: "text", text: "read result" }] },
+							isError: false,
+						};
+					},
+					async commit(_context, outcome) {
+						commits++;
+						return outcome.result;
+					},
+				},
+			},
+			async execute() {
+				throw new Error("Cancelled read must not fall back to ordinary execution");
+			},
+		};
+		const write: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "Bash",
+			description: "Cancels while the read waits for its effects",
+			parameters: schema,
+			approval: "exec",
+			async execute() {
+				await readStarted.promise;
+				for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+				controller.abort();
+				return { content: [] };
+			},
+		};
+		const writeCall = { type: "toolCall", id: "write", name: "bash", arguments: {} } as const;
+		const readCall = { type: "toolCall", id: "read", name: "read", arguments: {} } as const;
+		const message = createAssistantMessage([writeCall, readCall], "toolUse");
+		const mock = createMockModel({ responses: [] });
+		const streamFn: typeof mock.stream = () => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "toolcall_end", contentIndex: 1, toolCall: readCall, partial: message });
+				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: writeCall, partial: message });
+				stream.push({ type: "done", reason: "toolUse", message });
+				stream.end();
+			});
+			return stream;
+		};
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [""], messages: [], tools: [write, read] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				speculativeToolExecution: { enabled: true, host: { authorize: () => ({ allowed: true }) } },
+			},
+			controller.signal,
+			streamFn,
+		);
+		let readIsError: boolean | undefined;
+		for await (const event of stream) {
+			if (event.type === "tool_execution_start" && event.toolCallId === "read") readStarted.resolve();
+			if (event.type === "tool_execution_end" && event.toolCallId === "read") readIsError = event.isError;
+		}
+		expect(readIsError).toBe(true);
+		expect(commits).toBe(0);
+	});
+
 	it("discards the stale speculative result when beforeToolCall revises admitted args", async () => {
 		const schema = type({ path: "string" });
 		let transformCalls = 0;

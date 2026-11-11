@@ -3682,7 +3682,7 @@ async function executeToolCalls(
 				if (abortBeforeToolExecution()) return;
 
 				const speculativeOutcome = speculationCoordinator
-					? await speculationCoordinator.claim(tool, toolCall, executionArgs, earlierEffectsSettled)
+					? await speculationCoordinator.claim(tool, toolCall, executionArgs, earlierEffectsSettled, record.signal)
 					: undefined;
 				if (speculativeOutcome) {
 					// Normalize exactly like the ordinary execute path below: third-party
