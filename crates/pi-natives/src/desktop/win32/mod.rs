@@ -218,15 +218,18 @@ impl Backend for Win32Backend {
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
-	use std::{sync::mpsc, thread, time::Duration};
+	use std::{
+		io::{BufRead, BufReader, Write},
+		process::{Child, Command, Stdio},
+		time::Duration,
+	};
 
 	use windows_sys::Win32::{
 		Foundation::HWND,
-		System::Threading::GetCurrentThreadId,
 		UI::WindowsAndMessaging::{
 			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetForegroundWindow, GetMessageW, MSG,
-			PostThreadMessageW, SendMessageW, SetForegroundWindow, TranslateMessage, WM_GETTEXT,
-			WM_QUIT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+			SendMessageW, SetForegroundWindow, TranslateMessage, WM_GETTEXT, WS_OVERLAPPEDWINDOW,
+			WS_VISIBLE,
 		},
 	};
 
@@ -239,59 +242,41 @@ mod tests {
 
 	const USER: &str = "omp test: user window";
 	const TARGET: &str = "omp test: takeover target";
+	/// Set for the copy of this test binary that hosts the windows.
+	const HOST: &str = "OMP_TAKEOVER_TEST_WINDOWS";
 
-	/// Two top-level edit windows on a thread that pumps their messages, as
-	/// another app's would: the user's window and the takeover target. Their
-	/// text is their title, which `windows()` needs to list them.
+	/// Two top-level edit windows in another process, as another app's would
+	/// be: the user's window and the takeover target. `windows()` leaves out
+	/// this process's own windows, so a copy of this test binary running
+	/// `takeover_test_windows` opens them and pumps their messages until it is
+	/// killed. Their text is their title, which `windows()` needs to list them.
 	struct Windows {
 		user:   HWND,
 		target: HWND,
-		thread: u32,
+		host:   Child,
 	}
 
 	impl Windows {
 		fn open() -> Self {
-			let (sender, receiver) = mpsc::channel();
-			thread::spawn(move || {
-				let create = |title: &str| {
-					let (class, text) = (wide("EDIT"), wide(title));
-					// SAFETY: both strings are NUL-terminated and outlive the call;
-					// EDIT is a system class, so no instance handle is needed.
-					unsafe {
-						CreateWindowExW(
-							0,
-							class.as_ptr(),
-							text.as_ptr(),
-							WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-							CW_USEDEFAULT,
-							CW_USEDEFAULT,
-							400,
-							300,
-							std::ptr::null_mut(),
-							std::ptr::null_mut(),
-							std::ptr::null_mut(),
-							std::ptr::null(),
-						)
-					}
-				};
-				let user = create(USER) as usize;
-				let target = create(TARGET) as usize;
-				// SAFETY: no preconditions.
-				let thread = unsafe { GetCurrentThreadId() };
-				sender.send((user, target, thread)).unwrap();
-				// SAFETY: `message` is writable for each call.
-				unsafe {
-					let mut message: MSG = std::mem::zeroed();
-					while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
-						TranslateMessage(&message);
-						DispatchMessageW(&message);
-					}
-				}
-			});
-			let (user, target, thread) = receiver.recv().unwrap();
-			let windows = Self { user: user as HWND, target: target as HWND, thread };
-			assert!(!windows.user.is_null() && !windows.target.is_null());
-			windows
+			let mut host = Command::new(std::env::current_exe().unwrap())
+				.args([
+					"--ignored",
+					"--exact",
+					"desktop::win32::tests::takeover_test_windows",
+					"--nocapture",
+				])
+				.env(HOST, "1")
+				.stdout(Stdio::piped())
+				.spawn()
+				.unwrap();
+			let line = BufReader::new(host.stdout.take().unwrap())
+				.lines()
+				.map_while(Result::ok)
+				.find(|line| line.starts_with("windows "))
+				.expect("the window host printed its windows");
+			let mut handles = line.split(' ').skip(1).map(|handle| handle.parse::<usize>().unwrap());
+			let (user, target) = (handles.next().unwrap(), handles.next().unwrap());
+			Self { user: user as HWND, target: target as HWND, host }
 		}
 
 		fn text(window: HWND) -> String {
@@ -305,8 +290,52 @@ mod tests {
 
 	impl Drop for Windows {
 		fn drop(&mut self) {
-			// SAFETY: posting to a thread id has no memory preconditions.
-			unsafe { PostThreadMessageW(self.thread, WM_QUIT, 0, 0) };
+			let _ = self.host.kill();
+			let _ = self.host.wait();
+		}
+	}
+
+	/// The window host `Windows::open` starts: opens both windows, prints their
+	/// handles and pumps their messages until it is killed. Run any other way,
+	/// it returns at once.
+	#[test]
+	#[ignore = "the window host of element_takeover_hands_the_foreground_back_to_the_users_window"]
+	fn takeover_test_windows() {
+		if std::env::var_os(HOST).is_none() {
+			return;
+		}
+		let create = |title: &str| {
+			let (class, text) = (wide("EDIT"), wide(title));
+			// SAFETY: both strings are NUL-terminated and outlive the call;
+			// EDIT is a system class, so no instance handle is needed.
+			unsafe {
+				CreateWindowExW(
+					0,
+					class.as_ptr(),
+					text.as_ptr(),
+					WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+					CW_USEDEFAULT,
+					CW_USEDEFAULT,
+					400,
+					300,
+					std::ptr::null_mut(),
+					std::ptr::null_mut(),
+					std::ptr::null_mut(),
+					std::ptr::null(),
+				)
+			}
+		};
+		let (user, target) = (create(USER), create(TARGET));
+		assert!(!user.is_null() && !target.is_null());
+		println!("windows {} {}", user as usize, target as usize);
+		std::io::stdout().flush().unwrap();
+		// SAFETY: `message` is writable for each call.
+		unsafe {
+			let mut message: MSG = std::mem::zeroed();
+			while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+				TranslateMessage(&message);
+				DispatchMessageW(&message);
+			}
 		}
 	}
 
