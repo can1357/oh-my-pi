@@ -916,6 +916,7 @@ export class MCPManager implements MCPManagerApi {
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
+		options?: { forceEager?: boolean },
 	): Promise<MCPLoadResult> {
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
@@ -963,6 +964,31 @@ export class MCPManager implements MCPManagerApi {
 				continue;
 			}
 
+			// A lazy server advertises the tools a previous session cached and
+			// starts its process on the first tool call. Without a cache entry
+			// there is nothing to advertise, so it connects eagerly this once.
+			if (!options?.forceEager && config.lifecycle === "lazy" && this.toolCache) {
+				const lazyValidationErrors = validateServerConfig(name, config);
+				if (lazyValidationErrors.length === 0) {
+					const cached = await this.toolCache.get(name, config);
+					if (cached && cached.length > 0) {
+						this.#forgetLostServer(name);
+						this.#serverConfigs.set(name, config);
+						this.#replaceServerTools(
+							name,
+							DeferredMCPTool.fromTools(
+								name,
+								cached,
+								() => this.#ensureConnected(name),
+								this.#sources.get(name),
+								() => this.reconnectServer(name),
+								this.#observeToolCall(name),
+							),
+						);
+						continue;
+					}
+				}
+			}
 			statusServerNames.push(name);
 
 			// Validate config
@@ -1510,6 +1536,30 @@ export class MCPManager implements MCPManagerApi {
 			if (result) return result;
 		}
 		throw new Error(`MCP server not connected: ${name}`);
+	}
+
+	/**
+	 * Connect a server on demand — the first tool call of a {@link
+	 * MCPServerConfig.lifecycle} `"lazy"` server lands here before its process
+	 * exists. Idempotent: shares an existing or in-flight connection, and forces
+	 * the eager path so a lazy config cannot re-enter this method's cache branch.
+	 */
+	async #ensureConnected(name: string): Promise<MCPServerConnection> {
+		const connection = this.#connections.get(name);
+		if (connection) return connection;
+		const pending = this.#pendingConnections.get(name);
+		if (pending) return pending;
+		if (this.#pendingToolLoads.has(name)) {
+			await this.#pendingToolLoads.get(name)?.catch(() => {});
+			return this.waitForConnection(name);
+		}
+		const config = this.#serverConfigs.get(name);
+		if (!config) throw new Error(`MCP server not configured: ${name}`);
+		const source = this.#sources.get(name);
+		await this.connectServers({ [name]: config }, source ? { [name]: source } : {}, undefined, 0, {
+			forceEager: true,
+		});
+		return this.waitForConnection(name);
 	}
 
 	/**

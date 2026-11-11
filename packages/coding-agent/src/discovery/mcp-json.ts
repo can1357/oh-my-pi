@@ -28,6 +28,7 @@ interface MCPConfigFile {
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
 			instructions?: boolean;
+			lifecycle?: "eager" | "lazy";
 			command?: string;
 			args?: string[];
 			env?: Record<string, string>;
@@ -101,12 +102,23 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
+			let lifecycle: "eager" | "lazy" | undefined;
+			if (serverConfig.lifecycle === "eager" || serverConfig.lifecycle === "lazy") {
+				lifecycle = serverConfig.lifecycle;
+			} else if (serverConfig.lifecycle !== undefined) {
+				logger.warn("MCP server has invalid 'lifecycle' value, ignoring", {
+					name,
+					value: serverConfig.lifecycle,
+				});
+			}
+
 			const server: MCPServer = {
 				name,
 				enabled,
 				timeout,
 				requestIdFormat,
 				instructions,
+				lifecycle,
 				command: serverConfig.command,
 				args: serverConfig.args,
 				env: serverConfig.env,
