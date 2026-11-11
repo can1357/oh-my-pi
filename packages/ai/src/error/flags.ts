@@ -889,7 +889,7 @@ export function isAccountPolicyError(error: unknown, api?: Api): boolean {
  * Model id from Codex's exact ChatGPT-account entitlement denial. Generic
  * unsupported-model invalid requests deliberately do not match.
  */
-export function codexChatGPTAccountPolicyModel(error: unknown, depth = 0): string | undefined {
+function codexChatGPTAccountPolicyModel(error: unknown, depth = 0): string | undefined {
 	if (depth > 6) return undefined;
 	if (typeof error === "string") return codexChatGPTAccountPolicyModelFromText(error);
 	if (!error || typeof error !== "object") return undefined;
@@ -904,11 +904,7 @@ export function codexChatGPTAccountPolicyModel(error: unknown, depth = 0): strin
 }
 
 /** Whether the exact Codex entitlement denial applies to this provider and requested model. */
-export function isCodexChatGPTAccountPolicyError(
-	error: unknown,
-	provider: string,
-	modelId: string | undefined,
-): boolean {
+function isCodexChatGPTAccountPolicyError(error: unknown, provider: string, modelId: string | undefined): boolean {
 	const deniedModel = codexChatGPTAccountPolicyModel(error);
 	const deniedIdentity = normalizeCodexChatGPTAccountPolicyModel(deniedModel);
 	const requestedIdentity = normalizeCodexChatGPTAccountPolicyModel(modelId);
@@ -916,7 +912,7 @@ export function isCodexChatGPTAccountPolicyError(
 }
 
 /** Model id from Anthropic's HTTP 404 model-not-found envelope, not a thread or endpoint failure. */
-export function anthropicModelNotFoundId(error: unknown, depth = 0): string | undefined {
+function anthropicModelNotFoundId(error: unknown, depth = 0): string | undefined {
 	if (depth > 6 || !error || typeof error !== "object") return undefined;
 	const message =
 		"errorMessage" in error && typeof error.errorMessage === "string"
@@ -945,7 +941,7 @@ export function anthropicModelNotFoundId(error: unknown, depth = 0): string | un
 }
 
 /** Whether Anthropic's exact model-not-found envelope names this request's model. */
-export function isAnthropicModelNotFoundError(error: unknown, provider: string, modelId: string | undefined): boolean {
+function isAnthropicModelNotFoundError(error: unknown, provider: string, modelId: string | undefined): boolean {
 	return (
 		provider === "anthropic" &&
 		typeof modelId === "string" &&
@@ -955,7 +951,7 @@ export function isAnthropicModelNotFoundError(error: unknown, provider: string, 
 }
 
 /** Whether Cursor returned a non-retryable plan entitlement denial for this account. */
-export function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth = 0): boolean {
+function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth = 0): boolean {
 	if (provider !== "cursor" || depth > 6) return false;
 	if (typeof error === "string") return isCursorPlanPolicyText(error);
 	if (!error || typeof error !== "object") return false;
@@ -968,6 +964,38 @@ export function isCursorPlanAccountPolicyError(error: unknown, provider: string,
 	}
 	if ("message" in error && typeof error.message === "string" && isCursorPlanPolicyText(error.message)) return true;
 	return "cause" in error && isCursorPlanAccountPolicyError(error.cause, provider, depth + 1);
+}
+
+/**
+ * Flags for a rejection that denies this credential only the requested model
+ * (Codex ChatGPT-account entitlement, Cursor plan, Anthropic model-not-found
+ * 404), or 0. A denial that names a model must match `provider` and the
+ * requested `modelId`, so provider-controlled text cannot block another model.
+ */
+export function modelEntitlementDenialKinds(error: unknown, provider: string, modelId: string | undefined): number {
+	if (isCodexChatGPTAccountPolicyError(error, provider, modelId) || isCursorPlanAccountPolicyError(error, provider)) {
+		return Flag.AccountPolicy | Flag.ContentBlocked;
+	}
+	return isAnthropicModelNotFoundError(error, provider, modelId) ? Flag.AccountPolicy : 0;
+}
+
+/** Whether a rejection denies this credential only the requested model; see {@link modelEntitlementDenialKinds}. */
+export function isModelEntitlementDenial(error: unknown, provider: string, modelId: string | undefined): boolean {
+	return modelEntitlementDenialKinds(error, provider, modelId) !== 0;
+}
+
+/**
+ * Whether a model-entitlement denial names a model other than this provider's
+ * requested one. Such provider-controlled input must not change credential state.
+ */
+export function isMismatchedModelEntitlementDenial(
+	error: unknown,
+	provider: string,
+	modelId: string | undefined,
+): boolean {
+	const namesModel =
+		codexChatGPTAccountPolicyModel(error) !== undefined || anthropicModelNotFoundId(error) !== undefined;
+	return namesModel && !isModelEntitlementDenial(error, provider, modelId);
 }
 
 /**
