@@ -1289,6 +1289,14 @@ export interface SelectUiRequest {
 	title: string;
 	options: string[];
 	optionDetails?: SelectOptionDetail[];
+	/** Index into `options` to focus first. */
+	initialIndex?: number;
+	/** Marker style for the first `markableCount` options. */
+	selectionMarker?: "radio" | "checkbox";
+	/** For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option. */
+	checkedIndices?: number[];
+	/** Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set. */
+	markableCount?: number;
 	timeout?: number;
 }
 

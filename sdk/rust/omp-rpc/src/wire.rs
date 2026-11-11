@@ -4531,6 +4531,18 @@ pub struct SelectUiRequest {
 	pub options: Vec<String>,
 	#[serde(rename = "optionDetails", default, skip_serializing_if = "Option::is_none")]
 	pub option_details: Option<Vec<SelectOptionDetail>>,
+	/// Index into `options` to focus first.
+	#[serde(rename = "initialIndex", default, skip_serializing_if = "Option::is_none")]
+	pub initial_index: Option<i64>,
+	/// Marker style for the first `markableCount` options.
+	#[serde(rename = "selectionMarker", default, skip_serializing_if = "Option::is_none")]
+	pub selection_marker: Option<SelectUiRequestSelectionMarker>,
+	/// For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option.
+	#[serde(rename = "checkedIndices", default, skip_serializing_if = "Option::is_none")]
+	pub checked_indices: Option<Vec<i64>>,
+	/// Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set.
+	#[serde(rename = "markableCount", default, skip_serializing_if = "Option::is_none")]
+	pub markable_count: Option<i64>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
 }
@@ -6010,6 +6022,24 @@ impl DictationStateEventState {
 			Self::Starting => "starting",
 			Self::Recording => "recording",
 			Self::Transcribing => "transcribing",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SelectUiRequestSelectionMarker {
+	#[serde(rename = "radio")]
+	Radio,
+	#[serde(rename = "checkbox")]
+	Checkbox,
+}
+
+impl SelectUiRequestSelectionMarker {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Radio => "radio",
+			Self::Checkbox => "checkbox",
 		}
 	}
 }
