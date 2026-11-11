@@ -895,6 +895,7 @@ Common event types:
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
 - `queue_update`
+- `user_wait_start`, `user_wait_end`
 
 ### `queue_update` event
 
@@ -914,6 +915,21 @@ is still pending. Live-steered messages stay listed until recorded in the
 transcript, even after they cease to be removable. Render the queue from this
 event rather than tracking chips independently, and treat removal replies as
 confirmation of a change rather than independent queue state.
+
+### `user_wait_start` / `user_wait_end` events
+
+```json
+{ "type": "user_wait_start", "id": 3, "kind": "permission", "msg": "Allow gh pr merge?" }
+{ "type": "user_wait_end", "id": 3 }
+```
+
+A running prompt is waiting on a dialog for the user's answer: a tool approval,
+`ask`, an extension's `confirm`/`select`/`input`/`editor`/`custom`/ask/form
+dialog, or a coding-plan reserve confirmation. `kind` is `permission` for an
+approval and `question` otherwise; `msg` is the dialog's title or first
+question. The end with the same `id` follows when the dialog settles. Dialogs
+opened while no prompt runs (the user's own slash command) and dialogs with a
+deadline (`ask.timeout`), which settle on their own, send neither.
 
 Extension runner errors are emitted separately as:
 

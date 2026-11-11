@@ -59,7 +59,7 @@ import {
 	sessionApprovalScope,
 } from "../../tools/approval";
 import { recoverAskHtml } from "../../tools/ask";
-import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
+import { firstFieldQuestion } from "@oh-my-pi/pi-tui/html-form/data";
 import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
@@ -228,9 +228,9 @@ export class EventController {
 	 * the call's `tool_execution_end` carries its `running` start result.
 	 */
 	#settledBeforeReturn = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
-	/** Tool calls waiting on the user (an approval prompt or `ask`), with the
-	 *  `blocked` status each reports; cleared at their tool_execution_end so the
-	 *  run returns to `working` once none is left. */
+	/** What the run waits on the user for: tool calls predicted to prompt (an approval or `ask`),
+	 *  cleared at their tool_execution_end, and the dialogs the session reports open (`user-wait:<id>`), cleared at
+	 *  their user_wait_end. The run reports `blocked` while any is left. */
 	#blockingPrompts = new Map<string, RunStatus>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
@@ -496,6 +496,12 @@ export class EventController {
 			queue_update: async () => {
 				this.ctx.updatePendingMessagesDisplay();
 			},
+			user_wait_start: async event => {
+				const blocked: RunStatus = { state: "blocked", kind: event.kind, msg: event.msg };
+				this.#blockingPrompts.set(`user-wait:${event.id}`, blocked);
+				setRunStatus(blocked);
+			},
+			user_wait_end: async event => this.#releaseBlockingPrompt(`user-wait:${event.id}`),
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -2162,6 +2168,18 @@ export class EventController {
 	}
 
 	/**
+	 * Drop one thing the run waited on the user for. The run returns to `working`
+	 * only when the LAST one goes: with queued prompts (always-ask approvals, a
+	 * hook's dialog inside a tool call), the first to settle must not clear the
+	 * blocked signal while another still waits; the run reports that one instead.
+	 */
+	#releaseBlockingPrompt(key: string): void {
+		if (this.#blockingPrompts.delete(key)) {
+			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
+		}
+	}
+
+	/**
 	 * The `blocked` status of a tool call that waits on the user before it
 	 * completes: an `ask` question, or an approval prompt. The extension wrapper
 	 * waits on `uiContext.select(...)` after emitting `tool_execution_start`, so
@@ -2176,12 +2194,10 @@ export class EventController {
 	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
 		if (toolName === "ask") {
 			const html = recoverAskHtml(args);
-			const form = html === undefined ? undefined : parseHtmlForm(html);
-			const question = form?.fields.find(field => field.name);
 			return {
 				state: "blocked",
 				kind: "question",
-				msg: form && question ? fieldQuestions(form).get(question) : undefined,
+				msg: html === undefined ? undefined : firstFieldQuestion(parseHtmlForm(html)),
 			};
 		}
 		const session = this.ctx.viewSession;
@@ -2328,15 +2344,9 @@ export class EventController {
 		// which only fire `tool_execution_end`, never `_update` — do not leave
 		// the UI looking idle while the session keeps streaming (#3857).
 		this.#ensureWorkingLoaderWhileStreaming();
-		// Return to `working` only when the LAST outstanding user-blocking prompt
-		// resolves: with queued approval prompts (always-ask/write), the first tool
-		// to finish must not clear the blocked signal while another prompt still
-		// waits — the run reports that prompt instead. `ask` ids are in the map too
-		// (added at tool_execution_start), so the delete also covers them without
-		// leaking ids until turn end.
-		if (this.#blockingPrompts.delete(event.toolCallId)) {
-			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
-		}
+		// `ask` ids are in the map too (added at tool_execution_start), so this also
+		// covers them without leaking ids until turn end.
+		this.#releaseBlockingPrompt(event.toolCallId);
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
 				const component = this.ctx.pendingTools.get(event.toolCallId);

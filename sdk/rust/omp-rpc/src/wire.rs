@@ -3992,6 +3992,23 @@ pub struct QueueUpdateEvent {
 	pub live_steered: i64,
 }
 
+/// A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserWaitStartEvent {
+	pub id: i64,
+	/// An approval to grant, or a question to answer.
+	pub kind: UserWaitStartEventKind,
+	/// What the dialog asks, in a line.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub msg: Option<String>,
+}
+
+/// The dialog of the `user_wait_start` with the same `id` settled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserWaitEndEvent {
+	pub id: i64,
+}
+
 /// A session event, discriminated by `type`; `set_event_filter` selects which are sent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RpcAgentEvent {
@@ -4036,6 +4053,10 @@ pub enum RpcAgentEvent {
 	GoalUpdated(GoalUpdatedEvent),
 	/// Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.
 	QueueUpdate(QueueUpdateEvent),
+	/// A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.
+	UserWaitStart(UserWaitStartEvent),
+	/// The dialog of the `user_wait_start` with the same `id` settled.
+	UserWaitEnd(UserWaitEndEvent),
 }
 
 impl RpcAgentEvent {
@@ -4075,6 +4096,8 @@ impl RpcAgentEvent {
 			Some("thinking_level_changed") => |value| serde_json::from_value(value).map(Self::ThinkingLevelChanged),
 			Some("goal_updated") => |value| serde_json::from_value(value).map(Self::GoalUpdated),
 			Some("queue_update") => |value| serde_json::from_value(value).map(Self::QueueUpdate),
+			Some("user_wait_start") => |value| serde_json::from_value(value).map(Self::UserWaitStart),
+			Some("user_wait_end") => |value| serde_json::from_value(value).map(Self::UserWaitEnd),
 			other => {
 				return Err(serde_json::Error::custom(format!("unknown RpcAgentEvent type {other:?}")));
 			}
@@ -4119,6 +4142,8 @@ impl Serialize for RpcAgentEvent {
 			Self::ThinkingLevelChanged(member) => serialize_tagged(member, &[("type", "thinking_level_changed")], serializer),
 			Self::GoalUpdated(member) => serialize_tagged(member, &[("type", "goal_updated")], serializer),
 			Self::QueueUpdate(member) => serialize_tagged(member, &[("type", "queue_update")], serializer),
+			Self::UserWaitStart(member) => serialize_tagged(member, &[("type", "user_wait_start")], serializer),
+			Self::UserWaitEnd(member) => serialize_tagged(member, &[("type", "user_wait_end")], serializer),
 		}
 	}
 }
@@ -5127,7 +5152,7 @@ impl RpcNotification {
 			Some("session_info_update") => |value| serde_json::from_value(value).map(Self::SessionInfoUpdate),
 			Some("config_update") => |value| serde_json::from_value(value).map(Self::ConfigUpdate),
 			Some("rpc_frame_error") => |value| serde_json::from_value(value).map(Self::RpcFrameError),
-			Some("agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcAgentEvent),
+			Some("agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update" | "user_wait_start" | "user_wait_end") => |value| serde_json::from_value(value).map(Self::RpcAgentEvent),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -5190,7 +5215,7 @@ impl RpcServerFrame {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("response") => |value| serde_json::from_value(value).map(Self::Response),
 			Some("host_tool_call" | "host_tool_cancel" | "host_uri_request" | "host_uri_cancel") => |value| serde_json::from_value(value).map(Self::RpcHostRequest),
-			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
+			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update" | "user_wait_start" | "user_wait_end") => |value| serde_json::from_value(value).map(Self::RpcNotification),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -5974,6 +5999,24 @@ impl LogoutAccountType {
 		match self {
 			Self::ApiKey => "api_key",
 			Self::Oauth => "oauth",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserWaitStartEventKind {
+	#[serde(rename = "permission")]
+	Permission,
+	#[serde(rename = "question")]
+	Question,
+}
+
+impl UserWaitStartEventKind {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Permission => "permission",
+			Self::Question => "question",
 		}
 	}
 }

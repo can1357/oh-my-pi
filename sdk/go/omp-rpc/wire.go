@@ -4585,6 +4585,84 @@ func (v QueueUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"queue_update"`, nil)
 }
 
+// A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.
+type UserWaitStartEvent struct {
+	ID int64 `json:"id"`
+	// An approval to grant, or a question to answer.
+	Kind UserWaitStartEventKind `json:"kind"`
+	// What the dialog asks, in a line.
+	Msg *string `json:"msg,omitempty"`
+}
+
+func (v *UserWaitStartEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "UserWaitStartEvent", v.decodeFrom)
+}
+
+func (v *UserWaitStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out UserWaitStartEvent
+	d := fieldDecoder{raw: raw, owner: "UserWaitStartEvent"}
+	d.constant("type", "user_wait_start")
+	d.required("id", &out.ID)
+	d.required("kind", &out.Kind)
+	d.optional("msg", &out.Msg)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v UserWaitStartEvent) MarshalJSON() ([]byte, error) {
+	type plain UserWaitStartEvent
+	return encodeObject(plain(v), `"type":"user_wait_start"`, nil)
+}
+
+type UserWaitStartEventKind string
+
+const (
+	UserWaitStartEventKindPermission UserWaitStartEventKind = "permission"
+	UserWaitStartEventKindQuestion   UserWaitStartEventKind = "question"
+)
+
+func (v *UserWaitStartEventKind) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "UserWaitStartEventKind")
+	if err != nil {
+		return err
+	}
+	switch value := UserWaitStartEventKind(s); value {
+	case UserWaitStartEventKindPermission, UserWaitStartEventKindQuestion:
+		*v = value
+		return nil
+	}
+	return unknownValue("UserWaitStartEventKind", s)
+}
+
+// The dialog of the `user_wait_start` with the same `id` settled.
+type UserWaitEndEvent struct {
+	ID int64 `json:"id"`
+}
+
+func (v *UserWaitEndEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "UserWaitEndEvent", v.decodeFrom)
+}
+
+func (v *UserWaitEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out UserWaitEndEvent
+	d := fieldDecoder{raw: raw, owner: "UserWaitEndEvent"}
+	d.constant("type", "user_wait_end")
+	d.required("id", &out.ID)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v UserWaitEndEvent) MarshalJSON() ([]byte, error) {
+	type plain UserWaitEndEvent
+	return encodeObject(plain(v), `"type":"user_wait_end"`, nil)
+}
+
 // A session event, discriminated by `type`; `set_event_filter` selects which are sent.
 type RpcAgentEvent struct {
 	// Value holds one variant, chosen by "type" on decode.
@@ -4630,6 +4708,8 @@ func (NoticeEvent) isRpcAgentEvent()                 {}
 func (ThinkingLevelChangedEvent) isRpcAgentEvent()   {}
 func (GoalUpdatedEvent) isRpcAgentEvent()            {}
 func (QueueUpdateEvent) isRpcAgentEvent()            {}
+func (UserWaitStartEvent) isRpcAgentEvent()          {}
+func (UserWaitEndEvent) isRpcAgentEvent()            {}
 func (UnknownNotification) isRpcAgentEvent()         {}
 
 func (v RpcAgentEvent) MarshalJSON() ([]byte, error) {
@@ -4717,6 +4797,10 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "user_wait_start":
+		value, err = decodeVariant[UserWaitStartEvent](raw)
+	case "user_wait_end":
+		value, err = decodeVariant[UserWaitEndEvent](raw)
 	default:
 		return unknownValue("RpcAgentEvent.type", tag)
 	}
@@ -6809,6 +6893,8 @@ func (NoticeEvent) isRpcNotification()                  {}
 func (ThinkingLevelChangedEvent) isRpcNotification()    {}
 func (GoalUpdatedEvent) isRpcNotification()             {}
 func (QueueUpdateEvent) isRpcNotification()             {}
+func (UserWaitStartEvent) isRpcNotification()           {}
+func (UserWaitEndEvent) isRpcNotification()             {}
 func (UnknownNotification) isRpcNotification()          {}
 
 func (v RpcNotification) MarshalJSON() ([]byte, error) {
@@ -6933,6 +7019,10 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "user_wait_start":
+		value, err = decodeVariant[UserWaitStartEvent](raw)
+	case "user_wait_end":
+		value, err = decodeVariant[UserWaitEndEvent](raw)
 	default:
 		value = newUnknownNotification(tag, data)
 	}
@@ -7014,6 +7104,8 @@ func (NoticeEvent) isRpcServerFrame()                  {}
 func (ThinkingLevelChangedEvent) isRpcServerFrame()    {}
 func (GoalUpdatedEvent) isRpcServerFrame()             {}
 func (QueueUpdateEvent) isRpcServerFrame()             {}
+func (UserWaitStartEvent) isRpcServerFrame()           {}
+func (UserWaitEndEvent) isRpcServerFrame()             {}
 func (UnknownNotification) isRpcServerFrame()          {}
 
 func (v RpcServerFrame) MarshalJSON() ([]byte, error) {
@@ -7148,6 +7240,10 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "user_wait_start":
+		value, err = decodeVariant[UserWaitStartEvent](raw)
+	case "user_wait_end":
+		value, err = decodeVariant[UserWaitEndEvent](raw)
 	default:
 		value = newUnknownNotification(tag, data)
 	}

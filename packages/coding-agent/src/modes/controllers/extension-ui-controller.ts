@@ -65,7 +65,6 @@ import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, them
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
-import { type BlockedKind, type BlockedStatus, holdBlockedStatus } from "../../utils/run-status";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
@@ -193,13 +192,9 @@ export class ExtensionUiController {
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
 			supportsEditor: true,
-			// Extension dialogs hold the session on the user, so they report `blocked`; omp's own
-			// prompts that share these components opt in individually.
-			select: (title, options, dialogOptions) =>
-				this.showCollabAwareSelector(title, options, dialogOptions, { blocked: "question" }),
-			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions, "permission"),
-			input: (title, placeholder, dialogOptions) =>
-				this.showHookInput(title, placeholder, dialogOptions, "question"),
+			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
+			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
+			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
 			formDialog: (html, dialogOptions) => this.showFormDialog(html, dialogOptions),
 			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
@@ -223,7 +218,7 @@ export class ExtensionUiController {
 			},
 			getEditorText: () => this.ctx.editor.getText(),
 			editor: (title, prefill, dialogOptions, editorOptions) =>
-				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions, "question"),
+				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions),
 			addAutocompleteProvider: factory => this.ctx.addAutocompleteProvider(factory),
 			getEditorComponent: () => this.ctx.getEditorComponent(),
 			get theme() {
@@ -256,7 +251,6 @@ export class ExtensionUiController {
 				"Coding-plan reserve reached",
 				`${confirmation.from} has ${reserve}. Switch to ${confirmation.to}? Choose No to keep using the current plan.`,
 				{ signal },
-				"permission",
 			);
 		});
 
@@ -678,7 +672,7 @@ export class ExtensionUiController {
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
-		extra?: { slider?: HookSelectorSlider; blocked?: BlockedKind },
+		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = {
 			kind: "select",
@@ -700,11 +694,10 @@ export class ExtensionUiController {
 		prefill?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
-		blocked?: BlockedKind,
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = { kind: "editor", title, prefill };
 		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
-			this.showHookEditor(title, prefill, { ...dialogOptions, signal }, editorOptions, blocked),
+			this.showHookEditor(title, prefill, { ...dialogOptions, signal }, editorOptions),
 		);
 	}
 
@@ -757,7 +750,7 @@ export class ExtensionUiController {
 		const signal = dialogOptions?.signal ? AbortSignal.any([dialogOptions.signal, steered.signal]) : steered.signal;
 		try {
 			const choice = await this.#raceCollabDialog(request, signal, localSignal =>
-				this.#presentDialog({ state: "blocked", kind: "permission", msg: prompt.compact }, localSignal, settle => {
+				this.#presentDialog(localSignal, settle => {
 					const editor = this.ctx.editor;
 					const dialog = new ApprovalDialogComponent(
 						prompt.compact,
@@ -898,13 +891,7 @@ export class ExtensionUiController {
 		form: HtmlForm,
 		dialogOptions: ExtensionUIDialogOptions | undefined,
 	): Promise<ExtensionFormDialogResult | undefined> {
-		const question = form.fields.find(field => field.name);
-		const blocked: BlockedStatus = {
-			state: "blocked",
-			kind: "question",
-			msg: question ? fieldQuestions(form).get(question) : undefined,
-		};
-		return this.#presentDialog<ExtensionFormDialogResult>(blocked, dialogOptions?.signal, settle => {
+		return this.#presentDialog<ExtensionFormDialogResult>(dialogOptions?.signal, settle => {
 			const inputGuard = this.#draftInputGuard();
 			const dialog = new HtmlFormDialog(form, {
 				tui: this.ctx.ui,
@@ -1079,8 +1066,7 @@ export class ExtensionUiController {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		const blocked: BlockedStatus = { state: "blocked", kind: "question", msg: questions[0]?.question };
-		return this.#presentDialog<ExtensionAskDialogResult>(blocked, dialogOptions?.signal, settle => {
+		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: AskDialogPromptValue | AskDialogPromptDraft | undefined) => void) | undefined;
 			let closed = false;
@@ -1389,19 +1375,15 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Show a selector for hooks. With `extra.blocked`, the run reports `blocked`
-	 * on that kind with `extra.msg` or the title while it is open.
+	 * Show a selector for hooks.
 	 */
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
-		extra?: { slider?: HookSelectorSlider; blocked?: BlockedKind; msg?: string },
+		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
-		const blocked: BlockedStatus | undefined = extra?.blocked
-			? { state: "blocked", kind: extra.blocked, msg: extra.msg ?? title }
-			: undefined;
-		return this.#presentDialog(blocked, dialogOptions?.signal, settle => {
+		return this.#presentDialog(dialogOptions?.signal, settle => {
 			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
 			this.ctx.hookSelector = new HookSelectorComponent(
 				title,
@@ -1460,19 +1442,14 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Show a confirmation dialog for hooks. With `blocked`, the run reports
-	 * `blocked` on that kind with the title while it is open.
+	 * Show a confirmation dialog for hooks.
 	 */
 	async showHookConfirm(
 		title: string,
 		message: string,
 		dialogOptions?: InteractiveSelectorDialogOptions,
-		blocked?: BlockedKind,
 	): Promise<boolean> {
-		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions, {
-			blocked,
-			msg: title,
-		});
+		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
 		return result === "Yes";
 	}
 
@@ -1483,10 +1460,8 @@ export class ExtensionUiController {
 		title: string,
 		placeholder?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
-		blocked?: BlockedKind,
 	): Promise<string | undefined> {
-		const hold: BlockedStatus | undefined = blocked ? { state: "blocked", kind: blocked, msg: title } : undefined;
-		return this.#presentDialog(hold, dialogOptions?.signal, settle => {
+		return this.#presentDialog(dialogOptions?.signal, settle => {
 			this.ctx.hookInput = new HookInputComponent(
 				title,
 				placeholder,
@@ -1528,10 +1503,8 @@ export class ExtensionUiController {
 		prefill?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
-		blocked?: BlockedKind,
 	): Promise<string | undefined> {
-		const hold: BlockedStatus | undefined = blocked ? { state: "blocked", kind: blocked, msg: title } : undefined;
-		return this.#presentDialog(hold, dialogOptions?.signal, settle => {
+		return this.#presentDialog(dialogOptions?.signal, settle => {
 			this.ctx.hookEditor = new HookEditorComponent(
 				this.ctx.ui,
 				title,
@@ -1811,12 +1784,8 @@ export class ExtensionUiController {
 	 * presented at a time and the rest queue (FIFO). `settle` (or an abort) hides
 	 * the current dialog and hands the surface to the next queued request. A request
 	 * whose signal aborts before its turn resolves `undefined` and is never shown.
-	 *
-	 * With `blocked`, the run reports it while the dialog is presented (OSC 7501
-	 * and the title), since the session waits on the user.
 	 */
 	#presentDialog<T = string>(
-		blocked: BlockedStatus | undefined,
 		signal: AbortSignal | undefined,
 		present: (settle: (value: T | undefined) => void) => () => void,
 	): Promise<T | undefined> {
@@ -1824,7 +1793,6 @@ export class ExtensionUiController {
 		let settled = false;
 		let started = false;
 		let hide: (() => void) | undefined;
-		let releaseBlocked: (() => void) | undefined;
 
 		function onAbort(): void {
 			settle(undefined);
@@ -1837,10 +1805,7 @@ export class ExtensionUiController {
 			if (started) {
 				hide?.();
 				this.#dialogActive = false;
-				// Present the next dialog before releasing this hold; no intermediate
-				// done/working report may escape while another prompt is waiting.
 				this.#advanceDialogQueue();
-				releaseBlocked?.();
 			}
 			resolve(value);
 		};
@@ -1853,17 +1818,14 @@ export class ExtensionUiController {
 			}
 			started = true;
 			this.#dialogActive = true;
-			// Held before `present` so a synchronous settle still releases it.
-			releaseBlocked = blocked ? holdBlockedStatus(blocked) : undefined;
 			try {
 				hide = present(settle);
 			} catch (error) {
 				settled = true;
 				signal?.removeEventListener("abort", onAbort);
 				this.#dialogActive = false;
-				this.#advanceDialogQueue();
-				releaseBlocked?.();
 				reject(error);
+				this.#advanceDialogQueue();
 			}
 		};
 

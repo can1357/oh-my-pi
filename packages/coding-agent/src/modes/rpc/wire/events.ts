@@ -193,6 +193,19 @@ export const eventDefs = {
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
+	UserWaitStartEvent: doc(
+		{
+			type: "'user_wait_start'",
+			id: "number.integer",
+			kind: doc("'permission' | 'question'", "An approval to grant, or a question to answer."),
+			"msg?": doc("string", "What the dialog asks, in a line."),
+		},
+		"A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none.",
+	),
+	UserWaitEndEvent: doc(
+		{ type: "'user_wait_end'", id: "number.integer" },
+		"The dialog of the `user_wait_start` with the same `id` settled.",
+	),
 
 	RpcAgentEvent: doc(
 		[
@@ -229,6 +242,8 @@ export const eventDefs = {
 			"ThinkingLevelChangedEvent",
 			"GoalUpdatedEvent",
 			"QueueUpdateEvent",
+			"UserWaitStartEvent",
+			"UserWaitEndEvent",
 		].join(" | "),
 		"A session event, discriminated by `type`; `set_event_filter` selects which are sent.",
 	),

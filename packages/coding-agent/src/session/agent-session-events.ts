@@ -9,6 +9,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { CustomMessage } from "./messages";
 import type { CacheWarmingRefreshEnd, CacheWarmingRefreshStart } from "./cache-warmer";
+import type { UserPrompt } from "../extensibility/extensions/user-wait";
 
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
@@ -99,6 +100,11 @@ export type AgentSessionEvent =
 			resolved?: Effort;
 	  }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	// One pair per dialog a running prompt waits on for the user's answer (a tool approval, `ask`, an extension
+	// dialog): the run is blocked on the user until the matching end. Dialogs opened while no prompt runs (a slash
+	// command's own prompts) and dialogs with a deadline, which settle on their own, emit none.
+	| ({ type: "user_wait_start"; id: number } & UserPrompt)
+	| { type: "user_wait_end"; id: number }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
 	// whenever it differs from the last `queue_update` (enqueue, dequeue on
 	// delivery, remove, clear/restore, live-steering adoption/withdrawal, or

@@ -171,6 +171,19 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
 	});
 
+	it("reports a dialog the session waits on inside a tool call as blocked until it settles", async () => {
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const controller = new EventController(createInteractiveModeContext());
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "gh pr merge" }));
+		await controller.handleEvent({ type: "user_wait_start", id: 1, kind: "permission", msg: "Allow gh pr merge?" });
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow gh pr merge?" });
+
+		await controller.handleEvent({ type: "user_wait_end", id: 1 });
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
 	it("judges a focused subagent's tool call by the subagent's own settings and session approvals", async () => {
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;

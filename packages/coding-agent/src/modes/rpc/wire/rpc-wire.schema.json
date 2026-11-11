@@ -4426,6 +4426,51 @@
 			],
 			"description": "Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."
 		},
+		"UserWaitStartEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "user_wait_start"
+				},
+				"id": {
+					"type": "integer"
+				},
+				"kind": {
+					"enum": [
+						"permission",
+						"question"
+					],
+					"type": "string",
+					"description": "An approval to grant, or a question to answer."
+				},
+				"msg": {
+					"type": "string",
+					"description": "What the dialog asks, in a line."
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"kind"
+			],
+			"description": "A running prompt waits on a dialog for the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs, and dialogs with a deadline, send none."
+		},
+		"UserWaitEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "user_wait_end"
+				},
+				"id": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"type",
+				"id"
+			],
+			"description": "The dialog of the `user_wait_start` with the same `id` settled."
+		},
 		"RpcAgentEvent": {
 			"anyOf": [
 				{
@@ -4526,6 +4571,12 @@
 				},
 				{
 					"$ref": "#/$defs/QueueUpdateEvent"
+				},
+				{
+					"$ref": "#/$defs/UserWaitStartEvent"
+				},
+				{
+					"$ref": "#/$defs/UserWaitEndEvent"
 				}
 			],
 			"description": "A session event, discriminated by `type`; `set_event_filter` selects which are sent."

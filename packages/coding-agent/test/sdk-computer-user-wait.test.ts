@@ -15,6 +15,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -148,6 +149,29 @@ describe("SDK session dialogs and the computer display hold", () => {
 		open.answer("Deny");
 		await running;
 		expect(releases).toEqual([1, 2]);
+	});
+
+	it("reports a dialog a running prompt waits on, but not one the user opens while idle", async () => {
+		const target = await createSession({}, [call("ask", { html: GO_ON_FORM }), { content: ["done"] }]);
+		const waits: Extract<AgentSessionEvent, { type: "user_wait_start" | "user_wait_end" }>[] = [];
+		target.subscribe(event => {
+			if (event.type === "user_wait_start" || event.type === "user_wait_end") waits.push(event);
+		});
+
+		// An extension command's own prompt, opened at the idle editor.
+		const picked = target.extensionRunner!.getUIContext().select("Pick a branch", []);
+		(await dialog.promise).answer("main");
+		await picked;
+		expect(waits).toEqual([]);
+
+		dialog = Promise.withResolvers();
+		const running = target.prompt("go");
+		const open = await dialog.promise;
+		const [start] = waits;
+		expect(waits).toEqual([{ type: "user_wait_start", id: expect.any(Number), kind: "question", msg: "Go on?" }]);
+		open.answer("Yes");
+		await running;
+		expect(waits).toEqual([start, { type: "user_wait_end", id: start.id }]);
 	});
 });
 

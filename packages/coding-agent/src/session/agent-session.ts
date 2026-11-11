@@ -166,6 +166,7 @@ import { extensionEventFromSessionEvent } from "../extensibility/extensions/life
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { UserPrompt } from "../extensibility/extensions/user-wait";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
@@ -1376,6 +1377,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#clientPromptInFlightCount = 0;
 	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
 	#userWaitCount = 0;
+	/** Ids of the reported `user_wait_start`/`user_wait_end` pairs. */
+	#userWaitSeq = 0;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
 	#inFlightEpoch = 0;
@@ -1558,8 +1561,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * question. Once the last open dialog settles, if a prompt is still in flight, the turn goes on: the run still active
 	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again. While it is open,
 	 * the agent counts as blocked on the user ({@link USER_AWAIT_ID}), so a peer's wait for its reply ends.
+	 *
+	 * With `describe`, a dialog a running prompt waits on is reported as a `user_wait_start`/`user_wait_end` pair; one
+	 * opened while no prompt runs (a slash command's own prompts) is the user's own doing and is not.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+	async waitForUser<T>(dialog: () => Promise<T>, describe?: () => UserPrompt): Promise<T> {
 		if (this.#userWaitCount++ === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
@@ -1567,9 +1573,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const releaseUserHold = this.#agentId
 			? this.#agentRegistry?.awaits.hold(this.#agentId, [USER_AWAIT_ID], { interruptible: false })
 			: undefined;
+		let waitId: number | undefined;
+		if (describe && this.#promptInFlightCount > 0) {
+			waitId = ++this.#userWaitSeq;
+			this.#emit({ type: "user_wait_start", id: waitId, ...describe() });
+		}
 		try {
 			return await dialog();
 		} finally {
+			if (waitId !== undefined) this.#emit({ type: "user_wait_end", id: waitId });
 			releaseUserHold?.();
 			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
@@ -2659,7 +2671,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
-			waitForUser: dialog => this.waitForUser(dialog),
+			waitForUser: (dialog, describe) => this.waitForUser(dialog, describe),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -3431,7 +3443,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
-		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title)) : undefined;
+		this.#planProposalHandler = handler
+			? title =>
+					this.waitForUser(
+						() => handler(title),
+						() => ({ kind: "permission", msg: title }),
+					)
+			: undefined;
 	}
 
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
@@ -7194,7 +7212,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
 		this.#usageFallbackConfirmer = confirmer
-			? (confirmation, signal) => this.waitForUser(() => confirmer(confirmation, signal))
+			? (confirmation, signal) =>
+					this.waitForUser(
+						() => confirmer(confirmation, signal),
+						() => ({ kind: "permission", msg: `Switch to ${confirmation.to}?` }),
+					)
 			: undefined;
 	}
 

@@ -1,19 +1,36 @@
+import { firstFieldQuestion } from "@oh-my-pi/pi-tui/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { ExtensionUIContext } from "./types";
+import type { BlockedKind } from "../../utils/run-status";
+import type { ExtensionApprovalPrompt, ExtensionAskDialogQuestion, ExtensionUIContext } from "./types";
 
-/** Runs a dialog that waits for the user's answer, so its session can treat the time as the user's, not the agent's. */
-export type UserWaitTracker = <T>(dialog: () => Promise<T>) => Promise<T>;
+/** What an open dialog asks of the user: a permission or an answer, with `msg` naming it in a line. */
+export interface UserPrompt {
+	kind: BlockedKind;
+	msg?: string;
+}
 
-/** The {@link ExtensionUIContext} methods that wait for the user's answer. */
-const DIALOGS: Record<string, true> = {
-	select: true,
-	confirm: true,
-	input: true,
-	editor: true,
-	custom: true,
-	askDialog: true,
-	formDialog: true,
-	approve: true,
+/**
+ * Runs a dialog that waits for the user's answer, so its session can treat the time as the user's, not the agent's.
+ * `describe` says what the dialog asks; it is read only when the wait is reported.
+ */
+export type UserWaitTracker = <T>(dialog: () => Promise<T>, describe?: () => UserPrompt) => Promise<T>;
+
+const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+/** The {@link ExtensionUIContext} methods that wait for the user's answer, each with what it asks given its arguments. */
+const DIALOGS: Record<string, (args: unknown[]) => UserPrompt> = {
+	select: args => ({ kind: "question", msg: text(args[0]) }),
+	confirm: args => ({ kind: "permission", msg: text(args[0]) }),
+	input: args => ({ kind: "question", msg: text(args[0]) }),
+	editor: args => ({ kind: "question", msg: text(args[0]) }),
+	custom: () => ({ kind: "question" }),
+	askDialog: args => ({ kind: "question", msg: (args[0] as ExtensionAskDialogQuestion[] | undefined)?.[0]?.question }),
+	formDialog: args => {
+		const html = text(args[0]);
+		return { kind: "question", msg: html === undefined ? undefined : firstFieldQuestion(parseHtmlForm(html)) };
+	},
+	approve: args => ({ kind: "permission", msg: (args[0] as ExtensionApprovalPrompt | undefined)?.compact }),
 };
 
 type Method = (...args: unknown[]) => unknown;
@@ -32,11 +49,16 @@ export function trackUserWaits(ui: ExtensionUIContext, track: UserWaitTracker): 
 			if (typeof value !== "function") return value;
 			const cached = methods.get(property);
 			if (cached?.value === value) return cached.method;
-			const method: Method = Object.hasOwn(DIALOGS, property)
+			const describe =
+				typeof property === "string" && Object.hasOwn(DIALOGS, property) ? DIALOGS[property] : undefined;
+			const method: Method = describe
 				? (...args) =>
 						args.some(arg => isRecord(arg) && typeof arg.timeout === "number" && arg.timeout > 0)
 							? value.apply(target, args)
-							: track(() => value.apply(target, args))
+							: track(
+									() => value.apply(target, args),
+									() => describe(args),
+								)
 				: value.bind(target);
 			methods.set(property, { value: value as Method, method });
 			return method;

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { stripVTControlCharacters } from "node:util";
 import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
@@ -12,14 +12,6 @@ import { ExtensionUiController } from "../../../src/modes/controllers/extension-
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
-import {
-	disposeProgramStatus,
-	initProgramStatus,
-	setProgramStatusEnabled,
-	setRunStatus,
-} from "../../../src/utils/run-status";
-import * as titleGenerator from "../../../src/utils/title-generator";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
@@ -844,138 +836,5 @@ describe("ExtensionUiController tool approval", () => {
 		expect(body()).not.toContain("rm-rf~");
 		harness.handleInput("\x0f");
 		expect(body()).toContain("rm-rf~");
-	});
-});
-
-describe("ExtensionUiController OSC 7501 run status", () => {
-	const report = (body: string) => `\x1b]7501;${body}\x1b\\`;
-	const blocked = (kind: "permission" | "question", msg: string) =>
-		report(`state=blocked:kind=${kind}:app=omp:msg=${Buffer.from(msg).toString("base64")}`);
-	let writes: string[] = [];
-	let prevHeadless = false;
-	let ttyDescriptor: PropertyDescriptor | undefined;
-
-	beforeEach(() => {
-		vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
-		prevHeadless = setTerminalHeadless(false);
-		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-		writes = [];
-		spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
-			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
-			return true;
-		});
-		initProgramStatus();
-		setProgramStatusEnabled(true);
-		setRunStatus({ state: "working" });
-		writes.length = 0;
-	});
-
-	afterEach(() => {
-		disposeProgramStatus();
-		vi.restoreAllMocks();
-		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
-		else Reflect.deleteProperty(process.stdout, "isTTY");
-		setTerminalHeadless(prevHeadless);
-	});
-
-	it("reports a hook confirm as blocked on permission with its title until answered, across a settled run", async () => {
-		const harness = makeHarness();
-		const ui = await harness.init();
-
-		const answer = ui.confirm("Run terraform apply?", "This changes production.");
-		const dialog = harness.editorContainer.children[0];
-		expect(Bun.stripANSI(dialog?.render(120).join("\n") ?? "")).toContain("This changes production.");
-		expect(writes).toEqual([blocked("permission", "Run terraform apply?")]);
-
-		// The run settles while the dialog still waits: the dialog keeps the record.
-		setRunStatus({ state: "done" });
-		expect(writes).toHaveLength(1);
-
-		harness.handleInput("\r");
-		expect(await answer).toBe(true);
-		expect(writes.slice(1)).toEqual([report("state=done:app=omp")]);
-	});
-
-	it("hands a blocked record to the next queued dialog without reporting completion between prompts", async () => {
-		const harness = makeHarness();
-		const ui = await harness.init();
-		const first = ui.confirm("Approve deployment?", "terraform apply");
-		const second = ui.input("Deployment reason?");
-		setRunStatus({ state: "done" });
-
-		harness.handleInput("\r");
-		expect(await first).toBe(true);
-		expect(writes).toEqual([blocked("permission", "Approve deployment?"), blocked("question", "Deployment reason?")]);
-
-		harness.handleInput("\x1b");
-		expect(await second).toBeUndefined();
-		expect(writes.at(-1)).toBe(report("state=done:app=omp"));
-	});
-
-	it("reports an extension input as blocked on a question and returns to working when dismissed", async () => {
-		const harness = makeHarness();
-		const ui = await harness.init();
-
-		const answer = ui.input("Release name?");
-		expect(writes).toEqual([blocked("question", "Release name?")]);
-
-		harness.handleInput("\x1b");
-		expect(await answer).toBeUndefined();
-		expect(writes.slice(1)).toEqual([report("state=working:app=omp")]);
-	});
-
-	it("leaves the record alone for omp's own prompts that share the hook dialogs", async () => {
-		const harness = makeHarness();
-		await harness.init();
-		setRunStatus({ state: "idle" });
-		writes.length = 0;
-
-		// e.g. the paste picker or a slash-command confirm the user just opened.
-		const input = harness.controller.showHookInput("Pasted 40 lines");
-		harness.handleInput("\x1b");
-		expect(await input).toBeUndefined();
-		const confirm = harness.controller.showHookConfirm("Reset session?", "This clears the transcript.");
-		harness.handleInput("\r");
-		expect(await confirm).toBe(true);
-		expect(writes).toEqual([]);
-	});
-
-	it("reports an extension approve as blocked on permission and releases it when the call aborts", async () => {
-		const harness = makeHarness();
-		const ui = await harness.init();
-		const abort = new AbortController();
-
-		const answer = ui.approve!(
-			{ full: "Allow tool: bash\nCommand: gh pr merge", compact: "Allow tool: bash\nCommand: gh pr merge" },
-			{ signal: abort.signal },
-		);
-		expect(writes).toEqual([blocked("permission", "Allow tool: bash Command: gh pr merge")]);
-
-		abort.abort();
-		expect(await answer).toBe("deny");
-		expect(writes.slice(1)).toEqual([report("state=working:app=omp")]);
-	});
-
-	it("reports the presented approval dialog's prompt, not the newest queued tool call's", async () => {
-		const harness = makeHarness();
-		const ui = await harness.init();
-
-		// Two concurrent approvals: the event flow reports each call as it starts,
-		// while the dialogs present one at a time.
-		setRunStatus({ state: "blocked", kind: "permission", msg: "Allow tool: read a" });
-		const first = ui.select("Allow tool: read a", ["Approve", "Deny"]);
-		setRunStatus({ state: "blocked", kind: "permission", msg: "Allow tool: read b" });
-		const second = ui.select("Allow tool: read b", ["Approve", "Deny"]);
-		expect(writes).toEqual([blocked("permission", "Allow tool: read a")]);
-
-		harness.handleInput("\r");
-		expect(await first).toBe("Approve");
-		expect(writes.slice(1)).toEqual([blocked("permission", "Allow tool: read b")]);
-
-		harness.handleInput("\r");
-		expect(await second).toBe("Approve");
-		setRunStatus({ state: "working" });
-		expect(writes.slice(2)).toEqual([report("state=working:app=omp")]);
 	});
 });

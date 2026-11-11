@@ -4,10 +4,12 @@
 
 ### Fixed
 
-- Fixed Tern and other OSC 7501 terminals showing a session as `working`, with no needs-you alert, while an extension or hook dialog waits on you (`ctx.ui.confirm`, `select`, `input`, `editor`, `askDialog`, `formDialog`, `approve`) or the coding-plan reserve confirm is open, including a dialog opened from a `tool_call` handler to gate a command; the run now reports `blocked` (confirm and approve as `permission`, the others as `question`) with the dialog's prompt until it closes ([#15107](https://github.com/can1357/oh-my-pi/issues/15107), [#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed Tern and other OSC 7501 terminals showing a session as `working`, with no needs-you alert, while a running prompt waits on a dialog: an extension or hook dialog (`ctx.ui.confirm`, `select`, `input`, `editor`, `custom`, `askDialog`, `formDialog`, `approve`), such as one a `tool_call` handler opens to gate a command, or the coding-plan reserve confirm. The run now reports `blocked` (confirmations and approvals as `permission`, the rest as `question`) with the dialog's prompt until it closes; dialogs you open yourself at the idle prompt, such as an extension command's picker, raise no alert ([#15107](https://github.com/can1357/oh-my-pi/issues/15107), [#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
+
 ### Added
 
 - Extensions can import the form theme, the native span helpers (`styledSpans`, `compactText`, `rowsText` and the rest of the ANSI/span conversions), the `xd://` URL helpers (`parseXdUrl` and friends) and the `cfgExtensionTranscriptPresenters` setting handle from `@oh-my-pi/pi-coding-agent` instead of internal module paths, which stop the extension from loading when a file moves ([#18849](https://github.com/can1357/oh-my-pi/pull/18849) by [@materemias](https://github.com/materemias))
+- RPC and SDK sessions emit `user_wait_start`/`user_wait_end` while a running prompt waits on a dialog for the user's answer, with its kind (`permission` or `question`) and prompt ([#18868](https://github.com/can1357/oh-my-pi/pull/18868) by [@wolfiesch](https://github.com/wolfiesch))
 ### Changed
 
 - Agent-to-agent messages now always reach the recipient as user turns: one that ends a `wait` arrives right after it instead of inside the `wait` tool result, and none is sent with developer or system authority
