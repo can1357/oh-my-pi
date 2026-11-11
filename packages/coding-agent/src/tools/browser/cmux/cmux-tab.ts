@@ -1020,10 +1020,7 @@ export class CmuxTab implements InProcessRunTab {
 	async waitForSelector(selector: string, options?: SelectorWaitOptions): Promise<CmuxElementHandle | null> {
 		const opts = selectorWaitOptions(options);
 		const cellMs = this.#runContext?.timeoutMs ?? 30_000;
-		const timeoutMs =
-			opts.timeout === 0 || opts.timeout === Number.POSITIVE_INFINITY
-				? resolveWaitTimeout(cellMs, opts.timeout)
-				: (opts.timeout ?? cellMs);
+		const timeoutMs = opts.timeout === undefined ? cellMs : resolveWaitTimeout(cellMs, opts.timeout);
 		if ((opts.state === undefined && !opts.visible && !opts.hidden) || opts.state === "attached") {
 			await this.#waitForSelector(selector, timeoutMs);
 			return new CmuxElementHandle(this, selector);

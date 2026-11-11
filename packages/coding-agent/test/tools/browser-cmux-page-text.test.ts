@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import type { Page } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 import { rejectionOf } from "../helpers/rejection";
@@ -74,6 +75,26 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 			expect(await rejectionOf(tab.waitForSelector("#shown", JSON.parse('{"state":"gone"}')))).toMatchObject({
 				message: expect.stringContaining("waitForSelector() accepts"),
 			});
+		});
+	}, 30_000);
+
+	it("clamps finite selector wait timeouts below the run budget", async () => {
+		await withCmuxPage(async (tab, page) => {
+			await page.setContent('<div id="hidden" hidden>still attached</div>');
+			tab.setRunContext({
+				timeoutMs: 1_001,
+				signal: new AbortController().signal,
+				session: { cwd: process.cwd() },
+				output: new RunOutput(),
+				screenshots: [],
+			});
+			try {
+				expect(await rejectionOf(tab.waitForSelector("#hidden", { state: "visible", timeout: 1_100 }))).toMatchObject({
+					message: 'tab.waitForSelector("#hidden") timed out after 1ms',
+				});
+			} finally {
+				tab.clearRunContext();
+			}
 		});
 	}, 30_000);
 
