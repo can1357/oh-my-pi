@@ -246,7 +246,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - JS: `tool(fn, { name?, description?, parameters? })`; `fn` receives one args object.
 - `tool.defined()` lists names; `tool.undefine(name)` removes one. Redefining replaces.
 - Consumers: `task` items' `tools`, `agent(tools=...)`, `workpool(tools=...)`. The host resolves names against the retained Python and JS kernels (a name defined in both is an error) and exposes each as an essential custom tool of the child session. Calls run on a dedicated runner thread (Python) or inside the worker's run context (JS), so a parent cell blocked in `wait()` can still serve them. Async Python tools all run on one shared tool event loop (not the cell loop), so a module-level `asyncio.Lock()` can serialize concurrent calls from several subagents; a caller that gives up (interrupt, cancellation) cancels its async call's coroutine, while a sync tool runs to completion. A tool that raises reports the error to the caller; the kernel keeps running. A kernel that is not running yields an error result instead.
-- Unknown names fail the `task`/`agent()` call synchronously; plan mode rejects `tools` entirely.
+- `tools` cannot be resolved from the running cell that defines them: a `task`/`agent()`/`workpool()` call made from a cell while naming kernel-defined `tools` fails fast (the cell's kernel is blocked waiting for the spawn call, so it cannot answer the name lookup). Issue the spawn from the host (a model tool call, kernel idle) instead, or drop `tools` there. Unknown names fail the `task`/`agent()` call synchronously; plan mode rejects `tools` entirely.
 
 ## Side effects and cancellation
 
