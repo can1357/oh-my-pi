@@ -18,9 +18,8 @@ use x11rb::{
 	wrapper::ConnectionExt as _,
 };
 
+use super::mpx::DEVICE_PREFIX;
 use crate::desktop::error::{CoreResult, DesktopError};
-
-const DEVICE_PREFIX: &str = "OMP MPX ";
 
 pub(crate) struct Listener {
 	stop:    Option<Mutex<UnixStream>>,
