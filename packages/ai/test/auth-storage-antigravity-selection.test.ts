@@ -15,7 +15,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -114,8 +113,6 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 	};
 
 	beforeEach(async () => {
-		// Antigravity is paused in its auth rules; its ranking code stays for when it is turned back on.
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-antigravity-selection-"));
 		dbPath = path.join(tempDir, "agent.db");
 		store = await SqliteAuthCredentialStore.open(dbPath);

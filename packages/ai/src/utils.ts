@@ -700,6 +700,52 @@ export function getOpenAIResponsesHistoryItems(
 }
 
 /**
+ * Apply extension-rewritten assistant text to a native Responses history
+ * payload. Same-model replay sends the payload's items verbatim, so without
+ * this sync a documented `assistant_message` rewrite silently never reaches
+ * the wire (#18312). Text blocks pair positionally with the payload `message`
+ * items' `output_text` entries — the same flatten the capture produced; on any
+ * shape mismatch the payload is left alone rather than half-updated.
+ *
+ * Returns a new payload when at least one entry changed, else `undefined`.
+ */
+export function syncOpenAIResponsesHistoryTexts(
+	providerPayload: ProviderPayload | undefined,
+	texts: readonly string[],
+): OpenAIResponsesHistoryPayload | undefined {
+	if (providerPayload?.type !== "openaiResponsesHistory" || !Array.isArray(providerPayload.items)) {
+		return undefined;
+	}
+	let targetCount = 0;
+	for (const item of providerPayload.items) {
+		if ((item as { type?: unknown }).type !== "message") continue;
+		const content = (item as { content?: unknown }).content;
+		if (!Array.isArray(content)) return undefined;
+		for (const part of content) {
+			const outputText = part as { type?: unknown; text?: unknown };
+			if (outputText.type !== "output_text" || typeof outputText.text !== "string") return undefined;
+			targetCount += 1;
+		}
+	}
+	if (targetCount !== texts.length) return undefined;
+	let changed = false;
+	let index = 0;
+	const items = providerPayload.items.map(item => {
+		if ((item as { type?: unknown }).type !== "message") return item;
+		const content = (item as { content?: unknown }).content as Array<Record<string, unknown>>;
+		const nextContent = content.map(part => {
+			const text = texts[index++];
+			if (text === part.text) return part;
+			changed = true;
+			return { ...part, text };
+		});
+		return { ...(item as Record<string, unknown>), content: nextContent };
+	});
+	if (!changed) return undefined;
+	return { ...providerPayload, items };
+}
+
+/**
  * Resolve cache retention preference: explicit request option first, then the
  * `PI_CACHE_RETENTION` env override (`long` | `short` | `none`), then the
  * provider-supplied fallback.

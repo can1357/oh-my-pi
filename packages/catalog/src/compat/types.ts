@@ -584,6 +584,8 @@ export interface CompiledAuthProvider {
 	showInLoginList?: boolean;
 	/** Why the provider is turned off: no login, and no credential of any source reaches it. */
 	disabled?: string;
+	/** Account risk a user must accept (by typing "yes") before a new login starts. */
+	loginWarning?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;

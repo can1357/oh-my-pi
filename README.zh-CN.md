@@ -41,7 +41,7 @@
 curl -fsSL https://omp.sh/install | sh
 ```
 
-如果没有可用的 bun（或指定了 `--binary`），安装脚本会从 `build.stencil.so` 下载预编译二进制，并在安装前校验其 SHA-256。可通过 `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` 固定某个版本（PowerShell：`-Binary -Ref v<version>`）。
+安装脚本会从 `build.stencil.so` 下载预编译二进制，并在安装前校验其 SHA-256；如需改用 bun 安装软件包，请传入 `--source`（PowerShell：`-Source`）。可通过 `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` 固定某个版本（PowerShell：`-Binary -Ref v<version>`）。
 
 > **Alpine / musl：** 预编译的 musl 二进制动态链接 `libstdc++`/`libgcc`，而原生 Alpine 并不自带。请先安装：`apk add libstdc++ libgcc`。
 

@@ -1340,6 +1340,7 @@ LiteLLM is an open-source AI proxy and gateway that unifies access to multiple L
 - **Credentials & env (`packages/catalog/src/compat/rules/providers/litellm.kdl`, `packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Authenticates via `LITELLM_API_KEY`.
 - **Login onboarding (`packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Declared as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), directing users to setup docs (`https://docs.litellm.ai/docs/proxy/deploy`), prompting for master/virtual keys (`sk-...`), and noting `LITELLM_BASE_URL` for custom proxy endpoints. CLI `login` delegates to `SqliteAuthCredentialStore.login()`.
 - **Default base URL (`packages/catalog/src/provider-models/cache-provider-id.ts`)**: Resolves to `Bun.env.LITELLM_BASE_URL` or `http://localhost:4000/v1`.
+- **Usage reporting (`packages/ai/src/usage/litellm.ts`)**: reads `GET /key/info` (`sk-` keys only) and `GET /v2/user/info` from the management base (base URL minus a trailing `/v1`) and reports each as a USD budget (spend, `max_budget`, `budget_duration` window, reset), probing with the one key inference would send (`usesRequestKey`). `ModelRegistry` registers it through `usage.replaceConfiguredProviders` for `litellm` and every `discovery.type: litellm` provider not in `disabledProviders`. A 401 drops that scope; a 401 on every scope tried discards the cached report.
 
 ### Catalog model handling
 

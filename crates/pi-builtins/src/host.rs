@@ -667,28 +667,14 @@ mod msys {
 		if text == "/dev/null" {
 			return Some(PathBuf::from("NUL"));
 		}
-		let rest = text.strip_prefix('/')?;
-		if let Some(native) = drive(rest) {
-			return Some(native);
+		if let Some((letter, tail)) = pi_vfs::msys_drive(text.as_bytes()) {
+			// `tail` is a suffix of `text` cut after an ASCII `/`.
+			let tail = std::str::from_utf8(tail).ok()?;
+			let mut native = format!("{}:\\", char::from(letter));
+			native.extend(tail.chars().map(|ch| if ch == '/' { '\\' } else { ch }));
+			return Some(PathBuf::from(native));
 		}
-		tmp(rest, temp_dir)
-	}
-
-	/// `c/x/y` or `mnt/c/x/y` (after the leading `/`) as `C:\\x\\y`.
-	fn drive(rest: &str) -> Option<PathBuf> {
-		let rest = match rest.get(..4) {
-			Some(prefix) if prefix.eq_ignore_ascii_case("mnt/") => &rest[4..],
-			_ => rest,
-		};
-		let mut chars = rest.chars();
-		let letter = chars.next().filter(char::is_ascii_alphabetic)?;
-		let tail = chars.as_str();
-		if !(tail.is_empty() || tail.starts_with('/')) {
-			return None;
-		}
-		let mut native = format!("{}:\\", letter.to_ascii_uppercase());
-		native.extend(tail.trim_start_matches('/').chars().map(|ch| if ch == '/' { '\\' } else { ch }));
-		Some(PathBuf::from(native))
+		tmp(text.strip_prefix('/')?, temp_dir)
 	}
 
 	/// `tmp/...` (after the leading `/`) under `temp_dir()`, after resolving
