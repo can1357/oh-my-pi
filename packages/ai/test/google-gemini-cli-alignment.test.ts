@@ -47,6 +47,22 @@ function createContext(): Context {
 	};
 }
 
+/** Streams one SSE frame per entry; the last frame ends with `STOP`. */
+async function streamParts(model: Model<"google-gemini-cli">, frames: unknown[][]) {
+	const sse = frames
+		.map((parts, index) => {
+			const finishReason = index === frames.length - 1 ? "STOP" : undefined;
+			return `data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts }, finishReason }] } })}\n\n`;
+		})
+		.join("");
+	const fetchMock: FetchImpl = async () =>
+		new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+	return streamGoogleGeminiCli(model, createContext(), {
+		apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+		fetch: fetchMock,
+	}).result();
+}
+
 const VALIDATION_URL = "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbtTOKEN";
 
 const validationRequiredBody = JSON.stringify({
@@ -1062,6 +1078,39 @@ describe("Google Gemini CLI alignment", () => {
 
 			expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
 		});
+
+		it("lands held reply text ahead of the thought that ends it", async () => {
+			// "{" is held as a possible planning leak; the thought ends that run of reply text.
+			const result = await streamParts(createModel("google-gemini-cli"), [
+				[{ text: "{" }, { thought: true, text: "plan" }],
+				[{ text: " x: 1 }" }],
+			]);
+
+			expect(result.content).toEqual([
+				{ type: "text", text: "{" },
+				{ type: "thinking", thinking: "plan", summary: true },
+				{ type: "text", text: " x: 1 }" },
+			]);
+		});
+
+		// A trailing signature-only part signs the reply text before it, even while that
+		// text is still held, not the thinking block that was last materialized.
+		for (const [stage, held, rest, text] of [
+			["planning-leak buffer", "{", " x: 1 }", "{ x: 1 }"],
+			["markup healing", "<thi", "", "<thi"],
+		] as const) {
+			it(`signs reply text held by the ${stage} with a trailing signature`, async () => {
+				const result = await streamParts(createModel("google-gemini-cli"), [
+					[{ thought: true, text: "plan" }, { text: held }, { text: "", thoughtSignature: "U0lH" }],
+					rest ? [{ text: rest }] : [],
+				]);
+
+				expect(result.content).toEqual([
+					{ type: "thinking", thinking: "plan", summary: true },
+					{ type: "text", text, textSignature: "U0lH" },
+				]);
+			});
+		}
 
 		it("handles unescaped quotes in leak with trailing response", async () => {
 			const sseChunks = [

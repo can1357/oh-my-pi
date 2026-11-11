@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Gemini CLI and Antigravity no longer merge reply text around a thought signature or lose that signature at the start of a reply or after a tool call; it goes back as the thought part it arrived as, as on the other Google routes ([#18942](https://github.com/can1357/oh-my-pi/pull/18942) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed Gemini CLI and Antigravity merging reply text around a thought signature, dropping signatures at the start of a reply or after a tool call, and placing a thought ahead of reply text that streamed before it ([#18942](https://github.com/can1357/oh-my-pi/pull/18942) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [18.18.9] - 2026-11-11
 
