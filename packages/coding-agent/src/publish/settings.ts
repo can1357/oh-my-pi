@@ -10,33 +10,21 @@ import {
 } from "../blob-broker/destinations";
 
 /**
- * Families whose uploads cannot hold an HTML page: image/video hosts reject or
- * transcode it, messaging targets yield no stable page URL, and serving/tunnel
- * destinations stop answering when omp exits.
+ * Families whose uploaders replace an object in place at a stable URL and can
+ * delete it, which hosted pages need. Backblaze B2 also requires its
+ * S3-compatible keys; the publisher rejects native application keys.
  */
-const NON_PAGE_FAMILIES: Readonly<Record<string, true>> = {
-	"image-host": true,
-	"video-host": true,
-	messaging: true,
-	"provider-files": true,
-	"local-serving": true,
-	tunnel: true,
-	"sharex-routing": true,
-	"sharex-custom": true,
-};
+const PAGE_FAMILIES: Readonly<Record<string, true>> = { s3: true, "object-storage": true };
 
 const DESTINATIONS: readonly BlobDestinationMetadata<BlobDestinationId>[] = Object.values(BUILTIN_BLOB_DESTINATIONS);
 
-const PUBLISH_BACKEND_CHOICES = DESTINATIONS.filter(
-	destination =>
-		destination.status !== "incompatible" &&
-		destination.status !== "defunct" &&
-		NON_PAGE_FAMILIES[destination.family] !== true,
-).map(destination => ({
-	value: destination.id,
-	label: destination.label,
-	description: destination.reason ?? destination.family,
-}));
+const PUBLISH_BACKEND_CHOICES = DESTINATIONS.filter(destination => PAGE_FAMILIES[destination.family] === true).map(
+	destination => ({
+		value: destination.id,
+		label: destination.label,
+		description: destination.reason ?? destination.family,
+	}),
+);
 
 const DEFAULT_PUBLISH_BACKENDS: BlobDestinationId[] = [];
 
@@ -49,7 +37,7 @@ export const cfgPublishBackends = register({
 		group: "Available Tools",
 		label: "Publish Backends",
 		description:
-			"Ordered destinations the publish tool uploads web pages to. Empty publishes to claude.ai Artifacts when logged in to Anthropic with OAuth. Options and credentials are shared with Image URL Backends. Object storage (S3, R2, GCS, Azure, B2, MinIO) keeps one URL across updates",
+			"Ordered object-storage destinations for new pages from the publish tool; empty publishes to claude.ai Artifacts when logged in to Anthropic with OAuth. Options and credentials are shared with Image URL Backends",
 		options: PUBLISH_BACKEND_CHOICES,
 		ordered: true,
 	},

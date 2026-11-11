@@ -1,28 +1,29 @@
 /**
  * Published web pages: a local, versioned record of every page plus remote
  * hosting on one of two hosts:
- * - the blob-broker destinations configured in `publish.backends`;
  * - claude.ai Artifacts, used when `publish.backends` is empty and an
- *   Anthropic OAuth login is available.
+ *   Anthropic OAuth login is available;
+ * - object storage configured in `publish.backends`.
  *
  * The local store under `~/.omp/agent/published/<id>/` is the source of truth
- * for listing, reading and deleting; hosts only hold the served copy. Blob
- * uploads target `<id>/index.html` (assets `<id>/<name>`), so hierarchical
- * destinations overwrite one object per page and keep its URL across updates.
- * A page keeps the host it was created on.
+ * for listing, reading and deleting; hosts only hold the served copy. A page
+ * is bound to the host (claude.ai account or blob destination) that created
+ * it, and every later operation goes there. Blob destinations must replace
+ * objects in place and delete them: a page is one object at
+ * `<prefix>/<id>/index.html` with assets beside it, so its URL never changes.
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getPublishedDir, isEnoent } from "@oh-my-pi/pi-utils";
 import type { BlobDestinationId } from "../blob-broker/destinations";
-import type { BlobPublication, BlobUploader } from "../blob-broker/publication";
+import type { BlobPublication, BlobUploader, BlobUploadRequest } from "../blob-broker/publication";
 import { destinationRuntimeConfig } from "../blob-broker/service";
 import { createConfiguredUploader } from "../blob-broker/uploaders";
 import type { Settings } from "../config/settings";
 import { writeFileAtomically } from "../utils/atomic-file";
-import markdownPageTemplate from "./markdown-page.html.txt" with { type: "text" };
 import { type ClaudeAccount, type ClaudeArtifactsClient, claudeArtifactUrl } from "./claude-artifacts";
+import markdownPageTemplate from "./markdown-page.html.txt" with { type: "text" };
 import { cfgPublishBackends } from "./settings";
 
 const PAGE_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -40,8 +41,6 @@ export interface PageVersion {
 	source: string;
 	/** URL the revision is served at. */
 	url: string;
-	/** Blob-destination publication; absent on claude.ai pages. */
-	publication?: BlobPublication;
 	/** claude.ai version id; the base for the next claude.ai publish. */
 	claudeVersion?: string;
 }
@@ -53,7 +52,7 @@ export interface PageAsset {
 	publication: BlobPublication;
 }
 
-/** Durable record of one page. */
+/** Durable record of one page. Exactly one of `claudeSlug` and `destination` is set. */
 export interface PublishedPage {
 	/** 128-bit random hex id; also the remote folder name. */
 	id: string;
@@ -65,22 +64,24 @@ export interface PublishedPage {
 	pinned: boolean;
 	/** Oldest first; never empty. */
 	versions: PageVersion[];
-	/** Blob-destination assets; claude.ai pages have none. */
+	/** Files beside a blob page; claude.ai pages have none. */
 	assets: PageAsset[];
-	/** claude.ai artifact slug; set exactly for pages hosted on claude.ai. */
+	/** claude.ai artifact slug. */
 	claudeSlug?: string;
 	/** Anthropic account that owns the claude.ai artifact; later calls must use it. */
 	claudeOwner?: ClaudeAccount;
+	/** Blob destination hosting the page. */
+	destination?: BlobDestinationId;
+	/** The page object on `destination`, replaced in place by every version. */
+	object?: BlobPublication;
 }
 
 /** Outcome of deleting a page's remote copies. */
 export interface PageRemoval {
-	/** Whether the local record was deleted: no remote deletion failed. Stranded copies do not block it. */
+	/** Whether the local record was deleted: every remote deletion succeeded. */
 	removed: boolean;
 	/** URLs deleted remotely. */
 	deleted: string[];
-	/** URLs whose destination offers no deletion; they stay online. */
-	stranded: string[];
 	/** Per-URL deletion failures. */
 	errors: string[];
 }
@@ -115,11 +116,6 @@ export function assetName(filePath: string): string {
 	if (!name) throw new Error(`Cannot derive an asset name from ${filePath}`);
 	if (name === PAGE_FILE || name === MANIFEST_FILE) throw new Error(`Asset name ${name} is reserved; rename the file`);
 	return name;
-}
-
-/** Where a page is hosted, for display: `claude.ai` or its latest blob destination. */
-export function pageHost(page: PublishedPage): string | undefined {
-	return page.claudeSlug ? "claude.ai" : page.versions.at(-1)?.publication?.destination;
 }
 
 /** Filesystem store of page records and their revision contents. */
@@ -189,7 +185,10 @@ export interface PagePublisherOptions {
 	claude?: ClaudeArtifactsClient;
 }
 
-/** Publishes pages to claude.ai or through the configured destination chain. */
+/** An uploader able to host pages: it replaces objects in place and deletes them. */
+type PageUploader = BlobUploader & Required<Pick<BlobUploader, "remove">>;
+
+/** Publishes pages to claude.ai or to object storage. */
 export class PagePublisher {
 	readonly store: PageStore;
 	#settings: Settings;
@@ -210,54 +209,42 @@ export class PagePublisher {
 		return this.#claude;
 	}
 
-	#uploader(destination: BlobDestinationId): BlobUploader {
+	#uploader(destination: BlobDestinationId): PageUploader {
 		const uploader = createConfiguredUploader(destination, destinationRuntimeConfig(this.#settings, destination));
-		if (!uploader) {
-			throw new Error(`${destination} serves from the running omp process and cannot host durable pages`);
+		if (!uploader?.overwrites || !uploader.remove) {
+			throw new Error(`${destination} cannot host pages: it does not replace and delete uploads in place`);
 		}
-		return uploader;
+		return uploader as PageUploader;
 	}
 
-	/**
-	 * Upload `name` for `page`: inside its folder where the destination keeps
-	 * folders, else flat as `<pageId>-<name>` so pages never collide. Tries
-	 * `preferred` (the page's destination) first even after it left the
-	 * chain, so existing pages stay put; failures before the success are
-	 * returned for reporting.
-	 */
-	async #upload(
-		page: PublishedPage,
-		name: string,
-		bytes: Uint8Array,
-		mimeType: string,
-		preferred: BlobDestinationId | undefined,
-	): Promise<{ publication: BlobPublication; failures: string[] }> {
+	/** Upload to one destination; failures name it, since a page never moves to another. */
+	async #uploadTo(destination: BlobDestinationId, request: BlobUploadRequest): Promise<BlobPublication> {
+		try {
+			return await this.#uploader(destination).upload(request);
+		} catch (error) {
+			throw new Error(`${destination}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+		}
+	}
+
+	/** Place a new page on the first destination in the chain that accepts it. */
+	async #uploadNew(request: BlobUploadRequest): Promise<{ destination: BlobDestinationId; object: BlobPublication }> {
 		const chain = cfgPublishBackends.get(this.#settings) as BlobDestinationId[];
-		const order = preferred ? [preferred, ...chain.filter(d => d !== preferred)] : chain;
-		if (order.length === 0) throw new Error("No publish destination is configured (publish.backends is empty)");
-		const extension = path.extname(name).slice(1);
 		const failures: string[] = [];
-		for (const destination of order) {
+		for (const destination of chain) {
 			try {
-				const uploader = this.#uploader(destination);
-				const publication = await uploader.upload(
-					uploader.folders
-						? { bytes, mimeType, extension, filename: name, folder: page.id }
-						: { bytes, mimeType, extension, filename: `${page.id}-${name}` },
-				);
-				return { publication, failures };
+				return { destination, object: await this.#uploadTo(destination, request) };
 			} catch (error) {
-				failures.push(`${destination}: ${error instanceof Error ? error.message : String(error)}`);
+				failures.push((error as Error).message);
 			}
 		}
 		throw new Error(`Every publish destination failed:\n${failures.join("\n")}`);
 	}
 
 	/**
-	 * Publish `html` as a new page, or as the next revision of `existing`.
-	 * New pages go to claude.ai exactly when no destination is configured;
-	 * existing pages stay on their host. `force` overwrites a claude.ai
-	 * version published elsewhere since.
+	 * Publish `html` as a new page, or as the next revision of `existing` on
+	 * the host that created it. New pages go to claude.ai exactly when no
+	 * destination is configured. `force` overwrites a claude.ai version
+	 * published elsewhere since.
 	 */
 	async publish(options: {
 		html: string;
@@ -266,7 +253,7 @@ export class PagePublisher {
 		projectDir: string;
 		existing?: PublishedPage;
 		force?: boolean;
-	}): Promise<{ page: PublishedPage; version: PageVersion; previousUrl: string | undefined; failures: string[] }> {
+	}): Promise<{ page: PublishedPage; version: PageVersion }> {
 		const page: PublishedPage = options.existing ?? {
 			id: crypto.getRandomValues(new Uint8Array(16)).toHex(),
 			title: options.title,
@@ -280,9 +267,8 @@ export class PagePublisher {
 		const onClaude = options.existing
 			? page.claudeSlug !== undefined
 			: cfgPublishBackends.get(this.#settings).length === 0;
-		let hosted: Pick<PageVersion, "url" | "publication" | "claudeVersion">;
-		let failures: string[] = [];
 		let html = options.html;
+		let hosted: Pick<PageVersion, "url" | "claudeVersion">;
 		if (onClaude) {
 			// claude.ai only serves content that sniffs as an HTML document.
 			if (!/^\s*<!doctype html/i.test(html)) html = `<!DOCTYPE html>\n${html}`;
@@ -298,15 +284,19 @@ export class PagePublisher {
 			page.claudeOwner = deployment.owner;
 			hosted = { url: claudeArtifactUrl(deployment.slug), claudeVersion: deployment.version };
 		} else {
-			const uploaded = await this.#upload(
-				page,
-				PAGE_FILE,
-				new TextEncoder().encode(html),
-				HTML_MIME,
-				previous?.publication?.destination,
-			);
-			failures = uploaded.failures;
-			hosted = { url: uploaded.publication.url, publication: uploaded.publication };
+			const request: BlobUploadRequest = {
+				bytes: new TextEncoder().encode(html),
+				mimeType: HTML_MIME,
+				extension: "html",
+				filename: PAGE_FILE,
+				folder: page.id,
+			};
+			const placed = page.destination
+				? { destination: page.destination, object: await this.#uploadTo(page.destination, request) }
+				: await this.#uploadNew(request);
+			page.destination = placed.destination;
+			page.object = placed.object;
+			hosted = { url: placed.object.url };
 		}
 		const version: PageVersion = { version: (previous?.version ?? 0) + 1, source: options.source, ...hosted };
 		await this.store.writeVersion(page.id, version.version, html);
@@ -314,24 +304,23 @@ export class PagePublisher {
 		page.title = options.title;
 		page.updatedAt = Date.now();
 		await this.store.save(page);
-		return { page, version, previousUrl: previous?.url, failures };
+		return { page, version };
 	}
 
-	/** Upload a file beside `page`, replacing a same-named asset. */
+	/** Upload a file beside `page`, replacing a same-named asset in place. */
 	async uploadAsset(page: PublishedPage, name: string, bytes: Uint8Array, mimeType: string): Promise<PageAsset> {
-		if (page.claudeSlug) {
+		if (!page.destination) {
 			throw new Error(
 				"claude.ai pages take no separate assets; inline them in the HTML (<style>, <script>, data: URIs)",
 			);
 		}
-		const replaced = page.assets.find(asset => asset.name === name);
-		const { publication } = await this.#upload(
-			page,
-			name,
+		const publication = await this.#uploadTo(page.destination, {
 			bytes,
 			mimeType,
-			replaced?.publication.destination ?? page.versions.at(-1)?.publication?.destination,
-		);
+			extension: path.extname(name).slice(1),
+			filename: name,
+			folder: page.id,
+		});
 		const asset: PageAsset = { name, publication };
 		page.assets = [...page.assets.filter(existing => existing.name !== name), asset];
 		page.updatedAt = Date.now();
@@ -348,34 +337,32 @@ export class PagePublisher {
 
 	/**
 	 * Delete every remote copy of `page`, then its local record. The record
-	 * stays when a deletion fails so the call can be retried; copies whose
-	 * destination cannot delete are reported as stranded.
+	 * stays when a deletion fails so the call can be retried.
 	 */
 	async remove(page: PublishedPage): Promise<PageRemoval> {
-		const result: PageRemoval = { removed: false, deleted: [], stranded: [], errors: [] };
-		if (page.claudeSlug) {
-			const url = claudeArtifactUrl(page.claudeSlug);
+		const result: PageRemoval = { removed: false, deleted: [], errors: [] };
+		const attempt = async (url: string, run: () => Promise<void>): Promise<void> => {
 			try {
-				await this.#requireClaude().remove(page.claudeSlug, page.claudeOwner);
+				await run();
 				result.deleted.push(url);
 			} catch (error) {
 				result.errors.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
 			}
+		};
+		if (page.claudeSlug) {
+			const slug = page.claudeSlug;
+			await attempt(claudeArtifactUrl(slug), () => this.#requireClaude().remove(slug, page.claudeOwner));
 		}
-		const seen = new Set<string>();
-		const publications = [
-			...page.versions.flatMap(version => (version.publication ? [version.publication] : [])),
-			...page.assets.map(asset => asset.publication),
-		];
-		for (const publication of publications) {
-			const identity = `${publication.destination}\0${publication.remoteId ?? publication.url}`;
-			if (seen.has(identity)) continue;
-			seen.add(identity);
+		if (page.destination) {
+			const objects = [...(page.object ? [page.object] : []), ...page.assets.map(asset => asset.publication)];
+			let uploader: PageUploader | undefined;
 			try {
-				if (await this.#removePublication(publication)) result.deleted.push(publication.url);
-				else result.stranded.push(publication.url);
+				uploader = this.#uploader(page.destination);
 			} catch (error) {
-				result.errors.push(`${publication.url}: ${error instanceof Error ? error.message : String(error)}`);
+				result.errors.push(`${page.destination}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			if (uploader) {
+				for (const object of objects) await attempt(object.url, () => uploader.remove(object));
 			}
 		}
 		if (result.errors.length === 0) {
@@ -383,29 +370,5 @@ export class PagePublisher {
 			result.removed = true;
 		}
 		return result;
-	}
-
-	/** `false` when the destination offers no way to delete the publication. */
-	async #removePublication(publication: BlobPublication): Promise<boolean> {
-		let uploader: BlobUploader | undefined;
-		try {
-			uploader = this.#uploader(publication.destination);
-		} catch {
-			// Destination no longer configured; a captured delete request may still work.
-		}
-		if (uploader?.remove) {
-			await uploader.remove(publication);
-			return true;
-		}
-		const action = publication.delete;
-		if (!action) return false;
-		const response = await fetch(action.url, {
-			method: action.method,
-			...(action.headers !== undefined ? { headers: action.headers } : {}),
-			...(action.body !== undefined ? { body: action.body } : {}),
-		});
-		await response.body?.cancel();
-		if (!response.ok && response.status !== 404) throw new Error(`delete failed with HTTP ${response.status}`);
-		return true;
 	}
 }

@@ -39,9 +39,8 @@ export interface BlobUploadRequest {
 	/** Preferred remote filename when a backend supports naming. */
 	filename?: string;
 	/**
-	 * Relative remote folder (slash-separated); honoured only by uploaders
-	 * declaring {@link BlobUploader.folders}, which together with `filename`
-	 * makes repeat uploads overwrite one stable object.
+	 * Relative remote folder (slash-separated) under the destination's key
+	 * prefix, for uploaders that key objects by path; others ignore it.
 	 */
 	folder?: string;
 }
@@ -50,8 +49,11 @@ export interface BlobUploadRequest {
 export interface BlobUploader {
 	/** Registry destination implemented by this uploader. */
 	readonly destination: BlobDestinationId;
-	/** Uploads land under {@link BlobUploadRequest.folder}; other uploaders store flat. */
-	readonly folders?: boolean;
+	/**
+	 * Uploads keyed by `folder`/`filename`: uploading the same key again
+	 * replaces the served object at the same URL. Hosted pages require it.
+	 */
+	readonly overwrites?: boolean;
 	/** Publish one blob and return its durable publication metadata. */
 	upload(request: BlobUploadRequest): Promise<BlobPublication>;
 	/**

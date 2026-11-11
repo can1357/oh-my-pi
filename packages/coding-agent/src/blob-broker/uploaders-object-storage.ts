@@ -219,7 +219,7 @@ function createS3Uploader(destination: BlobDestinationId, config: DestinationRun
 
 	return {
 		destination,
-		folders: true,
+		overwrites: true,
 		async upload(uploadRequest) {
 			const key = objectKey(settings.keyPrefix, uploadRequest);
 			const target = requestObjectUrl(settings, key);
@@ -310,7 +310,7 @@ function createGcsUploader(config: DestinationRuntimeConfig): BlobUploader {
 
 	return {
 		destination,
-		folders: true,
+		overwrites: true,
 		async upload(uploadRequest) {
 			const key = objectKey(prefix, uploadRequest);
 			const boundary = `omp-${crypto.randomUUID()}`;
@@ -448,7 +448,7 @@ function createAzureUploader(config: DestinationRuntimeConfig): BlobUploader {
 
 	return {
 		destination,
-		folders: true,
+		overwrites: true,
 		async upload(uploadRequest) {
 			const key = objectKey(prefix, uploadRequest);
 			const { url, resourcePath } = objectTarget(key);
@@ -613,7 +613,6 @@ function createNativeB2Uploader(config: DestinationRuntimeConfig): BlobUploader 
 
 	return {
 		destination,
-		folders: true,
 		async upload(uploadRequest) {
 			const key = objectKey(prefix, uploadRequest);
 			const authorization = await authorizeB2(config);
@@ -650,21 +649,6 @@ function createNativeB2Uploader(config: DestinationRuntimeConfig): BlobUploader 
 					body: JSON.stringify({ fileName: uploadedName, fileId }),
 				},
 			});
-		},
-		async remove(published) {
-			// The captured delete body names the file; only its authorization token expires.
-			const fileName = optionalStringField(JSON.parse(published.delete?.body ?? "{}"), "fileName");
-			if (!published.remoteId || !fileName) throw new Error(`${destination} publication has no file id or name`);
-			const authorization = await authorizeB2(config);
-			await b2Json(
-				config,
-				`${authorization.apiUrl}/b2api/v2/b2_delete_file_version`,
-				authorization.authorizationToken,
-				{
-					fileName,
-					fileId: published.remoteId,
-				},
-			);
 		},
 	};
 }

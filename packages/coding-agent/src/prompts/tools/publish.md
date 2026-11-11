@@ -1,10 +1,10 @@
 Publish a local HTML or Markdown file as a hosted web page and get its URL. Use when a dashboard, report, diagram, or small interactive tool communicates better than terminal text; the user can open or share the link.
 
-Pages go to the storage configured in `publish.backends`, or, when none is configured, to claude.ai Artifacts in the user's account (private until the user shares them). A page stays on the host it was created on.
+Pages go to the object storage configured in `publish.backends`, or, when none is configured, to claude.ai Artifacts in the user's account (private until the user shares them). A page stays on the host it was created on and keeps its URL across versions.
 
 Actions (`action`, default `publish`):
-- `publish`: `path` to a `.html`/`.htm`/`.md`/`.markdown` file. Markdown renders into a styled page. Pass `page` (id or URL) to publish a new version of an existing page instead of creating one; claude.ai and folder-capable storage keep the same URL. `force` overwrites a claude.ai version someone changed since your last publish; use only when the user wants their copy to win.
-- `upload_asset`: upload `path` (image, CSS, JS, data, font) beside existing `page`. Reference it by the returned URL (by bare filename only when that URL sits next to the page's). Not available on claude.ai: inline assets there (`<style>`, `<script>`, `data:` URIs).
+- `publish`: `path` to a `.html`/`.htm`/`.md`/`.markdown` file. Markdown renders into a styled page. Pass `page` (id or URL) to publish a new version of an existing page instead of creating one. `force` overwrites a claude.ai version someone changed since your last publish; use only when the user wants their copy to win.
+- `upload_asset`: upload `path` (image, CSS, JS, data, font) next to existing `page`; the HTML can reference it by filename. Not available on claude.ai: inline assets there (`<style>`, `<script>`, `data:` URIs).
 - `list`: pages from this project; `scope: all` lists every project.
 - `read`: published HTML of `page`; `version` selects an older version.
 - `delete`: remove every remote copy of `page`, then its record.

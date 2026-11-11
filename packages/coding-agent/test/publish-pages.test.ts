@@ -81,49 +81,34 @@ describe("PagePublisher", () => {
 		expect(await publisher.store.load(first.page.id)).toBeNull();
 	});
 
-	it("falls through to the next destination and reports every failure when all fail", async () => {
-		// `ftp` without a host cannot upload; the chain must continue to minio.
-		const publisher = new PagePublisher(minioSettings(store.endpoint, ["ftp", "minio"]), {
+	it("places a new page on the first destination that can host pages and reports every failure", async () => {
+		// `0x0` mints a new URL per upload and cannot delete, so it cannot host pages.
+		const publisher = new PagePublisher(minioSettings(store.endpoint, ["0x0", "minio"]), {
 			store: new PageStore(root),
 		});
-		const { version } = await publisher.publish({ html: "<p/>", title: "T", source: "a.html", projectDir: root });
-		expect(version.publication?.destination).toBe("minio");
+		const { page } = await publisher.publish({ html: "<p/>", title: "T", source: "a.html", projectDir: root });
+		expect(page.destination).toBe("minio");
 
 		store.stop();
 		const failing = publisher.publish({ html: "<p/>", title: "T", source: "a.html", projectDir: root });
-		await expect(failing).rejects.toThrow(/Every publish destination failed:\nftp: .+\nminio: /);
+		await expect(failing).rejects.toThrow(/Every publish destination failed:\n0x0: .*cannot host pages.*\nminio: /);
 	});
 
-	it("keeps existing pages on their destination and gives flat destinations page-unique names", async () => {
-		const shared = path.join(root, "shared");
-		const settings = Settings.isolated({
-			"publish.backends": ["minio"],
-			"images.urls.options": {
-				minio: { endpoint: store.endpoint, bucket: "pages", publicBaseUrl: `${store.endpoint}/pages` },
-				"shared-folder": { root: shared, publicBaseUrl: "https://files.example" },
-			},
-			"images.urls.credentials": { minio: { accessKeyId: "id", secretAccessKey: "secret" } },
-		});
-		const publisher = new PagePublisher(settings, { store: new PageStore(path.join(root, "records")) });
+	it("keeps an existing page on its destination after the chain changes and never moves it on failure", async () => {
+		const settings = minioSettings(store.endpoint, ["minio"]);
+		const publisher = new PagePublisher(settings, { store: new PageStore(root) });
 		const original = await publisher.publish({ html: "<p>a1</p>", title: "A", source: "a.html", projectDir: root });
+		const update = (html: string) =>
+			publisher.publish({ html, title: "A", source: "a.html", projectDir: root, existing: original.page });
 
-		// Dropping minio from the chain must not move the existing page.
-		cfgPublishBackends.override(settings, ["shared-folder"]);
-		const updated = await publisher.publish({
-			html: "<p>a2</p>",
-			title: "A",
-			source: "a.html",
-			projectDir: root,
-			existing: original.page,
-		});
+		cfgPublishBackends.override(settings, []);
+		const updated = await update("<p>a2</p>");
 		expect(updated.version.url).toBe(original.version.url);
 		expect(store.objects.get(`/pages/${original.page.id}/index.html`)).toBe("<p>a2</p>");
 
-		const b = await publisher.publish({ html: "<p>b</p>", title: "B", source: "b.html", projectDir: root });
-		const c = await publisher.publish({ html: "<p>c</p>", title: "C", source: "c.html", projectDir: root });
-		expect(b.version.url).not.toBe(c.version.url);
-		expect(await Bun.file(path.join(shared, `${b.page.id}-index.html`)).text()).toBe("<p>b</p>");
-		expect(await Bun.file(path.join(shared, `${c.page.id}-index.html`)).text()).toBe("<p>c</p>");
+		store.stop();
+		await expect(update("<p>a3</p>")).rejects.toThrow(/minio/);
+		expect((await publisher.store.load(original.page.id))?.versions).toHaveLength(2);
 	});
 
 	it("uses claude.ai only while no destination is configured and keeps each artifact on its owning account", async () => {
@@ -173,7 +158,7 @@ describe("PagePublisher", () => {
 		expect(updated.version.url).toBe(created.version.url);
 
 		const fresh = await publisher.publish({ html: "<p>c</p>", title: "U", source: "c.html", projectDir: root });
-		expect(fresh.version.publication?.destination).toBe("minio");
+		expect(fresh.page.destination).toBe("minio");
 		expect(deploys).toHaveLength(2);
 	});
 

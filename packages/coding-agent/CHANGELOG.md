@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `publish` tool: the agent can publish an HTML or Markdown file as a hosted web page (and update it in place, list, read, pin, delete, upload assets). With an Anthropic OAuth login and no `publish.backends`, pages go to claude.ai Artifacts like Claude Code's, private to your account; `publish.backends` instead uploads through the blob destinations, where object storage keeps one URL across updates ([#18806](https://github.com/can1357/oh-my-pi/pull/18806) by [@H4vC](https://github.com/H4vC))
+- Added the `publish` tool: the agent can publish an HTML or Markdown file as a hosted web page (and update it in place, list, read, pin, delete, upload assets). With an Anthropic OAuth login and no `publish.backends`, pages go to claude.ai Artifacts like Claude Code's, private to your account; `publish.backends` instead puts them on your object storage (S3, R2, GCS, Azure, MinIO, …) at a stable URL ([#18806](https://github.com/can1357/oh-my-pi/pull/18806) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 

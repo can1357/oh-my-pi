@@ -5,7 +5,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import publishDescription from "../prompts/tools/publish.md" with { type: "text" };
 import { ClaudeArtifactsClient } from "../publish/claude-artifacts";
-import { assetName, PagePublisher, pageHost, type PublishedPage, renderPageSource } from "../publish/pages";
+import { assetName, PagePublisher, type PublishedPage, renderPageSource } from "../publish/pages";
 import type { ToolSession } from ".";
 import { resolveToCwd } from "./path-utils";
 
@@ -33,7 +33,7 @@ function describePage(page: PublishedPage): string {
 	const latest = page.versions[page.versions.length - 1];
 	const pin = page.pinned ? " [pinned]" : "";
 	const lines = [
-		`${page.title}${pin} (${page.id}, v${latest.version} on ${pageHost(page)}, updated ${new Date(page.updatedAt).toISOString()})`,
+		`${page.title}${pin} (${page.id}, v${latest.version} on ${page.claudeSlug ? "claude.ai" : page.destination}, updated ${new Date(page.updatedAt).toISOString()})`,
 		`  ${latest.url}`,
 	];
 	for (const asset of page.assets) lines.push(`  asset ${asset.name}: ${asset.publication.url}`);
@@ -132,7 +132,7 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		const existing = params.page ? await this.#requirePage(params.page, "publish") : undefined;
 		const text = await readSource(Bun.file(absolute), params.path!, file => file.text());
 		const rendered = renderPageSource(absolute, text, params.title ?? existing?.title);
-		const { page, version, previousUrl, failures } = await this.#publisher.publish({
+		const { page, version } = await this.#publisher.publish({
 			html: rendered.html,
 			title: rendered.title,
 			source: absolute,
@@ -141,18 +141,8 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 			force: params.force,
 		});
 		const lines = [`Published "${page.title}" v${version.version} (${page.id}): ${version.url}`];
-		if (previousUrl && previousUrl !== version.url) {
-			lines.push(
-				failures.length > 0
-					? `URL changed from ${previousUrl}: published to ${pageHost(page)} after ${failures.join("; ")}. The old copy still serves the previous version.`
-					: `URL changed from ${previousUrl}: ${pageHost(page)} cannot overwrite in place.`,
-			);
-		}
-		if (page.claudeSlug && !previousUrl) {
+		if (page.claudeSlug && !existing) {
 			lines.push("The artifact is private to the user's claude.ai account until they share it.");
-		}
-		if (version.publication?.expiresAt !== undefined) {
-			lines.push(`Expires ${new Date(version.publication.expiresAt).toISOString()}.`);
 		}
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
@@ -204,14 +194,11 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		if (page.pinned) throw new ToolError(`Page ${page.id} is pinned; unpin it before deleting`);
 		const result = await this.#publisher.remove(page);
 		const lines = [
-			!result.removed
-				? `Kept the record of "${page.title}" (${page.id}) because some deletions failed; retry delete.`
-				: result.stranded.length > 0
-					? `Deleted the record of "${page.title}" (${page.id}); ${result.stranded.length} cop${result.stranded.length === 1 ? "y stays" : "ies stay"} online because the destination cannot delete.`
-					: `Deleted "${page.title}" (${page.id}).`,
+			result.removed
+				? `Deleted "${page.title}" (${page.id}).`
+				: `Kept the record of "${page.title}" (${page.id}) because some deletions failed; retry delete.`,
 		];
 		for (const url of result.deleted) lines.push(`removed ${url}`);
-		for (const url of result.stranded) lines.push(`still online (destination cannot delete): ${url}`);
 		for (const error of result.errors) lines.push(`failed ${error}`);
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
