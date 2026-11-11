@@ -128,13 +128,16 @@ function countBlocks(blocks: readonly string[]): Map<string, number> {
  * Claims each source fragment in the effective prompt. A source is claimed only when it occurs once
  * in the built prompt, in a block that is unchanged at its original index and unique in the
  * effective prompt, and overlaps no other source. A repeated fragment reserves every occurrence.
- * `complete` is false when a source the effective prompt may still hold stays unattributed.
+ * `complete` is false when a source the effective prompt may still hold stays unattributed. A kind the
+ * built prompt holds no fragment of (a template that formats it without `{{fragment}}`) never counts.
  */
 function claimPromptSources(
 	effective: readonly string[],
 	metadata: SystemPromptSources,
 ): { claims: Map<number, SourceClaim[]>; complete: boolean } {
 	let complete = true;
+	const locatedKinds = new Set<SystemPromptSource["kind"]>();
+	const missingKinds = new Set<SystemPromptSource["kind"]>();
 	const effectiveCounts = countBlocks(effective);
 	const candidates = new Map<number, SourceClaim[]>();
 	for (const source of metadata.sources) {
@@ -161,10 +164,17 @@ function claimPromptSources(
 			ranges.push({ start, end: start + fragment.length, source, ambiguous });
 			candidates.set(index, ranges);
 		}
-		// Absent from the built prompt: the template omitted it, or whole-prompt formatting (an unclosed
-		// fence) changed it. Otherwise only a source the effective prompt may still hold is left behind.
-		if (unattributed && (located.length === 0 || remains)) complete = false;
+		// Absent from the built prompt: the template formats this kind itself, or whole-prompt formatting
+		// (an unclosed fence) changed it; decided per kind below. Otherwise only a source the effective
+		// prompt may still hold is left behind.
+		if (located.length === 0) missingKinds.add(source.kind);
+		else {
+			locatedKinds.add(source.kind);
+			if (unattributed && remains) complete = false;
+		}
 	}
+	// Some sources of the kind were built in: the missing ones were changed by formatting.
+	for (const kind of missingKinds) if (locatedKinds.has(kind)) complete = false;
 	const claims = new Map<number, SourceClaim[]>();
 	for (const [index, ranges] of candidates) {
 		// Validate the whole block before claiming: every participant in an overlap stays unattributed.

@@ -248,6 +248,23 @@ describe("context snapshot prompt sources", () => {
 		expect(entryTexts(data, "system-prompt")).toEqual(["Replacement policy", ""]);
 	});
 
+	it("shows no notice for a kind a custom template formats without {{fragment}}", async () => {
+		const built = await buildSystemPrompt({
+			cwd: import.meta.dir,
+			personality: "none",
+			activeRepoContext: null,
+			contextFiles: [{ path: instructionPath, content: "Unique instruction body" }],
+			skills,
+			// Instruction files still come from the separate project block through `{{fragment}}`.
+			systemPromptTemplate: "Custom policy\n{{#each skills}}* {{name}} — {{description}}\n{{/each}}",
+		});
+		const data = buildSessionContextView(sessionWith({ prompt: built.systemPrompt, sources: built.sources, skills }));
+		expect(data.notices).toEqual([]);
+		expect(entryTexts(data, "skills")).toEqual([]);
+		expect(category(data, "instruction-files").entries.map(entry => entry.label)).toEqual([instructionPath]);
+		expect(entryTexts(data, "system-prompt")[0]).toContain("* fixture — Use <T>");
+	});
+
 	it("notices a source whole-prompt formatting changed after an unclosed fence", async () => {
 		// Inside the earlier file's open fence the table row keeps its padding; formatted alone it is compacted.
 		const built = await buildFixturePrompt(undefined, [
