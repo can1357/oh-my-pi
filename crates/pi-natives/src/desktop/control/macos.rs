@@ -27,7 +27,6 @@ const SOURCE_UNIX_PID: u32 = 41;
 const TARGET_UNIX_PID: u32 = 40;
 const KEYBOARD_KEYCODE: u32 = 9;
 const LEFT_MOUSE_DOWN: u32 = 1;
-const LEFT_MOUSE_UP: u32 = 2;
 const RIGHT_MOUSE_DOWN: u32 = 3;
 const KEY_DOWN: u32 = 10;
 const OTHER_MOUSE_DOWN: u32 = 25;
@@ -417,12 +416,12 @@ const fn foreign(tag: i64, source_pid: i64, own_pid: i64) -> bool {
 
 const fn foreign_input(tag: i64, source_pid: i64, own_pid: i64, kind: u32, point: CGPoint) -> bool {
 	// Raw make-key records have no tag; another omp process posts them as
-	// left clicks at the origin. Hardware input still has source pid zero.
-	let make_key = tag == 0
-		&& source_pid != 0
-		&& matches!(kind, LEFT_MOUSE_DOWN | LEFT_MOUSE_UP)
-		&& point.x == 0.0
-		&& point.y == 0.0;
+	// left presses at the origin. The tap subscribes only to presses, not
+	// releases. Hardware input still has source pid zero. A foreign tool's
+	// untagged origin press is indistinguishable from this measured make-key
+	// shape.
+	let make_key =
+		tag == 0 && source_pid != 0 && kind == LEFT_MOUSE_DOWN && point.x == 0.0 && point.y == 0.0;
 	foreign(tag, source_pid, own_pid) && !make_key
 }
 
@@ -797,8 +796,6 @@ mod tests {
 		assert!(!foreign_input(0, own, own, LEFT_MOUSE_DOWN, CGPoint::ZERO));
 		// Another omp process's raw make-key records cannot carry the tag.
 		assert!(!foreign_input(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::ZERO));
-		assert!(!foreign_input(0, 4242, own, LEFT_MOUSE_UP, CGPoint::ZERO));
-		assert!(foreign_input(0, 0, own, LEFT_MOUSE_UP, CGPoint::ZERO));
 		assert!(foreign_input(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::new(0.0, 1.0)));
 		assert!(foreign_input(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::new(1.0, 0.0)));
 		assert!(foreign_input(0, 4242, own, RIGHT_MOUSE_DOWN, CGPoint::ZERO));
