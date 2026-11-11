@@ -17,6 +17,9 @@
 ### Fixed
 
 - Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
+### Added
+
+- Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
 
 ## [18.18.7] - 2026-11-10
 
