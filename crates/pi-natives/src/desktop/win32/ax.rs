@@ -384,9 +384,9 @@ impl AxBackend for Win32Ax {
 		// UIA rectangles already use physical desktop pixels, the same
 		// native coordinate space as window metadata and capture geometry.
 		let bounds = element.get_bounding_rectangle().ok().map(|rect| AxBounds {
-			x: f64::from(rect.get_left()),
-			y: f64::from(rect.get_top()),
-			width: f64::from(rect.get_right()) - f64::from(rect.get_left()),
+			x:      f64::from(rect.get_left()),
+			y:      f64::from(rect.get_top()),
+			width:  f64::from(rect.get_right()) - f64::from(rect.get_left()),
 			height: f64::from(rect.get_bottom()) - f64::from(rect.get_top()),
 		});
 		Ok(AxProps {
