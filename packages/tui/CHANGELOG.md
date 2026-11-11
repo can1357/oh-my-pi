@@ -4,7 +4,7 @@
 
 ### Added
 
-- GitHub Actions watch cards show current-step progress and expand with Ctrl+O to reveal ordered step states and durations in ANSI and native Tern views (by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- GitHub Actions watch cards show current-step progress and expand with Ctrl+O to reveal ordered step states and durations in ANSI and native Tern views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.18.9] - 2026-11-11
 
