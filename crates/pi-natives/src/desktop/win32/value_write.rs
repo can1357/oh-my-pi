@@ -219,19 +219,20 @@ pub(super) fn set_combo(
 		));
 	}
 	let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-	let mut actual = vec![0_u16; wide.len() + 1];
-	let length = send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)?;
-	if usize::try_from(length).ok() == Some(wide.len() - 1)
-		&& actual[..wide.len() - 1] == wide[..wide.len() - 1]
-	{
-		return Ok(());
-	}
 	// The native search is case-insensitive. It only supplies a candidate:
 	// exact post-write text and index readback decide success. Never query
 	// item names through MSAA (unbounded provider calls) or CB_GETLBTEXT
 	// (an unbounded caller-buffer copy if the item grows).
 	let candidate_index =
 		usize::try_from(send(hwnd, CB_FINDSTRINGEXACT, usize::MAX, wide.as_ptr() as isize)?).ok();
+	let mut actual = vec![0_u16; wide.len() + 1];
+	let length = send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)?;
+	if usize::try_from(length).ok() == Some(wide.len() - 1)
+		&& actual[..wide.len() - 1] == wide[..wide.len() - 1]
+		&& send(hwnd, CB_GETCURSEL, 0, 0)? == candidate_index.map_or(-1, |index| index as isize)
+	{
+		return Ok(());
+	}
 	// SAFETY: GetParent accepts the native combo handle.
 	let parent = unsafe { GetParent(hwnd) };
 	if parent.is_null() {
@@ -310,7 +311,6 @@ pub(super) fn set_combo(
 	// WM_GETTEXT takes the buffer capacity, unlike CB_GETLBTEXT. One extra
 	// code unit beyond the expected text distinguishes a longer value from
 	// an exact match even when the read is truncated.
-	actual.fill(0);
 	let length =
 		usize::try_from(send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)?)
 			.map_err(|_| failed())?;
