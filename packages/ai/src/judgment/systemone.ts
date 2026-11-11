@@ -14,9 +14,12 @@
  *   of base64 data URLs when images are supplied, and returns Cloudflare's
  *   `{ result, success, errors }` envelope. The credential is a Cloudflare
  *   API token plus the account id the URL needs.
+ * - `liquid-systemone`: Liquid AI's `POST {baseUrl}/decisions/v1/systemone`.
+ *   Same body, verbatim model, plus a top-level array of base64 data URLs
+ *   when images are supplied.
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
-import { $env, IMAGE_METADATA_HEADER_BYTES, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
+import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { embeddedImageDataUrl } from "../images/shared";
 import type { ImageContent } from "../types";
@@ -206,40 +209,21 @@ export const workersAiWire: JudgmentWire = {
 	decode: payload => (isRecord(payload) ? decodeSystemOne(payload.result) : undefined),
 };
 
-/** Liquid AI decision models (`d1.1`, `d1-ultra`) through `/decisions/v1/systemone`. */
+/** Liquid AI decision models (`d1.1`, `d1-ultra`). */
 export const liquidWire: JudgmentWire = {
 	...systemOneWire("/decisions/v1/systemone"),
-	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements
+	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements. The documented 4.5 MB cap covers the
+	// whole JSON body; 3 MB of images is 4 MB as base64, leaving room for state and questions.
 	images: {
 		mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
 		maxCount: 8,
-		maxTotalBytes: 3 * 1024 * 1024,
-		maxPixels: 10_240_000,
+		maxTotalBytes: 3_000_000,
 		maxTotalPatches: 10_000,
 	},
-	encode(request, model) {
-		for (const [index, image] of (request.images ?? []).entries()) {
-			const header = Buffer.from(image.data.slice(0, Math.ceil((IMAGE_METADATA_HEADER_BYTES * 4) / 3)), "base64");
-			const metadata = parseImageMetadata(header);
-			if (metadata?.width && metadata?.height) {
-				const { width, height } = metadata;
-				if (Math.max(width / height, height / width) > 100) {
-					throw new AIError.ValidationError(
-						`Liquid AI image aspect ratio exceeds 100:1 (images[${index}] is ${width}x${height})`,
-					);
-				}
-			}
-		}
-		const body = {
-			state: request.state,
-			model,
-			questions: wireQuestions(request.questions),
-			...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
-		};
-		const bodyBytes = Buffer.byteLength(JSON.stringify(body));
-		if (bodyBytes > 4_500_000) {
-			throw new AIError.ValidationError(`Liquid AI System One request body exceeds 4.5 MB (${bodyBytes} bytes)`);
-		}
-		return body;
-	},
+	encode: (request, model) => ({
+		state: request.state,
+		model,
+		questions: wireQuestions(request.questions),
+		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+	}),
 };

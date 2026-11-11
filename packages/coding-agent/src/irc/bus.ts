@@ -38,7 +38,7 @@ export interface IrcWaitFilter {
 }
 
 /** Whether a bus wait under `filter` consumes `msg`. */
-export function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
+function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
 	if (filter.from !== undefined && msg.from !== filter.from) return false;
 	if (!filter.directOnly || (!msg.broadcast && !msg.progress)) return true;
 	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
@@ -261,9 +261,9 @@ export class IrcBus implements IrcBusApi {
 			}
 		}
 
-		// A pending `wait` from the recipient consumes the message directly —
-		// it is returned from their irc tool call and never hits the inbox or
-		// the session injection path.
+		// A pending bus wait from the recipient consumes the message directly
+		// and never hits the inbox; the `wait` tool hands it to its own session,
+		// which injects it as a user turn.
 		const waiter = this.#takeMatchingWaiter(message);
 		if (waiter) {
 			waiter.resolve(message);
@@ -434,9 +434,9 @@ export class IrcBus implements IrcBusApi {
 	/**
 	 * Surface agent↔agent traffic as a display-only card on the main session
 	 * UI. Skipped when the main agent is either endpoint: as recipient its
-	 * own `deliverIrcMessage` (or `wait` tool result) already shows the
-	 * message, and as sender the irc send tool call already rendered the
-	 * outbound body — relaying it again would duplicate it in the transcript.
+	 * own `deliverIrcMessage` already shows the message, and as sender the
+	 * irc send tool call already rendered the outbound body — relaying it
+	 * again would duplicate it in the transcript.
 	 */
 	#relayToMainUi(message: IrcMessage): void {
 		if (message.to === MAIN_AGENT_ID || message.from === MAIN_AGENT_ID) return;

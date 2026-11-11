@@ -382,6 +382,14 @@ pub(crate) fn read_at(h: &Handle, buf: &mut [u8], off: u64) -> io::Result<usize>
 	read_raw(h, buf.as_mut_ptr(), buf.len(), off)
 }
 
+/// Identity of an open file, read from its handle rather than from the path it
+/// was opened by.
+pub(crate) fn handle_metadata(h: &Handle) -> io::Result<pi_vfs::Metadata> {
+	use std::os::windows::io::AsHandle;
+	let owned = h.as_handle().try_clone_to_owned()?;
+	pi_vfs::Metadata::from_file(&std::fs::File::from(owned))
+}
+
 pub(crate) fn stat(s: &mut Scratch, path: &Path, follow: bool) -> io::Result<FileInfo> {
 	if !follow || !path.is_absolute() {
 		return stat_win32(path, follow);

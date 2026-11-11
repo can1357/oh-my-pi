@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export type Transferable = Bun.Transferable;
 
@@ -45,13 +46,31 @@ export interface SessionSnapshot {
 /**
  * The page an attach worker drives. `create`: open and own a background tab in a
  * spawned browser or relay; `nearTargetId` selects the relay browser when given.
- * `owned`: an omp tab adopted after recycle. `borrowed`: a user's page, never closed.
+ * `owned`: an omp tab adopted after recycle. `borrowed`: a user's page, never closed,
+ * and focus-emulated only in a browser the user drives (see `userDriven`).
  */
 export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
 
 /** omp created the payload's page: closing the tab closes the page. */
 export function ownsPage(payload: WorkerInitPayload): boolean {
 	return payload.mode === "headless" || payload.page.kind !== "borrowed";
+}
+
+/** Globals every page has and omp's Bun runtime lacks: run code that cannot find one was written for the page. */
+const PAGE_ONLY_GLOBAL_RE =
+	/^(document|window|location|history|localStorage|sessionStorage|customElements|getComputedStyle|CSS|HTML\w*Element|Element|Node) is not defined$/;
+
+/**
+ * Whether run code itself, in omp's runtime, reached for a page-only global. An exception thrown in the page arrives
+ * as a plain `Error` that Puppeteer names after it, so it never counts. A floating rejection arrives wrapped: one
+ * reason as the wrapper's `cause`, or, once an in-process run returned, all of them in its `rejections`.
+ */
+export function isMissingPageGlobal(error: unknown): boolean {
+	if (error instanceof ReferenceError) return PAGE_ONLY_GLOBAL_RE.test(error.message);
+	if (!(error instanceof Error)) return false;
+	if (error.cause instanceof ReferenceError) return isMissingPageGlobal(error.cause);
+	const rejections = error instanceof ToolError ? error.context?.rejections : undefined;
+	return Array.isArray(rejections) && rejections.some(isMissingPageGlobal);
 }
 
 export type WorkerInitPayload =
@@ -103,7 +122,10 @@ export type WorkerInitPayload =
 			recover?: boolean;
 			/**
 			 * The user drives this browser (connected, relay): downloads keep its one browser-wide folder and real file
-			 * names, since the user's own downloads land there too. Unset means an OMP-launched browser.
+			 * names, since the user's own downloads land there too. The page, borrowed user tabs included, is also
+			 * focus-emulated so a background tab takes trusted input without being selected; the emulation ends with
+			 * the CDP session (on the relay, with the bridge's last session of the tab). Unset means an OMP-launched
+			 * browser.
 			 */
 			userDriven?: boolean;
 			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
@@ -144,6 +166,8 @@ export interface RunErrorPayload {
 	isAbort: boolean;
 	/** The worker could not restore tab-scoped browser state and must be recycled. */
 	recoverTab?: boolean;
+	/** The run's own code reached for a page-only global ({@link isMissingPageGlobal}). */
+	missingPageGlobal?: boolean;
 	/** `tab.goto` outlasted its budget; the page stays on what loaded. */
 	navigationTimeout?: boolean;
 	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */

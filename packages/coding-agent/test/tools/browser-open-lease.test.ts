@@ -63,12 +63,16 @@ async function drainAllTabs(): Promise<void> {
 }
 
 let prevSocketPath: string | undefined;
+let prevTerminalOwner: string | undefined;
 
 beforeEach(() => {
 	prevSocketPath = process.env.CMUX_SOCKET_PATH;
 	// Unique per test so the module-global browsers map (keyed by socket path)
 	// never carries a handle across tests.
 	process.env.CMUX_SOCKET_PATH = `/tmp/omp-open-lease-${process.pid}-${Math.random().toString(36).slice(2)}.sock`;
+	// Run from an interactive omp's bash tool, the tests inherit its claim on the terminal, which skips cmux.
+	prevTerminalOwner = process.env.PI_TERMINAL_OWNER_PID;
+	delete process.env.PI_TERMINAL_OWNER_PID;
 });
 
 afterEach(async () => {
@@ -77,6 +81,7 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	if (prevSocketPath === undefined) delete process.env.CMUX_SOCKET_PATH;
 	else process.env.CMUX_SOCKET_PATH = prevSocketPath;
+	if (prevTerminalOwner !== undefined) process.env.PI_TERMINAL_OWNER_PID = prevTerminalOwner;
 });
 
 describe("browser open — requested timeout bounds the whole acquisition (#6365)", () => {

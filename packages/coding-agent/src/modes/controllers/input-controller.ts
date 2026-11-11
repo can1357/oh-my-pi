@@ -18,6 +18,7 @@ import {
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
@@ -702,6 +703,14 @@ export class InputController {
 		this.ctx.editor.onCycleThinkingLevel = () => {
 			hintUsage.record("effort");
 			this.cycleThinkingLevel();
+		};
+		this.ctx.editor.onSetThinkingLevel = value => {
+			const level = parseConfiguredThinkingLevel(value);
+			const viewed = this.ctx.viewSession;
+			if (level === undefined || !viewed.getAvailableEffortSelectors().includes(level)) return;
+			viewed.setThinkingLevel(level);
+			this.ctx.statusLine.invalidate();
+			this.ctx.updateEditorBorderColor();
 		};
 		this.ctx.editor.setActionKeys("app.model.cycleForward", this.ctx.keybindings.getKeys("app.model.cycleForward"));
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel("forward");

@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
@@ -417,8 +416,6 @@ describe("imageGenTool catalog routing", () => {
 	});
 
 	it("falls back to the selected Antigravity id when discovery advertises no image model", async () => {
-		// Antigravity is paused in its auth rules; its image transport stays for when it is turned back on.
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		const model = catalogModel("google-antigravity", "gemini-selected-image", "google-gemini-cli");
 		const requestBodies: Array<Record<string, unknown>> = [];
 		const fetchMock: FetchImpl = async (input, init) => {

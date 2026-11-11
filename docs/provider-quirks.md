@@ -662,7 +662,7 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 
 - **Provider entry (`devin`)**: `packages/catalog/src/compat/rules/providers/devin.kdl` declares default model `swe-1-6`, the boot-time fallback. Once discovery lands, the account default it reports (`defaultOverrideModelConfig`, marked `isProviderDefault`) is the provider default instead. When an effort routes to that lane (server family metadata or the static collapse table), its family starts at that wire id and effort; any other lane, such as a no-thinking `off` lane, starts the family on its own default. Environment keys: `DEVIN_API_KEY`.
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
-- **Authored seeds**: `swe-1-6-fast`, `swe-1-6`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `swe-1-6`; bundle policy `always`. Limits, capabilities, and prices are authored alongside this row.
 
 * **Dynamic Discovery:** `fetchDevinModels` in `packages/catalog/src/discovery/devin.ts` invokes the unary Connect RPC `GetCliModelConfigs` (`/exa.api_server_pb.ApiServerService/GetCliModelConfigs`) with the native `chisel` discovery metadata from `packages/catalog/src/wire/devin.ts` and every supported display slot. `normalizeDevinModels` drops disabled/internal configs, converts `ClientModelConfig` into `ModelSpec<"devin-agent">` entries (context window from `ClientModelConfig.maxTokens`, else `ModelInfo.maxTokens`, where current catalogs carry it, else 200k; 64k max tokens by default), and preserves server-supplied output caps, pricing dimensions, tool/parallel-tool/image support, description, and `new`/`beta`/`recommended` badges. Exception: `DEVIN_IMAGE_BLIND_UIDS` strips the image modality from `swe-1-6`/`swe-1-6-fast`, whose configs advertise `supports_images` while the backend silently drops the `ChatMessagePrompt.images` field (verified live; every other model reads it). An empty-but-200 catalog response logs a stale-identity-pin warning. Router configs (`displayOption MODEL_ROUTER` or `isModelRouter`) stay standalone with `compat.modelRouter`.
 
@@ -1340,6 +1340,7 @@ LiteLLM is an open-source AI proxy and gateway that unifies access to multiple L
 - **Credentials & env (`packages/catalog/src/compat/rules/providers/litellm.kdl`, `packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Authenticates via `LITELLM_API_KEY`.
 - **Login onboarding (`packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Declared as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), directing users to setup docs (`https://docs.litellm.ai/docs/proxy/deploy`), prompting for master/virtual keys (`sk-...`), and noting `LITELLM_BASE_URL` for custom proxy endpoints. CLI `login` delegates to `SqliteAuthCredentialStore.login()`.
 - **Default base URL (`packages/catalog/src/provider-models/cache-provider-id.ts`)**: Resolves to `Bun.env.LITELLM_BASE_URL` or `http://localhost:4000/v1`.
+- **Usage reporting (`packages/ai/src/usage/litellm.ts`)**: reads `GET /key/info` (`sk-` keys only) and `GET /v2/user/info` from the management base (base URL minus a trailing `/v1`) and reports each as a USD budget (spend, `max_budget`, `budget_duration` window, reset), probing with the one key inference would send (`usesRequestKey`). `ModelRegistry` registers it through `usage.replaceConfiguredProviders` for `litellm` and every `discovery.type: litellm` provider not in `disabledProviders`. A 401 drops that scope; a 401 on every scope tried discards the cached report.
 
 ### Catalog model handling
 
@@ -2700,7 +2701,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 ### Catalog model handling
 
 - **Provider entry (`web`)**: `packages/catalog/src/compat/rules/providers/web.kdl` declares default model `public`. Model management permits unauthenticated access.
-- **Authored seeds**: `hosted`, `parallel`, `perplexity`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `hosted`, `parallel`, `perplexity`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public`, `hackernews`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `webModelManagerOptions` in `packages/catalog/src/provider-models/special.ts`.
 
 ## Yolo-Auto (`yolo-auto`)

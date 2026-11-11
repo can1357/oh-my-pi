@@ -86,7 +86,7 @@ Do not mix wrapped and flat server entries: when `servers` is an object, sibling
 | `settings`              | `object`   |                        no | Pushed via `workspace/didChangeConfiguration`                                                                                                            |
 | `disabled`              | `boolean`  |                        no | Set `true` to disable this server                                                                                                                        |
 | `warmupTimeoutMs`       | `number`   |                        no | Warmup initialize timeout in milliseconds (default 5000; built-in marksman uses 2000)                                                                    |
-| `isLinter`              | `boolean`  |                        no | Marks a dedicated linter/formatter server: excluded from type-intelligence, but preferred over type-checkers when choosing the `formatOnWrite` formatter |
+| `isLinter`              | `boolean`  |                        no | Dedicated linter/formatter: fallback for single-server actions; `rename_file` queries all matching LSP servers; preferred for `formatOnWrite`            |
 | `capabilities`          | `object`   |                        no | Opt-in server-specific features; see [Capabilities](#capabilities)                                                                                       |
 | `workspaceReadyTimings` | `object`   |                        no | Advanced rust-analyzer workspace-readiness timing overrides; see below                                                                                   |
 

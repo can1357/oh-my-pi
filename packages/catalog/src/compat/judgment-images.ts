@@ -19,8 +19,16 @@ export interface JudgmentImageInput {
 	/** Inclusive bounds on each side, when the image header reports dimensions. */
 	minSide?: number;
 	maxSide?: number;
-	/** 32x32 patches across all images in a request. */
+	/** {@link judgmentImagePatches} across all images, when the image headers report dimensions. */
 	maxTotalPatches?: number;
+}
+
+/** Side in pixels of the square patches {@link JudgmentImageInput.maxTotalPatches} counts. */
+export const JUDGMENT_IMAGE_PATCH_SIDE = 32;
+
+/** Patches a `width`x`height` image covers, counting partial patches whole. */
+export function judgmentImagePatches(width: number, height: number): number {
+	return Math.ceil(width / JUDGMENT_IMAGE_PATCH_SIDE) * Math.ceil(height / JUDGMENT_IMAGE_PATCH_SIDE);
 }
 
 type NumericField =
@@ -54,7 +62,6 @@ const POLICY_FIELDS: Record<string, true> = {
 	maxSide: true,
 	maxTotalPatches: true,
 };
-
 const MIME_TYPE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
 
 function positiveInteger(value: unknown): value is number {

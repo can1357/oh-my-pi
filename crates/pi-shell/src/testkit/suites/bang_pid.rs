@@ -50,8 +50,8 @@ impl World {
 		w
 	}
 
-	/// A host whose externals are fakes by name: `/x/true` exits 0 at once,
-	/// `/x/trap42` and `/x/trap43` exit 42 or 43 on `TERM` (a trap), any
+	/// A host whose externals are fakes by name: `/fake/true` exits 0 at once,
+	/// `/fake/trap42` and `/fake/trap43` exit 42 or 43 on `TERM` (a trap), any
 	/// other runs until a terminating signal kills it.
 	fn host(&self) -> FakeHost {
 		let world = self.clone();
@@ -62,9 +62,9 @@ impl World {
 				.lock()
 				.push((spec.argv[0].clone(), spec.redirs.clone()));
 			let (status, trap) = match spec.argv[0].as_slice() {
-				b"/x/true" => (Some(ExitStatus::Exited(0)), None),
-				b"/x/trap42" => (None, Some(42)),
-				b"/x/trap43" => (None, Some(43)),
+				b"/fake/true" => (Some(ExitStatus::Exited(0)), None),
+				b"/fake/trap42" => (None, Some(42)),
+				b"/fake/trap43" => (None, Some(43)),
 				_ => (None, None),
 			};
 			let signals = Arc::clone(&world.signals);
@@ -154,7 +154,7 @@ fn a_lone_external_job_is_known_by_its_os_pid() {
 	let world = World::new();
 	let (out, status) = run(
 		world.host(),
-		"/x/sleeper & echo \"$!\"; jobs -p; jobs -l; kill \"$!\"; wait \"$!\"; echo \"st=$? \
+		"/fake/sleeper & echo \"$!\"; jobs -p; jobs -l; kill \"$!\"; wait \"$!\"; echo \"st=$? \
 		 last=$!\"",
 	);
 	assert_eq!(status, 0, "{out}");
@@ -173,8 +173,8 @@ fn assignments_redirections_and_exec_keep_the_os_pid() {
 	let world = World::new();
 	let (out, _) = run(
 		world.host(),
-		"FOO=1 /x/true >out & a=$!; { exec /x/true; } & b=$!; f() { exec /x/true; }; f & c=$!; \
-		 command /x/true & d=$!; wait; echo $a $b $c $d",
+		"FOO=1 /fake/true >out & a=$!; { exec /fake/true; } & b=$!; f() { exec /fake/true; }; f & \
+		 c=$!; command /fake/true & d=$!; wait; echo $a $b $c $d",
 	);
 	assert_eq!(out, "5001 5002 5003 5004\n");
 }
@@ -187,8 +187,8 @@ fn compound_and_builtin_jobs_keep_virtual_pids() {
 	let world = World::new();
 	let (out, _) = run(
 		world.host(),
-		"{ :; /x/true; } & a=$!; : & b=$!; f() { /x/true; }; f & c=$!; ( /x/true ) & e=$!; { \
-		 /x/true; } & g=$!; wait; echo $a $b $c $e $g",
+		"{ :; /fake/true; } & a=$!; : & b=$!; f() { /fake/true; }; f & c=$!; ( /fake/true ) & e=$!; \
+		 { /fake/true; } & g=$!; wait; echo $a $b $c $e $g",
 	);
 	let pids: Vec<&str> = out.split_whitespace().collect();
 	assert_eq!(pids.len(), 5, "{out}");
@@ -202,13 +202,15 @@ fn compound_and_builtin_jobs_keep_virtual_pids() {
 fn a_background_pipeline_is_known_by_its_last_program() {
 	for prefix in ["", "! ", "time "] {
 		let world = World::new();
-		let (out, _) =
-			run(world.host(), &format!("{prefix}/x/true | /x/trap42 & p=$!; kill $p; wait; echo $p"));
+		let (out, _) = run(
+			world.host(),
+			&format!("{prefix}/fake/true | /fake/trap42 & p=$!; kill $p; wait; echo $p"),
+		);
 		let last = world
 			.redirs
 			.lock()
 			.iter()
-			.position(|(argv0, _)| argv0.as_slice() == b"/x/trap42")
+			.position(|(argv0, _)| argv0.as_slice() == b"/fake/trap42")
 			.expect("the last stage ran");
 		let pid = FIRST + last as u32;
 		assert_eq!(out, format!("{pid}\n"), "{prefix:?}");
@@ -224,7 +226,7 @@ fn an_ended_last_stage_is_no_longer_signalled() {
 	let world = World::new();
 	let (out, _) = run(
 		world.host(),
-		&format!("/x/sleeper | /x/true & p=$!; {BUSY}; kill -0 $p; echo $?; kill %1; wait"),
+		&format!("/fake/sleeper | /fake/true & p=$!; {BUSY}; kill -0 $p; echo $?; kill %1; wait"),
 	);
 	assert_eq!(out, "1\n");
 	assert_eq!(world.got(FIRST), [Signal::Term], "only `kill %1` reached the first stage");
@@ -238,7 +240,7 @@ fn wait_p_and_disown_take_the_os_pid() {
 	let world = World::new();
 	let (out, _) = run(
 		world.host(),
-		"/x/true & p=$!; wait -n -p v; echo \"$v $p\"; /x/sleeper & q=$!; disown \"$q\"; echo \
+		"/fake/true & p=$!; wait -n -p v; echo \"$v $p\"; /fake/sleeper & q=$!; disown \"$q\"; echo \
 		 \"disown=$? jobs=$(jobs -p)\"; kill \"$q\"; wait \"$q\"; echo $?",
 	);
 	assert_eq!(out, "5001 5001\ndisown=0 jobs=\n143\n");
@@ -254,8 +256,8 @@ fn a_signalled_lone_external_ends_with_its_own_status() {
 		world.host(),
 		// `: $!` waits until the job runs its program (as bash's job has by
 		// the time it traps).
-		"/x/trap43 & : $!; kill %1; wait %1; echo \"job=$?\"; /x/trap43 & kill $!; wait $!; echo \
-		 \"pid=$?\"",
+		"/fake/trap43 & : $!; kill %1; wait %1; echo \"job=$?\"; /fake/trap43 & kill $!; wait $!; \
+		 echo \"pid=$?\"",
 	);
 	assert_eq!(out, "job=43\npid=43\n");
 	assert_eq!(world.got(FIRST), [Signal::Term], "one TERM, not one per path");
@@ -270,7 +272,8 @@ fn a_signalled_pipeline_job_ends_with_its_stages_statuses() {
 	let (out, _) = run(
 		world.host(),
 		&format!(
-			"/x/trap42 | /x/trap43 & {BUSY}; kill -STOP %1; kill -CONT %1; kill %1; wait %1; echo $?"
+			"/fake/trap42 | /fake/trap43 & {BUSY}; kill -STOP %1; kill -CONT %1; kill %1; wait %1; \
+			 echo $?"
 		),
 	);
 	assert_eq!(out, "43\n");
@@ -291,7 +294,7 @@ fn a_signalled_pipeline_job_ends_with_its_stages_statuses() {
 fn the_os_pid_survives_snapshots() {
 	let world = World::new();
 	let mut r = Rig::new(world.host(), skeleton_init(&[]));
-	assert_eq!(r.run(Script::command(&b"/x/sleeper &"[..]), Fault::None), 0);
+	assert_eq!(r.run(Script::command(&b"/fake/sleeper &"[..]), Fault::None), 0);
 	// Let the job reach its external.
 	let (shell, host, store) = r.parts();
 	while let Step::Yield | Step::Done { .. } =
@@ -302,10 +305,10 @@ fn the_os_pid_survives_snapshots() {
 	assert_eq!(r.host.stdout.bytes(), b"5001\n5001\n");
 
 	let base =
-		run_script(World::new().host(), b"/x/true & echo $!; wait $!; echo $?", &[], Fault::None);
+		run_script(World::new().host(), b"/fake/true & echo $!; wait $!; echo $?", &[], Fault::None);
 	let hit = run_script(
 		World::new().host(),
-		b"/x/true & echo $!; wait $!; echo $?",
+		b"/fake/true & echo $!; wait $!; echo $?",
 		&[],
 		Fault::Snapshot { every: 1 },
 	);
@@ -372,9 +375,9 @@ fn drive(world: &World, tool: &str, exec: bool, src: &str) -> String {
 #[test]
 fn an_exec_like_callout_hands_its_job_to_the_program() {
 	let world = World::new();
-	assert_eq!(drive(&world, "nohup", true, "nohup /x/true & echo $!; wait"), "5001\n");
+	assert_eq!(drive(&world, "nohup", true, "nohup /fake/true & echo $!; wait"), "5001\n");
 	let other = World::new();
-	let out = drive(&other, "wrap", false, "wrap /x/true & echo $!; wait");
+	let out = drive(&other, "wrap", false, "wrap /fake/true & echo $!; wait");
 	assert!(is_virtual(out.trim()), "{out}");
 }
 
@@ -388,39 +391,39 @@ fn a_redirection_that_would_wait_is_left_to_the_process() {
 	let world = World::new();
 	let fs = MemFs::with_latency(7, 1.0, 1);
 	let host = world.host().with_fs(fs).with_child_opens();
-	let (out, _) = run(host, "/x/sleeper > /f 2>&1 & echo $!; kill $!; wait $!; echo $?");
+	let (out, _) = run(host, "/fake/sleeper > /out 2>&1 & echo $!; kill $!; wait $!; echo $?");
 	assert_eq!(out, "5001\n143\n");
 	let seen = world.redirs.lock().clone();
 	let Some((name, Some(redirs))) = seen.first() else {
 		panic!("the spawn got no redirections: {seen:?}");
 	};
-	assert_eq!(name, "/x/sleeper");
+	assert_eq!(name, "/fake/sleeper");
 	let [ChildRedir::Open { fds, path, flags, mode, diag }, ChildRedir::Dup { fd: 2, src: 1, .. }] =
 		redirs.list.as_slice()
 	else {
 		panic!("{redirs:?}");
 	};
-	assert_eq!((fds.as_slice(), path.as_slice(), *mode), (&[1][..], &b"/f"[..], 0o644));
+	assert_eq!((fds.as_slice(), path.as_slice(), *mode), (&[1][..], &b"/out"[..], 0o644));
 	assert_eq!(
 		*flags,
 		OpenFlags::WRITE
 			.with(OpenFlags::CREATE)
 			.with(OpenFlags::TRUNC)
 	);
-	assert!(diag.ends_with(b"/f: ") && diag.starts_with(b"bash: "), "{diag}");
-	assert!(redirs.exec_diag.ends_with(b"/x/sleeper: "), "{}", redirs.exec_diag);
+	assert!(diag.ends_with(b"/out: ") && diag.starts_with(b"bash: "), "{diag}");
+	assert!(redirs.exec_diag.ends_with(b"/fake/sleeper: "), "{}", redirs.exec_diag);
 
 	// A builtin opens it here: the job keeps its virtual pid at once.
 	let fs = MemFs::with_latency(7, 1.0, 1);
-	fs.add_file("/g", b"line\n", 0o644);
+	fs.add_file("/in", b"line\n", 0o644);
 	let host = World::new().host().with_fs(fs).with_child_opens();
-	let (out, _) = run(host, "read x < /g & echo $!; wait");
+	let (out, _) = run(host, "read x < /in & echo $!; wait");
 	assert!(is_virtual(out.trim()), "{out}");
 
 	// Without the host's consent the engine opens it: virtual pid, no wait.
 	let world = World::new();
 	let host = world.host().with_fs(MemFs::with_latency(7, 1.0, 1));
-	let (out, _) = run(host, "/x/true > /f & echo $!; wait");
+	let (out, _) = run(host, "/fake/true > /out & echo $!; wait");
 	assert!(is_virtual(out.trim()), "{out}");
 	assert!(world.redirs.lock().iter().all(|(_, r)| r.is_none()));
 }

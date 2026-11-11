@@ -414,7 +414,7 @@ export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"w
 	};
 }
 
-/** Liquid AI decision models (`d1.1`, `d1-ultra`). */
+/** Liquid AI judges: the authored d1 rows. */
 export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemone"> {
 	return {
 		providerId: "liquid",

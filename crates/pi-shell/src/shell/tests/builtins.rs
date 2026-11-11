@@ -425,12 +425,12 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
 		// Some builtins are registered under the familiar command name but
 		// keep their implementation's own help text, exactly as the
-		// standalone versions did: `rg` is ripgrep, `jq` is jaq, `sg`
-		// is ast-grep (whose help names itself only through its usage
-		// line, here `sg`).
+		// standalone versions did: `rg` is ripgrep, `sg` is ast-grep
+		// (whose help names itself only through its usage line, here
+		// `sg`), and `jq` prints jq 1.8.2's help.
 		let expected = match name {
 			"rg" => "ripgrep",
-			"jq" => "jaq",
+			"jq" => "jq - commandline JSON processor [version 1.8.2]",
 			"sg" => "using AST pattern",
 			other => other,
 		};
@@ -1763,4 +1763,29 @@ async fn is_session_builtin(session: &mut ShellSessionCore, name: &str) -> bool 
 		.await
 		.expect("type -t");
 	read_capture(&out) == "builtin\n"
+}
+
+/// On Windows a utility written in the syntax of the System32 program it
+/// shadows runs that program: `find /c /v ""` counts lines with cmd's
+/// `FIND` (pi's GNU `find` read `/c` as drive `C:` and walked it), and its
+/// search string reaches `FIND` quoted, as `FIND` requires, even when it
+/// starts with `/`. GNU syntax keeps pi's `find`.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_switch_syntax_runs_the_shadowed_system_program() {
+	// Varied text: `FIND` guesses UTF-16 (`IsTextUnicode`) for tiny uniform
+	// input such as `a\nb\n`.
+	let input = r"printf 'apple pie\r\nbanana split\r\nGET /api/users\r\n'";
+	let (result, output) = execute_captured(format!(
+		"{input} | find /c /v \"\"; {input} | find /i \"BANANA\"; {input} | find /i \"/API\"; find \
+		 . -maxdepth 0"
+	))
+	.await;
+	assert_eq!(result.exit_code, Some(0), "{output}");
+	let lines: Vec<&str> = output
+		.lines()
+		.map(str::trim_end)
+		.filter(|l| !l.is_empty())
+		.collect();
+	assert_eq!(lines, ["3", "banana split", "GET /api/users", "."]);
 }

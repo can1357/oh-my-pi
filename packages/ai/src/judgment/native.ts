@@ -19,7 +19,11 @@
  * (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL` overrides the API root,
  * `TYPESAFE_DEFAULT_MODEL` the model.
  */
-import { resolveJudgmentImageInput, type JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
+import {
+	type JudgmentImageInput,
+	judgmentImagePatches,
+	resolveJudgmentImageInput,
+} from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { resolveJudgmentQuestionsMax } from "@oh-my-pi/pi-catalog/compat/judgment-questions";
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -91,7 +95,12 @@ export function nativeJudgmentImageBounds(model: Model): JudgmentImageInput | un
 /** Whether `model`'s native judgment API takes these exact images: image support within every {@link nativeJudgmentImageBounds}. */
 export function nativeJudgmentAcceptsImages(model: Model, images: readonly ImageContent[]): boolean {
 	const bounds = nativeJudgmentImageBounds(model);
-	return bounds !== undefined && imageLimitViolation(images, bounds) === undefined;
+	return bounds !== undefined && judgmentImagesWithin(images, bounds);
+}
+
+/** Whether `images` fall within every cap and floor of `bounds`. */
+export function judgmentImagesWithin(images: readonly ImageContent[], bounds: JudgmentImageInput): boolean {
+	return imageLimitViolation(images, bounds) === undefined;
 }
 
 /** The bounds both `a` and `b` allow: shared MIME types, the lower of each cap, the higher of each floor. */
@@ -238,20 +247,19 @@ function isAnswerOf(value: unknown, type: Answer["type"]): value is Answer {
 }
 
 /** The first documented cap `images` exceed, phrased to follow the backend label; `undefined` when within every cap. */
-export function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentImageInput): string | undefined {
+function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentImageInput): string | undefined {
 	if (limits.maxCount !== undefined && images.length > limits.maxCount) {
 		return `accepts at most ${limits.maxCount} images, got ${images.length}`;
 	}
 	let totalBytes = 0;
 	let totalPatches = 0;
 	const { minPixels, maxPixels, minSide, maxSide, maxTotalPatches } = limits;
-	const patchNeeded = maxTotalPatches !== undefined;
 	const checkDimensions =
 		minPixels !== undefined ||
 		maxPixels !== undefined ||
 		minSide !== undefined ||
 		maxSide !== undefined ||
-		patchNeeded;
+		maxTotalPatches !== undefined;
 	const needsBytes = limits.maxBytes !== undefined || limits.maxTotalBytes !== undefined;
 	for (const [index, image] of images.entries()) {
 		const mimeType = image.mimeType.toLowerCase();
@@ -268,9 +276,7 @@ export function imageLimitViolation(images: readonly ImageContent[], limits: Jud
 		const metadata = parseImageMetadata(bytes);
 		if (!metadata?.width || !metadata.height) continue;
 		const { width, height } = metadata;
-		if (patchNeeded) {
-			totalPatches += Math.ceil(width / 32) * Math.ceil(height / 32);
-		}
+		totalPatches += judgmentImagePatches(width, height);
 		const size = `images[${index}] is ${width}x${height}`;
 		if (maxPixels !== undefined && width * height > maxPixels)
 			return `accepts images up to ${maxPixels} pixels; ${size}`;
@@ -288,7 +294,7 @@ export function imageLimitViolation(images: readonly ImageContent[], limits: Jud
 		return `accepts at most ${limits.maxTotalBytes} image bytes per request, got ${totalBytes}`;
 	}
 	if (maxTotalPatches !== undefined && totalPatches > maxTotalPatches) {
-		return `accepts at most ${maxTotalPatches} image patches per request, got ${totalPatches}`;
+		return `accepts at most ${maxTotalPatches} 32x32 image patches per request, got ${totalPatches}`;
 	}
 	return undefined;
 }
