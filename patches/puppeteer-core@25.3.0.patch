@@ -258,7 +258,7 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
          /**
           * The full HTML contents of the frame, including the DOCTYPE.
 diff --git a/lib/puppeteer/cdp/ExecutionContext.js b/lib/puppeteer/cdp/ExecutionContext.js
-index c67098fd6c9f66666ad2b41d5b7dea42e1991833..2a543a09bfbd48bb9c02f085399788e913d0e8e4 100644
+index c67098fd6c9f66666ad2b41d5b7dea42e1991833..8cb17f9acc50ff47bbbd5faf09112e05558c4af2 100644
 --- a/lib/puppeteer/cdp/ExecutionContext.js
 +++ b/lib/puppeteer/cdp/ExecutionContext.js
 @@ -201,7 +201,10 @@ export class ExecutionContext extends EventEmitter {
@@ -266,14 +266,14 @@ index c67098fd6c9f66666ad2b41d5b7dea42e1991833..2a543a09bfbd48bb9c02f085399788e9
      get puppeteerUtil() {
          let promise = Promise.resolve();
 -        if (!this.#bindingsInstalled) {
-+        // ARIA queries run in the named utility world. Polling in the main
++        // xxx-stealth: ARIA queries run in the named utility world. Polling in the main
 +        // world needs the utility pollers, not the page-visible query bindings.
 +        // Do not install globals that page scripts can read or replace.
 +        if (!this.#bindingsInstalled && this.#name) {
              promise = Promise.all([
                  this.#addBindingWithoutThrowing(ariaQuerySelectorBinding),
                  this.#addBindingWithoutThrowing(ariaQuerySelectorAllBinding),
-@@ -326,14 +326,19 @@ export class ExecutionContext extends EventEmitter {
+@@ -326,14 +329,19 @@ export class ExecutionContext extends EventEmitter {
          return await this.#evaluate(false, pageFunction, ...args);
      }
      async #evaluate(returnByValue, pageFunction, ...args) {
@@ -296,7 +296,7 @@ index c67098fd6c9f66666ad2b41d5b7dea42e1991833..2a543a09bfbd48bb9c02f085399788e9
              const { exceptionDetails, result: remoteObject } = await this.#client
                  .send('Runtime.evaluate', {
                  expression: expressionWithSourceUrl,
-@@ -352,9 +357,8 @@ export class ExecutionContext extends EventEmitter {
+@@ -352,9 +360,8 @@ export class ExecutionContext extends EventEmitter {
              return this.#world.createCdpHandle(remoteObject);
          }
          const functionDeclaration = stringifyFunction(pageFunction);
