@@ -448,13 +448,7 @@ impl X11Capture {
 					.ok_or_else(|| {
 						DesktopError::window_not_found(format!("window {id} was not found"))
 					})?;
-				// A compositing manager keeps each window's pixels in a pixmap of
-				// its own, which nothing over the window reaches; without one the
-				// screen is the only copy.
-				let (image, (x, y, width, height)) = match self.capture_named(client, id)? {
-					Some(capture) => capture,
-					None => self.capture_unredirected(client, id, || {})?,
-				};
+				let (image, (x, y, width, height)) = self.capture_held(client, id, || {})?;
 				let frame_window = DesktopWindow { x, y, width, height, ..window };
 				let frame = FrameGeometry::for_window(&frame_window, image.width(), image.height());
 				Ok((image, frame))
@@ -504,11 +498,34 @@ impl X11Capture {
 		self.decode(&reply, width, height, self.masks)
 	}
 
+	/// `client`'s pixels, with the server held from the stacking check through
+	/// the read, so nothing maps, raises or moves over the window in between:
+	/// from the pixmap a compositing manager keeps of it, which nothing over
+	/// the window reaches, and else from the screen, the only copy. `between`
+	/// runs there, after the check (a no-op but in tests).
+	fn capture_held(
+		&self,
+		client: Window,
+		id: &str,
+		between: impl Fn(),
+	) -> CoreResult<(RgbaImage, Area)> {
+		let _grab = ServerGrab::new(&self.conn)?;
+		match self.capture_named(client, id, &between)? {
+			Some(capture) => Ok(capture),
+			None => self.capture_screen(client, id, between),
+		}
+	}
+
 	/// `client` and its own popups, each read from the pixmap the server keeps
 	/// for it while it is redirected, and cut to its shape; `None` when no
 	/// window from `client` up to the root is redirected, or when one of its
 	/// popups over it is not.
-	fn capture_named(&self, client: Window, id: &str) -> CoreResult<Option<(RgbaImage, Area)>> {
+	fn capture_named(
+		&self,
+		client: Window,
+		id: &str,
+		between: &dyn Fn(),
+	) -> CoreResult<Option<(RgbaImage, Area)>> {
 		if !self.composite {
 			return Ok(None);
 		}
@@ -559,6 +576,7 @@ impl X11Capture {
 				"window {id} is covered by another window inside its own frame"
 			)));
 		}
+		between();
 		let (holder_x, holder_y) = origins[level];
 		let mut image = self.read_drawable(
 			pixmap.1,
@@ -590,19 +608,7 @@ impl X11Capture {
 
 	/// Where no window from `client` up to the root is redirected, the screen
 	/// is the only copy of its pixels: a root crop, refused where the server
-	/// stacks another client's window over it. The server stays grabbed from
-	/// the stacking check through the read, so nothing maps over the window in
-	/// between; `between` runs there, after the check (a no-op but in tests).
-	fn capture_unredirected(
-		&self,
-		client: Window,
-		id: &str,
-		between: impl FnOnce(),
-	) -> CoreResult<(RgbaImage, Area)> {
-		let _grab = ServerGrab::new(&self.conn)?;
-		self.capture_screen(client, id, between)
-	}
-
+	/// stacks another client's window over it.
 	fn capture_screen(
 		&self,
 		client: Window,
@@ -745,7 +751,8 @@ impl X11Capture {
 	/// The windows of `siblings` whose rectangle meets `area`: another
 	/// client's, and `client`'s own override-redirect popups. A window of the
 	/// server's own, such as the compositing overlay, covers nothing; an
-	/// override-redirect window `client`'s own process made belongs to it.
+	/// override-redirect window `client`'s own process made belongs to it
+	/// unless it says it is another window's ([`X11Capture::popup_of`]).
 	fn above(&self, client: Window, area: Area, siblings: &[(usize, Window)]) -> CoreResult<Above> {
 		let attributes = siblings
 			.iter()
@@ -792,13 +799,45 @@ impl X11Capture {
 				continue;
 			};
 			let over = Over { level, window, part, origin, border };
-			if attributes.override_redirect && owner(window) == owner(client) {
+			if attributes.override_redirect
+				&& owner(window) == owner(client)
+				&& self.popup_of(window, client)?
+			{
 				above.popups.push(over);
 			} else {
 				above.covers.push(over);
 			}
 		}
 		Ok(above)
+	}
+
+	/// Whether `popup`, from `client`'s connection, is `client`'s. A menu or
+	/// tooltip names the window it is for in `WM_TRANSIENT_FOR` (GTK and Qt
+	/// set it), directly or through the menu it opened from: it is `client`'s
+	/// only if that reaches `client`. One that names no window is taken to
+	/// be `client`'s, as the connection made it.
+	fn popup_of(&self, popup: Window, client: Window) -> CoreResult<bool> {
+		let mut window = popup;
+		// Longer than any menu chain: a loop.
+		for _ in 0..8 {
+			let next = self
+				.property(window, AtomEnum::WM_TRANSIENT_FOR.into(), AtomEnum::WINDOW, 1)
+				.and_then(|reply| reply.value32()?.next())
+				.filter(|&next| next != x11rb::NONE && next != self.root);
+			let Some(next) = next else {
+				// A chain that ends at a popup naming nothing is that popup's.
+				let attributes = self
+					.conn
+					.get_window_attributes(window)
+					.map_err(request_failed)?;
+				return Ok(window == popup || attributes.reply().is_ok_and(|a| a.override_redirect));
+			};
+			if next == client {
+				return Ok(true);
+			}
+			window = next;
+		}
+		Ok(false)
 	}
 
 	/// Whether any of `covers` puts part of its bounding shape over `area`.
@@ -1872,7 +1911,7 @@ mod tests {
 		wm.sync().expect("destroyed");
 
 		let error = capture
-			.capture_named(gone, &gone.to_string())
+			.capture_named(gone, &gone.to_string(), &|| {})
 			.expect_err("nothing to read");
 		assert_eq!(error.code, ErrorCode::WindowNotFound);
 	}
@@ -1898,7 +1937,7 @@ mod tests {
 		// The cover's map reaches the server between the check and the read,
 		// and waits there for the grab to end.
 		let (image, _) = capture
-			.capture_unredirected(red, &id, || {
+			.capture_held(red, &id, || {
 				other.map_window(cover).expect("map cover");
 				other.flush().expect("map sent");
 			})
@@ -1910,6 +1949,93 @@ mod tests {
 			.capture(&Target::Window(id), None)
 			.expect_err("the cover is mapped now");
 		assert!(error.message.contains("covered"), "{}", error.message);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn child_mapped_in_the_frame_by_another_client_waits_for_the_pixmap_read() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		redirect_top_levels(&wm);
+		let (_, blue, frame) = covered_pair(&wm);
+		let (other, _) = x11rb::connect(Some(&display)).expect("second client");
+		let child =
+			window(&other, frame, (60, 20, 50, 50), &CreateWindowAux::new().background_pixel(YELLOW));
+		other.unmap_window(child).expect("unmap child");
+		other.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+		let id = blue.to_string();
+
+		// The child's map reaches the server between the check and the read of
+		// the frame's pixmap, and waits there for the grab to end.
+		let (image, _) = capture
+			.capture_held(blue, &id, || {
+				other.map_window(child).expect("map child");
+				other.flush().expect("map sent");
+			})
+			.expect("nothing was over blue when it was checked");
+		assert_eq!(pixel(&image, (70, 20)), [0, 0, 255, 255]);
+
+		other.sync().expect("child mapped");
+		let error = capture
+			.capture(&Target::Window(id), None)
+			.expect_err("the child is mapped now");
+		assert!(error.message.contains("covered"), "{}", error.message);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn popup_for_another_window_of_the_same_client_is_left_out() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		redirect_top_levels(&wm);
+		let (red, blue, _) = covered_pair(&wm);
+		let root = wm.setup().roots[0].root;
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+		let tree = capture.tree(red, &red.to_string()).expect("tree");
+		let popup = capture
+			.above(red, (0, 0, 200, 150), &tree.siblings)
+			.expect("stacking")
+			.popups[0]
+			.window;
+		// A menu, off red, that the popup opened from.
+		let menu = window(
+			&wm,
+			root,
+			(250, 0, 40, 30),
+			&CreateWindowAux::new()
+				.background_pixel(YELLOW)
+				.override_redirect(1),
+		);
+		let transient_for = |window: Window, of: Window| {
+			wm.change_property32(
+				PropMode::REPLACE,
+				window,
+				AtomEnum::WM_TRANSIENT_FOR,
+				AtomEnum::WINDOW,
+				&[of],
+			)
+			.expect("transient for");
+			wm.sync().expect("sync");
+		};
+		let popup_pixel = || {
+			let (image, _) = capture
+				.capture(&Target::Window(red.to_string()), None)
+				.expect("covered window");
+			pixel(&image, POPUP)
+		};
+
+		transient_for(popup, red);
+		assert_eq!(popup_pixel(), [255, 255, 0, 255]);
+		transient_for(popup, blue);
+		assert_eq!(popup_pixel(), [255, 0, 0, 255], "blue's popup");
+		transient_for(popup, menu);
+		transient_for(menu, blue);
+		assert_eq!(popup_pixel(), [255, 0, 0, 255], "the popup of blue's menu");
+		wm.delete_property(menu, AtomEnum::WM_TRANSIENT_FOR.into())
+			.expect("unnamed menu");
+		wm.sync().expect("sync");
+		assert_eq!(popup_pixel(), [255, 255, 0, 255], "the popup of a menu naming no window");
 	}
 
 	#[test]
