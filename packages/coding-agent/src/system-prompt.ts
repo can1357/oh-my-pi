@@ -44,6 +44,8 @@ import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { expandTilde } from "./tools/path-utils";
+import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
@@ -57,6 +59,7 @@ import {
 	cfgIncludeWorkspaceTree,
 	cfgInlineToolDescriptors,
 	cfgPersonality,
+	cfgSystemPromptTemplates,
 } from "./session/settings";
 import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
@@ -76,6 +79,7 @@ import {
  */
 export const cfgSystemPromptInputs = combine({
 	personality: cfgPersonality,
+	systemPromptTemplates: cfgSystemPromptTemplates,
 	includeModelInPrompt: cfgIncludeModelInPrompt,
 	includeWorkspaceTree: cfgIncludeWorkspaceTree,
 	inlineToolDescriptors: cfgInlineToolDescriptors,
@@ -513,6 +517,12 @@ export interface BuildSystemPromptOptions {
 	resolvedCustomPrompt?: string;
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
+	/**
+	 * Compiled `systemPromptTemplates` setting, matched against `model`. The selected file replaces
+	 * only the bundled default and is read only then: explicit and discovered (`SYSTEM.md`/
+	 * `SYSTEM_TEMPLATE.md`) prompts win. A missing, empty, or invalid file warns and keeps the bundled prompt.
+	 */
+	modelSystemPromptTemplates?: readonly ModelPatternEntry<string>[];
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -771,6 +781,30 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			resolvedSystemPromptTemplate = undefined;
 		} else {
 			throw new Error("System prompt template must not be empty");
+		}
+	}
+	// A `systemPromptTemplates` file is discovered input like SYSTEM_TEMPLATE.md: it applies only when
+	// nothing above did, and a missing, empty, or invalid file falls back to the bundled prompt.
+	const modelTemplatePath =
+		resolvedSystemPromptTemplate === undefined && resolvedCustomPromptInput === undefined && !hasExplicitCustomPrompt
+			? matchModelPattern(options.modelSystemPromptTemplates ?? [], model)
+			: undefined;
+	if (modelTemplatePath !== undefined) {
+		const templateFile = expandTilde(modelTemplatePath);
+		try {
+			const content = await Bun.file(templateFile).text();
+			if (content.trim()) resolvedSystemPromptTemplate = content;
+			else
+				logger.warn("Ignoring empty systemPromptTemplates template; using the bundled prompt", {
+					model,
+					path: templateFile,
+				});
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			logger.warn("systemPromptTemplates template not found; using the bundled prompt", {
+				model,
+				path: templateFile,
+			});
 		}
 	}
 
@@ -1108,10 +1142,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rendered = prompt.renderTracked(selectedTemplate, data, sourceItems);
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
-		if (!hasDiscoveredTemplate) {
+		if (options.systemPromptTemplate !== undefined) {
 			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
 		}
-		logger.warn("Ignoring invalid discovered system prompt template; using the bundled prompt", {
+		logger.warn("Ignoring invalid system prompt template file; using the bundled prompt", {
 			error: String(error),
 		});
 		resolvedSystemPromptTemplate = undefined;
