@@ -6,6 +6,8 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
   `browser.tab(name)` returns an open one; `await browser.tabs()` lists them;
   `await browser.targets({app?})` lists pages `app.target` can adopt;
   `await browser.close({name?, all?})` releases tabs. Python takes the same names as keyword arguments.
+- Relay tabs omp opened close when the session ends. For a page you leave open for the user, pass `persist: true` to `open`;
+  for a tab already open, call `browser.open({ name, persist: true })` again with its name.
 - `open`, `close`, and `run` take `timeout` in seconds; `waitFor*` helpers take it in milliseconds.
 - Tab helpers:
   - Navigation: `url`, `title`, `goto`, `back`, `forward`, `reload`.
