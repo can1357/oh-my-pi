@@ -1,4 +1,5 @@
 use std::{
+	cell::Cell,
 	ptr,
 	time::{Duration, Instant},
 };
@@ -1607,9 +1608,109 @@ enum FrontTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct EntryFront(Option<libc::pid_t>);
 
+thread_local! {
+	/// The front process a request read before its first call to the target's
+	/// application, which every [`EntryFront`] of the request takes as its own
+	/// ([`pin_entry_front`]).
+	static PINNED_FRONT: Cell<Option<Option<libc::pid_t>>> = const { Cell::new(None) };
+}
+
+/// Holds the front process [`pin_entry_front`] read until it drops.
+pub(crate) struct PinnedFront(());
+
+impl Drop for PinnedFront {
+	fn drop(&mut self) {
+		PINNED_FRONT.set(None);
+	}
+}
+
+/// Reads the user's front process now, for a request that asks the target's
+/// application something before its input begins: following a rebuilt row
+/// probes the ref's element, which blocks while the app is busy, and the
+/// user may pick the target meanwhile. Each [`EntryFront`] of the request
+/// is this read until the returned guard drops.
+pub(crate) fn pin_entry_front() -> PinnedFront {
+	pin_front_with(skylight::front_pid)
+}
+
+fn pin_front_with(front: impl FnOnce() -> Option<libc::pid_t>) -> PinnedFront {
+	PINNED_FRONT.set(Some(front()));
+	PinnedFront(())
+}
+
+/// Whether a request's front process is pinned ([`pin_entry_front`]).
+#[cfg(test)]
+pub(crate) fn entry_front_pinned() -> bool {
+	PINNED_FRONT.get().is_some()
+}
+
+thread_local! {
+	/// The table row an element click aims at, with its process, held until
+	/// the click is posted ([`aim_at_element`]).
+	static AIMED: std::cell::RefCell<Option<(CFRetained<AXUIElement>, libc::pid_t)>> =
+		const { std::cell::RefCell::new(None) };
+}
+
+/// Holds the row [`aim_at_element`] took until it drops.
+pub(super) struct Aimed(());
+
+impl Drop for Aimed {
+	fn drop(&mut self) {
+		AIMED.with_borrow_mut(Option::take);
+	}
+}
+
+/// Makes each press of the click this request posts check, right before it
+/// is posted, that its point still hits the table row `element` sits in
+/// ([`aimed_row_check`]): readying a background click asks the app for its
+/// windows and focus, and a double click spans two presses, long enough for
+/// an app that sorts its rows as it refreshes, as Activity Monitor does, to
+/// move another row into the point. Read with the element's frame; an
+/// element outside a row aims at none.
+pub(super) fn aim_at_element(element: &AXUIElement) -> CoreResult<Aimed> {
+	let row = ax::aimed_row(element)?;
+	AIMED.with_borrow_mut(|aimed| *aimed = row);
+	Ok(Aimed(()))
+}
+
+/// [`aim_at_element`]'s check for each press of `event`: `StaleRef` before
+/// the first press, with nothing sent, and `InputFailed` before a later one,
+/// once earlier presses went out, when another row is under the point.
+fn aimed_row_check(event: &PointerEvent) -> impl Fn() -> CoreResult<()> + use<> {
+	let point = match *event {
+		PointerEvent::Click { x, y, .. } => Some((x, y)),
+		_ => None,
+	};
+	let pressed = Cell::new(false);
+	move || {
+		let Some((x, y)) = point else {
+			return Ok(());
+		};
+		let later = pressed.replace(true);
+		let lands = AIMED.with_borrow(|aimed| {
+			aimed
+				.as_ref()
+				.is_none_or(|(row, pid)| ax::row_at(row, *pid, x, y))
+		});
+		if lands {
+			return Ok(());
+		}
+		Err(if later {
+			DesktopError::input_failed(
+				"another row moved under the click's point after its first press went out; the rest \
+				 of the click was not sent",
+			)
+		} else {
+			DesktopError::stale_ref(
+				"another row is now where the clicked element's row was read; nothing was sent",
+			)
+		})
+	}
+}
+
 impl EntryFront {
 	pub(super) fn now() -> Self {
-		Self(skylight::front_pid())
+		Self(PINNED_FRONT.get().unwrap_or_else(skylight::front_pid))
 	}
 
 	/// Whether `pid` was behind another application as the input began.
@@ -1634,7 +1735,7 @@ impl EntryFront {
 		front: impl FnOnce() -> Option<libc::pid_t>,
 		probe: impl FnOnce() -> CoreResult<T>,
 	) -> CoreResult<(Self, T)> {
-		let entry = Self(front());
+		let entry = Self(PINNED_FRONT.get().unwrap_or_else(front));
 		probe().map(|value| (entry, value))
 	}
 
@@ -2355,13 +2456,19 @@ fn background_gesture(
 	post: Post<'_>,
 ) -> CoreResult<()> {
 	// Every pointer kind goes through the same check right before it posts.
-	let before_post = pointer_rechecks(
+	let rechecks = pointer_rechecks(
 		(prepared, rechecks_report_sent(&event)),
 		entry_front,
 		(pid, wid, &window.app),
 		skylight::front_pid,
 		|| visit.happened(),
 	);
+	// A click aimed at a table row checks the row is still under its point.
+	let rows = aimed_row_check(&event);
+	let before_post = || {
+		rechecks()?;
+		rows()
+	};
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, modifiers } => {
 			background_left_click(
@@ -4094,8 +4201,12 @@ fn foreground_pointer(
 							skylight::require_front_window(pid, wid)
 						})
 					},
-					(event, None) => global_pointer(source, event),
+					(event, None) => {
+						aimed_row_check(&event)()?;
+						global_pointer(source, event)
+					},
 					(event, Some(path)) => {
+						aimed_row_check(&event)()?;
 						let before = capture::menu_windows(pid).ok_or_else(|| {
 							DesktopError::input_failed(format!(
 								"cannot list the open menus of window {} ({}), so no menu item could be \
@@ -8004,6 +8115,59 @@ mod tests {
 		.unwrap();
 		assert_eq!(entry, EntryFront(Some(9)));
 		assert_eq!(front_target(entry, Some(7), 7, || true), FrontTarget::CameForward);
+	}
+
+	#[test]
+	fn a_target_picked_while_a_row_follow_probes_it_refuses_as_come_forward() {
+		// The request read the user's app (9) in front before following the
+		// ref's rebuilt row, and the user brings the target (7) forward while
+		// that probe blocks: the input's own front read happens after it.
+		let pin = pin_front_with(|| Some(9));
+		let (entry, ()) = EntryFront::before(|| Some(7), || Ok(())).unwrap();
+		assert_eq!(entry, EntryFront(Some(9)));
+		assert_eq!(EntryFront::now(), EntryFront(Some(9)));
+		assert_eq!(front_target(entry, Some(7), 7, || true), FrontTarget::CameForward);
+		drop(pin);
+		assert!(!entry_front_pinned());
+	}
+
+	#[test]
+	fn a_click_lands_in_its_row_unless_another_row_is_found_first_above_the_hit() {
+		// The aimed row is 1; each hit's ancestry is listed from the hit up,
+		// marked where it is a row.
+		let lands = |ancestry: &[(u32, bool)]| ax::lands_in_row(&1, ancestry.iter().copied());
+		assert!(lands(&[(12, false), (11, false), (1, true)]));
+		// A web table's text under a link under a cell, deeper than the
+		// element side is read.
+		assert!(lands(&[(14, false), (13, false), (12, false), (1, true)]));
+		// The neighbouring row was sorted into the point, or the old row was
+		// rebuilt there as a new element.
+		assert!(!lands(&[(22, false), (21, false), (2, true), (1, true)]));
+		// A point outside any row lands as it would without the check.
+		assert!(lands(&[(30, false), (31, false)]));
+	}
+
+	#[test]
+	fn only_a_click_with_an_aimed_row_is_checked_and_the_aim_ends_with_its_request() {
+		let click = PointerEvent::Click {
+			x:         1.0,
+			y:         1.0,
+			button:    MouseButton::Left,
+			count:     2,
+			modifiers: Modifiers::default(),
+		};
+		// Nothing aimed: a plain window click or a click outside a row.
+		assert!(aimed_row_check(&click)().is_ok());
+		{
+			let _aimed = Aimed(());
+			let crate::desktop::ax::AxHandle::Mac(app) = ax::application_handle(1).unwrap() else {
+				unreachable!("a macOS handle")
+			};
+			AIMED.with_borrow_mut(|aimed| *aimed = Some((app, 1)));
+			// Other gestures skip it.
+			assert!(aimed_row_check(&PointerEvent::Move { x: 1.0, y: 1.0 })().is_ok());
+		}
+		assert!(AIMED.with_borrow(Option::is_none));
 	}
 
 	#[test]

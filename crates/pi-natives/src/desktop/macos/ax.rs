@@ -1872,6 +1872,74 @@ fn read_as_values(values: &NodeValues) -> CoreResult<Option<AxReadAs>> {
 	}
 }
 
+/// How far above a clicked element its table row can sit: a cell's text,
+/// the cell, the row.
+const ROW_DEPTH: usize = 2;
+
+/// The table row a click on `element` aims at: the element itself or its
+/// parent within [`ROW_DEPTH`], with the row's process. `None` for an
+/// element outside a row; `StaleRef` once the app destroyed the element.
+pub(super) fn aimed_row(
+	element: &AXUIElement,
+) -> CoreResult<Option<(CFRetained<AXUIElement>, libc::pid_t)>> {
+	let mut current = element.retain();
+	for _ in 0..=ROW_DEPTH {
+		let role = copy_held_attribute(&current, "AXRole")?
+			.and_then(|value| value.downcast::<CFString>().ok());
+		if role.is_some_and(|role| role.to_string() == "AXRow") {
+			let pid = element_pid(&current)?;
+			return Ok(Some((current, pid)));
+		}
+		let Some(parent) = copy_held_attribute(&current, "AXParent")?
+			.and_then(|value| value.downcast::<AXUIElement>().ok())
+		else {
+			return Ok(None);
+		};
+		current = parent;
+	}
+	Ok(None)
+}
+
+/// Whether a click whose point hit the first element of `ancestry` (then
+/// its parents, each marked when it is a table row) lands in `row`: it does
+/// unless another row comes first on the way up. A point outside any row
+/// lands where it would without the check.
+pub(super) fn lands_in_row<T: PartialEq>(
+	row: &T,
+	ancestry: impl IntoIterator<Item = (T, bool)>,
+) -> bool {
+	for (node, is_row) in ancestry {
+		if node == *row {
+			return true;
+		}
+		if is_row {
+			return false;
+		}
+	}
+	true
+}
+
+/// Whether a click at `(x, y)` lands in `row` of process `pid`, as that
+/// process's own hit test answers right before the press: a background click
+/// goes to the target app however its window is covered. An app that sorts
+/// its rows as it refreshes, as Activity Monitor does, can move another row
+/// into the place the clicked element's frame was read at. A hit test the app
+/// does not answer passes.
+pub(super) fn row_at(row: &AXUIElement, pid: libc::pid_t, x: f64, y: f64) -> bool {
+	let Some(hit) = probe_application(pid).and_then(|app| open_menu::hit_test(&app, x, y)) else {
+		return true;
+	};
+	let mut next = Some(hit);
+	let ancestry = std::iter::from_fn(|| {
+		let node = next.take()?;
+		next = copy_element(&node, "AXParent");
+		let is_row = copy_string(&node, "AXRole").as_deref() == Some("AXRow");
+		Some((node, is_row))
+	})
+	.take(MAX_ANCESTRY_DEPTH);
+	lands_in_row(&row.retain(), ancestry)
+}
+
 fn is_secure(element: &AXUIElement) -> bool {
 	secure_subrole(copy_attribute_result(element, "AXSubrole").map(|value| {
 		match value {
