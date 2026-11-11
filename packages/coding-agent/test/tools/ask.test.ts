@@ -454,6 +454,32 @@ describe("AskTool without a form surface", () => {
 		expect(text(result)).toBe("User answers:\n{}");
 	});
 
+	it("hides Done selecting on a required checkbox group until one option is checked", async () => {
+		const calls: (string | undefined)[][] = [];
+		const select: Select = async (_title, options) => {
+			const rows = options.map(label);
+			calls.push(rows);
+			if (calls.length === 1) return "Alpha";
+			return rows.find(row => row?.endsWith("Done selecting"));
+		};
+		const result = await new AskTool(createSession()).execute(
+			"call-required-choice",
+			{
+				html: `<form>
+  <label><input type="checkbox" name="pick" value="a" required> Alpha</label>
+  <label><input type="checkbox" name="pick" value="b"> Beta</label>
+</form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ select }),
+		);
+
+		expect(calls[0]?.some(row => row?.endsWith("Done selecting"))).toBe(false);
+		expect(calls[1]?.some(row => row?.endsWith("Done selecting"))).toBe(true);
+		expect(JSON.parse(text(result)?.replace("User answers:\n", "") ?? "")).toEqual({ pick: ["a"] });
+	});
+
 	it("aborts the turn when the user cancels a later field", async () => {
 		const abort = vi.fn();
 		const outcome = new AskTool(createSession()).execute(
