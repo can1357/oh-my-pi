@@ -5,6 +5,7 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy, parseClaudeUsagePayload } from "@oh-my-pi/pi-ai/usage/claude";
 import { claudeResetClearedBlockScopes } from "@oh-my-pi/pi-ai/usage/claude-reset";
@@ -114,11 +115,15 @@ interface HealHarness {
 	blocks: Map<string, number>;
 }
 
-function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarness {
-	const rows = [oauthRow(1), oauthRow(2)];
+function makeHarness(
+	report: UsageReport,
+	blockScope = "tier:fable",
+	options?: { reports: UsageReport[]; blockedCredentialId: number },
+): HealHarness {
+	const rows = options ? options.reports.map((_, index) => oauthRow(index + 1)) : [oauthRow(1), oauthRow(2)];
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
 	const blocks = new Map<string, number>();
-	blocks.set(`1:${blockScope}`, Date.now() + 3 * 24 * 60 * 60_000);
+	blocks.set(`${options?.blockedCredentialId ?? 1}:${blockScope}`, Date.now() + 3 * 24 * 60 * 60_000);
 	const clearedScopes: string[] = [];
 	let probes = 0;
 	const store: AuthCredentialStore = {
@@ -154,6 +159,11 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		id: "anthropic",
 		fetchUsage: async params => {
 			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			if (options) {
+				probes += 1;
+				const index = rows.findIndex(row => row.credential.type === "oauth" && row.credential.access === access);
+				return options.reports[index] ?? null;
+			}
 			if (access === "access-2") return nearlySpentSiblingReport();
 			probes += 1;
 			return report;
@@ -433,4 +443,94 @@ describe("claude usage-block healing", () => {
 			);
 		});
 	});
+});
+
+describe("Claude Mythos rotation with a stale usable sibling", () => {
+	for (const hasSession of [false, true]) {
+		it(`serves B after A's 429 without restoring Mythos-denied C/D (${hasSession ? "running" : "inactive"} 5h window)`, async () => {
+			const modelId = "claude-mythos-5-2";
+			const modelScope = `model-policy:${modelId}`;
+			const retryAfterMs = 77_000_000;
+			const reset = new Date(Date.now() + 60 * 60_000).toISOString();
+			const limits: Record<string, unknown>[] = [
+				{ kind: "weekly_all", percent: 20, resets_at: reset, scope: null, is_active: false },
+				{
+					kind: "weekly_scoped",
+					percent: 10,
+					resets_at: reset,
+					scope: { model: { id: null, display_name: "Mythos" }, surface: null },
+					is_active: true,
+				},
+			];
+			const payload: Record<string, unknown> = { ...noSessionPayload(20), limits };
+			if (hasSession) {
+				payload.five_hour = { utilization: 10, resets_at: reset };
+				limits.push({ kind: "session", percent: 10, resets_at: reset, scope: null, is_active: false });
+			}
+			const recovered = parsedReport(payload);
+			const healthy = claudeReport([
+				sharedLimit("5h", "5h", 0.1),
+				sharedLimit("7d", "7d", 0.2),
+				tierLimit("mythos", 0),
+			]);
+			const { storage, blocks } = makeHarness(recovered, "tier:mythos", {
+				reports: [healthy, recovered, healthy, healthy],
+				blockedCredentialId: 2,
+			});
+			try {
+				await storage.credentials.reload();
+				// Write entitlement blocks through the actual failure path, not
+				// by seeding the scope this regression is meant to protect.
+				const denial = new ProviderHttpError(
+					`404 {"type":"error","error":{"type":"not_found_error","message":"model: ${modelId}"}}`,
+					404,
+				);
+				for (const id of [3, 4]) {
+					await storage.limits.rotate("anthropic", "mythos-denial", {
+						error: denial,
+						apiKey: `access-${id}`,
+						modelId,
+					});
+				}
+
+				// An already active request on A need not rank/probe B first.
+				// B must still be stale when rotation judges sibling availability.
+				storage.sessions.pin("anthropic", "mythos-request", 1);
+				const first = await storage.keys.get("anthropic", "mythos-request", { modelId });
+				expect(first).toBe("access-1");
+				expect(blocks.has("2:tier:mythos")).toBe(true);
+				const before429 = Date.now();
+				const rotation = await storage.limits.rotate("anthropic", "mythos-request", {
+					apiKey: first,
+					modelId,
+					error: new ProviderHttpError(
+						`429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit."}} retry-after-ms=${retryAfterMs}`,
+						429,
+					),
+				});
+				const after429 = Date.now();
+				expect(rotation.switched).toBe(true);
+				expect(await storage.keys.get("anthropic", "mythos-request", { modelId })).toBe("access-2");
+				expect(blocks.has("2:tier:mythos")).toBe(false);
+				expect(blocks.get("1:tier:mythos")).toBeGreaterThanOrEqual(before429 + retryAfterMs);
+				expect(blocks.get("1:tier:mythos")).toBeLessThanOrEqual(after429 + retryAfterMs);
+				for (const id of [3, 4]) {
+					expect(blocks.get(`${id}:${modelScope}`)).toBeGreaterThan(Date.now());
+					expect(blocks.has(`${id}:auth`)).toBe(false);
+					expect(blocks.has(`${id}:account-policy`)).toBe(false);
+					expect(blocks.has(`${id}:`)).toBe(false);
+				}
+
+				// A denial of Mythos must not disable the same OAuth row for Opus.
+				storage.sessions.pin("anthropic", "opus-request", 3);
+				expect(await storage.keys.get("anthropic", "opus-request", { modelId: "claude-opus-5-5" })).toBe(
+					"access-3",
+				);
+				expect(blocks.get(`3:${modelScope}`)).toBeGreaterThan(Date.now());
+				expect(blocks.get(`4:${modelScope}`)).toBeGreaterThan(Date.now());
+			} finally {
+				storage.close();
+			}
+		});
+	}
 });

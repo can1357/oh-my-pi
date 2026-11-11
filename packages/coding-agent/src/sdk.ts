@@ -2512,6 +2512,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						model: message.model,
 						usage: message.usage,
 						stopReason: message.stopReason,
+						errorMessage: message.errorMessage,
 					},
 					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
 				);
@@ -2678,6 +2679,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionSpawns: () => options.spawns ?? "*",
 			getSessionAgents: () => session?.getSessionAgents() ?? [],
 			advertisedSessionAgents: () => session?.getAdvertisedSessionAgents() ?? [],
+			advertisedPerCallModel: () => session?.getAdvertisedPerCallModel(),
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -4456,6 +4458,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				// The viewer attributes only default blocks the callback left unchanged.
+				sources: defaultPrompt.sources,
 			};
 		};
 
@@ -4608,7 +4612,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, sources: systemPromptSources } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -5206,6 +5210,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorStreamFn: settingsAwareStreamFn,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			systemPromptSources,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,
@@ -5255,7 +5260,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
 			// context — the primary bridge passes the same store.
-			advisorGetToolContext: () => toolContextStore.getContext(),
+			advisorGetToolContext: toolCall => toolContextStore.getContext(toolCall),
 			// Same live connections the primary bridge reads; an advisor's
 			// resource frame would otherwise report every server as empty.
 			advisorMcpResources: cursorMcpResources,

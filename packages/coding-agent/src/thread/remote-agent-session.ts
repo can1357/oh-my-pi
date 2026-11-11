@@ -98,7 +98,6 @@ import type { CustomEntry, SessionEntry } from "../session/session-entries";
 import { conversationTip, lastModelChangeRole, SessionEntryIndex } from "../session/session-manager";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
-import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { TokenRateMeter } from "../utils/token-rate";
 import type { ThreadId } from "./identity";
@@ -210,7 +209,6 @@ function emptyViewState(): SessionViewState {
 		todoPhases: [],
 		queuedMessages: { steering: [], followUp: [], liveSteered: 0 },
 		restorableQueue: { steering: [], followUp: [] },
-		approvals: { scopes: [], grants: [] },
 		ephemeralMaxTokensPreservesRequest: false,
 		settings: { base: null, layers: [] },
 		activeToolExecutionUpdates: [],
@@ -753,17 +751,6 @@ export class RemoteAgentSession implements AgentViewSession {
 			this.#settle(id);
 		}
 		return restored;
-	}
-
-	hasSessionApproval(key: string): boolean {
-		return this.#view.approvals.scopes.includes(key);
-	}
-
-	/** The child's conversation tier, as mirrored, over the database of its agent directory. */
-	getApprovalGrants(): ApprovalGrantStore {
-		const grants = getApprovalGrants(this.settings.getAgentDir());
-		for (const key of this.#view.approvals.grants) grants.session.record(key);
-		return grants;
 	}
 
 	resume(): Promise<void> {

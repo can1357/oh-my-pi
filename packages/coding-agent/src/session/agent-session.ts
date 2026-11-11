@@ -194,7 +194,7 @@ import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from ".
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageTokens, type SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile, resolvePlanFilePath } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -239,7 +239,6 @@ import {
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
 import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
-import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { recoverAskHtml } from "../tools/ask";
 import {
@@ -572,6 +571,7 @@ import {
 	cfgThemeDark,
 	cfgThemeLight,
 } from "../modes/settings";
+import type { PerCallModelAdvertisement } from "../task/model-approval";
 import { cfgTaskBatch, cfgTaskDisabledAgents, perCallModelEnabled } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
@@ -2451,8 +2451,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
-			setBaseSystemPrompt: prompt => {
-				this.#tools.setBaseSystemPrompt(prompt);
+			restoreBaseSystemPromptBeforeMemoryPromotion: prompt => {
+				this.#tools.restoreBaseSystemPrompt(prompt, this.#tools.systemPromptSources);
 				this.agent.setSystemPrompt(prompt);
 			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
@@ -2680,6 +2680,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			xdev: config.xdev,
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
+			systemPromptSources: config.systemPromptSources,
 			skills: config.skills,
 			skillWarnings: config.skillWarnings,
 			skillsSettings: config.skillsSettings,
@@ -6311,6 +6312,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					model: message.model,
 					usage: message.usage,
 					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
 					...(refresh ? { cacheRefresh: refresh } : {}),
 				},
 				{ sessionId: this.sessionId, parentId: this.sessionManager.getLeafId() },
@@ -7401,6 +7403,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.agent.state.systemPrompt;
 	}
 
+	/** Sources committed with the base prompt; the context viewer verifies them against {@link systemPrompt}. */
+	get systemPromptSources(): SystemPromptSources | undefined {
+		return this.#tools.systemPromptSources;
+	}
+
 	/** Base system prompt blocks the next turn builds on, before any `before_agent_start` override. */
 	get baseSystemPrompt(): string[] {
 		return this.#tools.baseSystemPrompt;
@@ -7673,6 +7680,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	getAdvertisedSessionAgents(): readonly AgentDefinition[] {
 		return this.#tools.advertisedSessionAgents;
+	}
+
+	/**
+	 * Per-call model roles frozen into the task/eval descriptions (see
+	 * {@link SessionTools.advertisedPerCallModel}). Another instance's role edit
+	 * leaves them untouched until the next base-prompt rebuild.
+	 */
+	getAdvertisedPerCallModel(): PerCallModelAdvertisement {
+		return this.#tools.advertisedPerCallModel;
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */
@@ -14063,6 +14079,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
+		const previousSystemPromptSources = this.#tools.systemPromptSources;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
@@ -14331,7 +14348,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
+			this.#tools.restoreBaseSystemPrompt(previousBaseSystemPrompt, previousSystemPromptSources);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
 			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
@@ -16371,16 +16388,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
-	}
-
-	/** Whether the user approved approval scope `key` for the rest of this session (see {@link ExtensionRunner.hasSessionApproval}). */
-	hasSessionApproval(key: string): boolean {
-		return this.#extensionRunner?.hasSessionApproval(key) ?? false;
-	}
-
-	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */
-	getApprovalGrants(): ApprovalGrantStore {
-		return getApprovalGrants(this.settings.getAgentDir(), this.sessionManager.getSessionId());
 	}
 
 	/**

@@ -5,6 +5,7 @@ import type {
 	AgentToolContext,
 	StreamFn,
 	ThinkingLevel,
+	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -45,6 +46,7 @@ import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
@@ -350,6 +352,8 @@ export interface AgentSessionConfig {
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
 	rebuildSystemPrompt?: SystemPromptRebuilder;
+	/** Sources of the initial base prompt, as returned by `buildSystemPrompt`. */
+	systemPromptSources?: SystemPromptSources;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -397,14 +401,14 @@ export interface AgentSessionConfig {
 	 */
 	advisorCreateEditTool?(): AgentTool | undefined;
 	/**
-	 * The execute-time context the advisor's bridge tools resolve approval from.
+	 * The execute-time context for the advisor's loop and bridge tools.
 	 *
 	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
 	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
 	 * with none it fails closed to `always-ask` with empty policies (no user
 	 * grant), so a bridge tool that needs a prompt cannot run unattended.
 	 */
-	advisorGetToolContext?: () => AgentToolContext | undefined;
+	advisorGetToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	/**
 	 * The live MCP connections the advisor's Cursor resource frames answer from.
 	 *
@@ -591,6 +595,7 @@ export interface ContextUsageBreakdown {
 	systemPromptTokens: number;
 	systemToolsTokens: number;
 	systemContextTokens: number;
+	instructionFilesTokens: number;
 	skillsTokens: number;
 	messagesTokens: number;
 }

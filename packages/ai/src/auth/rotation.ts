@@ -126,7 +126,7 @@ export class RateLimits implements LimitsApi {
 		const rankingContext: CredentialRankingContext = { modelId };
 		const defaultBlockScope = strategy?.blockScope?.(rankingContext);
 		const blockScope = blockScopeOverride ?? defaultBlockScope;
-		const requestBlockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, defaultBlockScope);
+		const requestBlockScopes = credentialBlockScopesForRequest(strategy, rankingContext, defaultBlockScope);
 		const siblingBlockScopes =
 			blockScopeOverride && !requestBlockScopes.includes(blockScopeOverride)
 				? [...requestBlockScopes, blockScopeOverride]
@@ -430,8 +430,9 @@ export class RateLimits implements LimitsApi {
 	 * - usage-limit / account-rate-limit error → {@link RateLimits.markReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
-	 * - exact model-entitlement denial (Codex ChatGPT account or Cursor plan) →
-	 *   temporarily block only that requested model, then rotate.
+	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan, or
+	 *   Anthropic model-not-found 404) → temporarily block only that requested
+	 *   model, then rotate. A denial naming another model or provider changes nothing.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
@@ -453,8 +454,10 @@ export class RateLimits implements LimitsApi {
 		const error = options?.error;
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-		const exactCursorModelPolicy = AIError.isCursorPlanAccountPolicyError(error, provider);
-		const accountPolicy = exactCursorModelPolicy || AIError.isAccountPolicyError(error);
+		// A provider-controlled model id must match the provider and request before any mutation.
+		if (AIError.isMismatchedModelEntitlementDenial(error, provider, options?.modelId)) return { switched: false };
+		const modelPolicy = AIError.isModelEntitlementDenial(error, provider, options?.modelId);
+		const accountPolicy = modelPolicy || AIError.isAccountPolicyError(error);
 		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
@@ -463,6 +466,7 @@ export class RateLimits implements LimitsApi {
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,
+				baseUrl: options?.baseUrl,
 				modelId: options?.modelId,
 				apiKey: options?.apiKey,
 				credentialId: options?.credentialId,
@@ -471,25 +475,15 @@ export class RateLimits implements LimitsApi {
 			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
 		}
 
-		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
-		const exactCodexModelPolicy =
-			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, options?.modelId);
-		const exactModelPolicy = exactCodexModelPolicy || exactCursorModelPolicy;
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
-			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
+			allowStaleOAuthBearer: accountPolicy,
 		});
 		if (!sessionCredential) return { switched: false };
-		// The exact sentence is provider-controlled input. A non-Codex provider,
-		// absent request model, or mismatched model must not turn it into either a
-		// global block or a hard-auth invalidation.
-		if (deniedModel !== undefined && !exactCodexModelPolicy) return { switched: false };
-		if (exactModelPolicy || accountPolicy) {
-			const modelPolicyScope = exactModelPolicy
-				? modelAccountPolicyBlockScope(provider, options?.modelId)
-				: undefined;
-			if (exactModelPolicy && modelPolicyScope === undefined) return { switched: false };
+		if (accountPolicy) {
+			const modelPolicyScope = modelPolicy ? modelAccountPolicyBlockScope(options?.modelId) : undefined;
+			if (modelPolicy && modelPolicyScope === undefined) return { switched: false };
 			const routing = this.#credentialBlockRouting(
 				provider,
 				sessionCredential.type,
