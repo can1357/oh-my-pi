@@ -5,12 +5,17 @@
 ### Added
 
 - Added the `systemPromptTemplates` setting: map model-selector substrings to Handlebars template files (start from the bundled `system-prompt.md`) to replace the system prompt for matching models; the prompt re-renders when you switch models, and a missing, empty, or malformed template falls back to the bundled prompt with a warning ([#17835](https://github.com/can1357/oh-my-pi/pull/17835) by [@DeprecatedLuke](https://github.com/DeprecatedLuke))
+- `task.steps`: task items take ordered `steps` instead of one `task`; the subagent gets the first step, and each later step only after it finishes the previous one (past four steps, the earlier messages carry two or more). The last step's result is the task's result, and `omp --restore` goes on with the steps an interrupted subagent had left
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 - GitHub Actions watches now show per-step progress, states, and durations, with Ctrl+O expansion and native Tern Surface Protocol views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Changed
 
 - `edit.modelVariants` now picks the longest matching model pattern instead of the first, so a specific key like `openai/gpt-5` wins over `gpt` whatever the config order ([#17835](https://github.com/can1357/oh-my-pi/pull/17835) by [@DeprecatedLuke](https://github.com/DeprecatedLuke))
+
+### Removed
+
+- Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 
 ### Fixed
 
