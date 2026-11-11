@@ -23,7 +23,7 @@
 
 ### Fixed
 
-- When Chrome detaches omp from a relay tab omp opened and omp cannot reattach, the error now says omp closed that tab and to open a new one, instead of saying the tab may still be open and to navigate it in Chrome
+- When Chrome detaches omp from a relay tab omp opened and omp cannot reattach, the error now says omp closed that tab and to open a new one, instead of saying the tab may still be open and to navigate it in Chrome ([#18832](https://github.com/can1357/oh-my-pi/pull/18832) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
