@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
+import { applyStrip, planStrip } from "@oh-my-pi/pi-coding-agent/cli/gc-strip";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -3324,5 +3325,45 @@ describe("runGcCommand replay data stripping", () => {
 			.split("\n")
 			.slice(0, -1);
 		expectStripped(lines, replayLines(id));
+	});
+
+	test("applyStrip refuses to replace a transcript or archive that changed since planStrip", async () => {
+		const file = await writeReplaySession(Bun.randomUUIDv7());
+		const plan = await planStrip(file, Date.now());
+		expect(plan).toBeDefined();
+		await fs.appendFile(file, `${prompt("appended after plan")}\n`);
+		const afterAppend = await Bun.file(file).text();
+
+		expect(await applyStrip(plan!, new FileSessionStorage())).toBe(false);
+		expect(await Bun.file(file).text()).toBe(afterAppend);
+		expect((await fs.readdir(path.dirname(file))).filter(name => name.endsWith(".tmp"))).toEqual([]);
+
+		const archiveId = Bun.randomUUIDv7();
+		const archive = path.join(root, "archive", "sessions", "project", `${archiveId}.jsonl.gz`);
+		await fs.mkdir(path.dirname(archive), { recursive: true });
+		await Bun.write(archive, gzipSync(`${replayLines(archiveId).join("\n")}\n`));
+		await agePath(archive, 40);
+		const archivePlan = await planStrip(archive, Date.now());
+		expect(archivePlan).toBeDefined();
+		const updatedArchive = gzipSync(`${[...replayLines(archiveId), prompt("appended after plan")].join("\n")}\n`);
+		await Bun.write(archive, updatedArchive);
+
+		expect(await applyStrip(archivePlan!, new FileSessionStorage())).toBe(false);
+		expect(await Bun.file(archive).bytes()).toEqual(new Uint8Array(updatedArchive));
+		expect((await fs.readdir(path.dirname(archive))).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	test("refuses to strip a hard-linked transcript so its links stay intact", async () => {
+		const file = await writeReplaySession(Bun.randomUUIDv7());
+		const linked = path.join(root, "linked-transcript.jsonl");
+		await fs.link(file, linked);
+		const before = await Bun.file(file).text();
+
+		expect(await planStrip(file, Date.now())).toBeUndefined();
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ scanned: 1, wouldStrip: 0, stripped: 0, records: 0, errors: [] });
+		expect(await Bun.file(file).text()).toBe(before);
+		expect(await Bun.file(linked).text()).toBe(before);
 	});
 });
