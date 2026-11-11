@@ -78,6 +78,9 @@ export class RpcNextMessagePredictor {
 			if (enabled || this.#controller.activeId === undefined) return;
 			if ((this.#controller.choices?.length ?? 0) !== 1) this.#controller.cancel();
 		});
+		// Some appends announce themselves with no session event (an extension's hidden message, a
+		// contextual bash result): check for a stale offer after every entry, not only from `observe()`.
+		session.sessionManager.subscribeEntryAppended(() => this.#retireStale());
 	}
 
 	/**
@@ -136,7 +139,11 @@ export class RpcNextMessagePredictor {
 			this.#controller.cancel();
 			return;
 		}
-		// An offered prediction the conversation moved past; a pending request settles `stale` on its own.
+		this.#retireStale();
+	}
+
+	/** Retire an offered prediction the conversation moved past; a pending request settles `stale` on its own. */
+	#retireStale(): void {
 		if (this.#offered !== undefined && this.#controller.offeredId !== this.#offered) this.#controller.cancel();
 	}
 

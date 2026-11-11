@@ -104,6 +104,15 @@ function harness(
 			messages.push(message);
 			predictor.observe({ type: "message_end", message } as AgentSessionEvent);
 		},
+		/**
+		 * A message lands with no session event, as a hidden extension message (`display: false`) or a
+		 * contextual bash result does: the live history and the journal grow, nothing is emitted.
+		 */
+		appendSilently(content: string) {
+			const message = userMessage(content);
+			messages.push(message);
+			sessionManager.appendMessage(message);
+		},
 	};
 }
 
@@ -158,6 +167,15 @@ describe("RpcNextMessagePredictor", () => {
 		advance("deploy it");
 		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: id!, status: "retired" });
 		expect(frames).toHaveLength(2);
+	});
+
+	it("retires an offer when a message lands without any session event", async () => {
+		const { predictor, frames, reply, appendSilently } = harness();
+		const id = predictor.request()!;
+		await reply(0, "ship it");
+
+		appendSilently("hidden extension context");
+		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: id, status: "retired" });
 	});
 
 	it("settles a reply that arrives after the conversation moved on as stale, with no choices", async () => {

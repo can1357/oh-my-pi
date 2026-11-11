@@ -1290,12 +1290,13 @@ which the host must stop showing it and must not accept it. It retires when
 the host cancels it or requests another, when the host sends `prompt` (builtins
 such as `/handoff` included), `steer`, `follow_up`, `abort_and_prompt`, `bash` (excluded or not) or
 `handoff`, as soon as the server reads that command (even while it waits behind
-an earlier one), when a new message lands, when user input
+an earlier one), when a new message lands (including one no session event
+announces, such as an extension's hidden `display: false` message), when user input
 is queued (an extension's `steer` or `followUp` included), when a run or
 a compaction (manual or automatic) starts, and on `new_session`, `switch_session`, `branch`,
 `fork`, `navigate_tree`, `open_session`, extension-initiated session changes,
 and shutdown. A pending prediction is cancelled at the same points except one:
-when a new message lands without a run starting (an extension's display-only
+when a new message lands without a run starting (an extension's custom
 message, say), its side turn runs on and settles `stale`. Turning `composer.predictions` off while the process runs (a
 settings write or reload) cancels a pending prediction and retires an offered
 one; turning `composer.predictionAlternatives` off does the same for a pending
