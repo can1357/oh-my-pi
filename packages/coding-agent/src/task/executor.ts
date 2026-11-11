@@ -5106,11 +5106,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
-			// Bill the auto-prewalk judgment to the child session it decided for.
-			const journalJudgment = journalJudgmentUsage(sessionManager);
-			if (journalJudgment) {
-				for (const usage of judgmentUsage) journalJudgment(usage);
-			}
 			if (preparedSession) openedSessionManager = sessionManager;
 			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
@@ -5186,6 +5181,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(model)
 			) {
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
+			}
+			// Bill the auto-prewalk judgment to the child session it decided for, only now:
+			// an earlier entry would make the SDK treat this fresh session as resumed and
+			// skip persisting its starting model, effort and service tier.
+			const journalJudgment = journalJudgmentUsage(sessionManager);
+			if (journalJudgment) {
+				for (const usage of judgmentUsage) journalJudgment(usage);
 			}
 			sessionCreatedAt = performance.now();
 

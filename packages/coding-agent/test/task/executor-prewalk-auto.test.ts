@@ -206,6 +206,7 @@ describe("runSubprocess auto-prewalk through a real child session", () => {
 	it("stays on the planning model when the judge picks primary", async () => {
 		const judged = stubJudge("primary", { prewalk: 0.1, primary: 0.8, direct: 0.1 });
 		const ledger = vi.spyOn(SessionManager.prototype, "appendModelUsage");
+		const effortWrites = vi.spyOn(SessionManager.prototype, "appendThinkingLevelChange");
 		const { exitCode, requests } = await spawn();
 		expect(exitCode).toBe(0);
 		expect(judged).toHaveLength(1);
@@ -213,5 +214,7 @@ describe("runSubprocess auto-prewalk through a real child session", () => {
 		expect(requests.every(model => model === PLANNER)).toBe(true);
 		// An unarmed judgment is still a billed judgment.
 		expect(autoPrewalkBills(ledger)).toBe(1);
+		// The billed judgment must not make the fresh child look resumed: the SDK still persists its starting effort.
+		expect(effortWrites).toHaveBeenCalled();
 	}, 30_000);
 });
