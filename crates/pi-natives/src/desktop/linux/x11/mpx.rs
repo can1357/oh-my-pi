@@ -81,6 +81,9 @@ const OWNER_PREFIX: &str = "OMP MPX v1.";
 
 static NONCE: AtomicU16 = AtomicU16::new(1);
 
+#[cfg(test)]
+type ReleaseEvents = std::cell::RefCell<Box<dyn FnMut() -> Option<Event> + Send>>;
+
 pub(super) struct Mpx {
 	conn:            RustConnection,
 	root:            Window,
@@ -103,7 +106,7 @@ pub(super) struct Mpx {
 	/// Replaces only raw-event polling in typing regressions; emission, keymap,
 	/// focus, error mapping and the session gate still run normally.
 	#[cfg(test)]
-	release_events:  Option<std::cell::RefCell<Box<dyn FnMut() -> Option<Event> + Send>>>,
+	release_events:  Option<ReleaseEvents>,
 }
 
 /// The uinput keyboard slave, created on the first keyboard or modifier use
