@@ -1598,6 +1598,61 @@ mod tests {
 			.expect_err("hand-back intervention cannot report success");
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		keys_received();
+
+		// A WM can leave its active property at the previous window after
+		// our request has already moved core focus to the takeover target.
+		let previous = app.generate_id().expect("previous window");
+		app.create_window(
+			x11rb::COPY_DEPTH_FROM_PARENT,
+			previous,
+			root,
+			110,
+			0,
+			100,
+			100,
+			0,
+			WindowClass::INPUT_OUTPUT,
+			x11rb::COPY_FROM_PARENT,
+			&CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
+		)
+		.expect("previous window");
+		app.map_window(previous).expect("map previous");
+		app.change_property32(
+			x11rb::protocol::xproto::PropMode::REPLACE,
+			root,
+			input.atoms.net_active_window,
+			AtomEnum::WINDOW,
+			&[previous],
+		)
+		.expect("lagging WM property");
+		app.set_input_focus(InputFocus::PARENT, previous, CURRENT_TIME)
+			.expect("previous focus");
+		app.sync().expect("previous is focused");
+		let error = input
+			.with_foreground::<()>(target, Duration::ZERO, |_| {
+				panic!("unconfirmed activation must not run the body")
+			})
+			.expect_err("the WM never confirms activation");
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert_eq!(input.wm().input_focus(), Some((previous, InputFocus::PARENT)));
+		assert!(input.takeover_presses.is_none());
+		for event in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
+			user
+				.xtest_fake_input(event, code, CURRENT_TIME, root, 0, 0, 0)
+				.expect("user resumes after activation error");
+		}
+		user.sync().expect("user input reached the server");
+		app.sync().expect("user input delivered");
+		let recipients: Vec<_> = std::iter::from_fn(|| app.poll_for_event().expect("event"))
+			.filter_map(|event| match event {
+				x11rb::protocol::Event::KeyPress(event) => Some(event.event),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(recipients, [previous], "the user's key must not reach the takeover target");
+		app.delete_property(root, input.atoms.net_active_window)
+			.expect("stop tracking activation");
+		app.sync().expect("property removed");
 		// Lost observation refuses further input, even without user presses.
 		input.activity = None;
 		input.watch_user().expect("fresh listener");
