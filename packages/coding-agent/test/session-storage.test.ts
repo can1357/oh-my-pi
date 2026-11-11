@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { purgeDeletedSessionRows } from "@oh-my-pi/pi-coding-agent/session/session-db-purge";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
@@ -341,6 +343,87 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(rmSpy).toHaveBeenCalledWith(artifactsDir, { recursive: true, force: true });
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(artifactsDir)).toBe(true);
+	});
+
+	it("purges history and stats rows for the deleted session (#18674)", async () => {
+		const marker = "delete-me-marker-purge-regression";
+		const sessionId = "purge-regression-session";
+		const projectDir = path.join(tempDir, "project");
+		await fsp.mkdir(projectDir, { recursive: true });
+		const sessionPath = path.join(projectDir, `20260101_${sessionId}.jsonl`);
+		await Bun.write(
+			sessionPath,
+			`${JSON.stringify({ type: "session", id: sessionId, timestamp: "2025-01-01T00:00:00Z", cwd: projectDir })}\n${JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: marker } })}\n`,
+		);
+		// Nested subagent transcript under the artifacts dir, like a real run leaves.
+		const nestedPath = path.join(sessionPath.slice(0, -".jsonl".length), "subagent.jsonl");
+		await fsp.mkdir(path.dirname(nestedPath), { recursive: true });
+		await Bun.write(nestedPath, "{}\n");
+
+		const historyDbPath = path.join(tempDir, "history.db");
+		const historyDb = new Database(historyDbPath);
+		historyDb.run(
+			"CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL, session_id TEXT)",
+		);
+		historyDb.run("CREATE VIRTUAL TABLE history_fts USING fts5(prompt, content='history', content_rowid='id')");
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES (?, ?)", [marker, sessionId]);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES ('other prompt', 'other-session')");
+		historyDb.run("INSERT INTO history_fts(history_fts) VALUES('rebuild')");
+		historyDb.run("CREATE TABLE session_titles (session_id TEXT PRIMARY KEY, title TEXT NOT NULL)");
+		historyDb.run("INSERT INTO session_titles (session_id, title) VALUES (?, 'old title')", [sessionId]);
+		historyDb.run("INSERT INTO session_titles (session_id, title) VALUES ('other-session', 'live title')");
+		historyDb.run("CREATE TABLE session_recaps (id INTEGER PRIMARY KEY, session_id TEXT, cwd TEXT, recap TEXT)");
+		historyDb.run("INSERT INTO session_recaps (session_id, cwd, recap) VALUES (?, '/p', 'old recap')", [sessionId]);
+		historyDb.run("INSERT INTO session_recaps (session_id, cwd, recap) VALUES ('other-session', '/p', 'live recap')");
+		historyDb.close();
+
+		const statsDbPath = path.join(tempDir, "stats.db");
+		const statsDb = new Database(statsDbPath);
+		for (const table of ["messages", "user_messages", "tool_calls", "file_offsets"]) {
+			statsDb.run(`CREATE TABLE ${table} (session_file TEXT NOT NULL)`);
+			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(sessionPath);
+			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(nestedPath);
+			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(path.join(tempDir, "keep.jsonl"));
+		}
+		statsDb.close();
+
+		purgeDeletedSessionRows(sessionPath, { historyDbPath, statsDbPath });
+
+		const check = new Database(historyDbPath);
+		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
+		const titles = check.query("SELECT session_id FROM session_titles").all() as Array<{ session_id: string }>;
+		const recaps = check.query("SELECT session_id FROM session_recaps").all() as Array<{ session_id: string }>;
+		const fts = check
+			.query(
+				"SELECT h.prompt AS prompt FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?",
+			)
+			.all(`"${marker}"`) as Array<{ prompt: string }>;
+		check.close();
+		expect(prompts.map(row => row.prompt)).toEqual(["other prompt"]);
+		expect(titles.map(row => row.session_id)).toEqual(["other-session"]);
+		expect(recaps.map(row => row.session_id)).toEqual(["other-session"]);
+		expect(fts).toEqual([]);
+
+		const statsCheck = new Database(statsDbPath);
+		for (const table of ["messages", "user_messages", "tool_calls", "file_offsets"]) {
+			const rows = statsCheck.query(`SELECT session_file FROM ${table}`).all() as Array<{
+				session_file: string;
+			}>;
+			expect(rows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
+		}
+		statsCheck.close();
+	});
+
+	it("deleteSessionWithArtifacts removes the transcript and its artifacts dir", async () => {
+		const sessionPath = await createSessionFile("purge-wires-delete");
+		const nestedDir = sessionPath.slice(0, -".jsonl".length);
+		await fsp.mkdir(nestedDir, { recursive: true });
+		await Bun.write(path.join(nestedDir, "subagent.jsonl"), "{}\n");
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(nestedDir)).toBe(false);
 	});
 });
 

@@ -23,6 +23,7 @@ import {
 	type SessionTitleUpdate,
 	serializeTitleSlot,
 } from "./session-title-slot";
+import { purgeDeletedSessionRows } from "./session-db-purge";
 
 /** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
 const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
@@ -1425,6 +1426,11 @@ export class FileSessionStorage implements SessionStorage {
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+		// Purge history/stats rows before the transcript is gone: the purge
+		// reads the session id from the live header (#18674). Best-effort, so
+		// a busy dashboard store never fails the delete itself.
+		purgeDeletedSessionRows(sessionPath);
+
 		// Delete the session file itself
 		await this.unlink(sessionPath);
 
