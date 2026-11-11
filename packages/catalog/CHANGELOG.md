@@ -21,6 +21,9 @@
 
 - Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
 - Devin requests now identify as Devin CLI 3000.12.43, the current stable release, instead of 3000.11.205 ([#18766](https://github.com/can1357/oh-my-pi/pull/18766) by [@will-bogusz](https://github.com/will-bogusz))
+### Removed
+
+- Removed Devin's retired SWE-1.6 Fast from the models omp lists before Devin's live model list loads (first start, or when Devin is unreachable) ([#18795](https://github.com/can1357/oh-my-pi/pull/18795) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.7] - 2026-11-10
 
