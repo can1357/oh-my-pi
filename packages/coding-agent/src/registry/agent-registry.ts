@@ -34,6 +34,8 @@ export type AgentKind = "main" | "sub" | "advisor";
  * accepted result never terminalized.
  */
 export interface AgentRunLifecycle {
+	/** When the session reported the current run's start (see {@link AgentRegistryApi.startRun}). */
+	runStartedAt?: number;
 	/** When the run produced its final response (an accepted terminal `yield`). */
 	responseAt?: number;
 	/** When the run's final result was accepted by its driver. */
@@ -146,6 +148,8 @@ export interface AgentRegistryApi {
 	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean;
 	/** Transition `id` to `status` when it still matches `expected`. */
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
+	/** Enter a new run on `id`, `running` already or not, when it still matches `expected`. */
+	startRun(id: string, expected?: AgentRefExpectation): boolean;
 	/** Record that the current run handed over its final result. */
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
 	/** Accepted-but-running refs whose run already finished. */
@@ -332,6 +336,22 @@ export class AgentRegistry implements AgentRegistryApi {
 	}
 
 	/**
+	 * Enter a new run on `id`. A session can start a wake or follow-up run
+	 * before the previous run's `idle` arrives, so the ref is still `running`
+	 * and {@link setStatus} keeps its lifecycle. This also rotates the
+	 * run-scoped milestones in that case, and stamps `runStartedAt`.
+	 */
+	startRun(id: string, expected?: AgentRefExpectation): boolean {
+		const wasRunning = this.#refs.get(id)?.status === "running";
+		if (!this.setStatus(id, "running", expected)) return false;
+		const ref = this.#refs.get(id);
+		if (!ref) return false;
+		ref.lifecycle = { runStartedAt: Date.now() };
+		if (wasRunning) this.#emit({ type: "metadata_changed", ref });
+		return true;
+	}
+
+	/**
 	 * Record that this agent's run produced and handed over its final result,
 	 * and terminalize the ref when no turn is in flight. Acceptance is the
 	 * executor's run boundary: the result is settled, so a ref still `running`
@@ -345,11 +365,16 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * ref re-entered `running`).
 	 *
 	 * Returns false when the id is gone, aborted, or no longer owned by
-	 * `expected`; those cases must not stamp a newer generation.
+	 * `expected`, or when the session started a newer run after `responseAt`;
+	 * those cases must not stamp a newer generation or run.
 	 */
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
+		// The result came from a run that ended before the current one started (its driver
+		// awaited while a wake began): it does not settle the run in flight.
+		const runStartedAt = ref.status === "running" ? ref.lifecycle?.runStartedAt : undefined;
+		if (responseAt !== undefined && runStartedAt !== undefined && runStartedAt > responseAt) return false;
 		const now = Date.now();
 		ref.lifecycle = {
 			...ref.lifecycle,
@@ -466,7 +491,8 @@ export class AgentRegistry implements AgentRegistryApi {
 	/** Mirror a session's authoritative run-state notifications into its owned registry ref. */
 	syncSessionStatus(id: string, session: AgentSessionHandle): () => void {
 		const unsubscribe = session.subscribeRunState(status => {
-			this.setStatus(id, status, session);
+			if (status === "running") this.startRun(id, session);
+			else this.setStatus(id, status, session);
 		});
 		return unsubscribe;
 	}

@@ -4,7 +4,7 @@
  * milestones must be recorded. Milestones are run-scoped, so a ref reused by a
  * follow-up or wake turn never reports a previous run's acceptance.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
@@ -22,8 +22,28 @@ describe("AgentRegistry final-result acceptance", () => {
 	});
 
 	afterEach(() => {
+		setSystemTime();
 		AgentRegistry.resetGlobalForTests();
 	});
+
+	/** A streaming session whose run-state notifications the test drives, mirrored into the registry. */
+	function syncedSession(id: string) {
+		const listeners = new Set<(state: "running" | "idle") => void>();
+		const session = {
+			isStreaming: true,
+			subscribeRunState(listener: (state: "running" | "idle") => void) {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+		} as unknown as AgentSession;
+		const ref = registerRunning(id, session);
+		registry.syncSessionStatus(id, session);
+		const startRun = (at: number) => {
+			setSystemTime(at);
+			for (const listener of listeners) listener("running");
+		};
+		return { ref, startRun };
+	}
 
 	function registerRunning(id: string, session: AgentSession | null) {
 		return registry.register({ id, displayName: id, kind: "sub", session, status: "running" });
@@ -102,5 +122,31 @@ describe("AgentRegistry final-result acceptance", () => {
 		expect(registry.markResultAccepted("PolicyCommand", sessionStub(false), ref.createdAt)).toBe(false);
 		expect(registry.get("PolicyCommand")?.lifecycle?.acceptedAt).toBeUndefined();
 		expect(registry.get("PolicyCommand")?.status).toBe("running");
+	});
+
+	it("clears an accepted run's milestones when the session starts its next run without going idle", () => {
+		const { ref, startRun } = syncedSession("PolicyCommand");
+		startRun(1_000);
+		expect(registry.markResultAccepted("PolicyCommand", ref, 2_000)).toBe(true);
+		expect(registry.get("PolicyCommand")?.lifecycle?.acceptedAt).toBeNumber();
+
+		// A wake run starts before the first run's `idle` arrives.
+		startRun(3_000);
+
+		expect(registry.get("PolicyCommand")?.status).toBe("running");
+		expect(registry.get("PolicyCommand")?.lifecycle?.acceptedAt).toBeUndefined();
+	});
+
+	it("does not stamp a running wake run with the acceptance of the run before it", () => {
+		const { ref, startRun } = syncedSession("PolicyCommand");
+		startRun(1_000);
+		// The first run yields at 2_000, but its driver records acceptance only after a wake run started.
+		startRun(3_000);
+
+		expect(registry.markResultAccepted("PolicyCommand", ref, 2_000)).toBe(false);
+		expect(registry.get("PolicyCommand")?.status).toBe("running");
+		expect(registry.get("PolicyCommand")?.lifecycle?.acceptedAt).toBeUndefined();
+		// The wake run's own result still settles it.
+		expect(registry.markResultAccepted("PolicyCommand", ref, 4_000)).toBe(true);
 	});
 });
