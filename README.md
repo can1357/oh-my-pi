@@ -639,6 +639,15 @@ For a non-interactive smoke check:
 bun dev -- --version
 ```
 
+#### Apple Silicon Nix builds
+
+On Apple Silicon, `nix build .#omp` compiles the Apple Foundation Models bridge
+with nixpkgs' Swift compiler and `apple-sdk_27`; host Xcode or Command Line Tools
+are never used, and the build fails rather than shipping without the bridge.
+Both are build-only dependencies. Using the models still requires macOS 27+, an
+eligible device, and Apple Intelligence enabled. To build without the bridge, use
+`omp.override { withAppleFm = false; }`.
+
 ### Debug Command
 
 `/debug` opens tools for debugging, reporting, and profiling.
