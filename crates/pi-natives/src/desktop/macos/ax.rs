@@ -1157,7 +1157,7 @@ impl AxBackend for MacAx {
 		// the ref fingerprint: the user can pick this app while it blocks.
 		let started_in_background = entry_front.known_behind(pid);
 		skylight::with_background_guard(pid, || {
-			require_read_as(|| read_as(element))?;
+			require_element_read_as(element)?;
 			let wid = element_window(element)
 				.as_deref()
 				.and_then(window_id)
@@ -1206,7 +1206,7 @@ impl AxBackend for MacAx {
 		let element = mac_handle(h)?;
 		// The guard reads the user's front app before the element is read.
 		skylight::with_background_guard(element_pid(element)?, || {
-			require_read_as(|| read_as(element))?;
+			require_element_read_as(element)?;
 			control::intervention::check_press()?;
 			set_focused(element)
 		})
@@ -1453,7 +1453,14 @@ fn perform_choosing(
 	// Read before any probe of the target, as for background input
 	// ([`input::EntryFront`]).
 	let entry_front = input::EntryFront::now();
-	require_read_as(|| read_as(element))?;
+	let raise = is_raise_action(action);
+	if raise {
+		// Raising explicitly changes the front window; only its ref's
+		// identity, not the background-input boundary, constrains it.
+		require_read_as(|| read_as(element))?;
+	} else {
+		require_element_read_as(element)?;
+	}
 	let actions = copy_strings_from_action_names(element)?;
 	choose_action(
 		&actions,
@@ -1463,7 +1470,7 @@ fn perform_choosing(
 			// AXRaise is an explicit request to change stacking, including the
 			// takeover preparation path. Other semantic actions must stay
 			// background.
-			if is_raise_action(action) {
+			if raise {
 				if path.is_some() {
 					return Err(DesktopError::invalid_target(
 						"AXRaise opens no menu to choose an item from",
@@ -1473,7 +1480,14 @@ fn perform_choosing(
 			}
 			let pid = element_pid(element)?;
 			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
-			let perform = || press_into_view(native, scroll, |action| send_action(element, action));
+			let perform = || {
+				entry_front.require_behind(
+					skylight::front_pid(),
+					pid,
+					window_id(element).unwrap_or_default(),
+				)?;
+				press_into_view(native, scroll, |action| send_action(element, action))
+			};
 			// A menu that a background application opens takes the keyboard from
 			// the user's app, so it is closed before the action returns; a
 			// frontmost application's menu stays open for the next call unless an
@@ -1740,6 +1754,28 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 
 fn verify_text_value(element: &AXUIElement, sent: &str, expected: &str) -> CoreResult<()> {
 	text_readback(sent, expected, copy_string(element, "AXValue").as_deref(), is_secure(element))
+}
+
+/// Every pre-action fingerprint probe must preserve the front-app boundary,
+/// even on paths whose longer-lived background guard starts after the probe.
+pub(super) fn require_element_read_as(element: &AXUIElement) -> CoreResult<()> {
+	require_read_as(|| {
+		checked_ref_read(skylight::front_pid, || Ok((element_pid(element)?, read_as(element)?)))
+	})
+}
+
+fn checked_ref_read(
+	front: impl Fn() -> Option<libc::pid_t>,
+	probe: impl FnOnce() -> CoreResult<(libc::pid_t, Option<AxProps>)>,
+) -> CoreResult<Option<AxProps>> {
+	let (entry, (pid, props)) = input::EntryFront::before(&front, probe)?;
+	if entry.behind(pid) && front() == Some(pid) {
+		return Err(DesktopError::user_intervened(
+			"the element's application came to the front while its reference was checked, so nothing \
+			 was sent",
+		));
+	}
+	Ok(props)
 }
 
 /// What `element` reads as now, for [`require_read_as`]: its role and labels
@@ -2768,6 +2804,29 @@ mod tests {
 		);
 		assert!(identity(&lone).is_none());
 		assert!(!answered(&lone.get(CHILDREN)));
+	}
+
+	#[test]
+	fn a_ref_probe_refuses_when_the_user_picks_its_app_while_it_blocks() {
+		use super::checked_ref_read;
+		use crate::desktop::error::ErrorCode;
+
+		let front = std::cell::Cell::new(Some(9));
+		let sent = std::cell::Cell::new(false);
+		let result = checked_ref_read(
+			|| front.get(),
+			|| {
+				front.set(Some(7));
+				Ok((7, None))
+			},
+		)
+		.map(|_| sent.set(true));
+		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
+		assert!(!sent.get());
+		// A target already in front, or one that stays behind, still takes
+		// its ordinary action even when its fingerprint was unanswered.
+		assert!(checked_ref_read(|| Some(7), || Ok((7, None))).is_ok());
+		assert!(checked_ref_read(|| Some(9), || Ok((7, None))).is_ok());
 	}
 
 	#[test]

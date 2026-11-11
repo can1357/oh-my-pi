@@ -15,7 +15,7 @@ use super::{
 	AxTextSelection, CoreResult, DesktopError, TextSelectRequest, TextSurface, Utf16Range,
 	attribute_settable, ax_result, control, copy_bool, copy_held_attribute, copy_parameterized,
 	copy_range, copy_string, element_pid, innermost_window_id, may_borrow_focus, open_menu,
-	popup::poll, probe_application, process, read_as, require_read_as, skylight, text_surface,
+	popup::poll, probe_application, process, require_element_read_as, skylight, text_surface,
 	utf16_slice,
 };
 
@@ -33,7 +33,7 @@ pub(super) fn select(
 	// Selecting moves the caret that typing into a focused field replaces, so
 	// an app the user brings forward during the call is left to them.
 	let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
-	require_read_as(|| read_as(element))?;
+	require_element_read_as(element)?;
 	// A destroyed element throws `StaleRef` here, as from every element
 	// operation, rather than reading as an unsettable one.
 	let role = copy_held_attribute(element, "AXRole")?
