@@ -551,17 +551,23 @@ export class HtmlFormDialog implements Component, Focusable {
 			if (event.act === "cancel") this.#cancel();
 			else if (event.act === "hide" || event.act === "show") this.#setHidden(event.act === "hide");
 			else if (this.#hidden) return;
-			else if (event.act === "submit") this.#submit();
-			else if (event.act === "next") this.#showTab(this.#tab + 1);
-			else if (event.act === "note") this.#noteFromPointer(event.key);
-			else if (event.act.startsWith(EDIT_ACT)) {
-				const field = this.#form.fields[Number(event.act.slice(EDIT_ACT.length))];
-				const stop = this.#stops.findIndex(candidate => candidate.kind === "text" && candidate.field === field);
-				if (stop !== -1) this.#setFocus(stop);
+			else {
+				// A pointer action on the dialog is an explicit hand-off from the draft.
+				this.#releaseGuardForPointer();
+				if (event.act === "submit") this.#submit();
+				else if (event.act === "next") this.#showTab(this.#tab + 1);
+				else if (event.act === "note") this.#noteFromPointer(event.key);
+				else if (event.act.startsWith(EDIT_ACT)) {
+					const field = this.#form.fields[Number(event.act.slice(EDIT_ACT.length))];
+					const stop = this.#stops.findIndex(candidate => candidate.kind === "text" && candidate.field === field);
+					if (stop !== -1) this.#setFocus(stop);
+				}
 			}
 			return;
 		}
 		if (this.#hidden || (event.type !== "select" && event.type !== "activate")) return;
+		// A click on a row (the Other one especially) takes the keys the same way up/down do.
+		this.#releaseGuardForPointer();
 		const leaf = leafKey(event.key);
 		if (leaf === "tabs") {
 			const index = event.item === REVIEW_ID ? this.#tabs.length : itemIndex(event.item, "t");
@@ -908,6 +914,13 @@ export class HtmlFormDialog implements Component, Focusable {
 	/** True while a draft that predates the form still owns typing. */
 	#guardBlocks(): boolean {
 		return !this.#guardReleased && (this.#options.inputGuard?.isBlocked() ?? false);
+	}
+
+	/** A pointer pick or action on the form is the user handing the keys over, as up/down does. */
+	#releaseGuardForPointer(): void {
+		if (!this.#guardBlocks()) return;
+		this.#guardReleased = true;
+		this.#changed();
 	}
 
 	#guardHint(guard: AskDialogInputGuard): string {

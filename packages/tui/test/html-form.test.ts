@@ -995,6 +995,37 @@ describe("html form", () => {
 			expect(form.data()).toMatchObject({ db: "Fly Postgres HA" });
 		});
 
+		it("natively: clicking Other hands the keys over even while a composer draft owns typing", () => {
+			const typed: string[] = [];
+			const { form } = dialog(DB_FORM, {
+				inputGuard: {
+					isBlocked: () => true,
+					handleInput: (data: string) => typed.push(data),
+					hint: "typing edits your prompt",
+				},
+			});
+			const radios = findPath(form.describe(CX), node => node.k === "list" && node.key === "f0")!;
+			form.handleNativeEvent({ type: "select", key: radios, item: "other" });
+			for (const key of ["F", "l", "y"]) form.handleInput(key);
+			expect(form.data()).toMatchObject({ db: "Fly" });
+			expect(typed).toEqual([]);
+		});
+
+		it("natively: clicking a text well hands the keys over even while a composer draft owns typing", () => {
+			const typed: string[] = [];
+			const { form } = dialog(DB_FORM, {
+				inputGuard: {
+					isBlocked: () => true,
+					handleInput: (data: string) => typed.push(data),
+					hint: "typing edits your prompt",
+				},
+			});
+			form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
+			form.handleInput("5");
+			expect(form.data()).toMatchObject({ workers: 54 });
+			expect(typed).toEqual([]);
+		});
+
 		it("natively: keys act immediately even though rows were never rendered", () => {
 			const form = new HtmlFormDialog(parseHtmlForm(DB_FORM), { onSubmit: vi.fn(), onCancel: vi.fn() });
 			form.focused = true;
