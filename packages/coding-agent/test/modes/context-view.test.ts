@@ -7,7 +7,8 @@ import { Settings } from "../../src/config/settings";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import { buildSessionContextView } from "../../src/session/context-view";
-import { buildSystemPrompt, type SystemPromptSources } from "../../src/system-prompt";
+import { buildSystemPrompt } from "../../src/system-prompt";
+import { computeNonMessageBreakdown, type SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { Skill } from "../../src/extensibility/skills";
 import type { ContextViewData } from "@oh-my-pi/pi-tui/chrome/context-view-model";
 
@@ -158,8 +159,8 @@ describe("context snapshot prompt sources", () => {
 			skills,
 		});
 	const entryTexts = (data: ContextViewData, id: string) => category(data, id).entries.map(entry => entry.text);
-	const changedNotice =
-		"The system prompt changed after it was built (e.g. by an extension hook or SDK callback); sources in changed blocks stay in System Prompt.";
+	const changedNotice = (left: string) =>
+		`${left} in System Prompt: the system prompt changed after it was built (e.g. by an extension hook or SDK callback).`;
 
 	it.each([
 		{ name: "bundled prompt", customPrompt: undefined, skill: "- fixture: Use <T> & {{literal}} without expansion" },
@@ -206,6 +207,15 @@ describe("context snapshot prompt sources", () => {
 			"skills",
 			"instruction-files",
 		]);
+
+		// The status line counts the same sources, so its categories match the viewer's.
+		const totals = (id: string) => category(data, id).entries.reduce((sum, entry) => sum + entry.tokens, 0);
+		const status = computeNonMessageBreakdown(session, session.agent.tokenizer);
+		expect([status.skillsTokens, status.instructionFilesTokens]).toEqual([
+			totals("skills"),
+			totals("instruction-files"),
+		]);
+		expect(status.systemPromptTokens + status.systemContextTokens).toBe(totals("system-prompt"));
 	});
 
 	it("keeps sources of changed or moved blocks in System Prompt with the changed-prompt notice", async () => {
@@ -214,7 +224,7 @@ describe("context snapshot prompt sources", () => {
 		const changed = buildSessionContextView(
 			sessionWith({ prompt: [`${policy}\nhook addition`, project!], sources: built.sources, skills }),
 		);
-		expect(changed.notices).toEqual([changedNotice]);
+		expect(changed.notices).toEqual([changedNotice("1 skill stays")]);
 		expect(entryTexts(changed, "skills")).toEqual([]);
 		expect(entryTexts(changed, "instruction-files")).toHaveLength(1);
 		expect(entryTexts(changed, "system-prompt")[0]).toContain("- fixture: Use <T>");
@@ -222,7 +232,7 @@ describe("context snapshot prompt sources", () => {
 		const moved = buildSessionContextView(
 			sessionWith({ prompt: [project!, policy!], sources: built.sources, skills }),
 		);
-		expect(moved.notices).toEqual([changedNotice]);
+		expect(moved.notices).toEqual([changedNotice("1 instruction file and 1 skill stay")]);
 		expect(entryTexts(moved, "skills")).toEqual([]);
 		expect(entryTexts(moved, "instruction-files")).toEqual([]);
 		expect(entryTexts(moved, "system-prompt")).toEqual([project, policy]);
@@ -234,7 +244,7 @@ describe("context snapshot prompt sources", () => {
 				skills,
 			}),
 		);
-		expect(edited.notices).toEqual([changedNotice]);
+		expect(edited.notices).toEqual([changedNotice("1 instruction file stays")]);
 		expect(entryTexts(edited, "instruction-files")).toEqual([]);
 		expect(entryTexts(edited, "system-prompt")[1]).toContain("Edited instruction body");
 	});
@@ -244,12 +254,12 @@ describe("context snapshot prompt sources", () => {
 		const data = buildSessionContextView(
 			sessionWith({ prompt: ["Replacement policy", ""], sources: built.sources, skills }),
 		);
-		expect(data.notices).toEqual([changedNotice]);
+		expect(data.notices).toEqual([changedNotice("1 instruction file and 1 skill stay")]);
 		expect(entryTexts(data, "instruction-files")).toEqual([]);
 		expect(entryTexts(data, "system-prompt")).toEqual(["Replacement policy", ""]);
 	});
 
-	it.each([
+	it.each<{ listing: string; attributed: string[] }>([
 		{ listing: "{{#each skills}}\n* {{name}} — {{description}}\n{{/each}}", attributed: ["* fixture — Use <T> & {{literal}} without expansion"] },
 		// Iterations that share a line cannot be isolated; the listing stays in System Prompt.
 		{ listing: "Skills: {{#each skills}}{{name}} {{/each}}", attributed: [] },

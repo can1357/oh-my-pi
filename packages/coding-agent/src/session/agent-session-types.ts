@@ -45,7 +45,8 @@ import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { BuildSystemPromptResult, SystemPromptSources } from "../system-prompt";
+import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import type { BuildSystemPromptResult } from "../system-prompt";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
@@ -594,6 +595,7 @@ export interface ContextUsageBreakdown {
 	systemPromptTokens: number;
 	systemToolsTokens: number;
 	systemContextTokens: number;
+	instructionFilesTokens: number;
 	skillsTokens: number;
 	messagesTokens: number;
 }

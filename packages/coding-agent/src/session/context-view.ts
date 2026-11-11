@@ -10,9 +10,13 @@ import {
 	type ContextViewEntry,
 	type ContextViewSourceMarker,
 } from "@oh-my-pi/pi-tui/chrome/context-view-model";
-import { type ContextBreakdown, toolSchemaFragments } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import {
+	type ContextBreakdown,
+	claimPromptSources,
+	type SystemPromptSource,
+	toolSchemaFragments,
+} from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
-import type { SystemPromptSource, SystemPromptSources } from "../system-prompt";
 import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
 import { type ContextViewMessage, convertMessagesForContextView } from "./messages";
@@ -109,31 +113,16 @@ function appendToolOutput(state: SnapshotBuildState, toolName: string, entry: Co
 	appendEntry(state, "tool-output", entry);
 }
 
-/** Overview notice when a block holding a source differs from the built prompt (hook or SDK callback). */
-const CHANGED_PROMPT_NOTICE =
-	"The system prompt changed after it was built (e.g. by an extension hook or SDK callback); sources in changed blocks stay in System Prompt.";
-
-/**
- * Sources of each built block the effective prompt still holds unchanged at the same index, in block
- * order. `changed` reports a source left in System Prompt because its block changed after the build.
- */
-function claimPromptSources(
-	effective: readonly string[],
-	metadata: SystemPromptSources,
-): { claims: Map<number, SystemPromptSource[]>; changed: boolean } {
-	let changed = false;
-	const claims = new Map<number, SystemPromptSource[]>();
-	for (const source of metadata.sources) {
-		if (effective[source.block] !== metadata.blocks[source.block]) {
-			changed = true;
-			continue;
-		}
-		const sources = claims.get(source.block) ?? [];
-		sources.push(source);
-		claims.set(source.block, sources);
-	}
-	for (const sources of claims.values()) sources.sort((a, b) => a.start - b.start);
-	return { claims, changed };
+/** Overview notice for sources left in System Prompt because their block changed after the build. */
+function changedPromptNotice(left: readonly SystemPromptSource[]): string | undefined {
+	const files = left.filter(source => source.kind === "instruction-files").length;
+	const skills = left.length - files;
+	const counts = [
+		files ? `${files} instruction file${files === 1 ? "" : "s"}` : undefined,
+		skills ? `${skills} skill${skills === 1 ? "" : "s"}` : undefined,
+	].filter(Boolean);
+	if (counts.length === 0) return undefined;
+	return `${counts.join(" and ")} ${left.length === 1 ? "stays" : "stay"} in System Prompt: the system prompt changed after it was built (e.g. by an extension hook or SDK callback).`;
 }
 
 /**
@@ -144,10 +133,7 @@ function claimPromptSources(
 function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState): string[] {
 	const tokenizer = session.agent.tokenizer;
 	const effective = session.systemPrompt;
-	const metadata = session.systemPromptSources;
-	const { claims, changed } = metadata
-		? claimPromptSources(effective, metadata)
-		: { claims: new Map<number, SystemPromptSource[]>(), changed: false };
+	const { byBlock: claims, left } = claimPromptSources(effective, session.systemPromptSources);
 	for (const [index, block] of effective.entries()) {
 		const blockClaims = claims.get(index) ?? [];
 		const remaining: string[] = [];
@@ -186,7 +172,8 @@ function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildSt
 			sourceMarkers: sourceMarkers.length > 0 ? sourceMarkers : undefined,
 		});
 	}
-	return changed ? [CHANGED_PROMPT_NOTICE] : [];
+	const notice = changedPromptNotice(left);
+	return notice ? [notice] : [];
 }
 
 function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuildState): void {

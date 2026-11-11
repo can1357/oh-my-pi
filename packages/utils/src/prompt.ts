@@ -196,6 +196,37 @@ interface AtomicLine {
 	readonly source: string;
 }
 
+/**
+ * Width of `line`'s leading whitespace: spaces and tabs, or any Unicode whitespace when the first other
+ * character is non-ASCII. Counts without allocating a trimmed copy on the ASCII path.
+ */
+function lineIndent(line: string): number {
+	let s = 0;
+	let first = line.charCodeAt(0);
+	while (first === 32 /* space */ || first === 9 /* tab */) first = line.charCodeAt(++s);
+	// Possible unicode leading whitespace — defer to trimStart for exactness.
+	return first >= 128 ? line.length - line.trimStart().length : s;
+}
+
+/** Whether `line`, indented by `indent`, opens or closes a code fence for {@link format}. */
+function isFenceLine(line: string, indent: number): boolean {
+	return line.startsWith("```", indent) || line.startsWith("~~~", indent);
+}
+
+/**
+ * `text` with a closing fence appended when it ends inside a code fence by {@link format}'s rule, so an
+ * unclosed fence in one inserted text never leaves the text after it unformatted.
+ */
+export function closeCodeFence(text: string): string {
+	let open: string | undefined;
+	for (const line of text.split("\n")) {
+		const indent = lineIndent(line);
+		if (isFenceLine(line, indent)) open = open ? undefined : line.slice(indent, indent + 3);
+	}
+	if (!open) return text;
+	return text.endsWith("\n") ? `${text}${open}` : `${text}\n${open}`;
+}
+
 export function format(content: string, options: PromptFormatOptions = {}): string {
 	return formatLines(content.split("\n"), options).join("\n");
 }
@@ -233,19 +264,11 @@ function formatLines<A extends AtomicLine = never>(lines: (string | A)[], option
 		// lines are pushed as the original string — no allocation.
 		const last = raw.charCodeAt(raw.length - 1);
 		let line = last <= 32 || last >= 128 ? raw.trimEnd() : raw;
-		// Locate the first non-whitespace char without allocating a trimStart
-		// copy; `s` is the indent width, `first` the char code there (NaN when
-		// the line is blank).
-		let s = 0;
-		let first = line.charCodeAt(0);
-		while (first === 32 /* space */ || first === 9 /* tab */) first = line.charCodeAt(++s);
-		if (first >= 128) {
-			// Possible unicode leading whitespace — defer to trimStart for exactness.
-			s = line.length - line.trimStart().length;
-			first = line.charCodeAt(s);
-		}
+		// `s` is the indent width, `first` the char code there (NaN when the line is blank).
+		let s = lineIndent(line);
+		let first = line.charCodeAt(s);
 
-		if ((first === 96 /* ` */ || first === 126) /* ~ */ && (line.startsWith("```", s) || line.startsWith("~~~", s))) {
+		if ((first === 96 /* ` */ || first === 126) /* ~ */ && isFenceLine(line, s)) {
 			inCodeBlock = !inCodeBlock;
 			result[n++] = line;
 			continue;
@@ -260,13 +283,8 @@ function formatLines<A extends AtomicLine = never>(lines: (string | A)[], option
 			const replaced = replaceCommonAsciiSymbolsOutsideHtmlComments(line, htmlCommentState);
 			if (replaced !== line) {
 				line = replaced;
-				s = 0;
-				first = line.charCodeAt(0);
-				while (first === 32 || first === 9) first = line.charCodeAt(++s);
-				if (first >= 128) {
-					s = line.length - line.trimStart().length;
-					first = line.charCodeAt(s);
-				}
+				s = lineIndent(line);
+				first = line.charCodeAt(s);
 			}
 		}
 
@@ -587,11 +605,11 @@ interface ItemLine extends AtomicLine {
 const compiledMarkedCache = new LRUCache<string, Handlebars.MarkedTemplateDelegate<TemplateContext>>({ max: 256 });
 
 /**
- * {@link render} that reports where each of `items` was rendered. A template `{{#each}}` iteration
- * over an item (not inside a helper block or partial) that covers whole lines is formatted on its own,
+ * {@link render} that also reports where each of `items` was rendered; the text always equals
+ * `render(template, context)`. A template `{{#each}}` iteration over an item (not inside a helper block
+ * or partial) that covers whole lines and closes every code fence it opens is formatted on its own,
  * without the blank lines at its edges, and composed into the formatted template as one block, so its
- * range is known by construction; a code fence it leaves open never reaches the text after it.
- * Iterations that share a line with other text are formatted in place and not reported.
+ * range is known by construction. Other iterations are formatted in place and not reported.
  */
 export function renderTracked(template: string, context: TemplateContext, items: readonly object[]): TrackedRender {
 	let compiled = compiledMarkedCache.get(template);
@@ -622,8 +640,10 @@ export function renderTracked(template: string, context: TemplateContext, items:
 			if (NON_BLANK.test(raw.slice(lineStart, end))) break;
 			end = lineStart - 1;
 		}
-		if (start > cursor) for (const line of raw.slice(cursor, start - 1).split("\n")) lines.push(line);
 		const source = raw.slice(start, end);
+		// A fence left open would leave the text after it unformatted in place; alone it could not.
+		if (closeCodeFence(source) !== source) continue;
+		if (start > cursor) for (const line of raw.slice(cursor, start - 1).split("\n")) lines.push(line);
 		lines.push({ text: format(source, { renderPhase: "post-render" }), source, item: itemIndex.get(mark.item)! });
 		cursor = end + 1;
 	}

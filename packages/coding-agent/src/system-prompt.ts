@@ -39,6 +39,7 @@ import projectPromptTemplate from "./prompts/system/project-prompt.md" with { ty
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
+import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
@@ -621,30 +622,11 @@ export interface BuildSystemPromptOptions {
 	subagent?: boolean;
 }
 
-/** A context file or skill rendered by one build, located by construction in a built block. */
-export interface SystemPromptSource {
-	readonly id: string;
-	readonly kind: "instruction-files" | "skills";
-	readonly label: string;
-	readonly path?: string;
-	/** Index of the built block holding this source. */
-	readonly block: number;
-	/** UTF-16 range of the source in that block. */
-	readonly start: number;
-	readonly end: number;
-}
-
-/** Sources paired with the blocks they were built into; valid only while those blocks are unchanged. */
-export interface SystemPromptSources {
-	readonly blocks: readonly string[];
-	readonly sources: readonly SystemPromptSource[];
-}
-
 /** Result of building provider-facing system prompt messages. */
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
-	/** Context file and skill fragments rendered into `systemPrompt`; absent for prompts not built from templates. */
+	/** Context files and skills located in `systemPrompt`; absent for prompts not built from templates. */
 	sources?: SystemPromptSources;
 	/**
 	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
@@ -1048,10 +1030,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
+	// A fence a file leaves open is closed at its end, so it never leaves the rest of the prompt unformatted.
+	const promptContextFiles = contextFiles.map(file => ({ ...file, content: prompt.closeCodeFence(file.content) }));
 	// Each `{{#each}}` iteration over a context file or skill records where that source landed.
-	const sourceItems = [...contextFiles, ...filteredSkills];
+	const sourceItems = [...promptContextFiles, ...filteredSkills];
 	const sourceIdentities: SourceIdentity[] = [
-		...contextFiles.map((file, index) => ({
+		...promptContextFiles.map((file, index) => ({
 			id: `instruction-${index}`,
 			kind: "instruction-files" as const,
 			label: file.path,
@@ -1078,7 +1062,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolListMode,
 		toolRefs,
 		environment,
-		contextFiles,
+		contextFiles: promptContextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		hasSkillUriAccess,

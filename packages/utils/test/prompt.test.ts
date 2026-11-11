@@ -116,10 +116,17 @@ describe("renderTracked", () => {
 		expect(texts(result)).toEqual([["<i>\none\n</i>"], ["<i>\ntwo\n</i>"]]);
 	});
 
-	it("keeps a code fence an iteration leaves open out of the text after it", () => {
+	it("leaves an iteration that opens a fence without closing it in place and untracked", () => {
 		const items = [{ body: "```\nopen" }, { body: "| a  |  b |" }];
 		const result = prompt.renderTracked(template, { items }, items);
-		expect(result.text).toBe("<list>\n<i>\n```\nopen\n</i>\n\n<i>\n|a|b|\n</i>\n</list>\n|x|y|");
+		expect(result.text).toBe(prompt.render(template, { items }));
+		expect(texts(result)).toEqual([[], []]);
+	});
+
+	it("closes a code fence the text leaves open, with the opening marker", () => {
+		expect(prompt.closeCodeFence("~~~ts\ncode")).toBe("~~~ts\ncode\n~~~");
+		expect(prompt.closeCodeFence("```\nclosed\n```\n")).toBe("```\nclosed\n```\n");
+		expect(prompt.closeCodeFence("  ```\nindented open\n")).toBe("  ```\nindented open\n```");
 	});
 
 	it("renders as render and reports nothing for iterations it cannot isolate", () => {

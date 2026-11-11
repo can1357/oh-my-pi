@@ -4,6 +4,7 @@
 
 ### Added
 
+- The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
 ### Fixed
@@ -12,6 +13,7 @@
 
 ### Removed
 
+- Removed `estimateSkillsTokens()` and the `skillful` context-usage option; Skills tokens come from the built prompt's sources ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Removed `contextCategoryDescriptor()` and `overviewLabel()` with the descriptor `overviewLabel`/`openable` fields; every context category now opens and uses its own label ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
 ## [18.18.8] - 2026-11-11
