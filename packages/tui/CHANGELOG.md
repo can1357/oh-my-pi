@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - File links resolve through `resolveFileLink(link, terminalId?)` (`render/hyperlink`), which replaces `tryFileUri` and `fileUriForTerminal`. `fileHyperlink`, `fileLinkSpan` and `FileListOptions.hyperlinkFn` take a `FileLink` (`{ path, kind, line?, col? }`) in place of a path and position options, and `fileHref` (`tools/native-view`) takes the kind as its second argument. `kind` is required: `file`, `dir`, or `unknown` where the caller cannot tell; a `dir` link never carries a line or column ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `SettingsHost` now requires `setEntry(path, key, value)` and `shadowingLayer(path, key)` ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ### Added
 

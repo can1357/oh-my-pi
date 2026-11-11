@@ -89,9 +89,12 @@ interface Harness {
 	values: Map<string, unknown>;
 	changes: [string, unknown][];
 	previews: string[];
+	/** Each `setEntry` call: path, key, value. */
+	entryWrites: [string, string, unknown][];
 }
 
-function harness(initial: Record<string, unknown> = {}): Harness {
+/** @param shadowed - record keys a layer above the global config supplies, by that layer's name */
+function harness(initial: Record<string, unknown> = {}, shadowed: Record<string, string> = {}): Harness {
 	const values = new Map<string, unknown>();
 	for (const entry of ENTRIES) values.set(entry.path, entry.defaultValue);
 	for (const key in initial) values.set(key, initial[key]);
@@ -99,7 +102,15 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 		entries: ENTRIES,
 		get: path => values.get(path),
 		set: (path, value) => void values.set(path, value),
+		setEntry: (path, key, value) => {
+			entryWrites.push([path, key, value]);
+			const record = { ...(values.get(path) as Record<string, unknown>) };
+			if (value === undefined) delete record[key];
+			else record[key] = value;
+			values.set(path, record);
+		},
 		unset: path => void values.set(path, ENTRIES.find(entry => entry.path === path)?.defaultValue),
+		shadowingLayer: (_path, key) => shadowed[key],
 		normalizeProviderLimits: () => ({}),
 		validateProviderLimits: () => ({}),
 	};
@@ -121,6 +132,7 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 	};
 	const changes: [string, unknown][] = [];
 	const previews: string[] = [];
+	const entryWrites: [string, string, unknown][] = [];
 	const selector = new SettingsSelectorComponent(
 		{
 			settings,
@@ -136,7 +148,7 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 			onCancel: () => {},
 		},
 	);
-	return { selector, values, changes, previews };
+	return { selector, values, changes, previews, entryWrites };
 }
 
 const PREFS: DescribeContext = {
@@ -349,6 +361,33 @@ describe("settings as a native prefs page", () => {
 				act: "edit",
 			});
 			expect(screen(selector)).toContain("1 entry: ~");
+		});
+
+		it("keeps an entry a higher layer supplies read-only and saves a new entry on its own", () => {
+			const { selector, entryWrites } = harness(
+				{ "tui.linkMap": { "/work": "file:///W:/" } },
+				{ "/work": "--config overlay" },
+			);
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			// Rows: the higher layer's entry, Add entry…, Test a path…. Choosing the entry does not open its target form.
+			selector.handleInput(ENTER);
+			expect(screen(selector)).not.toContain("/work/example.md");
+			expect(screen(selector)).toContain("--config overlay");
+
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			// Adding the same prefix is refused, naming the layer: a global entry for it would not reach links.
+			type(selector, "/work");
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("--config overlay");
+			for (let i = 0; i < 4; i++) selector.handleInput(BACKSPACE);
+			type(selector, "mnt/projects");
+			selector.handleInput(ENTER);
+			type(selector, "file:///Z:/");
+			selector.handleInput(ENTER);
+			// The save is that one entry: the higher layer's entry is not written along with it.
+			expect(entryWrites).toEqual([["tui.linkMap", "/mnt/projects", "file:///Z:/"]]);
 		});
 
 		it.skipIf(process.platform === "win32")("tests a path against the map links use, and clears every entry", () => {

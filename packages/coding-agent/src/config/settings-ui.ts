@@ -1,7 +1,7 @@
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
-import { isSettingsInitialized, Settings, settings } from "./settings";
+import { isSettingsInitialized, PROVENANCE_LABELS, Settings, settings } from "./settings";
 import { orderedSettings } from "./all-settings";
 import { type AnySetting, lookup } from "./registry";
 
@@ -14,7 +14,7 @@ import {
 } from "../session/settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { cfgComposerPredictions, cfgTuiLinkMap, cfgTuiVimMode } from "../modes/settings";
+import { cfgComposerPredictions, cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
@@ -85,13 +85,11 @@ export function createSettingsHost(): SettingsHost {
 		entries,
 		get: path => lookup(path)?.layered(settings),
 		set: (path, value) => resolve(path).set(settings, value),
+		setEntry: (path, key, value) => settings.writeEntry(resolve(path), key, value),
 		unset: path => resolve(path).unset(settings),
-		// A `--config` file or a runtime override outranks the global config the Link Map editor writes: a
-		// save would report success, leave links unchanged and copy that layer's entries into the global config.
-		isReadOnly: path => {
-			if (path !== cfgTuiLinkMap.id) return false;
-			const from = cfgTuiLinkMap.provenance(settings);
-			return from === "overlay" || from === "runtime";
+		shadowingLayer: (path, key) => {
+			const from = resolve(path).provenance(settings, key);
+			return from === "global" || from === "default" ? undefined : PROVENANCE_LABELS[from];
 		},
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
 		validateProviderLimits: validateProviderMaxInFlightRequests,

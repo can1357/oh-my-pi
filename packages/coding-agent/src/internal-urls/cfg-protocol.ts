@@ -22,7 +22,7 @@ import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { type CfgWriteDetails, type CfgWriteOutcome } from "@oh-my-pi/pi-tui/tools/cfg-render";
 import { CFG_SAVE_SEGMENT, CFG_URL_PREFIX, parseCfgUrl } from "@oh-my-pi/pi-tui/tools/cfg-url";
 import { type AnySetting, all } from "../config/registry";
-import type { SettingProvenance, Settings } from "../config/settings";
+import { PROVENANCE_LABELS, type SettingProvenance, type Settings } from "../config/settings";
 import cfgPromptDoc from "../prompts/internal-urls/cfg.md" with { type: "text" };
 import cfgEnvShadowedTemplate from "../prompts/tools/cfg-env-shadowed.md" with { type: "text" };
 import cfgApprovalTimeoutTemplate from "../prompts/tools/cfg-approval-timeout.md" with { type: "text" };
@@ -62,15 +62,6 @@ function allSettings(): AnySetting[] {
 const REDACTED = "<redacted>";
 /** Tree listings keep only the description's first sentence, capped here; single-setting reads show it whole. */
 const TREE_COMMENT_MAX_CHARS = 120;
-
-const PROVENANCE_LABELS: Record<SettingProvenance, string> = {
-	env: "environment variable",
-	runtime: "session override",
-	overlay: "--config overlay",
-	project: "project config",
-	global: "global config",
-	default: "default",
-};
 
 /** A settings change awaiting the user's decision. Values are display-formatted, credentials redacted. */
 export interface CfgChangeRequest {

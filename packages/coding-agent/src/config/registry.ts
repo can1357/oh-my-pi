@@ -803,9 +803,9 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
 
-	/** Layer supplying the effective value. */
-	provenance(scope: ScopeLike): SettingProvenance {
-		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
+	/** Layer supplying the effective value, or with `entry` that entry of this record setting. */
+	provenance(scope: ScopeLike, entry?: string): SettingProvenance {
+		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this, entry);
 	}
 }
 

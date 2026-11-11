@@ -2,6 +2,10 @@
  * `/settings` editor for `tui.linkMap`: the entries, sorted by prefix, then Add entry…, Test a path… and Clear
  * all entries. The target form shows the link a sample path under the prefix gets as the target is typed.
  * Saving an entry stays in the editor; Escape from the list closes it.
+ *
+ * The editor writes the global config only, one entry at a time. An entry a higher layer supplies (a `--config`
+ * file, a runtime override) is listed with that layer's name and can be neither opened nor added again: a value
+ * saved for it would not reach links.
  */
 import { expandTilde } from "@oh-my-pi/pi-utils";
 import { formTheme } from "../chrome/form-theme";
@@ -76,43 +80,66 @@ export class LinkMapSubmenu extends Container {
 		return linkMapEntries(this.#settings.get(LINK_MAP_PATH));
 	}
 
-	#save(next: Record<string, string>): void {
-		this.#settings.set(LINK_MAP_PATH, next);
-		this.#onChange(next);
+	/**
+	 * Why an entry for `key` cannot be saved, if so: a layer above the global config supplies that entry, so the
+	 * saved one would not reach links. Asked again at each save, since a layer can change while a form is open.
+	 */
+	#refusal(key: string): string | undefined {
+		const layer = this.#settings.shadowingLayer(LINK_MAP_PATH, key);
+		return layer === undefined
+			? undefined
+			: sanitizeDisplayLine(`The ${layer} sets ${key}, so an entry saved here would not take effect.`);
+	}
+
+	/** Saves one entry to the global config (`undefined` removes it) and reports the map as it now reads. */
+	#saveEntry(key: string, target: string | undefined): void {
+		this.#settings.setEntry(LINK_MAP_PATH, key, target);
+		this.#onChange(this.#entries());
 	}
 
 	#showList(note?: string): void {
 		this.clear();
 		this.#afterInput = undefined;
 		const entries = this.#entries();
-		// A `--config` file or a runtime override outranks the global config this editor writes.
-		const readOnly = this.#settings.isReadOnly?.(LINK_MAP_PATH) === true;
 		const keys = Object.keys(entries).sort((a, b) => a.localeCompare(b));
-		const items: SelectItem[] = keys.map(key => ({
-			value: `entry:${key}`,
-			label: key,
-			description:
-				isLinkMapKey(key) && parseLinkTarget(entries[key]) !== undefined
-					? `→ ${entries[key]}`
-					: `→ ${entries[key]} (ignored: not a valid entry)`,
-		}));
-		if (!readOnly) {
-			items.push({
+		// Entries a layer above the global config supplies, by that layer's name.
+		const layers = new Map<string, string>();
+		for (const key of keys) {
+			const layer = this.#settings.shadowingLayer(LINK_MAP_PATH, key);
+			if (layer !== undefined) layers.set(key, layer);
+		}
+		const items: SelectItem[] = keys.map(key => {
+			const valid = isLinkMapKey(key) && parseLinkTarget(entries[key]) !== undefined;
+			const layer = layers.get(key);
+			return {
+				value: `entry:${key}`,
+				label: sanitizeDisplayLine(key),
+				description: sanitizeDisplayLine(
+					`→ ${entries[key]}${valid ? "" : " (ignored: not a valid entry)"}${layer === undefined ? "" : ` (${layer}, read-only)`}`,
+				),
+			};
+		});
+		items.push(
+			{
 				value: "__add",
 				label: "Add entry…",
 				description: "A path prefix and the URI prefix its links go to",
-			});
-		}
-		items.push({
-			value: "__test",
-			label: "Test a path…",
-			description: "Show which entry a path matches and its link",
-		});
-		if (keys.length > 0 && !readOnly) {
+			},
+			{
+				value: "__test",
+				label: "Test a path…",
+				description: "Show which entry a path matches and its link",
+			},
+		);
+		// Clearing removes the global config's map, so it is offered only when that would change an entry shown.
+		if (layers.size < keys.length) {
 			items.push({
 				value: "__clear_all",
 				label: "Clear all entries",
-				description: "Links fall back to PI_LINK_SCHEME or plain file links",
+				description:
+					layers.size > 0
+						? "Removes the entries of the global config; read-only entries stay"
+						: "Links fall back to PI_LINK_SCHEME or plain file links",
 			});
 		}
 		this.#listField = new SelectFormField({
@@ -121,23 +148,25 @@ export class LinkMapSubmenu extends Container {
 			description:
 				note !== undefined
 					? sanitizeDisplayLine(note)
-					: readOnly
-						? "Set by a --config file or a runtime override, so it is shown here but edited there."
-						: "Each entry sends file links under a path prefix to a URI prefix; the longest matching prefix wins.",
+					: "Each entry sends file links under a path prefix to a URI prefix; the longest matching prefix wins.",
 			items,
 			maxVisible: 12,
 			selectTheme: getSelectListTheme(),
 			hint: `  ${editorKey("tui.select.confirm")} to choose · ${editorKey("tui.select.cancel")} to close`,
 			onSubmit: value => {
 				if (value === "__clear_all") {
-					this.#save({});
-					this.#backToList("Cleared every entry.");
+					this.#settings.unset(LINK_MAP_PATH);
+					this.#onChange(this.#entries());
+					this.#backToList(layers.size > 0 ? "Cleared the global config's entries." : "Cleared every entry.");
 				} else if (value === "__add") {
 					this.#showPrefix();
 				} else if (value === "__test") {
 					this.#showTest();
-				} else if (value.startsWith("entry:") && !readOnly) {
-					this.#showTarget(value.slice("entry:".length));
+				} else if (value.startsWith("entry:")) {
+					const key = value.slice("entry:".length);
+					const layer = layers.get(key);
+					if (layer === undefined) this.#showTarget(key);
+					else this.#backToList(`${key} comes from the ${layer} and cannot be changed here.`);
 				}
 				this.#requestRender?.();
 			},
@@ -173,14 +202,11 @@ export class LinkMapSubmenu extends Container {
 			hint: `  ${editorKey("tui.input.submit")} to save · ${editorKey("tui.select.cancel")} to cancel · Clear field to remove`,
 			validate: value =>
 				acceptableTarget(value)
-					? undefined
+					? this.#refusal(key)
 					: "Use a URI with a scheme and no query or fragment, such as file:///Z:/",
 			onSubmit: value => {
-				const next = this.#entries();
 				const trimmed = value.trim();
-				if (trimmed === "") delete next[key];
-				else next[key] = trimmed;
-				this.#save(next);
+				this.#saveEntry(key, trimmed === "" ? undefined : trimmed);
 				this.#backToList(trimmed === "" ? `Removed ${key}.` : `Saved ${key} → ${trimmed}`);
 			},
 			onCancel: () => this.#backToList(),
@@ -203,7 +229,7 @@ export class LinkMapSubmenu extends Container {
 				hint: `  ${editorKey("tui.input.submit")} to continue · ${editorKey("tui.select.cancel")} to cancel`,
 				validate: value =>
 					isLinkMapKey(value.trim())
-						? undefined
+						? this.#refusal(value.trim())
 						: "Start with / or ~ and use no . or .. segment, for example /mnt/projects or ~/src",
 				onSubmit: value => {
 					this.#showTarget(value.trim());

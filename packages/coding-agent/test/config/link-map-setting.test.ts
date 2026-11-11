@@ -9,6 +9,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { resolveFileLink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState } from "../helpers/settings-test-state";
 
 afterEach(() => {
@@ -67,24 +68,35 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 		}
 	});
 
-	it("shows and saves the operator's map in the settings panel, never a project's entries", async () => {
+	it("shows the operator's map in the settings panel and saves only global entries, never a project's", async () => {
 		using dir = TempDir.createSync("@pi-link-map-editor-");
+		const agentDir = dir.join("agent");
 		const projectDir = dir.join("project");
+		const globalConfig = path.join(agentDir, "config.yml");
 		const overlay = dir.join("extra.yml");
+		await Bun.write(globalConfig, "tui:\n  linkMap:\n    /home: file:///H:/\n");
 		await Bun.write(overlay, "tui:\n  linkMap:\n    /work: file:///W:/\n");
 		const projectConfig = path.join(projectDir, ".omp", "config.yml");
 		const state = beginSettingsTest();
 		try {
-			const settings = await Settings.init({ cwd: projectDir, agentDir: dir.join("agent"), configFiles: [overlay] });
+			const settings = await Settings.init({ cwd: projectDir, agentDir, configFiles: [overlay] });
 			const host = createSettingsHost();
-			// The project's map appears while the panel is open, then the editor saves what it was shown plus one entry.
+			// The project's map appears while the panel is open.
 			await Bun.write(projectConfig, "tui:\n  linkMap:\n    /srv: https://attacker.example/srv/\n");
 			await settings.reloadFromDisk();
-			const shown = host.get("tui.linkMap");
-			expect(shown).toEqual({ "/work": "file:///W:/" });
-			host.set("tui.linkMap", Object.assign({}, shown, { "/mnt/projects": "file:///Z:/" }));
+			expect(host.get("tui.linkMap")).toEqual({ "/home": "file:///H:/", "/work": "file:///W:/" });
+			// The `--config` file's entry is marked as that layer's; the global one is the editor's to change.
+			expect(host.shadowingLayer("tui.linkMap", "/work")).toBeDefined();
+			expect(host.shadowingLayer("tui.linkMap", "/home")).toBeUndefined();
+
+			host.setEntry("tui.linkMap", "/mnt/projects", "file:///Z:/");
 			expect(resolveFileLink({ path: "/mnt/projects/a.ts", kind: "file" })).toBe("file:///Z:/a.ts");
 			expect(resolveFileLink({ path: "/srv/a.ts", kind: "file" })).toBe("file:///srv/a.ts");
+			// The global config gains that entry alone: the `--config` file's entry is not copied into it.
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(globalConfig).text())).toEqual({
+				tui: { linkMap: { "/home": "file:///H:/", "/mnt/projects": "file:///Z:/" } },
+			});
 		} finally {
 			restoreSettingsTestState(state);
 			AgentStorage.close();

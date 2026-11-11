@@ -65,6 +65,16 @@ import { cfgShellPath } from "../exec/settings";
 /** Settings layer that supplies an effective value; see {@link Settings.getProvenance}. */
 export type SettingProvenance = "env" | "runtime" | "overlay" | "project" | "global" | "default";
 
+/** Display name of each layer. */
+export const PROVENANCE_LABELS: Record<SettingProvenance, string> = {
+	env: "environment variable",
+	runtime: "session override",
+	overlay: "--config overlay",
+	project: "project config",
+	global: "global config",
+	default: "default",
+};
+
 /** Raw settings object as stored in YAML */
 export interface RawSettings {
 	[key: string]: unknown;
@@ -1090,15 +1100,23 @@ export class Settings {
 	 * Layer supplying the effective value of `setting`, in merge precedence order:
 	 * runtime override → config overlay → project → global → (overlay parent) → schema default.
 	 * A value that merges to `null` is unset and reports `"default"`.
+	 *
+	 * With `entry`, the layer supplying that entry of a record setting instead: the first layer whose
+	 * record holds the entry, or that sets the setting to anything but a record (a `null` included)
+	 * and so replaces every entry of the layers below.
 	 */
-	getProvenance(setting: AnySetting): SettingProvenance {
-		if (!this.isConfigured(setting)) return "default";
-		const segments = setting.segments;
-		if (getByPath(this.#overrides, segments) !== undefined) return "runtime";
-		if (getByPath(this.#configOverlay, segments) !== undefined) return "overlay";
-		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) return "project";
-		if (getByPath(this.#global, segments) !== undefined) return "global";
-		return this.#parent?.getProvenance(setting) ?? "default";
+	getProvenance(setting: AnySetting, entry?: string): SettingProvenance {
+		if (entry === undefined && !this.isConfigured(setting)) return "default";
+		const supplies = (layer: RawSettings): boolean => {
+			const value = getByPath(layer, setting.segments);
+			if (entry === undefined || !isRecord(value)) return value !== undefined;
+			return Object.hasOwn(value, entry) && value[entry] !== undefined;
+		};
+		if (supplies(this.#overrides)) return "runtime";
+		if (supplies(this.#configOverlay)) return "overlay";
+		if (supplies(projectLayerForMerge(this.#project))) return "project";
+		if (supplies(this.#global)) return "global";
+		return this.#parent?.getProvenance(setting, entry) ?? "default";
 	}
 
 	/**

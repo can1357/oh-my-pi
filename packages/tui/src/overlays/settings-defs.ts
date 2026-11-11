@@ -148,12 +148,20 @@ export interface SettingsHost {
 	get(path: string): unknown;
 	set(path: string, value: unknown): void;
 	/**
+	 * Saves the `key` entry of record setting `path` to the global config; `undefined` removes it. The
+	 * record's other entries, saved or supplied by another layer, stay as they are.
+	 */
+	setEntry(path: string, key: string, value: unknown): void;
+	/**
 	 * Removes the value from the global config: a project or other layer, or an environment
 	 * variable, that configures the setting still applies; otherwise the default does.
 	 */
 	unset(path: string): void;
-	/** True when a layer above the global config sets `path`, so a value saved here would not take effect. */
-	isReadOnly?(path: string): boolean;
+	/**
+	 * Name of the layer above the global config that supplies the `key` entry of record setting `path`,
+	 * so an entry saved for that key would not take effect; undefined when the global config decides it.
+	 */
+	shadowingLayer(path: string, key: string): string | undefined;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
 }
