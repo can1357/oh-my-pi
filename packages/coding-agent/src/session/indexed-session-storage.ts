@@ -351,6 +351,7 @@ export class IndexedSessionStorage implements SessionStorage {
 						this.#abandonFrame(path, mtimeMs);
 						return;
 					}
+					options?.onCommit?.();
 					await this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize);
 				},
 				{ trackDrain: false },

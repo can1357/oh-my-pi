@@ -32,7 +32,11 @@ import {
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { MemorySessionStorage, SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	MemorySessionStorage,
+	SessionWriteConflictError,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 /** Real-shape indexed backend: local index is set synchronously by the
  * caller (`IndexedSessionStorage`) before this backend is ever invoked, so no
@@ -236,8 +240,14 @@ describe("SessionManager seal()+close() recovers a sync-rewrite conflict against
 		// tolerates via a readback; close()'s terminal rewrite must tolerate
 		// it the same way now that both share `#publishAuthoritativeBody`.
 		let ackLost = true;
-		storage.writeTextAtomic = async (path: string, content: string): Promise<void> => {
+		storage.writeTextAtomic = async (
+			path: string,
+			content: string,
+			options?: WriteTextAtomicOptions,
+		): Promise<void> => {
+			if (options?.commitGuard && !options.commitGuard()) return;
 			storage.writeTextSync(path, content);
+			options?.onCommit?.();
 			if (ackLost) {
 				ackLost = false;
 				throw new Error("connection reset after commit");

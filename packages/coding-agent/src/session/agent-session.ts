@@ -1274,6 +1274,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#turnIndex = 0;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
+	#pendingMessageEndQueue: Array<{
+		message: AgentMessage;
+		promptGeneration: number;
+		key: string | undefined;
+		deferred: PromiseWithResolvers<void>;
+	}> = [];
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -4225,16 +4231,52 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Commit messages in emission order without waiting for notification listeners. */
 	#queueMessageEndPersistence(message: AgentMessage, promptGeneration: number): Promise<void> {
 		const key = sessionMessagePersistenceKey(message);
-		const pending = this.#messageEndPersistenceTail
-			.then(() => this.#persistMessageEnd(message, promptGeneration))
-			.finally(() => {
-				if (key !== undefined && this.#pendingMessageEndPersistence.get(key) === pending) {
-					this.#pendingMessageEndPersistence.delete(key);
+		const deferred = Promise.withResolvers<void>();
+		deferred.promise.catch(() => {});
+		this.#pendingMessageEndQueue.push({ message, promptGeneration, key, deferred });
+		if (key !== undefined) this.#pendingMessageEndPersistence.set(key, deferred.promise);
+		if (this.#pendingMessageEndQueue.length === 1) {
+			const drain = this.#messageEndPersistenceTail.then(() => {
+				const items = this.#pendingMessageEndQueue.splice(0);
+				if (items.length === 0) return;
+				const errors = new Map<number, unknown>();
+				let batchError: unknown;
+				let hasBatchError = false;
+				try {
+					this.sessionManager.withAppendBatch(() => {
+						for (let i = 0; i < items.length; i++) {
+							try {
+								this.#persistMessageEnd(items[i].message, items[i].promptGeneration);
+							} catch (err) {
+								errors.set(i, err);
+							}
+						}
+					});
+				} catch (err) {
+					batchError = err;
+					hasBatchError = true;
+				} finally {
+					for (let i = 0; i < items.length; i++) {
+						const item = items[i];
+						if (
+							item.key !== undefined &&
+							this.#pendingMessageEndPersistence.get(item.key) === item.deferred.promise
+						) {
+							this.#pendingMessageEndPersistence.delete(item.key);
+						}
+						if (errors.has(i)) {
+							item.deferred.reject(errors.get(i));
+						} else if (hasBatchError) {
+							item.deferred.reject(batchError);
+						} else {
+							item.deferred.resolve();
+						}
+					}
 				}
 			});
-		if (key !== undefined) this.#pendingMessageEndPersistence.set(key, pending);
-		this.#messageEndPersistenceTail = pending.catch(() => {});
-		return pending;
+			this.#messageEndPersistenceTail = drain.catch(() => {});
+		}
+		return deferred.promise;
 	}
 
 	async #waitForSessionMessagePersistence(message: AgentMessage): Promise<void> {
@@ -4414,12 +4456,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		if (lastAssistant?.role !== "assistant") return;
 		const knownCalls = new Set(lastAssistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])));
-		for (let index = start; index < messages.length; index++) {
-			const message = messages[index];
-			if (message.role !== "toolResult" || !knownCalls.has(message.toolCallId)) continue;
-			if (!message.isError && semanticToolResult(message.toolName, message)?.toolName === "rewind") continue;
-			this.#persistSessionMessageIfMissing(message);
-		}
+		this.sessionManager.withAppendBatch(() => {
+			for (let index = start; index < messages.length; index++) {
+				const message = messages[index];
+				if (message.role !== "toolResult" || !knownCalls.has(message.toolCallId)) continue;
+				if (!message.isError && semanticToolResult(message.toolName, message)?.toolName === "rewind") continue;
+				this.#persistSessionMessageIfMissing(message);
+			}
+		});
 	}
 
 	/**
@@ -4561,8 +4605,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			});
 			return false;
 		}
-		for (const index of plan.toPersist) {
-			this.#persistSessionMessageIfMissing(turnMessages[index]);
+		if (plan.toPersist.length > 0) {
+			this.sessionManager.withAppendBatch(() => {
+				for (const index of plan.toPersist) {
+					this.#persistSessionMessageIfMissing(turnMessages[index]);
+				}
+			});
 		}
 		return true;
 	}
@@ -13112,14 +13160,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 				if (calls.length > 0) {
 					const callIds = new Set(calls.map(call => call.id));
+					const reparentedAssistant = sanitizeAssistantForReparentedHistory({
+						...turn.message,
+						content: calls,
+					});
 					// The rewind branch ends at the checkpoint, whose recorded prompt may predate this reply's.
 					this.#tools.recordPromptDigest(explorationPromptDigest);
-					this.sessionManager.appendMessage(
-						sanitizeAssistantForReparentedHistory({ ...turn.message, content: calls }),
-					);
-					for (const result of siblingResults) {
-						if (callIds.has(result.toolCallId)) this.sessionManager.appendMessage(result);
-					}
+					this.sessionManager.withAppendBatch(() => {
+						this.sessionManager.appendMessage(reparentedAssistant);
+						for (const result of siblingResults) {
+							if (callIds.has(result.toolCallId)) this.sessionManager.appendMessage(result);
+						}
+					});
 				}
 			}
 		}
@@ -13478,8 +13530,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			{ assumeExit: true },
 		);
 		if (abort) {
-			for (const result of createInterruptedToolResults(branch)) this.sessionManager.appendMessage(result);
-			this.sessionManager.appendMessage(abort);
+			this.sessionManager.withAppendBatch(() => {
+				for (const result of createInterruptedToolResults(branch)) this.sessionManager.appendMessage(result);
+				this.sessionManager.appendMessage(abort);
+			});
 			this.replaceMessagesFromSessionContext(this.buildDisplaySessionContext().messages);
 		}
 		return this.retry();
@@ -14728,14 +14782,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
-			if (imageDescriptionNotice) this.sessionManager.appendMessage(imageDescriptionNotice);
-			this.sessionManager.appendMessage({
-				role: "user",
-				content: [{ type: "text", text: question }, ...(promotedImages ?? [])],
-				attribution: "user",
-				timestamp: Date.now(),
+			this.sessionManager.withAppendBatch(() => {
+				if (imageDescriptionNotice) this.sessionManager.appendMessage(imageDescriptionNotice);
+				this.sessionManager.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: question }, ...(promotedImages ?? [])],
+					attribution: "user",
+					timestamp: Date.now(),
+				});
+				this.sessionManager.appendMessage(sanitizeAssistantForReparentedHistory(assistantMessage));
 			});
-			this.sessionManager.appendMessage(sanitizeAssistantForReparentedHistory(assistantMessage));
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;

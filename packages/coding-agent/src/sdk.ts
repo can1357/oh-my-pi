@@ -2216,8 +2216,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let existingBranch = logger.time("getSessionBranch", () => sessionManager.getBranch());
 	const interruptedTurnAbort = createInterruptedTurnAbortMessage(existingBranch);
 	if (interruptedTurnAbort) {
-		for (const result of createInterruptedToolResults(existingBranch)) sessionManager.appendMessage(result);
-		sessionManager.appendMessage(interruptedTurnAbort);
+		sessionManager.withAppendBatch(() => {
+			for (const result of createInterruptedToolResults(existingBranch)) sessionManager.appendMessage(result);
+			sessionManager.appendMessage(interruptedTurnAbort);
+		});
 		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getBranch());
 	}
 	let existingSession = logger.time("loadSessionContext", () =>
@@ -3728,8 +3730,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				model: model.id,
 			});
 			if (selectedModelAbort) {
-				for (const result of createInterruptedToolResults(existingBranch)) sessionManager.appendMessage(result);
-				sessionManager.appendMessage(selectedModelAbort);
+				sessionManager.withAppendBatch(() => {
+					for (const result of createInterruptedToolResults(existingBranch)) sessionManager.appendMessage(result);
+					sessionManager.appendMessage(selectedModelAbort);
+				});
 				existingBranch = logger.time("getRecoveredUserTailBranch", () => sessionManager.getBranch());
 				existingSession = logger.time("loadRecoveredUserTailContext", () =>
 					deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),

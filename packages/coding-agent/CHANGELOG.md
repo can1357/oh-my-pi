@@ -6,6 +6,10 @@
 
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
+### Changed
+
+- Multi-entry turn flushes batch session JSONL appends under a single publish-lock pass instead of locking and checking file replacement once per record ([#18819](https://github.com/can1357/oh-my-pi/pull/18819) by [@iliaal](https://github.com/iliaal))
+
 ### Fixed
 
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`

@@ -122,9 +122,11 @@ import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
+	SessionLockError,
 	type SessionStorage,
 	type SessionStorageWriter,
 	SessionWriteConflictError,
+	type WriteTextAtomicOptions,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
@@ -814,6 +816,7 @@ interface DiskQueueOptions {
 	ignorePriorError?: boolean;
 	ignoreEpoch?: boolean;
 	epoch?: number;
+	mutationCell?: JournalDurabilityCell;
 }
 
 interface AtomicEntryBatch {
@@ -825,6 +828,54 @@ interface AtomicEntryBatch {
 	externalLeafId: string | null;
 }
 
+interface StagedAppendBatch {
+	sessionId: string;
+	sessionFile: string | undefined;
+	diskEpoch: number;
+	entries: SessionEntry[];
+}
+
+interface JournalDurabilityCell {
+	bytes: number | null;
+	issuedAppends: number;
+	issuedRewrites: number;
+	queuedMutations: number;
+	canceledMutations: number;
+	deferredPublishGen: number;
+	deferredPublishAppendFloor: number;
+	postDeferredPublishConfirmedBytes: number;
+	postDeferredPublishEntries: WeakRef<SessionEntry>[];
+	persistedEntries: WeakSet<SessionEntry>;
+	appendFailures: number;
+	superseded: boolean;
+	sessionPathKey?: string;
+	supersededBy?: JournalDurabilityCell;
+	confirmedStamp?: SessionBodyStamp;
+}
+
+interface SnapshotDurabilityOrigin {
+	manager: SessionManager;
+	cell: JournalDurabilityCell;
+	issuedAppends: number;
+	issuedRewrites: number;
+	canceledMutations: number;
+	appendFailures: number;
+	forceFileCreation: boolean;
+	headerPrefix: string;
+}
+
+interface CellPublishSnapshot {
+	cell: JournalDurabilityCell;
+	bytes: number | null;
+	committed: boolean;
+	issuedAppends: number;
+	issuedRewrites: number;
+	deferredPublishGen: number;
+	appendFailures: number;
+}
+
+const SNAPSHOT_ORIGINS = new WeakMap<SessionManagerStateSnapshot, SnapshotDurabilityOrigin>();
+
 /**
  * The state a full-file body was serialized from, cheap to compare against
  * the live state. Entries change only by append, array replacement, or an
@@ -832,9 +883,7 @@ interface AtomicEntryBatch {
  * revision); the title slot and header are small and compared by value.
  */
 interface SessionBodyStamp {
-	entries: readonly SessionEntry[];
-	entryCount: number;
-	lastEntry: SessionEntry | undefined;
+	entryRefs: readonly WeakRef<SessionEntry>[];
 	revision: number;
 	/** Serialized title slot and header lines. */
 	prefix: string;
@@ -971,15 +1020,20 @@ export class SessionManager {
 	#rewriteRequired = false;
 	/** Malformed records the loader skipped for the current session file; reported by `/dump anon`. */
 	#loadedMalformedRecords = 0;
-	/** Byte length this manager last loaded or durably wrote; `null` means the path was absent. */
-	#expectedDiskSize: number | null = null;
 	/**
-	 * Generation of the latest deferred publish queued on a `defersSyncPublish`
-	 * backend. A deferred-rewrite confirmation older than the latest queued
-	 * publish is stale (the backend no longer holds its body) and must record
-	 * nothing (rvEW).
+	 * Confirmed byte length for the active journal (`null` when the path was
+	 * absent). Replaced with a fresh cell whenever the file is overwritten,
+	 * realigned, relocated, or switched so in-flight append confirmations
+	 * advance durable size iff their target journal cell was not superseded.
 	 */
-	#deferredPublishGen = 0;
+	#durableSize: JournalDurabilityCell = this.#createDurabilityCell(null);
+	readonly #durableCellsByPath = new Map<string, WeakRef<JournalDurabilityCell>>();
+	readonly #durableCellFinalizer = new FinalizationRegistry<string>(key => {
+		if (!this.#durableCellsByPath.get(key)?.deref()) {
+			this.#durableCellsByPath.delete(key);
+		}
+	});
+	readonly #queuedMutationCells = new Set<JournalDurabilityCell>();
 	/** Lazy gate crossed (ensureOnDisk / loaded file): every entry must persist from now on. */
 	#forceFileCreation = false;
 	/**
@@ -1009,6 +1063,7 @@ export class SessionManager {
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
 	#diskTail: Promise<void> = Promise.resolve();
 	#diskFailure: Error | undefined;
+	#lastDiskFailure: Error | undefined;
 	#diskFailureLogged = false;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
 	#atomicPersistenceTail: Promise<void> = Promise.resolve();
@@ -1018,7 +1073,7 @@ export class SessionManager {
 	#diskEpoch = 0;
 	/**
 	 * Epoch of the in-flight atomic rewrite, or `null` when no rewrite is running.
-	 * The fence in {@link #appendToSessionFile} only applies while this matches
+	 * The fence in {@link #appendEntriesToSessionFile} only applies while this matches
 	 * `#diskEpoch`: once a synchronous rewrite (`flushSync` → `#rewriteSynchronously`)
 	 * bumps the epoch, the pending atomic publish is guaranteed to abandon via
 	 * its `commitGuard`, and appends can safely take the hot path against the
@@ -1036,6 +1091,18 @@ export class SessionManager {
 	#sessionFileRelocating: { source: string; dest: string; copying?: boolean } | null = null;
 	/** Atomic entry batch currently staged for a full-file commit. */
 	#atomicEntryBatch: AtomicEntryBatch | undefined;
+	/** Synchronous append batch coalescing sequential entries into one writer flush. */
+	#appendBatch: StagedAppendBatch | undefined;
+	/** FIFO queue serializing `onEntryAppended` delivery across reentrant drains. */
+	#pendingAppendedNotifications: SessionEntry[] = [];
+	#appendedNotificationCursor = 0;
+	#notifyingAppendedEntries = false;
+	/** In-flight per-line `writer.append` confirmation callbacks for non-sync / deferred writers. */
+	#pendingWriterConfirmations = new Set<Promise<void>>();
+	/** In-flight `confirmWrites` callbacks for deferred full-file publishes. */
+	#pendingDeferredConfirmations = new Set<Promise<void>>();
+	/** In-flight `#runFencedAtomicRewrite` executions that may still reconcile after `#diskTail` resets. */
+	#pendingAtomicRewrites = new Set<Promise<void>>();
 
 	#artifactManager: ArtifactManager | null = null;
 	#artifactManagerSessionFile: string | null = null;
@@ -1100,6 +1167,7 @@ export class SessionManager {
 
 	#clearDiskError(): void {
 		this.#diskFailure = undefined;
+		this.#lastDiskFailure = undefined;
 		this.#diskFailureLogged = false;
 	}
 
@@ -1123,6 +1191,7 @@ export class SessionManager {
 
 	#noteDiskFailure(errorLike: unknown): Error {
 		const error = toError(errorLike);
+		this.#lastDiskFailure = error;
 		if (!this.#diskFailure) this.#diskFailure = error;
 		// A line that failed to land leaves its blob refs unreferenced on disk,
 		// so the next persist must re-check those blobs instead of trusting the memo.
@@ -1236,7 +1305,7 @@ export class SessionManager {
 			adopted++;
 		}
 		this.#index.setLeaf(leaf);
-		this.#expectedDiskSize = diskSize;
+		this.#replaceDurableSize(diskSize);
 		if (adopted > 0)
 			logger.warn("Kept session entries another writer added", { sessionFile: this.#sessionFile, adopted });
 	}
@@ -1266,7 +1335,7 @@ export class SessionManager {
 			content = this.#storage.readTextSync(contested);
 		} catch (readError) {
 			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
-			this.#expectedDiskSize = null;
+			this.#replaceDurableSize(null);
 			return contested;
 		}
 		const foreign = this.#foreignEntriesIn(content);
@@ -1289,7 +1358,7 @@ export class SessionManager {
 			// A synchronous rewrite during the read already recovered; retry against its result.
 			if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
 			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
-			this.#expectedDiskSize = null;
+			this.#replaceDurableSize(null);
 			return contested;
 		}
 		if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
@@ -1344,7 +1413,7 @@ export class SessionManager {
 		};
 		this.#closeWriterEventually();
 		this.#sessionFile = to;
-		this.#expectedDiskSize = null;
+		this.#switchDurableSize(null);
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = true;
 		this.#artifactManager = null;
@@ -1356,12 +1425,42 @@ export class SessionManager {
 		return to;
 	}
 
+	#advanceDiskEpoch(): number {
+		this.#diskEpoch++;
+		for (const cell of this.#queuedMutationCells) {
+			cell.canceledMutations += cell.queuedMutations;
+			cell.queuedMutations = 0;
+			cell.confirmedStamp = undefined;
+		}
+		this.#queuedMutationCells.clear();
+		return this.#diskEpoch;
+	}
+
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
 		const epoch = options.epoch ?? this.#diskEpoch;
+		const mutationCell = options.mutationCell;
+		if (mutationCell) {
+			mutationCell.queuedMutations++;
+			this.#queuedMutationCells.add(mutationCell);
+		}
 		const scheduled = this.#diskTail
 			.catch(() => undefined)
 			.then(async () => {
-				if (!options.ignoreEpoch && epoch !== this.#diskEpoch) return;
+				let claimedMutation = false;
+				if (mutationCell && mutationCell.queuedMutations > 0) {
+					mutationCell.queuedMutations--;
+					if (mutationCell.queuedMutations === 0) {
+						this.#queuedMutationCells.delete(mutationCell);
+					}
+					claimedMutation = true;
+				}
+				if (!options.ignoreEpoch && epoch !== this.#diskEpoch) {
+					if (claimedMutation && mutationCell) {
+						mutationCell.canceledMutations++;
+						mutationCell.confirmedStamp = undefined;
+					}
+					return;
+				}
 				if (this.#diskFailure && !options.ignorePriorError) throw this.#diskFailure;
 				await work();
 			});
@@ -1386,6 +1485,7 @@ export class SessionManager {
 	}
 
 	async #drainAndCloseWriter(): Promise<void> {
+		this.#drainAppendBatch();
 		try {
 			await this.#scheduleDiskWork(
 				async () => {
@@ -1405,16 +1505,59 @@ export class SessionManager {
 		if (writer) void writer.close().catch(() => undefined);
 	}
 
+	async #awaitWriterConfirmations(): Promise<void> {
+		while (this.#pendingWriterConfirmations.size > 0) {
+			await Promise.allSettled(this.#pendingWriterConfirmations);
+		}
+	}
+
+	async #awaitDeferredConfirmations(): Promise<void> {
+		while (this.#pendingDeferredConfirmations.size > 0) {
+			await Promise.allSettled(this.#pendingDeferredConfirmations);
+		}
+	}
+
+	async #awaitPendingAtomicRewrites(): Promise<void> {
+		while (this.#pendingAtomicRewrites.size > 0) {
+			await Promise.allSettled(this.#pendingAtomicRewrites);
+		}
+	}
+
+	async #awaitSelfConflictSettlement(): Promise<void> {
+		await this.#awaitPendingAtomicRewrites();
+		if (this.#diskFailure && this.#durableSize.deferredPublishGen > 0) {
+			await this.#scheduleDiskWork(
+				async () => {
+					do {
+						await this.#storage.drain();
+						await this.#awaitDeferredConfirmations();
+					} while (this.#pendingDeferredConfirmations.size > 0);
+				},
+				{ ignorePriorError: true },
+			);
+		}
+	}
+
 	async #closeWriterHandle(): Promise<void> {
 		const writer = this.#writer;
-		if (!writer) return;
+		if (!writer) {
+			await this.#awaitWriterConfirmations();
+			return;
+		}
 		this.#writer = undefined;
-		await writer.close();
+		try {
+			await writer.close();
+		} finally {
+			await this.#awaitWriterConfirmations();
+		}
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
 		const error = new SessionPersistenceIndeterminateError(operationError, recoveryErrors);
 		this.#diskFailure = error;
+		this.#lastDiskFailure = error;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
 		forgetExternalizedImages(this.#blobs);
 		if (!this.#diskFailureLogged) {
 			this.#diskFailureLogged = true;
@@ -1431,14 +1574,17 @@ export class SessionManager {
 		const notifications = [...this.#pendingDurabilityNotifications, ...entries];
 		this.#pendingDurabilityNotifications = [];
 		const seen = new Set<string>();
+		const deduped: SessionEntry[] = [];
 		for (const entry of notifications) {
 			if (seen.has(entry.id)) continue;
 			seen.add(entry.id);
-			this.#notifyEntryAppended(entry);
+			deduped.push(entry);
 		}
+		this.#notifyEntriesAppended(deduped);
 	}
 
 	async #authoritativelyRewriteCurrentStateLocked(operationError: Error): Promise<void> {
+		this.#drainAppendBatch();
 		if (this.#released) {
 			// Terminal seal: repair would reset the disk tail (escaping the
 			// close() serialization) and atomically publish #serializeBody() — after
@@ -1450,10 +1596,11 @@ export class SessionManager {
 			return;
 		}
 		if (!this.#persist || !this.#sessionFile) return;
+		const active = Promise.withResolvers<void>();
+		this.#pendingAtomicRewrites.add(active.promise);
 		const previousDiskTail = this.#diskTail;
 		const writer = this.#writer;
-		this.#diskEpoch++;
-		const epoch = this.#diskEpoch;
+		const epoch = this.#advanceDiskEpoch();
 		this.#writer = undefined;
 		this.#diskTail = Promise.resolve();
 		this.#forceFileCreation = true;
@@ -1484,6 +1631,7 @@ export class SessionManager {
 				]);
 			}
 
+			let latestStamp: SessionBodyStamp | undefined;
 			do {
 				this.#atomicRewriteDirty = false;
 				const sessionFile = this.#sessionFile;
@@ -1492,7 +1640,7 @@ export class SessionManager {
 						new Error("Session file disappeared during authoritative repair."),
 					]);
 				}
-				await this.#publishAuthoritativeBody(
+				const body = await this.#publishAuthoritativeBody(
 					sessionFile,
 					operationError,
 					() => !this.#released && this.#diskEpoch === epoch,
@@ -1502,8 +1650,23 @@ export class SessionManager {
 						new Error("Authoritative session repair was superseded before verification."),
 					]);
 				}
+				latestStamp = body.stamp;
+				if (!this.#stampMatchesCurrentJournal(latestStamp)) {
+					this.#atomicRewriteDirty = true;
+				}
 			} while (this.#atomicRewriteDirty);
 
+			if (
+				this.#released ||
+				this.#diskEpoch !== epoch ||
+				this.#durableSize.deferredPublishGen > 0 ||
+				latestStamp === undefined ||
+				!this.#stampMatchesCurrentJournal(latestStamp)
+			) {
+				throw this.#latchIndeterminate(operationError, [
+					new Error("Authoritative session repair was superseded before verification."),
+				]);
+			}
 			this.#fileIsCurrent = true;
 			this.#rewriteRequired = false;
 			this.#hasTitleSlot = true;
@@ -1513,6 +1676,8 @@ export class SessionManager {
 			throw this.#latchIndeterminate(operationError, [toError(error)]);
 		} finally {
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			this.#pendingAtomicRewrites.delete(active.promise);
+			active.resolve();
 		}
 	}
 
@@ -1529,17 +1694,16 @@ export class SessionManager {
 		operationError: Error,
 		commitGuard?: () => boolean,
 		recoveries = 0,
-	): Promise<void> {
+	): Promise<SessionFileBody> {
 		const target =
 			sessionFile === this.#sessionFile && this.#sessionOwnedElsewhere()
 				? this.#moveOffSessionFile("open-elsewhere")
 				: sessionFile;
+		const publishCell = this.#durableSize;
+		const publishSnapshot = this.#captureCellPublishSnapshot(publishCell);
 		const body = this.#serializeBody();
-		const options = { expectedSize: this.#expectedDiskSize, commitGuard };
 		try {
-			await (this.#storage.writeLinesAtomic
-				? this.#storage.writeLinesAtomic(target, body.lines, options)
-				: this.#storage.writeTextAtomic(target, body.lines.join(""), options));
+			await this.#writeBodyAtomic(target, body, publishSnapshot, commitGuard);
 		} catch (error) {
 			const retryPath = await this.#recoverFromWriteConflict(error, recoveries);
 			if (retryPath) return this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1);
@@ -1560,8 +1724,34 @@ export class SessionManager {
 				recoveryErrors.push(new Error("Authoritative session repair did not match durable storage."));
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
+			if (commitGuard && !commitGuard()) {
+				if (this.#canReconcileStalePublishReadback(publishSnapshot)) {
+					this.#reconcileStaleAtomicPublish(target, publishSnapshot, body);
+				}
+				return body;
+			}
 		}
-		this.#recordFullRewrite(body.bytes);
+		if (commitGuard && !commitGuard()) {
+			if (this.#canReconcileStalePublishReadback(publishSnapshot)) {
+				try {
+					if (
+						textMatchesLines(await this.#storage.readText(target), body.lines) &&
+						this.#canReconcileStalePublishReadback(publishSnapshot)
+					) {
+						this.#reconcileStaleAtomicPublish(target, publishSnapshot, body);
+					}
+				} catch {
+					// Superseding epoch owns durability state when readback is unavailable.
+				}
+			}
+			return body;
+		}
+		if (target === this.#sessionFile) {
+			this.#recordFullRewrite(body.bytes, body.stamp);
+		} else {
+			this.#replaceDurableSizeOnCell(publishCell, body.bytes, body.stamp);
+		}
+		return body;
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -1579,12 +1769,294 @@ export class SessionManager {
 	#lineFor(entry: FileEntry): string {
 		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
 	}
-	#recordDurableAppend(line: string): void {
-		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
+	get #expectedDiskSize(): number | null {
+		return this.#durableSize.bytes;
 	}
 
-	#recordFullRewrite(bytes: number): void {
-		this.#expectedDiskSize = bytes;
+	#createDurabilityCell(bytes: number | null, confirmedStamp?: SessionBodyStamp): JournalDurabilityCell {
+		const persistedEntries = new WeakSet<SessionEntry>();
+		if (confirmedStamp) {
+			for (const ref of confirmedStamp.entryRefs) {
+				const entry = ref.deref();
+				if (entry) persistedEntries.add(entry);
+			}
+		}
+		return {
+			bytes,
+			issuedAppends: 0,
+			issuedRewrites: 0,
+			queuedMutations: 0,
+			canceledMutations: 0,
+			deferredPublishGen: 0,
+			deferredPublishAppendFloor: 0,
+			postDeferredPublishConfirmedBytes: 0,
+			postDeferredPublishEntries: [],
+			persistedEntries,
+			appendFailures: 0,
+			superseded: false,
+			confirmedStamp,
+		};
+	}
+
+	#getLivePathCell(key: string): JournalDurabilityCell | undefined {
+		const ref = this.#durableCellsByPath.get(key);
+		if (!ref) return undefined;
+		const cell = ref.deref();
+		if (!cell) {
+			this.#durableCellsByPath.delete(key);
+			return undefined;
+		}
+		return cell;
+	}
+
+	#setPathCell(key: string, cell: JournalDurabilityCell): void {
+		const previous = this.#durableCellsByPath.get(key)?.deref();
+		if (previous && previous !== cell) {
+			this.#durableCellFinalizer.unregister(previous);
+		}
+		cell.sessionPathKey = key;
+		this.#durableCellsByPath.set(key, new WeakRef(cell));
+		this.#durableCellFinalizer.register(cell, key, cell);
+	}
+
+	#captureCellPublishSnapshot(cell: JournalDurabilityCell): CellPublishSnapshot {
+		return {
+			cell,
+			bytes: cell.bytes,
+			committed: false,
+			issuedAppends: cell.issuedAppends,
+			issuedRewrites: cell.issuedRewrites,
+			deferredPublishGen: cell.deferredPublishGen,
+			appendFailures: cell.appendFailures,
+		};
+	}
+
+	async #writeBodyAtomic(
+		targetPath: string,
+		body: SessionFileBody,
+		publishSnapshot: CellPublishSnapshot,
+		commitGuard?: () => boolean,
+	): Promise<void> {
+		const publishCell = publishSnapshot.cell;
+		let guardAbandoned = false;
+		let counted = false;
+		const countCommit = () => {
+			if (counted) return;
+			counted = true;
+			publishSnapshot.committed = true;
+			publishSnapshot.issuedRewrites = ++publishCell.issuedRewrites;
+		};
+		const wrappedGuard = () => {
+			const ok = commitGuard ? commitGuard() : true;
+			if (!ok) guardAbandoned = true;
+			return ok;
+		};
+		const options: WriteTextAtomicOptions = {
+			expectedSize: publishCell.bytes,
+			commitGuard: commitGuard ? wrappedGuard : undefined,
+			onCommit: countCommit,
+		};
+		try {
+			await (this.#storage.writeLinesAtomic
+				? this.#storage.writeLinesAtomic(targetPath, body.lines, options)
+				: this.#storage.writeTextAtomic(targetPath, body.lines.join(""), options));
+			if (!guardAbandoned) {
+				countCommit();
+			}
+		} catch (error) {
+			if (error instanceof SessionWriteConflictError || error instanceof SessionLockError) {
+				if (counted && publishCell.issuedRewrites === publishSnapshot.issuedRewrites) {
+					publishCell.issuedRewrites--;
+					publishSnapshot.committed = false;
+					counted = false;
+				}
+			}
+			throw error;
+		}
+	}
+
+	#canReconcileStalePublishReadback(snapshot: CellPublishSnapshot): boolean {
+		const { cell } = snapshot;
+		return (
+			snapshot.committed &&
+			!cell.superseded &&
+			cell.supersededBy === undefined &&
+			cell.issuedAppends === snapshot.issuedAppends &&
+			cell.issuedRewrites === snapshot.issuedRewrites &&
+			cell.deferredPublishGen === snapshot.deferredPublishGen &&
+			cell.appendFailures === snapshot.appendFailures
+		);
+	}
+
+	#reconcileStaleAtomicPublish(
+		sessionFile: string,
+		publishSnapshot: CellPublishSnapshot,
+		body: SessionFileBody,
+		options?: { clearPriorDiskError?: boolean },
+	): void {
+		const nextCell = this.#replaceDurableSizeOnCell(publishSnapshot.cell, body.bytes, body.stamp);
+		if (
+			this.#released ||
+			this.#sessionFileRelocating ||
+			this.#durableSize !== nextCell ||
+			this.#sessionFile !== sessionFile
+		) {
+			return;
+		}
+		const conflictError = options?.clearPriorDiskError ? this.#lastDiskFailure : this.#diskFailure;
+		const selfConflictWithThisPublish =
+			conflictError instanceof SessionWriteConflictError &&
+			path.resolve(conflictError.path) === path.resolve(sessionFile) &&
+			conflictError.expectedSize === publishSnapshot.bytes &&
+			conflictError.actualSize === body.bytes;
+		if (!selfConflictWithThisPublish) return;
+		this.#clearDiskError();
+		if (this.#atomicEntryBatch) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#atomicRewriteDirty = true;
+			return;
+		}
+		if (this.#durableSize.deferredPublishGen === 0 && this.#stampMatchesCurrentJournal(body.stamp)) {
+			this.#fileIsCurrent = true;
+			this.#materializeBreadcrumb();
+			this.#rewriteRequired = false;
+			this.#hasTitleSlot = true;
+			return;
+		}
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#rewriteSynchronously();
+	}
+
+	#replaceDurableSizeOnCell(
+		cell: JournalDurabilityCell,
+		bytes: number | null,
+		confirmedStamp?: SessionBodyStamp,
+	): JournalDurabilityCell {
+		if (cell.superseded) return cell;
+		const next = this.#createDurabilityCell(bytes, confirmedStamp);
+		cell.confirmedStamp = undefined;
+		cell.postDeferredPublishEntries.length = 0;
+		cell.superseded = true;
+		cell.supersededBy = next;
+		if (cell.sessionPathKey !== undefined) {
+			next.sessionPathKey = cell.sessionPathKey;
+			if (this.#getLivePathCell(cell.sessionPathKey) === cell) {
+				this.#setPathCell(cell.sessionPathKey, next);
+			}
+		}
+		if (this.#durableSize === cell) {
+			this.#durableSize = next;
+		}
+		return next;
+	}
+
+	#bindPathDurableSize(
+		sessionFile: string,
+		bytes: number | null,
+		confirmedStamp?: SessionBodyStamp,
+	): JournalDurabilityCell {
+		const key = path.resolve(sessionFile);
+		let existing = this.#getLivePathCell(key);
+		if (existing) {
+			while (existing.supersededBy) {
+				existing = existing.supersededBy;
+			}
+			if (!existing.superseded) {
+				return this.#replaceDurableSizeOnCell(existing, bytes, confirmedStamp);
+			}
+		}
+		const cell = this.#createDurabilityCell(bytes, confirmedStamp);
+		this.#setPathCell(key, cell);
+		return cell;
+	}
+
+	#replaceDurableSize(bytes: number | null, confirmedStamp?: SessionBodyStamp): void {
+		const activePath = this.#liveRelocationWritePath() ?? this.#sessionFile;
+		if (activePath && this.#durableSize.sessionPathKey === undefined) {
+			const key = path.resolve(activePath);
+			if (this.#getLivePathCell(key)) {
+				this.#durableSize.sessionPathKey = key;
+			} else {
+				this.#setPathCell(key, this.#durableSize);
+			}
+		}
+		this.#replaceDurableSizeOnCell(this.#durableSize, bytes, confirmedStamp);
+	}
+
+	#switchDurableSize(bytes: number | null, sessionFile: string | undefined = this.#sessionFile): void {
+		if (!sessionFile) {
+			this.#durableSize = this.#createDurabilityCell(bytes);
+			return;
+		}
+		this.#durableSize = this.#bindPathDurableSize(sessionFile, bytes);
+	}
+
+	#resolveSnapshotCell(origin: SnapshotDurabilityOrigin): JournalDurabilityCell | undefined {
+		let cell = origin.cell;
+		while (cell.supersededBy) {
+			cell = cell.supersededBy;
+		}
+		return cell.superseded ? undefined : cell;
+	}
+
+	#stampMatchesCurrentJournal(stamp: SessionBodyStamp): boolean {
+		if ((this.#appendBatch?.entries.length ?? 0) > 0) return false;
+		const entries = this.#entries;
+		return (
+			stamp.entryRefs.length === entries.length &&
+			entries.every((entry, index) => stamp.entryRefs[index]?.deref() === entry) &&
+			stamp.revision === this.#bodyRevision &&
+			stamp.prefix === this.#titleSlotLine() + this.#lineFor(this.#header)
+		);
+	}
+
+	#stampMatchesSnapshot(
+		stamp: SessionBodyStamp | undefined,
+		snapshot: SessionManagerStateSnapshot,
+		origin: SnapshotDurabilityOrigin,
+	): boolean {
+		if (!stamp) return false;
+		return (
+			stamp.entryRefs.length === snapshot.entries.length &&
+			snapshot.entries.every((entry, index) => stamp.entryRefs[index]?.deref() === entry) &&
+			stamp.revision === this.#bodyRevision &&
+			stamp.prefix === origin.headerPrefix
+		);
+	}
+
+	#recordDurableAppendToCell(
+		cell: JournalDurabilityCell,
+		line: string,
+		appendOrdinal?: number,
+		appendedEntries?: readonly SessionEntry[],
+	): void {
+		if (cell.superseded) return;
+		const delta = Buffer.byteLength(line, "utf8");
+		cell.confirmedStamp = undefined;
+		cell.bytes = (cell.bytes ?? 0) + delta;
+		const postDeferred =
+			cell.deferredPublishGen > 0 && appendOrdinal !== undefined && appendOrdinal > cell.deferredPublishAppendFloor;
+		if (postDeferred) {
+			cell.postDeferredPublishConfirmedBytes += delta;
+		}
+		if (appendedEntries) {
+			for (const entry of appendedEntries) {
+				cell.persistedEntries.add(entry);
+				if (postDeferred) {
+					cell.postDeferredPublishEntries.push(new WeakRef(entry));
+				}
+			}
+		}
+	}
+
+	#recordDurableAppend(line: string, appendOrdinal?: number, appendedEntries?: readonly SessionEntry[]): void {
+		this.#recordDurableAppendToCell(this.#durableSize, line, appendOrdinal, appendedEntries);
+	}
+
+	#recordFullRewrite(bytes: number, confirmedStamp?: SessionBodyStamp): void {
+		this.#replaceDurableSize(bytes, confirmedStamp);
 	}
 
 	/**
@@ -1604,25 +2076,48 @@ export class SessionManager {
 	 * store's queue-time size check fail-fasts before a second provisional
 	 * publish can queue behind the unconfirmed one.
 	 */
-	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void): void {
+	#confirmDeferredPublish(
+		sessionFile: string,
+		publishCell: JournalDurabilityCell,
+		generation: number,
+		appendFloor: number,
+		onConfirm?: () => void,
+	): void {
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
 		if (!confirmed) return;
-		void confirmed
-			.then(() => {
+		const settled = confirmed
+			.then(async () => {
+				if (publishCell.superseded || generation !== publishCell.deferredPublishGen) return;
+				if (publishCell.issuedAppends > appendFloor) {
+					await this.#awaitWriterConfirmations();
+					if (publishCell.superseded || generation !== publishCell.deferredPublishGen) return;
+				}
 				onConfirm?.();
 			})
 			.catch(err => {
-				this.#fileIsCurrent = false;
-				this.#rewriteRequired = true;
+				if (publishCell.superseded || generation !== publishCell.deferredPublishGen) return;
+				let actualBytes: number | null | undefined;
 				try {
-					this.#expectedDiskSize = this.#storage.existsSync(sessionFile)
-						? this.#storage.statSync(sessionFile).size
-						: null;
+					actualBytes = this.#storage.existsSync(sessionFile) ? this.#storage.statSync(sessionFile).size : null;
 				} catch {
 					// Backend unreadable: leave the record for the next write to re-establish.
 				}
-				this.#noteDiskFailure(err);
+				const activeCell =
+					actualBytes !== undefined ? this.#replaceDurableSizeOnCell(publishCell, actualBytes) : publishCell;
+				activeCell.appendFailures++;
+				if (
+					this.#durableSize === activeCell &&
+					(this.#sessionFile === sessionFile || this.#liveRelocationWritePath() === sessionFile)
+				) {
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+					this.#noteDiskFailure(err);
+				}
+			})
+			.finally(() => {
+				this.#pendingDeferredConfirmations.delete(settled);
 			});
+		this.#pendingDeferredConfirmations.add(settled);
 	}
 
 	#titleSlotLine(): string {
@@ -1639,16 +2134,16 @@ export class SessionManager {
 		const headerLine = this.#lineFor(this.#header);
 		const entries = this.#entries;
 		const lines = [titleLine, headerLine];
+		const entryRefs: WeakRef<SessionEntry>[] = [];
 		let bytes = Buffer.byteLength(titleLine, "utf8") + Buffer.byteLength(headerLine, "utf8");
 		for (const entry of entries) {
 			const line = this.#lineFor(entry);
 			bytes += Buffer.byteLength(line, "utf8");
 			lines.push(line);
+			entryRefs.push(new WeakRef(entry));
 		}
 		const stamp: SessionBodyStamp = {
-			entries,
-			entryCount: entries.length,
-			lastEntry: entries.at(-1),
+			entryRefs,
 			revision: this.#bodyRevision,
 			prefix: titleLine + headerLine,
 		};
@@ -1689,96 +2184,138 @@ export class SessionManager {
 	 * concurrent completed entries are durable without recreating a vacated source.
 	 */
 	#rewriteSynchronously(): void {
-		if (this.#released) return;
-		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
-		let targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
-		if (!targetPath) return;
-
+		const absorbed =
+			this.#appendBatch &&
+			this.#appendBatch.sessionId === this.#sessionId &&
+			this.#appendBatch.sessionFile === this.#sessionFile &&
+			this.#appendBatch.entries.length > 0
+				? this.#appendBatch.entries.splice(0)
+				: undefined;
 		try {
-			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
-			let body = this.#serializeBody();
-			this.#diskEpoch++;
-			this.#diskTail = Promise.resolve();
-			this.#closeWriterEventually();
-			for (let recoveries = 0; ; recoveries++) {
-				try {
-					const options = { expectedSize: this.#expectedDiskSize };
-					if (this.#storage.writeLinesSync) this.#storage.writeLinesSync(targetPath, body.lines, options);
-					else this.#storage.writeTextSync(targetPath, body.lines.join(""), options);
-					break;
-				} catch (err) {
-					const retryPath = this.#recoverFromWriteConflictSync(err, recoveries);
-					if (!retryPath) throw err;
-					targetPath = retryPath;
-					body = this.#serializeBody();
+			if (this.#released) return;
+			if (!this.#persist || !this.#shouldHaveSessionFile()) return;
+			let targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
+			if (!targetPath) return;
+
+			try {
+				if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
+				let body = this.#serializeBody();
+				this.#advanceDiskEpoch();
+				this.#diskTail = Promise.resolve();
+				this.#closeWriterEventually();
+				for (let recoveries = 0; ; recoveries++) {
+					try {
+						const options = { expectedSize: this.#expectedDiskSize };
+						if (this.#storage.writeLinesSync) this.#storage.writeLinesSync(targetPath, body.lines, options);
+						else this.#storage.writeTextSync(targetPath, body.lines.join(""), options);
+						break;
+					} catch (err) {
+						const retryPath = this.#recoverFromWriteConflictSync(err, recoveries);
+						if (!retryPath) throw err;
+						targetPath = retryPath;
+						body = this.#serializeBody();
+					}
 				}
-			}
-			this.#clearDiskError();
-			if (this.#storage.defersSyncPublish) {
+				this.#clearDiskError();
+				if (this.#storage.defersSyncPublish) {
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+					// The publish is only queued: record nothing and stay non-current
+					// until the backend confirms (hV-oB). A racing rewrite still
+					// carries the last confirmed token, so the store's queue-time
+					// size check fail-fasts it instead of queueing a second
+					// provisional publish behind the unconfirmed one; a racing
+					// append retries the transcript on the cold path instead of
+					// landing a bare append on a body the backend may still reject.
+					// The success handler below is the single place the replacement
+					// becomes durable state.
+					const publishCell = this.#durableSize;
+					publishCell.issuedRewrites++;
+					const appendFloor = publishCell.issuedAppends;
+					publishCell.deferredPublishAppendFloor = appendFloor;
+					publishCell.postDeferredPublishConfirmedBytes = 0;
+					publishCell.postDeferredPublishEntries = [];
+					const generation = ++publishCell.deferredPublishGen;
+					const { bytes, stamp } = body;
+					this.#confirmDeferredPublish(targetPath, publishCell, generation, appendFloor, () => {
+						const postPublishBytes = publishCell.postDeferredPublishConfirmedBytes;
+						const postPublishEntries = publishCell.postDeferredPublishEntries.slice();
+						const effectiveStamp = publishCell.issuedAppends > appendFloor ? undefined : stamp;
+						const nextCell = this.#replaceDurableSizeOnCell(
+							publishCell,
+							bytes + postPublishBytes,
+							effectiveStamp,
+						);
+						if (effectiveStamp === undefined) {
+							for (const ref of stamp.entryRefs) {
+								const entry = ref.deref();
+								if (entry) nextCell.persistedEntries.add(entry);
+							}
+							for (const ref of postPublishEntries) {
+								const entry = ref.deref();
+								if (entry) nextCell.persistedEntries.add(entry);
+							}
+						}
+						if (this.#durableSize !== nextCell) return;
+						if (this.#sessionFile !== targetPath && this.#liveRelocationWritePath() !== targetPath) return;
+						const bodyIsCurrent =
+							effectiveStamp !== undefined && this.#stampMatchesCurrentJournal(effectiveStamp);
+						if (!bodyIsCurrent) {
+							// Entries raced the unconfirmed publish: the confirmed
+							// body predates them. Stay non-current and re-issue the
+							// full transcript instead of declaring it durable
+							// (rvEW); the re-issued publish carries the
+							// just-confirmed size token, so its queue-time check
+							// passes.
+							this.#fileIsCurrent = false;
+							this.#rewriteRequired = true;
+							this.#rewriteSynchronously();
+							return;
+						}
+						if (this.#diskFailure) {
+							this.#fileIsCurrent = false;
+							this.#rewriteRequired = true;
+							return;
+						}
+						if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
+							this.#fileIsCurrent = true;
+							this.#materializeBreadcrumb();
+							this.#rewriteRequired = false;
+							this.#hasTitleSlot = true;
+						}
+					});
+					return;
+				}
+				this.#recordFullRewrite(body.bytes, body.stamp);
+				// Only mark the manager current when writing the active session path.
+				// Mid-move writes update the live relocation path; `#sessionFile` is
+				// still the pre-repoint source until moveTo repoints it.
+				if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
+					this.#fileIsCurrent = true;
+					this.#materializeBreadcrumb();
+					this.#rewriteRequired = false;
+					this.#hasTitleSlot = true;
+				} else {
+					// Destination body is current on disk; in-memory still needs a
+					// header-cwd rewrite after repoint, but entries are durable.
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+					this.#hasTitleSlot = true;
+				}
+			} catch (err) {
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
-				// The publish is only queued: record nothing and stay non-current
-				// until the backend confirms (hV-oB). A racing rewrite still
-				// carries the last confirmed token, so the store's queue-time
-				// size check fail-fasts it instead of queueing a second
-				// provisional publish behind the unconfirmed one; a racing
-				// append retries the transcript on the cold path instead of
-				// landing a bare append on a body the backend may still reject.
-				// The success handler below is the single place the replacement
-				// becomes durable state.
-				const generation = ++this.#deferredPublishGen;
-				const { bytes, stamp } = body;
-				this.#confirmDeferredPublish(targetPath, () => {
-					// A newer deferred publish owns the durability record now;
-					// this body is no longer on the backend, so record nothing.
-					if (generation !== this.#deferredPublishGen) return;
-					this.#recordFullRewrite(bytes);
-					const entries = this.#entries;
-					const bodyIsCurrent =
-						stamp.entries === entries &&
-						stamp.entryCount === entries.length &&
-						stamp.lastEntry === entries.at(-1) &&
-						stamp.revision === this.#bodyRevision &&
-						stamp.prefix === this.#titleSlotLine() + this.#lineFor(this.#header);
-					if (!bodyIsCurrent) {
-						// Entries raced the unconfirmed publish: the confirmed
-						// body predates them. Stay non-current and re-issue the
-						// full transcript instead of declaring it durable
-						// (rvEW); the re-issued publish carries the
-						// just-confirmed size token, so its queue-time check
-						// passes.
-						this.#fileIsCurrent = false;
-						this.#rewriteRequired = true;
-						this.#rewriteSynchronously();
-						return;
-					}
-					if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
-						this.#fileIsCurrent = true;
-						this.#materializeBreadcrumb();
-						this.#rewriteRequired = false;
-						this.#hasTitleSlot = true;
-					}
-				});
-				return;
+				this.#noteDiskFailure(err);
 			}
-			this.#recordFullRewrite(body.bytes);
-			// Only mark the manager current when writing the active session path.
-			// Mid-move writes update the live relocation path; `#sessionFile` is
-			// still the pre-repoint source until moveTo repoints it.
-			if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
-				this.#fileIsCurrent = true;
-				this.#materializeBreadcrumb();
-				this.#rewriteRequired = false;
-				this.#hasTitleSlot = true;
-			} else {
-				// Destination body is current on disk; in-memory still needs a
-				// header-cwd rewrite after repoint, but entries are durable.
-				this.#fileIsCurrent = false;
-				this.#rewriteRequired = true;
-				this.#hasTitleSlot = true;
+		} finally {
+			if (this.#appendBatch) {
+				this.#appendBatch.sessionId = this.#sessionId;
+				this.#appendBatch.sessionFile = this.#sessionFile;
+				this.#appendBatch.diskEpoch = this.#diskEpoch;
 			}
-		} catch (err) {
-			this.#noteDiskFailure(err);
+			if (absorbed) {
+				this.#notifyEntriesAppended(absorbed);
+			}
 		}
 	}
 
@@ -1793,20 +2330,42 @@ export class SessionManager {
 	 * before it ran.
 	 */
 	async #rewriteAtomically(): Promise<void> {
+		this.#drainAppendBatch();
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#released) return;
+		const targetSessionId = this.#sessionId;
+		const targetSessionFile = this.#sessionFile;
+		if (this.#diskFailure && (this.#pendingAtomicRewrites.size > 0 || this.#durableSize.deferredPublishGen > 0)) {
+			await this.#awaitSelfConflictSettlement();
+			if (
+				this.#released ||
+				!this.#persist ||
+				!this.#sessionFile ||
+				this.#sessionId !== targetSessionId ||
+				this.#sessionFile !== targetSessionFile
+			) {
+				return;
+			}
+			if (
+				!this.#diskFailure &&
+				this.#fileIsCurrent &&
+				!this.#rewriteRequired &&
+				this.#durableSize.deferredPublishGen === 0 &&
+				!this.#sessionOwnedElsewhere() &&
+				this.#durableSize.confirmedStamp !== undefined &&
+				this.#stampMatchesCurrentJournal(this.#durableSize.confirmedStamp)
+			) {
+				return;
+			}
+		}
 
 		const startEpoch = this.#diskEpoch;
+		const queuedCell = this.#durableSize;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (await this.#runFencedAtomicRewrite(startEpoch)) {
-					this.#fileIsCurrent = true;
-					this.#materializeBreadcrumb();
-					this.#rewriteRequired = false;
-					this.#hasTitleSlot = true;
-				}
+				await this.#runFencedAtomicRewrite(startEpoch, { materializeBreadcrumb: true });
 			},
-			{ epoch: startEpoch },
+			{ epoch: startEpoch, mutationCell: queuedCell },
 		);
 	}
 
@@ -1815,31 +2374,48 @@ export class SessionManager {
 	 * `#persistTitleChangeEntry` fallback. Holds `#atomicRewriteActive` across
 	 * the writer close and the full-file replace, and loops on
 	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
-	 * is captured before the task resolves. Returns `false` when the disk epoch
-	 * moved so callers skip current-marking updates; a body that landed before
-	 * that change still advances the durable byte record after readback.
+	 * is captured before the task resolves. Marks the manager current
+	 * synchronously right after recording the durable size only when the epoch,
+	 * deferred-publish state, and stamped journal still match; a body that
+	 * landed before an epoch change still advances the durable byte record
+	 * after readback.
 	 */
-	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
+	async #runFencedAtomicRewrite(
+		epoch: number,
+		options?: { clearDiskError?: boolean; materializeBreadcrumb?: boolean },
+	): Promise<boolean> {
 		if (this.#released) return false;
+		const active = Promise.withResolvers<void>();
+		this.#pendingAtomicRewrites.add(active.promise);
 		this.#atomicRewriteFenceEpoch = epoch;
 		let recoveries = 0;
+		let latestStamp: SessionBodyStamp | undefined;
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
-				await this.#closeWriterHandle();
+				const activeWriter = this.#writer;
+				try {
+					await this.#closeWriterHandle();
+				} catch (closeError) {
+					if (!options?.clearDiskError || activeWriter?.isOpen()) throw closeError;
+				}
+				if (options?.clearDiskError) {
+					await this.#storage.drain().catch(() => undefined);
+				}
 				if (this.#sessionOwnedElsewhere()) this.#moveOffSessionFile("open-elsewhere");
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
+				const publishCell = this.#durableSize;
+				const publishSnapshot = this.#captureCellPublishSnapshot(publishCell);
 				const body = this.#serializeBody();
-				const options = {
-					expectedSize: this.#expectedDiskSize,
-					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
-				};
 				try {
-					await (this.#storage.writeLinesAtomic
-						? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
-						: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
+					await this.#writeBodyAtomic(
+						sessionFile,
+						body,
+						publishSnapshot,
+						() => !this.#released && this.#diskEpoch === epoch,
+					);
 				} catch (error) {
 					if (await this.#recoverFromWriteConflict(error, recoveries)) {
 						recoveries++;
@@ -1847,27 +2423,57 @@ export class SessionManager {
 						this.#atomicRewriteDirty = true;
 						continue;
 					}
-					try {
-						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+					if (this.#canReconcileStalePublishReadback(publishSnapshot)) {
+						try {
+							if (
+								textMatchesLines(await this.#storage.readText(sessionFile), body.lines) &&
+								this.#canReconcileStalePublishReadback(publishSnapshot)
+							) {
+								this.#reconcileStaleAtomicPublish(sessionFile, publishSnapshot, body, {
+									clearPriorDiskError: options?.clearDiskError,
+								});
+							}
+						} catch {
+							// Preserve the publish error when durable state cannot be read back.
 						}
-					} catch {
-						// Preserve the publish error when durable state cannot be read back.
 					}
 					throw error;
 				}
 				if (this.#diskEpoch !== epoch) {
-					try {
-						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+					if (this.#canReconcileStalePublishReadback(publishSnapshot)) {
+						try {
+							if (
+								textMatchesLines(await this.#storage.readText(sessionFile), body.lines) &&
+								this.#canReconcileStalePublishReadback(publishSnapshot)
+							) {
+								this.#reconcileStaleAtomicPublish(sessionFile, publishSnapshot, body, {
+									clearPriorDiskError: options?.clearDiskError,
+								});
+							}
+						} catch {
+							// A superseding rewrite owns the durability record when its body cannot be read back.
 						}
-					} catch {
-						// A superseding rewrite owns the durability record when its body cannot be read back.
 					}
 					return false;
 				}
-				this.#recordFullRewrite(body.bytes);
+				this.#recordFullRewrite(body.bytes, body.stamp);
+				latestStamp = body.stamp;
 			} while (this.#atomicRewriteDirty);
+			if (
+				latestStamp === undefined ||
+				this.#released ||
+				this.#diskEpoch !== epoch ||
+				this.#durableSize.deferredPublishGen > 0 ||
+				(!options?.clearDiskError && this.#diskFailure !== undefined) ||
+				!this.#stampMatchesCurrentJournal(latestStamp)
+			) {
+				return false;
+			}
+			if (options?.clearDiskError) this.#clearDiskError();
+			this.#fileIsCurrent = true;
+			if (options?.materializeBreadcrumb) this.#materializeBreadcrumb();
+			this.#rewriteRequired = false;
+			this.#hasTitleSlot = true;
 			return true;
 		} finally {
 			// Only relinquish the fence if we still own it. A superseding
@@ -1877,10 +2483,13 @@ export class SessionManager {
 			// this stale rewrite was still awaiting storage. Clearing it here
 			// unconditionally would strand appends during the newer publish.
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			this.#pendingAtomicRewrites.delete(active.promise);
+			active.resolve();
 		}
 	}
 
-	#appendToSessionFile(entry: SessionEntry): void {
+	#appendEntriesToSessionFile(entries: readonly SessionEntry[]): void {
+		if (entries.length === 0) return;
 		if (this.#released || !this.#persist || !this.#sessionFile) return;
 		if (this.#atomicEntryBatch) {
 			this.#fileIsCurrent = false;
@@ -1910,22 +2519,32 @@ export class SessionManager {
 		if (
 			this.#storage.withSessionFileLockSync &&
 			this.#draftOnlySessionCleanupArmed &&
-			!isDraftOnlyMetadataEntry(entry) &&
-			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate))
+			entries.some(entry => !isDraftOnlyMetadataEntry(entry))
 		) {
-			try {
-				this.#storage.withSessionFileLockSync(this.#sessionFile, () => this.#appendToCurrentSessionFile(entry));
-			} catch (err) {
-				this.#fileIsCurrent = false;
-				this.#rewriteRequired = true;
-				this.#noteDiskFailure(err);
+			const batchSet = entries.length === 1 ? undefined : new Set(entries);
+			if (
+				this.#entries.every(
+					candidate =>
+						(batchSet ? batchSet.has(candidate) : candidate === entries[0]) ||
+						isDraftOnlyMetadataEntry(candidate),
+				)
+			) {
+				try {
+					this.#storage.withSessionFileLockSync(this.#sessionFile, () =>
+						this.#appendEntriesToCurrentSessionFile(entries),
+					);
+				} catch (err) {
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+					this.#noteDiskFailure(err);
+				}
+				return;
 			}
-			return;
 		}
-		this.#appendToCurrentSessionFile(entry);
+		this.#appendEntriesToCurrentSessionFile(entries);
 	}
 
-	#appendToCurrentSessionFile(entry: SessionEntry): void {
+	#appendEntriesToCurrentSessionFile(entries: readonly SessionEntry[]): void {
 		// Atomic replacement / move window: do not open a fresh append writer that
 		// a Windows EPERM replace could detach from the current JSONL path.
 		// - moveTo: write a full body to the live relocation path (source pre-
@@ -1946,56 +2565,162 @@ export class SessionManager {
 		// Cold/divergent: not on disk yet, in-memory entries diverged from the
 		// file, or another live process owns it → rewrite the whole file
 		// synchronously (to a sibling in the last case) and keep going.
-		if (!this.#fileIsCurrent || this.#rewriteRequired || this.#sessionOwnedElsewhere()) {
+		if (
+			this.#diskFailure !== undefined ||
+			!this.#fileIsCurrent ||
+			this.#rewriteRequired ||
+			this.#durableSize.deferredPublishGen > 0 ||
+			this.#sessionOwnedElsewhere()
+		) {
 			this.#rewriteSynchronously();
 			return;
 		}
 
-		// Hot path: write the entry directly on the writer, outside the async disk
-		// chain. Prefer appendSync so write failures latch `#diskFailure` before
-		// this call returns (not via a discarded rejected Promise after a later
-		// microtask). Callers stay non-throwing here — the core turn loop invokes
+		// Hot path: write directly on the writer, outside the async disk chain.
+		// Prefer appendSync so write failures latch `#diskFailure` before this call
+		// returns (not via a discarded rejected Promise after a later microtask).
+		// Callers stay non-throwing here — the core turn loop invokes
 		// appendMessage/appendCustomEntry without try/catch. A later entry retries
-		// all in-memory state through a full rewrite. File writers apply each line
-		// to the OS page cache before return.
+		// all in-memory state through a full rewrite. File writers apply the joined
+		// payload to the OS page cache under a single publish-lock pass before return.
 		// A mid-close writer leaves `#writer` undefined, so `#appendWriter` simply
-		// opens a fresh append handle and the entry still lands.
+		// opens a fresh append handle and the payload still lands.
 		try {
 			const writer = this.#appendWriter();
-			const line = this.#lineFor(entry);
+			const lines = entries.map(entry => this.#lineFor(entry));
 			if (writer.appendSync && !this.#storage.defersSyncPublish) {
-				writer.appendSync(line);
-				this.#recordDurableAppend(line);
+				const payload = lines.length === 1 ? lines[0] : lines.join("");
+				if (payload.length === 0) return;
+				writer.appendSync(payload);
+				this.#durableSize.issuedAppends += lines.length;
+				const appendOrdinal = this.#durableSize.issuedAppends;
+				this.#recordDurableAppend(payload, appendOrdinal, entries);
 			} else {
-				// A backend that only queues the publish (indexed) has no synchronous
-				// durability, so the durable size may advance only once it confirms
-				// the line: a lost publish must not leave the record describing bytes
-				// the store never accepted, or the next recovery rewrite hands the
-				// backend CAS an impossible `expectedSize`.
-				if (writer.appendSync) writer.appendSync(line);
-				const confirmed = writer.appendSync ? writer.flush() : writer.append(line);
-				void confirmed
-					.then(() => this.#recordDurableAppend(line))
-					.catch(err => {
-						this.#fileIsCurrent = false;
-						this.#rewriteRequired = true;
-						this.#noteDiskFailure(err);
-					});
+				// A backend that only queues the publish (indexed) or lacks synchronous
+				// atomic appends has no all-or-nothing batch rollback, so enqueue every
+				// line onto the writer immediately in journal order and advance durable
+				// size per confirmed line: if an earlier append succeeds and a later one
+				// fails, `#expectedDiskSize` still reflects the prefix the store kept.
+				const sizeCell = this.#durableSize;
+				for (let index = 0; index < entries.length; index++) {
+					const entry = entries[index];
+					const line = lines[index];
+					if (!entry || !line || line.length === 0) continue;
+					const appendOrdinal = ++sizeCell.issuedAppends;
+					const settled = writer
+						.append(line)
+						.then(
+							() => {
+								this.#recordDurableAppendToCell(sizeCell, line, appendOrdinal, [entry]);
+							},
+							err => {
+								sizeCell.appendFailures++;
+								if (this.#durableSize === sizeCell) {
+									this.#fileIsCurrent = false;
+									this.#rewriteRequired = true;
+									this.#noteDiskFailure(err);
+								}
+							},
+						)
+						.finally(() => {
+							this.#pendingWriterConfirmations.delete(settled);
+						});
+					this.#pendingWriterConfirmations.add(settled);
+				}
 			}
 		} catch (err) {
+			this.#durableSize.appendFailures++;
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#noteDiskFailure(err);
 		}
 	}
 
+	#drainAppendBatch(): void {
+		const staged = this.#appendBatch;
+		if (!staged) return;
+		if (staged.entries.length === 0) {
+			staged.sessionId = this.#sessionId;
+			staged.sessionFile = this.#sessionFile;
+			staged.diskEpoch = this.#diskEpoch;
+			return;
+		}
+		while (this.#appendBatch === staged && staged.entries.length > 0) {
+			const entries = staged.entries.splice(0);
+			if (staged.sessionId !== this.#sessionId || staged.sessionFile !== this.#sessionFile) {
+				this.#appendBatch = undefined;
+				logger.warn("Dropped staged append batch after unexpected session transition", {
+					stagedSessionFile: staged.sessionFile,
+					currentSessionFile: this.#sessionFile,
+					count: entries.length,
+				});
+				return;
+			}
+			this.#appendEntriesToSessionFile(entries);
+			staged.sessionId = this.#sessionId;
+			staged.sessionFile = this.#sessionFile;
+			staged.diskEpoch = this.#diskEpoch;
+			this.#notifyEntriesAppended(entries);
+		}
+	}
+
+	#drainTransitionAppendBatch(): void {
+		const staged = this.#appendBatch;
+		if (!staged && this.#appendedNotificationCursor >= this.#pendingAppendedNotifications.length) return;
+		try {
+			while (
+				(staged !== undefined && this.#appendBatch === staged && staged.entries.length > 0) ||
+				this.#appendedNotificationCursor < this.#pendingAppendedNotifications.length
+			) {
+				if (staged !== undefined && this.#appendBatch === staged && staged.entries.length > 0) {
+					this.#drainAppendBatch();
+				}
+				if (this.#appendedNotificationCursor < this.#pendingAppendedNotifications.length) {
+					this.#drainAppendedNotifications();
+				}
+			}
+		} finally {
+			if (staged !== undefined && this.#appendBatch === staged) {
+				this.#appendBatch = undefined;
+			}
+		}
+	}
+
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
+		this.#drainAppendBatch();
 		if (!this.#persist || !this.#sessionFile) return;
+		const targetSessionId = this.#sessionId;
+		const targetSessionFile = this.#sessionFile;
+		if (this.#diskFailure && (this.#pendingAtomicRewrites.size > 0 || this.#durableSize.deferredPublishGen > 0)) {
+			await this.#awaitSelfConflictSettlement();
+			if (
+				this.#released ||
+				!this.#persist ||
+				!this.#sessionFile ||
+				this.#sessionId !== targetSessionId ||
+				this.#sessionFile !== targetSessionFile ||
+				!this.#entries.includes(entry)
+			) {
+				return;
+			}
+		}
 		if (this.#diskFailure) {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#rewriteSynchronously();
 			if (this.#diskFailure) throw this.#diskFailure;
+			if (this.#durableSize.deferredPublishGen > 0) {
+				await this.#scheduleDiskWork(
+					async () => {
+						do {
+							await this.#storage.drain();
+							await this.#awaitDeferredConfirmations();
+						} while (this.#pendingDeferredConfirmations.size > 0);
+					},
+					{ ignorePriorError: true },
+				);
+				if (this.#diskFailure) throw this.#diskFailure;
+			}
 			return;
 		}
 
@@ -2005,7 +2730,7 @@ export class SessionManager {
 		}
 
 		// Title changes use their own asynchronous append path rather than
-		// #appendToSessionFile. During move, write the full body (including the
+		// #appendEntriesToSessionFile. During move, write the full body (including the
 		// title entry) to the live relocation path so a crash mid-move still
 		// keeps the title change; the trailing rewrite still updates header cwd.
 		if (this.#sessionFileRelocating) {
@@ -2013,56 +2738,150 @@ export class SessionManager {
 			return;
 		}
 
+		if (!this.#durableSize.persistedEntries.has(entry)) {
+			if (
+				!this.#fileIsCurrent ||
+				this.#rewriteRequired ||
+				this.#durableSize.deferredPublishGen > 0 ||
+				!this.#hasTitleSlot ||
+				!this.#storage.existsSync(this.#sessionFile) ||
+				this.#sessionOwnedElsewhere()
+			) {
+				await this.#rewriteAtomically();
+			} else {
+				const epoch = this.#diskEpoch;
+				const queuedCell = this.#durableSize;
+				const line = this.#lineFor(entry);
+				await this.#scheduleDiskWork(
+					async () => {
+						if (this.#released) return;
+						const sessionFile = this.#sessionFile;
+						if (
+							!sessionFile ||
+							this.#sessionId !== targetSessionId ||
+							sessionFile !== targetSessionFile ||
+							!this.#entries.includes(entry)
+						) {
+							return;
+						}
+						const activeCell = this.#durableSize;
+						if (activeCell.persistedEntries.has(entry)) return;
+						try {
+							if (!this.#fileIsCurrent || this.#rewriteRequired || activeCell.deferredPublishGen > 0) {
+								throw new Error("Session journal requires full rewrite before appending title entry.");
+							}
+							const writer = this.#appendWriter();
+							const appendOrdinal = ++activeCell.issuedAppends;
+							const settled = writer.append(line).then(
+								() => {
+									this.#recordDurableAppendToCell(activeCell, line, appendOrdinal, [entry]);
+								},
+								err => {
+									activeCell.appendFailures++;
+									throw err;
+								},
+							);
+							const confirmation = settled.then(
+								() => undefined,
+								() => undefined,
+							);
+							this.#pendingWriterConfirmations.add(confirmation);
+							try {
+								await settled;
+							} finally {
+								this.#pendingWriterConfirmations.delete(confirmation);
+							}
+							await this.#storage.updateSessionTitle(sessionFile, update);
+							if (
+								!this.#released &&
+								this.#diskEpoch === epoch &&
+								!this.#rewriteRequired &&
+								!this.#diskFailure &&
+								this.#durableSize.deferredPublishGen === 0
+							) {
+								this.#fileIsCurrent = true;
+							}
+						} catch {
+							await this.#runFencedAtomicRewrite(epoch, { clearDiskError: true });
+						}
+					},
+					{ epoch, mutationCell: queuedCell },
+				);
+			}
+		}
+		await this.#awaitPendingAtomicRewrites();
 		if (
-			!this.#fileIsCurrent ||
-			this.#rewriteRequired ||
-			!this.#hasTitleSlot ||
-			!this.#storage.existsSync(this.#sessionFile) ||
-			this.#sessionOwnedElsewhere()
+			!this.#released &&
+			this.#persist &&
+			!this.#sessionFileRelocating &&
+			!this.#atomicEntryBatch &&
+			this.#sessionId === targetSessionId &&
+			this.#sessionFile === targetSessionFile &&
+			!this.#diskFailure &&
+			this.#durableSize.deferredPublishGen > 0
+		) {
+			await this.#scheduleDiskWork(async () => {
+				do {
+					await this.#storage.drain();
+					await this.#awaitDeferredConfirmations();
+				} while (this.#pendingDeferredConfirmations.size > 0);
+			});
+		}
+		if (
+			!this.#released &&
+			this.#persist &&
+			!this.#sessionFileRelocating &&
+			!this.#atomicEntryBatch &&
+			this.#sessionId === targetSessionId &&
+			this.#sessionFile === targetSessionFile &&
+			!this.#diskFailure &&
+			(!this.#fileIsCurrent || this.#rewriteRequired) &&
+			this.#entries.includes(entry)
 		) {
 			await this.#rewriteAtomically();
-			return;
 		}
-
-		const epoch = this.#diskEpoch;
-		const line = this.#lineFor(entry);
-		await this.#scheduleDiskWork(
-			async () => {
-				if (this.#released) return;
-				const sessionFile = this.#sessionFile;
-				if (!sessionFile) return;
-				try {
-					await this.#appendWriter().append(line);
-					this.#recordDurableAppend(line);
-					await this.#storage.updateSessionTitle(sessionFile, update);
-					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
-				} catch {
-					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
-					this.#clearDiskError();
-					this.#fileIsCurrent = true;
-					this.#rewriteRequired = false;
-					this.#hasTitleSlot = true;
-				}
-			},
-			{ epoch },
-		);
 	}
 
 	#notifyEntryAppended(entry: SessionEntry): void {
-		const callback = this.onEntryAppended;
-		if (callback) {
-			try {
-				callback(entry);
-			} catch (err) {
-				logger.warn("collab entry hook failed", { error: String(err) });
+		this.#notifyEntriesAppended([entry]);
+	}
+
+	#notifyEntriesAppended(entries: readonly SessionEntry[]): void {
+		if (entries.length === 0 || (!this.#notifyingAppendedEntries && !this.onEntryAppended)) return;
+		this.#pendingAppendedNotifications.push(...entries);
+		if (this.#notifyingAppendedEntries) return;
+		this.#drainAppendedNotifications();
+	}
+
+	#drainAppendedNotifications(): void {
+		const prevNotifying = this.#notifyingAppendedEntries;
+		this.#notifyingAppendedEntries = true;
+		try {
+			while (this.#appendedNotificationCursor < this.#pendingAppendedNotifications.length) {
+				const entry = this.#pendingAppendedNotifications[this.#appendedNotificationCursor++]!;
+				const callback = this.onEntryAppended;
+				if (!callback) continue;
+				try {
+					callback(entry);
+				} catch (err) {
+					logger.warn("collab entry hook failed", { error: String(err) });
+				}
+			}
+		} finally {
+			this.#notifyingAppendedEntries = prevNotifying;
+			if (!prevNotifying && this.#appendedNotificationCursor >= this.#pendingAppendedNotifications.length) {
+				this.#pendingAppendedNotifications.length = 0;
+				this.#appendedNotificationCursor = 0;
 			}
 		}
 	}
 
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+		this.#drainTransitionAppendBatch();
+		this.#pendingWriterConfirmations.clear();
+		this.#advanceDiskEpoch();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
-		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
 		if (options?.sessionDir && this.#persist) {
 			this.#sessionDir = path.resolve(options.sessionDir);
@@ -2117,9 +2936,11 @@ export class SessionManager {
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+			this.#switchDurableSize(null, this.#sessionFile);
 			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
 		} else {
 			this.#sessionFile = undefined;
+			this.#switchDurableSize(null, undefined);
 		}
 
 		return this.#sessionFile;
@@ -2172,7 +2993,18 @@ export class SessionManager {
 			// An off-branch entry replays to the leaf it captured, not to itself.
 			batch.externalLeafId = sessionEntryLeafId(entry);
 		}
-		this.#appendToSessionFile(entry);
+		if (this.#appendBatch && !batch) {
+			if (
+				this.#appendBatch.sessionId === this.#sessionId &&
+				this.#appendBatch.sessionFile === this.#sessionFile &&
+				this.#appendBatch.diskEpoch === this.#diskEpoch
+			) {
+				this.#appendBatch.entries.push(entry);
+				return;
+			}
+			this.#appendBatch = undefined;
+		}
+		this.#appendEntriesToSessionFile([entry]);
 		if (batch) batch.deferredNotifications.push(entry);
 		else this.#notifyEntryAppended(entry);
 	}
@@ -2281,7 +3113,8 @@ export class SessionManager {
 	}
 
 	captureState(): SessionManagerStateSnapshot {
-		return {
+		this.#drainAppendBatch();
+		const snapshot: SessionManagerStateSnapshot = {
 			cwd: this.#cwd,
 			sessionDir: this.#sessionDir,
 			sessionId: this.#sessionId,
@@ -2303,6 +3136,17 @@ export class SessionManager {
 			header: structuredClone(this.#header),
 			entries: [...this.#entries],
 		};
+		SNAPSHOT_ORIGINS.set(snapshot, {
+			manager: this,
+			cell: this.#durableSize,
+			issuedAppends: this.#durableSize.issuedAppends,
+			issuedRewrites: this.#durableSize.issuedRewrites,
+			canceledMutations: this.#durableSize.canceledMutations,
+			appendFailures: this.#durableSize.appendFailures,
+			forceFileCreation: this.#forceFileCreation,
+			headerPrefix: this.#titleSlotLine() + this.#lineFor(this.#header),
+		});
+		return snapshot;
 	}
 
 	/**
@@ -2318,7 +3162,8 @@ export class SessionManager {
 		clone.restoreState(this.captureState());
 		if (!persist) {
 			clone.#sessionFile = undefined;
-			clone.#expectedDiskSize = null;
+			clone.#durableCellsByPath.clear();
+			clone.#switchDurableSize(null, undefined);
 			clone.#fileIsCurrent = false;
 			clone.#rewriteRequired = false;
 			clone.#forceFileCreation = false;
@@ -2327,33 +3172,134 @@ export class SessionManager {
 	}
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
-		this.#closeWriterEventually();
-		this.#diskTail = Promise.resolve();
+		this.#drainTransitionAppendBatch();
+		const origin = SNAPSHOT_ORIGINS.get(snapshot);
+		const sameJournal =
+			origin?.manager === this &&
+			this.#sessionId === snapshot.sessionId &&
+			this.#sessionFile !== undefined &&
+			this.#sessionFile === snapshot.sessionFile;
+		const entriesDiverged =
+			sameJournal &&
+			(this.#entries.length !== snapshot.entries.length ||
+				this.#entries.some((entry, index) => entry !== snapshot.entries[index]));
+		const headerDiverged = sameJournal && origin.headerPrefix !== this.#titleSlotLine() + this.#lineFor(this.#header);
+		const journalDivergedSinceCapture =
+			sameJournal &&
+			(origin.cell !== this.#durableSize ||
+				origin.cell.issuedAppends !== origin.issuedAppends ||
+				origin.cell.issuedRewrites !== origin.issuedRewrites ||
+				origin.cell.canceledMutations !== origin.canceledMutations ||
+				origin.cell.appendFailures !== origin.appendFailures ||
+				origin.cell.appendFailures > 0 ||
+				entriesDiverged ||
+				headerDiverged ||
+				(snapshot.onDisk && !this.#fileIsCurrent) ||
+				(!snapshot.needsRewrite && this.#rewriteRequired) ||
+				this.#diskFailure !== undefined);
+
+		let confirmedSnapshotOnRestore = false;
+		if (!sameJournal) {
+			this.#closeWriterEventually();
+			this.#pendingWriterConfirmations.clear();
+			this.#advanceDiskEpoch();
+			this.#diskTail = Promise.resolve();
+			const targetCell =
+				origin?.manager === this && snapshot.sessionFile !== undefined
+					? this.#resolveSnapshotCell(origin)
+					: undefined;
+			if (origin && targetCell && snapshot.sessionFile !== undefined) {
+				this.#durableSize = targetCell;
+				const confirmedMatchesSnapshot =
+					targetCell !== origin.cell &&
+					targetCell.issuedAppends === 0 &&
+					targetCell.issuedRewrites === 0 &&
+					targetCell.deferredPublishGen === 0 &&
+					targetCell.canceledMutations === 0 &&
+					targetCell.appendFailures === 0 &&
+					this.#stampMatchesSnapshot(targetCell.confirmedStamp, snapshot, origin);
+				const cellDiverged =
+					!confirmedMatchesSnapshot &&
+					(targetCell !== origin.cell ||
+						targetCell.issuedAppends !== origin.issuedAppends ||
+						targetCell.issuedRewrites !== origin.issuedRewrites ||
+						targetCell.deferredPublishGen > 0 ||
+						targetCell.canceledMutations > 0 ||
+						targetCell.appendFailures !== origin.appendFailures ||
+						targetCell.appendFailures > 0);
+				const hasBackingState =
+					snapshot.onDisk || targetCell.bytes !== null || this.#storage.existsSync(snapshot.sessionFile);
+				confirmedSnapshotOnRestore = confirmedMatchesSnapshot;
+				this.#fileIsCurrent = confirmedMatchesSnapshot ? true : cellDiverged ? false : snapshot.onDisk;
+				this.#rewriteRequired = confirmedMatchesSnapshot
+					? false
+					: cellDiverged
+						? hasBackingState || snapshot.needsRewrite
+						: snapshot.needsRewrite;
+				this.#forceFileCreation = origin.forceFileCreation;
+			} else {
+				this.#switchDurableSize(snapshot.expectedDiskSize, snapshot.sessionFile);
+				this.#fileIsCurrent = snapshot.onDisk;
+				this.#rewriteRequired = snapshot.needsRewrite;
+				this.#forceFileCreation = origin?.forceFileCreation ?? snapshot.onDisk;
+			}
+		} else if (journalDivergedSinceCapture) {
+			this.#closeWriterEventually();
+			this.#advanceDiskEpoch();
+			this.#diskTail = Promise.resolve();
+			const sessionFile = this.#sessionFile as string;
+			const confirmedMatchesSnapshot =
+				this.#durableSize !== origin.cell &&
+				this.#durableSize.issuedAppends === 0 &&
+				this.#durableSize.issuedRewrites === 0 &&
+				this.#durableSize.deferredPublishGen === 0 &&
+				this.#durableSize.canceledMutations === 0 &&
+				this.#durableSize.appendFailures === 0 &&
+				this.#stampMatchesSnapshot(this.#durableSize.confirmedStamp, snapshot, origin);
+			if (confirmedMatchesSnapshot) {
+				confirmedSnapshotOnRestore = true;
+				this.#fileIsCurrent = true;
+				this.#rewriteRequired = false;
+			} else {
+				const hasBackingState =
+					snapshot.onDisk ||
+					this.#fileIsCurrent ||
+					this.#expectedDiskSize !== null ||
+					this.#pendingWriterConfirmations.size > 0 ||
+					this.#storage.existsSync(sessionFile);
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = hasBackingState || snapshot.needsRewrite;
+			}
+			this.#forceFileCreation = origin.forceFileCreation;
+		} else {
+			this.#fileIsCurrent = snapshot.onDisk;
+			this.#rewriteRequired = snapshot.needsRewrite;
+			this.#forceFileCreation = this.#forceFileCreation || origin.forceFileCreation || snapshot.onDisk;
+		}
 		this.#clearDiskError();
 
 		this.#cwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
 		this.#sessionFile = snapshot.sessionFile;
-		this.#expectedDiskSize = snapshot.expectedDiskSize;
-		this.#fileIsCurrent = snapshot.onDisk;
-		this.#rewriteRequired = snapshot.needsRewrite;
-		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		// A completed moveTo drops the stash, so a rollback restores it here.
 		this.#taskSiblingCandidate = snapshot.taskSiblingCandidate;
-		this.#applyEntries(snapshot.header, [...snapshot.entries]);
+		this.#applyEntries(structuredClone(snapshot.header), [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
 
 		this.#titleSource = snapshot.titleSource;
 		this.#titleUpdatedAt = snapshot.titleUpdatedAt;
-		this.#hasTitleSlot = snapshot.hasTitleSlot;
+		this.#hasTitleSlot = confirmedSnapshotOnRestore || snapshot.hasTitleSlot;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
 
-		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+		if (this.#sessionFile) {
+			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+			if (confirmedSnapshotOnRestore) this.#materializeBreadcrumb();
+		}
 	}
 
 	/**
@@ -2380,15 +3326,14 @@ export class SessionManager {
 			);
 		}
 		// The inverse moveTo already rewrote the restored source file and left
-		// #expectedDiskSize describing that on-disk body. restoreState resets it
-		// to the pre-move snapshot size, so capture the post-relocation size and
-		// reapply it — otherwise the final rewrite would compare a stale size and
-		// reject an otherwise successful rollback.
+		// #expectedDiskSize describing that on-disk body. Reapply that post-
+		// relocation size so the final header rewrite compares against the
+		// relocated file rather than any pre-move snapshot size.
 		const relocatedDiskSize = this.#expectedDiskSize;
 		this.restoreState(snapshot);
 		// Persist the captured header so disk and memory agree after a fresh open.
 		if (this.#persist && this.#sessionFile) {
-			this.#expectedDiskSize = relocatedDiskSize;
+			this.#replaceDurableSize(relocatedDiskSize);
 			this.#forceFileCreation = true;
 			this.#rewriteRequired = true;
 			await this.#rewriteAtomically();
@@ -2404,6 +3349,7 @@ export class SessionManager {
 		loadedSession?: SessionLoadResult,
 		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
 	): Promise<void> {
+		this.#drainTransitionAppendBatch();
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -2439,10 +3385,9 @@ export class SessionManager {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
 			// keep the requested path and materialize the header immediately.
 			this.#resetToNewSession(options?.newSession, resolvedSessionFile);
-			this.#expectedDiskSize = sourceSize;
+			this.#switchDurableSize(sourceSize, resolvedSessionFile);
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
-			this.#fileIsCurrent = true;
 			return;
 		}
 
@@ -2475,7 +3420,12 @@ export class SessionManager {
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
-		this.#expectedDiskSize = sourceSize;
+		this.#switchDurableSize(sourceSize, resolvedSessionFile);
+		if (sourceSize !== null) {
+			for (const entry of this.#entries) {
+				this.#durableSize.persistedEntries.add(entry);
+			}
+		}
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
@@ -2512,10 +3462,20 @@ export class SessionManager {
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
 	async dropSession(sessionPath: string): Promise<void> {
 		await this.#drainAndCloseWriter();
+		const supersedeDroppedPath = (): void => {
+			const resolvedPath = path.resolve(sessionPath);
+			const isActivePath = this.#sessionFile !== undefined && path.resolve(this.#sessionFile) === resolvedPath;
+			if (isActivePath || this.#getLivePathCell(resolvedPath) !== undefined) {
+				const next = this.#bindPathDurableSize(resolvedPath, null);
+				if (isActivePath) this.#durableSize = next;
+			}
+		};
 		try {
 			await this.#storage.deleteSessionWithArtifacts(sessionPath);
+			supersedeDroppedPath();
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
+			supersedeDroppedPath();
 		}
 	}
 
@@ -2524,6 +3484,7 @@ export class SessionManager {
 	 * @returns the old and new session file paths, or undefined when not persisting.
 	 */
 	async fork(): Promise<{ oldSessionFile: string; newSessionFile: string } | undefined> {
+		this.#drainTransitionAppendBatch();
 		if (!this.#persist || !this.#sessionFile) return undefined;
 
 		const oldSessionFile = this.#sessionFile;
@@ -2536,7 +3497,7 @@ export class SessionManager {
 		this.#sessionId = mintSessionId();
 		this.#taskSiblingCandidate = undefined;
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
-		this.#expectedDiskSize = null;
+		this.#switchDurableSize(null);
 		this.#header = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -2568,6 +3529,7 @@ export class SessionManager {
 
 	/** Move the session to a new working directory. */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
+		this.#drainAppendBatch();
 		const resolvedCwd = path.resolve(newCwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
 		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, this.#cwd);
@@ -2733,10 +3695,18 @@ export class SessionManager {
 				this.#sessionFile = newSessionFile;
 				// The freshness expectation must describe the NEW path. A successful
 				// rename carried this manager's tracked bytes to `newSessionFile`, so
-				// #expectedDiskSize still applies; without a rename the destination
-				// holds no bytes this manager wrote, so a recreate-from-memory must
-				// publish against an absent file rather than a stale size.
-				if (sessionPathChanged && !sessionMoved) this.#expectedDiskSize = null;
+				// #expectedDiskSize still applies (under a fresh cell for the relocated
+				// path); without a rename the destination holds no bytes this manager
+				// wrote, so a recreate-from-memory must publish against an absent file
+				// rather than a stale size.
+				if (sessionPathChanged) {
+					const relocatedBytes = sessionMoved ? this.#expectedDiskSize : null;
+					const oldKey = path.resolve(oldSessionFile);
+					if (this.#getLivePathCell(oldKey)) {
+						this.#bindPathDurableSize(oldKey, null);
+					}
+					this.#switchDurableSize(relocatedBytes, newSessionFile);
+				}
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
@@ -2786,6 +3756,7 @@ export class SessionManager {
 	 * session/new must create a discoverable file immediately).
 	 */
 	async ensureOnDisk(): Promise<void> {
+		this.#drainAppendBatch();
 		if (!this.#persist || !this.#sessionFile) return;
 		this.#forceFileCreation = true;
 		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
@@ -2797,6 +3768,7 @@ export class SessionManager {
 		options?: { sessionDir?: string; suppressBreadcrumb?: boolean },
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionManager> {
+		this.#drainAppendBatch();
 		const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(this.#cwd, undefined, storage);
 		const manager = new SessionManager(this.#cwd, sessionDir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
@@ -2829,6 +3801,7 @@ export class SessionManager {
 	}
 
 	async #appendEntriesAtomicallyLocked<T>(append: () => T): Promise<T> {
+		this.#drainAppendBatch();
 		if (!this.#persist || !this.#sessionFile) return append();
 		if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
 		try {
@@ -2893,6 +3866,7 @@ export class SessionManager {
 	 */
 	recoverPersistenceFromCurrentState(): Promise<void> {
 		return this.#withAtomicPersistenceLock(async () => {
+			this.#drainAppendBatch();
 			if (!this.#persist || !this.#sessionFile) return;
 			if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
 			const operationError =
@@ -2904,16 +3878,42 @@ export class SessionManager {
 
 	/** Flush pending writes. Call before switching sessions or on shutdown. */
 	async flush(): Promise<void> {
+		this.#drainAppendBatch();
 		if (!this.#persist || !this.#sessionFile) return;
-		await this.#scheduleDiskWork(async () => {
-			if (this.#writer?.isOpen()) await this.#writer.flush();
-		});
+		await this.#awaitPendingAtomicRewrites();
+		// A prior synchronous write can self-conflict with this manager's own
+		// unconfirmed deferred publish; drain despite the latch so that publish
+		// can confirm and re-issue any racing entries before flush() settles.
+		await this.#scheduleDiskWork(
+			async () => {
+				if (this.#writer?.isOpen()) await this.#writer.flush();
+				await this.#awaitWriterConfirmations();
+			},
+			{ ignorePriorError: true },
+		);
 		// Drain any fire-and-forget backing writes (e.g. `writeTextSync` queued
 		// on IndexedSessionStorage during `flushSync`) so callers relying on
 		// flush() see the write durably visible to readers.
-		await this.#scheduleDiskWork(async () => {
-			await this.#storage.drain();
-		});
+		await this.#scheduleDiskWork(
+			async () => {
+				do {
+					await this.#storage.drain();
+					await this.#awaitDeferredConfirmations();
+				} while (this.#pendingDeferredConfirmations.size > 0);
+			},
+			{ ignorePriorError: true },
+		);
+		if (
+			!this.#released &&
+			!this.#atomicEntryBatch &&
+			!this.#sessionFileRelocating &&
+			!this.#diskFailure &&
+			!this.#fileIsCurrent &&
+			this.#rewriteRequired &&
+			this.#shouldHaveSessionFile()
+		) {
+			await this.#rewriteAtomically();
+		}
 		await this.#pendingArtifactCopy?.done;
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
@@ -2924,10 +3924,11 @@ export class SessionManager {
 	 * history, and Ctrl+C must not rebuild the whole JSONL string just to flush.
 	 */
 	flushSync(): void {
+		this.#drainAppendBatch();
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#atomicEntryBatch) throw new Error("Cannot synchronously flush during an atomic session batch.");
 		if (this.#diskFailure) throw this.#diskFailure;
-		if (this.#fileIsCurrent && !this.#rewriteRequired) {
+		if (this.#fileIsCurrent && !this.#rewriteRequired && this.#durableSize.deferredPublishGen === 0) {
 			this.#writer?.flushSync?.();
 			const writerError = this.#writer?.getError();
 			if (writerError) throw writerError;
@@ -2991,11 +3992,13 @@ export class SessionManager {
 
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
+		this.#drainAppendBatch();
 		if (!this.#persist) return;
 		// Closing gives up this process's ownership claim; a later write reclaims it.
 		const claim = this.#sessionClaim;
 		claim?.release?.();
 		if (claim) claim.release = undefined;
+		await this.#awaitPendingAtomicRewrites();
 		// A prior `flushSync` can self-conflict with this manager's own
 		// unconfirmed deferred publish; drain despite the latch so that
 		// publish can still confirm before we give up on the transcript.
@@ -3003,8 +4006,14 @@ export class SessionManager {
 			async () => {
 				const hadWriter = this.#writer !== undefined;
 				await this.#closeWriterHandle();
-				if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+				if (
+					!this.#rewriteRequired &&
+					!this.#diskFailure &&
+					this.#durableSize.deferredPublishGen === 0 &&
+					(hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+				) {
 					this.#fileIsCurrent = true;
+				}
 			},
 			{ ignorePriorError: true },
 		);
@@ -3015,7 +4024,10 @@ export class SessionManager {
 		// a fire-and-forget publish is still on the wire.
 		await this.#scheduleDiskWork(
 			async () => {
-				await this.#storage.drain();
+				do {
+					await this.#storage.drain();
+					await this.#awaitDeferredConfirmations();
+				} while (this.#pendingDeferredConfirmations.size > 0);
 			},
 			{ ignorePriorError: true },
 		);
@@ -3059,9 +4071,10 @@ export class SessionManager {
 	 * terminal.
 	 */
 	seal(): void {
+		this.#drainTransitionAppendBatch();
 		if (this.#released) return;
 		this.#released = true;
-		this.#diskEpoch++;
+		this.#advanceDiskEpoch();
 	}
 
 	/**
@@ -3085,6 +4098,9 @@ export class SessionManager {
 		this.#entries = [];
 		this.#index.clear();
 		this.#inMemoryArtifacts = null;
+		this.#durableSize.confirmedStamp = undefined;
+		this.#durableCellsByPath.clear();
+		this.#queuedMutationCells.clear();
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
 	}
@@ -3465,6 +4481,10 @@ export class SessionManager {
 		const title = SessionManager.#cleanTitle(name);
 		if (!title) return false;
 
+		this.#drainAppendBatch();
+		if (this.#released) return false;
+		if (this.#titleSource === "user" && source === "auto") return false;
+
 		const previousTitle = this.#sessionName;
 		const timestamp = nowIso();
 		this.#sessionName = title;
@@ -3483,17 +4503,20 @@ export class SessionManager {
 		};
 		if (previousTitle) entry.previousTitle = previousTitle;
 		if (trigger) entry.trigger = trigger;
+		const targetSessionId = this.#sessionId;
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		this.#notifyEntryAppended(entry);
 		await this.#persistTitleChangeEntry(entry, { title, source, updatedAt: timestamp });
-		// Keep the recent-sessions title index current so welcome-screen lookups
-		// never have to content-scan this session's file.
-		if (this.#persist && this.#storage instanceof FileSessionStorage) {
-			recordSessionTitle(this.#sessionId, title);
-		}
+		if (this.#sessionId === targetSessionId && this.#entries.includes(entry)) {
+			// Keep the recent-sessions title index current so welcome-screen lookups
+			// never have to content-scan this session's file.
+			if (this.#persist && this.#storage instanceof FileSessionStorage) {
+				recordSessionTitle(this.#sessionId, title);
+			}
 
-		this.#notifySessionNameListeners();
+			this.#notifySessionNameListeners();
+		}
 		return true;
 	}
 
@@ -3567,6 +4590,38 @@ export class SessionManager {
 	 */
 	snapshotForReplication(): { header: SessionHeader; entries: readonly SessionEntry[] } {
 		return { header: this.#header, entries: this.#entries };
+	}
+
+	/**
+	 * Coalesce synchronous appends recorded during `append` into a single
+	 * writer flush while updating in-memory leaf/branch state per entry.
+	 *
+	 * `append` must remain synchronous and must not switch sessions.
+	 */
+	withAppendBatch<T>(append: () => T): T {
+		if (this.#appendBatch || this.#atomicEntryBatch) {
+			return append();
+		}
+		const batch: StagedAppendBatch = {
+			sessionId: this.#sessionId,
+			sessionFile: this.#sessionFile,
+			diskEpoch: this.#diskEpoch,
+			entries: [],
+		};
+		this.#appendBatch = batch;
+		try {
+			return append();
+		} finally {
+			try {
+				while (this.#appendBatch === batch && batch.entries.length > 0) {
+					this.#drainAppendBatch();
+				}
+			} finally {
+				if (this.#appendBatch === batch) {
+					this.#appendBatch = undefined;
+				}
+			}
+		}
 	}
 
 	/**
@@ -3779,6 +4834,7 @@ export class SessionManager {
 	 * outputs). Use sparingly.
 	 */
 	async rewriteEntries(): Promise<void> {
+		this.#drainAppendBatch();
 		this.#bodyRevision++;
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
@@ -4074,6 +5130,7 @@ export class SessionManager {
 	 * counting it. A subtree preserved off-branch keeps its own usage.
 	 */
 	async discardEntryDurably(entryId: string): Promise<void> {
+		this.#drainAppendBatch();
 		const entry = this.#index.get(entryId);
 		if (!entry) return;
 		const children = this.#index.childrenOf(entryId);
@@ -4142,6 +5199,7 @@ export class SessionManager {
 	 * Returns the new file path, or undefined when not persisting.
 	 */
 	createBranchedSession(leafId: string, options?: { copyArtifacts?: boolean }): string | undefined {
+		this.#drainTransitionAppendBatch();
 		const sourceSessionFile = this.#sessionFile;
 		const branchPath = this.getBranch(leafId);
 		if (branchPath.length === 0) throw new Error(`Entry ${leafId} not found`);
@@ -4207,6 +5265,7 @@ export class SessionManager {
 
 		if (!this.#persist) {
 			this.#sessionFile = undefined;
+			this.#switchDurableSize(null);
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = false;
 			return undefined;
@@ -4219,7 +5278,7 @@ export class SessionManager {
 				done: copySessionArtifacts(sourceSessionFile, newSessionFile),
 			};
 		}
-		this.#expectedDiskSize = null;
+		this.#switchDurableSize(null);
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
 		return newSessionFile;

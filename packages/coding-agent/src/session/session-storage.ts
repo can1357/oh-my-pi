@@ -149,6 +149,8 @@ export class SessionLockError extends Error {
  */
 export interface WriteTextAtomicOptions extends SessionStorageWriteOptions {
 	commitGuard?: () => boolean;
+	/** Invoked synchronously once `expectedSize` and `commitGuard` pass and the publish commits. */
+	onCommit?: () => void;
 }
 
 export interface SessionStorage {
@@ -1170,10 +1172,15 @@ export class FileSessionStorage implements SessionStorage {
 				this.#assertExpectedSize(target, options?.expectedSize);
 				try {
 					this.renameSync(tempPath, target);
+					options?.onCommit?.();
 					return;
 				} catch (err) {
 					if (!hasFsCode(err, "EPERM")) throw toError(err);
-					this.#replaceSessionFileAfterEpermSync(tempPath, target, err, options?.commitGuard);
+					if (
+						this.#replaceSessionFileAfterEpermSync(tempPath, target, err, options?.commitGuard, options?.onCommit)
+					) {
+						options?.onCommit?.();
+					}
 				}
 			});
 		} catch (err) {
@@ -1210,7 +1217,8 @@ export class FileSessionStorage implements SessionStorage {
 		targetPath: string,
 		renameError: unknown,
 		commitGuard?: () => boolean,
-	): void {
+		onCommit?: () => void,
+	): boolean {
 		const dir = path.resolve(targetPath, "..");
 		const backupPath = path.join(dir, `${path.basename(targetPath)}.${Snowflake.next()}.bak`);
 		try {
@@ -1219,10 +1227,10 @@ export class FileSessionStorage implements SessionStorage {
 			if (isEnoent(moveAsideError)) {
 				if (commitGuard && !commitGuard()) {
 					this.#discardTemp(tempPath, targetPath);
-					return;
+					return false;
 				}
 				this.renameSync(tempPath, targetPath);
-				return;
+				return true;
 			}
 			throw toError(renameError);
 		}
@@ -1234,6 +1242,7 @@ export class FileSessionStorage implements SessionStorage {
 			try {
 				this.renameSync(backupPath, targetPath);
 			} catch (restoreErr) {
+				onCommit?.();
 				logger.warn("Failed to restore backup after commitGuard rejection", {
 					sessionFile: targetPath,
 					backupPath,
@@ -1241,7 +1250,7 @@ export class FileSessionStorage implements SessionStorage {
 				});
 			}
 			this.#discardTemp(tempPath, targetPath);
-			return;
+			return false;
 		}
 		try {
 			this.renameSync(tempPath, targetPath);
@@ -1249,6 +1258,7 @@ export class FileSessionStorage implements SessionStorage {
 			try {
 				this.renameSync(backupPath, targetPath);
 			} catch (rollbackErr) {
+				onCommit?.();
 				const rollbackError = toError(rollbackErr);
 				throw new Error(
 					`Failed to replace session file after EPERM (original: ${toError(renameError).message}; retry: ${
@@ -1270,6 +1280,7 @@ export class FileSessionStorage implements SessionStorage {
 				});
 			}
 		}
+		return true;
 	}
 
 	async rename(path: string, nextPath: string): Promise<void> {
@@ -1745,6 +1756,7 @@ export class MemorySessionStorage implements SessionStorage {
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		if (options?.commitGuard && !options.commitGuard()) return Promise.resolve();
 		this.writeTextSync(path, content, { expectedSize: options?.expectedSize });
+		options?.onCommit?.();
 		return Promise.resolve();
 	}
 
