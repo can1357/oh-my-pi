@@ -21,7 +21,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -361,6 +361,69 @@ describe("AgentSession client intent identity", () => {
 		expect(reopened.isClientMessageResolved("intent-deferred")).toBe(true);
 		// The destination never admitted the input, so its ID stays free there.
 		expect(manager.isClientMessageResolved("intent-deferred")).toBe(false);
+	});
+
+	test("refuses a deferred resolution for a journal another process owns instead of moving it", async () => {
+		const disk = TempDir.createSync("@client-message-owned-origin-");
+		cleanup.push(async () => disk.removeSync());
+		const storage = new FileSessionStorage();
+		const manager = SessionManager.create(disk.path(), disk.path(), storage);
+		manager.appendCustomEntry("history", {}, { forceFileCreation: true });
+		await manager.flush();
+		const origin = manager.getSessionFile();
+		const originId = manager.getSessionId();
+		if (!origin) throw new Error("Expected a persistent origin session");
+		await manager.newSession();
+		const claim = storage.claimSession.bind(storage);
+		const owned = vi
+			.spyOn(storage, "claimSession")
+			.mockImplementation((sessionId, sessionPath) =>
+				sessionId === originId ? null : claim(sessionId, sessionPath),
+			);
+		const journals = () => Array.from(new Bun.Glob("**/*.jsonl").scanSync(disk.path())).sort();
+		const filesBefore = journals();
+		await expect(manager.resolveClientMessagesInJournal(origin, ["intent-owned"])).rejects.toThrow(
+			"owned by another process",
+		);
+		// Refused, not moved off: no continuation journal appeared.
+		expect(journals()).toEqual(filesBefore);
+		owned.mockRestore();
+		await manager.resolveClientMessagesInJournal(origin, ["intent-owned"]);
+		const reopened = await SessionManager.open(origin, undefined, undefined, { throwIfMissing: true });
+		expect(reopened.isClientMessageResolved("intent-owned")).toBe(true);
+		await manager.close();
+	});
+
+	test("a custom expansion retargeted by a session change cannot reuse an ID the destination took", async () => {
+		const expanding = Promise.withResolvers<void>();
+		const finishExpand = Promise.withResolvers<void>();
+		const expand: LoadedCustomCommand = {
+			path: "expand",
+			resolvedPath: "expand",
+			source: "user",
+			command: {
+				name: "expand",
+				description: "Expands into a prompt after a delay",
+				execute: async () => {
+					expanding.resolve();
+					await finishExpand.promise;
+					return "expanded request";
+				},
+			},
+		};
+		const { session, manager } = setup({ config: { customCommands: [expand] } });
+		const expanded = session.prompt("/expand", intent("intent-retargeted"));
+		await withTimeout(expanding.promise, 5_000, "The custom command never started");
+		expect(await session.newSession()).toBe(true);
+		// The destination never saw the ID, so a new prompt there may take it.
+		await session.prompt("destination request", intent("intent-retargeted"));
+		finishExpand.resolve();
+		await expect(expanded).rejects.toThrow("clientMessageId already submitted: intent-retargeted");
+		await session.settleInFlightMessagePersistence();
+		const carriers = manager
+			.getEntries()
+			.filter(entry => entry.type === "message" && entry.clientMessageId !== undefined);
+		expect(carriers.map(entry => entry.type === "message" && entry.message.role)).toEqual(["user"]);
 	});
 
 	test("a queued follow-up keeps its ID taken after a branch changes the journal", async () => {

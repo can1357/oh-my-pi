@@ -8896,6 +8896,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							return false;
 						}
 						text = customResult;
+						// A session change while the command ran retargets its prompt: its ID was only
+						// admitted in the journal it left, so admit and reserve it again here.
+						if (registration && registration.journalId !== this.sessionManager.getSessionId()) {
+							this.#reserveClientMessageId(registration.id);
+						}
 					}
 				} finally {
 					if (registration) await this.finishLocalClientMessage(registration, consumed);

@@ -3795,21 +3795,37 @@ export class SessionManager {
 
 	/**
 	 * Journal `ids` as resolved in another session file of this storage, one this manager has left.
-	 * Reopening takes that journal's own writer and ownership claim, then gives them back.
+	 * Like {@link renameSessionTitle}, the cross-process lease is claimed before the load and held
+	 * through the write: a journal another process owns is refused instead of moved off to a
+	 * continuation, which would leave the requested journal without the resolution.
+	 * @throws when another process owns the journal or the write did not land in it
 	 */
 	async resolveClientMessagesInJournal(sessionFile: string, ids: readonly string[]): Promise<void> {
-		const journal = await SessionManager.open(sessionFile, undefined, this.#storage, {
-			suppressBreadcrumb: true,
-			throwIfMissing: true,
-		});
+		let release: (() => void) | undefined;
+		if (this.#storage.claimSession) {
+			const sessionId = await readSessionHeaderId(sessionFile);
+			if (!sessionId) throw new Error(`No session header in ${sessionFile}`);
+			release = this.#storage.claimSession(sessionId, sessionFile) ?? undefined;
+			if (!release) throw new Error(`Session ${sessionId} is owned by another process`);
+		}
+		let journal: SessionManager | undefined;
 		try {
+			journal = await SessionManager.open(sessionFile, undefined, this.#storage, {
+				suppressBreadcrumb: true,
+				throwIfMissing: true,
+			});
 			journal.appendCustomEntry(
 				CLIENT_MESSAGE_RESOLUTION_CUSTOM_TYPE,
 				{ clientMessageIds: [...new Set(ids)] },
 				{ forceFileCreation: true },
 			);
+			if (journal.getSessionFile() !== sessionFile) throw new Error(`Session ${sessionFile} moved during the write`);
 		} finally {
-			await journal.close();
+			try {
+				await journal?.close();
+			} finally {
+				release?.();
+			}
 		}
 	}
 
