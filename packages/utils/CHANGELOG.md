@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `prompt.renderWithSlots` and `prompt.PromptSlot`: renders a template like `prompt.render` and reports where each slot the template interpolates on its own line lands in the output, with no placeholder text ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+- Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
 ## [18.18.8] - 2026-11-11
 

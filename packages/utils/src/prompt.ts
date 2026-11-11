@@ -192,17 +192,19 @@ function replaceCommonAsciiSymbolsOutsideHtmlComments(line: string, state: HtmlC
 /** Pre-formatted text that {@link formatLines} keeps as one opaque line; it never counts as blank. */
 interface AtomicLine {
 	readonly text: string;
+	/** Unformatted lines, used verbatim when the block falls inside a code fence. */
+	readonly source: string;
 }
 
 export function format(content: string, options: PromptFormatOptions = {}): string {
 	return formatLines(content.split("\n"), options).join("\n");
 }
 
-/** {@link format} over lines; atomic lines pass through unchanged and keep their identity. */
-function formatLines<A extends AtomicLine = never>(
-	lines: readonly (string | A)[],
-	options: PromptFormatOptions,
-): (string | A)[] {
+/**
+ * {@link format} over lines. An atomic line passes through unchanged and keeps its identity, except
+ * inside a code fence, where its source lines replace it, as they would stay verbatim in place.
+ */
+function formatLines<A extends AtomicLine = never>(lines: (string | A)[], options: PromptFormatOptions): (string | A)[] {
 	const {
 		renderPhase = "post-render",
 		replaceAsciiSymbols = false,
@@ -220,7 +222,10 @@ function formatLines<A extends AtomicLine = never>(
 	for (let i = 0; i < lines.length; i++) {
 		const raw = lines[i];
 		if (typeof raw !== "string") {
-			result[n++] = raw;
+			if (inCodeBlock) {
+				lines.splice(i, 1, ...raw.source.split("\n"));
+				i--;
+			} else result[n++] = raw;
 			continue;
 		}
 		// charCode fast paths: only pay for trimEnd when the last char might be
@@ -563,73 +568,67 @@ export function render(template: string, context: TemplateContext = {}): string 
 	return format(rendered, { renderPhase: "post-render" });
 }
 
-/**
- * Text a template interpolates through {@link renderWithSlots}, which reports where it lands. A slot the
- * template interpolates alone on its own lines, outside any helper block or partial, is formatted on its
- * own, so a code fence it leaves open never reaches the text after it. Anywhere else it is plain text,
- * formatted with its surroundings and not tracked.
- */
-export class PromptSlot {
-	/** Post-render form of {@link text}, as a tracked slot appears in the output. */
-	readonly formatted: string;
-
-	constructor(readonly text: string) {
-		this.formatted = format(text, { renderPhase: "post-render" });
-	}
-
-	toString(): string {
-		return this.text;
-	}
-}
-
-/** UTF-16 range of one slot occurrence in rendered text. */
-export interface SlotRange {
+/** UTF-16 range of a tracked item's text in rendered output. */
+export interface ItemRange {
 	readonly start: number;
 	readonly end: number;
 }
 
-export interface SlottedRender {
+export interface TrackedRender {
 	readonly text: string;
-	/** Tracked occurrences of `slots[i]`, in output order. */
-	readonly ranges: readonly (readonly SlotRange[])[];
+	/** Ranges of `items[i]`, one per tracked iteration that rendered it. */
+	readonly ranges: readonly (readonly ItemRange[])[];
 }
 
-interface SlotLine extends AtomicLine {
-	readonly slot: number;
+interface ItemLine extends AtomicLine {
+	readonly item: number;
 }
 
 const compiledMarkedCache = new LRUCache<string, Handlebars.MarkedTemplateDelegate<TemplateContext>>({ max: 256 });
 
 /**
- * {@link render} that formats each tracked {@link PromptSlot} on its own and composes it into the
- * formatted template as one opaque line, so its range in the output is known by construction.
+ * {@link render} that reports where each of `items` was rendered. A template `{{#each}}` iteration
+ * over an item (not inside a helper block or partial) that covers whole lines is formatted on its own,
+ * without the blank lines at its edges, and composed into the formatted template as one block, so its
+ * range is known by construction; a code fence it leaves open never reaches the text after it.
+ * Iterations that share a line with other text are formatted in place and not reported.
  */
-export function renderWithSlots(
-	template: string,
-	context: TemplateContext,
-	slots: readonly PromptSlot[],
-): SlottedRender {
+export function renderTracked(template: string, context: TemplateContext, items: readonly object[]): TrackedRender {
 	let compiled = compiledMarkedCache.get(template);
 	if (!compiled) {
 		compiled = handlebars.compileMarked<TemplateContext>(template, { noEscape: true, strict: false });
 		compiledMarkedCache.set(template, compiled);
 	}
-	const slotIndex = new Map<unknown, number>(slots.map((slot, index) => [slot, index]));
-	const { text: raw, marks } = compiled(context ?? {}, new Set(slots));
-	// Each slot interpolated alone on its lines becomes one atomic line between the template's lines.
-	const lines: (string | SlotLine)[] = [];
+	const itemIndex = new Map<unknown, number>(items.map((item, index) => [item, index]));
+	const { text: raw, marks } = compiled(context ?? {}, new Set(items));
+	const lines: (string | ItemLine)[] = [];
 	let cursor = 0;
-	for (const { value, start, end } of marks) {
-		const slot = slotIndex.get(value)!;
-		const { formatted } = slots[slot]!;
-		const ownLines = (start === 0 || raw[start - 1] === "\n") && (end === raw.length || raw[end] === "\n");
-		if (!ownLines || !formatted) continue;
+	// Iterations finish inner-first; take the outermost first and skip what it contains.
+	for (const mark of marks.toSorted((a, b) => a.start - b.start || b.end - a.end)) {
+		let { start, end } = mark;
+		if (start < cursor || (start > 0 && raw[start - 1] !== "\n")) continue;
+		if (raw[end - 1] === "\n") end--;
+		if (end < raw.length && raw[end] !== "\n") continue;
+		// Blank edge lines stay template lines: alone, the block would drop them.
+		while (start < end) {
+			const newline = raw.indexOf("\n", start);
+			const lineEnd = newline < 0 || newline > end ? end : newline;
+			if (NON_BLANK.test(raw.slice(start, lineEnd))) break;
+			start = lineEnd + 1;
+		}
+		if (start >= end) continue;
+		for (;;) {
+			const lineStart = raw.lastIndexOf("\n", end - 1) + 1;
+			if (NON_BLANK.test(raw.slice(lineStart, end))) break;
+			end = lineStart - 1;
+		}
 		if (start > cursor) for (const line of raw.slice(cursor, start - 1).split("\n")) lines.push(line);
-		lines.push({ text: formatted, slot });
+		const source = raw.slice(start, end);
+		lines.push({ text: format(source, { renderPhase: "post-render" }), source, item: itemIndex.get(mark.item)! });
 		cursor = end + 1;
 	}
 	if (cursor <= raw.length) for (const line of raw.slice(cursor).split("\n")) lines.push(line);
-	const ranges: SlotRange[][] = slots.map(() => []);
+	const ranges: ItemRange[][] = items.map(() => []);
 	let text = "";
 	for (const [index, line] of formatLines(lines, { renderPhase: "post-render" }).entries()) {
 		if (index > 0) text += "\n";
@@ -637,7 +636,7 @@ export function renderWithSlots(
 			text += line;
 			continue;
 		}
-		ranges[line.slot]!.push({ start: text.length, end: text.length + line.text.length });
+		ranges[line.item]!.push({ start: text.length, end: text.length + line.text.length });
 		text += line.text;
 	}
 	return { text, ranges };

@@ -73,26 +73,27 @@ type Evaluation = {
 	partials: Map<string, Template>;
 	options: CompileOptions;
 	runtime: RuntimeOptions;
-	/** Values whose direct interpolations are recorded as marks. */
+	/** Items whose `{{#each}}` iterations are recorded as marks. */
 	tracked?: ReadonlySet<unknown>;
 };
 
-/** Range of one interpolation of a tracked value in rendered text. */
+/** Range of the output one `{{#each}}` iteration rendered for a tracked item. */
 export interface TemplateMark {
-	readonly value: unknown;
+	readonly item: unknown;
 	readonly start: number;
 	readonly end: number;
 }
 
-/** Rendered text with the marks of its tracked values, in text order. */
+/** Rendered text with the marks of its tracked items, in the order the iterations finished. */
 export interface MarkedRender {
 	readonly text: string;
 	readonly marks: readonly TemplateMark[];
 }
 
 /**
- * A compiled template that also reports where values in `tracked` were interpolated. Interpolations
- * inside a helper block or partial are not reported: helpers and partials produce plain strings.
+ * A compiled template that also reports the range each `{{#each}}` iteration over an item in
+ * `tracked` rendered. Iterations inside a helper block or partial are not reported: helpers and
+ * partials produce plain strings.
  */
 export type MarkedTemplateDelegate<T = unknown> = (
 	context: T | undefined,
@@ -100,7 +101,7 @@ export type MarkedTemplateDelegate<T = unknown> = (
 	options?: RuntimeOptions,
 ) => MarkedRender;
 
-/** Render sink: nodes append to `text`, tracked interpolations to `marks`. */
+/** Render sink: nodes append to `text`, tracked iterations to `marks`. */
 type Output = { text: string; marks: TemplateMark[] };
 
 const helpers = new Map<string, HelperDelegate>();
@@ -413,12 +414,17 @@ function renderInto(nodes: Node[], frame: Frame, evaluation: Evaluation, output:
 		if (node.kind === "text") output.text += node.value;
 		else if (node.kind === "output") {
 			const value = evaluateCall(node.expression, frame, evaluation, false);
-			const start = output.text.length;
 			output.text += stringify(value, node.escaped && !evaluation.options.noEscape);
-			if (evaluation.tracked?.has(value)) output.marks.push({ value, start, end: output.text.length });
 		} else if (node.kind === "partial") output.text += renderPartial(node, frame, evaluation);
 		else evaluateBlock(node, frame, evaluation, output);
 	}
+}
+
+/** Renders one `{{#each}}` iteration, marking its output when `item` is tracked. */
+function renderIteration(body: Node[], frame: Frame, evaluation: Evaluation, output: Output, item: unknown): void {
+	const start = output.text.length;
+	renderInto(body, frame, evaluation, output);
+	if (evaluation.tracked?.has(item)) output.marks.push({ item, start, end: output.text.length });
 }
 
 function helperOptions(
@@ -493,7 +499,7 @@ function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation, ou
 			// `forEach` skips holes, as the `map().join("")` it replaces did.
 			else
 				value.forEach((item, index) =>
-					renderInto(
+					renderIteration(
 						node.body,
 						childFrame(frame, item, {
 							...frame.data,
@@ -504,6 +510,7 @@ function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation, ou
 						}),
 						evaluation,
 						output,
+						item,
 					),
 				);
 			return;
@@ -513,7 +520,7 @@ function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation, ou
 			if (!entries.length) renderInto(node.inverse, frame, evaluation, output);
 			else
 				entries.forEach(([key, item], index) =>
-					renderInto(
+					renderIteration(
 						node.body,
 						childFrame(frame, item, {
 							...frame.data,
@@ -524,6 +531,7 @@ function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation, ou
 						}),
 						evaluation,
 						output,
+						item,
 					),
 				);
 			return;

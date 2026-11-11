@@ -10,7 +10,9 @@ If a skill applies, you MUST read `skill://<name>` before proceeding.
 {{#unless @first}}
 
 {{/unless}}
-{{fragment}}
+<skill name="{{name}}">
+{{description}}
+</skill>
 {{/each}}
 </skills>
 {{/if}}

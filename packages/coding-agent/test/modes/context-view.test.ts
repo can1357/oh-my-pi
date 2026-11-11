@@ -249,21 +249,23 @@ describe("context snapshot prompt sources", () => {
 		expect(entryTexts(data, "system-prompt")).toEqual(["Replacement policy", ""]);
 	});
 
-	it("shows no notice for a kind a custom template formats without {{fragment}}", async () => {
+	it.each([
+		{ listing: "{{#each skills}}\n* {{name}} — {{description}}\n{{/each}}", attributed: ["* fixture — Use <T> & {{literal}} without expansion"] },
+		// Iterations that share a line cannot be isolated; the listing stays in System Prompt.
+		{ listing: "Skills: {{#each skills}}{{name}} {{/each}}", attributed: [] },
+	])("attributes skills a custom template lists on their own lines: $listing", async ({ listing, attributed }) => {
 		const built = await buildSystemPrompt({
 			cwd: import.meta.dir,
 			personality: "none",
 			activeRepoContext: null,
 			contextFiles: [{ path: instructionPath, content: "Unique instruction body" }],
 			skills,
-			// Instruction files still come from the separate project block through `{{fragment}}`.
-			systemPromptTemplate: "Custom policy\n{{#each skills}}* {{name}} — {{description}}\n{{/each}}",
+			systemPromptTemplate: `Custom policy\n${listing}`,
 		});
 		const data = buildSessionContextView(sessionWith({ prompt: built.systemPrompt, sources: built.sources, skills }));
 		expect(data.notices).toEqual([]);
-		expect(entryTexts(data, "skills")).toEqual([]);
+		expect(entryTexts(data, "skills")).toEqual(attributed);
 		expect(category(data, "instruction-files").entries.map(entry => entry.label)).toEqual([instructionPath]);
-		expect(entryTexts(data, "system-prompt")[0]).toContain("* fixture — Use <T>");
 	});
 
 	it("attributes every instruction file when an earlier one leaves a code fence open", async () => {

@@ -104,35 +104,36 @@ describe("helpers: join", () => {
 	});
 });
 
-describe("renderWithSlots", () => {
-	const template = "<list>\n{{#each items}}\n{{slot}}\n{{/each}}\n</list>\n\n\n| x  |  y |";
+describe("renderTracked", () => {
+	const template = "<list>\n{{#each items}}\n{{#unless @first}}\n\n{{/unless}}\n<i>\n{{body}}\n</i>\n{{/each}}\n</list>\n\n\n| x  |  y |";
+	const texts = (result: prompt.TrackedRender) =>
+		result.ranges.map(ranges => ranges.map(({ start, end }) => result.text.slice(start, end)));
 
-	it("matches render and reports where each whole-line slot landed", () => {
-		const slots = [new prompt.PromptSlot("- a:  one   "), new prompt.PromptSlot("<b>\n\n\nbody\n</b>")];
-		const items = slots.map(slot => ({ slot }));
-		const result = prompt.renderWithSlots(template, { items }, slots);
-		expect(result.text).toBe(
-			prompt.render(template, { items: [{ slot: "- a:  one   " }, { slot: "<b>\n\n\nbody\n</b>" }] }),
-		);
-		expect(result.ranges.map(ranges => ranges.map(({ start, end }) => result.text.slice(start, end)))).toEqual([
-			["- a:  one"],
-			["<b>\nbody\n</b>"],
-		]);
+	it("matches render and reports each tracked iteration without its blank edge lines", () => {
+		const items = [{ body: "one   " }, { body: "\n\n\ntwo" }];
+		const result = prompt.renderTracked(template, { items }, items);
+		expect(result.text).toBe(prompt.render(template, { items }));
+		expect(texts(result)).toEqual([["<i>\none\n</i>"], ["<i>\ntwo\n</i>"]]);
 	});
 
-	it("keeps a code fence a slot leaves open out of the text after it", () => {
-		const slots = [new prompt.PromptSlot("```\nopen")];
-		const result = prompt.renderWithSlots(template, { items: [{ slot: slots[0] }] }, slots);
-		expect(result.text).toBe("<list>\n```\nopen\n</list>\n|x|y|");
+	it("keeps a code fence an iteration leaves open out of the text after it", () => {
+		const items = [{ body: "```\nopen" }, { body: "| a  |  b |" }];
+		const result = prompt.renderTracked(template, { items }, items);
+		expect(result.text).toBe("<list>\n<i>\n```\nopen\n</i>\n\n<i>\n|a|b|\n</i>\n</list>\n|x|y|");
 	});
 
-	it("leaves a slot untracked inside a line or a helper block, rendered as render would", () => {
-		const slots = [new prompt.PromptSlot("inline   "), new prompt.PromptSlot("listed   ")];
-		const template = 'before {{inline}}after\n\n\n{{#list items join="\\n"}}\n{{this}}\n{{/list}}';
-		const result = prompt.renderWithSlots(template, { inline: slots[0], items: [slots[1]] }, slots);
-		expect(result).toEqual({
-			text: prompt.render(template, { inline: "inline   ", items: ["listed   "] }),
-			ranges: [[], []],
-		});
+	it("renders as render and reports nothing for iterations it cannot isolate", () => {
+		const cases = [
+			// Inside a helper block, which returns a plain string.
+			{ template: '{{#list items join="\\n"}}\n{{body}}\n{{/list}}', items: [{ body: "a   " }] },
+			// Sharing a line with template text.
+			{ template: "before {{#each items}}{{body}}{{/each}}\n\n\nafter", items: [{ body: "a   " }] },
+			// Inside a fence the template opened, where lines stay verbatim.
+			{ template: "```\n{{#each items}}\n{{body}}\n{{/each}}\n```", items: [{ body: "| a  |  b |" }] },
+		];
+		for (const { template, items } of cases) {
+			const result = prompt.renderTracked(template, { items }, items);
+			expect(result).toEqual({ text: prompt.render(template, { items }), ranges: [[]] });
+		}
 	});
 });

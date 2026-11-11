@@ -102,7 +102,7 @@ Generated blocks that are outside block 0 remain normal: the `<project-context>`
 
 The generated project/footer route already renders `contextFiles` and `appendPrompt` once. A template SHOULD NOT render those fields in block 0 unless it intentionally wants duplicate copies.
 
-Inside `{{#each skills}}`, `{{fragment}}` renders the bundled `- name: description` line. `/context` shows skills in its Skills category only when block 0 renders them through `{{fragment}}` alone on its own line, outside helper blocks such as `{{#list}}` (use `{{#each}}`); a template that formats skills itself keeps them in System Prompt. Instruction files come from the project block, so the template does not affect their attribution.
+`/context` shows each context file and skill in its own category when an `{{#each}}` iteration renders it on lines of its own, outside helper blocks such as `{{#list}}`; a template that lists skills on one line or through a helper keeps them in System Prompt. Instruction files come from the project block, so the template does not affect their attribution.
 
 Use effective session settings and live tool data rather than copying today's rendered prose. `subagent` is true when rendering a task subagent's prompt; the bundled templates use it to replace verification duties with a hand-off to the main agent. `eagerTasks` and `eagerTasksAlways` reflect task settings captured when the session starts, while `xdevDocs`, `toolInventory`, and `toolRefs` reflect mounted devices and tool state whenever the prompt rebuilds. `xdevDocs` also reflects the `tools.xdevDocs` / `tools.xdevInlineDevices` settings used for that rebuild.
 

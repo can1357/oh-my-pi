@@ -8,7 +8,9 @@
 <repo-rules>
 MUST follow these context files for all tasks:
 {{#each contextFiles}}
-{{fragment}}
+<file path="{{path}}">
+{{content}}
+</file>
 {{/each}}
 </repo-rules>
 {{/if}}

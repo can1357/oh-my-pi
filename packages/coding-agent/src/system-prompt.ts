@@ -31,9 +31,6 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
-import contextFileTemplate from "./prompts/system/context-file.md" with { type: "text" };
-import contextSkillTemplate from "./prompts/system/context-skill.md" with { type: "text" };
-import customContextSkillTemplate from "./prompts/system/custom-context-skill.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -659,16 +656,13 @@ export interface BuildSystemPromptResult {
 	xdevCatalogNames?: readonly string[];
 }
 
-/** Static wrappers; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */
+/** Static wrapper; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */
 const renderUserAppend = prompt.compile(userAppendPromptTemplate.trimEnd());
-const renderContextFile = prompt.compile(contextFileTemplate.trimEnd());
-const renderContextSkill = prompt.compile(contextSkillTemplate.trimEnd());
-const renderCustomContextSkill = prompt.compile(customContextSkillTemplate.trimEnd());
 
 type SourceIdentity = Pick<SystemPromptSource, "id" | "kind" | "label" | "path">;
 
 /** Drops the leading whitespace `String.trim` removes, shifting ranges with it. */
-function trimSlotted(rendered: prompt.SlottedRender): prompt.SlottedRender {
+function trimTracked(rendered: prompt.TrackedRender): prompt.TrackedRender {
 	const text = rendered.text.trim();
 	const lead = rendered.text.length - rendered.text.trimStart().length;
 	if (lead === 0) return { text, ranges: rendered.ranges };
@@ -680,9 +674,9 @@ function trimSlotted(rendered: prompt.SlottedRender): prompt.SlottedRender {
 	};
 }
 
-/** One source per slot occurrence in `rendered`, which was built as block `block`. */
-function slotSources(
-	rendered: prompt.SlottedRender,
+/** One source per tracked occurrence in `rendered`, which was built as block `block`. */
+function trackedSources(
+	rendered: prompt.TrackedRender,
 	block: number,
 	identities: readonly SourceIdentity[],
 ): SystemPromptSource[] {
@@ -1054,34 +1048,24 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	// Each context file and skill is a slot: its wrapper is rendered and formatted on its own, so the
-	// built blocks record where it landed.
-	const renderedContextFiles = contextFiles.map(file => ({
-		...file,
-		fragment: new prompt.PromptSlot(renderContextFile(file)),
-	}));
-	// Each outer template renders skills through its own fragment wrapper; select them together.
-	const { template: selectedTemplate, renderSkill } = resolvedCustomPrompt
-		? { template: customSystemPromptTemplate, renderSkill: renderCustomContextSkill }
-		: { template: resolvedSystemPromptTemplate ?? systemPromptTemplate, renderSkill: renderContextSkill };
-	const renderedSkills = filteredSkills.map(skill => ({
-		...skill,
-		fragment: new prompt.PromptSlot(renderSkill({ name: skill.name, description: skill.description })),
-	}));
-	const slots = [...renderedContextFiles, ...renderedSkills].map(source => source.fragment);
+	// Each `{{#each}}` iteration over a context file or skill records where that source landed.
+	const sourceItems = [...contextFiles, ...filteredSkills];
 	const sourceIdentities: SourceIdentity[] = [
-		...renderedContextFiles.map((file, index) => ({
+		...contextFiles.map((file, index) => ({
 			id: `instruction-${index}`,
 			kind: "instruction-files" as const,
 			label: file.path,
 		})),
-		...renderedSkills.map((skill, index) => ({
+		...filteredSkills.map((skill, index) => ({
 			id: `skill-${index}`,
 			kind: "skills" as const,
 			label: skill.name,
 			path: skill.filePath,
 		})),
 	];
+	const selectedTemplate = resolvedCustomPrompt
+		? customSystemPromptTemplate
+		: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
 	const environment = getEnvironmentInfo();
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
@@ -1094,12 +1078,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolListMode,
 		toolRefs,
 		environment,
-		contextFiles: renderedContextFiles,
+		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		hasSkillUriAccess,
 		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
-		skills: renderedSkills,
+		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		cwd: promptCwd,
@@ -1133,9 +1117,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		writeTransportOnly,
 		subagent,
 	};
-	let rendered: prompt.SlottedRender;
+	let rendered: prompt.TrackedRender;
 	try {
-		rendered = prompt.renderWithSlots(selectedTemplate, data, slots);
+		rendered = prompt.renderTracked(selectedTemplate, data, sourceItems);
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
 		if (!hasDiscoveredTemplate) {
@@ -1145,10 +1129,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			error: String(error),
 		});
 		resolvedSystemPromptTemplate = undefined;
-		rendered = prompt.renderWithSlots(systemPromptTemplate, data, slots);
+		rendered = prompt.renderTracked(systemPromptTemplate, data, sourceItems);
 	}
 	const systemPrompt = [rendered.text];
-	const sources = slotSources(rendered, 0, sourceIdentities);
+	const sources = trackedSources(rendered, 0, sourceIdentities);
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);
@@ -1158,11 +1142,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// `<project-context>` block after every static block, so sessions in
 	// different directories share the static prefix and the Anthropic head
 	// cache breakpoint lands right before this block.
-	const projectPrompt = trimSlotted(
-		prompt.renderWithSlots(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt }, slots),
+	const projectPrompt = trimTracked(
+		prompt.renderTracked(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt }, sourceItems),
 	);
 	if (projectPrompt.text) {
-		sources.push(...slotSources(projectPrompt, systemPrompt.length, sourceIdentities));
+		sources.push(...trackedSources(projectPrompt, systemPrompt.length, sourceIdentities));
 		systemPrompt.push(projectPrompt.text);
 	}
 
