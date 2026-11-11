@@ -542,6 +542,11 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
  * the caller's promise resolves to the stub fallback. Late SDK responses that
  * arrive after abort/timeout — both rejections and successful `accept`s —
  * are dropped silently (no `logger.warn`) to keep operator logs clean.
+ *
+ * A client that rejects the request (JSON-RPC error, unrenderable schema,
+ * closed transport) rejects the returned promise with that error as `cause`:
+ * `undefined` means the user dismissed the form, and a failed request is not
+ * a user decision.
  */
 async function elicitFormFromAcpClient(
 	connection: AgentSideConnection,
@@ -556,16 +561,17 @@ async function elicitFormFromAcpClient(
 	if (signal?.aborted) {
 		return undefined;
 	}
-	const { promise, resolve } = Promise.withResolvers<CreateElicitationResponse | undefined>();
+	const { promise, resolve, reject } = Promise.withResolvers<CreateElicitationResponse | undefined>();
 	let settled = false;
 	let timeoutId: NodeJS.Timeout | undefined;
-	const finish = (value: CreateElicitationResponse | undefined) => {
+	const settle = (done: () => void) => {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timeoutId);
 		signal?.removeEventListener("abort", onAbort);
-		resolve(value);
+		done();
 	};
+	const finish = (value: CreateElicitationResponse | undefined) => settle(() => resolve(value));
 	const onAbort = () => finish(undefined);
 	signal?.addEventListener("abort", onAbort, { once: true });
 	if (dialogOptions?.timeout !== undefined) {
@@ -601,7 +607,8 @@ async function elicitFormFromAcpClient(
 			// Caller may already have moved on via abort/timeout; suppress noise.
 			if (settled) return;
 			logger.warn("ACP elicitation failed", { acpSessionId: sessionId, method, error });
-			finish(undefined);
+			const reason = error instanceof Error ? error.message : String(error);
+			settle(() => reject(new Error(`ACP client failed the ${method} elicitation: ${reason}`, { cause: error })));
 		});
 	const response = await promise;
 	if (!isAcceptedElicitation(response) || !response.content) {
@@ -610,6 +617,11 @@ async function elicitFormFromAcpClient(
 	return response.content;
 }
 
+/**
+ * Single-value elicitation for `select`/`confirm`/`input`/`editor` and plan
+ * approval. A failed client request reads as no answer: these callers already
+ * fail closed on `undefined` (deny, keep plan mode, skip input).
+ */
 async function elicitFromAcpClient(
 	connection: AgentSideConnection,
 	sessionId: string,
@@ -618,16 +630,20 @@ async function elicitFromAcpClient(
 	property: ElicitationPropertySchema,
 	dialogOptions: ExtensionUIDialogOptions | undefined,
 ): Promise<ElicitationContentValue | undefined> {
-	const content = await elicitFormFromAcpClient(
-		connection,
-		sessionId,
-		method,
-		message,
-		{ value: property },
-		["value"],
-		dialogOptions,
-	);
-	return content?.value;
+	try {
+		const content = await elicitFormFromAcpClient(
+			connection,
+			sessionId,
+			method,
+			message,
+			{ value: property },
+			["value"],
+			dialogOptions,
+		);
+		return content?.value;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
