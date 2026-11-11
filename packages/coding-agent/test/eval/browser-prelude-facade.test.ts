@@ -360,6 +360,7 @@ describe("browser facade in real Eval runtimes", () => {
 		expect((await run("print((await tab.observe()).elements);")).split("\n")).toEqual(lines.slice(5));
 		const single = await executeJs("print(await tab.observe());", { cwd: process.cwd(), sessionId, session });
 		expect(single.output).toBe(`${lines.join("\n")}\n`);
+		expect(await run("print(await tab.run(async ({ tab }) => tab.observe()));")).toBe(lines.join("\n"));
 		expect((await run('print(await tab.observe(), "done");')).split("\n")).toEqual([...lines, " done"]);
 		expect((await run('print((await tab.observe()).elements, "done");')).split("\n")).toEqual([
 			...lines.slice(5),
@@ -419,6 +420,11 @@ describe("browser facade in real Eval runtimes", () => {
 			"Object.setPrototypeOf(o.elements[0].states, { join() { globalThis.ran++; throw new Error('ran'); } })",
 			"id: 150",
 		],
+		[
+			"edited prototype",
+			"Object.getPrototypeOf(o.elements[0].states).join = () => { globalThis.ran++; throw new Error('ran'); }",
+			"id: 150",
+		],
 		["hidden field", 'Object.defineProperty(o.elements[0], "id", { enumerable: false })', "id: 150"],
 	])(
 		"prints an edited observation through plain inspect, whole, running none of its code: %s",
@@ -438,7 +444,7 @@ describe("browser facade in real Eval runtimes", () => {
 			];
 			// util.inspect is the call under test; `print` adds its own JSON view, which reads the value separately.
 			const result = await executeJs(
-				`globalThis.ran = 0; const { inspect } = require("node:util"); const tab = await browser.open({ name: "edited" }); const o = await tab.observe(); ${edit}; const text = inspect(o, { depth: 6, breakLength: 120 }); print(text); print(inspect(Object.getOwnPropertyDescriptor(o, "elements").value ?? null, { depth: 6 })); print("ids:", text.match(/\\bid: \\d+/g)?.length ?? 0, "ran:", globalThis.ran);`,
+				`globalThis.ran = 0; const { inspect } = require("node:util"); const tab = await browser.open({ name: "edited" }); const o = await tab.observe(); const prototype = Object.getPrototypeOf(o.elements[0].states); const join = Object.getOwnPropertyDescriptor(prototype, "join"); let text; try { ${edit}; text = inspect(o, { depth: 6, breakLength: 120 }); } finally { Object.defineProperty(prototype, "join", join); } print(text); print(inspect(Object.getOwnPropertyDescriptor(o, "elements").value ?? null, { depth: 6 })); print("ids:", text.match(/\\bid: \\d+/g)?.length ?? 0, "ran:", globalThis.ran);`,
 				{ cwd: process.cwd(), sessionId: `browser-facade-edited-${crypto.randomUUID()}`, session },
 			);
 			expect(result.exitCode).toBe(0);

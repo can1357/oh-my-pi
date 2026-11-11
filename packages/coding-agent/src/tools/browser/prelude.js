@@ -40,7 +40,7 @@
 	// argument starts a line of its own instead of reading as fields of the last element.
 	//
 	// The short form is only for an observation whose objects are all as `observe()` returned them: `snapshot`
-	// records each one's prototype and own properties, and `untouched` compares those, reading nothing but the
+	// records each one's prototype chain and own properties, and `untouched` compares those, reading nothing but
 	// recorded objects' own descriptors. Anything Eval code changed (a field, a getter, a Proxy, a prototype) is
 	// therefore never read or run here: that observation goes to plain inspect, with no cut at 100 items.
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
@@ -48,26 +48,32 @@
 	const snapshot = root => {
 		const records = [];
 		const seen = new Set();
-		const visit = value => {
+		const visit = (value, inherited = false) => {
 			if (value === null || typeof value !== "object" || seen.has(value)) return;
 			seen.add(value);
 			const keys = Reflect.ownKeys(value);
 			const properties = keys.map(key => Object.getOwnPropertyDescriptor(value, key));
-			records.push({ object: value, prototype: Object.getPrototypeOf(value), keys, properties });
-			for (const property of properties) visit(property.value);
+			const prototype = Object.getPrototypeOf(value);
+			records.push({ object: value, prototype, keys, properties, inherited });
+			visit(prototype, true);
+			if (!inherited) for (const property of properties) visit(property.value);
 		};
 		visit(root);
 		return records;
 	};
 	const untouched = records => {
-		for (const { object, prototype, keys, properties } of records) {
+		for (const { object, prototype, keys, properties, inherited } of records) {
 			const now = Reflect.ownKeys(object);
 			if (Object.getPrototypeOf(object) !== prototype || now.length !== keys.length) return false;
 			for (let at = 0; at < keys.length; at++) {
 				const was = properties[at];
 				const is = now[at] === keys[at] && Object.getOwnPropertyDescriptor(object, keys[at]);
-				if (!is || !("value" in is) || !Object.is(is.value, was.value)) return false;
-				if (is.enumerable !== was.enumerable) return false;
+				if (!is) return false;
+				if (inherited) {
+					if (is.get !== was.get || is.set !== was.set || is.writable !== was.writable) return false;
+					if (is.configurable !== was.configurable) return false;
+				} else if (!("value" in is)) return false;
+				if (!Object.is(is.value, was.value) || is.enumerable !== was.enumerable) return false;
 			}
 		}
 		return true;
@@ -342,7 +348,7 @@
 				parameters.code = fnOrCode;
 			}
 			const details = await invoke("run", parameters);
-			return details.value;
+			return withPrintForm(details.value);
 		};
 		tab.close = async options => {
 			const opts = validateOptions("tab.close", options);
