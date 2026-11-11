@@ -733,8 +733,10 @@ export class ModelControls {
 			}
 		}
 
-		// Drop the result if the turn was aborted/superseded while classifying.
+		// Drop the result if the turn was aborted/superseded while classifying, or the model changed:
+		// it was judged on the old model's ladder, and the switch already set the new model's level.
 		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		if (!modelsAreEqual(this.#model, model)) return;
 
 		const effort = clampThinkingLevelToCeiling(
 			model,
