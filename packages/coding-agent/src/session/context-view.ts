@@ -124,18 +124,27 @@ function countBlocks(blocks: readonly string[]): Map<string, number> {
 	return counts;
 }
 
+/** Overview notice when a block holding a source differs from the built prompt (hook or SDK callback). */
+const CHANGED_PROMPT_NOTICE =
+	"The system prompt changed after it was built (e.g. by an extension hook or SDK callback); sources in changed blocks stay in System Prompt.";
+/** Overview notice when a source in an unchanged block is repeated, overlaps another, or was reformatted. */
+const UNATTRIBUTED_NOTICE = "Some prompt sources could not be attributed.";
+
 /**
  * Claims each source fragment in the effective prompt. A source is claimed only when it occurs once
  * in the built prompt, in a block that is unchanged at its original index and unique in the
  * effective prompt, and overlaps no other source. A repeated fragment reserves every occurrence.
- * `complete` is false when a source the effective prompt may still hold stays unattributed. A kind the
- * built prompt holds no fragment of (a template that formats it without `{{fragment}}`) never counts.
+ * Only a source the effective prompt may still hold is reported: `changed` when its block was
+ * changed, moved, or repeated after the build; `incomplete` when it is repeated, overlapping, or
+ * reformatted. A kind the built prompt holds no fragment of (a template that formats it without
+ * `{{fragment}}`) is never reported.
  */
 function claimPromptSources(
 	effective: readonly string[],
 	metadata: SystemPromptSources,
-): { claims: Map<number, SourceClaim[]>; complete: boolean } {
-	let complete = true;
+): { claims: Map<number, SourceClaim[]>; changed: boolean; incomplete: boolean } {
+	let changed = false;
+	let incomplete = false;
 	const locatedKinds = new Set<SystemPromptSource["kind"]>();
 	const missingKinds = new Set<SystemPromptSource["kind"]>();
 	const effectiveCounts = countBlocks(effective);
@@ -147,7 +156,7 @@ function claimPromptSources(
 			for (let start = block.indexOf(fragment); start >= 0; start = block.indexOf(fragment, start + 1))
 				located.push({ index, start });
 		const ambiguous = located.length > 1;
-		let unattributed = located.length === 0 || ambiguous;
+		let blockChanged = false;
 		let remains = effective.some(text => text.includes(fragment));
 		for (const { index, start } of located) {
 			const block = metadata.blocks[index]!;
@@ -157,7 +166,7 @@ function claimPromptSources(
 			remains ||= effective.some(text => text.includes(before) && text.includes(after));
 			// Never remap moved or changed blocks, even when the fragment text still appears.
 			if (effective[index] !== block || effectiveCounts.get(block) !== 1) {
-				unattributed = true;
+				blockChanged = true;
 				continue;
 			}
 			const ranges = candidates.get(index) ?? [];
@@ -170,17 +179,18 @@ function claimPromptSources(
 		if (located.length === 0) missingKinds.add(source.kind);
 		else {
 			locatedKinds.add(source.kind);
-			if (unattributed && remains) complete = false;
+			if (remains && blockChanged) changed = true;
+			if (remains && ambiguous) incomplete = true;
 		}
 	}
 	// Some sources of the kind were built in: the missing ones were changed by formatting.
-	for (const kind of missingKinds) if (locatedKinds.has(kind)) complete = false;
+	for (const kind of missingKinds) if (locatedKinds.has(kind)) incomplete = true;
 	const claims = new Map<number, SourceClaim[]>();
 	for (const [index, ranges] of candidates) {
 		// Validate the whole block before claiming: every participant in an overlap stays unattributed.
 		const accepted = ranges.filter(range => {
 			const overlaps = ranges.some(other => other !== range && range.start < other.end && range.end > other.start);
-			if (overlaps) complete = false;
+			if (overlaps) incomplete = true;
 			return !range.ambiguous && !overlaps;
 		});
 		claims.set(
@@ -188,21 +198,21 @@ function claimPromptSources(
 			accepted.sort((a, b) => a.start - b.start),
 		);
 	}
-	return { claims, complete };
+	return { claims, changed, incomplete };
 }
 
 /**
  * System blocks with claimed instruction-file and skill fragments moved to their own categories.
  * Each fragment leaves a colored marker in its block; markers are display-only and carry no tokens.
- * Returns false when some source could not be attributed.
+ * Returns the Overview notices for sources left in System Prompt.
  */
-function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState): boolean {
+function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState): string[] {
 	const tokenizer = session.agent.tokenizer;
 	const effective = session.systemPrompt;
 	const metadata = session.systemPromptSources;
-	const { claims, complete } = metadata
+	const { claims, changed, incomplete } = metadata
 		? claimPromptSources(effective, metadata)
-		: { claims: new Map<number, SourceClaim[]>(), complete: true };
+		: { claims: new Map<number, SourceClaim[]>(), changed: false, incomplete: false };
 	for (const [index, block] of effective.entries()) {
 		const blockClaims = claims.get(index) ?? [];
 		const remaining: string[] = [];
@@ -240,7 +250,10 @@ function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildSt
 			sourceMarkers: sourceMarkers.length > 0 ? sourceMarkers : undefined,
 		});
 	}
-	return complete;
+	const notices: string[] = [];
+	if (changed) notices.push(CHANGED_PROMPT_NOTICE);
+	if (incomplete) notices.push(UNATTRIBUTED_NOTICE);
+	return notices;
 }
 
 function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuildState): void {
@@ -502,8 +515,7 @@ export function buildSessionContextView(
 		serverToolNamesByCallId: new Map(),
 	};
 
-	const notices: string[] = [];
-	if (!appendSystemPromptEntries(session, state)) notices.push("Some prompt sources could not be attributed.");
+	const notices = appendSystemPromptEntries(session, state);
 	appendToolDefinitionEntries(session, state);
 	appendMessageEntries(session, state);
 	finalizeToolOutputGroups(state);

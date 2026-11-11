@@ -159,6 +159,8 @@ describe("context snapshot prompt sources", () => {
 		});
 	const entryTexts = (data: ContextViewData, id: string) => category(data, id).entries.map(entry => entry.text);
 	const notice = "Some prompt sources could not be attributed.";
+	const changedNotice =
+		"The system prompt changed after it was built (e.g. by an extension hook or SDK callback); sources in changed blocks stay in System Prompt.";
 
 	it.each([
 		{ name: "bundled prompt", customPrompt: undefined, skill: "- fixture: Use <T> & {{literal}} without expansion" },
@@ -207,13 +209,13 @@ describe("context snapshot prompt sources", () => {
 		]);
 	});
 
-	it("keeps sources of changed or moved blocks in System Prompt with a notice", async () => {
+	it("keeps sources of changed or moved blocks in System Prompt with the changed-prompt notice", async () => {
 		const built = await buildFixturePrompt();
 		const [policy, project] = built.systemPrompt;
 		const changed = buildSessionContextView(
 			sessionWith({ prompt: [`${policy}\nhook addition`, project!], sources: built.sources, skills }),
 		);
-		expect(changed.notices).toEqual([notice]);
+		expect(changed.notices).toEqual([changedNotice]);
 		expect(entryTexts(changed, "skills")).toEqual([]);
 		expect(entryTexts(changed, "instruction-files")).toHaveLength(1);
 		expect(entryTexts(changed, "system-prompt")[0]).toContain("- fixture: Use <T>");
@@ -221,7 +223,7 @@ describe("context snapshot prompt sources", () => {
 		const moved = buildSessionContextView(
 			sessionWith({ prompt: [project!, policy!], sources: built.sources, skills }),
 		);
-		expect(moved.notices).toEqual([notice]);
+		expect(moved.notices).toEqual([changedNotice]);
 		expect(entryTexts(moved, "skills")).toEqual([]);
 		expect(entryTexts(moved, "instruction-files")).toEqual([]);
 		expect(entryTexts(moved, "system-prompt")).toEqual([project, policy]);
@@ -233,7 +235,7 @@ describe("context snapshot prompt sources", () => {
 				skills,
 			}),
 		);
-		expect(edited.notices).toEqual([notice]);
+		expect(edited.notices).toEqual([changedNotice]);
 		expect(entryTexts(edited, "instruction-files")).toEqual([]);
 		expect(entryTexts(edited, "system-prompt")[1]).toContain("Edited instruction body");
 	});
