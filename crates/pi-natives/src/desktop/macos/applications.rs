@@ -584,19 +584,21 @@ fn showing(windows: Vec<DesktopWindow>, name: Option<&str>) -> Vec<DesktopWindow
 
 /// The names a window showing the file or folder at `path` can be titled
 /// with: its file name, and the name Finder shows when that differs (Pages
-/// titles `Budget.pages`, its extension hidden, as "Budget").
+/// titles `Budget.pages`, its extension hidden, as "Budget"). A root has no
+/// file name, so its Finder display name is the primary name.
 fn item_names(path: &Path) -> Vec<String> {
-	let Some(name) = path.file_name() else {
-		return Vec::new();
-	};
-	let mut names = vec![name.to_string_lossy().into_owned()];
+	let mut names: Vec<String> = path
+		.file_name()
+		.map(|name| name.to_string_lossy().into_owned())
+		.into_iter()
+		.collect();
 	if let Some(path) = path.to_str() {
 		let shown = autoreleasepool(|_| {
 			NSFileManager::defaultManager()
 				.displayNameAtPath(&NSString::from_str(path))
 				.to_string()
 		});
-		if !shown.is_empty() && shown != names[0] {
+		if !shown.is_empty() && names.first() != Some(&shown) {
 			names.push(shown);
 		}
 	}
@@ -1269,6 +1271,39 @@ mod tests {
 				.as_deref(),
 			Some("3")
 		);
+	}
+
+	#[test]
+	fn an_opened_root_folder_keeps_file_semantics() {
+		let root = Path::new("/");
+		let display_name = autoreleasepool(|_| {
+			NSFileManager::defaultManager()
+				.displayNameAtPath(&NSString::from_str("/"))
+				.to_string()
+		});
+		assert!(!display_name.is_empty());
+		let names = item_names(root);
+		assert_eq!(names.first(), Some(&display_name));
+		let found = shown_window(
+			Duration::from_secs(60),
+			&names,
+			&titles(&[("1", &display_name)]),
+			|| Some(vec![titled("1", &display_name)]),
+			|_| Some(true),
+			|| -> CoreResult<()> { panic!("an unchanged root folder matches immediately") },
+		)
+		.expect("no failure");
+		assert_eq!(found.map(|window| window.id).as_deref(), Some("1"));
+		let unrelated = shown_window(
+			Duration::ZERO,
+			&names,
+			&titles(&[("2", "unrelated")]),
+			|| Some(vec![titled("2", "unrelated")]),
+			|_| Some(true),
+			|| Ok(()),
+		)
+		.expect("no failure");
+		assert!(unrelated.is_none(), "a root folder must not use the URL fallback");
 	}
 
 	#[test]
