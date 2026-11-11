@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use image::{Rgba, RgbaImage};
 use x11rb::{
-	connection::Connection,
+	connection::{Connection, RequestConnection as _},
 	errors::ReplyError,
 	protocol::{
 		ErrorKind,
 		randr::ConnectionExt as _,
+		render::{ConnectionExt as _, QueryPictFormatsReply},
 		xproto::{
 			Atom, AtomEnum, ConnectionExt as _, GetImageReply, ImageFormat, ImageOrder, MapState,
 			VisualClass, Window, WindowClass,
@@ -34,23 +35,23 @@ struct Above {
 	covered: bool,
 	/// The window's own popups over it: each window, the part of the area it
 	/// covers, and its origin.
-	popups:  Vec<(Window, Area, (i32, i32))>,
+	popups: Vec<(Window, Area, (i32, i32))>,
 }
 
 #[derive(Clone, Copy)]
 struct ColorMasks {
-	red:   u32,
+	red: u32,
 	green: u32,
-	blue:  u32,
+	blue: u32,
 	/// Premultiplied alpha of a 32-bit ARGB visual; 0 for opaque visuals.
 	alpha: u32,
 }
 
 #[derive(Clone, Copy)]
 struct ComponentMask {
-	mask:  u32,
+	mask: u32,
 	shift: u32,
-	max:   u32,
+	max: u32,
 }
 
 impl ComponentMask {
@@ -76,14 +77,16 @@ impl ComponentMask {
 
 #[derive(Clone)]
 pub struct X11Capture {
-	conn:        Arc<RustConnection>,
-	root:        Window,
-	root_width:  u32,
+	conn: Arc<RustConnection>,
+	root: Window,
+	root_width: u32,
 	root_height: u32,
-	masks:       ColorMasks,
-	selector:    DisplaySelector,
+	masks: ColorMasks,
+	selector: DisplaySelector,
 	/// The selection a compositing manager owns on this screen (EWMH).
-	compositor:  Atom,
+	compositor: Atom,
+	/// Render defines alpha independently of the core TrueColor RGB masks.
+	pictformats: Option<Arc<QueryPictFormatsReply>>,
 }
 
 impl X11Capture {
@@ -118,9 +121,9 @@ impl X11Capture {
 			)));
 		}
 		let masks = ColorMasks {
-			red:   visual.red_mask,
+			red: visual.red_mask,
 			green: visual.green_mask,
-			blue:  visual.blue_mask,
+			blue: visual.blue_mask,
 			alpha: 0,
 		};
 		let root = screen.root;
@@ -132,7 +135,23 @@ impl X11Capture {
 			.reply()
 			.map_err(request_failed)?
 			.atom;
-		let capture = Self { conn, root, root_width, root_height, masks, selector, compositor };
+		let pictformats = if conn
+			.extension_information("RENDER")
+			.map_err(request_failed)?
+			.is_some()
+		{
+			Some(Arc::new(
+				conn
+					.render_query_pict_formats()
+					.map_err(request_failed)?
+					.reply()
+					.map_err(request_failed)?,
+			))
+		} else {
+			None
+		};
+		let capture =
+			Self { conn, root, root_width, root_height, masks, selector, compositor, pictformats };
 		capture.capture_root(0, 0, 1, 1)?;
 		Ok(capture)
 	}
@@ -182,18 +201,18 @@ impl X11Capture {
 		}
 		if displays.is_empty() {
 			displays.push(DesktopDisplay {
-				id:           "0".into(),
-				name:         "Screen".into(),
-				x:            0,
-				y:            0,
-				width:        self.root_width,
-				height:       self.root_height,
-				scale:        1.0,
-				pixel_x:      0,
-				pixel_y:      0,
-				pixel_width:  self.root_width,
+				id: "0".into(),
+				name: "Screen".into(),
+				x: 0,
+				y: 0,
+				width: self.root_width,
+				height: self.root_height,
+				scale: 1.0,
+				pixel_x: 0,
+				pixel_y: 0,
+				pixel_width: self.root_width,
 				pixel_height: self.root_height,
-				is_primary:   true,
+				is_primary: true,
 			});
 		}
 		let min_x = displays.iter().map(|display| display.x).min().unwrap_or(0);
@@ -498,9 +517,16 @@ impl X11Capture {
 			.map(|&window| self.conn.get_geometry(window))
 			.collect::<Result<Vec<_>, _>>()
 			.map_err(request_failed)?;
+		let origins = children
+			.iter()
+			.map(|&window| self.conn.translate_coordinates(window, self.root, 0, 0))
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(request_failed)?;
 		let owner = |window: Window| window & !self.conn.setup().resource_id_mask;
 		let mut above = Above { covered: false, popups: Vec::new() };
-		for ((&window, attributes), geometry) in children.iter().zip(attributes).zip(geometries) {
+		for (((&window, attributes), geometry), origin) in
+			children.iter().zip(attributes).zip(geometries).zip(origins)
+		{
 			// A window destroyed since the tree was read covers nothing.
 			let (Ok(attributes), Ok(geometry)) = (attributes.reply(), geometry.reply()) else {
 				continue;
@@ -511,12 +537,7 @@ impl X11Capture {
 			{
 				continue;
 			}
-			let Ok(origin) = self
-				.conn
-				.translate_coordinates(window, self.root, 0, 0)
-				.map_err(request_failed)?
-				.reply()
-			else {
+			let Ok(origin) = origin.reply() else {
 				continue;
 			};
 			let border = u32::from(geometry.border_width);
@@ -609,12 +630,15 @@ impl X11Capture {
 				 unsupported",
 			));
 		}
-		let color = visual.red_mask | visual.green_mask | visual.blue_mask;
+		// Core visual masks say nothing about alpha, including at depth 32.
 		let masks = ColorMasks {
-			red:   visual.red_mask,
+			red: visual.red_mask,
 			green: visual.green_mask,
-			blue:  visual.blue_mask,
-			alpha: if reply.depth == 32 { !color } else { 0 },
+			blue: visual.blue_mask,
+			alpha: self
+				.pictformats
+				.as_deref()
+				.map_or(0, |formats| visual_alpha(formats, reply.visual)),
 		};
 		self.decode(&reply, width, height, masks)
 	}
@@ -648,6 +672,26 @@ impl X11Capture {
 			masks,
 		)
 	}
+}
+
+fn visual_alpha(formats: &QueryPictFormatsReply, visual: u32) -> u32 {
+	let format = formats
+		.screens
+		.iter()
+		.flat_map(|screen| &screen.depths)
+		.flat_map(|depth| &depth.visuals)
+		.find(|entry| entry.visual == visual)
+		.and_then(|entry| {
+			formats
+				.formats
+				.iter()
+				.find(|format| format.id == entry.format)
+		});
+	format.map_or(0, |format| {
+		u32::from(format.direct.alpha_mask)
+			.checked_shl(u32::from(format.direct.alpha_shift))
+			.unwrap_or(0)
+	})
 }
 
 impl NativeWindows for X11Capture {
@@ -1198,13 +1242,48 @@ mod tests {
 	}
 
 	#[test]
-	fn argb_pixels_come_out_with_straight_alpha() {
-		let masks = ColorMasks {
-			red:   0x00ff_0000,
-			green: 0x0000_ff00,
-			blue:  0x0000_00ff,
-			alpha: 0xff00_0000,
+	fn render_format_controls_alpha_not_unused_rgb_bits() {
+		use x11rb::protocol::render::{
+			Directformat, Pictdepth, Pictforminfo, Pictscreen, Pictvisual,
 		};
+
+		let mut formats = QueryPictFormatsReply {
+			formats: vec![Pictforminfo {
+				id: 1,
+				direct: Directformat { alpha_shift: 28, alpha_mask: 0xf, ..Default::default() },
+				..Default::default()
+			}],
+			screens: vec![Pictscreen {
+				fallback: 0,
+				depths: vec![Pictdepth {
+					depth: 32,
+					visuals: vec![Pictvisual { visual: 7, format: 1 }],
+				}],
+			}],
+			..Default::default()
+		};
+		let mut masks = ColorMasks {
+			red: 0x00ff_0000,
+			green: 0x0000_ff00,
+			blue: 0x0000_00ff,
+			alpha: visual_alpha(&formats, 7),
+		};
+		assert_eq!(masks.alpha, 0xf000_0000);
+		let image = zpixmap_to_rgba(&0xfaff_0000u32.to_le_bytes(), 1, 1, 32, 32, 32, true, masks)
+			.expect("padding does not affect alpha");
+		assert_eq!(pixel(&image, (0, 0)), [255, 0, 0, 255]);
+		formats.formats[0].direct.alpha_mask = 0;
+		masks.alpha = visual_alpha(&formats, 7);
+		let image = zpixmap_to_rgba(&RED.to_le_bytes(), 1, 1, 32, 32, 32, true, masks)
+			.expect("opaque depth-32 format");
+		assert_eq!(pixel(&image, (0, 0)), [255, 0, 0, 255]);
+		assert_eq!(visual_alpha(&formats, 99), 0);
+	}
+
+	#[test]
+	fn argb_pixels_come_out_with_straight_alpha() {
+		let masks =
+			ColorMasks { red: 0x00ff_0000, green: 0x0000_ff00, blue: 0x0000_00ff, alpha: 0xff00_0000 };
 		let data: Vec<u8> = [0x8080_0000u32, 0, 0xffff_0000]
 			.iter()
 			.flat_map(|pixel| pixel.to_le_bytes())
