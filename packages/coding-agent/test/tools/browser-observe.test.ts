@@ -299,12 +299,12 @@ describe("browser observe after an action", () => {
 				const clock = spyOn(Date, "now").mockReturnValue(1_000);
 				try {
 					const earlier = page.waitForRequest(request => request.url().endsWith("/hold"));
-					await page.evaluate(() => document.querySelector<HTMLButtonElement>("#hang")!.click());
+					await page.click("#hang");
 					await earlier;
 					const since = network.nextRequestSeq;
 					expect(network.hasPendingRequests(since)).toBe(false);
 					const started = page.waitForRequest(request => request.url().endsWith("/hold"));
-					await page.evaluate(() => document.querySelector<HTMLButtonElement>("#hang")!.click());
+					await page.click("#hang");
 					await started;
 					expect(network.hasPendingRequests(since)).toBe(true);
 				} finally {
