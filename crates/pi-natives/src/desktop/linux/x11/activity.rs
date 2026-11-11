@@ -168,8 +168,11 @@ impl UserActivity {
 }
 
 fn admission_limit(now: Instant, deadline: Option<Instant>) -> Instant {
-	deadline
-		.map_or(now + QUIET, |deadline| deadline.checked_sub(control::DEADLINE_MARGIN).unwrap_or(deadline))
+	deadline.map_or(now + QUIET, |deadline| {
+		deadline
+			.checked_sub(control::DEADLINE_MARGIN)
+			.unwrap_or(deadline)
+	})
 }
 
 #[derive(Debug, PartialEq, Eq)]

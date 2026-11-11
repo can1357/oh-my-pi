@@ -46,7 +46,11 @@ impl X11Backend {
 impl Backend for X11Backend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let displays = self.capture.displays();
-		let watched = self.input.watch_user().and_then(|activity| activity.sync()).is_ok();
+		let watched = self
+			.input
+			.watch_user()
+			.and_then(|activity| activity.sync())
+			.is_ok();
 		DesktopCapabilities {
 			backend: "x11".to_string(),
 			display_server: self.display_server.clone(),
@@ -59,7 +63,8 @@ impl Backend for X11Backend {
 			menus: self.ax.is_some(),
 			held_input: true,
 			spaces: false,
-			global_escape: watched && std::env::var_os("WAYLAND_DISPLAY").is_none()
+			global_escape: watched
+				&& std::env::var_os("WAYLAND_DISPLAY").is_none()
 				&& !std::env::var("XDG_SESSION_TYPE")
 					.is_ok_and(|session| session.eq_ignore_ascii_case("wayland")),
 			secure_input: false,
