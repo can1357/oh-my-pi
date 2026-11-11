@@ -595,9 +595,7 @@ async function resolveSystemChromium(): Promise<string | undefined> {
 /** Per-process launch features controlled by browser.open options. */
 export interface HeadlessLaunchFeatures {
 	/** Trust invalid HTTPS certificates in this Chromium process. */
-	ignoreHttpsErrors?: boolean;
-	/** Permit file: documents to read other local files. */
-	allowFileAccess?: boolean;
+	insecure?: boolean;
 }
 
 /** Options shared by headless Chromium consumers. */
@@ -636,13 +634,13 @@ export function buildHeadlessLaunchArgs(
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
 		DISABLE_AUTOMATION_CONTROLLED_ARG,
+		"--allow-file-access-from-files",
 		"--hide-scrollbars",
 		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
 		...RENDERER_PRIORITY_ARGS,
 	];
-	if (features.ignoreHttpsErrors) launchArgs.push("--ignore-certificate-errors");
-	if (features.allowFileAccess) launchArgs.push("--allow-file-access-from-files");
+	if (features.insecure) launchArgs.push("--ignore-certificate-errors");
 	const proxy = process.env.PUPPETEER_PROXY;
 	if (proxy) {
 		launchArgs.push(`--proxy-server=${proxy}`);
@@ -672,8 +670,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	};
 	const puppeteer = await loadPuppeteer();
 	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
-		ignoreHttpsErrors: opts.ignoreHttpsErrors,
-		allowFileAccess: opts.allowFileAccess,
+		insecure: opts.insecure,
 	});
 	for (const arg of opts.args ?? []) {
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);

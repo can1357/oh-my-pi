@@ -52,7 +52,7 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => {});
 });
 
-/** A headless Chromium on a CDP port, attached the way `app.cdp_url` attaches a user's browser. */
+/** A headless Chromium on a CDP port, attached the way an `app` CDP URL attaches a user's browser. */
 async function connectedBrowser(): Promise<PuppeteerBrowserHandle> {
 	const exe = await ensureChromiumExecutable();
 	if (!exe) throw new Error("Expected a Chromium executable");
