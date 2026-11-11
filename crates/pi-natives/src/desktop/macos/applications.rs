@@ -671,6 +671,8 @@ fn shown_window(
 /// Without Accessibility, a new identity is the available evidence; otherwise
 /// other new windows must change title, so an unchanged Open dialog does not
 /// count.
+/// An unknown AX role leaves a new identity eligible, but does not prove key
+/// capability: without AX a Quartz compositor surface cannot be ruled out.
 fn changed_window(
 	windows: &[DesktopWindow],
 	url: bool,
