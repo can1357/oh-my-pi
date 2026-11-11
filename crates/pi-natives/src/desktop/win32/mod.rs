@@ -237,8 +237,12 @@ mod tests {
 		text.encode_utf16().chain(Some(0)).collect()
 	}
 
-	/// Two empty top-level edit windows on a thread that pumps their messages,
-	/// as another app's would: the user's window and the takeover target.
+	const USER: &str = "omp test: user window";
+	const TARGET: &str = "omp test: takeover target";
+
+	/// Two top-level edit windows on a thread that pumps their messages, as
+	/// another app's would: the user's window and the takeover target. Their
+	/// text is their title, which `windows()` needs to list them.
 	struct Windows {
 		user:   HWND,
 		target: HWND,
@@ -249,8 +253,8 @@ mod tests {
 		fn open() -> Self {
 			let (sender, receiver) = mpsc::channel();
 			thread::spawn(move || {
-				let create = || {
-					let (class, text) = (wide("EDIT"), wide(""));
+				let create = |title: &str| {
+					let (class, text) = (wide("EDIT"), wide(title));
 					// SAFETY: both strings are NUL-terminated and outlive the call;
 					// EDIT is a system class, so no instance handle is needed.
 					unsafe {
@@ -270,8 +274,8 @@ mod tests {
 						)
 					}
 				};
-				let user = create() as usize;
-				let target = create() as usize;
+				let user = create(USER) as usize;
+				let target = create(TARGET) as usize;
 				// SAFETY: no preconditions.
 				let thread = unsafe { GetCurrentThreadId() };
 				sender.send((user, target, thread)).unwrap();
@@ -337,7 +341,10 @@ mod tests {
 			// SAFETY: no preconditions.
 			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
 		}
-		assert_eq!(Windows::text(windows.target), "xtyped");
-		assert_eq!(Windows::text(windows.user), "");
+		// Whether focusing an edit selects its text is the control's business;
+		// the keys reached the target and nothing reached the user's window.
+		let typed = Windows::text(windows.target);
+		assert!(typed != TARGET && typed.contains('x'), "target text {typed:?}");
+		assert_eq!(Windows::text(windows.user), USER);
 	}
 }
