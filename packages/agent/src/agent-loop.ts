@@ -3954,33 +3954,19 @@ async function executeToolCalls(
 			sharedEffects = [];
 		} else {
 			sharedTasks.push(task);
-			// Resolve a dynamic tier from the arguments the call runs with. Without
-			// a speculative transform already cached, run the transform now and cache
-			// it (or its error) on the record, so `runTool` uses it and the
-			// transform still runs once per call.
+			// A transform can depend on an earlier exclusive call's effects. Leave
+			// uncached transforms to `runTool`, after the start barrier, and count
+			// their dynamic approvals conservatively until the arguments are known.
 			const { tool } = record;
-			if (
-				typeof tool?.approval === "function" &&
-				transformToolCallArguments &&
-				record.executionArgs === undefined &&
-				record.transformError === undefined &&
-				record.validationErrorMessage === undefined &&
-				record.prepareError === undefined &&
-				!record.blocked
-			) {
-				try {
-					record.executionArgs = transformToolCallArguments(record.args, record.toolCall.name);
-				} catch (error) {
-					record.transformError = error;
-				}
-			}
 			let tier: ToolTier = "exec";
 			try {
 				// A resolver may tier the call higher with a context than without, so
 				// hand it the host's session context, as the approval gate would.
 				const approval =
 					typeof tool?.approval === "function"
-						? tool.approval(record.executionArgs ?? record.args, getToolContext?.())
+						? transformToolCallArguments && record.executionArgs === undefined
+							? undefined
+							: tool.approval(record.executionArgs ?? record.args, getToolContext?.())
 						: tool?.approval;
 				tier = typeof approval === "string" ? approval : (approval?.tier ?? "exec");
 			} catch {

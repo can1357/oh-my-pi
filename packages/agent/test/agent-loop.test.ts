@@ -2575,11 +2575,12 @@ describe("agentLoop with AgentMessage", () => {
 		expect(settled["tool-read-later"]).toBeUndefined();
 	});
 
-	it("counts a call as writing by the arguments its transform hands it, transforming once", async () => {
+	it("transforms a dynamic shared call once after the preceding exclusive call settles", async () => {
 		const toolSchema = type({ value: "string", tier: "'read' | 'exec'" });
 		const settled: Record<string, Promise<void> | undefined> = {};
 		const transformed: string[] = [];
 		const ran: Record<string, string> = {};
+		let currentTier = "read";
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "op",
 			label: "Op",
@@ -2587,7 +2588,9 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: toolSchema,
 			approval: args =>
 				args && typeof args === "object" && "tier" in args && args.tier === "read" ? "read" : "exec",
+			concurrency: args => (args.value === "barrier" ? "exclusive" : "shared"),
 			async execute(_toolCallId, params) {
+				if (params.value === "barrier") currentTier = "exec";
 				ran[params.value] = params.tier;
 				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
 			},
@@ -2596,6 +2599,7 @@ describe("agentLoop with AgentMessage", () => {
 			responses: [
 				{
 					content: [
+						{ type: "toolCall", id: "tool-barrier", name: "op", arguments: { value: "barrier", tier: "read" } },
 						// Asks as a read; the transform turns it into a write.
 						{ type: "toolCall", id: "tool-write", name: "op", arguments: { value: "write", tier: "read" } },
 						{ type: "toolCall", id: "tool-read", name: "op", arguments: { value: "read", tier: "read" } },
@@ -2610,7 +2614,7 @@ describe("agentLoop with AgentMessage", () => {
 			convertToLlm: identityConverter,
 			transformToolCallArguments: args => {
 				transformed.push(String(args.value));
-				return args.value === "write" ? { ...args, tier: "exec" } : args;
+				return args.value === "write" ? { ...args, tier: currentTier } : args;
 			},
 			getToolContext: toolCall => {
 				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
@@ -2621,8 +2625,8 @@ describe("agentLoop with AgentMessage", () => {
 		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
 
 		expect(settled["tool-read"]).toBeInstanceOf(Promise);
-		expect(ran).toEqual({ write: "exec", read: "read" });
-		expect(transformed.sort()).toEqual(["read", "write"]);
+		expect(ran).toEqual({ barrier: "read", write: "exec", read: "read" });
+		expect(transformed.sort()).toEqual(["barrier", "read", "write"]);
 	});
 
 	it("counts a call as writing when its approval resolver takes a context", async () => {
