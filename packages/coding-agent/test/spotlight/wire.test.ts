@@ -376,7 +376,7 @@ describe("spotlight holdout", () => {
 });
 
 describe("spotlight whole reads", () => {
-	it("shows a Markdown read and one line range as plain does, but still cuts a multi-range read", async () => {
+	it("shows a Markdown read and bounded line ranges as plain does, but still cuts an open-ended range", async () => {
 		const shaped = await experimentSession(undefined, {}, { scoreFree: 1 });
 		const plain = await plainSession();
 		// Every line is past the 400-character cap a cut read applies.
@@ -388,12 +388,18 @@ describe("spotlight whole reads", () => {
 		const read = async ({ session }: { session: ToolSession }, target: string) =>
 			resultText(await new ReadTool(session).execute("r1", { path: target }));
 
-		for (const target of ["wide.md", "wide.md:1-10,20-30", "wide.ts:5-40", "wide.ts:5+30"]) {
+		for (const target of [
+			"wide.md",
+			"wide.md:1-10,20-30",
+			"wide.ts:5-40",
+			"wide.ts:5+30",
+			"wide.ts:1-10,20-30",
+			"wide.ts:raw:5-40",
+			"wide.ts:-20",
+		]) {
 			expect(await read(shaped, target)).toBe(await read(plain, target));
 		}
-		for (const target of ["wide.ts:1-10,20-30", "wide.ts:raw:5-40"]) {
-			expect(await read(shaped, target)).not.toBe(await read(plain, target));
-		}
+		expect(await read(shaped, "wide.ts:5-")).not.toBe(await read(plain, "wide.ts:5-"));
 	});
 });
 
