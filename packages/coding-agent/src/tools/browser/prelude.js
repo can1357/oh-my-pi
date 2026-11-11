@@ -42,13 +42,17 @@
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
 	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
 	const showField = (value, inspect) => {
-		if (typeof value === "number" || typeof value === "boolean") return String(value);
-		try {
-			return JSON.stringify(value) ?? String(value);
-		} catch {
-			// Annotations may contain BigInts or cycles; do not recurse into our own print hook.
-			return inspect(value, { customInspect: false, depth: null, compact: true, breakLength: Infinity });
-		}
+		if (typeof value === "string") return JSON.stringify(value);
+		// Native inspection preserves cycles and accessors without running nested getters or toJSON.
+		return inspect(value, {
+			customInspect: false,
+			getters: false,
+			depth: null,
+			compact: true,
+			breakLength: Infinity,
+			maxArrayLength: null,
+			maxStringLength: null,
+		});
 	};
 	const showProperty = (descriptor, inspect) => {
 		if ("value" in descriptor) return descriptor.value === undefined ? undefined : showField(descriptor.value, inspect);
@@ -60,7 +64,7 @@
 		const properties = Object.getOwnPropertyDescriptors(element);
 		const id = properties.id;
 		const role = properties.role;
-		const shownId = id && "value" in id ? String(id.value) : id ? showProperty(id, inspect) : "undefined";
+		const shownId = id ? (showProperty(id, inspect) ?? "undefined") : "undefined";
 		const shownRole =
 			typeof role?.value === "string" && /^\S+$/.test(role.value)
 				? role.value
@@ -96,15 +100,17 @@
 		});
 		Object.defineProperty(observation, inspectCustom, {
 			value: (depth, options, inspect) => {
-				if (!Array.isArray(observation.elements)) return observation;
+				const descriptor = Object.getOwnPropertyDescriptor(observation, "elements");
+				if (!descriptor || !("value" in descriptor) || !Array.isArray(descriptor.value)) return observation;
+				const currentElements = descriptor.value;
 				const lines = [];
 				for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(observation))) {
 					if (key === "elements" || !descriptor.enumerable) continue;
 					const shown = showProperty(descriptor, inspect);
 					if (shown !== undefined) lines.push(`${key}: ${shown}`);
 				}
-				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
-				for (const element of observation.elements) lines.push(elementLine(element, inspect));
+				lines.push(`elements (${currentElements.length}; tab.id(n) acts on [n]):`);
+				for (const element of currentElements) lines.push(elementLine(element, inspect));
 				return printedAtTop(depth, options)
 					? `${lines.join("\n")}\n`
 					: ["Observation {", ...lines.map(line => `  ${line}`), "}"].join("\n");

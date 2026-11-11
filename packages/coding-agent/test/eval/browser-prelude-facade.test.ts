@@ -346,8 +346,8 @@ describe("browser facade in real Eval runtimes", () => {
 		const lines = [
 			'url: "https://example.test/list"',
 			'title: "List"',
-			'viewport: {"width":800,"height":600}',
-			'scroll: {"x":0,"y":40,"width":800,"height":600,"scrollWidth":800,"scrollHeight":4000}',
+			"viewport: { width: 800, height: 600 }",
+			"scroll: { x: 0, y: 40, width: 800, height: 600, scrollWidth: 800, scrollHeight: 4000 }",
 			"elements (150; tab.id(n) acts on [n]):",
 			'[1] button "Item 1"',
 			'[2] textbox "Two\\nlines \\"quoted\\"" value="Ada" description="Full name" keyshortcuts="Alt+N" focused required',
@@ -420,17 +420,34 @@ describe("browser facade in real Eval runtimes", () => {
 			`Object.defineProperty(o.elements[0], "${key}", { enumerable: true, get() { throw new Error("getter ran"); } })`,
 			"[Getter]",
 		]),
+		[
+			"observation elements getter",
+			'Object.defineProperty(o, "elements", { enumerable: true, get() { throw new Error("getter ran"); } })',
+			"elements: [Getter]",
+		],
+		[
+			"nested observation getter",
+			"o.extra = { get value() { globalThis.annotationHits++; return 1; } }",
+			"extra: { value: [Getter] }",
+		],
+		[
+			"nested element getter",
+			"o.elements[0].extra = { get value() { globalThis.annotationHits++; return 1; } }",
+			"extra={ value: [Getter] }",
+		],
 	])("prints non-JSON annotations: %s", async (_name, annotation, expected) => {
 		let definitions: readonly EvalPreludeDefinition[] = [];
 		const session = makeSession(() => definitions);
 		definitions = [recorderDefinition(session, [])];
+		// Nested cases isolate this custom hook from Eval's separate JSON-view serialization.
+		const display = _name.startsWith("nested ") ? 'value => print(require("node:util").inspect(value))' : "print";
 		const result = await executeJs(
-			`const tab = await browser.open(); const o = await tab.observe(); ${annotation}; print(o); print(o.elements);`,
+			`globalThis.annotationHits = 0; const tab = await browser.open(); const o = await tab.observe(); ${annotation}; const display = ${display}; display(o); display(Object.getOwnPropertyDescriptor(o, "elements").value); print("getter hits:", globalThis.annotationHits);`,
 			{ cwd: process.cwd(), sessionId: `browser-facade-annotation-${crypto.randomUUID()}`, session },
 		);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain(expected);
-		expect(result.output).toContain("elements (1; tab.id(n) acts on [n]):");
+		expect(result.output).toContain("getter hits: 0");
 	});
 
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {
