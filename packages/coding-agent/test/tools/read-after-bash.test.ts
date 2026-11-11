@@ -60,7 +60,7 @@ function createSession(directory: string): ToolSession {
  * waiting after half a second.
  */
 async function bashThenRead(directory: string, change: string, readPath: string, session = createSession(directory)) {
-	const command = `for i in $(seq 50); do [ -e go ] && break; sleep 0.01; done; ${change}`;
+	const command = `i=0; while [ "$i" -lt 50 ]; do [ -e go ] && break; i=$((i + 1)); sleep 0.01; done; ${change}`;
 	const mock = createMockModel({
 		responses: [
 			{
@@ -94,6 +94,10 @@ async function bashThenRead(directory: string, change: string, readPath: string,
 		}
 	}
 	const messages = await stream.result();
+	const bash = messages.find(
+		(message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "bash-1",
+	);
+	if (!bash || bash.isError) throw new Error(`Bash did not succeed: ${JSON.stringify(bash?.content)}`);
 	const read = messages.find(
 		(message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "read-1",
 	);
@@ -102,7 +106,7 @@ async function bashThenRead(directory: string, change: string, readPath: string,
 	return { text, isError: read.isError, events };
 }
 
-describe("a read after a bash call in the same message", () => {
+describe.skipIf(process.platform === "win32")("a read after a bash call in the same message", () => {
 	it("returns the file as the bash command left it, starting while bash runs", async () => {
 		const directory = await tempDirectory();
 		await Bun.write(path.join(directory, "f"), "old\n");
@@ -452,10 +456,12 @@ describe("a read after a bash call in the same message", () => {
 		}
 	});
 
-	it("re-reads a proc:// view the bash command changed", async () => {
+	it("reconciles a proc:// part of a delimited list only once after bash", async () => {
 		const directory = await tempDirectory();
 		const status = path.join(directory, "status.txt");
 		await Bun.write(status, "starting\n");
+		await Bun.write(path.join(directory, "sentinel.txt"), "sentinel\n");
+		let reads = 0;
 		const router = InternalUrlRouter.instance();
 		const spec = router.spec("proc");
 		if (!spec) throw new Error("no proc:// handler");
@@ -463,17 +469,21 @@ describe("a read after a bash call in the same message", () => {
 		router.register({
 			scheme: "proc",
 			spec: { ...spec, write: undefined },
-			resolve: async () => ({
-				url: "proc://svc",
-				content: await Bun.file(status).text(),
-				contentType: "text/plain",
-			}),
+			resolve: async () => {
+				reads++;
+				return {
+					url: "proc://svc",
+					content: await Bun.file(status).text(),
+					contentType: "text/plain",
+				};
+			},
 		});
 
-		const { text } = await bashThenRead(directory, "echo ready > status.txt", "proc://svc");
+		const { text } = await bashThenRead(directory, "echo ready > status.txt", "proc://svc;sentinel.txt");
 
 		expect(text).toContain("ready");
 		expect(text).not.toContain("starting");
+		expect(reads).toBe(2);
 	});
 
 	it("reads a local file named like an opaque URI that no MCP server has, after the bash command rewrote it", async () => {

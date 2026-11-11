@@ -23,7 +23,7 @@
 
 ### Fixed
 
-- Fixed a `read` placed after a `bash` call in the same message returning the file as it was before that command changed, created or deleted it; both calls still start together ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a `read` placed after a `bash` call in the same message returning the file as it was before that command changed, created or deleted it; both calls still start together, and `;` lists reconcile once rather than re-reading each child twice ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

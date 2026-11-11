@@ -1355,6 +1355,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal: AbortSignal | undefined,
 		toolContext: AgentToolContext | undefined,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		// The outer call reconciles the whole list once, including how it splits.
+		const partContext = toolContext?.toolCall?.earlierEffectsSettled
+			? { ...toolContext, toolCall: { ...toolContext.toolCall, earlierEffectsSettled: undefined } }
+			: toolContext;
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
@@ -1372,7 +1376,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		for (const part of parts) {
 			try {
-				const result = await this.execute("read-delimited-part", { path: part }, signal, undefined, toolContext);
+				const result = await this.execute("read-delimited-part", { path: part }, signal, undefined, partContext);
 				const nestedTargets = result.details?.displayReadTargets;
 				if (nestedTargets?.length) {
 					const nestedLinks = result.details?.displayReadTargetLinks;

@@ -102,7 +102,6 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
-	ToolTier,
 } from "./types";
 import {
 	ASIDE_MESSAGE_COMMIT,
@@ -3954,24 +3953,12 @@ async function executeToolCalls(
 			sharedEffects = [];
 		} else {
 			sharedTasks.push(task);
-			// A transform can depend on an earlier exclusive call's effects. Leave
-			// uncached transforms to `runTool`, after the start barrier, and count
-			// their dynamic approvals conservatively until the arguments are known.
-			const { tool } = record;
-			let tier: ToolTier = "exec";
-			try {
-				// A resolver may tier the call higher with a context than without, so
-				// hand it the host's session context, as the approval gate would.
-				const approval =
-					typeof tool?.approval === "function"
-						? transformToolCallArguments && record.executionArgs === undefined
-							? undefined
-							: tool.approval(record.executionArgs ?? record.args, getToolContext?.())
-						: tool?.approval;
-				tier = typeof approval === "string" ? approval : (approval?.tier ?? "exec");
-			} catch {
-				// A throwing approval resolver counts as "exec", like an omitted approval.
-			}
+			// Dynamic approvals can depend on transformed arguments or the final
+			// per-call context. Neither is available while scheduling, so count
+			// those calls conservatively without invoking host code early.
+			const approval = record.tool?.approval;
+			const tier =
+				typeof approval === "function" ? "exec" : typeof approval === "string" ? approval : (approval?.tier ?? "exec");
 			if (tier !== "read") sharedEffects.push(task);
 		}
 	}

@@ -2511,8 +2511,7 @@ describe("agentLoop with AgentMessage", () => {
 			label: "Op",
 			description: "Op tool",
 			parameters: toolSchema,
-			approval: args =>
-				args && typeof args === "object" && "tier" in args && args.tier === "read" ? "read" : "exec",
+			approval: "read",
 			concurrency: args => (args.exclusive === true ? "exclusive" : "shared"),
 			async execute(toolCallId, params) {
 				if (params.value === "write") {
@@ -2536,7 +2535,7 @@ describe("agentLoop with AgentMessage", () => {
 			({
 				type: "toolCall",
 				id: `tool-${value}`,
-				name: "op",
+				name: tier === "exec" ? "write" : "op",
 				arguments: exclusive ? { value, tier, exclusive } : { value, tier },
 			}) as const;
 		const mock = createMockModel({
@@ -2553,7 +2552,11 @@ describe("agentLoop with AgentMessage", () => {
 				{ content: ["done"] },
 			],
 		});
-		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: [""],
+			messages: [],
+			tools: [tool, { ...tool, name: "write", approval: "exec" }],
+		};
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
@@ -2629,7 +2632,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(transformed.sort()).toEqual(["barrier", "read", "write"]);
 	});
 
-	it("counts a call as writing when its approval resolver takes a context", async () => {
+	it("counts a call as writing when its approval resolver requires the current call context", async () => {
 		const toolSchema = type({ value: "string" });
 		const settled: Record<string, Promise<void> | undefined> = {};
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -2637,9 +2640,7 @@ describe("agentLoop with AgentMessage", () => {
 			label: "Op",
 			description: "Op tool",
 			parameters: toolSchema,
-			// Reads without a context, writes with one; a rest parameter hides the
-			// context from `Function.length`.
-			approval: (...[, context]: [unknown, AgentToolContext?]) => (context ? "write" : "read"),
+			approval: (...[, context]: [unknown, AgentToolContext?]) => (context?.toolCall ? "write" : "read"),
 			async execute(_toolCallId, params) {
 				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
 			},
@@ -2661,7 +2662,7 @@ describe("agentLoop with AgentMessage", () => {
 			convertToLlm: identityConverter,
 			getToolContext: toolCall => {
 				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
-				return {} as AgentToolContext;
+				return { toolCall } as AgentToolContext;
 			},
 		};
 
