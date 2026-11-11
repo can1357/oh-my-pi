@@ -43,6 +43,7 @@ export type KnownProvider =
 	| "keln"
 	| "kilo"
 	| "kimi-code"
+	| "liquid"
 	| "litellm"
 	| "lm-studio"
 	| "local"

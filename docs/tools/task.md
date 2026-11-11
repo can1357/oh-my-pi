@@ -244,6 +244,18 @@ Artifacts and side channels:
 - Nested git repos are diffed independently inside isolated workspaces and merged separately with `applyNestedPatches(...)`.
 - `agent://` ids are name-based (`Task` first, `Task-2`/`Task-3` only when the name repeats, nested like `Parent.Child`) by `AgentOutputManager`; this is what prevents artifact collisions across repeated or nested invocations.
 
+## Auto-parallel
+
+`task.autoParallel` (`off` default, `suggest`, `on`) asks the native judge which parts of each new top-level prompt can run concurrently. Ownership: `auto-parallel/planner.ts` (segmentation, judgment, partition), `session/auto-parallel.ts` (mode, notice, hint), questions in `prompts/judge/auto-parallel.json`.
+
+- **Judged:** typed, user-authored prompts and queued follow-ups in the main session, never steering, skill prompts, subagents, or plan mode. The `task` tool must be enabled and the `judge` role must resolve first to a native backend (the `find.enabled: auto` condition).
+- **Items:** each top-level list entry and each line outside a list is one item; nested entries, lines indented to an entry's text, and fenced blocks stay with their item. Prompts with fewer than 2 or more than 16 items are not judged.
+- **Plan:** one judgment asks each item's role (`context`: background and list lead-ins, sent to every subtask; `task`; `wrapup`: checks, commits, changelog done after all subtasks) and whether each pair of items is coupled (same file or component, one needs the other's result, design, or API, a rename one touches, or one refines the other). Task items joined by a pair at P(coupled) ≥ 0.35 share a subtask, transitively. The threshold sits low because a missed split only costs time, while a wrong one puts two workers on coupled code.
+- **`suggest`** reports `Auto-parallel: 3 subtasks: … | … | …` or `Auto-parallel: no split` per judged prompt and changes nothing.
+- **`on`:** a split into two or more subtasks adds a hidden reminder to the prompt listing the subtasks, the shared context, and the wrap-up items, and tells the agent to settle cross-subtask contracts, then delegate the subtasks in one parallel `task` call. A prompt that does not split gets nothing.
+
+Like auto-prewalk, it fails open: a missing native judge, a judge error or malformed answer, the 4-second timeout, an abort, or a superseded prompt leave the turn unchanged. Judgments are journaled as model usage under the purpose `auto-parallel`.
+
 ## Seance
 
 Use `agent: "seance"` with required `sourceSession`, `task`, and `solutionSpace`; set `model` to override the source's active-branch model. A source with no restorable saved model requires an explicit selection. Plan mode hides the agent, fields, and consult guidance; explicit seance calls are rejected.

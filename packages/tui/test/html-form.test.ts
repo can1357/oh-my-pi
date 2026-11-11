@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
+import { Editor } from "@oh-my-pi/pi-tui/components/editor";
 import { loadFormImage } from "@oh-my-pi/pi-tui/html-form/media";
 import { getNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
@@ -39,9 +40,11 @@ function isNode(child: NativeChild): child is NativeNode {
 	return "k" in child && typeof child.k === "string";
 }
 
-/** The `Input` components a description mounts as children (the form's live text controls). */
-function liveInputs(root: NativeNode): Input[] {
-	return (root.c ?? []).flatMap(child => (isNode(child) ? liveInputs(child) : child instanceof Input ? [child] : []));
+/** The components of one kind a description mounts as children (the form's live text controls). */
+function liveControls<T>(root: NativeNode, kind: abstract new (...args: never[]) => T): T[] {
+	return (root.c ?? []).flatMap(child =>
+		isNode(child) ? liveControls(child, kind) : child instanceof kind ? [child] : [],
+	);
 }
 
 function findPath(root: NativeNode, predicate: (node: NativeNode) => boolean, path = ""): string | undefined {
@@ -53,6 +56,13 @@ function findPath(root: NativeNode, predicate: (node: NativeNode) => boolean, pa
 		if (found) return found;
 	}
 	return undefined;
+}
+
+/** The text of every `text` node under `root`, in order. */
+function textsOf(root: NativeNode): string[] {
+	const spans = root.k === "text" && root.p && "spans" in root.p ? root.p.spans : undefined;
+	const own = spans ? [spans.map(item => item.t).join("")] : [];
+	return [...own, ...(root.c ?? []).flatMap(child => (isNode(child) ? textsOf(child) : []))];
 }
 
 const DB_FORM = `<form>
@@ -69,6 +79,12 @@ const DB_FORM = `<form>
 <label>Notes<textarea name="notes" placeholder="anything else"></textarea></label>
 </fieldset>
 </form>`;
+
+const SELECT_FORM = `<form><label>Region<select name="region">
+	<option value="us">US</option><option disabled>Unavailable</option>
+	<option value="eu">EU</option><option value="ap">AP</option>
+	<option value="nl">Netherlands</option>
+	</select></label><p>Choose a deployment region.</p></form>`;
 
 function dialog(html: string, overrides: Partial<ConstructorParameters<typeof HtmlFormDialog>[1]> = {}) {
 	const onSubmit = vi.fn();
@@ -93,6 +109,302 @@ describe("html form", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	describe("option notes", () => {
+		it("notes the highlighted dropdown option without selecting it and restores the open menu", () => {
+			const { form, onSubmit, onCancel } = dialog(SELECT_FORM);
+			form.handleInput(SPACE);
+			form.handleInput(DOWN);
+			form.handleInput("\x1bn");
+			expect(form.debugState().noteEdit).toBe("region=eu");
+			form.handleInput("data residency");
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "us" });
+			expect(form.debugState().open).toBe("region");
+			expect(form.render(100).join("\n")).toContain("✎ draft");
+			form.handleInput("\x1bn");
+			form.handleInput(" changed");
+			form.handleInput(ESC);
+			expect(form.debugState().notes).toMatchObject({ region: { 2: "data residency" } });
+			expect(form.optionNotes()).toEqual([]);
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "eu" });
+			expect(form.render(100).join("\n")).toContain("✎ note");
+			expect(form.render(100).join("\n")).not.toContain("✎ draft");
+			form.handleInput("\x1bn");
+			expect(form.debugState().noteEdit).toBe("region=eu");
+			form.handleInput(" edited");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toEqual([
+				{ name: "region", question: "Region", option: "EU", value: "eu", text: "data residency edited" },
+			]);
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(onCancel).not.toHaveBeenCalled();
+			form.dispose();
+		});
+
+		it("preserves n type-ahead in closed and open dropdowns", () => {
+			const { form } = dialog(SELECT_FORM);
+			form.handleInput("n");
+			expect(form.data()).toEqual({ region: "nl" });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleInput("u");
+			form.handleInput(SPACE);
+			form.handleInput("n");
+			expect(form.data()).toEqual({ region: "us" });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "nl" });
+			form.dispose();
+		});
+
+		it("keeps notes tied to option indexes when submitted values are identical", () => {
+			const { form } = dialog(`<form><label><input type="radio" name="pick" value="same" checked>First</label>
+				<label><input type="radio" name="pick" value="same">Second</label></form>`);
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("second option only");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toEqual([]);
+			form.handleInput(SPACE);
+			expect(form.data()).toEqual({ pick: "same" });
+			expect(form.optionNotes()).toEqual([
+				{ name: "pick", question: "pick", option: "Second", value: "same", text: "second option only" },
+			]);
+			form.handleInput(DOWN);
+			form.handleInput("same");
+			expect(form.optionNotes()).toEqual([]);
+			expect(form.data()).toEqual({ pick: "same" });
+			form.dispose();
+		});
+
+		it("opens native dropdown row notes without choosing the row or accepting disabled targets", () => {
+			const { form } = dialog(SELECT_FORM);
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o1", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o2", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBe("region=eu");
+			form.handleInput("residency");
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "us" });
+			expect(JSON.stringify(form.describe(CX))).toContain("residency");
+			form.dispose();
+		});
+
+		it("edits and removes a focused radio note without changing answers or submitting", () => {
+			const { form, onSubmit, onCancel } = dialog(DB_FORM);
+			const before = form.data();
+			const pages = form.debugState().pages;
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			expect(form.debugState().noteEdit).toBe("db=pg");
+			expect(form.render(100).join("\n")).toContain("Note for Postgres");
+			expect(form.debugState().pages).toBe(pages);
+			form.handleInput("why postgres");
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual(before);
+			const rows = form.render(100);
+			expect(rows.find(row => row.includes("Postgres"))).toContain("✎ draft");
+			expect(rows.find(row => row.includes("SQLite"))).not.toContain("✎");
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres" } });
+			form.handleInput("n");
+			form.handleInput("!");
+			form.handleInput(ESC);
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres" } });
+			form.handleInput("n");
+			form.handleInput("\x01");
+			form.handleInput("\x0b");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toEqual({ db: {}, extras: {}, region: {} });
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(onCancel).not.toHaveBeenCalled();
+			form.dispose();
+		});
+
+		it("follows a remapped note key, keeping text keys out of dropdown notes", () => {
+			setKeybindings(
+				KeybindingsManager.inMemory({ "tui.select.cancel": "escape", "app.ask.note": ["x", "ctrl+e"] }),
+			);
+			const { form } = dialog(DB_FORM);
+			form.handleInput("n");
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleInput("x");
+			expect(form.debugState().noteEdit).toBe("db=sqlite");
+			form.dispose();
+
+			const select = dialog(SELECT_FORM).form;
+			select.handleInput("x");
+			expect(select.debugState().noteEdit).toBeUndefined();
+			select.handleInput("\x05");
+			expect(select.debugState().noteEdit).toBe("region=us");
+			select.dispose();
+		});
+
+		it("counts a host edit in the note editor as activity", () => {
+			vi.useFakeTimers();
+			const onTimeout = vi.fn();
+			const { form } = dialog(DB_FORM, { timeout: 1000, onTimeout });
+			form.handleInput("n");
+			const [editor] = liveControls(form.describe(CX), Editor);
+			vi.advanceTimersByTime(900);
+			editor!.handleNativeEvent({ type: "edit", key: "", from: 0, to: 0, text: "pasted", cursor: 6, len: 0 });
+			vi.advanceTimersByTime(900);
+			expect(onTimeout).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(200);
+			expect(onTimeout).toHaveBeenCalledWith(form.data(), [
+				{
+					name: "db",
+					question: "Which store should ledger use?",
+					option: "SQLite",
+					value: "sqlite",
+					text: "pasted",
+				},
+			]);
+			form.dispose();
+		});
+
+		it("does not expand a later note's literal paste marker to an earlier note's paste", () => {
+			const { form } = dialog(DB_FORM);
+			const paste = Array.from({ length: 12 }, (_, line) => `line ${line}`).join("\n");
+			form.handleInput("n");
+			form.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			form.handleInput(ENTER);
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("see [Paste #1]");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 0: paste, 1: "see [Paste #1]" } });
+			form.dispose();
+		});
+
+		it("hides and restores the form with a note draft still open", () => {
+			const { form } = dialog(DB_FORM);
+			form.handleInput("n");
+			form.handleInput("draft");
+			form.handleInput("\x1bh");
+			expect(form.render(100).join("\n")).not.toContain("Note for");
+			form.handleInput(ENTER);
+			expect(form.render(100).join("\n")).toContain("Note for SQLite");
+			form.handleInput(" kept");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 0: "draft kept" } });
+			form.dispose();
+		});
+
+		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
+			const { form } = dialog(DB_FORM);
+			form.handleInput("n");
+			form.handleInput("sqlite draft");
+			form.handleInput(ENTER);
+			form.handleInput(DOWN);
+			form.handleInput(SPACE);
+			form.handleInput(TAB);
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("docker reason");
+			form.handleInput(ENTER);
+			expect(form.data().extras).toEqual(["ci"]);
+			form.handleInput(SPACE);
+			form.handleInput("\x1b[Z");
+			form.handleInput("n");
+			form.handleInput("\x05");
+			form.handleInput(" edited");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 0: "sqlite draft edited" } });
+			expect(form.optionNotes()).toEqual([
+				{ name: "extras", question: "Extras", option: "Docker", value: "docker", text: "docker reason" },
+			]);
+			form.dispose();
+		});
+
+		it("opens native menu notes on the exact shown row and ignores stale tabs", () => {
+			const { form } = dialog(DB_FORM);
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o1", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBe("db=pg");
+			form.handleInput("native reason");
+			form.handleInput(ENTER);
+			expect(form.data().db).toBe("sqlite");
+			form.handleNativeEvent({ type: "select", key: "head/tabs", item: "t1" });
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o0", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(form.debugState().focus).toBe("extras=ci");
+			form.dispose();
+		});
+
+		it("saves a note draft and submits once when inactivity expires during editing", () => {
+			vi.useFakeTimers();
+			const onTimeout = vi.fn();
+			const { form, onCancel } = dialog(DB_FORM, { timeout: 1000, onTimeout });
+			form.handleInput("n");
+			vi.advanceTimersByTime(500);
+			form.handleInput("draft");
+			vi.advanceTimersByTime(999);
+			expect(onTimeout).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(501);
+			expect(onTimeout).toHaveBeenCalledTimes(1);
+			expect(onTimeout).toHaveBeenCalledWith(form.data(), [
+				{
+					name: "db",
+					question: "Which store should ledger use?",
+					option: "SQLite",
+					value: "sqlite",
+					text: "draft",
+				},
+			]);
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(onCancel).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(2000);
+			expect(onTimeout).toHaveBeenCalledTimes(1);
+			form.dispose();
+		});
+		it("mounts one native note editor and preserves its menu target through host edits", async () => {
+			const { form, onCancel } = dialog(DB_FORM);
+			const provider: TerminalFrameProvider & NativeSurfaceProvider = {
+				renderFrame: () => ({ viewport: [] }),
+				acknowledgeHistory: () => {},
+				describeSurface: () => ({ main: [], dock: [form] }),
+			};
+			const harness = await TspHarness.start(tui => {
+				tui.setFrameProvider(provider);
+				tui.setFocus(form);
+			});
+			try {
+				const target = harness.find(node => node.k === "item" && node.id.endsWith("/f0/o1"))!;
+				expect(target.p).toMatchObject({ actions: { menu: ["note"] } });
+				harness.event({ ev: "action", sf: harness.terminal.surface!, id: target.id, act: "note" });
+				await harness.render();
+				const editor = harness.find(node => node.k === "editor")!;
+				harness.event({
+					ev: "edit",
+					sf: harness.terminal.surface!,
+					id: editor.id,
+					from: 0,
+					to: 0,
+					text: "host reason",
+					cursor: 11,
+					len: 0,
+				});
+				form.handleNativeEvent({ type: "action", key: "", act: "save-note", mods: [] });
+				await harness.render();
+				expect(form.data().db).toBe("sqlite");
+				expect(form.debugState().notes).toMatchObject({ db: { 1: "host reason" } });
+				expect(harness.findAll(node => node.k === "editor")).toEqual([]);
+				expect(
+					JSON.stringify(harness.findAll(node => node.k === "item" && node.p?.detail !== undefined)),
+				).toContain("host reason");
+				harness.event({ ev: "action", sf: harness.terminal.surface!, id: target.id, act: "note" });
+				form.handleInput(" discarded");
+				form.handleNativeEvent({ type: "action", key: "", act: "cancel", mods: [] });
+				expect(form.debugState().noteEdit).toBeUndefined();
+				expect(form.debugState().notes).toMatchObject({ db: { 1: "host reason" } });
+				expect(onCancel).not.toHaveBeenCalled();
+				expect(harness.errors).toEqual([]);
+			} finally {
+				harness.stop();
+				form.dispose();
+			}
+		});
 	});
 
 	describe("parsing", () => {
@@ -444,13 +756,16 @@ describe("html form", () => {
 			form.handleInput(TAB); // notes
 			form.handleInput(TAB); // Submit
 			form.handleInput(ENTER);
-			expect(onSubmit).toHaveBeenCalledWith({
-				db: "pg",
-				extras: ["ci", "docker"],
-				region: "ap",
-				workers: 4,
-				notes: "",
-			});
+			expect(onSubmit).toHaveBeenCalledWith(
+				{
+					db: "pg",
+					extras: ["ci", "docker"],
+					region: "ap",
+					workers: 4,
+					notes: "",
+				},
+				[],
+			);
 		});
 
 		it("opens a long prefilled input at its start, and End reveals the tail", () => {
@@ -504,7 +819,7 @@ describe("html form", () => {
 			form.handleInput(TAB);
 			form.handleInput(TAB);
 			form.handleInput(ENTER);
-			expect(onSubmit).toHaveBeenCalledWith({ domain: "a", n: "" });
+			expect(onSubmit).toHaveBeenCalledWith({ domain: "a", n: "" }, []);
 			form.handleInput(ESC);
 			expect(onCancel).toHaveBeenCalledTimes(1);
 		});
@@ -519,7 +834,7 @@ describe("html form", () => {
 			vi.advanceTimersByTime(4000);
 			expect(onTimeout).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(2000);
-			expect(onTimeout).toHaveBeenCalledWith({ db: "pg", extras: ["ci"], region: "us", workers: 4, notes: "" });
+			expect(onTimeout).toHaveBeenCalledWith({ db: "pg", extras: ["ci"], region: "us", workers: 4, notes: "" }, []);
 			form.dispose();
 		});
 
@@ -539,7 +854,7 @@ describe("html form", () => {
 			form.handleNativeEvent({ type: "select", key: tabs, item: "review" });
 			expect(findPath(form.describe(CX), node => node.k === "kv")).toBeDefined();
 			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" });
+			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" }, []);
 		});
 
 		it("natively: Submit shows only on the last question tab (and Review) and sends from there", () => {
@@ -551,7 +866,10 @@ describe("html form", () => {
 			expect(findPath(root, node => node.k === "kv")).toBeUndefined(); // last question tab, not Review
 			expect(findPath(root, node => node.key === "submit")).toBeDefined();
 			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith({ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" });
+			expect(onSubmit).toHaveBeenCalledWith(
+				{ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" },
+				[],
+			);
 		});
 
 		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
@@ -596,6 +914,97 @@ describe("html form", () => {
 			} finally {
 				setNativeRendering(false);
 			}
+		});
+
+		it("natively: each question after the fieldsets gets its own tab, with the context before it", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label><label><input type="radio" name="length" value="long"> Long</label></fieldset>
+				<fieldset><legend>Languages</legend><label><input type="checkbox" name="languages" value="ts"> TypeScript</label><label><input type="checkbox" name="languages" value="py"> Python</label></fieldset>
+				<label>Editor <select name="editor"><option value="vscode">VS Code</option><option value="zed">Zed</option></select></label>
+				<p>How urgent is it?</p>
+				<label>Priority <input type="number" name="priority" value="3"></label>
+			</form>`);
+			const root = form.describe(CX);
+			const tabs = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of tabs.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			const editorTab = form.describe(CX);
+			expect(textsOf(editorTab)).toContain("Editor");
+			expect(textsOf(editorTab)).not.toContain("How urgent is it?");
+			// The Priority input's well, clickable while another field has focus.
+			expect(
+				findPath(editorTab, node => !!node.p && "actions" in node.p && node.p.actions?.click === "edit:3"),
+			).toBeUndefined();
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t3" });
+			const priorityTab = textsOf(form.describe(CX));
+			expect(priorityTab).toEqual(expect.arrayContaining(["How urgent is it?", "Priority"]));
+			expect(priorityTab).not.toContain("Editor");
+		});
+
+		it("natively: text between a loose group's options stays on the group's tab", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
+				<p>Premium includes backups</p>
+				<label><input type="radio" name="plan" value="premium"> Premium</label>
+				<label>Notes <input name="notes"></label>
+			</form>`);
+			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
+			expect(textsOf(form.describe(CX))).toContain("Premium includes backups");
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Notes"]));
+			expect(textsOf(form.describe(CX))).not.toContain("Premium includes backups");
+		});
+
+		it("natively: a field between a loose group's options keeps the context before it", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
+				<p>Choose a compliant region</p>
+				<label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label>
+				<label><input type="radio" name="plan" value="premium"> Premium</label>
+			</form>`);
+			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
+			expect(textsOf(form.describe(CX))).not.toContain("Choose a compliant region");
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Choose a compliant region", "Region"]));
+		});
+
+		it("natively: a loose field with only disabled options shares the next tab, so the focused field stays shown", () => {
+			const { form } = dialog(`<form>
+				<label><input type="checkbox" name="locked" disabled> Locked</label>
+				<label>Name <input name="name"></label>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+			</form>`);
+			const root = form.describe(CX);
+			const path = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+			// The shared tab is named after Name, the question the keyboard reaches.
+			const first = items[0];
+			expect(first && "label" in first && typeof first.label !== "string" ? first.label[0]?.t : "").toBe("Name");
+			// Focus opens on Name, the first control the keyboard reaches; the shown tab holds it.
+			expect(textsOf(root)).toContain("Name");
+		});
+
+		it("natively: a fieldset without a legend stays one tab", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<fieldset><label>Name <input name="name"></label><label>Email <input name="email"></label></fieldset>
+			</form>`);
+			const root = form.describe(CX);
+			const path = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
 		});
 
 		it("natively: the form sits in the card's shrinking, scrolling list and the action bar stays outside it", () => {
@@ -668,9 +1077,9 @@ describe("html form", () => {
 		it("natively: clicking Other mounts its input, and text the terminal types there becomes the radio's answer", () => {
 			const { form } = dialog(DB_FORM);
 			const radios = findPath(form.describe(CX), node => node.k === "list" && node.key === "f0")!;
-			expect(liveInputs(form.describe(CX))).toEqual([]);
+			expect(liveControls(form.describe(CX), Input)).toEqual([]);
 			form.handleNativeEvent({ type: "select", key: radios, item: "other" });
-			const [other] = liveInputs(form.describe(CX));
+			const [other] = liveControls(form.describe(CX), Input);
 			expect(other).toBeInstanceOf(Input);
 			other!.handleNativeEvent({
 				type: "edit",
@@ -682,6 +1091,37 @@ describe("html form", () => {
 				len: 0,
 			});
 			expect(form.data()).toMatchObject({ db: "Fly Postgres HA" });
+		});
+
+		it("natively: clicking Other hands the keys over even while a composer draft owns typing", () => {
+			const typed: string[] = [];
+			const { form } = dialog(DB_FORM, {
+				inputGuard: {
+					isBlocked: () => true,
+					handleInput: (data: string) => typed.push(data),
+					hint: "typing edits your prompt",
+				},
+			});
+			const radios = findPath(form.describe(CX), node => node.k === "list" && node.key === "f0")!;
+			form.handleNativeEvent({ type: "select", key: radios, item: "other" });
+			for (const key of ["F", "l", "y"]) form.handleInput(key);
+			expect(form.data()).toMatchObject({ db: "Fly" });
+			expect(typed).toEqual([]);
+		});
+
+		it("natively: clicking a text well hands the keys over even while a composer draft owns typing", () => {
+			const typed: string[] = [];
+			const { form } = dialog(DB_FORM, {
+				inputGuard: {
+					isBlocked: () => true,
+					handleInput: (data: string) => typed.push(data),
+					hint: "typing edits your prompt",
+				},
+			});
+			form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
+			form.handleInput("5");
+			expect(form.data()).toMatchObject({ workers: 54 });
+			expect(typed).toEqual([]);
 		});
 
 		it("natively: keys act immediately even though rows were never rendered", () => {

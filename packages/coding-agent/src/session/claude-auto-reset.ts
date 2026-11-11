@@ -26,6 +26,7 @@ const JUNIPER_PROGRAM = "juniper_tide";
 const CEDAR_PROGRAM = "cedar_ember";
 const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
 const FABLE_LIMIT_ID = "anthropic:7d:fable";
+const WEEKLY_LIMIT_ID = "anthropic:7d";
 const MAX_PLAUSIBLE_FIVE_HOUR_MS = 6 * 3_600_000;
 const MAX_PLAUSIBLE_WEEKLY_MS = 8 * 24 * 3_600_000;
 
@@ -653,7 +654,11 @@ export function claudeResetWindow(credit: UsageResetCreditDetail, limitIds: read
 	return limitIds.some(id => id !== FIVE_HOUR_LIMIT_ID) ? "weekly" : "5h";
 }
 
-/** A Fable launch grant, identified by the Fable weekly cap it clears. */
+/**
+ * A Fable launch grant: clears the Fable weekly cap but not the shared weekly
+ * window. A full reset clears both and is governed like any weekly reset.
+ */
 function isFableGrant(credit: UsageResetCreditDetail): boolean {
-	return credit.clears?.includes(FABLE_LIMIT_ID) === true;
+	const clears = credit.clears ?? [];
+	return clears.includes(FABLE_LIMIT_ID) && !clears.includes(WEEKLY_LIMIT_ID);
 }
