@@ -1019,6 +1019,36 @@ async fn exit_cut_short_multiline_reachability_and_definitions() {
 	);
 }
 
+/// An EXIT trap must not flip a trailing exit into a cut-short one: the
+/// trap-pop re-entry into `exit_shell` sees a `pc` that still points at the
+/// already-executed `exit`, so the first, correct computation stands.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_trap_keeps_trailing_exit_uncut() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	assert!(
+		!run("trap ':' EXIT; f() { exit 0; }; f").await.ended_by_exit,
+		"a trailing exit inside a function stays unreported across its EXIT trap"
+	);
+	assert!(
+		run("trap ':' EXIT; f() { exit 0; }; f; echo after")
+			.await
+			.ended_by_exit,
+		"input after the call really was hidden"
+	);
+}
+
 /// In a segmented chain, `exit` on the last segment that would run ends the
 /// command where it would have ended anyway, so only an abort that hides
 /// later segments is reported.

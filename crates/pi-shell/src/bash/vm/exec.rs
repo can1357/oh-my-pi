@@ -754,7 +754,14 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32, top_
 		&& let Some(run) = vp.runs.front()
 	{
 		k.exited = Some(run.id);
-		k.exited_cut_short = exit_cut_short(vp, top_unrun);
+		// A re-entry whose EXIT trap already started (the trap's end, or an
+		// `exit` inside it) sees a `pc` that still points at the
+		// already-executed `exit` — the trap started without advancing the
+		// interrupted frame — so rescanning would count that op itself.
+		// The first computation stands.
+		if !run.exit_trap_started {
+			k.exited_cut_short = exit_cut_short(vp, top_unrun);
+		}
 	}
 	if !in_exit_trap
 		&& vp
