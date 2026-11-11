@@ -311,15 +311,17 @@ impl AtSpiAx {
 				// The windows of an application that does not answer are left
 				// out rather than holding back every other application's.
 				let limit = 48 - listed.windows.len();
-				let Ok(windows) =
-					answered("the application", self.reply_timeout, self.app_windows(&app, limit)).await
-				else {
-					listed
-						.unanswered
-						.extend(app.name().map(ToString::to_string));
-					continue;
+				let windows = match self.app_windows(&app, limit).await {
+					Ok(windows) => windows,
+					Err(error) if error.code == ErrorCode::Timeout => {
+						listed
+							.unanswered
+							.extend(app.name().map(ToString::to_string));
+						continue;
+					},
+					Err(error) => return Err(error),
 				};
-				listed.windows.extend(windows?);
+				listed.windows.extend(windows);
 				if listed.windows.len() == 48 {
 					break;
 				}
@@ -353,19 +355,20 @@ impl AtSpiAx {
 
 	async fn app_windows(&self, app: &ObjectRefOwned, limit: usize) -> CoreResult<Vec<AtSpiWindow>> {
 		let mut windows = Vec::new();
-		let app_proxy = app
-			.as_accessible_proxy(&self.connection)
-			.await
+		let app_proxy = self
+			.reply(app.as_accessible_proxy(&self.connection))
+			.await?
 			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
-		let app_name = app_proxy.name().await.unwrap_or_default();
+		let app_name = self.reply(app_proxy.name()).await?.unwrap_or_default();
 		let pid = if let Some(bus_name) = app.name() {
-			let dbus = atspi::zbus::fdo::DBusProxy::new(&self.connection)
-				.await
+			let dbus = self
+				.reply(atspi::zbus::fdo::DBusProxy::new(&self.connection))
+				.await?
 				.ok();
 			if let Some(dbus) = dbus {
-				dbus
-					.get_connection_unix_process_id(bus_name.clone().into())
-					.await
+				self
+					.reply(dbus.get_connection_unix_process_id(bus_name.clone().into()))
+					.await?
 					.ok()
 			} else {
 				None
@@ -373,28 +376,41 @@ impl AtSpiAx {
 		} else {
 			None
 		};
-		for frame in Self::frames(&self.connection, app)
-			.await
-			.unwrap_or_default()
-		{
-			let frame_proxy = frame
-				.as_accessible_proxy(&self.connection)
-				.await
+		let children = self
+			.reply(app_proxy.get_children())
+			.await?
+			.unwrap_or_default();
+		for frame in children {
+			let frame_proxy = self
+				.reply(frame.as_accessible_proxy(&self.connection))
+				.await?
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI frame: {err}")))?;
-			let title = frame_proxy.name().await.unwrap_or_default();
-			let state = frame_proxy.get_state().await.ok();
-			let Ok(component) = Self::component(&self.connection, &frame).await else {
+			if !self
+				.reply(frame_proxy.get_role())
+				.await?
+				.is_ok_and(|role| top_level_role(role, true))
+			{
+				continue;
+			}
+			let title = self.reply(frame_proxy.name()).await?.unwrap_or_default();
+			let state = self.reply(frame_proxy.get_state()).await?.ok();
+			let Ok(component) = self
+				.reply(Self::component(&self.connection, &frame))
+				.await?
+			else {
 				continue;
 			};
-			let Ok((x, y, width, height)) = component.get_extents(CoordType::Screen).await else {
+			let Ok((x, y, width, height)) =
+				self.reply(component.get_extents(CoordType::Screen)).await?
+			else {
 				continue;
 			};
 			if width < 16 || height < 16 {
 				continue;
 			}
-			let position_known = component
-				.get_extents(CoordType::Window)
-				.await
+			let position_known = self
+				.reply(component.get_extents(CoordType::Window))
+				.await?
 				.is_ok_and(|(window_x, window_y, ..)| (window_x, window_y) != (x, y));
 			let id = atspi_window_id(&frame);
 			windows.push(AtSpiWindow {
@@ -2782,13 +2798,15 @@ mod tests {
 		/// A frame at `(x, y)` on screen, and at the origin in window
 		/// coordinates.
 		struct Extents {
-			x: i32,
-			y: i32,
+			x:     i32,
+			y:     i32,
+			delay: Duration,
 		}
 
 		#[interface(name = "org.a11y.atspi.Component")]
 		impl Extents {
-			fn get_extents(&self, coord_type: u32) -> (i32, i32, i32, i32) {
+			async fn get_extents(&self, coord_type: u32) -> (i32, i32, i32, i32) {
+				tokio::time::sleep(self.delay).await;
 				if coord_type == CoordType::Window as u32 {
 					(0, 0, 300, 200)
 				} else {
@@ -2826,6 +2844,10 @@ mod tests {
 		/// `(10, 20)` on screen, has the focus when `focused`. (A peer-to-peer
 		/// connection ignores the destination, so this process serves both.)
 		fn desktop(focused: bool) -> (AtSpiAx, Connection) {
+			desktop_with_delay(focused, Duration::ZERO)
+		}
+
+		fn desktop_with_delay(focused: bool, delay: Duration) -> (AtSpiAx, Connection) {
 			backend(HUNG_CALL_TIMEOUT, |server| {
 				server
 					.serve_at("/org/a11y/atspi/accessible/root", Element {
@@ -2854,9 +2876,18 @@ mod tests {
 						children: Vec::new(),
 					})
 					.unwrap()
-					.serve_at("/editor/frame", Extents { x: 10, y: 20 })
+					.serve_at("/editor/frame", Extents { x: 10, y: 20, delay })
 					.unwrap()
 			})
+		}
+
+		#[test]
+		fn windows_keep_an_application_whose_replies_together_exceed_the_limit() {
+			let (ax, _server) = desktop_with_delay(true, Duration::from_millis(600));
+			let listed = ax.windows().unwrap();
+			assert_eq!(listed.windows.len(), 1);
+			assert_eq!(listed.windows[0].window.title, "Document");
+			assert_eq!(listed.unanswered, [":1.8"]);
 		}
 
 		#[test]
