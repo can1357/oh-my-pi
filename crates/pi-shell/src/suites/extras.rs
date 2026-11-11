@@ -342,7 +342,8 @@ async fn awk_runs_command_lines_in_the_shell() {
 		"a\nb\n"
 	);
 	assert_eq!(
-		out(&mut s, "awk 'BEGIN { while ((\"echo hi\" | getline line) > 0) print \"got \" line }'").await,
+		out(&mut s, "awk 'BEGIN { while ((\"echo hi\" | getline line) > 0) print \"got \" line }'")
+			.await,
 		"got hi\n"
 	);
 	let ran = run(&mut s, "awk 'BEGIN { print system(\"no-such-command-here\") }'").await;
