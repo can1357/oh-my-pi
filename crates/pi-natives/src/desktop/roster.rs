@@ -37,6 +37,14 @@ pub struct DesktopRosterWindow {
 /// Samples every on-screen window, front to back, in one `WindowServer` pass,
 /// with no desktop session and no permission prompt. Empty off macOS.
 #[napi]
+#[cfg_attr(
+	not(target_os = "macos"),
+	allow(
+		clippy::missing_const_for_fn,
+		clippy::unnecessary_wraps,
+		reason = "matches the fallible macOS window-server API"
+	)
+)]
 pub fn desktop_window_roster() -> Result<Vec<DesktopRosterWindow>> {
 	#[cfg(target_os = "macos")]
 	{
