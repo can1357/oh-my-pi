@@ -363,6 +363,16 @@ describe("claude usage-block healing", () => {
 			name: "a model-family weekly limit is exhausted",
 			report: resetAt => claudeReport([sharedLimit("7d", "7d", 0, resetAt), tierLimit("opus", 1)]),
 		},
+		{
+			name: "only a model-family row's reset matches the deadline",
+			report: resetAt => {
+				const tier = tierLimit("opus", 0);
+				return claudeReport([
+					sharedLimit("7d", "7d", 0, resetAt + 60 * 60_000),
+					{ ...tier, window: { id: "7d", label: "7d", resetsAt: resetAt } },
+				]);
+			},
+		},
 	];
 	for (const { name, report } of partialKeepCases) {
 		it(`keeps a global block from a reset-matching partial report when ${name}`, async () => {
