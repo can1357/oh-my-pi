@@ -21,7 +21,6 @@ if not sys.flags.isolated:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse  # noqa: E402
-import importlib.metadata  # noqa: E402
 import json  # noqa: E402
 import shutil  # noqa: E402
 import statistics  # noqa: E402
@@ -65,7 +64,8 @@ import mnemosyne  # noqa: E402
 from mnemosyne.core import embeddings  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
 
-from model_digest import corpus_digest, model_dir_digest  # noqa: E402
+from engine_io import append_debug_scores, runtime_versions  # noqa: E402
+from model_digest import corpus_digest, loaded_model_digest  # noqa: E402
 
 # Run B's adapter runs this exact package; another install or version would calibrate a different runtime.
 if mnemosyne.__version__ != "4.0.0b4" or not Path(mnemosyne.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
@@ -73,16 +73,10 @@ if mnemosyne.__version__ != "4.0.0b4" or not Path(mnemosyne.__file__).resolve().
 print(f"mnemosyne {mnemosyne.__version__} from {mnemosyne.__file__}")
 
 
-def loaded_model_digest() -> str | None:
-	"""The files Mnemosyne's fastembed loaded, as Run B's engine records them; None before a model is loaded."""
-	loaded = getattr(getattr(getattr(embeddings, "_embedding_model", None), "model", None), "_model_dir", None)
-	return model_dir_digest(loaded) if loaded else None
-
-
 # Load the model before upstream ingests anything, as Run B's engine does, so the digest names the model every vector
 # came from; calibration-check compares it with Run B's.
 embeddings.embed(["warmup"])
-MODEL_DIGEST = loaded_model_digest()
+MODEL_DIGEST = loaded_model_digest(embeddings)
 if MODEL_DIGEST is None:
 	sys.exit("Mnemosyne loaded no local embedding model; calibration needs fastembed embeddings")
 
@@ -112,15 +106,7 @@ _recall = BeamMemory.recall
 def recording_recall(self, query, *args, **kwargs):
 	results = _recall(self, query, *args, **kwargs)
 	recalls.append((query, [row["content"] for row in results[:TOP_K]]))
-	debug_path = os.environ.get("MEMORY_EVAL_DEBUG_SCORES")
-	if debug_path:
-		# Calibration debugging only: same record as the Run B engine's, to tell a reordering from a tie.
-		rows = [
-			{"score": row.get("score"), "tier": row.get("tier"), "id": row["id"], "content": row["content"][:60]}
-			for row in results[:TOP_K]
-		]
-		with open(debug_path, "a", encoding="utf-8") as debug_file:
-			debug_file.write(json.dumps({"query": query, "rows": rows}) + "\n")
+	append_debug_scores(query, results[:TOP_K])
 	return results
 
 
@@ -175,11 +161,11 @@ questions = [
 	for (conversation, question, gold), (_, contents), recall in zip(queries, recalls, result["recalls"])
 ]
 mean_recall = statistics.mean(result["recalls"])
-if loaded_model_digest() != MODEL_DIGEST:
+if loaded_model_digest(embeddings) != MODEL_DIGEST:
 	sys.exit("embedding model files changed during Run A; dump not written")
 out_path.parent.mkdir(parents=True, exist_ok=True)
 # The numerical runtime behind the vectors can reorder near-ties; recorded under Run B's engineInfo names.
-runtime = {f"{name}_version": importlib.metadata.version(name) for name in ("fastembed", "onnxruntime")}
+runtime = runtime_versions("_version")
 out_path.write_text(
 	json.dumps(
 		{

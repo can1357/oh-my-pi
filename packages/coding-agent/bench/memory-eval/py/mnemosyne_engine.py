@@ -1,28 +1,20 @@
-"""Mnemosyne 4.0.0b4 engine for the memory-eval harness, driven over JSON lines.
-
-Request:  {"id": number, "op": string, "params": object}  (one per stdin line)
-Response: {"id": number, "result": ...} or {"id": number, "error": string}  (one per stdout line)
+"""Mnemosyne 4.0.0b4 engine for the memory-eval harness, driven over JSON lines (see engine_io.py).
 
 Run with venv-engine's python. The TS client (engines/mnemosyne.ts) sets the MNEMOSYNE_* environment before spawn:
 embedding settings are read when mnemosyne is imported, so one process serves one protocol.
 """
 
 import importlib.metadata
-import json
-import logging
 import os
 import sys
-import traceback
+
+# Launched directly or through runpy (the tests), this script's own directory may not be on sys.path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from engine_io import append_debug_scores, isolate_stdout, runtime_versions, serve
 
 EXPECTED_VERSION = "4.0.0b4"
 
-# Only protocol lines may reach the real stdout: keep a private copy of fd 1, then point fd 1 and sys.stdout at stderr
-# so library prints, logging and native writes cannot corrupt the stream.
-PROTOCOL_OUT = os.fdopen(os.dup(1), "w", encoding="utf-8")
-os.dup2(2, 1)
-sys.stdout = sys.stderr
-logging.basicConfig(stream=sys.stderr)
-sys.stdin.reconfigure(encoding="utf-8")
+PROTOCOL_OUT = isolate_stdout()
 
 try:
 	VERSION = importlib.metadata.version("mnemosyne-memory")
@@ -34,9 +26,7 @@ if VERSION != EXPECTED_VERSION:
 from mnemosyne.core import embeddings  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
 
-# Launched directly or through runpy (the tests), this script's own directory may not be on sys.path.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from model_digest import model_dir_digest  # noqa: E402
+from model_digest import loaded_model_digest  # noqa: E402
 
 
 RANKED_TIERS = ("working", "episodic")
@@ -52,25 +42,18 @@ class Engine:
 		self.dropped_tier_rows = 0
 		self.warm_digest = None
 
-	def model_digest(self):
-		"""The files Mnemosyne's fastembed loaded; None when no model was loaded (fts-only)."""
-		# `_embedding_model` is upstream's private lazy-load slot, so read it without assuming it exists.
-		loaded = getattr(getattr(getattr(embeddings, "_embedding_model", None), "model", None), "_model_dir", None)
-		return model_dir_digest(loaded) if loaded else None
-
 	def op_describe(self, _params):
 		info = {
 			"mnemosyne_version": VERSION,
 			"embedding_model": embeddings._DEFAULT_MODEL,
 			"embeddings_available": str(embeddings.available()).lower(),
 			"dropped_tier_rows": str(self.dropped_tier_rows),
-			"fastembed_version": importlib.metadata.version("fastembed"),
-			"onnxruntime_version": importlib.metadata.version("onnxruntime"),
+			**runtime_versions("_version"),
 		}
 		info.update({key: value for key, value in os.environ.items() if key.startswith("MNEMOSYNE_") and value})
 		# Warmup loaded the model, so its digest is the one that produced the vectors; a different one now means the
 		# files were replaced during the run.
-		now = self.model_digest()
+		now = loaded_model_digest(embeddings)
 		if self.warm_digest and now != self.warm_digest:
 			raise RuntimeError(f"embedding model files changed during the run ({self.warm_digest} → {now}); result not written")
 		if now:
@@ -80,7 +63,7 @@ class Engine:
 	def op_warmup(self, _params):
 		if embeddings.available():
 			embeddings.embed(["warmup"])
-			self.warm_digest = self.model_digest()
+			self.warm_digest = loaded_model_digest(embeddings)
 
 	def op_open(self, params):
 		self.op_close(None)
@@ -200,36 +183,13 @@ class Engine:
 
 	def op_recall_raw(self, params):
 		rows = self.beam.recall(params["query"], top_k=params["k"])[: params["k"]]
-		debug_path = os.environ.get("MEMORY_EVAL_DEBUG_SCORES")
-		if debug_path:
-			# Calibration debugging only: lets a reordering between Run A and Run B be told apart from a tie.
-			debug_rows = [
-				{"score": row.get("score"), "tier": row.get("tier"), "id": row["id"], "content": row["content"][:60]}
-				for row in rows
-			]
-			with open(debug_path, "a", encoding="utf-8") as debug_file:
-				debug_file.write(json.dumps({"query": params["query"], "rows": debug_rows}) + "\n")
+		append_debug_scores(params["query"], rows)
 		return [row["content"] for row in rows]
 
 
 def main():
 	engine = Engine()
-	for line in sys.stdin:
-		if not line.strip():
-			continue
-		request = json.loads(line)
-		try:
-			handler = getattr(engine, f"op_{request['op']}", None)
-			if handler is None:
-				raise ValueError(f"unknown op {request['op']!r}")
-			response = {"id": request["id"], "result": handler(request.get("params") or {})}
-		except Exception:
-			# The traceback goes in the response too: the client's stderr tail may not have caught up with it yet.
-			detail = traceback.format_exc().rstrip()
-			print(detail, file=sys.stderr)
-			response = {"id": request["id"], "error": detail}
-		PROTOCOL_OUT.write(json.dumps(response) + "\n")
-		PROTOCOL_OUT.flush()
+	serve(PROTOCOL_OUT, lambda op: getattr(engine, f"op_{op}", None))
 
 
 if __name__ == "__main__":
