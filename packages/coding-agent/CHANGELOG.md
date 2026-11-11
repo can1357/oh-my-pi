@@ -16,7 +16,7 @@
 - The shell's built-in `jq` no longer slows down quadratically on repeated updates such as `reduce range(n) as $i ([]; . + [$i])`
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
-- Browser `tab.click`, `tab.dblclick`, `tab.check`, `tab.uncheck`, `tab.uploadFile` and `frame.click` on Chromium tabs now look their selector up again when the page replaces the element before the click goes out, including between the actionability probe and delivery watcher setup, instead of waiting out the action timeout on the replaced element; a click through an element handle or an `aria-ref` whose element was replaced fails at once ([#18676](https://github.com/can1357/oh-my-pi/pull/18676) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `tab.click`, `tab.dblclick`, `tab.check`, `tab.uncheck`, `tab.uploadFile` and `frame.click` on Chromium tabs now look their selector up again when the page replaces the element before the click goes out, including during and after delivery watcher setup, instead of waiting out the action timeout on the replaced element; a click through an element handle or an `aria-ref` whose element was replaced fails at once ([#18676](https://github.com/can1357/oh-my-pi/pull/18676) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

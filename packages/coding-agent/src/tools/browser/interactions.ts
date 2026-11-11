@@ -423,7 +423,9 @@ export async function clickElement(
 			const page = globalThis as unknown as { addEventListener: Listen; removeEventListener: Listen };
 			const pointerDowns: InputEvent[] = [];
 			const state = {
-				detached: !(el as unknown as PageElement).isConnected,
+				get detached() {
+					return !(el as unknown as PageElement).isConnected;
+				},
 				reached: false,
 				// Read after the click: the page's handlers have run by then.
 				delivered: () => state.reached || pointerDowns.some(event => event.defaultPrevented),
