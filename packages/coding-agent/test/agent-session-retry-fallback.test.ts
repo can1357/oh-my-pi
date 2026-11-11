@@ -45,7 +45,8 @@ import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-c
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
@@ -6848,6 +6849,50 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual(["fireworks/kimi-k3-fast", "fireworks/kimi-k3"]);
 		expect(session.model?.id).toBe(baseModel.id);
 		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("holds an `auto` turn's resolved level to the base model's ceiling on a Fireworks Fast degrade", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k3");
+		if (!fastModel || !baseModel) throw new Error("Expected the bundled Fireworks Fast and base models to exist");
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.High);
+
+		const requestedLevels: Array<[string, ConfiguredThinkingLevel | undefined]> = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedLevels.push([model.id, session?.thinkingLevel]);
+				mock.push(
+					model.id === fastModel.id
+						? { throw: "rate limit exceeded retry-after-ms=200" }
+						: { content: ["the base model did the work"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+		settings.setModelRole("default", `${fastModel.provider}/${fastModel.id}`);
+		const ceilings = { "fireworks/kimi-k3-fast": Effort.High, "fireworks/kimi-k3": Effort.Low };
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+
+		await session.prompt("Classified high, then degrade off Fast");
+		await session.waitForIdle();
+
+		// The retry does not reclassify, so the base request must already run under its own cap.
+		expect(requestedLevels).toEqual([
+			[fastModel.id, Effort.High],
+			[baseModel.id, Effort.Low],
+		]);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {

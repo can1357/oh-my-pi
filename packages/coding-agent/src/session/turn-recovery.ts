@@ -276,6 +276,8 @@ export interface TurnRecoveryHost {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 	/** Hard per-model effort ceiling for `model`; fallback recovery must never raise thinking above it. */
 	thinkingLevelCeiling(model: Model): Effort | undefined;
+	/** Re-clamps an `auto` session's current resolution to the active model's ceiling, keeping `auto`. */
+	clampAutoThinkingToCeiling(): void;
 	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
 	modelFallbackDisabled?(): boolean;
 	isDisposed(): boolean;
@@ -2566,9 +2568,9 @@ export class TurnRecovery {
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		const configuredThinkingLevel = this.#host.configuredThinkingLevel();
-		if (configuredThinkingLevel !== AUTO_THINKING) {
-			this.#host.setThinkingLevel(clampThinkingLevelToCeiling(baseModel, configuredThinkingLevel, ceiling));
-		}
+		// The retry does not reclassify `auto`: hold this turn's resolved level to the base model's ceiling.
+		if (configuredThinkingLevel === AUTO_THINKING) this.#host.clampAutoThinkingToCeiling();
+		else this.#host.setThinkingLevel(clampThinkingLevelToCeiling(baseModel, configuredThinkingLevel, ceiling));
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",

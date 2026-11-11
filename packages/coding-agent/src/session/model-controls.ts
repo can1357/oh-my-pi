@@ -744,6 +744,18 @@ export class ModelControls {
 		return true;
 	}
 
+	/**
+	 * After a model swap that keeps `auto` (no reclassification before the retry), holds the turn's
+	 * level to the active model's ceiling; `auto` stays selected for later turns.
+	 */
+	clampAutoThinkingToCeiling(): void {
+		if (!this.#autoThinking) return;
+		const level = toReasoningEffort(this.#thinkingLevel);
+		if (level === undefined) return;
+		const clamped = clampThinkingLevelToCeiling(this.#model, level, this.#ceiling);
+		if (clamped !== undefined && clamped !== level) this.#resolveAutoThinkingLevel(clamped);
+	}
+
 	/** Publish `effort` as the turn's auto resolution; the transcript records only a changed level. */
 	#resolveAutoThinkingLevel(effort: Effort): void {
 		const shouldPersistResolution = this.#thinkingLevel !== effort;
