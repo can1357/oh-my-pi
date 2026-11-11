@@ -129,7 +129,7 @@ export type AnyUiMetadata = UiBase & {
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
 	secret?: boolean;
 	ordered?: boolean;
-	editor?: "json";
+	editor?: "json" | "linkMap";
 };
 
 /** Structural schema entries supplied by the application host. */
@@ -152,6 +152,8 @@ export interface SettingsHost {
 	 * variable, that configures the setting still applies; otherwise the default does.
 	 */
 	unset(path: string): void;
+	/** True when a layer above the global config sets `path`, so a value saved here would not take effect. */
+	isReadOnly?(path: string): boolean;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
 }
@@ -205,6 +207,11 @@ export interface ProviderLimitsSettingDef extends BaseSettingDef {
 	type: "providerLimits";
 }
 
+/** `tui.linkMap`, edited entry by entry (`ui.editor: "linkMap"`). */
+export interface LinkMapSettingDef extends BaseSettingDef {
+	type: "linkMap";
+}
+
 /** Array-of-enum setting edited as a toggle list; `ordered` lists render positions and support reordering. */
 export interface MultiSelectSettingDef extends BaseSettingDef {
 	type: "multiselect";
@@ -218,6 +225,7 @@ export type SettingDef =
 	| SubmenuSettingDef
 	| TextInputSettingDef
 	| ProviderLimitsSettingDef
+	| LinkMapSettingDef
 	| MultiSelectSettingDef;
 
 function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
@@ -287,9 +295,9 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 	}
 
 	if (schemaType === "record") {
-		return path === "providers.maxInFlightRequests"
-			? { ...base, type: "providerLimits" }
-			: { ...base, type: "text", secret: false };
+		if (path === "providers.maxInFlightRequests") return { ...base, type: "providerLimits" };
+		if (ui.editor === "linkMap") return { ...base, type: "linkMap" };
+		return { ...base, type: "text", secret: false };
 	}
 
 	return null;

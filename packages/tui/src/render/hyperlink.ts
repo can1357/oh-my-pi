@@ -11,6 +11,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { span } from "../native/describe";
 import { setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
+import { LINK_SCHEME, mappedLinkUri } from "./link-map";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";
@@ -31,17 +32,20 @@ export interface FileLinkConfig {
 	host?: string;
 }
 
-interface FileUriOptions {
+interface FilePosition {
 	line?: number;
 	col?: number;
-	/** Native image open actions need a local file URL rather than a desktop handler. */
+	/** The path is a directory; a VS Code Remote target then opens it as a folder. */
+	directory?: boolean;
+}
+
+interface FileUriOptions extends FilePosition {
+	/** Native image open actions need a local file URL rather than a desktop handler or a `tui.linkMap` target. */
 	local?: boolean;
 }
 
 let fileLinkTarget: { scheme: string; host: string } | undefined;
 
-/** URI scheme syntax (RFC 3986 §3.1), matched after lowercasing. */
-const FILE_LINK_SCHEME = /^[a-z][a-z0-9+.-]*$/;
 /** A bare host name with an optional port: no userinfo, path, query, or whitespace that would reshape the URI. */
 const FILE_LINK_HOST = /^[A-Za-z0-9._-]+(?::\d{1,5})?$/;
 
@@ -60,7 +64,7 @@ export function applyFileLinkSetting(
 	fileLinkTarget = undefined;
 	if (!config.scheme) return;
 	const scheme = config.scheme.toLowerCase();
-	if (!FILE_LINK_SCHEME.test(scheme)) {
+	if (!LINK_SCHEME.test(scheme)) {
 		logger.warn("Invalid PI_LINK_SCHEME; using ordinary file links", { scheme: config.scheme });
 		return;
 	}
@@ -85,6 +89,10 @@ function buildLinkId(uri: string): string {
 /**
  * A file-link target for `filePath`, or `undefined` when Node cannot encode it.
  *
+ * Precedence: a `tui.linkMap` entry covering the path, then the `PI_LINK_SCHEME`
+ * handler, then a plain `file:` URL. `opts.local` skips both for actions that
+ * run on this machine. Explicit hrefs supplied by a renderer keep their own target.
+ *
  * Node rejects a malformed UNC target (a UNC path escaped twice by its author,
  * e.g. `\\\wsl.localhost\…`) with `ERR_INVALID_ARG_VALUE: Empty UNC servername`.
  * A stored session keeps whatever a tool call recorded, so a transcript must
@@ -92,18 +100,46 @@ function buildLinkId(uri: string): string {
  */
 export function tryFileUri(filePath: string, opts?: FileUriOptions): string | undefined {
 	try {
+		const mapped = opts?.local ? undefined : mappedLinkUri(filePath);
+		if (mapped !== undefined) return withPosition(mapped, opts);
 		const fileUrl = url.pathToFileURL(filePath);
 		if (!fileLinkTarget || opts?.local) return fileUrl.href;
 		// Preserve UNC servers so the handler can reconstruct the network path.
 		const targetPath = fileUrl.host ? `//${fileUrl.host}${fileUrl.pathname}` : fileUrl.pathname;
-		const position = new URLSearchParams();
-		if (opts?.line !== undefined) position.set("line", String(opts.line));
-		if (opts?.col !== undefined) position.set("col", String(opts.col));
-		const query = position.size ? `?${position}` : "";
-		return `${fileLinkTarget.scheme}://${fileLinkTarget.host}${targetPath}${query}`;
+		return `${fileLinkTarget.scheme}://${fileLinkTarget.host}${targetPath}${positionQuery(opts)}`;
 	} catch {
 		return undefined;
 	}
+}
+
+function positionQuery(opts?: FilePosition): string {
+	const position = new URLSearchParams();
+	if (opts?.line !== undefined) position.set("line", String(opts.line));
+	if (opts?.col !== undefined) position.set("col", String(opts.col));
+	return position.size ? `?${position}` : "";
+}
+
+/** `:line` or `:line:col` after a path, the position form VS Code's URL handler reads, or `""`. */
+function pathPosition(opts?: FilePosition): string {
+	if (opts?.line === undefined) return "";
+	return opts.col === undefined ? `:${opts.line}` : `:${opts.line}:${opts.col}`;
+}
+
+/**
+ * A `tui.linkMap` target with `opts`' position in the form its scheme takes: none for `file:` and `http(s):`,
+ * a `:line:col` suffix for `vscode:` and `vscode-insiders:`, and the `line`/`col` query of `PI_LINK_SCHEME`
+ * for any other scheme.
+ *
+ * VS Code opens a `vscode-remote` path as a folder unless it ends in `:<line>`, so a file link without a line
+ * gets `:1` there.
+ */
+function withPosition(target: string, opts?: FilePosition): string {
+	if (/^(?:file|https?):/i.test(target)) return target;
+	if (/^vscode(?:-insiders)?:/i.test(target)) {
+		const remoteFile = opts?.line === undefined && !opts?.directory && /^[a-z-]+:\/\/vscode-remote\//i.test(target);
+		return target + (remoteFile ? ":1" : pathPosition(opts));
+	}
+	return target + positionQuery(opts);
 }
 
 /**
@@ -123,27 +159,34 @@ export function tryFileUri(filePath: string, opts?: FileUriOptions): string | un
  * parse a `path:line:col` suffix resolve that on their own. A configured custom
  * handler takes precedence and receives optional `line`/`col` query parameters.
  *
+ * A `tui.linkMap` entry covering the path takes precedence over all of these
+ * (see {@link tryFileUri}); on the VS Code family its `file:///` target keeps the
+ * `vscode://file/<path>:<line>:<col>` form.
+ *
  * Returns `undefined` when `filePath` cannot be encoded — a malformed UNC
  * target on the `file:` branch, or a lone surrogate on the `vscode://` branch.
  */
 export function fileUriForTerminal(
 	filePath: string,
-	opts: { line?: number; col?: number } | undefined,
+	opts: FilePosition | undefined,
 	terminalId: TerminalId,
 ): string | undefined {
-	if (fileLinkTarget || terminalId !== "vscode") return tryFileUri(filePath, opts);
-	// vscode:// takes a filesystem path with forward slashes. Encode each
-	// segment independently so separators and a Windows drive colon stay
-	// structural while reserved bytes in file names cannot become URI syntax.
+	if (terminalId !== "vscode") return tryFileUri(filePath, opts);
 	try {
+		const mapped = mappedLinkUri(filePath);
+		if (mapped?.startsWith("file:///"))
+			return `vscode://file/${mapped.slice("file:///".length)}${pathPosition(opts)}`;
+		if (mapped !== undefined) return withPosition(mapped, opts);
+		if (fileLinkTarget) return tryFileUri(filePath, opts);
+		// vscode:// takes a filesystem path with forward slashes. Encode each
+		// segment independently so separators and a Windows drive colon stay
+		// structural while reserved bytes in file names cannot become URI syntax.
 		const asPath = filePath.replace(/\\/gu, "/");
 		const encodedPath = asPath
 			.split("/")
 			.map((segment, index) => (index === 0 && /^[a-z]:$/iu.test(segment) ? segment : encodeURIComponent(segment)))
 			.join("/");
-		const position =
-			opts?.line === undefined ? "" : opts.col === undefined ? `:${opts.line}` : `:${opts.line}:${opts.col}`;
-		return `vscode://file${encodedPath.startsWith("/") ? "" : "/"}${encodedPath}${position}`;
+		return `vscode://file${encodedPath.startsWith("/") ? "" : "/"}${encodedPath}${pathPosition(opts)}`;
 	} catch {
 		// `encodeURIComponent` throws URIError on a lone surrogate, which a
 		// model-authored path can carry; the row keeps its text and loses the link.
@@ -302,7 +345,7 @@ export function fileLinkSpan(filePath: string, displayText: string, s = "path"):
  * @param displayText - Text to render as the hyperlink anchor (may contain ANSI codes)
  * @param opts - Optional line/col position (custom handlers use query params; VS Code uses a path suffix)
  */
-export function fileHyperlink(filePath: string, displayText: string, opts?: { line?: number; col?: number }): string {
+export function fileHyperlink(filePath: string, displayText: string, opts?: FilePosition): string {
 	const uri = fileUriForTerminal(filePath, opts, TERMINAL.id);
 	return uri ? wrapHyperlink(uri, displayText) : displayText;
 }

@@ -7,6 +7,7 @@ export * from "./extension-links";
 export * from "./file-list";
 export * from "./hyperlink";
 export * from "./link-hints";
+export * from "./link-map";
 export * from "./output-block";
 export * from "./output-pane";
 export * from "./render-utils";

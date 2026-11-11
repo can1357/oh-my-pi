@@ -694,6 +694,22 @@ For example, start a remote session with `PI_LINK_SCHEME=ompfile PI_LINK_HOST=be
 
 The desktop protocol handler must route the host to the remote machine, percent-decode the pathname, and read the optional position parameters. Windows drive paths use `/C:/...`. UNC paths retain the file server in a double-slash pathname, for example `ompfile://beelink//nas/share/a.ts`. Malformed filesystem paths render without a link. File links the model writes in Markdown keep their own query or fragment (for example `#L10`), so handlers must ignore parameters they do not recognize. The handler itself is registered separately on the desktop.
 
+To send different parts of the remote filesystem to different places, set `tui.linkMap` in the global config. Each key is a path prefix (an absolute path, `~` or `~/...`; `<user>` in a key stands for the login name) and each value is a URI prefix in any scheme:
+
+```yaml
+tui:
+  linkMap:
+    /home/alice/src: vscode://vscode-remote/ssh-remote+devbox/home/alice/src
+    /mnt/projects: file:///Z:/
+    /srv/handbook: https://git.contoso.example/handbook/blob/main
+```
+
+A link to `/mnt/projects/q3/report.csv` then targets `file:///Z:/q3/report.csv`, and `/srv/handbook/a b.md` targets `https://git.contoso.example/handbook/blob/main/a%20b.md`. The rest of the path is appended one percent-encoded segment at a time, the longest matching prefix wins, and matching is case-sensitive by whole segment (`/mnt/projects` does not cover `/mnt/projects-old`). `~` covers both the home directory and its resolved realpath. A map entry takes precedence over `PI_LINK_SCHEME`, which still handles paths no entry covers; precedence is map entry, then `PI_LINK_SCHEME`, then the VS Code `vscode://file` form, then a plain `file:` URL. Native image open actions stay local.
+
+The position a link carries depends on the target's scheme. `file:` and `http(s):` targets carry none, except that a `file:///` target becomes `vscode://file/<path>:<line>:<col>` on the VS Code family. `vscode:` targets get a `:<line>:<col>` suffix, which VS Code Remote reads. VS Code opens a `vscode-remote` path as a folder unless it ends in a line number, so a file link with no line gets `:1` there, and the status line's directory link is left without one. Other schemes get the same `line` and `col` query parameters as `PI_LINK_SCHEME`. A Windows-style `file:` value such as `file:\\Z:\data` is read as `file:///Z:/data/`. A value with a query or fragment, a one-letter scheme (read as a drive) or a key that is not an absolute path or has a `.` or `..` segment is ignored with a warning in the log. Only the global config, `--config` files and runtime overrides can set the map: a project's `.omp` settings cannot redirect where file links point. The map is not applied when omp itself runs on Windows.
+
+The map applies to filesystem targets built through omp's file-link helpers, whether rendered as OSC 8 links or native spans. It does not rewrite every native `href` or every URL supplied by an extension. An explicit link target keeps its own destination.
+
 ### Browser launch/proxy controls
 
 | Variable                               | Behavior                                                                                 |

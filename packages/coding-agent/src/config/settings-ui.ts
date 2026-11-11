@@ -14,7 +14,7 @@ import {
 } from "../session/settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { cfgComposerPredictions, cfgTuiVimMode } from "../modes/settings";
+import { cfgComposerPredictions, cfgTuiLinkMap, cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
@@ -43,6 +43,9 @@ const CONDITIONS: Record<string, () => boolean> = {
 	contextFilesExtraNotProject: whenSettings(s => cfgContextFilesExtra.provenance(s) !== "project"),
 	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
+	// The panel edits the operator's map (see `get` below). Under a project's map an edit to a key the
+	// project also sets would not reach links until restart, so the row is hidden.
+	linkMapNotProject: whenSettings(s => cfgTuiLinkMap.provenance(s) !== "project"),
 };
 
 /** Description suffix telling the panel user that an environment variable is in play. */
@@ -83,9 +86,18 @@ export function createSettingsHost(): SettingsHost {
 	};
 	return {
 		entries,
-		get: path => lookup(path)?.layered(settings),
+		// `tui.linkMap` is the operator's alone: a record merges across layers, and the editor saves what it
+		// was shown, so the panel must never hold a project's entries.
+		get: path => lookup(path)?.layered(path === cfgTuiLinkMap.id ? settings.grantAuthority() : settings),
 		set: (path, value) => resolve(path).set(settings, value),
 		unset: path => resolve(path).unset(settings),
+		// A `--config` file or a runtime override outranks the global config the Link Map editor writes: a
+		// save would report success, leave links unchanged and copy that layer's entries into the global config.
+		isReadOnly: path => {
+			if (path !== cfgTuiLinkMap.id) return false;
+			const from = cfgTuiLinkMap.provenance(settings);
+			return from === "overlay" || from === "runtime";
+		},
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
 		validateProviderLimits: validateProviderMaxInFlightRequests,
 	};

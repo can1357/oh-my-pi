@@ -588,7 +588,7 @@ const pathSegment: StatusLineSegment = {
 		if (stripPrefix && ctx.worktree) {
 			const { projectName, worktreeName } = ctx.worktree;
 			const label = ctx.git.branch === worktreeName ? projectName : `${projectName}/${worktreeName}`;
-			const text = fileHyperlink(getProjectDir(), clampPathLength(label, opts.maxLength ?? 40));
+			const text = fileHyperlink(getProjectDir(), clampPathLength(label, opts.maxLength ?? 40), { directory: true });
 			const content = withIcon(theme.icon.worktree, text);
 			return { content: theme.fg("statusLinePath", content), visible: true };
 		}
@@ -605,7 +605,7 @@ const pathSegment: StatusLineSegment = {
 
 		const showScratchIcon = scratch && stripPrefix;
 		const icon = showScratchIcon ? theme.icon.scratchFolder : theme.icon.folder;
-		const text = `${fileHyperlink(projectDir, pwd)}${repoSuffix}`;
+		const text = `${fileHyperlink(projectDir, pwd, { directory: true })}${repoSuffix}`;
 		const content = withIcon(icon, text);
 		return { content: theme.fg("statusLinePath", content), visible: true };
 	},

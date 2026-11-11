@@ -20,6 +20,7 @@ import * as terminalCaps from "@oh-my-pi/pi-tui";
 import { SkillMessageComponent } from "../src/chat/skill-message";
 import { openableImageProps } from "../src/native/blobs";
 import { fileHref } from "../src/tools/native-view";
+import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
 
 // OSC 8 sequence markers
 const OSC = "\x1b]";
@@ -384,6 +385,79 @@ describe("fileHyperlink", () => {
 		const result = fileHyperlink(filePath, colored);
 		expect(result).toContain(colored);
 		expect(isHyperlinked(result)).toBe(true);
+	});
+});
+
+describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
+	afterEach(() => applyLinkMapSetting({}));
+
+	it("gives every file-link producer the mapped target, but keeps image open actions local", async () => {
+		await initTheme();
+		setHyperlinkMode("always");
+		applyLinkMapSetting({ "/mnt/projects": "file:///Z:/" });
+		const filePath = "/mnt/projects/q3/report.csv";
+		const mapped = "file:///Z:/q3/report.csv";
+		expect(extractLinkUri(fileHyperlink(filePath, "report.csv"))).toBe(mapped);
+		expect(fileLinkSpan(filePath, "report.csv")).toEqual({ t: "report.csv", s: "path", href: mapped });
+		expect(fileHref(filePath)).toBe(mapped);
+		const skill = new SkillMessageComponent({
+			role: "custom",
+			customType: "skill-prompt",
+			content: "Loaded instructions",
+			display: true,
+			attribution: "user",
+			timestamp: 1,
+			details: { name: "example", path: "/mnt/projects/skills/SKILL.md", lineCount: 1, prompt: "/skill:example" },
+		});
+		const described = skill.describe();
+		if (described.k !== "card") throw new Error("Skill link must be in the card header");
+		expect(described.p?.head).toContainEqual(expect.objectContaining({ href: "file:///Z:/skills/SKILL.md" }));
+		expect(openableImageProps("/mnt/projects/q3/chart.png")).toEqual({
+			href: url.pathToFileURL("/mnt/projects/q3/chart.png").href,
+			actions: { menu: ["open"] },
+		});
+	});
+
+	it("keeps the vscode://file form for a file target on the VS Code family", () => {
+		applyLinkMapSetting({ "/mnt/projects": "file:///Z:/" });
+		expect(fileUriForTerminal("/mnt/projects/a b.ts", { line: 3, col: 2 }, "vscode")).toBe(
+			"vscode://file/Z:/a%20b.ts:3:2",
+		);
+		expect(fileUriForTerminal("/mnt/projects/a b.ts", { line: 3, col: 2 }, "kitty")).toBe("file:///Z:/a%20b.ts");
+	});
+
+	it("puts the position where each target scheme reads it", () => {
+		applyLinkMapSetting({
+			"/srv/handbook": "https://git.contoso.example/handbook/blob/main",
+			"/home/alice/src": "vscode://vscode-remote/ssh-remote+devbox/home/alice/src",
+			"/work": "ompfile://devbox/work",
+		});
+		const at = { line: 42, col: 7 };
+		for (const terminalId of ["kitty", "vscode"] as const) {
+			expect(fileUriForTerminal("/srv/handbook/a.md", at, terminalId)).toBe(
+				"https://git.contoso.example/handbook/blob/main/a.md",
+			);
+			expect(fileUriForTerminal("/home/alice/src/a.ts", at, terminalId)).toBe(
+				"vscode://vscode-remote/ssh-remote+devbox/home/alice/src/a.ts:42:7",
+			);
+			expect(fileUriForTerminal("/work/a b.ts", at, terminalId)).toBe(
+				"ompfile://devbox/work/a%20b.ts?line=42&col=7",
+			);
+		}
+		expect(tryFileUri("/home/alice/src/a.ts", { line: 9 })).toBe(
+			"vscode://vscode-remote/ssh-remote+devbox/home/alice/src/a.ts:9",
+		);
+	});
+
+	it("takes precedence over PI_LINK_SCHEME, which still handles paths no entry covers", () => {
+		applyFileLinkSetting({ scheme: "ompfile", host: "devbox" });
+		applyLinkMapSetting({ "/mnt/projects": "file:///Z:/" });
+		for (const terminalId of ["kitty", "vscode"] as const) {
+			expect(fileUriForTerminal("/mnt/projects/x.ts", { line: 3 }, terminalId)).toBe(
+				terminalId === "vscode" ? "vscode://file/Z:/x.ts:3" : "file:///Z:/x.ts",
+			);
+			expect(fileUriForTerminal("/other/x.ts", { line: 3 }, terminalId)).toBe("ompfile://devbox/other/x.ts?line=3");
+		}
 	});
 });
 

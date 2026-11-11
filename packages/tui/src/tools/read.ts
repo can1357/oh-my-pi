@@ -392,6 +392,7 @@ function formatReadPathLink(
 		suffixResolution?: { from: string; to: string };
 		offset?: number;
 		fallbackLabel?: string;
+		directory?: boolean;
 	},
 ): string {
 	const split = splitReadRenderPath(rawPath);
@@ -411,7 +412,7 @@ function formatReadPathLink(
 			: undefined;
 	const target = options.resolvedPath ?? options.sourcePath ?? inputPath;
 	const line = firstReadSelectorLine(split.sel) ?? options.offset;
-	const linkOptions = line !== undefined ? { line } : undefined;
+	const linkOptions = line !== undefined ? { line } : options.directory ? { directory: true } : undefined;
 	const linkedPath = target ? fileHyperlink(target, plainDisplayPath, linkOptions) : plainDisplayPath;
 	return `${linkedPath}${selectorSuffix}`;
 }
@@ -463,7 +464,9 @@ function readNativeHead(
 		title: "Read",
 		target: sanitizeText(target) || "…",
 		targetKind: "path",
-		href: fileHref(linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details)),
+		href: fileHref(linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details), {
+			directory: details?.isDirectory,
+		}),
 		meta,
 		badges:
 			conflicts > 0 ? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }] : undefined,
@@ -686,6 +689,7 @@ export const readToolRenderer = {
 			sourcePath: details?.displayTarget ?? readSourceFsPath(details),
 			suffixResolution: suffix,
 			offset: args?.offset,
+			directory: details?.isDirectory,
 		});
 		const correction = suffix ? ` ${uiTheme.fg("dim", `(corrected from ${shortenPath(suffix.from)})`)}` : "";
 		let title = displayPath ? `Read ${displayPath}${correction}` : "Read";

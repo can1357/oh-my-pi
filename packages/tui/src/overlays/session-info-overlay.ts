@@ -10,6 +10,7 @@ import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { plainText, styledSpans } from "../native/spans";
+import { fileLinkSpan } from "../render/hyperlink";
 import type { ContextUsage } from "../status-line/types";
 const PANEL_CHROME_ROWS = 4;
 
@@ -228,9 +229,17 @@ export class SessionInfoOverlay implements Component {
 						identity.unshift(identityField("ID", [span(joined(entry.v), "mono")], "id", "Copy session ID"));
 					else if (entry.k === "File") {
 						const path = joined(entry.v);
+						const href = entry.v.find(part => part.href !== undefined)?.href;
 						identity.push(
-							path.includes("/")
-								? identityField("File", [span(path, "path")], "file", `Copy ${path}`)
+							// A Windows path has no `/`; its link still marks it as a file.
+							href !== undefined || path.includes("/")
+								? identityField(
+										"File",
+										// Without OSC 8 the report text carries no link; the native field still gets one.
+										[href ? span(path, "path", { href }) : fileLinkSpan(path, path)],
+										"file",
+										`Copy ${path}`,
+									)
 								: identityField("File", [span(path, "muted")], "file"),
 						);
 					} else rest.push(node("kv", { items: [{ k: entry.k, v: entry.v }], role: "omp.info.kv" }));

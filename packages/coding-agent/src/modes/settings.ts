@@ -1,4 +1,4 @@
-import { combine, effect, register, type Setting } from "../config/registry";
+import { combine, effect, effectsSettings, register, type Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -17,6 +17,7 @@ import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-ga
 import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
@@ -25,6 +26,7 @@ import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
 import { parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
+const EMPTY_STRING_RECORD: Record<string, string> = {};
 
 // ────────────────────────────────────────────────────────────────────────
 // General settings (no UI)
@@ -641,6 +643,27 @@ export const cfgTuiHyperlinks = register({
 // Also re-applied when a project-scoped reload (`/move`, cross-project resume, rollback) changes the
 // effective value, so pi-tui renderers gating on the shared flag track it the same instant path links do.
 effect(cfgTuiHyperlinks, applyHyperlinkSetting);
+
+export const cfgTuiLinkMap = register({
+	id: "tui.linkMap",
+	type: "record",
+	default: EMPTY_STRING_RECORD,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Link Map",
+		editor: "linkMap",
+		condition: "linkMapNotProject",
+		description:
+			"Where file links point, by path prefix: maps an absolute path, ~ or ~/... to a URI prefix in any scheme, such as file:///Z:/ for a mapped drive, https://git.contoso.example/repo/blob/main for a web view or vscode://vscode-remote/ssh-remote+host/path for VS Code Remote. The rest of the path is appended and the longest prefix wins. Read from the operator's config; project settings cannot set it",
+	},
+});
+// The effect's own argument is the merged value, which includes a project's entries. A repository must
+// not be able to point clicks on local file links at a remote URL, so only the operator's layers apply.
+effect(cfgTuiLinkMap, () => {
+	const operator = effectsSettings()?.grantAuthority();
+	applyLinkMapSetting(operator && cfgTuiLinkMap.get(operator));
+});
 
 export const cfgTuiMouse = register({
 	id: "tui.mouse",
