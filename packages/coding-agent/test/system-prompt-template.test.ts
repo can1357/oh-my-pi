@@ -15,6 +15,7 @@ import liveDataTemplate from "./fixtures/system-prompt-template/live-data.md" wi
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgSystemPromptTemplates } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { compileModelPatterns } from "@oh-my-pi/pi-coding-agent/utils/model-patterns";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreEnvValue, restoreSettingsTestState } from "./helpers/settings-test-state";
 
@@ -360,205 +361,72 @@ describe("system prompt Handlebars templates", () => {
 });
 
 describe("per-model system prompt template", () => {
-	// Every per-model template must reference the required fields. This guard's condition is never
-	// set, so it renders nothing and the fixtures' output stays exactly their literal text.
-	const requiredFieldsGuard =
-		"{{#if requiredFieldsGuard}}{{subagent}}{{toolInventory}}{{xdevDocs}}{{skills}}{{rules}}{{alwaysApplyRules}}{{internalUrls}}{{/if}}";
+	const compile = (templates: Record<string, string>) => compileModelPatterns(templates, (file: string) => file);
 
-	async function writeModelTemplates(cwd: string): Promise<Record<string, string>> {
-		const routerPath = path.join(cwd, "templates", "router.md");
-		const qwenPath = path.join(cwd, "templates", "qwen.md");
-		await Bun.write(routerPath, `ROUTER TEMPLATE {{model}}${requiredFieldsGuard}`);
-		await Bun.write(qwenPath, `QWEN TEMPLATE {{model}}${requiredFieldsGuard}`);
-		// The shorter key comes first so a match on the longer key cannot be an insertion-order accident.
-		return { qwen: qwenPath, "openrouter/qwen": routerPath };
-	}
-
-	const selectionCases: Array<{ name: string; model: string; expected: string | undefined }> = [
-		{
-			name: "the longest matching key regardless of insertion order",
-			model: "openrouter/qwen/qwen3",
-			expected: "ROUTER TEMPLATE openrouter/qwen/qwen3",
-		},
-		{
-			name: "a key regardless of letter case",
-			model: "Together/QWEN3-Coder",
-			expected: "QWEN TEMPLATE Together/QWEN3-Coder",
-		},
-		{ name: "the bundled prompt when no key matches", model: "anthropic/claude-test", expected: undefined },
-	];
-	for (const { name, model, expected } of selectionCases) {
-		it(`selects ${name}`, async () => {
-			await withDiscoveryHome(async ({ cwd }) => {
-				const templates = await writeModelTemplates(cwd);
-				const result = await buildSystemPrompt(options(cwd, { model, modelSystemPromptTemplates: templates }));
-				const text = result.systemPrompt.join("\n\n");
-				if (expected === undefined) {
-					expect(text).not.toContain("ROUTER TEMPLATE");
-					expect(text).not.toContain("QWEN TEMPLATE");
-				} else {
-					expect(result.systemPrompt[0]).toBe(expected);
-				}
-			});
+	it("selects the longest matching key regardless of config order", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			const routerPath = path.join(cwd, "templates", "router.md");
+			const qwenPath = path.join(cwd, "templates", "qwen.md");
+			await Bun.write(routerPath, "ROUTER TEMPLATE {{model}}");
+			await Bun.write(qwenPath, "QWEN TEMPLATE {{model}}");
+			// The shorter key comes first, so first-match would pick the wrong file.
+			const templates = compile({ qwen: qwenPath, "openrouter/qwen": routerPath });
+			const result = await buildSystemPrompt(
+				options(cwd, { model: "openrouter/qwen/qwen3", modelSystemPromptTemplates: templates }),
+			);
+			expect(result.systemPrompt[0]).toBe("ROUTER TEMPLATE openrouter/qwen/qwen3");
 		});
-	}
-
-	// An empty template rejects when read, so a successful build proves the file was never loaded.
-	async function writeUnreadableTemplates(cwd: string): Promise<Record<string, string>> {
-		const emptyPath = path.join(cwd, "templates", "empty.md");
-		await Bun.write(emptyPath, " \n");
-		return { claude: emptyPath };
-	}
+	});
 
 	it("does not read the model template when a discovered project SYSTEM_TEMPLATE.md applies", async () => {
 		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
 			await Bun.write(path.join(projectConfig, "SYSTEM_TEMPLATE.md"), "PROJECT TEMPLATE");
+			// A directory path fails to read with EISDIR, which is not swallowed: success proves no read.
 			const result = await buildSystemPrompt(
-				options(cwd, {
-					model: "anthropic/claude-test",
-					modelSystemPromptTemplates: await writeUnreadableTemplates(cwd),
-				}),
+				options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: compile({ claude: cwd }) }),
 			);
 			expect(result.systemPrompt.join("\n\n")).toContain("PROJECT TEMPLATE");
 		});
 	});
 
-	it("does not read the model template when an explicit customPrompt applies", async () => {
-		await withDiscoveryHome(async ({ cwd }) => {
-			const result = await buildSystemPrompt(
-				options(cwd, {
-					model: "anthropic/claude-test",
-					customPrompt: "EXPLICIT CUSTOM",
-					modelSystemPromptTemplates: await writeUnreadableTemplates(cwd),
-				}),
-			);
-			expect(result.systemPrompt.join("\n\n")).toContain("EXPLICIT CUSTOM");
-		});
-	});
-
-	it("warns and renders the bundled prompt when the selected template file is missing", async () => {
-		await withDiscoveryHome(async ({ cwd }) => {
-			// The shorter key's template exists: a missing selection must not fall through to it.
-			const claudePath = path.join(cwd, "templates", "claude.md");
-			await Bun.write(claudePath, "CLAUDE TEMPLATE");
-			const missingPath = path.join(cwd, "templates", "missing.md");
-			const warn = spyOn(logger, "warn").mockImplementation(() => {});
-			try {
-				const result = await buildSystemPrompt(
-					options(cwd, {
-						model: "anthropic/claude-test",
-						modelSystemPromptTemplates: { claude: claudePath, "anthropic/claude": missingPath },
-					}),
-				);
-				const text = result.systemPrompt.join("\n\n");
-				expect(text).toContain("RFC 2119 keywords");
-				expect(text).not.toContain("CLAUDE TEMPLATE");
-				const warnings = warn.mock.calls.filter(
-					([message]) => message === "systemPromptTemplates template not found; using the bundled prompt",
-				);
-				expect(warnings).toHaveLength(1);
-				expect(warnings[0][1]).toMatchObject({ path: missingPath });
-			} finally {
-				warn.mockRestore();
-			}
-		});
-	});
-
-	const errorCases: Array<{ name: string; content: string; error: string }> = [
-		{ name: "an empty file", content: " \n", error: "System prompt template must not be empty" },
-		{ name: "malformed Handlebars", content: "{{#if eagerTasks}}", error: "Invalid system prompt template" },
+	const fallbackCases: Array<{ name: string; content: string | undefined; warning: string }> = [
+		{
+			name: "missing",
+			content: undefined,
+			warning: "systemPromptTemplates template not found; using the bundled prompt",
+		},
+		{
+			name: "empty",
+			content: " \n",
+			warning: "Ignoring empty systemPromptTemplates template; using the bundled prompt",
+		},
+		{
+			name: "malformed",
+			content: "{{#if eagerTasks}}",
+			warning: "Ignoring invalid system prompt template file; using the bundled prompt",
+		},
 	];
-	for (const { name, content, error } of errorCases) {
-		it(`rejects ${name} instead of falling back to the bundled prompt`, async () => {
+	for (const { name, content, warning } of fallbackCases) {
+		it(`warns and renders the bundled prompt when the selected template is ${name}`, async () => {
 			await withDiscoveryHome(async ({ cwd }) => {
 				const templatePath = path.join(cwd, "templates", "claude.md");
-				await Bun.write(templatePath, content);
-				const build = buildSystemPrompt(
-					options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: { claude: templatePath } }),
-				);
-				await expect(build).rejects.toThrow(error);
+				if (content !== undefined) await Bun.write(templatePath, content);
+				const warn = spyOn(logger, "warn").mockImplementation(() => {});
+				try {
+					const result = await buildSystemPrompt(
+						options(cwd, {
+							model: "anthropic/claude-test",
+							modelSystemPromptTemplates: compile({ claude: templatePath }),
+						}),
+					);
+					expect(result.systemPrompt.join("\n\n")).toContain("RFC 2119 keywords");
+					expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
+				} finally {
+					warn.mockRestore();
+				}
 			});
 		});
 	}
-
-	// Pinned here, not imported: dropping a field from the implementation's list must redden these tests.
-	const requiredFields = [
-		"subagent",
-		"toolInventory",
-		"xdevDocs",
-		"skills",
-		"rules",
-		"alwaysApplyRules",
-		"internalUrls",
-	];
-
-	const missingFieldCases: Array<{ name: string; content: string; missing: string[] }> = [
-		{
-			name: "only cosmetic fields",
-			content: "BARE TEMPLATE {{model}}{{#if renderSvg}}svg{{/if}}",
-			missing: requiredFields,
-		},
-		{
-			name: "some required fields, with the rest only in comments",
-			content: [
-				"PARTIAL TEMPLATE",
-				"{{!-- {{subagent}} --}}{{! xdevDocs }}",
-				"{{toolInventory}}{{internalUrls}}",
-				"{{#each skills}}{{name}}{{/each}}{{#if rules.length}}r{{/if}}{{#each alwaysApplyRules}}{{content}}{{/each}}",
-			].join("\n"),
-			missing: ["subagent", "xdevDocs"],
-		},
-	];
-	for (const { name, content, missing } of missingFieldCases) {
-		it(`rejects a model template referencing ${name}, naming exactly the missing fields`, async () => {
-			await withDiscoveryHome(async ({ cwd }) => {
-				const templatePath = path.join(cwd, "templates", "claude.md");
-				await Bun.write(templatePath, content);
-				const build = buildSystemPrompt(
-					options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: { claude: templatePath } }),
-				);
-				const error = await build.then(
-					() => undefined,
-					(reason: unknown) => reason,
-				);
-				expect(error).toBeInstanceOf(Error);
-				const message = (error as Error).message;
-				expect(message).toContain(templatePath);
-				const listed = [...message.matchAll(/\{\{(\w+)\}\}/g)].map(match => match[1]);
-				expect(listed.toSorted()).toEqual(missing.toSorted());
-			});
-		});
-	}
-
-	it("renders a model template that references every required field, even only inside false branches", async () => {
-		await withDiscoveryHome(async ({ cwd }) => {
-			const templatePath = path.join(cwd, "templates", "claude.md");
-			await Bun.write(
-				templatePath,
-				[
-					"COMPLETE TEMPLATE",
-					"{{#if subagent}}{{xdevDocs}}{{/if}}",
-					"{{#if neverSet}}{{toolInventory}}{{internalUrls}}{{else}}INVERSE BRANCH{{/if}}",
-					"{{#each skills}}{{name}}{{/each}}{{#if rules.length}}r{{/if}}{{#each alwaysApplyRules}}{{content}}{{/each}}",
-				].join("\n"),
-			);
-			const result = await buildSystemPrompt(
-				options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: { claude: templatePath } }),
-			);
-			const text = result.systemPrompt.join("\n\n");
-			expect(text).toContain("COMPLETE TEMPLATE");
-			expect(text).toContain("INVERSE BRANCH");
-			expect(text).not.toContain("RFC 2119 keywords");
-		});
-	});
-
-	it("does not require the fields in an explicit systemPromptTemplate", async () => {
-		await withDiscoveryHome(async ({ cwd }) => {
-			const { text } = await render(cwd, "EXPLICIT TEMPLATE {{model}}", { model: "anthropic/claude-test" });
-			expect(text).toContain("EXPLICIT TEMPLATE");
-			expect(text).not.toContain("RFC 2119 keywords");
-		});
-	});
 });
 
 describe("systemPromptTemplates config validation", () => {

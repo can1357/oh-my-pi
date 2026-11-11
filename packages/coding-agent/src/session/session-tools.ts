@@ -70,7 +70,8 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { type BuildSystemPromptResult, matchModelSystemPromptTemplate, toolReadsSkillUris } from "../system-prompt";
+import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
+import { matchModelPattern } from "../utils/model-patterns";
 
 import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
@@ -83,7 +84,7 @@ import {
 	cfgIncludeModelInPrompt,
 	cfgInlineToolDescriptors,
 	cfgSkillful,
-	cfgSystemPromptTemplates,
+	systemPromptTemplatePatterns,
 } from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import {
@@ -1155,10 +1156,7 @@ export class SessionTools {
 	#currentPromptTemplate(): string | undefined {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
-		return matchModelSystemPromptTemplate(
-			cfgSystemPromptTemplates.get(this.#host.settings),
-			formatModelString(activeModel),
-		);
+		return matchModelPattern(systemPromptTemplatePatterns.get(this.#host.settings), formatModelString(activeModel));
 	}
 
 	#currentPromptModelKey(): string | undefined {

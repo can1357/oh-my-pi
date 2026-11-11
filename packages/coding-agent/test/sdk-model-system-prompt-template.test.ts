@@ -17,13 +17,6 @@ function bundledOpenAi(id: string): Model {
 	return model;
 }
 
-/**
- * Every per-model template must reference the required fields. This guard's condition is never set,
- * so it renders nothing and keeps the fixtures' prompts byte-identical to their literal text.
- */
-const requiredFieldsGuard =
-	"{{#if requiredFieldsGuard}}{{subagent}}{{toolInventory}}{{xdevDocs}}{{skills}}{{rules}}{{alwaysApplyRules}}{{internalUrls}}{{/if}}";
-
 /** `prepare` writes the template files and returns the settings overrides the session starts with. */
 async function withTemplateSession<T>(
 	prepare: (tempDir: TempDir) => Promise<Record<string, unknown>>,
@@ -90,7 +83,7 @@ describe("SDK per-model system prompt templates", () => {
 		await withTemplateSession(
 			async tempDir => {
 				const templatePath = tempDir.join("mini.md");
-				await Bun.write(templatePath, `MINI TEMPLATE${requiredFieldsGuard}`);
+				await Bun.write(templatePath, "MINI TEMPLATE");
 				return { includeModelInPrompt: false, systemPromptTemplates: { "gpt-4o-mini": templatePath } };
 			},
 			async session => {
@@ -112,7 +105,7 @@ describe("SDK per-model system prompt templates", () => {
 				expect(session.agent.state.systemPrompt[0]).not.toContain("EDITED TEMPLATE");
 
 				const templatePath = tempDir.join("edited.md");
-				await Bun.write(templatePath, `EDITED TEMPLATE${requiredFieldsGuard}`);
+				await Bun.write(templatePath, "EDITED TEMPLATE");
 				const refresh = session.refreshBaseSystemPrompt.bind(session);
 				const rebuilds: Promise<void>[] = [];
 				const refreshSpy = spyOn(session, "refreshBaseSystemPrompt").mockImplementation(commitIf => {

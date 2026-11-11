@@ -199,35 +199,21 @@ systemPromptTemplates:
 
 #### Start from the bundled template
 
-Base every per-model template on the bundled default instruction template. Reference copy: [`system-prompt.md` on GitHub](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md) (in a checkout: [`packages/coding-agent/src/prompts/system/system-prompt.md`](../packages/coding-agent/src/prompts/system/system-prompt.md)); use the file from the tag matching your installed version. Copy that file, then adapt its prose for the target model. It already references every required field below and carries the tool policy, delegation, and workflow guidance a template written from scratch would lose. The [Handlebars template example](#supply-a-handlebars-template) above is not a valid starting point: it lacks required fields. Follow [Migrate the bundled prompt](#migrate-the-bundled-prompt), and diff your copy against the shipped file after each OMP update.
+Base every per-model template on the bundled default instruction template. Reference copy: [`system-prompt.md` on GitHub](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md) (in a checkout: [`packages/coding-agent/src/prompts/system/system-prompt.md`](../packages/coding-agent/src/prompts/system/system-prompt.md)); use the file from the tag matching your installed version. Copy that file, then adapt its prose for the target model. It carries the tool policy, delegation, and workflow guidance a template written from scratch would lose, plus the sections only the template inserts (`{{toolInventory}}`, `{{skills}}`, `{{rules}}`, `{{alwaysApplyRules}}`, `{{internalUrls}}`, `{{xdevDocs}}`, `{{#if subagent}}`); a template that omits one renders without that section. Follow [Migrate the bundled prompt](#migrate-the-bundled-prompt), and diff your copy against the shipped file after each OMP update.
 
 #### Matching
 
 - Keys match the active `provider/model-id` as case-insensitive substrings.
-- When several keys match, the longest wins regardless of config order: above, `openrouter/qwen/qwen3-coder` uses `qwen-openrouter.md` and every other qwen model uses `qwen.md`.
+- When several keys match, the longest wins regardless of config order (the same rule as `edit.modelVariants`): above, `openrouter/qwen/qwen3-coder` uses `qwen-openrouter.md` and every other qwen model uses `qwen.md`.
 - Blank keys are rejected. Use `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, or `APPEND_SYSTEM.md` for a prompt that applies to every model.
 - Paths must be absolute or start with `~/`. Relative paths are rejected because they would resolve to a different file in each project and subagent worktree.
-
-#### Required fields
-
-Templates receive the same Handlebars fields as `SYSTEM_TEMPLATE.md`. Each field below produces a prompt section only through the template, so a template **MUST** reference all of them:
-
-- `{{subagent}}`
-- `{{toolInventory}}`
-- `{{xdevDocs}}`
-- `{{skills}}`
-- `{{rules}}`
-- `{{alwaysApplyRules}}`
-- `{{internalUrls}}`
-
-A reference counts anywhere in the template, including a branch that never renders; a Handlebars comment does not count. A template missing any of them is rejected with an error naming the file, the missing fields, and the reference template URL.
 
 #### Runtime behavior
 
 - Templates also apply to subagent sessions; keep the `{{#if subagent}}` branches from the bundled template.
 - The prompt re-renders when the selected template changes: on `/model` and role switches, retry-fallback hops, and mid-session edits to `systemPromptTemplates`.
 - Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence; the per-model file is not read while one of them applies.
-- A missing file logs a warning and falls back to the bundled prompt. An empty or invalid file is an error.
+- The file is read like a discovered `SYSTEM_TEMPLATE.md`: a missing, empty, or malformed file logs a warning and falls back to the bundled prompt.
 
 ### Replace the personality block
 

@@ -22,6 +22,7 @@ import {
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
+import { compileModelPatterns } from "../utils/model-patterns";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
@@ -467,6 +468,11 @@ export const cfgSystemPromptTemplates = register({
 	validate: validateSystemPromptTemplates,
 	normalize: validateSystemPromptTemplates,
 });
+
+/** {@link cfgSystemPromptTemplates} compiled for `matchModelPattern`. */
+export const systemPromptTemplatePatterns = cfgSystemPromptTemplates.map(templates =>
+	compileModelPatterns(templates, (templatePath: string) => templatePath),
+);
 
 export const cfgIncludeWorkspaceTree = register({
 	id: "includeWorkspaceTree",

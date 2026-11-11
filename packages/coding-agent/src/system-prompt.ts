@@ -45,6 +45,7 @@ import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { expandTilde } from "./tools/path-utils";
+import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
@@ -298,64 +299,6 @@ export async function loadSystemPromptTemplateFile(filePath: string): Promise<st
 	return text;
 }
 
-/**
- * The `systemPromptTemplates` path configured for `model`: the longest key occurring in the model
- * string (case-insensitive), so `provider/model` beats `model` regardless of config order. Equal
- * lengths keep key order. Unloaded, so it also serves as a cheap selection key.
- */
-export function matchModelSystemPromptTemplate(
-	templates: Readonly<Record<string, string>> | undefined,
-	model: string | undefined,
-): string | undefined {
-	if (!templates || !model) return undefined;
-	const modelLower = model.toLowerCase();
-	let best: string | undefined;
-	for (const pattern in templates) {
-		if ((best === undefined || pattern.length > best.length) && modelLower.includes(pattern.toLowerCase())) {
-			best = pattern;
-		}
-	}
-	return best === undefined ? undefined : templates[best];
-}
-
-/** Bundled default template that per-model templates should be copied from. */
-const REFERENCE_SYSTEM_PROMPT_URL =
-	"https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md";
-
-/**
- * Data fields a `systemPromptTemplates` file must reference: omitting one silently strips that
- * section from the prompt, so a template that drops any of them is rejected instead.
- */
-export const REQUIRED_MODEL_TEMPLATE_FIELDS = [
-	"subagent",
-	"toolInventory",
-	"xdevDocs",
-	"skills",
-	"rules",
-	"alwaysApplyRules",
-	"internalUrls",
-] as const;
-
-/** Single wording for a template that fails to parse, shared by the field check and the render. */
-function invalidTemplateError(error: unknown): Error {
-	return new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
-}
-
-function assertModelTemplateFields(template: string, templatePath: string): void {
-	let referenced: Set<string>;
-	try {
-		referenced = prompt.referencedRoots(template);
-	} catch (error) {
-		throw invalidTemplateError(error);
-	}
-	const missing = REQUIRED_MODEL_TEMPLATE_FIELDS.filter(field => !referenced.has(field));
-	if (missing.length > 0) {
-		throw new Error(
-			`systemPromptTemplates template ${templatePath} is missing required fields: ${missing.map(field => `{{${field}}}`).join(", ")}. Start from the reference template: ${REFERENCE_SYSTEM_PROMPT_URL}`,
-		);
-	}
-}
-
 /** Resolve input as file path or literal string */
 export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
 	if (!input) {
@@ -575,11 +518,11 @@ export interface BuildSystemPromptOptions {
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
 	/**
-	 * `systemPromptTemplates` setting, matched against `model`. The selected file replaces only the
-	 * bundled default and is read only then: explicit and discovered (`SYSTEM.md`/`SYSTEM_TEMPLATE.md`)
-	 * prompts win. Paths are absolute or `~`-relative; a missing file warns and keeps the bundled prompt.
+	 * Compiled `systemPromptTemplates` setting, matched against `model`. The selected file replaces
+	 * only the bundled default and is read only then: explicit and discovered (`SYSTEM.md`/
+	 * `SYSTEM_TEMPLATE.md`) prompts win. A missing, empty, or invalid file warns and keeps the bundled prompt.
 	 */
-	modelSystemPromptTemplates?: Readonly<Record<string, string>>;
+	modelSystemPromptTemplates?: readonly ModelPatternEntry<string>[];
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -840,23 +783,28 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			throw new Error("System prompt template must not be empty");
 		}
 	}
+	// A `systemPromptTemplates` file is discovered input like SYSTEM_TEMPLATE.md: it applies only when
+	// nothing above did, and a missing, empty, or invalid file falls back to the bundled prompt.
 	const modelTemplatePath =
 		resolvedSystemPromptTemplate === undefined && resolvedCustomPromptInput === undefined && !hasExplicitCustomPrompt
-			? matchModelSystemPromptTemplate(options.modelSystemPromptTemplates, model)
+			? matchModelPattern(options.modelSystemPromptTemplates ?? [], model)
 			: undefined;
 	if (modelTemplatePath !== undefined) {
 		const templateFile = expandTilde(modelTemplatePath);
 		try {
-			resolvedSystemPromptTemplate = await loadSystemPromptTemplateFile(templateFile);
+			const content = await Bun.file(templateFile).text();
+			if (content.trim()) resolvedSystemPromptTemplate = content;
+			else
+				logger.warn("Ignoring empty systemPromptTemplates template; using the bundled prompt", {
+					model,
+					path: templateFile,
+				});
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			logger.warn("systemPromptTemplates template not found; using the bundled prompt", {
 				model,
 				path: templateFile,
 			});
-		}
-		if (resolvedSystemPromptTemplate !== undefined) {
-			assertModelTemplateFields(resolvedSystemPromptTemplate, modelTemplatePath);
 		}
 	}
 
@@ -1194,10 +1142,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rendered = prompt.renderTracked(selectedTemplate, data, sourceItems);
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
-		if (!hasDiscoveredTemplate) {
-			throw invalidTemplateError(error);
+		if (options.systemPromptTemplate !== undefined) {
+			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
 		}
-		logger.warn("Ignoring invalid discovered system prompt template; using the bundled prompt", {
+		logger.warn("Ignoring invalid system prompt template file; using the bundled prompt", {
 			error: String(error),
 		});
 		resolvedSystemPromptTemplate = undefined;
