@@ -26,6 +26,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("main-world Puppeteer navigation waits", ()
 					.waitForFunction(
 						() => {
 							//!world=main
+							const { document } = globalThis as unknown as {
+								document: { body: { dataset: { ready?: string } } | null };
+							};
 							return document.body?.dataset.ready;
 						},
 						{ polling, timeout: 3_000 },
@@ -45,6 +48,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("main-world Puppeteer navigation waits", ()
 			}
 			const stale = await page.evaluateHandle(() => {
 				//!world=main
+				const { document } = globalThis as unknown as {
+					document: { body: { isConnected: boolean } };
+				};
 				return document.body;
 			});
 			try {
@@ -67,7 +73,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("main-world Puppeteer navigation waits", ()
 			}
 		} finally {
 			await closeLaunchedBrowser(browser);
-			await removeUserDataDir(userDataDir);
+			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	});
 });
