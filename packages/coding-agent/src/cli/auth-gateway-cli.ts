@@ -55,7 +55,7 @@ import {
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
-import { GATEWAY_MODEL_KINDS, runAuthGatewayStdio } from "./auth-gateway-stdio";
+import { gatewayServableModels, runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
 export type AuthGatewayAction = "serve" | "stdio" | "token" | "status" | "check";
@@ -208,11 +208,9 @@ export function createAuthGatewayClientsReloader(
 	};
 }
 
-/** Every registry model of a kind the gateway can route, bundled catalog order within each kind. */
+/** Every registry model a gateway route can serve, bundled catalog order within each kind. */
 export function gatewayRoutableModels(registry: ModelRegistry): Model<Api>[] {
-	const models: Model<Api>[] = [];
-	for (const kind of GATEWAY_MODEL_KINDS) models.push(...registry.getAll(kind));
-	return models;
+	return gatewayServableModels(kind => registry.getAll(kind));
 }
 
 /**
