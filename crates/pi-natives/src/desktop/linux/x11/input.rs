@@ -491,7 +491,11 @@ impl X11Input {
 		hand_back: impl FnOnce(&Self),
 	) -> CoreResult<T> {
 		hand_back(self);
-		let intervened = self.check_user();
+		let intervened = self
+			.activity
+			.as_ref()
+			.map_or(Ok(()), UserActivity::sync)
+			.and_then(|()| self.check_user());
 		self.takeover_presses = None;
 		result.and_then(|value| intervened.map(|()| value))
 	}
@@ -1572,11 +1576,6 @@ mod tests {
 						.expect("user resumes after body");
 				}
 				user.sync().expect("user press reached the server");
-				input
-					.activity
-					.as_ref()
-					.expect("watching")
-					.wait_for_presses(2);
 			})
 			.expect_err("hand-back intervention cannot report success");
 		assert_eq!(error.code, ErrorCode::UserIntervened);

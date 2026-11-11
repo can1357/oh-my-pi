@@ -8,7 +8,7 @@
 //! those of tools that type for a remote or scripted user (x11vnc, xdotool):
 //! a press there beyond the ones this session sent is someone else's.
 use std::{
-	collections::{HashMap, HashSet},
+	collections::HashMap,
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
@@ -28,8 +28,6 @@ use crate::desktop::{
 /// How long the user leaves the keyboard and pointer alone before a takeover
 /// starts; macOS waits as long for the user to pause in the target app.
 const QUIET: Duration = Duration::from_secs(5);
-/// Time left before the run's deadline for the refusal to reach the caller.
-const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
 const READ_AGAIN: &str =
 	"read the window again (win.ax(), win.observe() or win.screenshot()) before acting on it";
 
@@ -134,6 +132,13 @@ impl UserActivity {
 		check_presses(baseline, self.presses.count.load(Ordering::Acquire))
 	}
 
+	pub(super) fn sync(&self) -> CoreResult<()> {
+		if let Some(listener) = &self.listener {
+			listener.sync()?;
+		}
+		Ok(())
+	}
+
 	fn healthy(&self) -> CoreResult<()> {
 		if let Some(listener) = &self.listener {
 			listener.check()?;
@@ -164,7 +169,7 @@ impl UserActivity {
 
 fn admission_limit(now: Instant, deadline: Option<Instant>) -> Instant {
 	deadline
-		.map_or(now + QUIET, |deadline| deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline))
+		.map_or(now + QUIET, |deadline| deadline.checked_sub(control::DEADLINE_MARGIN).unwrap_or(deadline))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -203,7 +208,6 @@ struct Sources {
 	devices: HashMap<u16, Source>,
 	/// Presses from the core XTEST devices taken as this session's own.
 	own:     u64,
-	held:    HashSet<(u16, u32)>,
 }
 
 impl Sources {
@@ -218,13 +222,9 @@ impl Sources {
 		let source = match event {
 			Event::XinputRawKeyPress(event) => event.sourceid,
 			Event::XinputRawButtonPress(event) => event.sourceid,
-			Event::XinputRawKeyRelease(event) => {
-				self.held.remove(&(event.sourceid, event.detail));
-				return Ok(false);
-			},
+			Event::XinputRawKeyRelease(_) => return Ok(false),
 			Event::XinputHierarchy(_) => {
 				self.devices.clear();
-				self.held.clear();
 				return Ok(false);
 			},
 			_ => return Ok(false),
@@ -232,31 +232,20 @@ impl Sources {
 		if let std::collections::hash_map::Entry::Vacant(entry) = self.devices.entry(source) {
 			entry.insert(read(source)?);
 		}
-		let key = match event {
-			Event::XinputRawKeyPress(event) => Some((source, event.detail)),
-			_ => None,
-		};
 		let repeat = matches!(event, Event::XinputRawKeyPress(event)
 			if event.flags.contains(KeyEventFlags::KEY_REPEAT));
 		Ok(match self.devices[&source] {
 			Source::User => true,
 			Source::Other => false,
-			Source::Xtest if repeat => !key.is_some_and(|key| self.held.contains(&key)),
 			// This session counts a press before sending it, so a press there
 			// while some of its own are unseen is one of them.
 			Source::Xtest if self.own < sent => {
-				if let Some(key) = key {
-					self.held.insert(key);
-				}
 				self.own += 1;
-				false
+				// A duplicate remote press and our key's repeat are
+				// indistinguishable, even with an outstanding own press.
+				repeat
 			},
-			Source::Xtest => {
-				if let Some(key) = key {
-					self.held.remove(&key);
-				}
-				true
-			},
+			Source::Xtest => true,
 		})
 	}
 }
@@ -377,7 +366,7 @@ mod tests {
 			flags: KeyEventFlags::KEY_REPEAT,
 			..Default::default()
 		});
-		assert!(!sources.step(&repeat, 2, kinds).unwrap(), "our held key repeats");
+		assert!(sources.step(&repeat, 2, kinds).unwrap(), "an overlapping remote press is ambiguous");
 		assert!(sources.step(&key(2), 2, kinds).unwrap());
 		assert!(sources.step(&repeat, 2, kinds).unwrap(), "a remote user's held key repeats");
 		assert!(!sources.step(&key(2), 3, kinds).unwrap());

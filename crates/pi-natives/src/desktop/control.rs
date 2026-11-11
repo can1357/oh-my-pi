@@ -38,7 +38,7 @@ pub(crate) use macos::{
 };
 
 /// Time left before the run's deadline for a refusal to reach the caller.
-const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
+pub(crate) const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 struct CancellationState {

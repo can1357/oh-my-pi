@@ -1,6 +1,7 @@
 //! Shared XI2 raw-input observation for takeover admission and emergency
 //! Escape.
 use std::{
+	io::{Read, Write},
 	os::{fd::AsRawFd, unix::net::UnixStream},
 	sync::Arc,
 	thread::{self, JoinHandle},
@@ -14,6 +15,7 @@ use x11rb::{
 		xinput::{ConnectionExt as _, Device, DeviceType, EventMask, XIEventMask},
 	},
 	rust_connection::RustConnection,
+	wrapper::ConnectionExt as _,
 };
 
 use crate::desktop::error::{CoreResult, DesktopError};
@@ -21,7 +23,7 @@ use crate::desktop::error::{CoreResult, DesktopError};
 const DEVICE_PREFIX: &str = "OMP MPX ";
 
 pub(crate) struct Listener {
-	stop:    Option<UnixStream>,
+	stop:    Option<Mutex<UnixStream>>,
 	thread:  Option<JoinHandle<()>>,
 	failure: Arc<Mutex<Option<DesktopError>>>,
 	#[cfg(test)]
@@ -90,7 +92,7 @@ impl Listener {
 			})
 			.map_err(failed)?;
 		Ok(Self {
-			stop: Some(stop),
+			stop: Some(Mutex::new(stop)),
 			thread: Some(thread),
 			failure,
 			#[cfg(test)]
@@ -106,6 +108,17 @@ impl Listener {
 			return Err(failed("the input listener stopped"));
 		}
 		Ok(())
+	}
+
+	/// Orders a server round trip and drains its preceding events on the
+	/// listener thread before the caller reads the activity counter.
+	pub(crate) fn sync(&self) -> CoreResult<()> {
+		self.check()?;
+		let mut pipe = self.stop.as_ref().expect("live listener").lock();
+		pipe.write_all(&[1]).map_err(failed)?;
+		let mut reply = [0];
+		pipe.read_exact(&mut reply).map_err(failed)?;
+		self.check()
 	}
 
 	#[cfg(test)]
@@ -138,7 +151,7 @@ impl Drop for Listener {
 
 fn run(
 	conn: &RustConnection,
-	stopped: &UnixStream,
+	mut stopped: &UnixStream,
 	mut event: impl FnMut(Event) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let mut descriptors =
@@ -160,7 +173,17 @@ fn run(
 			}
 			return Err(failed(error));
 		}
-		if descriptors[0].revents != 0 {
+		if descriptors[0].revents & libc::POLLIN != 0 {
+			let mut command = [0];
+			if stopped.read(&mut command).map_err(failed)? == 0 {
+				return Ok(());
+			}
+			conn.sync().map_err(failed)?;
+			while let Some(next) = conn.poll_for_event().map_err(failed)? {
+				event(next)?;
+			}
+			stopped.write_all(&[1]).map_err(failed)?;
+		} else if descriptors[0].revents != 0 {
 			return Ok(());
 		}
 		if descriptors[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
