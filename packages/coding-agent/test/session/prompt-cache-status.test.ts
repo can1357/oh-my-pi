@@ -62,6 +62,7 @@ describe("AgentSession prompt-cache status", () => {
 	/** What a warm refresh reads back: a hit by default. */
 	let refreshUsage: Usage;
 	let refreshStopReason: StopReason;
+	let refreshErrorMessage: string | undefined;
 	/** Holds a warm refresh back before the provider sends it (a wait for a provider slot). */
 	let refreshGate: Promise<void> | undefined;
 	/** Holds a sent warm refresh's response back. */
@@ -81,7 +82,11 @@ describe("AgentSession prompt-cache status", () => {
 				await refreshGate;
 				await options?.onPayload?.({});
 				await responseGate;
-				const message: AssistantMessage = { ...reply(model, refreshUsage), stopReason: refreshStopReason };
+				const message: AssistantMessage = {
+					...reply(model, refreshUsage),
+					stopReason: refreshStopReason,
+					errorMessage: refreshErrorMessage,
+				};
 				return {
 					async *[Symbol.asyncIterator]() {
 						yield { type: "done" as const, reason: "stop" as const, message };
@@ -119,6 +124,7 @@ describe("AgentSession prompt-cache status", () => {
 		model = { ...getBundledModel("anthropic", "claude-sonnet-4-5"), promptCache: { short: 300 } } as Model;
 		refreshUsage = usage({ cacheRead: 100_000 });
 		refreshStopReason = "stop";
+		refreshErrorMessage = undefined;
 		refreshGate = undefined;
 		responseGate = undefined;
 		await createSession(model);
@@ -274,6 +280,21 @@ describe("AgentSession prompt-cache status", () => {
 			await drain();
 
 			expect(refreshes().map(entry => entry.cacheRefresh)).toEqual([undefined, undefined]);
+		});
+
+		it("journals why a paid warm refresh failed", async () => {
+			session.setCacheWarmingMode("idle");
+			send();
+			refreshStopReason = "error";
+			refreshErrorMessage = "529 overloaded_error";
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+
+			expect(session.sessionManager.getEntries().find(entry => entry.type === "model_usage")).toMatchObject({
+				purpose: "cache-warm",
+				stopReason: "error",
+				errorMessage: "529 overloaded_error",
+			});
 		});
 
 		it("counts the lifetime and the next refresh from when the provider sent the request, past a slot wait", () => {
