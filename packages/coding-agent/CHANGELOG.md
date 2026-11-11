@@ -300,7 +300,7 @@
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 ### Fixed
 
-- `/session delete` outside the TUI (RPC, ACP) detaches to a fresh session before removing the file, so the next turn no longer resurrects a headerless file that resume rejects as malformed; the command now reports the new session it continues in ([#18665](https://github.com/can1357/oh-my-pi/issues/18665), [#18870](https://github.com/can1357/oh-my-pi/pull/18870) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- `/session delete` outside the TUI (RPC, ACP) detaches to a fresh session before removing the file, so the next turn no longer resurrects a headerless file that resume rejects as malformed; RPC runs the detach inside its session-change bracket (goal reconcile, subagent reset) and a storage failure to remove the file is reported instead of claimed as deleted; the command now reports the new session it continues in ([#18665](https://github.com/can1357/oh-my-pi/issues/18665), [#18870](https://github.com/can1357/oh-my-pi/pull/18870) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.8] - 2026-11-11
 
