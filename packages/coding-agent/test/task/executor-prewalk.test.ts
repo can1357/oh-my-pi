@@ -5,10 +5,12 @@
  * model it resolves to, and when the hand-off is skipped (override off,
  * target identical to the starting model).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { PrewalkRoute } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -16,6 +18,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -24,6 +27,9 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { asGlobalFetch } from "../helpers/fetch-mock";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgTaskAgentPrewalk, cfgTaskPrewalk } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -420,5 +426,256 @@ describe("task tool plan-mode prewalk guard", () => {
 
 	it("keeps the agent definition's prewalk outside plan mode", async () => {
 		expect(await spawnedAgentPrewalk(false)).toBe(true);
+	});
+});
+
+/**
+ * `task.agentPrewalkAuto`: when nothing arms prewalk unconditionally, the native
+ * judge decides once per spawn whether this assignment fits the hand-off. The
+ * judge is the real TypeSafe client against a stubbed `fetch`, so the whole
+ * path — classifier, judge chain, spawn — runs without network.
+ */
+describe("runSubprocess task.agentPrewalkAuto", () => {
+	const primary = modelOrThrow("claude-sonnet-4-5");
+	const target = modelOrThrow("claude-sonnet-4-6");
+	const ASSIGNMENT = "trace the sync engine, then fix the stale cursor";
+
+	let tempDir: TempDir;
+	let authStorage: AuthStorage | undefined;
+
+	beforeAll(() => {
+		tempDir = TempDir.createSync("@pi-subagent-prewalk-auto-");
+	});
+
+	afterEach(() => {
+		authStorage?.close();
+		authStorage = undefined;
+		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		tempDir.removeSync();
+	});
+
+	function verdict(prewalk: number, primaryRoute: number, direct: number) {
+		const probabilities: Record<PrewalkRoute, number> = { prewalk, primary: primaryRoute, direct };
+		const choice: PrewalkRoute =
+			prewalk >= primaryRoute && prewalk >= direct ? "prewalk" : primaryRoute >= direct ? "primary" : "direct";
+		return { type: "choice", choice, probabilities, confidence: probabilities[choice] };
+	}
+	const PREWALK = verdict(0.9, 0.07, 0.03);
+	const PRIMARY = verdict(0.1, 0.8, 0.1);
+	const DIRECT = verdict(0.05, 0.1, 0.85);
+
+	type Reply = "http-400" | { type: string; [key: string]: unknown };
+	interface JudgeCall {
+		questions: string[];
+		state: Record<string, string>;
+	}
+
+	/** Answer System One requests from `replies` (then `DIRECT`) and record each one. */
+	function stubJudge(replies: Reply[] = []): JudgeCall[] {
+		const calls: JudgeCall[] = [];
+		const usage = { input_tokens: 8, output_tokens: 2 };
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (input, init) => {
+				if (!String(input).endsWith("/v1/systemone")) throw new Error(`unexpected request: ${String(input)}`);
+				const body = JSON.parse(String(init?.body)) as {
+					state: Record<string, string>;
+					questions: Record<string, unknown>;
+				};
+				calls.push({ questions: Object.keys(body.questions), state: body.state });
+				const reply = replies.shift() ?? DIRECT;
+				if (reply === "http-400") return new Response("bad request", { status: 400 });
+				return Response.json({ model: "jev", answers: { route: reply }, usage });
+			}),
+		);
+		return calls;
+	}
+
+	const routeCalls = (calls: JudgeCall[]) => calls.filter(call => call.questions.includes("route"));
+
+	interface FixtureOptions {
+		/** `task.agentPrewalkAuto` record for this agent. */
+		auto?: Record<string, string>;
+		/** `task.agentPrewalk` record, which arms unconditionally. */
+		unconditional?: Record<string, string>;
+		/** `prewalk.autoTarget`; unset leaves the `@smol` default. */
+		autoTarget?: string;
+		/** Credential the native judge (default true). */
+		judge?: boolean;
+		tools?: string[];
+		/** Spawn as a restricted-tool run (plan mode), which is never judged. */
+		restrictToolNames?: boolean;
+	}
+
+	function createFixture(options: FixtureOptions = {}) {
+		authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		if (options.judge !== false) authStorage.keys.setRuntime("typesafe", "ts-key");
+		// Only the credentials set here exist. Ambient provider keys (TYPESAFE_API_KEY, OPENROUTER_API_KEY, …) must
+		// neither conjure a native judge nor give the chain a fallback candidate that reaches the network.
+		const credentialed = options.judge === false ? ["anthropic"] : ["anthropic", "typesafe"];
+		const source = authStorage.keys.source.bind(authStorage.keys);
+		vi.spyOn(authStorage.keys, "source").mockImplementation((provider, sourceOptions) =>
+			credentialed.includes(provider) ? source(provider, sourceOptions) : undefined,
+		);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-1.14.0" },
+			...(options.autoTarget ? { "prewalk.autoTarget": options.autoTarget } : {}),
+			...(options.auto ? { "task.agentPrewalkAuto": options.auto } : {}),
+			...(options.unconditional ? { "task.agentPrewalk": options.unconditional } : {}),
+		});
+		const session = yieldEmittingSession(options.tools ?? ["read", "yield"]);
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const spawn = async () => {
+			// `description` suppresses the tiny-model label pass, which would issue
+			// a request this stub refuses.
+			const result = await runSubprocess({
+				cwd: tempDir.path(),
+				task: ASSIGNMENT,
+				assignment: ASSIGNMENT,
+				description: "test",
+				index: 0,
+				id: "subagent-auto-prewalk",
+				settings,
+				modelRegistry,
+				enableLsp: false,
+				...(options.restrictToolNames ? { restrictToolNames: true } : {}),
+				agent: { ...baseAgent, model: [`${primary.provider}/${primary.id}`] },
+			});
+			return { result, forwarded: spy.mock.calls[0]?.[0], session };
+		};
+		return { spawn, session, spy, settings };
+	}
+
+	it("arms the judge-chosen prewalk and forwards the prewalk.autoTarget model", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({
+			auto: { task: "on" },
+			autoTarget: `${target.provider}/${target.id}`,
+			tools: ["read", "todo", "yield"],
+		});
+
+		const { result, forwarded, session } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk?.target.id).toBe(target.id);
+		expect(forwarded?.prewalk?.target.provider).toBe(target.provider);
+		const judged = routeCalls(calls);
+		expect(judged).toHaveLength(1);
+		expect(judged[0]?.state.request).toContain("trace the sync engine");
+		expect(judged[0]?.state.previous_request).toBeUndefined();
+		expect(session.getActiveToolNames()).toContain("todo");
+	});
+
+	it("resolves a configured pattern as the judged prewalk target", async () => {
+		stubJudge([PREWALK]);
+		const f = createFixture({ auto: { task: `${target.provider}/${target.id}` } });
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk?.target.id).toBe(target.id);
+	});
+
+	it("spawns without prewalk when the judge answers primary", async () => {
+		const calls = stubJudge([PRIMARY]);
+		const f = createFixture({
+			auto: { task: "on" },
+			autoTarget: `${target.provider}/${target.id}`,
+			tools: ["read", "todo", "yield"],
+		});
+
+		const { result, forwarded, session } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(1);
+		expect(session.getActiveToolNames()).not.toContain("todo");
+	});
+
+	it("fails open without a native judge credential and asks nothing", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({ auto: { task: "on" }, autoTarget: `${target.provider}/${target.id}`, judge: false });
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("fails open when the judge rejects the request", async () => {
+		stubJudge(["http-400"]);
+		const f = createFixture({ auto: { task: "on" }, autoTarget: `${target.provider}/${target.id}` });
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+	});
+
+	it("never judges an agent with no task.agentPrewalkAuto entry", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({ autoTarget: `${target.provider}/${target.id}` });
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("never judges an agent whose task.agentPrewalkAuto entry is 'off'", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({ auto: { task: "off" }, autoTarget: `${target.provider}/${target.id}` });
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("never judges a restricted-tool spawn", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({
+			auto: { task: "on" },
+			autoTarget: `${target.provider}/${target.id}`,
+			restrictToolNames: true,
+		});
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("never judges a target that matches the starting model", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({ auto: { task: `${primary.provider}/${primary.id}` } });
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("keeps an unconditional task.agentPrewalk arm and asks the judge nothing", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({
+			auto: { task: "on" },
+			unconditional: { task: `${target.provider}/${target.id}` },
+		});
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk?.target.id).toBe(target.id);
+		expect(routeCalls(calls)).toHaveLength(0);
 	});
 });
