@@ -1,5 +1,4 @@
 import {
-	type Agent,
 	AgentBusyError,
 	type AgentMessage,
 	isSyntheticToolResultMessage,
@@ -82,8 +81,10 @@ import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { isUserQueuedMessage } from "./queued-messages";
+import type { TurnClaim, TurnlessAgent } from "./turn-gate";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { journalJudgmentUsage } from "../judgment";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 import {
@@ -256,7 +257,7 @@ type RequestBodyReadTimeoutRecovery = "not-applicable" | "handled-retry" | "hand
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface TurnRecoveryHost {
-	agent: Agent;
+	agent: TurnlessAgent;
 	sessionManager: SessionManager;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
@@ -300,8 +301,24 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		/** `"user"`: a user's retry, which cancels a held `subagent_stop` pass; unset, the running work's own recovery. */
+		claim?: "user";
+		/** Called synchronously as the turn gate admits the continued turn, right before the agent claims it. */
+		onTurnAdmitted?: () => void;
+		/** The continued turn's pooled yield contract, installed once the turn may run. */
+		workPoolYieldItems?: readonly WorkPoolYieldItem[];
 		onError?: (error: unknown) => void;
 	}): void;
+	/**
+	 * Starts a prompt turn through the session's turn gate: `onAdmitted` runs synchronously right before the agent
+	 * claims it. `undefined` when the gate refused `claim` (nothing ran). Throws `AgentBusyError` while a turn runs.
+	 */
+	startTurn(
+		claim: TurnClaim,
+		messages: AgentMessage[],
+		options: { toolChoice?: ToolChoice } | undefined,
+		onAdmitted: (() => void) | undefined,
+	): Promise<void> | undefined;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
 	appendSessionMessage(message: AssistantMessage): void;
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
@@ -871,15 +888,22 @@ export class TurnRecovery {
 		return (await recorded).switchedCredential;
 	}
 
-	/** Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously
-	 *  right after a successful `agent.prompt` claim (before the run is awaited), letting the
-	 *  caller mark the exact moment its own run went live. */
+	/**
+	 * Prompts as `claim` after transient overlap with a prior agent run. `onClaimed` fires synchronously right after a
+	 * successful `agent.prompt` claim (before the run is awaited), letting the caller mark the exact moment its own
+	 * run went live; `onAdmitted` fires as the turn gate admits it, right before the claim. Each attempt, the retry
+	 * after waiting out a running turn included, is decided by the turn gate in the same tick as its claim.
+	 *
+	 * @returns whether the prompt ran: false when the gate refused it, with nothing dispatched.
+	 */
 	promptAgentWithIdleRetry(
 		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
-		onClaimed?: () => void,
-	): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
+		options: { toolChoice?: ToolChoice } | undefined,
+		onClaimed: (() => void) | undefined,
+		claim: TurnClaim,
+		onAdmitted?: () => void,
+	): Promise<boolean> {
+		return this.#promptAgentWithIdleRetry(messages, options, onClaimed, claim, onAdmitted);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -3363,20 +3387,21 @@ export class TurnRecovery {
 
 	async #promptAgentWithIdleRetry(
 		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
-		onClaimed?: () => void,
-	): Promise<void> {
+		options: { toolChoice?: ToolChoice } | undefined,
+		onClaimed: (() => void) | undefined,
+		claim: TurnClaim,
+		onAdmitted: (() => void) | undefined,
+	): Promise<boolean> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
-			// A claim whose synchronous prefix throws (busy agent, missing
-			// model) returns an already-rejected promise. Probe for that
-			// before firing `onClaimed`: a busy-retry parked behind an
-			// autonomous run must not report that run's streaming as ours
-			// going live. The rejection handler rethrows, so the error
-			// still surfaces at the await below.
+			// A claim whose synchronous prefix throws (missing model) returns an already-rejected promise. Probe for
+			// that before firing `onClaimed`. The rejection handler rethrows, so the error still surfaces at the await
+			// below. A busy agent throws synchronously, before the gate admits anything.
 			let claimFailed = false;
 			try {
-				const claim = this.#host.agent.prompt(messages, options).then(undefined, error => {
+				const started = this.#host.startTurn(claim, messages, options, onAdmitted);
+				if (!started) return false;
+				const run = started.then(undefined, error => {
 					claimFailed = true;
 					throw error;
 				});
@@ -3385,8 +3410,8 @@ export class TurnRecovery {
 				// `claimFailed` is settled by the time we resume.
 				await Promise.resolve();
 				if (!claimFailed) onClaimed?.();
-				await claim;
-				return;
+				await run;
+				return true;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {
 					throw err;
@@ -3469,7 +3494,10 @@ export class TurnRecovery {
 	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
-	async retry(): Promise<boolean> {
+	async retry(options?: {
+		onTurnAdmitted?: () => void;
+		workPoolYieldItems?: readonly WorkPoolYieldItem[];
+	}): Promise<boolean> {
 		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return false;
 
 		const messages = this.#host.agent.state.messages;
@@ -3503,7 +3531,7 @@ export class TurnRecovery {
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
+		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1, claim: "user", ...options });
 
 		return true;
 	}

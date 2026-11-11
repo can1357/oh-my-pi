@@ -1,0 +1,1 @@
+A subagent_stop handler refused the subagent's {{#if structured}}yield{{else}}final report{{/if}} without a reason. Finish the outstanding work and {{#if structured}}yield again{{else}}write your final report again{{/if}}.

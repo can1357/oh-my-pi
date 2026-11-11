@@ -148,7 +148,10 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 				if (index >= 0) listeners.splice(index, 1);
 			};
 		},
-		prompt: async (text: string) => {
+		prompt: async (text: string, promptOptions?: { onPromptAdmitted?: () => void; onTurnAdmitted?: () => void }) => {
+			// An idle session admits the prompt and its turn right away; a follow-up's monitor attaches at the turn.
+			promptOptions?.onPromptAdmitted?.();
+			promptOptions?.onTurnAdmitted?.();
 			promptEntered.resolve();
 			if (options?.hangPrompt) {
 				await hangingPrompt.promise;
@@ -175,6 +178,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		},
 		trackIrcReply: () => {},
 		holdIrcWakes: () => () => {},
+		whenTurnAdmissible: async () => {},
 		subscribeRunState: () => () => {},
 		isParentIrcSteer: () => false,
 		asyncJobManager: options?.asyncJobManager,

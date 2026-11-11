@@ -24,6 +24,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager, AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
@@ -483,6 +484,21 @@ export interface PromptOptions {
 	 * failed before admission still only settles through the returned promise.
 	 */
 	onPromptAdmitted?: () => void;
+	/**
+	 * Called synchronously as the session's turn gate admits this prompt's own turn, right before the agent claims
+	 * it: never for a prompt that queues into a running turn, is handed back, dropped, or fails in setup. A caller
+	 * that takes per-turn state (a monitor, a tool's turn state) takes it here, so it never sits under a turn the
+	 * prompt does not own.
+	 */
+	onTurnAdmitted?: () => void;
+	/**
+	 * The pooled yield contract this prompt's own turn runs under (`[]` is the ordinary contract), for a prompt that
+	 * starts a turn rather than queueing into a running one. Installed when the prompt is admitted, so the session is
+	 * never left under it for a turn this prompt does not own, and awaited before the turn dispatches. Put back if the
+	 * prompt is handed back, dropped or fails before its turn goes live; left in place once the turn has run, for the
+	 * caller to clear at the end of its batch.
+	 */
+	workPoolYieldItems?: readonly WorkPoolYieldItem[];
 	/**
 	 * Called synchronously when this prompt is pushed onto the steer or
 	 * follow-up queue, just before {@link onPromptAdmitted}, with the messages it

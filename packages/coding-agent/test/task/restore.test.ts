@@ -119,7 +119,7 @@ describe("restoreSession (omp --restore)", () => {
 		const followUp = vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockResolvedValue(result);
 		const restoreTurn = vi.fn(async () => true);
 		const session = {
-			sessionManager: { getSessionFile: () => mainFile },
+			sessionManager: { getSessionFile: () => mainFile, getSessionId: () => "main-session-1" },
 			asyncJobManager: manager,
 			settings: Settings.isolated(),
 			restoreInterruptedTurn: restoreTurn,

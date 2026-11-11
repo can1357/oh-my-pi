@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import {
 	Agent,
 	AgentBusyError,
+	TurnGateRefusedError,
 	type AgentEvent,
 	type AgentTool,
 	ThinkingLevel,
@@ -1940,6 +1941,26 @@ describe("Agent", () => {
 
 		agent.setMetadataResolver(undefined);
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "static" });
+	});
+
+	it("refuses prompt() and continue() that the turn gate rejects, without claiming the run", async () => {
+		const mock = createMockModel({ responses: [{ content: ["admitted"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		agent.appendMessage(createUserMessage("earlier"));
+		let open = false;
+		agent.setTurnGate(() => open);
+
+		await expect(agent.prompt("held")).rejects.toBeInstanceOf(TurnGateRefusedError);
+		await expect(agent.continue()).rejects.toBeInstanceOf(TurnGateRefusedError);
+		expect(agent.state.isStreaming).toBe(false);
+		expect(mock.calls).toHaveLength(0);
+
+		open = true;
+		await agent.prompt("admitted");
+		expect(mock.calls).toHaveLength(1);
 	});
 });
 

@@ -365,6 +365,151 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(resume?.[0]?.attribution).toBe("agent");
 	});
 
+	describe("while a subagent_stop pass holds the session", () => {
+		type Dispatched = { role: string; attribution?: string; synthetic?: boolean };
+		/** A turn in flight that a manual compaction interrupts, and a recording stand-in for the turns that start. */
+		function interruptedTurn() {
+			cfgCompactionKeepRecentTokens.set(session.settings, 1);
+			cfgCompactionAutoContinue.override(session.settings, true);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "previous answer" }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: {
+					input: 1_000,
+					output: 100,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1_100,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			session.agent.state.isStreaming = true;
+			const abort = vi.spyOn(session, "abort").mockImplementation(async () => {
+				session.agent.state.isStreaming = false;
+			});
+			const prompted: Dispatched[][] = [];
+			vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+				prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+			});
+			return { abort, prompted };
+		}
+		const isResume = (batch: Dispatched[] | undefined): boolean =>
+			batch?.some(message => message.role === "developer" && message.synthetic === true) === true;
+
+		it("holds the interrupted turn's resume until the hold releases, without making compact() wait", async () => {
+			const { prompted } = interruptedTurn();
+			const hold = session.holdForStopPass();
+
+			await session.compact();
+			await session.waitForIdle();
+			await flushEventLoop();
+
+			// compact() returned under the hold, and no turn started inside the pass.
+			expect(prompted).toHaveLength(0);
+			hold.release();
+			await until(() => prompted.length > 0, "the deferred resume to start its turn");
+			await session.waitForIdle();
+
+			expect(prompted).toHaveLength(1);
+			expect(isResume(prompted[0])).toBe(true);
+		});
+
+		it("holds a continuation that a message queued before the compaction drives, until the hold releases", async () => {
+			// The continuation waits 100 ms before it dispatches.
+			vi.useRealTimers();
+			const { prompted } = interruptedTurn();
+			const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+				session.agent.clearAllQueues();
+			});
+			session.agent.followUp({ role: "user", content: "queued before the compaction", timestamp: Date.now() });
+			const hold = session.holdForStopPass();
+
+			await session.compact();
+			await session.waitForIdle();
+			await flushEventLoop();
+
+			expect(continueSpy).not.toHaveBeenCalled();
+			hold.release();
+			await until(() => continueSpy.mock.calls.length > 0, "the queued message to resume the run");
+			await session.waitForIdle();
+
+			expect(continueSpy).toHaveBeenCalledTimes(1);
+			expect(prompted).toHaveLength(0);
+		});
+
+		it("drops the held resume when a prompt ran meanwhile, as an undeferred one is superseded", async () => {
+			const { prompted } = interruptedTurn();
+			const hold = session.holdForStopPass();
+			await session.compact();
+			await session.waitForIdle();
+
+			// The user's prompt waits for the hold and cancels the pass.
+			const typed = session.prompt("typed meanwhile");
+			await flushEventLoop();
+			hold.release();
+			await typed;
+			await session.waitForIdle();
+			await flushEventLoop();
+
+			expect(prompted).toHaveLength(1);
+			expect(isResume(prompted[0])).toBe(false);
+		});
+
+		it("drops the held resume when an abort cancelled it meanwhile", async () => {
+			const { abort, prompted } = interruptedTurn();
+			const hold = session.holdForStopPass();
+			await session.compact();
+			await session.waitForIdle();
+
+			abort.mockRestore();
+			await session.abort();
+			hold.release();
+			await session.waitForIdle();
+			await flushEventLoop();
+
+			expect(prompted).toHaveLength(0);
+		});
+
+		it("keeps the held resume when only the internal stop of a settled turn landed meanwhile", async () => {
+			const { abort, prompted } = interruptedTurn();
+			const hold = session.holdForStopPass();
+			await session.compact();
+			await session.waitForIdle();
+
+			// The executor stops the holder's settled turn (a yield parked behind a pass): no cancellation.
+			abort.mockRestore();
+			await session.abort({ turnStop: true });
+			hold.release();
+			await until(() => prompted.length > 0, "the deferred resume to start its turn");
+			await session.waitForIdle();
+
+			expect(prompted).toHaveLength(1);
+			expect(isResume(prompted[0])).toBe(true);
+		});
+
+		it("drops a continuation parked behind the hold when the session is reset before the release", async () => {
+			const { prompted } = interruptedTurn();
+			const hold = session.holdForStopPass();
+			await session.compact();
+			await session.waitForIdle();
+
+			// The conversation the resume belonged to is gone: nothing may replay into the cleared transcript.
+			expect(await session.resetSessionContext()).toBeDefined();
+			hold.release();
+			await session.waitForIdle();
+			await flushEventLoop();
+
+			expect(prompted).toHaveLength(0);
+			expect(session.messages.some(message => message.role === "developer")).toBe(false);
+		});
+	});
+
 	it("does not start a turn when a manual compaction interrupted nothing", async () => {
 		cfgCompactionKeepRecentTokens.set(session.settings, 1);
 		cfgCompactionAutoContinue.override(session.settings, true);

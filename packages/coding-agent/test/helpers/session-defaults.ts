@@ -15,6 +15,7 @@ export function createSessionDefaults() {
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
 		holdIrcWakes: () => () => {},
+		whenTurnAdmissible: async () => {},
 		isParentIrcSteer: () => false,
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
