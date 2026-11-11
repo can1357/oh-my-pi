@@ -412,14 +412,21 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+	async deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
 		// Purge history/stats rows before the transcript is gone (#18674).
 		// Best-effort: a busy dashboard store never fails the delete itself.
 		try {
-			purgeDeletedSessionRows(sessionPath, { content: await this.readText(sessionPath) });
+			purgeDeletedSessionRows(sessionPath, {
+				content: await this.readText(sessionPath),
+				historyDbPath: options?.historyDbPath,
+				statsDbPath: options?.statsDbPath,
+			});
 		} catch {}
 
 		const artifactsDir = sessionPath.slice(0, -6);

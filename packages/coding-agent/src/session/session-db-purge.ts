@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getHistoryDbPath, getStatsDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
-import { parseTitleSlotFromContent } from "./session-title-slot";
+import { readSessionHeaderIdSync, sessionIdFromContent } from "./session-header-id";
 /**
  * Purge the SQLite rows a deleted session leaves behind (`history.db` prompts,
  * titles, recaps and the FTS index; `stats.db` rows for the transcript and
@@ -42,39 +42,6 @@ function tableHasColumn(db: Database, table: string, column: string): boolean {
 	return rows.some(row => row.name === column);
 }
 
-/** Session id in `content`'s header, past the optional title slot. */
-function sessionIdFromContent(content: string): string | undefined {
-	if (parseTitleSlotFromContent(content)) content = content.slice(content.indexOf("\n") + 1);
-	const end = content.indexOf("\n");
-	if (end === -1) return undefined;
-	try {
-		const entry: unknown = JSON.parse(content.slice(0, end));
-		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
-			return typeof entry.id === "string" ? entry.id : undefined;
-		}
-	} catch {}
-	return undefined;
-}
-
-/** Read a header-sized prefix from `sessionPath` without loading the transcript. */
-function readSessionIdPrefix(sessionPath: string): string | undefined {
-	let fd: number | undefined;
-	try {
-		fd = fs.openSync(sessionPath, "r");
-		const buf = Buffer.alloc(64 * 1024);
-		const prefix = buf.toString("utf8", 0, fs.readSync(fd, buf, 0, buf.length, 0));
-		return sessionIdFromContent(prefix);
-	} catch {
-		return undefined;
-	} finally {
-		if (fd !== undefined) {
-			try {
-				fs.closeSync(fd);
-			} catch {}
-		}
-	}
-}
-
 function sessionArtifactsPath(sessionPath: string): string {
 	if (sessionPath.endsWith(COMPRESSED_SESSION_SUFFIX)) {
 		return sessionPath.slice(0, -COMPRESSED_SESSION_SUFFIX.length);
@@ -87,6 +54,8 @@ const STATS_SESSION_TABLES = [
 	"user_messages",
 	"tool_calls",
 	"file_offsets",
+	"session_rollup",
+	"session_dirty",
 	"spotlight_sessions",
 	"spotlight_results",
 	"spotlight_calls",
@@ -195,7 +164,7 @@ export function purgeDeletedSessionRows(sessionPath: string, options?: PurgeDele
 		isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR && !options?.historyDbPath && !options?.statsDbPath;
 	if (testDefaultPaths) return;
 	const sessionId = options?.sessionId ?? (options?.content ? sessionIdFromContent(options.content) : undefined);
-	const resolvedId = sessionId ?? readSessionIdPrefix(sessionPath);
+	const resolvedId = sessionId ?? readSessionHeaderIdSync(sessionPath);
 	const historyDbPath = options?.historyDbPath ?? getHistoryDbPath();
 	try {
 		if (resolvedId !== undefined && fs.existsSync(historyDbPath)) {

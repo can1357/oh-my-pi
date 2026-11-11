@@ -4,7 +4,6 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { purgeDeletedSessionRows } from "@oh-my-pi/pi-coding-agent/session/session-db-purge";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
@@ -94,6 +93,64 @@ class ControlledTitleUpdateBackend implements SessionStorageBackend {
 		this.#firstUpdate.reject(error);
 	}
 }
+
+class FileBackedSessionBackend implements SessionStorageBackend {
+	readonly #sessionPath: string;
+
+	constructor(sessionPath: string) {
+		this.#sessionPath = sessionPath;
+	}
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		return Promise.resolve([{ path: this.#sessionPath, size: 1, mtimeMs: 1 }]);
+	}
+
+	readFull(path: string): Promise<string | null> {
+		if (path !== this.#sessionPath) return Promise.resolve(null);
+		try {
+			return Promise.resolve(fs.readFileSync(path, "utf8"));
+		} catch {
+			return Promise.resolve(null);
+		}
+	}
+
+	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		if (path !== this.#sessionPath) return Promise.resolve(["", ""]);
+		const content = fs.readFileSync(path, "utf8");
+		const suffix = suffixBytes > 0 ? content.slice(-suffixBytes) : "";
+		return Promise.resolve([content.slice(0, prefixBytes), suffix]);
+	}
+
+	writeFull(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	append(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	updateSessionTitle(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	truncate(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	remove(paths: string[]): Promise<void> {
+		for (const target of paths) fs.rmSync(target, { recursive: true, force: true });
+		return Promise.resolve();
+	}
+
+	move(): Promise<void> {
+		return Promise.resolve();
+	}
+}
+
 describe("FileSessionStorage writer", () => {
 	let tempDir: string;
 	let storage: FileSessionStorage;
@@ -379,7 +436,15 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 
 		const statsDbPath = path.join(tempDir, "stats.db");
 		const statsDb = new Database(statsDbPath);
-		for (const table of ["messages", "user_messages", "tool_calls", "file_offsets"]) {
+		const statsTables = [
+			"messages",
+			"user_messages",
+			"tool_calls",
+			"file_offsets",
+			"session_rollup",
+			"session_dirty",
+		];
+		for (const table of statsTables) {
 			statsDb.run(`CREATE TABLE ${table} (session_file TEXT NOT NULL)`);
 			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(sessionPath);
 			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(nestedPath);
@@ -387,7 +452,7 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		}
 		statsDb.close();
 
-		purgeDeletedSessionRows(sessionPath, { historyDbPath, statsDbPath });
+		await storage.deleteSessionWithArtifacts(sessionPath, { historyDbPath, statsDbPath });
 
 		const check = new Database(historyDbPath);
 		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
@@ -405,13 +470,94 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(fts).toEqual([]);
 
 		const statsCheck = new Database(statsDbPath);
-		for (const table of ["messages", "user_messages", "tool_calls", "file_offsets"]) {
+		for (const table of statsTables) {
 			const rows = statsCheck.query(`SELECT session_file FROM ${table}`).all() as Array<{
 				session_file: string;
 			}>;
 			expect(rows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
 		}
 		statsCheck.close();
+		expect(fs.existsSync(sessionPath)).toBe(false);
+	});
+
+	it("purges history rows for a pretty-printed header (#18674)", async () => {
+		const marker = "delete-me-marker-pretty-header";
+		const prettyId = "purge-pretty-only-session";
+		const projectDir = path.join(tempDir, "project-pretty");
+		await fsp.mkdir(projectDir, { recursive: true });
+		const prettyPath = path.join(projectDir, `20260101_${prettyId}.jsonl`);
+		await Bun.write(
+			prettyPath,
+			`${JSON.stringify({ type: "session", id: prettyId, timestamp: "2025-01-01T00:00:00Z", cwd: projectDir }, null, 2)}\n${JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: marker } })}\n`,
+		);
+
+		const historyDbPath = path.join(tempDir, "history.db");
+		const historyDb = new Database(historyDbPath);
+		historyDb.run(
+			"CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL, session_id TEXT)",
+		);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES (?, ?)", [marker, prettyId]);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES ('other prompt', 'other-session')");
+		historyDb.close();
+
+		await storage.deleteSessionWithArtifacts(prettyPath, { historyDbPath });
+
+		const check = new Database(historyDbPath);
+		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
+		check.close();
+		expect(prompts.map(row => row.prompt)).toEqual(["other prompt"]);
+		expect(fs.existsSync(prettyPath)).toBe(false);
+	});
+
+	it("IndexedSessionStorage.deleteSessionWithArtifacts purges history and stats rows (#18674)", async () => {
+		const marker = "delete-me-marker-indexed-purge";
+		const sessionId = "purge-indexed-session";
+		const projectDir = path.join(tempDir, "project-indexed");
+		await fsp.mkdir(projectDir, { recursive: true });
+		const sessionPath = path.join(projectDir, `20260101_${sessionId}.jsonl`);
+		await Bun.write(
+			sessionPath,
+			`${JSON.stringify({ type: "session", id: sessionId, timestamp: "2025-01-01T00:00:00Z", cwd: projectDir })}\n${JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: marker } })}\n`,
+		);
+
+		const historyDbPath = path.join(tempDir, "history.db");
+		const historyDb = new Database(historyDbPath);
+		historyDb.run(
+			"CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL, session_id TEXT)",
+		);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES (?, ?)", [marker, sessionId]);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES ('other prompt', 'other-session')");
+		historyDb.close();
+
+		const statsDbPath = path.join(tempDir, "stats.db");
+		const statsDb = new Database(statsDbPath);
+		statsDb.run("CREATE TABLE messages (session_file TEXT NOT NULL)");
+		statsDb.query("INSERT INTO messages (session_file) VALUES (?)").run(sessionPath);
+		statsDb.query("INSERT INTO messages (session_file) VALUES (?)").run(path.join(tempDir, "keep.jsonl"));
+		statsDb.run("CREATE TABLE session_rollup (session_file TEXT NOT NULL)");
+		statsDb.query("INSERT INTO session_rollup (session_file) VALUES (?)").run(sessionPath);
+		statsDb.query("INSERT INTO session_rollup (session_file) VALUES (?)").run(path.join(tempDir, "keep.jsonl"));
+		statsDb.close();
+
+		const indexed = new IndexedSessionStorage(new FileBackedSessionBackend(sessionPath));
+		await indexed.initialize();
+		await indexed.deleteSessionWithArtifacts(sessionPath, { historyDbPath, statsDbPath });
+
+		const check = new Database(historyDbPath);
+		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
+		check.close();
+		expect(prompts.map(row => row.prompt)).toEqual(["other prompt"]);
+
+		const statsCheck = new Database(statsDbPath);
+		const messageRows = statsCheck.query("SELECT session_file FROM messages").all() as Array<{
+			session_file: string;
+		}>;
+		const rollupRows = statsCheck.query("SELECT session_file FROM session_rollup").all() as Array<{
+			session_file: string;
+		}>;
+		statsCheck.close();
+		expect(messageRows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
+		expect(rollupRows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
 	});
 
 	it("deleteSessionWithArtifacts removes the transcript and its artifacts dir", async () => {
