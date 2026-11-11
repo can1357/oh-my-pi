@@ -6,12 +6,7 @@ import { mnemopiEngine } from "../../bench/memory-eval/engines/mnemopi";
 import { PythonProcess } from "../../bench/memory-eval/engines/python-process";
 import { runCases } from "../../bench/memory-eval/runner";
 import type { EvalCase } from "../../bench/memory-eval/types";
-import { pythonPath } from "./python";
-
-function python(): string {
-	if (!pythonPath) throw new Error("Python is required for this test");
-	return pythonPath;
-}
+import { python, pythonPath } from "./python";
 
 const twoMessageCase: EvalCase = {
 	caseId: "c/1",
