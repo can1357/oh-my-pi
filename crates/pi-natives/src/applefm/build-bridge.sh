@@ -12,6 +12,9 @@
 #       is the SDK for every candidate, so the bridge never links against a
 #       different SDK than the rest of the addon. Probes versions only; never
 #       compiles.
+#       OMP_APPLEFM_DISABLE=1 selects nothing without probing any toolchain, so
+#       an opted-out build never compiles the bridge with host tools; setting
+#       it together with $OMP_APPLEFM_SWIFTC is an error.
 #
 #   build-bridge.sh build <out.dylib> <arch> [<swiftc> <sdk> [<swiftc arg>...]]
 #       Compiles bridge.swift into a standalone <out.dylib> with the given
@@ -49,6 +52,13 @@ usable() {
 }
 
 detect() {
+	if [ "${OMP_APPLEFM_DISABLE:-}" = 1 ]; then
+		if [ -n "${OMP_APPLEFM_SWIFTC:-}" ]; then
+			echo "OMP_APPLEFM_DISABLE=1 conflicts with OMP_APPLEFM_SWIFTC; set only one" >&2
+			return 1
+		fi
+		return 0
+	fi
 	selected_sdk=${SDKROOT:-$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)}
 	clt=/Library/Developer/CommandLineTools
 	if [ -n "${OMP_APPLEFM_SWIFTC:-}" ]; then

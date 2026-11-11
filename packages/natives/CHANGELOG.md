@@ -4,7 +4,9 @@
 
 ### Changed
 
+- `OMP_APPLEFM_DISABLE=1` builds without the Apple Foundation Models bridge without probing Xcode or the Command Line Tools, and the macOS addon's install name is now `@rpath/libpi_natives.dylib` instead of the build directory path
 - A set `OMP_APPLEFM_SWIFTC` must name a usable Swift 6.4+ compiler with a macOS 27+ SDK: the build now fails instead of falling back to Xcode, the Command Line Tools, or a build without Apple Foundation Models ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
+
 ### Fixed
 
 - Fixed macOS window screenshots drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; windows spanning displays or partly off screen are captured whole at their on-screen size, except while a sheet larger than the window is open ([#17757](https://github.com/can1357/oh-my-pi/pull/17757) by [@will-bogusz](https://github.com/will-bogusz))
