@@ -596,8 +596,11 @@ export function shapeFromEntry(
 	};
 }
 
-/** A shape entry's failed calls by cause, keeping positive counts; null when it names none. */
-function parseFailureCauses(value: unknown): Record<string, number> | null {
+/**
+ * Failed calls by cause, keeping positive finite counts; null when none is left. Normalizes both a shape entry's
+ * `failureCauses` at ingest and the decoded `sp_failure_causes` column at aggregation.
+ */
+export function parseFailureCauses(value: unknown): Record<string, number> | null {
 	if (!isRecord(value)) return null;
 	const causes: Record<string, number> = {};
 	for (const [cause, count] of Object.entries(value)) {

@@ -200,8 +200,14 @@ export async function shapeToolText(
 	return { text, spotlight };
 }
 
+/** A scorer's usage as a `spotlight:shape` entry journals it; stats ingest reads `failureCauses` from it. */
+interface JournaledUsage extends Omit<ScorerUsage, "failureCauses"> {
+	/** Failed calls by cause; present only when a call failed. */
+	failureCauses?: Record<string, number>;
+}
+
 /** A scorer's usage as journaled: the cost rounded, the failure causes only when a request failed. */
-function journalUsage({ failureCauses, ...usage }: ScorerUsage): Record<string, unknown> {
+function journalUsage({ failureCauses, ...usage }: ScorerUsage): JournaledUsage {
 	return {
 		...usage,
 		costUsd: Number(usage.costUsd.toFixed(8)),

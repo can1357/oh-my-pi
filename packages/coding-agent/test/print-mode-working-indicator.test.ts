@@ -9,6 +9,7 @@ import {
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/session/credential-disabled-notice";
+import { NO_CREDENTIAL_NOTICE, SPOTLIGHT_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/spotlight/session";
 import type { PlanProposalHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 
 function makeAssistantMessage(text: string): AssistantMessage {
@@ -289,6 +290,26 @@ describe("print mode working indicator", () => {
 
 		expect(stderrOutput.join("")).toBe(`Working...\nWarning: ${signedOut}\n`);
 		expect(stdoutOutput.join("")).toBe("final answer\n");
+	});
+
+	it("writes Spotlight's missing-credential notice to stderr in text mode", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });
+
+		await delayed.promptStarted;
+		try {
+			delayed.emit({
+				type: "notice",
+				level: "warning",
+				message: NO_CREDENTIAL_NOTICE,
+				source: SPOTLIGHT_NOTICE_SOURCE,
+			});
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stderrOutput.join("")).toBe(`Working...\nWarning: ${NO_CREDENTIAL_NOTICE}\n`);
 	});
 
 	it("flushes late JSON advisor events after catch-up before disposing", async () => {

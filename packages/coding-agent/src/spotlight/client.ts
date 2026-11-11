@@ -187,9 +187,12 @@ export class SpotlightClient {
 		if (this.#warming) return;
 		this.#warming = this.#credential
 			.resolve()
-			.then(token => {
-				if (!token) throw new SpotlightError(StencilCredential.missingMessage, 0, "no_credential");
-				return this.#post(
+			.then(async token => {
+				if (!token) {
+					logger.debug("spotlight warm skipped: no credential");
+					return;
+				}
+				const reply = await this.#post(
 					token,
 					{
 						state: { task: "warm-up" },
@@ -200,11 +203,9 @@ export class SpotlightClient {
 					undefined,
 					WARM_TIMEOUT_MS,
 				);
+				logger.debug("spotlight warm", { ms: reply.ms });
 			})
-			.then(
-				reply => logger.debug("spotlight warm", { ms: reply.ms }),
-				error => logger.debug("spotlight warm failed", { error: String(error) }),
-			);
+			.catch(error => logger.debug("spotlight warm failed", { error: String(error) }));
 		void this.#warming.finally(() => {
 			this.#warming = undefined;
 		});

@@ -44,7 +44,13 @@ import type {
 	SpotlightToolTotals,
 } from "./shared-types";
 import { BOOTSTRAP_MIN_SESSIONS, bootstrapInterval, bootstrapRatio, quantile } from "./spotlight-bootstrap";
-import { artifactIds, parseReadSelection, resolveReadPath, selectedLines } from "./spotlight-ingest";
+import {
+	artifactIds,
+	parseFailureCauses,
+	parseReadSelection,
+	resolveReadPath,
+	selectedLines,
+} from "./spotlight-ingest";
 import {
 	computeAdjusted,
 	computeCoverage,
@@ -294,14 +300,11 @@ function parseStrings(json: string | null): string[] {
 	}
 }
 
-function parseFailureCauses(json: string | null): Record<string, number> | null {
+/** The `sp_failure_causes` column, by ingest's rules; null when empty or unreadable. */
+function failureCausesColumn(json: string | null): Record<string, number> | null {
 	if (!json) return null;
 	try {
-		const value: unknown = JSON.parse(json);
-		if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-		const causes: Record<string, number> = {};
-		for (const [cause, count] of Object.entries(value)) if (typeof count === "number") causes[cause] = count;
-		return causes;
+		return parseFailureCauses(JSON.parse(json));
 	} catch {
 		return null;
 	}
@@ -383,7 +386,7 @@ function toResult(row: ResultRow): Result {
 		hiddenLines: row.hidden_lines,
 		spotlightCalls: row.sp_calls ?? 0,
 		spotlightFailures: row.sp_failures ?? 0,
-		spotlightFailureCauses: parseFailureCauses(row.sp_failure_causes),
+		spotlightFailureCauses: failureCausesColumn(row.sp_failure_causes),
 		spotlightMs: row.sp_ms ?? 0,
 		spotlightUsd: row.sp_cost ?? 0,
 		shapeMs: row.shape_ms,
