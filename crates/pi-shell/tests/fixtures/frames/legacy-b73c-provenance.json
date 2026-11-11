@@ -1,23 +1,23 @@
 {
-  "generated_at": "2026-11-11T03:26:08Z",
+  "generated_at": "2026-11-11T04:11:22Z",
   "writer": "03f6cbc7b1d6193f6c19b29edac225d9880f863d",
   "writer_product_changes": ["legacy-b73c-version.patch"],
-  "crate_version": "18.18.7",
+  "crate_version": "18.18.8",
   "ir_version": 17,
   "frames_version": 30,
-  "build_id": [183, 60, 181, 34, 161, 38, 76, 89, 183, 24, 69, 105, 233, 131, 213, 59, 228, 123, 193, 51, 47, 194, 60, 252, 162, 108, 178, 164, 25, 129, 94, 232],
+  "build_id": [238, 228, 183, 209, 130, 14, 216, 46, 52, 172, 56, 204, 224, 234, 70, 92, 187, 187, 241, 48, 45, 187, 215, 197, 135, 101, 45, 250, 81, 28, 116, 88],
   "source": "legacy-b73c-fixture-writer.rs",
-  "purpose": "Regenerate real pre-explicit-ownership process records with the current 18.18.7 engine identity. The old producer is used unchanged except for its package version; no existing image identity or header is edited.",
+  "purpose": "Regenerate real pre-explicit-ownership process records with the current 18.18.8 engine identity. The old producer is used unchanged except for its package version; no existing image identity or header is edited.",
   "scenarios": {
     "legacy-b73c-owned-self-parent.image": "Frameless root restore from vpid 0 to 1, then a foreground subshell blocked in hold, which produces the formerly ambiguous self-parented Proc record.",
     "legacy-b73c-disowned.image": "A running background function is disowned by pid and externalized at hold.",
     "legacy-b73c-disown-all.image": "A running background function is removed with disown -a and externalized at hold."
   },
   "files": {
-    "legacy-b73c-disown-all.image": {"sha256": "b4d5b1f9617a705bfff2a74662909f1aa7ea53cf5a7175f0550dd35b5978ae0b", "size": 2001},
-    "legacy-b73c-disowned.image": {"sha256": "6f72ffacac41f8cc3fe59d8f62e5af0260c3a6edf25ef9b6ff0dc1cb24fc3092", "size": 2032},
+    "legacy-b73c-disown-all.image": {"sha256": "e32e22d1efabef966e7ec859efe9f069e1bdf9d76bd95b3a4889ee9872ceb62a", "size": 2001},
+    "legacy-b73c-disowned.image": {"sha256": "a331dd3c912362e2d5fcd06f0dc7038c29ca87746118f763a3a45e69be044d5f", "size": 2032},
     "legacy-b73c-fixture-writer.rs": {"sha256": "5afcff59f81bcbdde9338ac94ca644c793976a50c150261098e0983d89ac6ce6", "size": 3652},
-    "legacy-b73c-owned-self-parent.image": {"sha256": "fd364f1550ec41d9b86b26e78f2f9b0cd113f51ee4f591ca4aaddbf17d2d62dd", "size": 1534},
-    "legacy-b73c-version.patch": {"sha256": "0f3c6c5314f92794c5374e3ee38394ff87285e8cbb1f95a13c5133990e341341", "size": 241}
+    "legacy-b73c-owned-self-parent.image": {"sha256": "2351f30a080dd4640607ed811554b466e13a5e051442c76afe0337245ae625fe", "size": 1534},
+    "legacy-b73c-version.patch": {"sha256": "e0d2db659ec627ca85e96939e6639db45c34d7f86f59302d58c55fac28eaa113", "size": 241}
   }
 }

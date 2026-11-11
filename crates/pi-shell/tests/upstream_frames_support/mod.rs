@@ -14,8 +14,10 @@ pub enum Identity {
 // Provenance and writer sources accompany the v30 generation. Never relabel
 // image headers.
 pub fn store(parent_wait: bool, identity: Identity) -> MemStore {
-	let images: [&[u8]; 9] = if parent_wait {
+	let images: [&[u8]; 11] = if parent_wait {
 		[
+			include_bytes!("../fixtures/frames/upstream-v30-18.18.8-parent-wait.image"),
+			include_bytes!("../fixtures/frames/foreign-v30-18.18.8-parent-wait.image"),
 			include_bytes!("../fixtures/frames/upstream-v30-18.18.7-parent-wait.image"),
 			include_bytes!("../fixtures/frames/foreign-v30-18.18.7-parent-wait.image"),
 			include_bytes!("../fixtures/frames/upstream-v30-18.18.2-parent-wait.image"),
@@ -28,6 +30,8 @@ pub fn store(parent_wait: bool, identity: Identity) -> MemStore {
 		]
 	} else {
 		[
+			include_bytes!("../fixtures/frames/upstream-v30-18.18.8-no-wait.image"),
+			include_bytes!("../fixtures/frames/foreign-v30-18.18.8-no-wait.image"),
 			include_bytes!("../fixtures/frames/upstream-v30-18.18.7-no-wait.image"),
 			include_bytes!("../fixtures/frames/foreign-v30-18.18.7-no-wait.image"),
 			include_bytes!("../fixtures/frames/upstream-v30-18.18.2-no-wait.image"),

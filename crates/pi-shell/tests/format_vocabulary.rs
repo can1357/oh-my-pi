@@ -15,21 +15,21 @@ use pi_shell::{
 use serde::{Deserialize, Serialize};
 
 const BASE: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/base-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.8-ir17/base-parent-wait.image");
 const UNKNOWN: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/unknown-root-kept.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.8-ir17/unknown-root-kept.image");
 const UNKNOWN_RECORD: &[u8] = include_bytes!(
-	"fixtures/format-vocabulary/18.18.7-ir17/unknown-root-kept.record"
+	"fixtures/format-vocabulary/18.18.8-ir17/unknown-root-kept.record"
 );
 const UNKNOWN_CHILD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/unknown-subshell-kept.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.8-ir17/unknown-subshell-kept.image");
 const UNKNOWN_CHILD_RECORD: &[u8] = include_bytes!(
-	"fixtures/format-vocabulary/18.18.7-ir17/unknown-subshell-kept.record"
+	"fixtures/format-vocabulary/18.18.8-ir17/unknown-subshell-kept.record"
 );
 const NEWER: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/newer-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.8-ir17/newer-parent-wait.image");
 const FOREIGN: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/foreign-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.8-ir17/foreign-parent-wait.image");
 
 fn records(store: &mut MemStore) -> Vec<Vec<u8>> {
 	let mut records = Vec::new();
@@ -497,6 +497,19 @@ fn previous_build_cores_are_refused_before_records_without_changing_the_store() 
 		include_bytes!("fixtures/frames/upstream-v30-18.18.1-no-wait.image").as_slice(),
 		include_bytes!("fixtures/frames/foreign-v30-18.18.1-parent-wait.image").as_slice(),
 		include_bytes!("fixtures/frames/foreign-v30-18.18.1-no-wait.image").as_slice(),
+		include_bytes!("fixtures/frames/upstream-v30-18.18.7-parent-wait.image").as_slice(),
+		include_bytes!("fixtures/frames/upstream-v30-18.18.7-no-wait.image").as_slice(),
+		include_bytes!("fixtures/frames/foreign-v30-18.18.7-parent-wait.image").as_slice(),
+		include_bytes!("fixtures/frames/foreign-v30-18.18.7-no-wait.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/base-parent-wait.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/foreign-parent-wait.image")
+			.as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/owned-required.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/owned-optional.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/reserved-required.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/unknown-root-kept.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/unknown-subshell-kept.image")
+			.as_slice(),
 		include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/base-parent-wait.image").as_slice(),
 		include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/foreign-parent-wait.image")
 			.as_slice(),
@@ -520,6 +533,7 @@ fn previous_build_cores_are_refused_before_records_without_changing_the_store() 
 	}
 	for image in [
 		include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/newer-parent-wait.image"),
+		include_bytes!("fixtures/format-vocabulary/18.18.7-ir17/newer-parent-wait.image"),
 		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/newer-parent-wait.image"),
 	] {
 		refuse_before_records(image, true);
