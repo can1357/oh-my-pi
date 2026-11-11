@@ -433,6 +433,10 @@ describe("per-call model advertisement", () => {
 		const taskTool = await TaskTool.create(toolSession);
 		const evalTool = new EvalTool(toolSession);
 
+		// Prime the applied signature so the later reapply exercises the
+		// steady-state path instead of a first-ever apply, which always builds.
+		await surface.applyActiveToolsByName(surface.getActiveToolNames());
+
 		const frozen = surface.advertisedPerCallModel;
 		expect(frozen.roles).toEqual([
 			{ role: "default", patterns: ["mock/target"] },
@@ -450,6 +454,13 @@ describe("per-call model advertisement", () => {
 			{ role: "default", patterns: ["mock/edited"] },
 			{ role: "slow", patterns: ["mock/other"] },
 		]);
+		expect(surface.advertisedPerCallModel).toBe(frozen);
+		expect(taskTool.description).toBe(taskDescription);
+		expect(evalTool.description).toBe(evalDescription);
+
+		// An ordinary tool reapply after a config reload must not rebuild the
+		// base prompt or move the descriptions either.
+		await surface.applyActiveToolsByName(surface.getActiveToolNames());
 		expect(surface.advertisedPerCallModel).toBe(frozen);
 		expect(taskTool.description).toBe(taskDescription);
 		expect(evalTool.description).toBe(evalDescription);

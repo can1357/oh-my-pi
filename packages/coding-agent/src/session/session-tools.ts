@@ -2605,6 +2605,7 @@ export class SessionTools {
 		const candidate: PromptSurface = {
 			...this.#derivePromptSurface(),
 			evalToolNames: this.#promptSurface.evalToolNames,
+			perCallModelAdvertisement: this.#promptSurface.perCallModelAdvertisement,
 		};
 		const built = await this.#promptSurfaceScope.run(candidate, () =>
 			rebuildSystemPrompt(roster.toolNames, roster.tools, roster.xdev),
