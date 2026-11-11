@@ -318,6 +318,10 @@ export function matchModelSystemPromptTemplate(
 	return best === undefined ? undefined : templates[best];
 }
 
+/** Bundled default template that per-model templates should be copied from. */
+const REFERENCE_SYSTEM_PROMPT_URL =
+	"https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md";
+
 /**
  * Data fields a `systemPromptTemplates` file must reference: omitting one silently strips that
  * section from the prompt, so a template that drops any of them is rejected instead.
@@ -347,7 +351,7 @@ function assertModelTemplateFields(template: string, templatePath: string): void
 	const missing = REQUIRED_MODEL_TEMPLATE_FIELDS.filter(field => !referenced.has(field));
 	if (missing.length > 0) {
 		throw new Error(
-			`systemPromptTemplates template ${templatePath} is missing required fields: ${missing.map(field => `{{${field}}}`).join(", ")}`,
+			`systemPromptTemplates template ${templatePath} is missing required fields: ${missing.map(field => `{{${field}}}`).join(", ")}. Start from the reference template: ${REFERENCE_SYSTEM_PROMPT_URL}`,
 		);
 	}
 }

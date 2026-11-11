@@ -199,7 +199,7 @@ systemPromptTemplates:
 
 #### Start from the bundled template
 
-Base every per-model template on the bundled default instruction template, [`packages/coding-agent/src/prompts/system/system-prompt.md`](../packages/coding-agent/src/prompts/system/system-prompt.md). Copy that file, then adapt its prose for the target model. It already references every required field below and carries the tool policy, delegation, and workflow guidance a template written from scratch would lose. The [Handlebars template example](#supply-a-handlebars-template) above is not a valid starting point: it lacks required fields. Follow [Migrate the bundled prompt](#migrate-the-bundled-prompt), and diff your copy against the shipped file after each OMP update.
+Base every per-model template on the bundled default instruction template. Reference copy: [`system-prompt.md` on GitHub](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md) (in a checkout: [`packages/coding-agent/src/prompts/system/system-prompt.md`](../packages/coding-agent/src/prompts/system/system-prompt.md)); use the file from the tag matching your installed version. Copy that file, then adapt its prose for the target model. It already references every required field below and carries the tool policy, delegation, and workflow guidance a template written from scratch would lose. The [Handlebars template example](#supply-a-handlebars-template) above is not a valid starting point: it lacks required fields. Follow [Migrate the bundled prompt](#migrate-the-bundled-prompt), and diff your copy against the shipped file after each OMP update.
 
 #### Matching
 
@@ -220,7 +220,7 @@ Templates receive the same Handlebars fields as `SYSTEM_TEMPLATE.md`. Each field
 - `{{alwaysApplyRules}}`
 - `{{internalUrls}}`
 
-A reference counts anywhere in the template, including a branch that never renders; a Handlebars comment does not count. A template missing any of them is rejected with an error naming the file and the missing fields.
+A reference counts anywhere in the template, including a branch that never renders; a Handlebars comment does not count. A template missing any of them is rejected with an error naming the file, the missing fields, and the reference template URL.
 
 #### Runtime behavior
 
@@ -275,7 +275,7 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 | Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                         |
 | Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                       |
 | Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                              |
-| Replace the default instruction block for specific models                  | `systemPromptTemplates` setting                                                                                        |
+| Replace the default instruction block for specific models                  | `systemPromptTemplates` setting, starting from a copy of [`system-prompt.md`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md) |
 | Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                      |
 | Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                               |
 | Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                      |
