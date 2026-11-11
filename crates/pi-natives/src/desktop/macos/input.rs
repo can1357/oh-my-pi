@@ -1612,7 +1612,7 @@ thread_local! {
 	/// The front process a request read before its first call to the target's
 	/// application, which every [`EntryFront`] of the request takes as its own
 	/// ([`pin_entry_front`]).
-	static PINNED_FRONT: Cell<Option<Option<libc::pid_t>>> = const { Cell::new(None) };
+	static PINNED_FRONT: Cell<Option<EntryFront>> = const { Cell::new(None) };
 }
 
 /// Holds the front process [`pin_entry_front`] read until it drops.
@@ -1634,7 +1634,7 @@ pub(crate) fn pin_entry_front() -> PinnedFront {
 }
 
 fn pin_front_with(front: impl FnOnce() -> Option<libc::pid_t>) -> PinnedFront {
-	PINNED_FRONT.set(Some(front()));
+	PINNED_FRONT.set(Some(EntryFront(front())));
 	PinnedFront(())
 }
 
@@ -1710,7 +1710,7 @@ fn aimed_row_check(event: &PointerEvent) -> impl Fn() -> CoreResult<()> + use<> 
 
 impl EntryFront {
 	pub(super) fn now() -> Self {
-		Self(PINNED_FRONT.get().unwrap_or_else(skylight::front_pid))
+		PINNED_FRONT.get().unwrap_or_else(|| Self(skylight::front_pid()))
 	}
 
 	/// Whether `pid` was behind another application as the input began.
@@ -1735,7 +1735,7 @@ impl EntryFront {
 		front: impl FnOnce() -> Option<libc::pid_t>,
 		probe: impl FnOnce() -> CoreResult<T>,
 	) -> CoreResult<(Self, T)> {
-		let entry = Self(PINNED_FRONT.get().unwrap_or_else(front));
+		let entry = PINNED_FRONT.get().unwrap_or_else(|| Self(front()));
 		probe().map(|value| (entry, value))
 	}
 
