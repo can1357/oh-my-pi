@@ -29,6 +29,7 @@
 - The `ask` tool now submits the form's current values when its timeout expires; updated settings and documentation reflect this behavior.
 - The `read` tool loads detailed format selectors and URI sub-path syntax on demand, reducing the default request description while retaining inline details when `read` is disabled.
 - The default system prompt and tool descriptions have been streamlined, with guidance moved closer to the tools and detailed task/procedure references provided when relevant.
+- The `bash` pseudo view renders words built from literals and expansions as f-strings (`f"repos/org/{r}/rulesets"`) instead of `concat(...)` calls.
 
 ### Fixed
 
