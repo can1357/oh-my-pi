@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed `grep` tool results in ANSI and native Tern views to show a `binary matches` warning on both zero-match and matching searches ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
-- Fixed working-row shimmer freezing without synchronized output and live background-job labels staying stale when the loader uses a fixed interrupt glyph.
+- Fixed working-row shimmer freezing without synchronized output and live background-job labels staying stale when the loader uses a fixed interrupt glyph ([#19041](https://github.com/can1357/oh-my-pi/pull/19041) by [@cpu23](https://github.com/cpu23)).
 
 ## [18.19.0] - 2026-11-12
 
