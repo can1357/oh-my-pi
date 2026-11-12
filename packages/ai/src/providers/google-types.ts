@@ -173,6 +173,13 @@ export interface UsageMetadata {
 	thoughtsTokenCount?: number;
 	totalTokenCount?: number;
 	cachedContentTokenCount?: number;
+	/**
+	 * Not sent by Google. Set by `followGoogleContinuations` on a generation split into
+	 * segments, where the counts above are summed across the segments' requests (each is
+	 * billed): the current segment's own `totalTokenCount`, whose prompt is the original
+	 * prompt plus all earlier output, so it is the conversation's real size.
+	 */
+	contextTokenCount?: number;
 }
 
 /** Prompt-level safety feedback; `blockReason` is set (with no candidates) when the prompt is blocked. */

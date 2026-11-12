@@ -137,7 +137,15 @@ function expectOneGeneration(result: AssistantMessage): void {
 	expect(thinking.map(block => block.thinking)).toEqual(["Counting the residues."]);
 	const text = result.content.filter(block => block.type === "text");
 	expect(text.map(block => block.text)).toEqual(["42"]);
-	expect(result.usage).toMatchObject({ input: 120, output: 155, totalTokens: 275, reasoningTokens: 150 });
+	// Cost counts every request; the conversation's size is what one unsplit request would
+	// report, the second segment's own total (its prompt already holds the first segment).
+	expect(result.usage).toMatchObject({
+		input: 120,
+		output: 155,
+		totalTokens: 275,
+		reasoningTokens: 150,
+		contextTokens: 165,
+	});
 }
 
 describe("Google output continuation (Gemini API path)", () => {

@@ -562,6 +562,7 @@ export function mapGoogleUsage(metadata: UsageMetadata): Usage {
 		cacheWrite: 0,
 		totalTokens: total,
 		...(thinking > 0 ? { reasoningTokens: thinking } : {}),
+		...(metadata.contextTokenCount !== undefined ? { contextTokens: metadata.contextTokenCount } : {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
@@ -574,12 +575,20 @@ const USAGE_COUNTS = [
 	"cachedContentTokenCount",
 ] as const;
 
+/**
+ * Usage of a generation split into segments: every count is summed, since each segment's
+ * request is billed in full, and `contextTokenCount` is the latest segment's own total.
+ * That segment's prompt is the original prompt plus all earlier output, so its total is
+ * what one unsplit request would report; the summed total re-counts the earlier output
+ * once per later segment and would make the conversation look several times its size.
+ */
 function addGoogleUsage(earlier: UsageMetadata, segment: UsageMetadata): UsageMetadata {
 	const sum: UsageMetadata = { ...segment };
 	for (const key of USAGE_COUNTS) {
 		if (earlier[key] !== undefined || segment[key] !== undefined)
 			sum[key] = (earlier[key] ?? 0) + (segment[key] ?? 0);
 	}
+	sum.contextTokenCount = segment.totalTokenCount;
 	return sum;
 }
 
@@ -590,10 +599,13 @@ function addGoogleUsage(earlier: UsageMetadata, segment: UsageMetadata): UsageMe
  * `finishReason: CONTINUATION` and a `continuationToken`; resending the same request with
  * that token streams the next segment. `resume` sends that request. Chunks pass through
  * as they arrive, except that a CONTINUATION finish carrying a token is dropped (the next
- * segment follows it), so the consumer sees one generation, and usage is summed across
- * segments: each segment reports only its own request, whose prompt is the original prompt
- * plus all output so far.
+ * segment follows it), so the consumer sees one generation. From the second segment on,
+ * usage is summed across segments (see `addGoogleUsage`): each segment reports only its
+ * own request, whose prompt is the original prompt plus all output so far.
  * A CONTINUATION without a token is passed on and ends the generation as cut short.
+ * Each resume resends the request unchanged, so Google caps the whole generation at its
+ * `maxOutputTokens`: the segment that reaches it ends with MAX_TOKENS (verified live on
+ * the Gemini API, ending at exactly the requested total), which passes through as `length`.
  * Ref: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
  */
 export async function* followGoogleContinuations<C>(
@@ -607,7 +619,8 @@ export async function* followGoogleContinuations<C>(
 	resume: (continuationToken: string) => Promise<AsyncIterable<C>>,
 ): AsyncGenerator<C> {
 	let segment: AsyncIterable<C> | undefined = firstSegment;
-	let earlierUsage: UsageMetadata = {};
+	// Unset until a segment ends in CONTINUATION, so an unsplit generation keeps Google's usage as sent.
+	let earlierUsage: UsageMetadata | undefined;
 	while (segment) {
 		let continuationToken: string | undefined;
 		let segmentUsage: UsageMetadata | undefined;
@@ -620,13 +633,13 @@ export async function* followGoogleContinuations<C>(
 			}
 			if (response?.usageMetadata) {
 				segmentUsage = response.usageMetadata;
-				response.usageMetadata = addGoogleUsage(earlierUsage, segmentUsage);
+				if (earlierUsage) response.usageMetadata = addGoogleUsage(earlierUsage, segmentUsage);
 			}
 			yield chunk;
 		}
 		segment = undefined;
 		if (continuationToken) {
-			if (segmentUsage) earlierUsage = addGoogleUsage(earlierUsage, segmentUsage);
+			earlierUsage = addGoogleUsage(earlierUsage ?? {}, segmentUsage ?? {});
 			segment = await resume(continuationToken);
 		}
 	}
