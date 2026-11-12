@@ -673,6 +673,91 @@ describe("Generate E2E Tests", () => {
 			}
 		});
 
+		it("sends Vertex Mistral raw-predict requests as Mistral chat-completions (#19010)", async () => {
+			const envKeys = [
+				"GOOGLE_CLOUD_PROJECT",
+				"GCP_PROJECT",
+				"GCLOUD_PROJECT",
+				"GOOGLE_VERTEX_LOCATION",
+				"GOOGLE_CLOUD_LOCATION",
+				"VERTEX_LOCATION",
+				"GOOGLE_CLOUD_API_KEY",
+				"GOOGLE_APPLICATION_CREDENTIALS",
+				"APPDATA",
+			] as const;
+			const originalEnv = envKeys.map(key => [key, Bun.env[key]] as const);
+			// Force the metadata-server token path; see the Claude rawPredict test above.
+			const absentAdcHome = path.join(os.tmpdir(), `vertex-adc-absent-mistral-${Date.now()}`);
+			const homedirSpy = spyOn(os, "homedir").mockReturnValue(absentAdcHome);
+			const model: Model<"openai-completions"> = buildModel({
+				id: "mistral-small-2503",
+				name: "Mistral Small 3.1 (25.03)",
+				api: "openai-completions",
+				provider: "google-vertex",
+				baseUrl:
+					"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0.1, output: 0.3, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 128_000,
+			});
+			const captured = Promise.withResolvers<{ url: string; authorization: string | null; body: unknown }>();
+
+			try {
+				__resetVertexTokenCache();
+				for (const key of envKeys) delete Bun.env[key];
+				Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
+				Bun.env.GOOGLE_VERTEX_LOCATION = "europe-west4";
+				Bun.env.APPDATA = absentAdcHome;
+
+				const events = stream(
+					model,
+					{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
+					{
+						apiKey: "<authenticated>",
+						maxTokens: 256,
+						fetch: async (input, init) => {
+							const url = input instanceof Request ? input.url : input.toString();
+							if (
+								url ===
+								"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+							) {
+								return new Response(JSON.stringify({ access_token: "vertex-token", expires_in: 3600 }));
+							}
+							const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+							const bodyText = input instanceof Request ? await input.clone().text() : String(init?.body ?? "");
+							captured.resolve({ url, authorization: headers.get("authorization"), body: JSON.parse(bodyText) });
+							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), { status: 400 });
+						},
+					},
+				);
+
+				for await (const _event of events) {
+				}
+
+				const request = await captured.promise;
+				// The SDK's `/chat/completions` suffix is folded into the raw-predict verb,
+				// and the Anthropic-only body rewrite (drop `model`, add
+				// `anthropic_version`) must not touch the Mistral payload.
+				expect(request.url).toBe(
+					"https://europe-west4-aiplatform.googleapis.com/v1/projects/vertex-project/locations/europe-west4/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
+				);
+				expect(request.authorization).toBe("Bearer vertex-token");
+				const body = request.body as Record<string, unknown>;
+				expect(body).toMatchObject({ model: "mistral-small-2503", stream: true, max_tokens: 256 });
+				expect(body.anthropic_version).toBeUndefined();
+				expect(body.max_completion_tokens).toBeUndefined();
+			} finally {
+				__resetVertexTokenCache();
+				homedirSpy.mockRestore();
+				for (const [key, value] of originalEnv) {
+					if (value === undefined) delete Bun.env[key];
+					else Bun.env[key] = value;
+				}
+			}
+		});
+
 		it("routes impersonated_service_account ADC through IAM to the Vertex request", async () => {
 			const originalProject = Bun.env.GOOGLE_CLOUD_PROJECT;
 			const originalGcpProject = Bun.env.GCP_PROJECT;

@@ -45,6 +45,14 @@ const googleVertexModelsDevPayload = {
 				limit: { context: 200_000, output: 64_000 },
 				provider: { npm: "@ai-sdk/google-vertex/anthropic" },
 			},
+			"mistral-small-2503": {
+				name: "Mistral Small 3.1 (25.03)",
+				tool_call: true,
+				reasoning: false,
+				modalities: { input: ["text", "image"] },
+				limit: { context: 128_000, output: 128_000 },
+				provider: { npm: "@ai-sdk/mistral" },
+			},
 			"gemini-embedding-001": {
 				name: "Gemini Embedding 001",
 				tool_call: false,
@@ -82,6 +90,7 @@ describe("google-vertex model catalog", () => {
 			"gemini-3.5-flash",
 			"deepseek-ai/deepseek-v3.2-maas",
 			"claude-sonnet-4@20250514",
+			"mistral-small-2503",
 		]);
 
 		const gemini = models.find(model => model.id === "gemini-3.5-flash");
@@ -102,6 +111,16 @@ describe("google-vertex model catalog", () => {
 			"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
 		);
 		expect(claude?.reasoning).toBe(true);
+
+		// Bare-id `@ai-sdk/mistral` rows must not fall through to Gemini
+		// GenerateContent (`publishers/google/...:streamGenerateContent`, #19010).
+		const mistral = models.find(model => model.id === "mistral-small-2503");
+		expect(mistral?.api).toBe("openai-completions");
+		expect(mistral?.baseUrl).toBe(
+			"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
+		);
+		if (!mistral) throw new Error("mistral-small-2503 was not mapped");
+		expect(buildModel(mistral).compat).toMatchObject({ requiresMistralToolIds: true, maxTokensField: "max_tokens" });
 	});
 
 	it("uses the bundled Vertex catalog without ADC project discovery", async () => {

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
+- Fixed `google-vertex/mistral-small-2503`, `google-vertex/mistral-medium-3`, and `google-vertex/codestral-2` failing with 404 by routing them to Vertex AI's Mistral raw-predict endpoint instead of Gemini `streamGenerateContent` ([#19010](https://github.com/can1357/oh-my-pi/issues/19010)).
 
 ## [18.19.0] - 2026-11-12
 

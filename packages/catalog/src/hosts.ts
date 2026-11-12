@@ -50,7 +50,8 @@ export const KNOWN_HOSTS = {
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
 	xai: { providers: ["xai", "xai-oauth"], urlMarkers: ["api.x.ai"] },
-	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai"] },
+	/** Includes Vertex AI's Mistral partner raw-predict path, which serves the Mistral chat-completions wire. */
+	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai", "/publishers/mistralai/"] },
 	together: { providers: ["together"], urlMarkers: ["api.together.xyz"] },
 	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
 	/** URL-only on purpose: the `fireworks`/`firepass` providers route per-model and not every model is Fireworks-shaped. */
@@ -163,9 +164,14 @@ export function isVertexExpressOpenAIUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/endpoints/openapi");
 }
 
-/** Vertex AI Anthropic raw-predict endpoints (`:streamRawPredict` / `:rawPredict`). */
+/** Vertex AI partner-model raw-predict endpoints (`:streamRawPredict` / `:rawPredict`), e.g. Anthropic or Mistral. */
 export function isVertexRawPredictUrl(baseUrl: string): boolean {
 	return baseUrl.includes(":streamRawPredict") || baseUrl.includes(":rawPredict");
+}
+
+/** Vertex AI Anthropic raw-predict endpoints, whose body carries `anthropic_version` instead of `model`. */
+export function isVertexAnthropicRawPredictUrl(baseUrl: string): boolean {
+	return isVertexRawPredictUrl(baseUrl) && baseUrl.includes("/publishers/anthropic/");
 }
 
 /** Azure OpenAI deployment-scoped path (`…/deployments/<name>/…`). */
