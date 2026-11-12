@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The install script now prints the exact command for your shell (zsh, bash, fish, or sh) to add the install directory to your PATH
+- The install script now prints the exact command for your shell (zsh, bash, fish, or sh) to add the install directory to your PATH ([#19099](https://github.com/can1357/oh-my-pi/pull/19099) by [@wescopeland](https://github.com/wescopeland))
 
 ## [18.20.0] - 2026-11-12
 
