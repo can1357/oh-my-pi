@@ -48,18 +48,13 @@ describe("secret placeholders", () => {
 		expect(otherKey).not.toBe(first);
 	});
 
-	it("drops a friendly name that would reveal the secret or match a rule", () => {
+	it("drops a friendly name that spells out its own secret", () => {
 		const obfuscator = new SecretObfuscator(
-			[
-				{ type: "plain", content: "SHOWNLABEL123", friendlyName: "SHOWNLABEL123" },
-				{ type: "plain", content: "another-long-secret", friendlyName: "tok_abc123" },
-				{ type: "regex", content: "tok_[a-z0-9]+" },
-			],
+			[{ type: "plain", content: "shown-label-123", friendlyName: "Shown Label 123" }],
 			KEY,
 		);
-		const output = obfuscator.obfuscate("SHOWNLABEL123 another-long-secret");
 
-		expect(output).toMatch(new RegExp(`^\\$\\$${WORDS}\\$\\$ \\$\\$${WORDS}\\$\\$$`));
+		expect(obfuscator.obfuscate("shown-label-123")).toMatch(new RegExp(`^\\$\\$${WORDS}\\$\\$$`));
 	});
 
 	it("does not restore tokens in the retired hash format", () => {

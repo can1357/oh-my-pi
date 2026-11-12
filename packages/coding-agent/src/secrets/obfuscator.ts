@@ -3,13 +3,11 @@ import { deepWalkStrings } from "./json-strings";
 import {
 	buildPlaceholder,
 	defaultPlaceholderKey,
+	labelShowsSecret,
 	MIN_OBFUSCATE_SECRET_LEN,
 	PLACEHOLDER_RE,
 	PLACEHOLDER_WORDS,
 	placeholderWords,
-	SecretValueSet,
-	sanitizedLabelCollidesWithSecret,
-	sanitizeForCollisionCheck,
 	sanitizeSecretFriendlyName,
 } from "./placeholder";
 import { compileSecretRegex, type SecretPattern } from "./regex";
@@ -74,8 +72,6 @@ export class SecretObfuscator {
 	readonly #secretByWords = new Map<string, string>();
 	/** Secret → its placeholder. */
 	readonly #placeholderBySecret = new Map<string, string>();
-	/** Every configured literal value; a friendly name that would expose one is dropped. */
-	readonly #configuredSecretValues = new SecretValueSet();
 	#key: string | undefined;
 	#keyProvider: (() => string) | undefined;
 	readonly #hasAny: boolean;
@@ -94,7 +90,6 @@ export class SecretObfuscator {
 	#previousBatchNativeScans: Map<string, NativeScan> | undefined;
 
 	constructor(entries: SecretEntry[], key: string | (() => string) = defaultPlaceholderKey()) {
-		for (const entry of entries) if (entry.type === "plain") this.#configuredSecretValues.add(entry.content);
 		const regexEntries: CompiledRegexEntry[] = [];
 		for (const entry of entries) {
 			if (entry.type !== "regex") continue;
@@ -374,30 +369,11 @@ export class SecretObfuscator {
 		for (let count = PLACEHOLDER_WORDS + 1; this.#secretByWords.has(words); count++) {
 			words = placeholderWords(key, secret, count);
 		}
-		const placeholder = buildPlaceholder(words, this.#safeFriendlyName(friendlyName, secret));
+		const label = friendlyName === undefined || labelShowsSecret(friendlyName, secret) ? undefined : friendlyName;
+		const placeholder = buildPlaceholder(words, label && sanitizeSecretFriendlyName(label));
 		this.#secretByWords.set(words, secret);
 		this.#placeholderBySecret.set(secret, placeholder);
 		return placeholder;
-	}
-
-	/**
-	 * The sanitized friendly name, unless the model-visible label would expose
-	 * a secret: this one, any configured literal, or anything a regex entry
-	 * matches. The secret then gets a bare placeholder.
-	 */
-	#safeFriendlyName(friendlyName: string | undefined, secret: string): string | undefined {
-		const sanitized = friendlyName === undefined ? undefined : sanitizeSecretFriendlyName(friendlyName);
-		if (sanitized === undefined || friendlyName === undefined) return undefined;
-		const label = sanitizeForCollisionCheck(friendlyName);
-		if (sanitizedLabelCollidesWithSecret(label, sanitizeForCollisionCheck(secret))) return undefined;
-		if (this.#configuredSecretValues.collidesWithLabel(label)) return undefined;
-		for (const entry of this.#regexEntries) {
-			entry.regex.lastIndex = 0;
-			const matches = entry.regex.test(friendlyName);
-			entry.regex.lastIndex = 0;
-			if (matches) return undefined;
-		}
-		return sanitized;
 	}
 
 	/** One-way replacement for a configured value or a regex match without a custom replacement. */
@@ -420,7 +396,6 @@ export class SecretObfuscator {
 	 */
 	#setKey(key: string): void {
 		this.#key = key;
-		this.#configuredSecretValues.add(key);
 		this.#addLiteral(key, this.#replacementFor(key));
 	}
 

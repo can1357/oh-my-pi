@@ -82,7 +82,7 @@ Each entry in the array has these fields:
   friendlyName: GitHub Token
 ```
 
-This produces placeholders shaped like `$$GitHubToken_correctHorseStapleBattery$$`. The friendly name keeps its letters and digits (case preserved), is capped at 32 characters, and is omitted if nothing remains. Invalid optional `friendlyName` metadata does not disable the secret entry; the secret still obfuscates with an unlabeled placeholder. A label is also dropped if it would reveal its own secret or a configured literal, or if a configured regex matches it. The label is cosmetic: a placeholder is identified by its words.
+This produces placeholders shaped like `$$GitHubToken_correctHorseStapleBattery$$`. The friendly name keeps its letters and digits (case preserved), is capped at 32 characters, and is omitted if nothing remains. Invalid optional `friendlyName` metadata does not disable the secret entry; the secret still obfuscates with an unlabeled placeholder. The label is cosmetic: a placeholder is identified by its words. The label is shown to the model as written, so never put a secret in it; a label that spells out its own secret is dropped.
 
 Native Responses replay plaintext is obfuscated too, including message text, tool arguments/results, and file/web-search text. Dynamic definitions in `mcp_list_tools`, `tool_search_output`, and `additional_tools` also redact tool/namespace descriptions, shell skill descriptions, MCP annotations, and schema descriptive annotations and examples. Schema constraints (including `enum`/`const`), execution defaults, unknown schema extensions, identifiers, authentication/routing settings, and grammars remain unchanged and outside text redaction. Static `context.tools`, system prompts, and image/file bytes are unchanged.
 

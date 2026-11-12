@@ -67,113 +67,17 @@ export function sanitizeSecretFriendlyName(name: string): string | undefined {
 }
 
 /**
- * Normalize a secret value into the same alnum-only, uppercased shape a
- * friendly-name label or placeholder prefix is sanitized into, so comparing a
- * raw (possibly lowercase/punctuated) secret value against already-sanitized,
- * model-visible text does not miss a case- or separator-only variant. Unlike
- * `sanitizeSecretFriendlyName` this never truncates and never signals "empty"
- * via `undefined` — callers already guard on `.length > 0` before comparing.
+ * Whether a friendly name would show its own secret: compared as letters and
+ * digits, ignoring case, the label contains the secret or, at the display
+ * cap, is its prefix. Catches a secret pasted into its own label; short
+ * generic names like "TOKEN" stay.
  */
-export function sanitizeForCollisionCheck(value: string): string {
-	return value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-}
-
-// A label leaks a secret either by containing the whole normalized secret or,
-// once it reaches the public display cap, by being the secret's visible prefix.
-// Shorter names like "TOKEN" can still be intentional generic labels.
-export function sanitizedLabelCollidesWithSecret(sanitizedLabel: string, sanitizedSecret: string): boolean {
-	if (sanitizedSecret.length === 0) return false;
-	if (sanitizedLabel.includes(sanitizedSecret)) return true;
-	return sanitizedLabel.length >= MAX_FRIENDLY_NAME_LEN && sanitizedSecret.startsWith(sanitizedLabel);
-}
-
-/**
- * Raw secret values plus an index of their collision-normalized forms, so
- * {@link SecretValueSet.collidesWithLabel} answers "does any member leak through
- * this label?" without re-normalizing and scanning every member per label.
- */
-export class SecretValueSet extends Set<string> {
-	/** Normalized value → number of raw members normalizing to it. */
-	#normalized = new Map<string, number>();
-	/** Normalized length → number of distinct normalized values with that length. */
-	#lengths = new Map<number, number>();
-	/** First MAX_FRIENDLY_NAME_LEN chars → normalized values at least that long (display-cap prefix leaks). */
-	#heads = new Map<string, Set<string>>();
-
-	constructor(values?: Iterable<string>) {
-		// Populate after super(): `Set`'s iterable constructor would call `add`
-		// before this subclass's private fields exist.
-		super();
-		if (values) for (const value of values) this.add(value);
-	}
-
-	override add(value: string): this {
-		if (super.has(value)) return this;
-		super.add(value);
-		const normalized = sanitizeForCollisionCheck(value);
-		if (normalized.length === 0) return this;
-		const count = this.#normalized.get(normalized) ?? 0;
-		this.#normalized.set(normalized, count + 1);
-		if (count > 0) return this;
-		this.#lengths.set(normalized.length, (this.#lengths.get(normalized.length) ?? 0) + 1);
-		if (normalized.length >= MAX_FRIENDLY_NAME_LEN) {
-			const head = normalized.slice(0, MAX_FRIENDLY_NAME_LEN);
-			let bucket = this.#heads.get(head);
-			if (bucket === undefined) {
-				bucket = new Set();
-				this.#heads.set(head, bucket);
-			}
-			bucket.add(normalized);
-		}
-		return this;
-	}
-
-	override delete(value: string): boolean {
-		if (!super.delete(value)) return false;
-		const normalized = sanitizeForCollisionCheck(value);
-		if (normalized.length === 0) return true;
-		const count = this.#normalized.get(normalized)!;
-		if (count > 1) {
-			this.#normalized.set(normalized, count - 1);
-			return true;
-		}
-		this.#normalized.delete(normalized);
-		const lengthCount = this.#lengths.get(normalized.length)!;
-		if (lengthCount > 1) this.#lengths.set(normalized.length, lengthCount - 1);
-		else this.#lengths.delete(normalized.length);
-		if (normalized.length >= MAX_FRIENDLY_NAME_LEN) {
-			const head = normalized.slice(0, MAX_FRIENDLY_NAME_LEN);
-			const bucket = this.#heads.get(head)!;
-			bucket.delete(normalized);
-			if (bucket.size === 0) this.#heads.delete(head);
-		}
-		return true;
-	}
-
-	override clear(): void {
-		super.clear();
-		this.#normalized.clear();
-		this.#lengths.clear();
-		this.#heads.clear();
-	}
-
-	/** Same answer as `sanitizedLabelCollidesWithSecret(label, sanitizeForCollisionCheck(v))` for any member `v`. */
-	collidesWithLabel(sanitizedLabel: string): boolean {
-		if (this.#normalized.size === 0) return false;
-		const labelLength = sanitizedLabel.length;
-		for (const length of this.#lengths.keys()) {
-			for (let start = 0; start + length <= labelLength; start++) {
-				if (this.#normalized.has(sanitizedLabel.slice(start, start + length))) return true;
-			}
-		}
-		if (labelLength < MAX_FRIENDLY_NAME_LEN) return false;
-		const bucket = this.#heads.get(sanitizedLabel.slice(0, MAX_FRIENDLY_NAME_LEN));
-		if (bucket === undefined) return false;
-		for (const normalized of bucket) {
-			if (normalized.startsWith(sanitizedLabel)) return true;
-		}
-		return false;
-	}
+export function labelShowsSecret(friendlyName: string, secret: string): boolean {
+	const label = friendlyName.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+	const value = secret.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+	if (value.length === 0) return false;
+	if (label.includes(value)) return true;
+	return label.length >= MAX_FRIENDLY_NAME_LEN && value.startsWith(label.slice(0, MAX_FRIENDLY_NAME_LEN));
 }
 
 /**
