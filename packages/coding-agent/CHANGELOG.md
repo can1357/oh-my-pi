@@ -13,7 +13,7 @@
 - `edit.modelVariants` now picks the longest matching model pattern instead of the first, so a specific key like `openai/gpt-5` wins over `gpt` whatever the config order ([#17835](https://github.com/can1357/oh-my-pi/pull/17835) by [@DeprecatedLuke](https://github.com/DeprecatedLuke))
 
 ### Fixed
-
+- Isolated task branches no longer revert baseline commits when an agent starts its commit history from an older revision of a dirty checkout ([#18958](https://github.com/can1357/oh-my-pi/issues/18958))
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
 - An extension provider with an `oauth.modifyModels` hook no longer loads the whole model catalog at registration while that provider has no login ([#18821](https://github.com/can1357/oh-my-pi/pull/18821) by [@iliaal](https://github.com/iliaal))
 - Resuming an old session (`--resume`, `/resume`) no longer reads every later session's transcript in its directory to look for a continuation ([#18952](https://github.com/can1357/oh-my-pi/pull/18952) by [@iliaal](https://github.com/iliaal))

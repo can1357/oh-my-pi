@@ -1433,6 +1433,52 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(fixture).toContain("LINE5-AGENT-WITH-MESSAGE");
 	});
 
+	async function prepareOlderBaseline() {
+		const ancestor = await runGit(parent, ["rev-parse", "HEAD"]);
+		await fs.writeFile(path.join(parent, "added-at-baseline.txt"), "keep this file\n");
+		await runGit(parent, ["add", "added-at-baseline.txt"]);
+		await runGit(parent, ["commit", "-q", "-m", "add baseline file"]);
+		await fs.rm(isolation, { recursive: true, force: true });
+		await fs.cp(parent, isolation, { recursive: true });
+		await fs.writeFile(path.join(parent, "user-wip.txt"), "leave uncommitted\n");
+		await fs.writeFile(path.join(isolation, "user-wip.txt"), "leave uncommitted\n");
+		const baseline = await captureBaseline(parent);
+		await runGit(isolation, ["checkout", "-q", "-b", "agent-work", ancestor]);
+		return baseline;
+	}
+
+	it("keeps baseline commits when a dirty-baseline agent branches from an older commit", async () => {
+		const baseline = await prepareOlderBaseline();
+		await fs.writeFile(path.join(isolation, "EXP_CLEAN_COMMIT.txt"), "agent change\n");
+		await runGit(isolation, ["add", "EXP_CLEAN_COMMIT.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "change fixture"]);
+
+		const result = await commitToBranch(isolation, baseline, "older-parent", undefined);
+		expect(result?.branchName).toBe("omp/task/older-parent");
+		expect(
+			(await runGit(parent, ["diff", "--name-only", baseline.root.headCommit, result!.branchName!]))
+				.split("\n")
+				.filter(Boolean),
+		).toEqual(["EXP_CLEAN_COMMIT.txt"]);
+		expect(await runGit(parent, ["show", `${result!.branchName!}:added-at-baseline.txt`])).toBe("keep this file");
+		const merge = await mergeTaskBranches(parent, [
+			{ branchName: result!.branchName!, taskId: "older-parent", baseSha: result!.baseSha! },
+		]);
+		expect(merge.failed).toEqual([]);
+		expect(await fs.readFile(path.join(parent, "EXP_CLEAN_COMMIT.txt"), "utf8")).toBe("agent change\n");
+		expect(await fs.readFile(path.join(parent, "added-at-baseline.txt"), "utf8")).toBe("keep this file\n");
+	});
+
+	it("does not capture an older baseline's removals when the agent only commits WIP", async () => {
+		const baseline = await prepareOlderBaseline();
+		await runGit(isolation, ["add", "user-wip.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "commit baseline WIP"]);
+
+		const result = await commitToBranch(isolation, baseline, "older-wip-only", undefined);
+		expect(result?.branchName).toBeUndefined();
+		expect(await runGit(parent, ["show", "HEAD:added-at-baseline.txt"])).toBe("keep this file");
+	});
+
 	it("merges a committed agent edit beside unrelated dirty-parent lines", async () => {
 		const parentLines = [
 			"line1",

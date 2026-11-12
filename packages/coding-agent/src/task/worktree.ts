@@ -864,10 +864,26 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 	// cannot read objects created only inside isolation.
 	await writeSyntheticTree(opts.repoRoot, baselineSha, baselineWip);
 	const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, baselineWip);
+	const firstDetails = agentCommits[0] ? await isolationRepo.commitDetails(agentCommits[0]) : undefined;
+	const firstParentSha = firstDetails ? firstDetails.parents[0] : opts.isolationHead;
+	if (!firstParentSha) throw new Error(`Cannot replay root commit ${agentCommits[0]} for task ${opts.taskId}`);
 	let tip = baselineSha;
 	let previousFilteredTree = baselineSha;
+	if (firstParentSha !== baselineSha) {
+		// The first agent commit can branch from before the baseline. Compare
+		// filtered parent and child states so older baseline changes are never
+		// interpreted as part of that agent commit.
+		const parentStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${firstParentSha}^{tree}`);
+		previousFilteredTree = await patchTree(
+			opts.repoRoot,
+			baselineSha,
+			opts.taskId,
+			parentStatePatch,
+			opts.baseline.root,
+		);
+	}
 
-	for (const commitSha of agentCommits) {
+	for (const [index, commitSha] of agentCommits.entries()) {
 		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
 		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
 		// filtered tree through `patchTree` with that WIP context: hunks that
@@ -884,7 +900,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		);
 		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
 		if (commitPatchText.trim()) {
-			const details = await isolationRepo.commitDetails(commitSha);
+			const details = index === 0 && firstDetails ? firstDetails : await isolationRepo.commitDetails(commitSha);
 			tip = await commitPatch(
 				opts.repoRoot,
 				tip,
@@ -896,7 +912,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		}
 		previousFilteredTree = currentFilteredTree;
 	}
-	if (tip === baselineSha) {
+	if (tip === baselineSha && firstParentSha === baselineSha) {
 		// No filtered commit landed. Synthesising `HEAD + rootPatch` fails
 		// whenever rootPatch's WIP context can't be applied to a HEAD-only
 		// index (untracked WIP + agent modifies, staged-new WIP + agent
