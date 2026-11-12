@@ -10,7 +10,7 @@
  * bootstrapped the way `omp cleanse` does it.
  */
 import * as path from "node:path";
-import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { getProjectDir, logger, ptree } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveModelFromSettings } from "../config/model-resolver";
 import { Settings } from "../config/settings";
@@ -142,14 +142,20 @@ async function createWorkloadSession(
  *
  * A spawn that never starts (missing executable, unexecutable file) is a
  * failed attempt rather than a thrown error, so it goes through `retries` and
- * `on_failure` like any non-zero exit.
+ * `on_failure` like any non-zero exit. Aborting the run terminates the child's
+ * process tree so cancelled shell work stops mutating the workspace.
  */
-async function runShellStep(step: WorkloadStep, scope: TemplateScope, cwd: string): Promise<StepAttempt> {
+async function runShellStep(
+	step: WorkloadStep,
+	scope: TemplateScope,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<StepAttempt> {
 	const argv = (step.run ?? []).map(argument => interpolate(argument, scope));
 	const started = Bun.nanoseconds();
-	let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+	let result: ptree.ExecResult;
 	try {
-		child = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+		result = await ptree.exec(argv, { cwd, signal, stderr: "full", allowNonZero: true, allowAbort: true });
 	} catch (err) {
 		return {
 			ok: false,
@@ -157,9 +163,12 @@ async function runShellStep(step: WorkloadStep, scope: TemplateScope, cwd: strin
 			error: `spawn failed: ${err instanceof Error ? err.message : String(err)}`,
 		};
 	}
-	const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-	const exitCode = await child.exited;
 	const durationMs = Math.round((Bun.nanoseconds() - started) / 1_000_000);
+	const { stdout, stderr } = result;
+	if (result.exitError?.aborted) {
+		return { ok: false, stdout, durationMs, error: "aborted" };
+	}
+	const exitCode = result.exitCode ?? 1;
 	let output: unknown = stdout;
 	const trimmed = stdout.trim();
 	if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
@@ -241,7 +250,7 @@ async function executeStep(
 	const kind = step.run ? "shell" : "agent";
 	const items: unknown[] | undefined = step.forEach ? toFanOutItems(step, scope) : undefined;
 	const attemptOnce = async (itemScope: TemplateScope, label: string, index: number): Promise<StepAttempt> => {
-		if (step.run) return runShellStep(step, itemScope, context.cwd);
+		if (step.run) return runShellStep(step, itemScope, context.cwd, context.signal);
 		if (!context.session) throw new Error("Workload agent steps require a session");
 		return runAgentStep(step, itemScope, context.session, index, label, context.signal);
 	};
@@ -250,7 +259,7 @@ async function executeStep(
 		for (let attempt = 0; attempt <= step.retries; attempt++) {
 			const outcome = await attemptOnce(itemScope, attempt === 0 ? label : `${label}-retry${attempt}`, index);
 			attempts.push(outcome);
-			if (outcome.ok) break;
+			if (outcome.ok || context.signal?.aborted) break;
 		}
 		return attempts;
 	};

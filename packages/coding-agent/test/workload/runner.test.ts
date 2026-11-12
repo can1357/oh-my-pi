@@ -253,6 +253,32 @@ steps:
 		expect(result.steps.find(step => step.id === "after")?.status).toBe("skipped");
 	});
 
+	it("terminates a running shell step when the run is aborted, without retrying it", async () => {
+		const spec = parseWorkloadSpec(
+			`
+name: cancel
+steps:
+  - id: slow
+    run: ["sleep", "30"]
+    retries: 2
+`,
+			"/tmp/test.yml",
+		);
+		const controller = new AbortController();
+		const started = Date.now();
+		const pending = runWorkload(spec, resolveWorkloadArgs(spec, []), {
+			cwd: await tempCwd(),
+			signal: controller.signal,
+		});
+		setTimeout(() => controller.abort(), 100);
+		const result = await pending;
+		expect(Date.now() - started).toBeLessThan(10_000);
+		expect(result.status).toBe("failed");
+		const slow = result.steps.find(step => step.id === "slow");
+		expect(slow?.attempts).toBe(1);
+		expect(slow?.error).toBe("aborted");
+	});
+
 	it("fails a prompt step whose subagent reports an error with exit code 0", async () => {
 		// `runStructuredSubagent` attaches capture/merge failures to
 		// `result.error` while the subagent itself exited 0; that is a failed
