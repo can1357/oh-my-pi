@@ -548,6 +548,19 @@ export const cfgAstEditEnabled = register({
 	},
 });
 
+export const cfgFindVerifyModel = register({
+	id: "find.verifyModel",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tools",
+		group: "Find",
+		label: "Find Verification Model",
+		description:
+			"Model selector (e.g. openrouter/liquid/d1-ultra) tried first for find's passage verification, before the judge role; filename and sketch ranking stay on the judge role. Unset: the judge role verifies too",
+	},
+});
+
 export const cfgFindEnabled = register({
 	id: "find.enabled",
 	type: "enum",

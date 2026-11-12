@@ -659,6 +659,8 @@ Individual built-in tools and Eval preludes are toggled by their own keys, e.g. 
 
 `find.hitThreshold` (a number above 0, up to 1; unset is `0.2`) is the verified-passage probability `find` needs before it reports a file as a hit, and the lowest probability of the line ranges it lists. The default suits TypeSafe Jev. Other decision models calibrate differently, and a judge that gives unrelated passages higher probabilities needs a higher value to keep its weak hits out (see [find](./tools/find.md)).
 
+`find.verifyModel` (an unset-by-default model selector, e.g. `openrouter/liquid/d1-ultra`) tries that model first for passage verification; filename and sketch ranking stay on the `judge` role. It resolves against the judge role's candidates, then falls back to the role chain without duplicates under the same fallback rules; a selector matching nothing logs a warning and leaves verification on the plain `judge` chain (see [find](./tools/find.md)). Empty or whitespace-only values are unset.
+
 ### Window-scoped computer use
 
 The disabled-by-default `computer` Eval prelude captures and controls real host windows through native OS APIs. Window handles isolate an application without focusing it or moving the real pointer; the `desktop` object preserves selected-display composite and global input behavior. It remains separate from the `browser` Eval prelude, which manages Chromium/CDP tabs and structured page automation.
