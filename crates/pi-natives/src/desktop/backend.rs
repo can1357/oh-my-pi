@@ -282,6 +282,12 @@ pub trait Backend: Send {
 	fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
 		None
 	}
+	/// Why `target` is missing from the last [`Self::windows`] when that is
+	/// not because the window closed, such as an application that did not
+	/// answer the listing.
+	fn missing_window(&self, _target: &Target) -> Option<DesktopError> {
+		None
+	}
 	/// Explicit display keyboard input must establish the focused surface's
 	/// real global monitor, not infer it from window-relative coordinates.
 	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
