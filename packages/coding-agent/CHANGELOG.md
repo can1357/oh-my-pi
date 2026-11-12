@@ -700,6 +700,9 @@
 - ACP clients now receive `_omp/compaction/start` and `_omp/compaction/end` notifications, including failures and cancellations, without requiring an active prompt. ([#16969](https://github.com/can1357/oh-my-pi/issues/16969); [#17384](https://github.com/can1357/oh-my-pi/pull/17384) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT)).
 - Fixed `cd` (and `pushd`/`popd`/`z`) failing with `command not found: __zsh_like_cd` in agent shells when `mise activate` or `zoxide init` installed wrapper functions: the shell snapshot now keeps the underscore-prefixed helper functions those wrappers call, instead of dropping every private-looking function ([#17448](https://github.com/can1357/oh-my-pi/pull/17448) by [@KamijoToma](https://github.com/KamijoToma))
 
+### Fixed
+
+- Shake in a `--no-session` run no longer leaves placeholders pointing at an `artifact://` link that cannot be read; they now carry only the token count; in `--no-session` runs the request-body timeout recovery no longer shrinks and retries, since the dropped content would be unrecoverable ([#14593](https://github.com/can1357/oh-my-pi/pull/14593) by [@tahakotil](https://github.com/tahakotil))
 ## [18.14.2] - 2026-10-31
 
 ### Added
