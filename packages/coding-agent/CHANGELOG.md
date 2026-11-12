@@ -2,49 +2,19 @@
 
 ## [Unreleased]
 
-## [18.19.0] - 2026-11-12
-
-### Breaking Changes
-
-- Changed the browser `open` API: `ignore_https_errors` is now `insecure`, `allow_file_access` has been removed, and `file:` pages can access other local files.
-- Changed the browser `open` and `targets` `app` option from an object to a string or CDP endpoint/executable path. Use `argv` instead of `app.args` and the top-level `target` instead of `app.target`.
-- Removed `task.file` and the task tool's `taskFile` field; subagent instructions must now be provided inline.
-- Removed blocked todo tasks and the `blocked` status/blocker metadata. Existing blocked tasks are restored as pending.
-
 ### Added
 
 - Added `history.scope` (`session` | `cwd` | `repo` | `global`, default `global`) to scope what the `Up` arrow recalls to a conversation, a folder or a repository, and `history.searchScope` (default `global`) for what `Ctrl+R` opens on, with `Tab`/`Shift+Tab` changing scope inside the history panel ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Prompt history scope now follows the session, not just `/move`: `/wt` and resuming a session recorded in another directory re-point the workspace, so `cwd` — and `repo` across unrelated repositories — can read empty right after the switch. Nothing is lost, only out of scope ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Added `HistoryStorage.getRecentOrThrow()` for callers that need to retry read failures; scope-bound editor history uses it without changing the editor's `getRecent()` interface ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-- Added the `systemPromptTemplates` setting: map model-selector substrings to Handlebars template files (start from the bundled `system-prompt.md`) to replace the system prompt for matching models; the prompt re-renders when you switch models, and a missing, empty, or malformed template falls back to the bundled prompt with a warning ([#17835](https://github.com/can1357/oh-my-pi/pull/17835) by [@DeprecatedLuke](https://github.com/DeprecatedLuke))
-- The `bash` tool's shell now has its own `awk`, `tar`, `lsof`, `shasum`, `md5` and `strings`, so they work the same on every platform (including Windows without Git Bash) and accept internal-URI paths; `PI_DISABLE_UUTILS_DESTRUCTIVE` also hands `tar` to the system
-- `task.steps`: task items take ordered `steps` instead of one `task`; the subagent gets the first step, and each later step only after it finishes the previous one (past four steps, the earlier messages carry two or more). The last step's result is the task's result, and `omp --restore` goes on with the steps an interrupted subagent had left
-- Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
-- GitHub Actions watches now show per-step progress, states, and durations, with Ctrl+O expansion and native Tern Surface Protocol views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- Added `systemPromptTemplates`, which maps model-selector patterns to Handlebars template files for customizing system prompts. Templates re-render when switching models, with warnings and fallback to the bundled prompt for missing or invalid templates.
-- Added ordered multi-step tasks through `task.steps`. Subagents receive steps sequentially, and the final step determines the task result; interrupted tasks resume with their remaining steps.
-- Added Liquid AI judge models `liquid/d1.1` and `liquid/d1-ultra`, including image resizing for Liquid's request limits.
-- Added per-step progress, state, and duration reporting for GitHub Actions watches, with expandable details and native Tern Surface Protocol views.
-- Added `task.autoParallel` (`off`, `suggest`, or `on`) to identify subtasks that can run concurrently and optionally delegate them in a single parallel task call.
-- Added portable `awk`, `tar`, `lsof`, `shasum`, `md5`, and `strings` support to the `bash` tool, including Windows support and internal-URI paths.
-
-### Changed
-
-- Browser sessions now prefer the bundled ABKit WebKit engine when available, with automatic installation and SHA-256 verification. WebKit provides headed, user-visible tabs and broader browser compatibility; Chromium remains the fallback and can be selected explicitly with `app: "chromium"`, while `app: "webkit"` requires WebKit. Configure this behavior with `browser.webkit` and `browser.webkitPath` or the corresponding environment variables.
-- Browser visibility controls now show or hide WebKit tab windows immediately. Headed WebKit tabs can be interacted with directly, while Chromium tabs retain their existing mode-switching behavior.
-- In Tern environments with native DOM access, browser observation and interaction use trusted native input across frames and closed shadow roots, with caret-aware typing and case-insensitive text selectors.
-- `edit.modelVariants` now uses the longest matching model pattern, so specific patterns take precedence over generic ones regardless of configuration order.
-- The `ask` tool now submits the form's current values when its timeout expires; updated settings and documentation reflect this behavior.
-- The `read` tool loads detailed format selectors and URI sub-path syntax on demand, reducing the default request description while retaining inline details when `read` is disabled.
-- The default system prompt and tool descriptions have been streamlined, with guidance moved closer to the tools and detailed task/procedure references provided when relevant.
 
 ### Changed
 
 - Directory-scoped prompt recall no longer scans every stored prompt on each history keypress ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
 ### Fixed
-- Fixed compaction-queue drains to a read-only collab link dropping the queued prompt and its attachments: refused entries return to the editor beside newer drafts, in submission order ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+- Fixed compaction-queue drains to a read-only collab link dropping the queued prompt and its attachments: refused entries return to the editor beside newer drafts, in submission order ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed Hindsight outbox delivery observing partially published retain calls, batch items arriving out of order when file timestamps tie, and expired quarantine files surviving drains without new rejections ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed session-scoped prompt history using the main conversation while a subagent was focused. Persistent writes, Up-arrow recall and newly opened Ctrl+R searches now use the focused conversation's persistent identity, including worker-hosted agents. Delayed submissions retain their original conversation and project without leaking into another conversation's recall list; canceled drafts remain shared and nonpersistent ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed SDK prompt history reads returning no results when passed existing `{ cwd }`, `{ sessionId }`, combined, or empty filter objects; scoped reads remain supported ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
@@ -64,11 +34,37 @@
 - Fixed collaboration input disappearing when the local relay queue refuses admission during join, leave, closure, or overload, or when the guest replica activates with input still queued. Reconnect backlogs remain supported; admitted prompts are not automatically replayed after later transport errors, and rejected batches return in submission order. Refused detached host-only builtins retain their images and links beside newer drafts ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed queued prompts and attachments disappearing when compaction or a session change cancels credential lookup beside a newer draft; cancellation recovery no longer clears a newer submission's UI ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed ovnfs searches ignoring cancellation while waiting for the daemon handshake, without cancelling other callers sharing the connection ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-- `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
-- An extension provider with an `oauth.modifyModels` hook no longer loads the whole model catalog at registration while that provider has no login ([#18821](https://github.com/can1357/oh-my-pi/pull/18821) by [@iliaal](https://github.com/iliaal))
-- Resuming an old session (`--resume`, `/resume`) no longer reads every later session's transcript in its directory to look for a continuation ([#18952](https://github.com/can1357/oh-my-pi/pull/18952) by [@iliaal](https://github.com/iliaal))
-- Saving each session entry no longer blocks the UI for several milliseconds on Windows, where on-access scanning delayed the two re-opens of the session file that every write performed ([#18819](https://github.com/can1357/oh-my-pi/pull/18819))
-- `tui.autoGraph` `smart`/`auto` no longer draws charts whose kind and columns make no sense together (factors of unrelated columns, scatters of two arbitrary measures, dumbbells joining different quantities): the judge now reads the table first, then chooses among whole charts described as they would be drawn, and leaves sample sizes and p-values out of the plot
+
+## [18.19.0] - 2026-11-12
+
+### Breaking Changes
+
+- Changed the browser `open` API: `ignore_https_errors` is now `insecure`, `allow_file_access` has been removed, and `file:` pages can access other local files.
+- Changed the browser `open` and `targets` `app` option from an object to a string or CDP endpoint/executable path. Use `argv` instead of `app.args` and the top-level `target` instead of `app.target`.
+- Removed `task.file` and the task tool's `taskFile` field; subagent instructions must now be provided inline.
+- Removed blocked todo tasks and the `blocked` status/blocker metadata. Existing blocked tasks are restored as pending.
+
+### Added
+
+- Added `systemPromptTemplates`, which maps model-selector patterns to Handlebars template files for customizing system prompts. Templates re-render when switching models, with warnings and fallback to the bundled prompt for missing or invalid templates.
+- Added ordered multi-step tasks through `task.steps`. Subagents receive steps sequentially, and the final step determines the task result; interrupted tasks resume with their remaining steps.
+- Added Liquid AI judge models `liquid/d1.1` and `liquid/d1-ultra`, including image resizing for Liquid's request limits.
+- Added per-step progress, state, and duration reporting for GitHub Actions watches, with expandable details and native Tern Surface Protocol views.
+- Added `task.autoParallel` (`off`, `suggest`, or `on`) to identify subtasks that can run concurrently and optionally delegate them in a single parallel task call.
+- Added portable `awk`, `tar`, `lsof`, `shasum`, `md5`, and `strings` support to the `bash` tool, including Windows support and internal-URI paths.
+
+### Changed
+
+- Browser sessions now prefer the bundled ABKit WebKit engine when available, with automatic installation and SHA-256 verification. WebKit provides headed, user-visible tabs and broader browser compatibility; Chromium remains the fallback and can be selected explicitly with `app: "chromium"`, while `app: "webkit"` requires WebKit. Configure this behavior with `browser.webkit` and `browser.webkitPath` or the corresponding environment variables.
+- Browser visibility controls now show or hide WebKit tab windows immediately. Headed WebKit tabs can be interacted with directly, while Chromium tabs retain their existing mode-switching behavior.
+- In Tern environments with native DOM access, browser observation and interaction use trusted native input across frames and closed shadow roots, with caret-aware typing and case-insensitive text selectors.
+- `edit.modelVariants` now uses the longest matching model pattern, so specific patterns take precedence over generic ones regardless of configuration order.
+- The `ask` tool now submits the form's current values when its timeout expires; updated settings and documentation reflect this behavior.
+- The `read` tool loads detailed format selectors and URI sub-path syntax on demand, reducing the default request description while retaining inline details when `read` is disabled.
+- The default system prompt and tool descriptions have been streamlined, with guidance moved closer to the tools and detailed task/procedure references provided when relevant.
+
+### Fixed
+
 - Fixed `computer.close()` so subsequent computer-control calls start a fresh desktop session instead of failing.
 - Fixed extension providers with `oauth.modifyModels` so they do not load the full model catalog before login.
 - Fixed resuming sessions so it no longer scans unrelated later session transcripts.

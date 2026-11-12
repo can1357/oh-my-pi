@@ -2,16 +2,14 @@
 
 ## [Unreleased]
 
-## [18.19.0] - 2026-11-12
-
 ### Added
 
 - Added `pathIdentityKey()` to group filesystem aliases without merging distinct-case directories on case-sensitive filesystems. It follows symlinks/junctions through device/inode identity and falls back to a case-preserving resolved path when identity is unavailable; existing path-spelling and containment normalization is unchanged ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+## [18.19.0] - 2026-11-12
+
 ### Added
 
-- Added `getWebKitHostPath()`, where the WebKit browser engine's host executable is installed (`~/.o2/lib/abkit/ABHost`, `ABHost.exe` on Windows; shared with Tern)
-- Exported `BROWSER_ARCHIVE_LIMITS` from `@oh-my-pi/pi-utils/browsers`: the extraction ceilings for trusted browser engine archives
 - Added browser utilities exposing trusted browser archive extraction limits and the installed WebKit host executable path.
 
 ## [18.18.9] - 2026-11-11

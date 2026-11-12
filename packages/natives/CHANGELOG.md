@@ -2,18 +2,9 @@
 
 ## [Unreleased]
 
-## [18.19.0] - 2026-11-12
-
 ### Added
 
 - Added `initGit` to initialize a checkout through the native VCS API without spawning Git from callers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-
-### Added
-
-- Added `shellBuiltins(sessionEnv?)`: the commands the embedded shell adds to bash's builtins (`timeout`, `nohup`, process builtins, utilities), sorted, after its `PI_DISABLE_*` switches
-- Added `awk`, `tar`, `shasum`, `md5` and `strings` builtins and an `lsof` process builtin (Linux, macOS, Windows) to the embedded shell; `PI_DISABLE_UUTILS_DESTRUCTIVE` also hands `tar` to the system
-- Added `shellBuiltins(sessionEnv?)` to list commands provided by the embedded shell, including process controls and utilities.
-- Expanded the embedded shell with `awk`, `tar`, `shasum`, `md5`, `strings`, and `lsof` across Linux, macOS, and Windows. Destructive utilities can be disabled with `PI_DISABLE_UUTILS_DESTRUCTIVE`; when disabled, `tar` is delegated to the system.
 
 ### Fixed
 
@@ -24,7 +15,16 @@
 - Fixed `tail -f` continuing to follow after its downstream reader exits when unrelated directory activity keeps its filesystem watcher busy ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed cancelling a traced command leaving TERM-ignoring descendants alive after their parent exits, including blocked captured output and descendants that escape into new sessions. Cancellation now retains its pre-TERM identities through hard escalation and refreshes late orphan descendants; ordinary script signals and successful background commands keep their existing behavior ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed Zsh's GNU-profile signal names, function-trap activation and alias identity, and OS handler restoration across local scopes and re-exec. Function copies, enable/disable operations, missing function bodies, and failed handler setup now preserve their distinct trap semantics without losing cleanup errors or cancellation status ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-- Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success
+
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added `shellBuiltins(sessionEnv?)` to list commands provided by the embedded shell, including process controls and utilities.
+- Expanded the embedded shell with `awk`, `tar`, `shasum`, `md5`, `strings`, and `lsof` across Linux, macOS, and Windows. Destructive utilities can be disabled with `PI_DISABLE_UUTILS_DESTRUCTIVE`; when disabled, `tar` is delegated to the system.
+
+### Fixed
+
 - Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
 
 ## [18.18.9] - 2026-11-11

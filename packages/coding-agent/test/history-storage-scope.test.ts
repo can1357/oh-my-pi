@@ -282,6 +282,17 @@ describe("HistoryStorage scope filtering", () => {
 		expect(storage.getRecent(100, { kind: "repo", value: emptyRepo })).toEqual([]);
 	});
 
+	it("reads nothing for an empty directory scope target, never the whole history", async () => {
+		const dir = tempDir!;
+		const fixtures = await createFixtures(dir.path());
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
+
+		// An unset project directory must not widen `cwd` into a global read.
+		expect(storage.getRecent(100, { kind: "cwd", value: "" })).toEqual([]);
+		expect(storage.search("deploy", 100, { kind: "cwd", value: "" })).toEqual([]);
+	});
+
 	it("reads nothing for a scope kind it does not recognize, never the whole history", async () => {
 		const dir = tempDir!;
 		const fixtures = await createFixtures(dir.path());
