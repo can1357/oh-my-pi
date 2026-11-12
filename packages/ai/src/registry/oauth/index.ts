@@ -3,7 +3,6 @@
 // ============================================================================
 
 import { authPolicyFor, providerDisabledReason, providerLoginWarning } from "@oh-my-pi/pi-catalog/compat/auth";
-import { encodeKiroOAuthRow } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { assertNotNativeTransportRegistration } from "../../api-registry";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
@@ -168,25 +167,24 @@ export async function getOAuthApiKey(
 			{ kind: "validation", provider },
 		);
 	}
-	// Providers declaring `api-key-format "structured"` need request-time
-	// credential metadata, so the API key is the JSON-encoded credential. Kiro
-	// owns its encoding: the codec peek uses too, so both resolve one route and
-	// one model-cache scope per stored row.
-	const apiKey =
-		provider === "kiro"
-			? encodeKiroOAuthRow(creds)
-			: policy?.apiKeyFormat === "structured"
-				? JSON.stringify({
-						apiEndpoint: creds.apiEndpoint,
-						token: creds.access,
-						enterpriseUrl: creds.enterpriseUrl,
-						projectId: creds.projectId,
-						refreshToken: creds.refresh,
-						expiresAt: creds.expires,
-						email: creds.email,
-						accountId: creds.accountId,
-					})
-				: creds.access;
+	// A provider-owned encoding wins; otherwise providers declaring
+	// `api-key-format "structured"` need request-time credential metadata, so
+	// the API key is the JSON-encoded credential.
+	const getApiKey = getProviderDefinition(provider)?.getApiKey;
+	const apiKey = getApiKey
+		? getApiKey(creds)
+		: policy?.apiKeyFormat === "structured"
+			? JSON.stringify({
+					apiEndpoint: creds.apiEndpoint,
+					token: creds.access,
+					enterpriseUrl: creds.enterpriseUrl,
+					projectId: creds.projectId,
+					refreshToken: creds.refresh,
+					expiresAt: creds.expires,
+					email: creds.email,
+					accountId: creds.accountId,
+				})
+			: creds.access;
 	return { newCredentials: creds, apiKey };
 }
 

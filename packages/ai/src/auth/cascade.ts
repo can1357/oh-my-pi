@@ -1,11 +1,11 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
-import { encodeKiroOAuthRow, KiroCredentialError } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
 import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey, resolveAfterRotation } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
 import * as AIError from "../error";
+import { getProviderDefinition } from "../registry";
 import { assertProviderEnabled, providerPauseReason } from "../registry/oauth";
-import { AUTHENTICATED_SENTINEL } from "../registry/types";
+import { AUTHENTICATED_SENTINEL, type ProviderDefinition } from "../registry/types";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
@@ -20,6 +20,8 @@ import type {
 	OAuthCredential,
 	OAuthRequestIdentity,
 } from "./types";
+
+type OAuthKeyEncoder = NonNullable<ProviderDefinition["getApiKey"]>;
 
 /**
  * Default config value resolver that checks env vars and treats as literal.
@@ -156,23 +158,20 @@ export interface KeyCascadeDeps {
 /** The provider auth precedence cascade (runtime → config → OAuth → login key → env → stored key). */
 export class KeyCascade implements KeysApi {
 	#deps: KeyCascadeDeps;
-	/** Kiro rows already reported as undecodable, so repeated discovery peeks log each once. */
-	#reportedUndecodableKiroRows = new WeakSet<AuthCredential>();
 
 	constructor(deps: KeyCascadeDeps) {
 		this.#deps = deps;
 	}
 
-	/** The encoded Kiro `apiKey` for a stored OAuth row, or undefined when the row is incomplete. */
-	#kiroOAuthApiKey(credential: OAuthCredential): string | undefined {
+	/**
+	 * The request key a provider's `getApiKey` hook builds from a stored OAuth
+	 * row, or undefined when the hook rejects the row (an incomplete login).
+	 */
+	#encodeOAuthKey(getApiKey: OAuthKeyEncoder, credential: OAuthCredential): string | undefined {
 		try {
-			return encodeKiroOAuthRow(credential);
+			return getApiKey(credential);
 		} catch (error) {
-			if (!(error instanceof KiroCredentialError)) throw error;
-			if (!this.#reportedUndecodableKiroRows.has(credential)) {
-				this.#reportedUndecodableKiroRows.add(credential);
-				logger.warn("Kiro OAuth credential skipped: stored login is incomplete", { error: error.message });
-			}
+			logger.debug("Stored OAuth credential skipped: provider cannot build its key", { error: String(error) });
 			return undefined;
 		}
 	}
@@ -293,11 +292,11 @@ export class KeyCascade implements KeysApi {
 		// Peek never refreshes, so only an unexpired OAuth access token is usable
 		// unless the caller only needs the account it names.
 		const now = Date.now();
-		// A Kiro row the codec cannot encode (an incomplete login without its
-		// endpoint or login id) carries no usable credential: skip it so discovery
-		// moves on, as `get()` does when the same row fails to resolve.
+		// A provider-owned key encoding (`getApiKey`) is shared with `getOAuthApiKey`, so a peek
+		// and a refresh of one row resolve the same key; a row it rejects is skipped, as `get()` does.
+		const getApiKey = getProviderDefinition(provider)?.getApiKey;
 		const servable = (credential: AuthCredential): credential is OAuthCredential =>
-			credential.type === "oauth" && (provider !== "kiro" || this.#kiroOAuthApiKey(credential) !== undefined);
+			credential.type === "oauth" && (!getApiKey || this.#encodeOAuthKey(getApiKey, credential) !== undefined);
 		const oauthSelection =
 			this.#deps.selector.selectByType(
 				provider,
@@ -316,11 +315,7 @@ export class KeyCascade implements KeysApi {
 					apiEndpoint: oauthSelection.credential.apiEndpoint,
 				});
 			}
-			// Kiro: the same codec `getOAuthApiKey` uses, so a peek and a refresh
-			// of one stored row route and cache identically.
-			if (provider === "kiro") {
-				return this.#kiroOAuthApiKey(oauthSelection.credential);
-			}
+			if (getApiKey) return this.#encodeOAuthKey(getApiKey, oauthSelection.credential);
 			return oauthSelection.credential.access;
 		}
 
