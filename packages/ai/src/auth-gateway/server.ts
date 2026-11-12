@@ -361,10 +361,13 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
-	// A scoped client cannot choose headers sent with the gateway's credential,
-	// including headers captured by the format parser itself.
+	// A scoped client cannot choose headers sent with the gateway's credential:
+	// neither headers the format parser captured nor `userProfileId`, which the
+	// Anthropic parser reads from `anthropic-user-profile-id` and the provider
+	// sends back out as that header.
 	if (bootOpts.client) {
 		delete parsed.options.headers;
+		delete parsed.options.userProfileId;
 	} else {
 		// Preserve the parser's precedence for the unscoped gateway token.
 		const captured = captureRequestHeaders(req.headers);

@@ -16,7 +16,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { completionsChunks } from "./helpers/factory-droid";
+import { anthropicChunks, completionsChunks } from "./helpers/factory-droid";
 
 const GATEWAY_TOKEN = "gateway-token";
 const CI_TOKEN = "ci-token";
@@ -223,6 +223,60 @@ describe("auth-gateway scoped clients", () => {
 			}
 		},
 	);
+
+	it("drops a scoped caller's anthropic-user-profile-id on /v1/messages and keeps it for the gateway token", async () => {
+		const received: Headers[] = [];
+		const upstream = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async req => {
+				await req.arrayBuffer();
+				received.push(new Headers(req.headers));
+				const frames = anthropicChunks("ok").map(chunk => {
+					const { type } = JSON.parse(chunk) as { type: string };
+					return `event: ${type}\ndata: ${chunk}\n\n`;
+				});
+				return new Response(frames.join(""), { headers: { "Content-Type": "text/event-stream" } });
+			},
+		});
+		try {
+			const model = buildModel({
+				id: "granted",
+				name: "granted",
+				provider: "mock",
+				api: "anthropic-messages",
+				baseUrl: `http://127.0.0.1:${upstream.port}`,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 8192,
+				maxTokens: 128,
+			});
+			const handle = boot([model], [CI_CLIENT]);
+			for (const token of [CI_TOKEN, GATEWAY_TOKEN]) {
+				const response = await fetch(`${handle.url}/v1/messages`, {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"Content-Type": "application/json",
+						"anthropic-user-profile-id": "caller-profile",
+					},
+					body: JSON.stringify({
+						model: "mock/granted",
+						max_tokens: 128,
+						messages: [{ role: "user", content: "hi" }],
+					}),
+				});
+				expect(response.status).toBe(200);
+				expect(await response.text()).toContain("ok");
+				expect(received).toHaveLength(1);
+				const profile = received.pop()!.get("anthropic-user-profile-id");
+				expect(profile).toBe(token === CI_TOKEN ? null : "caller-profile");
+			}
+		} finally {
+			upstream.stop(true);
+		}
+	});
 
 	it("serves a client only from its bound account, never a sibling account or API key", async () => {
 		let accountBExhausted = false;
