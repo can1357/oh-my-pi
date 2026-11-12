@@ -525,9 +525,7 @@ export class SpotlightSheet implements Component {
 		this.#body = compact([
 			summary(original, single ? windows[0].rank : undefined, lines.length, all.length),
 			...sections(original, lines.length, all.length).map(section =>
-				single
-					? section.end > section.from && windowCode(sheet, section)
-					: windowSection(sheet, section),
+				single ? section.end > section.from && windowCode(sheet, section) : windowSection(sheet, section),
 			),
 			shapingNotes(sheet, spotlight.holdout === true || spotlight.gated === true),
 			actionBar([...legends.map(rankLegend), null, actionButton("Close", "close", { keys: "escape" })]),

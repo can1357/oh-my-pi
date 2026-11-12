@@ -776,7 +776,11 @@ describe("spotlight notice", () => {
 				.filter(node => prop(node, "role") === "omp.spotlight.head")
 				.flatMap(head => within(head, "text").map(words)),
 		);
-		expect(heads).toEqual([["a.ts"], ["b.ts", "2 of 10 lines shown"], ["c.ts", "not shown: past the first 5,000 lines"]]);
+		expect(heads).toEqual([
+			["a.ts"],
+			["b.ts", "2 of 10 lines shown"],
+			["c.ts", "not shown: past the first 5,000 lines"],
+		]);
 		expect(sections.map(section => within(section, "code").length)).toEqual([1, 1, 0]);
 		expect(h.errors).toEqual([]);
 	});
