@@ -30,7 +30,7 @@ Behavior notes:
 - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
+- Extension startup (`session_start`) runs after `ready`. Every frame is dispatched as it arrives, so a command sent during startup is answered while startup still runs (a malformed line still gets its `parse` failure at once). A frame that starts a turn, changes the session, changes goal state, or drives the live voice session — `prompt`, `steer`, `follow_up`, `abort_and_prompt`, `new_session`, `switch_session`, `branch`, `fork`, `open_session`, `compact`, `navigate_tree`, `handoff`, `live_start`, `live_connect`, `live_stop`, `live_mute`, and `goal` with any op but `get` — waits for startup to finish. All four live frames wait, and the ones read while startup ran resume in the order they were read: a `live_stop` sent during startup stops the `live_start` sent before it, and a `live_start` sent after a `live_stop` is the request that survives. What orders them is that all four are dispatched off the serial queue, so each begins its wait for startup as it is read, and the four resume in that order when startup ends. Every waiting frame except those four is ordered with the other commands and keeps the place it arrived in; the four live frames take no place in the serial queue at all — after startup as well as during it, so a `live_stop` or `live_mute` sent at any time is answered without waiting behind the commands queued ahead of it. Of the waiting frames, only the four user-input ones and `new_session`, `switch_session`, `branch`, `fork`, `open_session` and `navigate_tree` are numbered as they are read, and only a numbered frame can be withdrawn by an `abort`, `abort_and_prompt` or `abort_and_restore_queue` read after it. An `abort` sent after one of the four user-input frames withdraws it; after an `abort_and_prompt` it withdraws the prompt half only, while the abort half still runs and the frame still answers success. An `abort`, `abort_and_prompt` or `abort_and_restore_queue` read while a waiting `new_session`, `switch_session`, `fork` or `navigate_tree` is still held withdraws that frame too: when startup finishes it is answered `cancelled` instead of running. The withdrawal covers exactly the frames read while startup ran, including one that comes to its turn only after startup because another held frame was ahead of it; a `new_session`, `switch_session`, `fork` or `navigate_tree` read after startup always runs, whatever abort follows it. `branch` and `open_session` are not withdrawn, because their answers carry the branch text and the opened session's id besides `cancelled`; they run when startup finishes, as do the held frames with no cancelled answer at all — `compact`, `handoff`, `goal`, and the four live frames — whether or not an `abort` followed them. A command the dispatcher serializes behind one of the waiting frames it runs inline — `abort_and_prompt`, `new_session`, `switch_session`, `branch`, `fork`, `open_session`, `compact`, `navigate_tree`, `handoff`, and a `goal` that changes goal state — waits with it, while a command sent behind a waiting `prompt`, `steer`, `follow_up`, `live_start`, `live_connect`, `live_stop` or `live_mute` is answered at once, because those seven are dispatched in the background. `set_ask_dialog` is ordered with every other command rather than answered out of band, so a host that wants the ask dialog for a prompt sends it before that prompt. An `extension_ui_response` still reaches the dialog a startup handler awaits; if stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
@@ -733,6 +733,14 @@ one `select` (plus `editor` for free text) per choice. Builds without the
 command answer with a failed `response`, so hosts should keep the `select`
 fallback when enabling fails.
 
+The `ask` tool reads the setting when it asks, so a `set_ask_dialog` applies to
+every ask that starts after it, including one in a turn already running. The
+frame is ordered with every other command rather than answered out of band, so
+a command queued ahead of it — one still waiting for startup included — delays
+when it takes effect. Send it before the prompt it applies to: a frame still
+queued when that turn reaches its ask leaves that ask with the `select`
+fallback.
+
 ```json
 { "id": "req_ask", "type": "set_ask_dialog", "enabled": true }
 ```
@@ -1228,10 +1236,17 @@ such notice and dropped, and the `btw` or session change proceeds.
 
 Ordinary commands run on a serialized queue. Extension UI responses and host
 tool/URI updates/results bypass that queue, so they can complete a request
-while its command handler is waiting. `bash` also bypasses the serial queue and
-is tracked as background command work; its response may arrive out of order.
-`prompt` and `steer_subagent` start in queue order but await admission in the
-background, so their responses may also arrive after later commands'.
+while its command handler is waiting. `bash`, `predict_word`, `btw_cancel`,
+`abort_branch_summary` and the four live commands (`live_start`,
+`live_connect`, `live_stop` and `live_mute`) also bypass the serial queue and
+are tracked as background command work; their responses may arrive out of
+order. A `live_stop` or `live_mute` therefore takes effect without waiting for
+a command queued ahead of it, or for the connect a `live_start` is still
+running.
+`prompt`, `steer`, `follow_up` and `steer_subagent` start in queue order but
+await admission in the background, and `dictation_start` likewise answers only
+once recording has started, so their responses may also arrive after later
+commands'.
 
 ### Immediate ack vs completion
 

@@ -90,6 +90,14 @@ export default function (pi) {
 }
 `;
 
+/**
+ * How long a frame held for startup is left unanswered before the dialog startup awaits is answered.
+ * Real time, deliberately: the contract is that a held frame produces nothing while the agent is
+ * otherwise idle, and no signal from the agent marks "would have answered by now" — a session change
+ * that did not wait answers in a few milliseconds, far inside this window.
+ */
+const HELD_FRAME_WINDOW_MS = 2_000;
+
 describe("RPC extension UI", () => {
 	it("keeps extension dialogs headless while tool selections round-trip", async () => {
 		await using temp = await TempDir.create("@rpc-headless-tool-ui-");
@@ -225,7 +233,7 @@ await runRpcMode(session);
 		});
 	}
 
-	it("answers a dialog session_start awaits, running commands sent meanwhile only after startup, in order", async () => {
+	it("answers a dialog session_start awaits, and answers commands sent meanwhile while it waits, in order", async () => {
 		await using temp = await TempDir.create("@rpc-startup-dialog-");
 		const child = await spawnStartupDialogRuntime(temp);
 		const stderr = new Response(child.stderr).text();
@@ -235,32 +243,84 @@ await runRpcMode(session);
 			if (!isRecord(frame)) continue;
 			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
 				confirmId = frame.id;
-				// Held until startup finishes (had one run at once, its response would precede the confirm's
-				// notify) and then run in arrival order. set_ask_dialog is served during startup and takes effect.
+				// Answered as they arrive, in arrival order, while startup still waits for this dialog.
+				// set_ask_dialog serializes with every other command now, so it goes before the prompt that
+				// needs it. The confirm's `true` notify arrives only once the client answers the confirm below.
+				child.stdin.write(`${JSON.stringify({ id: "ask", type: "set_ask_dialog", enabled: true })}\n`);
 				for (const id of ["s1", "s2"]) child.stdin.write(`${JSON.stringify({ id, type: "get_state" })}\n`);
 				child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: "/probe" })}\n`);
 				child.stdin.write(`${JSON.stringify({ id: "s3", type: "get_state" })}\n`);
-				child.stdin.write(`${JSON.stringify({ id: "ask", type: "set_ask_dialog", enabled: true })}\n`);
 				await child.stdin.flush();
 			} else if (frame.type === "response" && frame.id === "ask") {
 				seen.push("ask");
-				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: confirmId, confirmed: true })}\n`);
-				await child.stdin.flush();
 			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
 				seen.push(String(frame.message));
+				// Both notifies seen: nothing is left to answer, so end stdin and drain stdout to its end.
+				// Ending it earlier would reject the dialog startup awaits, which the test below covers.
+				if (seen.includes("true") && seen.includes("askDialog:function")) child.stdin.end();
 			} else if (frame.type === "response" && typeof frame.id === "string" && /^(s\d|p)$/.test(frame.id)) {
 				seen.push(`${frame.id}:${frame.success}`);
-				// Drain stdout to its end: closing the reader early would break the child's output pipe.
-				if (frame.id === "s3") child.stdin.end();
+				// Answer the dialog only now: every frame answered above was answered while startup waited.
+				if (frame.id === "s3") {
+					child.stdin.write(
+						`${JSON.stringify({ type: "extension_ui_response", id: confirmId, confirmed: true })}\n`,
+					);
+					await child.stdin.flush();
+				}
 			}
 		}
 		await child.exited;
-		// The probe's own frames race the later state responses; every other frame's order is fixed.
+		// The prompt's own response races the later state responses; every other frame's order is
+		// fixed. The startup hold covers `prompt`, so the probe runs only once startup finishes and
+		// its notify arrives after the confirm's.
 		expect(
-			seen.filter(entry => entry !== "p:true" && entry !== "askDialog:function"),
+			seen.filter(entry => entry !== "p:true"),
 			await stderr,
-		).toEqual(["ask", "true", "s1:true", "s2:true", "s3:true"]);
-		expect(seen).toContain("askDialog:function");
+		).toEqual(["ask", "s1:true", "s2:true", "s3:true", "true", "askDialog:function"]);
+	}, 30_000);
+
+	it("holds a session change sent while startup waits, and the command behind it, until startup finishes", async () => {
+		await using temp = await TempDir.create("@rpc-startup-dialog-session-");
+		const child = await spawnStartupDialogRuntime(temp);
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		let confirmId: unknown;
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
+				confirmId = frame.id;
+				// A session change waits for startup, and the dispatcher serializes the get_state behind
+				// it, so neither may be answered before the confirm is. `btw_cancel` skips the serial
+				// queue and is answered at once: its response proves the two frames ahead of it on stdin
+				// were already read, so both are waiting before the confirm is answered.
+				child.stdin.write(`${JSON.stringify({ id: "n", type: "new_session" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "s", type: "get_state" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "read", type: "btw_cancel" })}\n`);
+				await child.stdin.flush();
+			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+				seen.push(String(frame.message));
+			} else if (frame.type === "response" && typeof frame.id === "string" && /^(n|s|read)$/.test(frame.id)) {
+				seen.push(`${frame.id}:${frame.success}`);
+				if (frame.id === "read") {
+					// The agent now has nothing to do but the two held frames. A session change that
+					// did not wait would finish inside this window — far longer than one takes — and
+					// its response would land before the notify below. Real time is what separates
+					// "held until startup" from "ran at once": the dialog is answered only after it.
+					await Bun.sleep(HELD_FRAME_WINDOW_MS);
+					child.stdin.write(
+						`${JSON.stringify({ type: "extension_ui_response", id: confirmId, confirmed: true })}\n`,
+					);
+					await child.stdin.flush();
+				}
+				// The session change and the frame behind it are back: nothing is left to answer.
+				if (frame.id === "s") child.stdin.end();
+			}
+		}
+		await child.exited;
+		// `read` is answered while startup waits; the confirm's `true` notify comes from startup itself.
+		// Both responses after it prove `new_session` — and the `get_state` the dispatcher put behind
+		// it — waited for startup to finish rather than running during the window above.
+		expect(seen, await stderr).toEqual(["read:true", "true", "n:true", "s:true"]);
 	}, 30_000);
 
 	it("rejects a dialog session_start awaits when stdin closes, so the process still exits", async () => {
