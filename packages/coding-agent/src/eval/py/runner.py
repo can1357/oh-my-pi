@@ -2563,14 +2563,18 @@ def _compile_source(
     return compile(module, filename, "exec", flags=_TLA_FLAG), None, False
 
 
-def _prepare_file_source(
-    source: str, ns: dict, filename: str, linecache_source: str | None
-) -> None:
-    display_source = source if linecache_source is None else linecache_source
+def _cache_source_lines(filename: str, display_source: str) -> None:
     lines = display_source.splitlines(keepends=True)
     if display_source and (not lines or not lines[-1].endswith(("\n", "\r"))):
         lines[-1] += "\n"
     linecache.cache[filename] = (len(display_source), None, lines, filename)
+
+
+def _prepare_file_source(
+    source: str, ns: dict, filename: str, linecache_source: str | None
+) -> None:
+    display_source = source if linecache_source is None else linecache_source
+    _cache_source_lines(filename, display_source)
     ns["__file__"] = filename
     script_dir = os.path.dirname(filename)
     if script_dir:
@@ -2607,7 +2611,12 @@ async def _exec_source_async(
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
     body_code, expr_code, has_expr = _compile_source(source, filename)
-    if filename != "<cell>":
+    if filename.startswith("<cell"):
+        # Inline cells have no file on disk; keep their source in linecache
+        # under the cell's own name so inspect.getsource and tracebacks can
+        # read functions defined in earlier cells.
+        _cache_source_lines(filename, source if linecache_source is None else linecache_source)
+    else:
         _prepare_file_source(source, ns, filename, linecache_source)
     if body_code is None:
         return
@@ -2921,7 +2930,7 @@ async def _handle_request_async(req: dict) -> None:
             filename = (
                 requested_filename
                 if isinstance(requested_filename, str) and requested_filename
-                else "<cell>"
+                else f"<cell {execution_count}>"
             )
         except SyntaxError as exc:
             _emit_error(rid, exc)
