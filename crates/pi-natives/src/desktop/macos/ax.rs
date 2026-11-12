@@ -30,7 +30,7 @@ use super::{
 	super::{
 		ax::{
 			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
-			performable_name, require_read_as, text_readback, truncate_chars,
+			performable_names, require_read_as, text_readback, truncate_chars,
 		},
 		backend::{AxBackend, KeyboardFocus, is_raise_action, native_action_name},
 		control,
@@ -1645,12 +1645,7 @@ fn choose_action(
 /// coordinates, which a window click, taking screenshot pixels, refuses
 /// before any screenshot and misses after one.
 fn unsupported_action(native: &str, actions: &[String]) -> DesktopError {
-	let mut offered: Vec<String> = Vec::new();
-	for name in actions.iter().filter_map(|action| performable_name(action)) {
-		if !offered.contains(&name) {
-			offered.push(name);
-		}
-	}
+	let offered = performable_names(actions);
 	let offered = if offered.is_empty() {
 		"none".to_owned()
 	} else {
