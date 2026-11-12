@@ -82,7 +82,7 @@ Single-shot result.
 - Plan-mode policy and path resolution run before mutation. An existing target that is neither a regular file nor a directory (including through a symlink) is refused; existing regular files then pass the generated-file guard, which opens and reads the file head on the main thread and could block forever on such a target.
 - If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused. This also applies to text handler-owned resources; tool-device arguments are exempt.
 - ACP bridge `writeTextFile` is tried first when available; otherwise the session writethrough writes the content. LSP settings may format, synchronize, and diagnose the write.
-- A leading shebang may add execute bits.
+- When the written (post-format) content starts with `#!` and not `#![`, adds execute bits (`mode | 0o111`, `chmod a+x`) once those bytes are on disk — after ACP `writeTextFile`, or in the writethrough before `textDocument/didSave` and LSP diagnostics (returned in the result or delivered late).
 
 11. The tool returns text plus optional diagnostics, executable, resolved-path, or device-dispatch metadata.
 
@@ -180,7 +180,7 @@ content: ""
    - Explicitly creates parent directories for archive files; the plain-file backend also supports missing parents.
    - Mutates existing SQLite databases; never creates a new SQLite DB.
    - Resolves conflict markers in files for `conflict://...` writes.
-   - May chmod a shebang file executable after a successful plain-file write.
+   - Adds execute bits (`mode | 0o111`, `chmod a+x`) on plain-file writes whose final content starts with `#!` (not `#![`) when the filesystem supports chmod, before LSP diagnostics are collected.
 - Subprocesses / native bindings
    - Uses Bun SQLite bindings via `bun:sqlite`.
    - Uses the unified archive utilities in `packages/utils/src/ar`: tar serialization plus gzip/zstd framing for compressed tars, `node:zlib`-backed DEFLATE framing for ZIP, and an ASAR encoder.
@@ -191,7 +191,7 @@ content: ""
    - `xd://` dispatches a mounted tool and may therefore have that tool's documented side effects.
 - Background work / cancellation
    - Marks the tool `concurrency = "exclusive"` in `WriteTool`.
-   - The write body is wrapped with `untilAborted`; LSP writethrough can schedule deferred diagnostics fetches after a timeout.
+   - The write body is wrapped with `untilAborted`; LSP writethrough can deliver diagnostics late when its inline wait expires or schedule a deferred fetch after its `5_000` ms operation timeout, in both cases after writing the final content and applying any shebang `chmod a+x`.
 
 ## Limits & Caps
 
