@@ -13,6 +13,7 @@ use crate::proctree;
 mod builtins;
 mod env_cwd;
 mod process_control;
+mod redirections;
 mod session;
 
 /// The standard streams of a command a test runs on a session directly;
@@ -115,6 +116,7 @@ async fn default_session() -> ShellSessionCore {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	create_session(&config).await.expect("create_session")
 }

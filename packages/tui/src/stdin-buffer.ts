@@ -18,6 +18,7 @@
  */
 import { EventEmitter } from "events";
 import { isKittyProtocolActive } from "./keys";
+import { TSP_OSC_PREFIX } from "./native/encode";
 
 const ESC = "\x1b";
 /** Terminal bracketed-paste open marker wrapping pasted input. */
@@ -124,12 +125,29 @@ function isRawMultilineBurst(text: string): boolean {
 	return false;
 }
 
+/**
+ * Whether a classified raw burst ends with an Enter typed after the pasted
+ * text: a final CR when every earlier break is LF. An unmarked paste encodes
+ * its breaks one way (terminals send CR, automation writes LF), so a lone CR
+ * after LF-delimited text is the submit key a stall batched into the same
+ * read (#17820). It rides along with the paste like a bracketed paste's
+ * trailing Enter.
+ */
+function endsWithTypedEnter(text: string): boolean {
+	const last = text.length - 1;
+	return text.charCodeAt(last) === 0x0d && text.lastIndexOf("\r", last - 1) === -1;
+}
+
 // `resolveEscapeEnd` result for an abandoned string sequence; see there.
 const STRING_ABORTED = -3;
 const OSC5522_PREFIX = "\x1b]5522;";
 // Kitty clipboard metadata (`type=read:status=DATA:mime=…:pw=…:id=…`) is
 // short; bounding the `;` search keeps a malformed packet O(n).
 const MAX_OSC5522_METADATA = 1024;
+
+function isPasteReport(buffer: string, pos = 0): boolean {
+	return buffer.startsWith("\x1b_", pos) || buffer.startsWith(TSP_OSC_PREFIX, pos);
+}
 
 /**
  * Resolve an OSC/DCS/APC string sequence by its grammar, not by time. A
@@ -486,7 +504,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	readonly #pasteByteLimit: number;
 	#pasteMode: boolean = false;
 	#pasteChunks: string[] = [];
-	#pasteOverlap: string = "";
 	#pasteBytes = 0;
 	#pasteWatchdog?: NodeJS.Timeout;
 	#pendingKittyPrintableCodepoint: number | undefined;
@@ -557,6 +574,10 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			str = this.#consumeStringDiscard(str);
 			if (str.length === 0) return;
 		}
+		if (this.#pasteMode) {
+			this.#consumePasteChunk(str);
+			return;
+		}
 		if (this.#dormantString !== undefined && this.#buffer.length === 0) {
 			if (Date.now() < this.#dormantUntilMs) this.#resumeDormantString(str);
 			else this.#dormantString = undefined;
@@ -575,11 +596,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 		if (str.length === 0 && this.#buffer.length === 0 && this.#rawPasteCandidate.length === 0) {
 			this.#emitDataSequence("");
-			return;
-		}
-
-		if (this.#pasteMode) {
-			this.#consumePasteChunk(str);
 			return;
 		}
 
@@ -635,7 +651,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.#buffer = "";
 			this.#pasteMode = true;
 			this.#pasteChunks = [];
-			this.#pasteOverlap = "";
 			this.#pasteBytes = 0;
 			this.#consumePasteChunk(firstChunk);
 			return;
@@ -682,55 +697,96 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	}
 
 	/**
-	 * Consume one chunk of paste-mode input. Chunks are accumulated in an array
-	 * and only joined once the end marker arrives, so a large paste delivered in
-	 * many small terminal reads stays O(total) instead of the O(total^2) cost of
-	 * re-concatenating and rescanning the whole buffer on every chunk. A short
-	 * overlap tail (end-marker length - 1) is carried across chunk boundaries so
-	 * a marker split between two reads is still detected without rescanning.
+	 * Accumulate pasted text while routing APC and ConPTY TSP reports through the data
+	 * path. Only an undecided escape suffix stays in the input buffer, so text
+	 * chunks are joined once and string scans resume where the last read ended.
 	 */
 	#consumePasteChunk(chunk: string): void {
-		const probe = this.#pasteOverlap + chunk;
-		if (probe.indexOf(BRACKETED_PASTE_END) === -1) {
-			this.#pasteChunks.push(chunk);
-			this.#pasteBytes += Buffer.byteLength(chunk, "utf8");
-			const keep = BRACKETED_PASTE_END.length - 1;
-			this.#pasteOverlap = probe.length > keep ? probe.slice(probe.length - keep) : probe;
-			if (this.#pasteBytes > this.#pasteByteLimit) {
-				this.#abortPaste();
+		const input = this.#buffer + chunk;
+		const searchOffset = this.#escapeSearchOffset;
+		const previousBytes = this.#pasteBytes;
+		this.#buffer = "";
+		this.#escapeSearchOffset = 0;
+		let textStart = 0;
+		let searchFrom = 0;
+
+		while (searchFrom < input.length) {
+			const escape = input.indexOf(ESC, searchFrom);
+			if (escape === -1) break;
+
+			if (input.startsWith(BRACKETED_PASTE_END, escape)) {
+				this.#appendPasteText(input.slice(textStart, escape));
+				this.#finishPaste(input.slice(escape + BRACKETED_PASTE_END.length));
 				return;
 			}
-			this.#armPasteWatchdog();
-			return;
+			if (input.length - escape < TSP_OSC_PREFIX.length) {
+				const tail = input.slice(escape);
+				if (BRACKETED_PASTE_END.startsWith(tail) || TSP_OSC_PREFIX.startsWith(tail)) {
+					this.#appendPasteText(input.slice(textStart, escape));
+					this.#buffer = tail;
+					textStart = input.length;
+					break;
+				}
+			}
+			if (!isPasteReport(input, escape)) {
+				searchFrom = escape + 1;
+				continue;
+			}
+
+			this.#appendPasteText(input.slice(textStart, escape));
+			const end = resolveEscapeEnd(input, escape, input.length, escape === 0 ? searchOffset : 0);
+			if (end === -1) {
+				this.#buffer = input.slice(escape);
+				this.#escapeSearchOffset = input.length - escape;
+				textStart = input.length;
+				break;
+			}
+			if (end === -2) {
+				this.#enterStringDiscard();
+				this.#consumePasteChunk(this.#consumeStringDiscard(input.slice(escape)));
+				return;
+			}
+			if (end <= STRING_ABORTED) {
+				searchFrom = STRING_ABORTED - end;
+			} else {
+				this.#emitDataSequence(input.slice(escape, end));
+				searchFrom = end;
+			}
+			textStart = searchFrom;
 		}
 
-		// End marker arrived: join once and split at its first occurrence,
-		// matching the prior indexOf-from-start semantics exactly.
-		const flat = this.#pasteChunks.length > 0 ? `${this.#pasteChunks.join("")}${chunk}` : chunk;
-		const endIndex = flat.indexOf(BRACKETED_PASTE_END);
-		const pastedContent = flat.slice(0, endIndex);
-		const remaining = flat.slice(endIndex + BRACKETED_PASTE_END.length);
-
-		this.#clearPasteWatchdog();
-		this.#pasteMode = false;
-		this.#pasteChunks = [];
-		this.#pasteOverlap = "";
-		this.#pasteBytes = 0;
-		this.#pendingKittyPrintableCodepoint = undefined;
-
-		// A paste-and-Enter burst (automation, terminals that batch reads) must
-		// not split into two dispatches: the paste may open an overlay that
-		// would then swallow the Enter meant to submit it.
-		const enter = leadingEnter(remaining);
-		this.emit("paste", pastedContent, enter);
-
-		const rest = enter === undefined ? remaining : remaining.slice(enter.length);
-		if (rest.length > 0) {
-			this.process(rest);
+		this.#appendPasteText(input.slice(textStart));
+		const pendingText = isPasteReport(this.#buffer) ? "" : this.#buffer;
+		if (this.#pasteBytes + Buffer.byteLength(pendingText, "utf8") > this.#pasteByteLimit) {
+			this.#abortPaste();
+		} else if (!this.#pasteWatchdog || this.#pasteBytes !== previousBytes || pendingText.length > 0) {
+			// Terminal replies do not keep a paste with a lost end marker alive.
+			this.#armPasteWatchdog();
 		}
 	}
 
-	/** Re-arm the paste-mode inactivity watchdog after each chunk. */
+	#appendPasteText(text: string): void {
+		if (text.length === 0) return;
+		this.#pasteChunks.push(text);
+		this.#pasteBytes += Buffer.byteLength(text, "utf8");
+	}
+
+	#finishPaste(remaining: string): void {
+		const content = this.#pasteChunks.join("");
+		this.#clearPasteWatchdog();
+		this.#pasteMode = false;
+		this.#pasteChunks = [];
+		this.#pasteBytes = 0;
+		this.#pendingKittyPrintableCodepoint = undefined;
+
+		// Keep paste-and-Enter on the same focus owner if the paste opens an overlay.
+		const enter = leadingEnter(remaining);
+		this.emit("paste", content, enter);
+		const rest = enter === undefined ? remaining : remaining.slice(enter.length);
+		if (rest.length > 0) this.process(rest);
+	}
+
+	/** Re-arm the paste-mode inactivity watchdog after pasted text arrives. */
 	#armPasteWatchdog(): void {
 		if (this.#pasteWatchdog) clearTimeout(this.#pasteWatchdog);
 		this.#pasteWatchdog = setTimeout(() => {
@@ -753,13 +809,14 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	 * keystrokes, nor accumulated forever while input appears dead.
 	 */
 	#abortPaste(): void {
-		this.#clearPasteWatchdog();
-		const content = this.#pasteChunks.join("");
-		this.#pasteMode = false;
-		this.#pasteChunks = [];
-		this.#pasteOverlap = "";
-		this.#pasteBytes = 0;
-		this.emit("paste", content);
+		const pending = this.#buffer;
+		this.#buffer = "";
+		this.#escapeSearchOffset = 0;
+		const reply = isPasteReport(pending);
+		if (!reply) this.#appendPasteText(pending);
+		this.#finishPaste("");
+		// A reply split across paste recovery still belongs to the terminal.
+		if (reply) this.process(pending);
 	}
 
 	/**
@@ -811,7 +868,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 		const content = this.#takeRawPasteCandidate();
 		this.#pendingKittyPrintableCodepoint = undefined;
-		this.emit("paste", content);
+		if (endsWithTypedEnter(content)) this.emit("paste", content.slice(0, -1), "\r");
+		else this.emit("paste", content);
 	}
 
 	/** Replay an ambiguous raw candidate as the original per-key data events. */
@@ -1162,7 +1220,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#rawPasteCandidate = "";
 		this.#pasteMode = false;
 		this.#pasteChunks = [];
-		this.#pasteOverlap = "";
 		this.#pasteBytes = 0;
 		this.#pendingKittyPrintableCodepoint = undefined;
 		this.#partialHoldStartMs = 0;

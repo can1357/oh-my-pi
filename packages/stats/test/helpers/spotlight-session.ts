@@ -53,6 +53,8 @@ export interface ShapeSpec {
 	ms?: number;
 	/** Spotlight calls that failed (the no-score fallback shaped the result). */
 	failures?: number;
+	/** The failed calls by cause, as pi journals them; omitted, the entry predates causes. */
+	failureCauses?: Record<string, number>;
 	/**
 	 * Held out: the model saw the result unshaped (`text`), while the counts and `original` describe the would-be cut
 	 * and `shapedUrl` names its text.
@@ -301,8 +303,9 @@ export class SpotlightSessionBuilder {
 				...(spec.scoreFree ? { scoreFree: true } : {}),
 				...gateFields(spec),
 				spotlight: {
-					calls: spec.costUsd ? 1 : 0,
+					calls: (spec.costUsd ? 1 : 0) + (spec.failures ?? 0),
 					failures: spec.failures ?? 0,
+					...(spec.failureCauses ? { failureCauses: spec.failureCauses } : {}),
 					ms: spec.ms ?? 120,
 					tokens: spec.inTokens,
 					costUsd: spec.costUsd ?? 0,

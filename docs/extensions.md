@@ -35,6 +35,14 @@ Extensions can combine all of the following in one module:
 - custom message rendering
 - session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
 
+Import host values from the package root, `@oh-my-pi/pi-coding-agent`. Deeper paths such as `@oh-my-pi/pi-tui/native/spans` also resolve inside the omp binary, but they name internal files: when a file moves, a static import of it stops the whole extension from loading. Besides the extension types and the theme (`theme`, `getSettingsListTheme`), the root exports these helpers:
+
+- `formTheme`, `editorKey`, `editorKeys` and `formatKeyHint` for settings dialogs and key hints
+- `styledSpans` and `compactText` to turn ANSI-styled text into `TspText`, such as a transcript presenter's `{ compact: { label, rows } }`, and `rowsText` to wrap pre-rendered rows in one native text node; `styleSpans`, `plainText`, `plainLine`, `spansLine` and `styledBackground` cover the other conversions between ANSI text and spans
+- `parseXdUrl` to read the device name from an `xd://` URL, plus `parseXdTopicUrl`, `stripXdUrlPrefix`, `couldBecomeXdUrl` and `XD_URL_PREFIX`
+- `unwrapHashlineHeaderPath` to turn a `[path#TAG]` write/edit target into its plain path
+- `cfgExtensionTranscriptPresenters`, the handle of the `extensionRenderers.transcriptPresenters` setting
+
 ## Runtime model
 
 1. Extension modules are imported concurrently; their factory functions then run sequentially in path order.
@@ -510,7 +518,7 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
-- `session_shutdown`
+- `session_before_shutdown` / `session_shutdown`
 
 In the interactive TUI, an extension whose factory registers no providers,
 shortcuts, composer shapes, or file fallbacks is loaded after the composer
@@ -534,8 +542,31 @@ Cancelable pre-events:
 - `session_before_branch` → `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_before_compact` → `{ cancel?: boolean; compaction?: CompactionResult }`
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
+- `session_before_shutdown` → `{ cancel?: boolean }`
+
+Pre-events are gates: handlers may ask the operator before deciding, so time spent awaiting a host dialog (`ctx.ui.select`, `confirm`, `input`, `askDialog`, `formDialog`, `approve`, `editor`, a presented `custom` component) does not count against the 30-second handler budget. The `signal` on `session_before_compact` and `session_before_tree` is cooperative: pass it to your own work, but the operation still waits for your handler. The `signal` on `session_before_shutdown` releases the close: on abort the host stops waiting, closes your pending dialogs, and ignores a late result.
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+#### Closing the session
+
+`session_before_shutdown` asks extensions before the operator ends the session through a close that can still be refused: in the interactive TUI that is `/exit`, `/quit`, Ctrl+D on an empty editor, double Ctrl+C, and quitting from the session selector. It runs before anything is stopped, while extension UI is available, and fires again on each attempt. Forced closes never emit it: fatal workspace errors, `ctx.shutdown()`, OS signals, restart, and RPC/ACP/print/SDK/subagent disposal.
+
+The first `{ cancel: true }` keeps the session open. Errors, timeouts, and aborts let the close proceed. The event's `signal` aborts when the close stops waiting: another close request (a further `/exit` or Ctrl+D, a fatal close), an OS signal, or the UI stopping. A cancel delivered after that is ignored. The operator's dialog keys are unchanged; dismissing a prompt resolves it as `undefined`, which closes normally.
+
+A `ctx.shutdown()` request that arrives during the prompt is not cancelled with the operator's quit; it still closes the session at the next settled boundary.
+
+```ts
+pi.on("session_before_shutdown", async (event, ctx) => {
+	const outcome = await ctx.ui.input("Did this session reach its goal?");
+	if (event.signal.aborted || outcome === undefined) return;
+	pi.appendEntry("session-outcome", { outcome });
+});
+```
+
+Cancellation stops the host from waiting but cannot stop extension code or undo its side effects; check `signal` before persisting late results. `appendEntry` follows normal session persistence, so it does not force an empty session onto disk.
+
+`session_shutdown` is unchanged: a notification-only teardown event with concurrent handlers and a 2-second budget. Ask questions in `session_before_shutdown`, not there.
 
 ### Prompt and turn lifecycle
 

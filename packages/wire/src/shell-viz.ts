@@ -60,7 +60,10 @@ export interface ShellVizRow {
 	depth: number;
 	node?: string;
 	range?: [number, number];
-	/** This row contains an active executable leaf, not merely an enclosing scope. */
+	/**
+	 * This row contains an active executable leaf, or text that leaf runs (its inline script, heredoc, or untraced
+	 * script), not merely an enclosing scope. Only rows with an active segment hold the executing span itself.
+	 */
 	active?: boolean;
 	role?: "stmt" | "head" | "mid" | "tail" | "raw" | "document";
 	state?: ShellTraceState;

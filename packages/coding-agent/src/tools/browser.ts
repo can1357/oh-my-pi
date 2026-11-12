@@ -22,6 +22,7 @@ import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
+import { ownsTerminal } from "./browser/terminal-owner";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -167,7 +168,7 @@ interface BrowserPreludeDetails {
  * relay, `browser.cdpUrl`, Tern (inside a Tern pane, unless `app.tern: false`;
  * `app.tern: true` forces it, `app.target` selects it over the `browser.tern`
  * setting to adopt a block; `headed` does not opt out), a cmux surface, then
- * Chromium.
+ * Chromium. Tern and cmux are automatic only while no other omp owns the terminal.
  */
 export function resolveBrowserKind(
 	params: BrowserParams,
@@ -223,17 +224,21 @@ export function resolveBrowserKind(
 	if (configuredCdpUrl) {
 		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
 	}
+	// Tern and cmux show the tab beside the omp drawn in that terminal. An omp started from that
+	// session's commands (`omp -p` from its bash tool, a script an eval cell runs) inherited the
+	// pane env, and its tabs would float over the other session's work.
+	const ownsPane = ownsTerminal(env);
 	if (app?.tern !== false) {
 		// `app.target` inside Tern names a browser block to adopt: an explicit request, like `app.tern: true`.
 		const ternKind = resolveTernKind(
-			{ settingEnabled: app?.target !== undefined || cfgBrowserTern.get(session.settings) },
+			{ settingEnabled: app?.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
 			env,
 		);
 		if (ternKind) return ternKind;
 	}
 	const cmuxKind = resolveCmuxKind(
 		{
-			settingEnabled: cfgBrowserCmux.get(session.settings),
+			settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings),
 		},
 		env,
 	);
@@ -438,6 +443,12 @@ async function openOnKind(
 	if (params.ignore_https_errors && kind.kind === "relay") {
 		throw new ToolError(
 			"ignore_https_errors is not supported through the Chrome relay: the extension debugger API does not expose the CDP Security domain. Pass app.relay:false to use omp's Chromium instead.",
+		);
+	}
+	// Chrome never lets an extension choose where downloads go. Refused here, before an existing tab is closed to reopen.
+	if (params.downloads !== undefined && kind.kind === "relay") {
+		throw new ToolError(
+			"The omp browser relay cannot choose where Chrome saves downloads: open the tab without `downloads`, and tab.waitForDownload() and tab.downloads() report where Chrome saved each file.",
 		);
 	}
 
@@ -692,6 +703,7 @@ async function runBrowser(
 		timeoutMs,
 		signal,
 		session,
+		waitsForDownload: params.action === "call" && params.chain?.[0]?.method === "waitForDownload",
 	});
 
 	if (screenshots.length) details.screenshots = screenshots;

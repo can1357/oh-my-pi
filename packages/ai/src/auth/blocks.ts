@@ -29,29 +29,24 @@ export const ACCOUNT_POLICY_BLOCK_SCOPE = "account-policy";
 const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE] as const;
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
-const MODEL_ACCOUNT_POLICY_PROVIDERS: Readonly<Record<string, true>> = {
-	"openai-codex": true,
-	cursor: true,
-};
 
-/** Scope key for one model-specific account-policy block, shared by selectors and rate limits. */
-export function modelAccountPolicyBlockScope(provider: string, modelId: string | undefined): string | undefined {
-	if (!Object.hasOwn(MODEL_ACCOUNT_POLICY_PROVIDERS, provider) || typeof modelId !== "string") return undefined;
-	const separator = modelId.lastIndexOf("/");
-	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).trim().toLowerCase();
-	if (!bareModelId || bareModelId.includes("\0")) return undefined;
-	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${bareModelId}`;
+/**
+ * Scope key for one model-specific account-policy block, shared by selectors
+ * and rate limits. Keyed by the exact requested id: distinct ids are distinct models.
+ */
+export function modelAccountPolicyBlockScope(modelId: string | undefined): string | undefined {
+	if (!modelId || modelId.includes("\0")) return undefined;
+	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${modelId}`;
 }
 
 /** Scope keys that a request must check, including model-policy constraints. */
 export function credentialBlockScopesForRequest(
-	provider: string,
 	strategy: CredentialRankingStrategy | undefined,
 	rankingContext: CredentialRankingContext,
 	blockScope: string | undefined,
 ): readonly string[] {
 	const scopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
-	const modelPolicyScope = modelAccountPolicyBlockScope(provider, rankingContext.modelId);
+	const modelPolicyScope = modelAccountPolicyBlockScope(rankingContext.modelId);
 	if (!modelPolicyScope || scopes.includes(modelPolicyScope)) return scopes;
 	return [...scopes, modelPolicyScope];
 }

@@ -662,7 +662,7 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 
 - **Provider entry (`devin`)**: `packages/catalog/src/compat/rules/providers/devin.kdl` declares default model `swe-1-6`, the boot-time fallback. Once discovery lands, the account default it reports (`defaultOverrideModelConfig`, marked `isProviderDefault`) is the provider default instead. When an effort routes to that lane (server family metadata or the static collapse table), its family starts at that wire id and effort; any other lane, such as a no-thinking `off` lane, starts the family on its own default. Environment keys: `DEVIN_API_KEY`.
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
-- **Authored seeds**: `swe-1-6-fast`, `swe-1-6`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `swe-1-6`; bundle policy `always`. Limits, capabilities, and prices are authored alongside this row.
 
 * **Dynamic Discovery:** `fetchDevinModels` in `packages/catalog/src/discovery/devin.ts` invokes the unary Connect RPC `GetCliModelConfigs` (`/exa.api_server_pb.ApiServerService/GetCliModelConfigs`) with the native `chisel` discovery metadata from `packages/catalog/src/wire/devin.ts` and every supported display slot. `normalizeDevinModels` drops disabled/internal configs, converts `ClientModelConfig` into `ModelSpec<"devin-agent">` entries (context window from `ClientModelConfig.maxTokens`, else `ModelInfo.maxTokens`, where current catalogs carry it, else 200k; 64k max tokens by default), and preserves server-supplied output caps, pricing dimensions, tool/parallel-tool/image support, description, and `new`/`beta`/`recommended` badges. Exception: `DEVIN_IMAGE_BLIND_UIDS` strips the image modality from `swe-1-6`/`swe-1-6-fast`, whose configs advertise `supports_images` while the backend silently drops the `ChatMessagePrompt.images` field (verified live; every other model reads it). An empty-but-200 catalog response logs a stale-identity-pin warning. Router configs (`displayOption MODEL_ROUTER` or `isModelRouter`) stay standalone with `compat.modelRouter`.
 
@@ -1340,6 +1340,7 @@ LiteLLM is an open-source AI proxy and gateway that unifies access to multiple L
 - **Credentials & env (`packages/catalog/src/compat/rules/providers/litellm.kdl`, `packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Authenticates via `LITELLM_API_KEY`.
 - **Login onboarding (`packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Declared as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), directing users to setup docs (`https://docs.litellm.ai/docs/proxy/deploy`), prompting for master/virtual keys (`sk-...`), and noting `LITELLM_BASE_URL` for custom proxy endpoints. CLI `login` delegates to `SqliteAuthCredentialStore.login()`.
 - **Default base URL (`packages/catalog/src/provider-models/cache-provider-id.ts`)**: Resolves to `Bun.env.LITELLM_BASE_URL` or `http://localhost:4000/v1`.
+- **Usage reporting (`packages/ai/src/usage/litellm.ts`)**: reads `GET /key/info` (`sk-` keys only) and `GET /v2/user/info` from the management base (base URL minus a trailing `/v1`) and reports each as a USD budget (spend, `max_budget`, `budget_duration` window, reset), probing with the one key inference would send (`usesRequestKey`). `ModelRegistry` registers it through `usage.replaceConfiguredProviders` for `litellm` and every `discovery.type: litellm` provider not in `disabledProviders`. A 401 drops that scope; a 401 on every scope tried discards the cached report.
 
 ### Catalog model handling
 
@@ -1831,6 +1832,24 @@ Qianfan (Baidu Cloud) provides access to Baidu's hosted model family via an Open
 - **Provider entry (`qianfan`)**: `packages/catalog/src/compat/rules/providers/qianfan.kdl` declares default model `deepseek-v3.2`. Environment keys: `QIANFAN_API_KEY`.
 - **Model Options**: `qianfanModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) constructs `openai-completions` options bound to `https://qianfan.baidubce.com/v2` via `createSimpleOpenAICompletionsOptions`.
 - **Bundled Models**: Static model specifications in `packages/catalog/src/models.json` define Qianfan models (e.g. `deepseek-v3.2` with `reasoning: true` and `baseUrl: "https://qianfan.baidubce.com/v2"`).
+
+## Otari (`otari`)
+
+Otari is an AI gateway and control plane that routes requests to upstream model providers on a workspace's behalf over an OpenAI-compatible Chat Completions interface at `https://api.otari.ai/api/v1`.
+
+### Special casings
+
+- **Workspace-scoped roster**: a workspace enables upstream providers and models in Otari, so the catalog is per-credential and dynamic. Nothing is bundled — the provider is registered in `CREDENTIAL_SCOPED_PROVIDERS` (`packages/catalog/scripts/generate-models.ts`), so catalog generation never fetches or commits one workspace's roster. Runtime discovery is authoritative (`dynamic-models-authoritative`): a successful key-scoped `/models` fetch is the whole catalog and prunes whatever the workspace has since disabled.
+- **Live row ownership**: `/models` rows are OpenRouter-style: `supported_parameters` (contains `reasoning` for reasoning models), `architecture.input_modalities` / `output_modalities`, context and output caps, and per-million USD pricing (`input_price_per_million`, `output_price_per_million`, optional `cache_read_price_per_million` / `cache_write_price_per_million`). With no bundled reference to merge from, the live row owns every capability field (`otariModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`). Rows the gateway has no models.dev metadata for omit `supported_parameters` and `architecture` and map as text-only, non-reasoning, with unknown limits.
+- **Non-chat rows**: the roster lists every model a workspace enables, including embedding, rerank, speech, image, and realtime models. Rows whose `architecture.output_modalities` contain no `text` are dropped in the mapper; metadata-less non-chat rows are dropped by `exclude-models provider="otari"` in `runtime/behavior.kdl`.
+- **No `developer` role**: Otari forwards through any-llm to the upstream, and some upstreams reject the `developer` role (`anthropic/` rows answer 400), so `supports-developer-role #false` sends instructions as `system`. `store`, `max_completion_tokens`, tool calls, and `reasoning_effort` (`minimal`..`xhigh`) pass through; the gateway maps effort to each upstream's own control.
+- **No stable default**: because the roster depends on the workspace, no model id is guaranteed to be enabled for every token, and `/models` marks no workspace default. `default-model` (`deepseek/deepseek-v4.1-flash`, the example selector in Otari's `/models` API docs) is a placeholder that only ranks already-available models and never fabricates a row; when the workspace does not enable it, the resolver falls back to the first available model.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/otari.kdl`. Environment key: `OTARI_API_KEY`. Validation uses `models-endpoint` against `https://api.otari.ai/api/v1/models`, which answers 401 both without a key and with a rejected one (verified 2026-11-02), so the probe validates the pasted key and bills nothing.
+- Self-hosted deployments set `OTARI_BASE_URL` to the deployment's API root (`https://host.example.com/api/v1`). It redirects `/login otari` validation (`base-url-env`), discovery, and requests, so a self-hosted key is never sent to the hosted gateway. A `models.yml` provider `baseUrl` override also redirects discovery and requests, but login validation only reads `OTARI_BASE_URL`.
+- **Cache scope**: the model cache namespace hashes the API key and base URL (`resolveModelCacheProviderId`, `otari` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), so a second workspace or deployment never reads another's cached roster.
 
 ## Qwen Portal (`qwen-portal`)
 
@@ -2682,7 +2701,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 ### Catalog model handling
 
 - **Provider entry (`web`)**: `packages/catalog/src/compat/rules/providers/web.kdl` declares default model `public`. Model management permits unauthenticated access.
-- **Authored seeds**: `hosted`, `parallel`, `perplexity`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `hosted`, `parallel`, `perplexity`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public`, `hackernews`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `webModelManagerOptions` in `packages/catalog/src/provider-models/special.ts`.
 
 ## Yolo-Auto (`yolo-auto`)

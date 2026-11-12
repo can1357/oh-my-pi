@@ -7,6 +7,7 @@ import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySess
 import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
+import { replaceFileWithRetry } from "../utils/atomic-file";
 import {
 	truncateHead,
 	truncateHeadBytes,
@@ -117,6 +118,8 @@ interface ManagedDaemon {
 	persistedSpec?: string;
 	/** Serialized metadata last written (or recovered); a write is skipped while unchanged. */
 	persistedMeta?: string;
+	/** Completes after a terminal generation's log, metadata, and completion notification are published. */
+	terminalSettled?: Promise<void>;
 }
 
 interface BrokerLease {
@@ -190,11 +193,11 @@ function syncReadyPending(record: ManagedDaemon): void {
 	record.snapshot.readyPending = pending.length > 0 ? pending : undefined;
 }
 
-/** Replace `filePath` via a pid-scoped temp file so readers never see a partial write. */
+/** Replace via a pid-scoped temp file; Windows may briefly deny replacement while a reader holds the target. */
 async function writeFileAtomic(filePath: string, content: string): Promise<void> {
 	const tempPath = `${filePath}.${process.pid}.tmp`;
 	await Bun.write(tempPath, content);
-	await fs.rename(tempPath, filePath);
+	await replaceFileWithRetry(tempPath, filePath);
 }
 
 async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
@@ -787,6 +790,7 @@ class DaemonBroker {
 		record.generation++;
 		const generation = record.generation;
 		record.stopRequested = false;
+		record.terminalSettled = undefined;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
 		record.snapshot.persist = record.spec.persist;
 		record.snapshot.detached = record.spec.detached;
@@ -1104,6 +1108,11 @@ class DaemonBroker {
 			return;
 		}
 		record.snapshot.state = failed && !record.stopRequested ? "failed" : "exited";
+		record.terminalSettled = this.#publishTerminal(record);
+		await record.terminalSettled;
+	}
+
+	async #publishTerminal(record: ManagedDaemon): Promise<void> {
 		const completion =
 			record.snapshot.owner !== undefined &&
 			!record.stopRequested &&
@@ -1236,6 +1245,8 @@ class DaemonBroker {
 		// readiness is still "not ready" — surface it as timed out so callers and the
 		// renderer don't chain work against a dead process.
 		const timedOut = operation.for === "ready" && !pattern ? !readyObserved() : !woke;
+		// The terminal state is visible before its log, metadata, and owner completion are published.
+		if (terminalState(record.snapshot.state)) await record.terminalSettled;
 		return { op: "wait", daemon: record.snapshot, matched, timedOut };
 	}
 
@@ -1278,9 +1289,8 @@ class DaemonBroker {
 			record.restartTimer = undefined;
 			record.snapshot.state = "exited";
 			record.snapshot.exitedAt = Date.now();
-			this.#persist(record);
-			await record.log?.close();
-			record.log = undefined;
+			record.terminalSettled = this.#publishTerminal(record);
+			await record.terminalSettled;
 			return;
 		}
 		record.snapshot.state = "stopping";

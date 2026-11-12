@@ -333,6 +333,10 @@ pub struct Root {
 	/// touch them.
 	zopts_on:          ZshOpts,
 	zopts_known:       ZshOpts,
+	/// Bumped whenever a root option record changes or the option facts are
+	/// dropped: what a cache of option-derived settings is valid for
+	/// ([`Self::opts_gen`]).
+	opts_gen:          u64,
 	/// Whether the root `DisabledBuiltins` list is non-empty (`None`: not
 	/// read since the last invalidation), for `builtins_disabled()`.
 	builtins_disabled: Option<bool>,
@@ -525,6 +529,7 @@ impl Root {
 		self.zopts_known = ZshOpts::default();
 		self.builtins_disabled = None;
 		self.locale_gen += 1;
+		self.opts_gen += 1;
 		self.hist_events.lock().clear();
 		if let Err(err) = self.rescan(store) {
 			self.fail(err);
@@ -613,10 +618,12 @@ impl Root {
 				} else {
 					self.opts_on &= !bit;
 				}
+				self.opts_gen += 1;
 			},
 			KeyBuf::ZshOpt(opt) => {
 				self.zopts_known.set(*opt, true);
 				self.zopts_on.set(*opt, zsh_opt_value(*opt, rec.as_ref()));
+				self.opts_gen += 1;
 			},
 			KeyBuf::Misc(MiscKey::DisabledBuiltins) => {
 				self.builtins_disabled = Some(matches!(&rec, Some(Record::Words(w)) if !w.is_empty()));
@@ -628,6 +635,13 @@ impl Root {
 			None => Change::Del(key.as_key()),
 		};
 		self.write(store, change);
+	}
+
+	/// Changes whenever a root option record does (or the option facts are
+	/// dropped): settings derived from root options stay valid while it is
+	/// the same.
+	pub const fn opts_gen(&self) -> u64 {
+		self.opts_gen
 	}
 
 	/// The root value of `opt`: a bit test once it was read or written.
@@ -789,7 +803,7 @@ fn root_binding_below(
 		return Ok(None);
 	}
 	// The innermost function scope, read once a private binding needs it.
-	let mut func = None;
+	let mut func = FuncScope::Unread;
 	for depth in (SCOPE_BITS..top).rev() {
 		if root_binds(root, store, name, depth, hide_private, &mut func)? {
 			return Ok(Some(depth));
@@ -805,17 +819,26 @@ fn root_binding_below(
 	Ok(None)
 }
 
+/// [`root_binds`]' cache of the innermost function scope.
+#[derive(Clone, Copy)]
+enum FuncScope {
+	/// Not read yet.
+	Unread,
+	/// [`root_func_scope`]'s answer.
+	Read(Option<u32>),
+}
+
 /// Whether root scope `depth` binds `name` for [`root_binding_below`]:
 /// with `hide_private`, a zsh private parameter there counts only when no
 /// function scope lies above it. `func` caches the innermost function
-/// scope (`None`: not read yet).
+/// scope.
 fn root_binds(
 	root: &Root,
 	store: &mut dyn StateStore,
 	name: &[u8],
 	depth: u32,
 	hide_private: bool,
-	func: &mut Option<Option<u32>>,
+	func: &mut FuncScope,
 ) -> Result<bool, StoreError> {
 	let private = match store.get(local_key(depth, name))? {
 		None => return Ok(false),
@@ -826,10 +849,10 @@ fn root_binds(
 		return Ok(true);
 	}
 	let innermost = match *func {
-		Some(f) => f,
-		None => {
+		FuncScope::Read(f) => f,
+		FuncScope::Unread => {
 			let f = root_func_scope(root, store)?;
-			*func = Some(f);
+			*func = FuncScope::Read(f);
 			f
 		},
 	};
@@ -1265,6 +1288,17 @@ pub enum VarEdit<'e> {
 	/// Append unkeyed elements after the highest index of an indexed array
 	/// (`a+=(x y)`); clears [`Attrs::INVISIBLE`].
 	Push(Vec<BString>),
+	/// Insert `key` into an associative array at the front of its bucket
+	/// among `buckets` ([`AssocArray::insert_front`]: zsh's hash order);
+	/// clears [`Attrs::INVISIBLE`].
+	Insert {
+		/// The key (absent; a present one takes the value in place).
+		key:     &'e [u8],
+		/// Its value.
+		value:   &'e [u8],
+		/// The zsh hash table's bucket count.
+		buckets: usize,
+	},
 }
 
 impl VarEdit<'_> {
@@ -1303,6 +1337,12 @@ impl VarEdit<'_> {
 					let first = items.last().map_or(0, |(i, _)| i + 1);
 					items.reserve(elems.len());
 					items.extend((first..).zip(elems));
+				}
+			},
+			Self::Insert { key, value, buckets } => {
+				var.attrs = var.attrs.without(Attrs::INVISIBLE);
+				if let VarValue::Assoc(items) = &mut var.value {
+					items.insert_front(buckets, BString::from(key), BString::from(value));
 				}
 			},
 		}
@@ -1358,6 +1398,8 @@ enum Fast<'e> {
 	Elem(Elem<'e>, &'e [u8], bool),
 	/// [`Change::SetElem`] of each pushed element from this index.
 	Push(i64),
+	/// [`Change::InsertElem`].
+	Insert(&'e [u8], &'e [u8], usize),
 	/// [`Change::DelElem`].
 	Remove(Elem<'e>),
 	/// The change leaves the variable as it is.
@@ -1388,6 +1430,12 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 			};
 		},
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
+		VarEdit::Insert { key, value, buckets } => {
+			return match &cur.value {
+				VarValue::Assoc(_) => Some(Fast::Insert(key, value, buckets)),
+				_ => Some(Fast::Nothing),
+			};
+		},
 	};
 	Some(match (&cur.value, elem) {
 		(VarValue::Str(_), None) => Fast::Scalar(value, append),
@@ -1458,6 +1506,12 @@ const fn seen_edit<'e>(edit: &VarEdit<'e>, seen: Seen) -> Option<Fast<'e>> {
 			};
 		},
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
+		VarEdit::Insert { key, value, buckets } => {
+			return match seen {
+				Seen::Assoc => Some(Fast::Insert(key, value, buckets)),
+				Seen::Scalar | Seen::Indexed { .. } => None,
+			};
+		},
 	};
 	match (seen, elem) {
 		(Seen::Scalar, None) => Some(Fast::Scalar(value, append)),
@@ -1507,6 +1561,9 @@ fn store_edit(
 			}
 		},
 		Ok(Fast::Remove(elem)) => root.write(store, Change::DelElem(key, elem)),
+		Ok(Fast::Insert(k, v, buckets)) => {
+			root.write(store, Change::InsertElem(key, buckets, BStr::new(k), BStr::new(v)));
+		},
 		Ok(Fast::Nothing) => {},
 		Err(mut var) => {
 			edit.apply(&mut var);
@@ -2228,13 +2285,16 @@ pub fn exported(
 
 /// Push `name` with `var`'s value when it is an exported, set scalar
 /// (an exported array keeps the attribute but stays out of the
-/// environment, in bash and zsh alike).
+/// environment, in bash and zsh alike). A zsh float goes out as zsh shows
+/// it, not as stored.
 fn push_exported(out: &mut Vec<(BString, BString)>, name: &[u8], var: &Var) {
 	if var.attrs.contains(Attrs::EXPORT)
 		&& !var.attrs.contains(Attrs::INVISIBLE)
 		&& let VarValue::Str(s) = &var.value
 	{
-		out.push((BString::from(name), s.clone()));
+		let value =
+			super::zsh::params::stored_float_display(var.attrs, s).unwrap_or_else(|| s.clone());
+		out.push((BString::from(name), value));
 	}
 }
 

@@ -21,7 +21,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
   - Emulation: `emulate(options?)` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides; `devices()` lists valid device names.
   - Clipboard: `clipboardRead()` returns `{text, source}`; `clipboardWrite(text)`, `clipboardCopy()`, and `clipboardPaste()` return `{source}` (`page` or write/read-only `shim` fallback).
   - Storage: `cookies`, `setCookies`, `clearCookies`, `storage`, `setStorage`, `clearStorage`, `saveState`, `loadState`; cookie imports accept objects, raw `Cookie:` headers, DevTools cURL dumps, or JSON arrays.
-  - Initialization: `addInitScript`, `removeInitScript`, `initScripts`; downloads: `waitForDownload`, `downloads`.
+  - Initialization: `addInitScript`, `removeInitScript`, `initScripts`; downloads: `waitForDownload`, `downloads`. `waitForDownload` holds the tab until a file arrives, so start it and the click that downloads in one `tab.run`: `const download = tab.waitForDownload(); await tab.click(selector); return await download;`.
   - Diagnostics: `console`, `errors`, `clearConsole`, `traceStart`, `traceStop`, `profileStart`, `profileStop`, `metrics`.
   - Recording: `recordStart(path, options?)`, `recordStop`, `recordRestart(path, options?)`, `recording`; `.mp4` uses H.264 and `.webm` uses VP9/VP8, with optional cursor overlay and changed-frame contact sheet.
   - Web Vitals + React: `vitals`, `reactEnable` (installs the hook and reloads), `reactTree`, `reactInspect`, `reactRenders`, `reactSuspense`; call `reactEnable` before other `react*` helpers.
@@ -41,12 +41,15 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
 
 Application modes:
 
-- Omit `app` → settings pick the browser: the user's Chrome through the relay when `browser.relay` is on (`PI_BROWSER_RELAY=1` turns it on even with the setting off, `=0` off), else `browser.cdpUrl`, else Tern inside a Tern pane, else cmux, else managed Chromium (installs on first use).
+- Omit `app` → settings pick the browser: the user's Chrome through the relay when `browser.relay` is on (`PI_BROWSER_RELAY=1` turns it on even with the setting off, `=0` off), else `browser.cdpUrl`, else Tern inside a Tern pane, else cmux, else managed Chromium (installs on first use). Tern and cmux are skipped when another omp session drawn in that terminal started this one (for example `omp -p` from its bash tool).
 - `headed` picks a visible or hidden managed browser per open. `allow_file_access` is a launch flag and cannot change an already-running shared Chromium; use a dedicated `app.path` with `app.args`. `ignore_https_errors` applies per tab through CDP.
 - `app.path`: launch the specified browser or Electron executable. Chromium-family browsers use an omp-owned profile unless `args` supplies `--user-data-dir`.
 - `app.cdp_url`: attach to an existing CDP endpoint.
 - `app.relay: true`: drive the user's Chrome through the omp relay. Without `app.target`, a new name opens omp's own background tab, leaving the user's tab alone (an outdated relay extension selects it instead); `url` navigates that tab. `app.target` borrows an existing tab by URL/title substring. Reopening an open name keeps its tab. `app.relay: false` skips the relay however the setting or `PI_BROWSER_RELAY` enables it, falling through to the next default.
 - Relay sessions are the user's real logged-in browser. Sites attribute actions to the user. NEVER navigate a borrowed tab without authorization.
+{{#if linux}}
+- On Linux under X11, Chrome 150 and later brings its window to the front when a mouse or touch press lands in the tab a window shows (the relay's `browser.targets()` marks it `shown`) while another window is in front, and what the user types next goes to that page. Presses: `click`, `dblclick`, `tap`, `drag`, `mouseDown`, `clickAt`, `check`/`uncheck` unless the element is already in the requested state (one that refuses the change still presses; unchecking a native radio does not press), and `uploadFile` on anything but an `<input type=file>`. Keys (`type`, `fill`, `press`), `focus`, `select`, `hover`, scrolling and screenshots are not presses, and a tab its window is not showing never comes forward. There, when the user must keep their app in front, use those on a shown tab instead: `focus()` then `press("Enter")` for a button, `press("Space")` for a checkbox, `uploadFile` on the file input itself. A control that opens a new tab or popup may still bring Chrome forward, however it is activated.
+{{/if}}
 - Inside a Tern pane, a tab opens as a browser picture-in-picture (PiP; native WKWebView, not Chromium) floating over your own pane. While the user looks at another Tern tab, it shows as a passive card in the corner of their current tab: it never takes focus or input, and clicking it takes them to your pane. The open result still says when it is not on screen (the user hid pictures in picture); then tell the user where it is. Explicit `app` options, the relay, and a configured CDP URL win over Tern.
 - `app.target` inside Tern adopts a browser block the user already has open (block id, or URL/title substring; no match lists the window's blocks). It is the user's page and signed-in session: opening with `url` navigates it, so do that only when asked. Closing releases it without closing it.
 - `app.tern: false` skips Tern only: with the relay on it still opens the user's Chrome, so pass `app: { tern: false, relay: false }` to skip both (e.g. parallel scraping by subagents, where PiPs would pile up over one pane); a configured `browser.cdpUrl` or cmux still comes before managed Chromium. `app.tern: true` requires Tern; `headed` never chooses between Tern and Chromium. When no Tern window can host a PiP, the open falls back to Chromium and says so.
@@ -76,6 +79,7 @@ await tab.close()
 <critical>
 - MUST open a tab before direct use; `browser.tab(name)` does not open one.
 - Default to `tab.observe()`; use screenshots for visual confirmation.
+- Report a step as done only when the page did it. NEVER alter the page with scripts to make a step look done (inserting controls, writing app state, revealing hidden elements); when a step cannot be done through the page, say so. When the user asks you to change the page with a script, do it.
 - `tab.run` has full Bun/Node and tool-bridge access; it is not sandboxed.
 - Relay and CDP actions operate on real user sessions.
 </critical>

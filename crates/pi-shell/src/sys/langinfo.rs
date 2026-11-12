@@ -1,7 +1,9 @@
-//! The C library's locale data, as zsh reads it: `nl_langinfo` items
-//! (zsh/langinfo's `$langinfo`) and `strftime` conversions (zsh/datetime's
-//! `strftime`) in a named locale, each through a `newlocale` object made for
-//! the one category asked about (zsh's per-category `setlocale`).
+//! The C library's locale data, as zsh reads it.
+//!
+//! `nl_langinfo` items (zsh/langinfo's `$langinfo`) and `strftime` conversions
+//! (zsh/datetime's `strftime`) in a named locale, each through a `newlocale`
+//! object made for the one category asked about (zsh's per-category
+//! `setlocale`).
 
 /// A locale category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +45,9 @@ pub struct Tm {
 	pub zone:   Vec<u8>,
 }
 
-/// `nl_langinfo(item)` of `locale` for category `cat`, `item` by its
+/// `nl_langinfo(item)` of `locale` for category `cat`.
+///
+/// `item` by its
 /// `<langinfo.h>` name (`CODESET`, `D_T_FMT`, …). A locale the C library
 /// does not know (or an empty name) reads as `C`. `None`: an item this
 /// target lacks, or a target without the C library's locale functions.
@@ -62,9 +66,10 @@ pub fn strftime(locale: &[u8], fmt: &[u8], tm: &Tm) -> Option<Vec<u8>> {
 pub struct Collator(native::Coll);
 
 impl Collator {
-	/// The collation of locale `name`; `None` for `C`, `POSIX`, an empty
-	/// or unknown name (strings compare as bytes), or a target without the
-	/// C library's locale functions.
+	/// The collation of locale `name`; `None` for `C`, `POSIX` and their
+	/// UTF-8 variants (`C.UTF-8`: code point order, which is byte order for
+	/// UTF-8), an empty or unknown name (strings compare as bytes), or a
+	/// target without the C library's locale functions.
 	pub fn new(name: &[u8]) -> Option<Self> {
 		native::Coll::new(name).map(Self)
 	}
@@ -76,12 +81,20 @@ impl Collator {
 	}
 }
 
-/// C `strptime(input, fmt, &tm)` in `locale`'s `LC_TIME`, `tm` starting
-/// zeroed with `tm_mday` 1 and `tm_isdst` -1 (zsh's `reverse_strftime`):
-/// the fields and the number of input bytes it used, `Some(None)` when the
-/// format does not match, `None` when the target lacks it. Input and
+/// What [`strptime`] made of its input.
+pub enum Parse {
+	/// The fields and the number of input bytes used.
+	Matched(Tm, usize),
+	/// The format does not match.
+	NoMatch,
+}
+
+/// C `strptime(input, fmt, &tm)` in `locale`'s `LC_TIME`.
+///
+/// `tm` starts zeroed with `tm_mday` 1 and `tm_isdst` -1 (zsh's
+/// `reverse_strftime`); `None` when the target lacks it. Input and
 /// format end at their first NUL byte, as C sees them.
-pub fn strptime(locale: &[u8], fmt: &[u8], input: &[u8]) -> Option<Option<(Tm, usize)>> {
+pub fn strptime(locale: &[u8], fmt: &[u8], input: &[u8]) -> Option<Parse> {
 	native::strptime(locale, fmt, input)
 }
 
@@ -93,7 +106,7 @@ mod native {
 	use core::ffi::{CStr, c_char, c_int};
 	use std::ffi::CString;
 
-	use super::{Category, Tm};
+	use super::{Category, Parse, Tm};
 
 	unsafe extern "C" {
 		fn nl_langinfo_l(item: libc::nl_item, loc: libc::locale_t) -> *mut c_char;
@@ -124,7 +137,12 @@ mod native {
 
 	impl Coll {
 		pub fn new(name: &[u8]) -> Option<Self> {
-			if matches!(name, b"" | b"C" | b"POSIX") || name.contains(&0) {
+			let (lang, codeset) =
+				name.split_at(name.iter().position(|&c| c == b'.').unwrap_or(name.len()));
+			let utf8 = codeset.is_empty()
+				|| codeset.eq_ignore_ascii_case(b".UTF-8")
+				|| codeset.eq_ignore_ascii_case(b".utf8");
+			if (matches!(lang, b"" | b"C" | b"POSIX") && utf8) || name.contains(&0) {
 				return None;
 			}
 			let c = CString::new(name).ok()?;
@@ -132,7 +150,12 @@ mod native {
 			// object.
 			let loc =
 				unsafe { libc::newlocale(libc::LC_COLLATE_MASK, c.as_ptr(), core::ptr::null_mut()) };
-			(!loc.is_null()).then_some(Self(Loc(loc)))
+			// Never wrap a null pointer: `Loc` frees it on drop.
+			if loc.is_null() {
+				None
+			} else {
+				Some(Self(Loc(loc)))
+			}
 		}
 
 		pub fn key(&self, s: &[u8]) -> Vec<u8> {
@@ -171,7 +194,8 @@ mod native {
 				// SAFETY: as above, with a literal C string.
 				loc = unsafe { libc::newlocale(mask, c"C".as_ptr(), core::ptr::null_mut()) };
 			}
-			(!loc.is_null()).then_some(Self(loc))
+			// Never wrap a null pointer: `Loc` frees it on drop.
+			if loc.is_null() { None } else { Some(Self(loc)) }
 		}
 	}
 
@@ -272,7 +296,7 @@ mod native {
 		s.iter().position(|&c| c == 0).map_or(s, |n| &s[..n])
 	}
 
-	pub fn strptime(locale: &[u8], fmt: &[u8], input: &[u8]) -> Option<Option<(Tm, usize)>> {
+	pub fn strptime(locale: &[u8], fmt: &[u8], input: &[u8]) -> Option<Parse> {
 		let loc = Loc::new(libc::LC_TIME_MASK, locale)?;
 		let f = CString::new(c_prefix(fmt)).ok()?;
 		let b = CString::new(c_prefix(input)).ok()?;
@@ -293,7 +317,7 @@ mod native {
 			end
 		};
 		if end.is_null() {
-			return Some(None);
+			return Some(Parse::NoMatch);
 		}
 		let used = (end as usize).wrapping_sub(b.as_ptr() as usize);
 		let tm = Tm {
@@ -308,7 +332,7 @@ mod native {
 			gmtoff: 0,
 			zone:   Vec::new(),
 		};
-		Some(Some((tm, used)))
+		Some(Parse::Matched(tm, used))
 	}
 
 	pub fn strftime(locale: &[u8], fmt: &[u8], tm: &Tm) -> Option<Vec<u8>> {
@@ -327,7 +351,7 @@ mod native {
 		t.tm_yday = tm.yday;
 		t.tm_isdst = 0;
 		t.tm_gmtoff = tm.gmtoff as _;
-		t.tm_zone = zone.as_ptr() as _;
+		t.tm_zone = zone.as_ptr().cast_mut();
 		let mut size = 64 + fmt.len() * 8;
 		for _ in 0..6 {
 			let mut buf = vec![0u8; size];
@@ -360,20 +384,24 @@ mod native {
 			None
 		}
 
+		#[expect(clippy::unused_self, reason = "same shape as the locale-backed `Coll::key`")]
 		pub fn key(&self, s: &[u8]) -> Vec<u8> {
 			s.to_vec()
 		}
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `langinfo`")]
 	pub fn langinfo(_locale: &[u8], _cat: Category, _item: &str) -> Option<Vec<u8>> {
 		None
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `strftime`")]
 	pub fn strftime(_locale: &[u8], _fmt: &[u8], _tm: &Tm) -> Option<Vec<u8>> {
 		None
 	}
 
-	pub fn strptime(_locale: &[u8], _fmt: &[u8], _input: &[u8]) -> Option<Option<(Tm, usize)>> {
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `strptime`")]
+	pub fn strptime(_locale: &[u8], _fmt: &[u8], _input: &[u8]) -> Option<super::Parse> {
 		None
 	}
 }

@@ -5,6 +5,7 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -358,12 +359,9 @@ export class TodoTracker {
 	}
 
 	#buildEagerPreludeContext(): { toolRefs: Record<string, string>; taskBatch: boolean } {
-		const wireName = (name: string): string => {
-			const tool = this.#host.toolRegistry().get(name);
-			return typeof tool?.customWireName === "string" ? tool.customWireName : name;
-		};
+		const registry = this.#host.toolRegistry();
 		return {
-			toolRefs: { task: wireName("task"), todo: wireName("todo") },
+			toolRefs: { task: toolWireName(registry, "task"), todo: toolWireName(registry, "todo") },
 			taskBatch: cfgTaskBatch.get(this.#host.settings),
 		};
 	}

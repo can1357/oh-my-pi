@@ -44,6 +44,7 @@ use std::{
 		Arc, OnceLock,
 		atomic::{AtomicBool, Ordering},
 	},
+	time::{Duration, Instant},
 };
 
 use futures::{
@@ -217,7 +218,12 @@ fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 	}
 }
 
-fn output_metadata(file: &OpenFile) -> Option<Metadata> {
+/// The identity of the file behind a handle, when the handle names one.
+///
+/// The metadata is taken from the handle itself rather than from the path it
+/// was opened by, so two descriptors onto one file compare equal however they
+/// were reached.
+fn handle_metadata(file: &OpenFile) -> Option<Metadata> {
 	match file {
 		// `Metadata::from_file` keeps the handle identity a Windows path stat
 		// drops; without it `path_is_stdout` can never match on Windows.
@@ -236,6 +242,48 @@ impl StdoutFile {
 	/// Whether `path` on `fs` is this file.
 	pub async fn is(&self, fs: &pi_vfs::Fs, path: &Path) -> bool {
 		fs.metadata(path).await.is_ok_and(|candidate| self.0.same_file(&candidate))
+	}
+
+	/// Whether `candidate` — metadata read from an already-open handle — is
+	/// this file.
+	pub fn matches(&self, candidate: &Metadata) -> bool {
+		self.0.same_file(candidate)
+	}
+}
+
+/// Pending output at which [`Host::pace_output`] delivers.
+const PACED_BYTES: usize = 32 * 1024;
+
+/// Longest [`Host::pace_output`] holds output back.
+const PACED_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Calls of [`Host::pace_output`] between its clock reads.
+const PACED_CLOCK_STRIDE: u32 = 64;
+
+/// When a loop paced by [`Host::pace_output`] last delivered its output, and
+/// its calls since the last clock read. Made by [`Host::output_pace`].
+pub(crate) struct OutputPace {
+	since:  Instant,
+	calls:  u32,
+	/// Output to a terminal is delivered per unit, as it is produced.
+	paced:  bool,
+}
+
+impl OutputPace {
+	/// A pace whose interval starts now.
+	fn restart(paced: bool) -> Self {
+		Self { since: Instant::now(), calls: 0, paced }
+	}
+
+	/// Whether [`PACED_INTERVAL`] has passed since the last delivery, read
+	/// once every [`PACED_CLOCK_STRIDE`] calls.
+	fn interval_passed(&mut self) -> bool {
+		self.calls += 1;
+		if self.calls < PACED_CLOCK_STRIDE {
+			return false;
+		}
+		self.calls = 0;
+		self.since.elapsed() >= PACED_INTERVAL
 	}
 }
 
@@ -589,8 +637,9 @@ fn virtual_descriptor_path(fd: i32) -> PathBuf {
 }
 
 /// The native path for a POSIX-style alias the shell accepts on Windows: an
-/// MSYS drive path (`/c/x`, `/mnt/c/x`) becomes `C:\\x`, and the `/tmp` tree
-/// lands in the system temporary directory. Elsewhere every path is native.
+/// MSYS drive path (`/c/x`, `/mnt/c/x`) becomes `C:\\x`, the `/tmp` tree
+/// lands in the system temporary directory, and `/dev/null` is the null
+/// device `NUL`. Elsewhere every path is native.
 #[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub(crate) fn normalize_shell_path(path: &Path) -> std::borrow::Cow<'_, Path> {
 	#[cfg(windows)]
@@ -615,28 +664,17 @@ mod msys {
 	/// `temp_dir` supplies the directory `/tmp` stands for.
 	pub(super) fn native(path: &std::path::Path, temp_dir: &dyn Fn() -> PathBuf) -> Option<PathBuf> {
 		let text = path.to_str()?;
-		let rest = text.strip_prefix('/')?;
-		if let Some(native) = drive(rest) {
-			return Some(native);
+		if text == "/dev/null" {
+			return Some(PathBuf::from("NUL"));
 		}
-		tmp(rest, temp_dir)
-	}
-
-	/// `c/x/y` or `mnt/c/x/y` (after the leading `/`) as `C:\\x\\y`.
-	fn drive(rest: &str) -> Option<PathBuf> {
-		let rest = match rest.get(..4) {
-			Some(prefix) if prefix.eq_ignore_ascii_case("mnt/") => &rest[4..],
-			_ => rest,
-		};
-		let mut chars = rest.chars();
-		let letter = chars.next().filter(char::is_ascii_alphabetic)?;
-		let tail = chars.as_str();
-		if !(tail.is_empty() || tail.starts_with('/')) {
-			return None;
+		if let Some((letter, tail)) = pi_vfs::msys_drive(text.as_bytes()) {
+			// `tail` is a suffix of `text` cut after an ASCII `/`.
+			let tail = std::str::from_utf8(tail).ok()?;
+			let mut native = format!("{}:\\", char::from(letter));
+			native.extend(tail.chars().map(|ch| if ch == '/' { '\\' } else { ch }));
+			return Some(PathBuf::from(native));
 		}
-		let mut native = format!("{}:\\", letter.to_ascii_uppercase());
-		native.extend(tail.trim_start_matches('/').chars().map(|ch| if ch == '/' { '\\' } else { ch }));
-		Some(PathBuf::from(native))
+		tmp(text.strip_prefix('/')?, temp_dir)
 	}
 
 	/// `tmp/...` (after the leading `/`) under `temp_dir()`, after resolving
@@ -687,6 +725,12 @@ mod msys {
 			assert_eq!(translate("/tmp/../tmp/f"), Some(PathBuf::from("T").join("f")));
 			assert_eq!(translate("/tmp/../etc"), None);
 			assert_eq!(translate("/var/tmp"), None);
+		}
+
+		#[test]
+		fn dev_null_is_the_null_device() {
+			assert_eq!(translate("/dev/null"), Some(PathBuf::from("NUL")));
+			assert_eq!(translate("/dev/nullx"), None);
 		}
 	}
 }
@@ -829,10 +873,40 @@ impl Host {
 	/// utility did not set [`Utility::CHECKS_STDOUT_PATH`].
 	pub fn stdout_file(&self) -> Option<StdoutFile> {
 		self.stdout_metadata
-			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
 			.as_ref()
 			.filter(|stdout| stdout.is_file())
 			.map(|stdout| StdoutFile(stdout.clone()))
+	}
+
+	/// Whether the file behind an already-opened handle is the regular file
+	/// currently backing stdout.
+	///
+	/// The handle counterpart of [`Host::path_is_stdout`]: GNU grep's guard
+	/// against reading the file it writes is `SAME_INODE (st, out_stat)` —
+	/// the same inode, not merely the same path — and `st` is what the
+	/// *opened* input descriptor reports, not what the path it was opened by
+	/// reports. Comparing the handle that was opened therefore cannot be
+	/// defeated by a path that is replaced, or a symlink that is retargeted,
+	/// between the check and the open.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn opened_is_stdout(&self, opened: &Metadata) -> bool {
+		self.stdout_file().is_some_and(|stdout| stdout.matches(opened))
+	}
+
+	/// Whether standard input is the regular file currently backing stdout.
+	///
+	/// GNU grep's guard against reading the file it writes is `SAME_INODE
+	/// (st, out_stat)` — the same inode, not merely the same path — so the
+	/// comparison is made between the two handles rather than between their
+	/// paths, and a shell redirection (`< file` with `>> file`) is caught
+	/// without ever opening the file again.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdin_is_stdout(&self) -> bool {
+		let Some(stdout) = self.stdout_file() else {
+			return false;
+		};
+		handle_metadata(self.stdin.file()).is_some_and(|stdin| stdout.matches(&stdin))
 	}
 
 	/// Looks up an exported shell variable.
@@ -984,6 +1058,42 @@ impl Host {
 	/// and ends the utility with the SIGPIPE status.
 	pub async fn flush_output(&self) -> io::Result<()> {
 		self.drain_output(false).await
+	}
+
+	/// [`Host::flush_output`] for a loop whose next unit of output follows
+	/// without waiting (a walk, a search of listed files): delivers once
+	/// [`PACED_BYTES`] are pending or [`PACED_INTERVAL`] has passed since
+	/// `pace` last delivered, so a pipe's reader wakes per batch rather than
+	/// per unit. A loop about to wait on anything else calls
+	/// [`Host::flush_output`] first.
+	///
+	/// # Errors
+	///
+	/// As for [`Host::flush_output`].
+	pub async fn pace_output(&self, pace: &mut OutputPace) -> io::Result<()> {
+		let Some(streams) = &self.async_out else {
+			return Ok(());
+		};
+		if pace.paced
+			&& streams.stdout.pending_len() < PACED_BYTES
+			&& streams.stderr.pending_len() < PACED_BYTES
+			&& !pace.interval_passed()
+		{
+			return Ok(());
+		}
+		let delivered = self.flush_output().await;
+		*pace = OutputPace::restart(pace.paced);
+		delivered
+	}
+
+	/// The pace of a [`Host::pace_output`] loop starting now. Output to a
+	/// terminal is not held back.
+	pub fn output_pace(&self) -> OutputPace {
+		let terminal = self
+			.async_out
+			.as_ref()
+			.is_some_and(|streams| streams.stdout.is_terminal() || streams.stderr.is_terminal());
+		OutputPace::restart(!terminal)
 	}
 
 	/// Delivers pending output: all of it when `full`, else as
@@ -1600,7 +1710,10 @@ impl Destination {
 /// That last one matters more than it looks: the host process's fd 2 belongs to
 /// the TUI, so a child left with inherited stderr writes straight into the
 /// rendered frame. [`ChildEnv::command`] therefore always pipes stderr, and
-/// [`ChildEnv::forward_stderr`] drains it to the command's own fd 2.
+/// [`ChildEnv::forward_stderr`] drains it to the command's own fd 2. For the
+/// same reason the child leads a new session without a controlling terminal,
+/// the embedded shell's policy for externals: `rsync`'s `ssh` would otherwise
+/// prompt on (and read keystrokes from) the user's terminal under the TUI.
 #[derive(Clone)]
 pub(crate) struct ChildEnv {
 	cwd:    PathBuf,
@@ -1619,7 +1732,8 @@ fn native_working_dir<'a>(filesystem: &BlockingFs, cwd: &'a Path) -> io::Result<
 
 impl ChildEnv {
 	/// Builds a `Command` for `program` with the shell's working directory and
-	/// environment, and with stderr piped.
+	/// environment, stderr piped, and (unix) in a new session with no
+	/// controlling terminal, so a `/dev/tty` open fails instead of prompting.
 	///
 	/// Stdin and stdout are left untouched for the caller to wire; they default
 	/// to inherited, so a caller that leaves them alone MUST redirect them.
@@ -1631,6 +1745,8 @@ impl ChildEnv {
 			.env_clear()
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(std::process::Stdio::piped());
+		#[cfg(unix)]
+		std::os::unix::process::CommandExt::setsid(&mut command, true);
 		Ok(command)
 	}
 
@@ -2259,7 +2375,7 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 /// All output the body left pending is delivered before the status is
 /// settled, so a closed reader still ends it with [`SIGPIPE_EXIT_CODE`]; a
 /// cancelled command delivers nothing more.
-async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
+pub(crate) async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 	let outcome = {
 		let body = AssertUnwindSafe(async { parsed.run(host).await }).catch_unwind();
 		let mut body = pin!(body);
@@ -2983,6 +3099,39 @@ mod testing {
 
 		assert_eq!(host.resolve("/c/Users/Adam/file.txt"), PathBuf::from(r"C:\Users\Adam\file.txt"));
 		assert_eq!(host.resolve("/tmp/probe"), std::env::temp_dir().join("probe"));
+	}
+
+	/// Contract: the identity of the output file is decided on the handle that
+	/// was opened, not on the path it was opened by.
+	///
+	/// GNU grep's guard against reading the file it writes is `SAME_INODE
+	/// (st, out_stat)`, where `st` is what the opened input descriptor
+	/// reports. A path replaced — or a symlink retargeted — between the check
+	/// and the open must therefore not be able to hide that the handle that
+	/// was opened is the output file, so the two checks have to disagree in
+	/// exactly that case.
+	#[tokio::test]
+	async fn an_opened_handle_is_recognised_as_the_output_file_after_its_path_changes() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stdout file");
+		let (mut host, _capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdout(OpenFile::File(Arc::new(stdout)));
+		// A handle opened on the output file, while the path still names it.
+		let opened = std::fs::File::open(&path).expect("open output file");
+		let opened = pi_vfs::Metadata::from_file(&opened).expect("opened metadata");
+		// A second file, written while the first still exists so the two have
+		// distinct identities, then renamed over the first: the path now names
+		// a different file, while the handle still names the output.
+		let other = tree.path().join("other.txt");
+		std::fs::write(&other, "other\n").unwrap();
+		std::fs::rename(&other, &path).unwrap();
+		assert!(!host.path_is_stdout(&path).await, "the path no longer names the output file");
+		assert!(host.opened_is_stdout(&opened), "the handle still names the output file");
 	}
 
 	/// Parses `argv` and runs `U` against an in-memory host, mirroring what the

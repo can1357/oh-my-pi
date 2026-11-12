@@ -10,6 +10,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { mkdirSync } from "node:fs";
+import * as fs from "node:fs/promises";
 import path from "node:path";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -34,7 +35,7 @@ import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall"
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
 import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
-import { currentLoopPhase, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { currentLoopPhase, isEnoent, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 // Mnemopi is lazy-loaded at runtime; preload it for synchronous state construction.
@@ -305,17 +306,37 @@ describe("Mnemopi tool factories", () => {
 });
 
 describe("retain.execute", () => {
+	let agentDir: TempDir;
+	let originalAgentDir: string;
+
 	beforeEach(() => {
 		resetSettingsForTest();
 		registeredState = undefined;
+		originalAgentDir = getAgentDir();
+		agentDir = TempDir.createSync("@hindsight-retain-");
+		setAgentDir(agentDir.path());
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
+		registeredState?.dispose();
 		registeredState = undefined;
+		setAgentDir(originalAgentDir);
+		await agentDir.remove();
 	});
 
-	it("queues the memory and reports success without calling the API", async () => {
+	/** Undelivered outbox events, across destinations. */
+	async function outboxEvents(): Promise<string[]> {
+		try {
+			const names = await fs.readdir(path.join(agentDir.path(), "hindsight-outbox"), { recursive: true });
+			return names.filter(name => !name.startsWith("quarantine") && name.endsWith(".json"));
+		} catch (error) {
+			if (isEnoent(error)) return [];
+			throw error;
+		}
+	}
+
+	it("persists the memory and reports success without calling the API", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
 		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
@@ -329,7 +350,7 @@ describe("retain.execute", () => {
 		// Tool returns before any HTTP work happens.
 		expect(retainBatchSpy).not.toHaveBeenCalled();
 		expect(retainSpy).not.toHaveBeenCalled();
-		expect(registeredState?.retainQueue.depth).toBe(1);
+		expect(await outboxEvents()).toHaveLength(1);
 	});
 
 	it("retains global items untagged, in a request separate from project-tagged items", async () => {
@@ -387,30 +408,34 @@ describe("retain.execute", () => {
 		]);
 	});
 
-	it("retains items queued through the two-argument enqueue as project-scoped", async () => {
+	it("retains items enqueued without a scope as project-scoped", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
 		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 		registerState(client, settings, { retainTags: ["project:pi"], config: { scoping: "per-project-tagged" } });
 
-		registeredState!.retainQueue.enqueue("legacy caller fact", "legacy context");
+		await registeredState!.retainQueue.enqueue("call-direct", [
+			{ content: "direct caller fact", context: "direct context" },
+		]);
 		await registeredState?.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
 		expect(retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }))).toEqual([
-			{ content: "legacy caller fact", tags: ["project:pi"] },
+			{ content: "direct caller fact", tags: ["project:pi"] },
 		]);
 	});
 
 	it.each(HINDSIGHT_GLOBAL_REJECTIONS)(
 		"rejects a global item enqueued directly on the queue %s",
-		(_label, config, error) => {
+		async (_label, config, error) => {
 			const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
 			registerState(client, undefined, { config });
 
-			expect(() => registeredState!.retainQueue.enqueue("cross-project fact", undefined, "global")).toThrow(error);
-			expect(registeredState?.retainQueue.depth).toBe(0);
+			await expect(
+				registeredState!.retainQueue.enqueue("call-rejected", [{ content: "cross-project fact", scope: "global" }]),
+			).rejects.toThrow(error);
+			expect(await outboxEvents()).toEqual([]);
 		},
 	);
 
@@ -427,44 +452,36 @@ describe("retain.execute", () => {
 					items: [{ content: "project fact" }, { content: "global preference", scope: "global" }],
 				}),
 			).rejects.toThrow(error);
-			expect(registeredState?.retainQueue.depth).toBe(0);
+			expect(await outboxEvents()).toEqual([]);
 		},
 	);
 
-	it.each([
-		["project", /failed for 2 memories: HTTP 503$/, ["global one"]],
-		["global", /failed for 1 global memory: HTTP 503$/, ["project one", "project two"]],
-		["both", /failed for 2 memories and 1 global memory: HTTP 503$/, []],
-	] as const)(
-		"reports the lost items in a single notice when the %s request fails",
-		async (failing, notice, delivered) => {
-			const settings = Settings.isolated({ "memory.backend": "hindsight" });
-			const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
-			const sent: string[] = [];
-			vi.spyOn(HindsightApi.prototype, "retainBatch").mockImplementation(async (_bankId, items) => {
-				const scope = items[0].tags ? "project" : "global";
-				if (failing === "both" || scope === failing) throw new Error("HTTP 503");
-				sent.push(...items.map(item => item.content));
-				return {} as never;
-			});
-			vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
-			const noticeSpy = vi.fn();
-			registerState(client, settings, {
-				retainTags: ["project:pi"],
-				config: { scoping: "per-project-tagged", globalScope: true },
-				sessionOverrides: { emitNotice: noticeSpy },
-			});
+	it("keeps a failed delivery on disk, notifies once per outage, and delivers it on a later flush", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockRejectedValue(new Error("HTTP 503"));
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const noticeSpy = vi.fn();
+		registerState(client, settings, { sessionOverrides: { emitNotice: noticeSpy } });
 
-			await MemoryRetainTool.createIf(makeSession(settings))!.execute("call-partial", {
-				items: [{ content: "project one" }, { content: "project two" }, { content: "global one", scope: "global" }],
-			});
-			await registeredState?.flushRetainQueue();
+		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+		await tool.execute("call-x", { items: [{ content: "kept fact" }] });
+		await registeredState?.flushRetainQueue();
+		await registeredState?.flushRetainQueue();
 
-			expect(sent).toEqual([...delivered]);
-			expect(noticeSpy).toHaveBeenCalledTimes(1);
-			expect(noticeSpy.mock.calls[0][1]).toMatch(notice);
-		},
-	);
+		expect(noticeSpy).toHaveBeenCalledTimes(1);
+		const [level, message, source] = noticeSpy.mock.calls[0];
+		expect(level).toBe("warning");
+		expect(source).toBe("Hindsight");
+		expect(message).toContain("HTTP 503");
+		expect(message).toContain("1 memory kept");
+		expect(await outboxEvents()).toHaveLength(1);
+
+		retainBatchSpy.mockResolvedValue({} as never);
+		await registeredState?.flushRetainQueue();
+		expect(retainBatchSpy.mock.calls.at(-1)?.[1].map(item => item.content)).toEqual(["kept fact"]);
+		expect(await outboxEvents()).toEqual([]);
+	});
 
 	it("flushes a multi-item tool call as a single retainBatch call with per-item context", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
@@ -484,39 +501,24 @@ describe("retain.execute", () => {
 		const [bankId, items, options] = retainBatchSpy.mock.calls[0];
 		expect(bankId).toBe("test-bank");
 		expect(options).toEqual(expect.objectContaining({ async: true }));
-		expect(items).toEqual([
-			expect.objectContaining({
-				content: "fact one",
-				metadata: { session_id: TEST_SESSION_ID },
-				tags: ["project:pi"],
-			}),
-			expect.objectContaining({
-				content: "fact two",
-				context: "user override",
-				metadata: { session_id: TEST_SESSION_ID },
-				tags: ["project:pi"],
-			}),
-		]);
-		expect(registeredState?.retainQueue.depth).toBe(0);
-	});
-
-	it("emits a UI-only warning notice when the batch flush fails", async () => {
-		const settings = Settings.isolated({ "memory.backend": "hindsight" });
-		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
-		vi.spyOn(HindsightApi.prototype, "retainBatch").mockRejectedValue(new Error("HTTP 503"));
-		const noticeSpy = vi.fn();
-		registerState(client, settings, { sessionOverrides: { emitNotice: noticeSpy } });
-
-		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
-		await tool.execute("call-x", { items: [{ content: "doomed fact" }] });
-		await registeredState?.flushRetainQueue();
-
-		expect(noticeSpy).toHaveBeenCalledTimes(1);
-		const [level, message, source] = noticeSpy.mock.calls[0];
-		expect(level).toBe("warning");
-		expect(source).toBe("Hindsight");
-		expect(message).toContain("HTTP 503");
-		expect(message).toContain("1 memory");
+		// Same-call items share a publication mtime, so their order within the batch is unspecified.
+		expect(items).toHaveLength(2);
+		expect(items).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					content: "fact one",
+					metadata: { session_id: TEST_SESSION_ID },
+					tags: ["project:pi"],
+				}),
+				expect.objectContaining({
+					content: "fact two",
+					context: "user override",
+					metadata: { session_id: TEST_SESSION_ID },
+					tags: ["project:pi"],
+				}),
+			]),
+		);
+		expect(await outboxEvents()).toEqual([]);
 	});
 
 	it("throws when no per-session state is registered", async () => {
@@ -1003,7 +1005,6 @@ describe("learn.execute (Hindsight backend)", () => {
 					},
 				}),
 			).rejects.toThrow(error);
-			expect(registeredState?.retainQueue.depth).toBe(0);
 			expect(await Bun.file(path.join(getManagedSkillsDir(), "global-lesson", "SKILL.md")).exists()).toBe(false);
 		},
 	);

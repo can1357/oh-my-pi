@@ -414,12 +414,12 @@ fn read_a_and_mapfile_need_an_indexed_array() {
 #[test]
 fn dollar_question_carries_into_eval_source_and_substitutions() {
 	let fs = MemFs::new();
-	fs.add_file("/w/s", b"echo \"src-in=$?\"\n", 0o644);
-	fs.add_file("/w/c", b"# only a comment\n", 0o644);
+	fs.add_file("/work/s", b"echo \"src-in=$?\"\n", 0o644);
+	fs.add_file("/work/c", b"# only a comment\n", 0o644);
 	let src = "false; eval 'echo in=$?'; false; eval '#c'; echo comment=$?; false; eval ' '; echo \
 	           blank=$?; false; eval 'x=$?'; echo x=$x; (exit 3); eval 'eval \"echo \
-	           nested=\\$?\"'; f() { return 4; }; f; eval 'echo fn=$?'; false; . /w/s; false; . \
-	           /w/c; echo comment-src=$?; false; x=$(); echo empty-cs=$?; false; x=$( ); echo \
+	           nested=\\$?\"'; f() { return 4; }; f; eval 'echo fn=$?'; false; . /work/s; false; . \
+	           /work/c; echo comment-src=$?; false; x=$(); echo empty-cs=$?; false; x=$( ); echo \
 	           blank-cs=$?; (exit 3); x=$(echo $?); echo inner=$x";
 	let out = run_script(FakeHost::new().with_fs(fs), src.as_bytes(), &[], Fault::None);
 	assert_eq!(String::from_utf8_lossy(&out.stderr), "");
@@ -449,11 +449,11 @@ fn dollar_question_carries_into_eval_source_and_substitutions() {
 #[test]
 fn mapfile_callbacks_read_the_input_after_their_line() {
 	let fs = MemFs::new();
-	fs.add_file("/w/lines", b"1\n2\n3\n4\n", 0o644);
+	fs.add_file("/work/lines", b"1\n2\n3\n4\n", 0o644);
 	let src = "cb() { read -r x; echo \"cb:$1:$2:$x\"; }; printf '1\\n2\\n3\\n4\\n' | { mapfile -t \
 	           -C cb -c 1 arr; echo \"arr=${arr[*]}\"; }; { mapfile -t -C cb -c 1 arr; echo \
-	           \"arr=${arr[*]}\"; } < /w/lines; { mapfile -t -C cb -c 2 -n 3 arr; read -r rest; \
-	           echo \"arr=${arr[*]} rest=$rest\"; } < /w/lines";
+	           \"arr=${arr[*]}\"; } < /work/lines; { mapfile -t -C cb -c 2 -n 3 arr; read -r rest; \
+	           echo \"arr=${arr[*]} rest=$rest\"; } < /work/lines";
 	let out = run_script(FakeHost::new().with_fs(fs), src.as_bytes(), &[], Fault::None);
 	assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 	assert_eq!(
