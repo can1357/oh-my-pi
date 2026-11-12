@@ -1318,13 +1318,26 @@ impl RunningCommand {
 	}
 }
 
-/// A command line a utility asks its [`CommandRunner`] to run (`xargs`, `find
-/// -exec`, `env`, `ifne`): `argv[0]` names the builtin or program. Stdin
-/// defaults to the null device, as GNU `xargs` and `find -exec` give their
-/// children; stdout and stderr are the utility's own.
+/// A command a utility asks its [`CommandRunner`] to run, in one of two
+/// kinds:
+///
+/// - an argv ([`ShellCommand::new`]; `xargs`, `find -exec`, `env`, `ifne`):
+///   `argv[0]` names the builtin or program, which is looked up before it
+///   runs, so a missing one fails the request itself;
+/// - a command line ([`ShellCommand::line`]; `awk`'s `system()` and pipes):
+///   shell source the invoking shell parses and runs, like `sh -c` but in the
+///   shell itself. Nothing is looked up beforehand: a missing command is the
+///   shell's own diagnostic and status 127 from the run.
+///
+/// Either way, environment changes, [`ShellCommand::current_dir`] and
+/// [`ShellCommand::stdin`] apply the same way. Stdin defaults to the null
+/// device, as GNU `xargs` and `find -exec` give their children; stdout and
+/// stderr are the utility's own.
 pub struct ShellCommand {
 	argv:  Vec<OsString>,
 	argv0: Option<OsString>,
+	/// The source of a command-line command; `argv` is then empty.
+	line:  Option<OsString>,
 	cwd:   Option<PathBuf>,
 	stdin: Option<Fd>,
 	env:   Vec<EnvChange>,
@@ -1346,13 +1359,28 @@ impl ShellCommand {
 	/// A command running `argv`; `argv[0]` names the builtin or program.
 	#[must_use]
 	pub fn new(argv: Vec<OsString>) -> Self {
-		Self { argv, argv0: None, cwd: None, stdin: None, env: Vec::new() }
+		Self { argv, argv0: None, line: None, cwd: None, stdin: None, env: Vec::new() }
 	}
 
-	/// The command line; `argv[0]` names the builtin or program to look up.
+	/// A command line `source` for the invoking shell to parse and run in a
+	/// subshell of its own, with no positional parameters (`sh -c source`).
+	#[must_use]
+	pub fn line(source: impl Into<OsString>) -> Self {
+		Self { argv: Vec::new(), argv0: None, line: Some(source.into()), cwd: None, stdin: None, env: Vec::new() }
+	}
+
+	/// The argv; `argv[0]` names the builtin or program to look up. Empty for
+	/// a command line ([`ShellCommand::source`]).
 	#[must_use]
 	pub fn args(&self) -> &[OsString] {
 		&self.argv
+	}
+
+	/// The source of a command made by [`ShellCommand::line`]; `None` for an
+	/// argv command.
+	#[must_use]
+	pub fn source(&self) -> Option<&std::ffi::OsStr> {
+		self.line.as_deref()
 	}
 
 	/// The `argv[0]` presented to the command instead of the looked-up name
@@ -1498,8 +1526,10 @@ fn cancelled_command() -> io::Error {
 /// A command runs with the utility's stdout and stderr, its own
 /// [`ShellCommand::take_stdin`] (else the null device), in
 /// [`ShellCommand::dir`] (else the invocation's working directory), with
-/// [`ShellCommand::env_changes`] applied to that command only. Side effects on
-/// shell state (`cd`, assignments) must not reach the invoking shell.
+/// [`ShellCommand::env_changes`] applied to that command only. A command line
+/// ([`ShellCommand::source`]) is parsed and run by the shell itself, with no
+/// lookup first. Side effects on shell state (`cd`, assignments) must not
+/// reach the invoking shell.
 pub trait CommandRunner: Send {
 	/// Starts `command`, resolving with how it ended.
 	///
@@ -2583,7 +2613,7 @@ pub(crate) const INTERRUPTED_EXIT_CODE: i32 = 130;
 /// Exit status of a process builtin given arguments it cannot parse.
 pub(crate) const INVALID_USAGE_EXIT_CODE: i32 = 2;
 
-/// A process builtin (`ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`): an
+/// A process builtin (`ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`, `lsof`): an
 /// async body that needs nothing of the shell beyond a [`ProcContext`].
 pub(crate) trait Process: clap::Parser + Send + Sync + 'static {
 	/// Whether the body resolves paths through [`ProcContext::paths`]; every
@@ -3302,7 +3332,8 @@ mod testing {
 	/// command as an extra when one has its name, else as one of the shell
 	/// builtins `echo`, `true`, `false`, `pwd`, and `cd`, else as a program
 	/// found on its `PATH`, writing to the invoking utility's stdout and
-	/// stderr. Environment changes apply to that command only.
+	/// stderr; a command line runs as `sh -c <source>`. Environment changes
+	/// apply to that command only.
 	pub(crate) struct TestRunner {
 		env:    HashMap<String, String>,
 		cwd:    PathBuf,
@@ -3368,8 +3399,11 @@ mod testing {
 				};
 				Ok::<_, io::Error>((runner, stdin))
 			})();
-			let mut argv: Vec<String> =
-				command.args().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+			// Outside the engine, a command line runs as `sh -c <source>`.
+			let mut argv: Vec<String> = match command.source() {
+				Some(source) => vec!["sh".into(), "-c".into(), source.to_string_lossy().into_owned()],
+				None => command.args().iter().map(|arg| arg.to_string_lossy().into_owned()).collect(),
+			};
 			let name = argv.first().cloned().unwrap_or_default();
 			let argv0 = command.presented_argv0().map(|argv0| argv0.to_string_lossy().into_owned());
 			Box::pin(async move {

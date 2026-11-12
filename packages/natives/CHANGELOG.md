@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `shellBuiltins(sessionEnv?)`: the commands the embedded shell adds to bash's builtins (`timeout`, `nohup`, process builtins, utilities), sorted, after its `PI_DISABLE_*` switches
+- Added `awk`, `tar`, `shasum`, `md5` and `strings` builtins and an `lsof` process builtin (Linux, macOS, Windows) to the embedded shell; `PI_DISABLE_UUTILS_DESTRUCTIVE` also hands `tar` to the system
+
 ### Fixed
 
 - Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success

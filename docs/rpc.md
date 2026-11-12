@@ -609,8 +609,8 @@ contains `"rpc"`; this covers both `--mode rpc` and `--mode rpc-ui`. When enable
 turn, sent as a hidden `goal-continuation` message.
 
 - The turn starts once the yielding run has fully unwound. At that moment the goal
-  must still be active, the session idle with nothing queued, plan mode off, open
-  todos not all blocked, and the session not being disposed.
+  must still be active, the session idle with nothing queued, plan mode off, and
+  the session not being disposed.
 - While the turn is decided but not yet started, `get_state.isSettled`,
   `prompt_result.sessionSettled` and `session_settled` treat the session as busy.
   `session_settled` follows if the continuation is abandoned.
@@ -760,9 +760,9 @@ fallback when enabling fails.
 ### `set_todos` payload
 
 Replaces the todo state for the current session and returns `{ todoPhases }`. The list is recorded on the current session branch and restored when that branch is reloaded, compacted, or resumed, like an interactive `/todo` edit.
-Phases use `{ name, tasks }`; tasks retain `{ content, status, blocker? }`. There
+Phases use `{ name, tasks }`; tasks retain `{ content, status }`. There
 are no phase or task IDs. Status is `"pending"`, `"in_progress"`, `"completed"`,
-`"abandoned"`, or `"blocked"`. Snapshot cloning drops extra fields, including
+or `"abandoned"`. Snapshot cloning drops extra fields, including
 task `details` and `notes`.
 
 ```json

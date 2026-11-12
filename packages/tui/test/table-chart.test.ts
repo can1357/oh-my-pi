@@ -5,6 +5,7 @@ import {
 	buildChart,
 	type ChartKind,
 	type ChartPlan,
+	isTransition,
 	planChart,
 	worthCharting,
 } from "@oh-my-pi/pi-tui/charts/chart-plan";
@@ -406,6 +407,33 @@ describe("analyzeTable", () => {
 			"| case | Go | Zig | speedup |\n|---|---|---|---|\n| a | 80 ms | 20 ms | 4.0× |\n| b | 90 ms | 60 ms | 1.5× |\n| c | 100 ms | 10.0 ms | 10.0× |",
 		);
 		expect(factors.measures.map(column => column.header)).toEqual(["Go", "Zig"]);
+	});
+});
+
+describe("isTransition", () => {
+	it("reads `with`/`to`/`from` as a condition only between headers naming one subject", () => {
+		expect(isTransition("Median", "Runs with ≥10")).toBe(false);
+		expect(isTransition("build without cache", "build with cache")).toBe(true);
+		expect(isTransition("Before (kata)", "After (vmon)")).toBe(true);
+	});
+});
+
+describe("row name nesting", () => {
+	it("keeps a leading number with the name before it", () => {
+		const table = analyzeTable(
+			["Detector", "AUC"],
+			[
+				["Step length alone", "0.690"],
+				["EmbeddingGemma 2 embedding", "0.743"],
+				["EmbeddingGemma 2, layer 14", "0.772"],
+				["Jev 15 + EmbeddingGemma", "0.759"],
+				["Jev 15 + layer 14", "0.783"],
+			],
+		);
+		const spec = buildChart(table, { kind: "bar", label: 0, series: [1], transpose: false });
+		const heads = (spec?.groups ?? []).map(group => group.name).filter(Boolean);
+		expect(heads).not.toContain("EmbeddingGemma");
+		expect(heads).not.toContain("Jev");
 	});
 });
 

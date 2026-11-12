@@ -434,4 +434,10 @@ export interface ProtocolHandler {
 	 * (conflict://, attachment://) omit this method.
 	 */
 	promptDoc?(host: SchemeHost): string | undefined;
+	/**
+	 * Sub-path, query and limit grammar the {@link promptDoc} line leaves out
+	 * (rendered from `prompts/internal-urls/<scheme>-reference.md`), served on demand
+	 * at `xd://read/urls`. Reads cheap process facts only; `undefined` omits the scheme.
+	 */
+	promptReference?(): string | undefined;
 }

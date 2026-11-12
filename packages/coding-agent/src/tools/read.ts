@@ -44,6 +44,7 @@ import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
+import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { McpResourceNotFoundError } from "../internal-urls/mcp-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -1166,6 +1167,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
 			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
 		});
+	}
+	/**
+	 * `xd://read/sources`: selector reference for the sources the description only names.
+	 * `xd://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
+	 */
+	docTopics(): Record<string, string> {
+		return {
+			sources: prompt.render(readSourcesDoc, { BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings) }),
+			urls: InternalUrlRouter.instance()
+				.reference()
+				.map(line => `- ${line}`)
+				.join("\n"),
+		};
 	}
 	readonly parameters = readSchema;
 	readonly strict = true;

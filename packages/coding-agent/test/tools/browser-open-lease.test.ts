@@ -352,7 +352,7 @@ describe("browser open — failed spawned-app acquisition reaps its owned proces
 			invokeBrowser({
 				action: "open",
 				name: "failed-open",
-				app: { path: "/tmp/chrome-headless-shell" },
+				app: "/tmp/chrome-headless-shell",
 				timeout: 1,
 			}),
 		).rejects.toBeInstanceOf(ToolError);
@@ -461,7 +461,7 @@ describe("browser open — a cancel during the relay extension read", () => {
 		return surfaces;
 	}
 
-	const relayOpen = { action: "open", name: "relay-read", app: { relay: true }, timeout: 30 };
+	const relayOpen = { action: "open", name: "relay-read", app: "relay", timeout: 30 };
 
 	it("opens no tab", async () => {
 		const surfaces = relayOpensOnCmux();
