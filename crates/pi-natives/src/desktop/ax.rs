@@ -117,6 +117,7 @@ pub struct AxProps {
 	pub label_complete:      bool,
 	/// The read-as guard's fingerprint when it differs from the displayed
 	/// label's fingerprint. None uses the displayed fingerprint.
+	#[cfg(any(target_os = "macos", test))]
 	pub read_as_fingerprint: Option<u64>,
 	/// Whether a row, cell, button or file icon reports itself selected.
 	pub selected:            bool,
