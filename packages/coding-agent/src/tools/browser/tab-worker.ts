@@ -1914,6 +1914,7 @@ export class WorkerCore {
 	#certificateOverride?: CDPSession;
 	/** Request boundary of the earliest action since the last look; the next look settles it. */
 	#actionRequestSeq?: number;
+	#actionGeneration = 0;
 	/** The settle a look started, which looks arriving while it runs wait for too. */
 	#settling?: Promise<void>;
 	readonly #recording = new RecordingController();
@@ -2871,6 +2872,7 @@ export class WorkerCore {
 				perOpMs,
 				sig => {
 					this.#actionRequestSeq ??= this.#requireNetwork().nextRequestSeq;
+					this.#actionGeneration++;
 					return fn(sig);
 				},
 				selectorOpts,
@@ -3602,9 +3604,9 @@ export class WorkerCore {
 	 */
 	async #settleAfterAction(signal: AbortSignal, perOpMs: number): Promise<void> {
 		const since = this.#actionRequestSeq;
-		if (since !== undefined) {
-			this.#actionRequestSeq = undefined;
+		if (!this.#settling && since !== undefined) {
 			const settling = this.#settle(since, Math.min(SETTLE_TIMEOUT_MS, perOpMs / 2)).finally(() => {
+				this.#actionRequestSeq = undefined;
 				if (this.#settling === settling) this.#settling = undefined;
 			});
 			this.#settling = settling;
@@ -3619,6 +3621,7 @@ export class WorkerCore {
 		const network = this.#requireNetwork();
 		const deadline = Date.now() + boundMs;
 		while (!this.#stopped && Date.now() < deadline) {
+			const generation = this.#actionGeneration;
 			if (network.hasPendingRequests(since)) {
 				await Bun.sleep(SETTLE_POLL_MS);
 				continue;
@@ -3626,7 +3629,7 @@ export class WorkerCore {
 			const remaining = deadline - Date.now();
 			// A navigation that commits mid-wait destroys the context; the loop then waits in the new document.
 			const quiet = await withTimeout(
-				page.evaluate(waitForQuietDom, SETTLE_QUIET_MS, remaining),
+				Promise.all(page.frames().map(frame => frame.evaluate(waitForQuietDom, SETTLE_QUIET_MS, remaining))),
 				remaining + SETTLE_POLL_MS,
 				"settle wait timed out",
 			).catch(async () => {
@@ -3634,7 +3637,14 @@ export class WorkerCore {
 				await Bun.sleep(SETTLE_POLL_MS);
 				return false;
 			});
-			if (quiet && !network.hasPendingRequests(since)) return;
+			if (
+				quiet &&
+				quiet.every(Boolean) &&
+				generation === this.#actionGeneration &&
+				!network.hasPendingRequests(since)
+			) {
+				return;
+			}
 		}
 	}
 
