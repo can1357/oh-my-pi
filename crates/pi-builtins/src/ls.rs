@@ -1663,7 +1663,16 @@ fn parse_width(width_match: Option<&String>, host: &Host, runtime: &LsRuntime) -
 		match u16::from_str_radix(s, radix) {
 			Ok(x) => Ok(x),
 			Err(e) => match e.kind() {
-				IntErrorKind::PosOverflow => Ok(u16::MAX),
+				// Overflow can be reported before a later invalid digit is reached.
+				IntErrorKind::PosOverflow
+					if s
+						.strip_prefix('+')
+						.unwrap_or(s)
+						.bytes()
+						.all(|c| c.is_ascii_digit() && (radix == 10 || c <= b'7')) =>
+				{
+					Ok(u16::MAX)
+				},
 				_ => Err(LsError::InvalidLineWidth(s.into())),
 			},
 		}
@@ -2046,13 +2055,15 @@ impl Config {
 			Dereference::DirArgs
 		};
 
+		// Validated even when color forces tab stops off, as GNU does.
+		let tab_size_arg = options
+			.get_one::<String>(options::format::TAB_SIZE)
+			.map(|size| size.parse::<usize>().map_err(|_| LsError::InvalidTabSize(size.clone())))
+			.transpose()?;
 		let tab_size = if needs_color {
 			Some(0)
 		} else {
-			options
-				.get_one::<String>(options::format::TAB_SIZE)
-				.and_then(|size| size.parse::<usize>().ok())
-				.or_else(|| host.var("TABSIZE").and_then(|s| s.parse().ok()))
+			tab_size_arg.or_else(|| host.var("TABSIZE").and_then(|s| s.parse().ok()))
 		}
 		.unwrap_or(SPACES_IN_TAB);
 
@@ -4069,6 +4080,9 @@ enum LsError {
 	#[error("invalid line width: '{0}'")]
 	InvalidLineWidth(String),
 
+	#[error("invalid tab size: '{0}'")]
+	InvalidTabSize(String),
+
 	#[error("general io error: {0}")]
 	IOError(#[from] std::io::Error),
 
@@ -4107,7 +4121,7 @@ enum LsError {
 impl LsError {
 	fn code(&self) -> i32 {
 		match self {
-			Self::InvalidLineWidth(_) => 2,
+			Self::InvalidLineWidth(_) | Self::InvalidTabSize(_) => 2,
 			Self::IOError(_) => 1,
 			Self::IOErrorContext(_, _, false, _) => 1,
 			Self::IOErrorContext(_, _, true, _) => 2,
@@ -5697,6 +5711,84 @@ mod integration_tests {
 		let (code, capture) = run_util::<Ls>(&["visible-name"], "", dir.path());
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "visible-name\n");
+	}
+
+	#[test]
+	fn invalid_tab_sizes_keep_gnu_errors_without_listing() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+		std::fs::create_dir(dir.path().join("target")).unwrap();
+
+		for (args, size) in [
+			(&["-laT", "target"][..], "target"),
+			(&["--color=always", "-T", "target"], "target"),
+			(&["--tabsize=-1"], "-1"),
+			(&["--tabsize=18446744073709551616"], "18446744073709551616"),
+		] {
+			let (code, capture) = run_util::<Ls>(args, "", dir.path());
+			assert_eq!(code, 2, "{args:?}: {}", capture.out());
+			assert!(capture.out().is_empty(), "{args:?}: {}", capture.out());
+			assert_eq!(capture.err(), format!("ls: invalid tab size: '{size}'\n"), "{args:?}");
+		}
+	}
+
+	#[test]
+	fn numeric_tab_sizes_preserve_directory_operands() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+		std::fs::create_dir(dir.path().join("target")).unwrap();
+		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
+
+		for args in [
+			&["-T", "4", "target"][..],
+			&["--tabsize=4", "target"],
+			&["--tabsize=0", "target"],
+		] {
+			let (code, capture) = run_util::<Ls>(args, "", dir.path());
+			assert_eq!(code, 0, "{args:?}: {}", capture.err());
+			assert_eq!(capture.out(), "TARGET_ONLY\n", "{args:?}");
+			assert!(capture.err().is_empty(), "{args:?}: {}", capture.err());
+		}
+	}
+
+	#[test]
+	fn invalid_widths_keep_gnu_errors_without_listing() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+		std::fs::create_dir(dir.path().join("target")).unwrap();
+		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
+
+		for (args, width) in [
+			(&["-w", "abc", "target"][..], "abc"),
+			(&["-w", "65536x", "target"], "65536x"),
+			(&["--width=07777778", "target"], "07777778"),
+		] {
+			let (code, capture) = run_util::<Ls>(args, "", dir.path());
+			assert_eq!(code, 2, "{args:?}: {}", capture.out());
+			assert!(capture.out().is_empty(), "{args:?}: {}", capture.out());
+			assert_eq!(capture.err(), format!("ls: invalid line width: '{width}'\n"), "{args:?}");
+		}
+	}
+
+	#[test]
+	fn numeric_widths_keep_octal_and_saturating_layout() {
+		let dir = tempfile::tempdir().unwrap();
+		for name in ["aa", "bb", "cc"] {
+			File::create(dir.path().join(name)).unwrap();
+		}
+
+		for (width, expected) in [
+			("010", "aa  bb\ncc\n"),
+			("10", "aa  bb  cc\n"),
+			("999999999999999999999999999999999999", "aa  bb  cc\n"),
+			("+999999999999999999999999999999999999", "aa  bb  cc\n"),
+		] {
+			let (code, capture) =
+				run_util::<Ls>(&["-x", "-T0", "-w", width], "", dir.path());
+			assert_eq!(code, 0, "{width}: {}", capture.err());
+			assert_eq!(capture.out(), expected, "{width}");
+			assert!(capture.err().is_empty(), "{width}: {}", capture.err());
+		}
 	}
 
 	#[cfg(windows)]
