@@ -22,7 +22,7 @@ export interface ReadBoundedBytesOptions {
 }
 
 /** A response body read up to a byte cap. */
-export interface BoundedBody {
+interface BoundedBody {
 	/** At most `maxBytes` bytes: the whole body, or its head when {@link truncated}. */
 	bytes: Uint8Array;
 	/** The body continued past the cap and the read stopped there. */
@@ -32,10 +32,9 @@ export interface BoundedBody {
 /**
  * Read a response body up to `maxBytes`, stopping once the cap is crossed so an
  * oversized body cannot balloon memory. Returns `null` when the response has
- * no readable body. The single streaming body reader; size policy (reject or
- * keep the head) belongs to the caller.
+ * no readable body.
  */
-export async function readBoundedBody(
+async function readBoundedBody(
 	response: Response,
 	maxBytes: number,
 	options: { signal?: AbortSignal } = {},

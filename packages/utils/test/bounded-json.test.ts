@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { BoundedJsonReadError, readBoundedBody, readBoundedBytes } from "@oh-my-pi/pi-utils/bounded-json";
+import { BoundedJsonReadError, readBoundedBytes } from "@oh-my-pi/pi-utils/bounded-json";
 
 function chunked(chunks: string[], { close = true } = {}): Response {
 	const encoder = new TextEncoder();
@@ -13,22 +13,15 @@ function chunked(chunks: string[], { close = true } = {}): Response {
 }
 
 describe("bounded body reads", () => {
-	it("keeps exactly the head up to the cap when a later chunk crosses it", async () => {
-		const body = await readBoundedBody(chunked(["abc", "", "defg", "hij"]), 5);
-		expect(new TextDecoder().decode(body?.bytes)).toBe("abcde");
-		expect(body?.truncated).toBe(true);
+	it("keeps exactly the head up to the cap when truncating, and rejects an oversized body otherwise", async () => {
+		const head = await readBoundedBytes(chunked(["abc", "", "defg", "hij"]), 5, { truncate: true });
+		expect(new TextDecoder().decode(head)).toBe("abcde");
+		const whole = await readBoundedBytes(chunked(["abc", "de"]), 5);
+		expect(new TextDecoder().decode(whole)).toBe("abcde");
 
-		const whole = await readBoundedBody(chunked(["abc", "de"]), 5);
-		expect(new TextDecoder().decode(whole?.bytes)).toBe("abcde");
-		expect(whole?.truncated).toBe(false);
-	});
-
-	it("rejects an oversized body unless truncation is requested", async () => {
 		const error = await readBoundedBytes(chunked(["abc", "def"]), 5).catch(caught => caught);
 		expect(error).toBeInstanceOf(BoundedJsonReadError);
 		expect((error as BoundedJsonReadError).kind).toBe("size");
-		const head = await readBoundedBytes(chunked(["abc", "def"]), 5, { truncate: true });
-		expect(new TextDecoder().decode(head)).toBe("abcde");
 	});
 
 	it("cancels the body when Content-Length already exceeds the cap", async () => {
@@ -46,7 +39,7 @@ describe("bounded body reads", () => {
 
 	it("stops waiting on a stalled body once the signal aborts", async () => {
 		const controller = new AbortController();
-		const read = readBoundedBody(chunked(["partial"], { close: false }), 64, { signal: controller.signal });
+		const read = readBoundedBytes(chunked(["partial"], { close: false }), 64, { signal: controller.signal });
 		controller.abort(new Error("deadline"));
 		await expect(read).rejects.toThrow("deadline");
 	});
