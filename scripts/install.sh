@@ -364,8 +364,53 @@ install_binary() {
     # Check if in PATH
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) echo "Run 'omp' to get started!" ;;
-        *) echo "Add ${INSTALL_DIR} to your PATH, then run 'omp'" ;;
+        *) print_path_hint ;;
     esac
+}
+
+# Tell the user that INSTALL_DIR is not on PATH and print one command, for
+# their login shell, that adds it to the shell's startup file and loads it.
+print_path_hint() {
+    # Write $HOME instead of the expanded home directory so the startup file
+    # line stays correct if the home directory moves.
+    case "$INSTALL_DIR" in
+        "$HOME"/*) path_ref="\$HOME/${INSTALL_DIR#"$HOME"/}" ;;
+        *) path_ref="$INSTALL_DIR" ;;
+    esac
+
+    # The startup file each shell reads, relative to the home directory, and
+    # the command that loads it into the current shell.
+    load_cmd="source"
+    case "$(basename "${SHELL:-sh}")" in
+        zsh) rc_file=".zshrc" ;;
+        bash)
+            # Terminals on macOS start bash as a login shell, which reads
+            # ~/.bash_profile and skips ~/.bashrc.
+            if [ "$(uname -s)" = "Darwin" ]; then
+                rc_file=".bash_profile"
+            else
+                rc_file=".bashrc"
+            fi
+            ;;
+        fish) rc_file="" ;;
+        *)
+            rc_file=".profile"
+            load_cmd="."
+            ;;
+    esac
+
+    if [ -n "$rc_file" ]; then
+        path_cmd="echo 'export PATH=\"${path_ref}:\$PATH\"' >> ~/${rc_file} && ${load_cmd} ~/${rc_file}"
+    else
+        path_cmd="fish_add_path \"${path_ref}\""
+    fi
+
+    echo ""
+    echo "${INSTALL_DIR} is not in your PATH. To add it, run:"
+    echo ""
+    echo "  ${path_cmd}"
+    echo ""
+    echo "Then run 'omp' to get started!"
 }
 
 # Main logic

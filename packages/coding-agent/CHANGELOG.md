@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The install script now prints the exact command for your shell (zsh, bash, fish, or sh) to add the install directory to your PATH
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
