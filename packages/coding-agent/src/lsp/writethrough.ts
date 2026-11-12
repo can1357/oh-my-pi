@@ -127,7 +127,7 @@ export interface WritethroughResult {
  * deferred fetches included. `write` sets a shebang's execute bits here, since linters read
  * them (Ruff's EXE001). Receives the final bytes.
  */
-type WritethroughCommitHook = (finalContent: string) => Promise<void>;
+export type WritethroughCommitHook = (finalContent: string) => Promise<void>;
 
 /** Callback type for the LSP writethrough */
 export type WritethroughCallback = (
