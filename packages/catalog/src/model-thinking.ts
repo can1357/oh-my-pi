@@ -102,12 +102,14 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 /** Maps a normalized thinking effort to Google's `thinkingLevel` enum values.
  * When a collapsed family routes `minimal` onto the same wire id as `low`
  * (Antigravity Gemini 3.6/3.7 Flash), emit `LOW` — Cloud Code Assist rejects
- * `MINIMAL` on those `-low` SKUs.
+ * `MINIMAL` on those `-low` SKUs. `xhigh` is `XHIGH`, which only Gemini 4
+ * Hydrogen accepts; callers validate the effort against the model's ladder
+ * first, and only Hydrogen's ladder offers xhigh.
  */
 export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 	effort: Effort,
 	model?: ApiModel<TApi>,
-): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" {
+): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH" {
 	if (effort === Effort.Minimal) {
 		const routing = model?.thinking?.effortRouting;
 		if (routing?.[Effort.Minimal] && routing[Effort.Minimal] === routing[Effort.Low]) {
@@ -121,9 +123,10 @@ export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 		case Effort.Medium:
 			return "MEDIUM";
 		case Effort.High:
-		case Effort.XHigh:
 		case Effort.Max:
 			return "HIGH";
+		case Effort.XHigh:
+			return "XHIGH";
 	}
 }
 

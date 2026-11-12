@@ -531,7 +531,6 @@ describe("model thinking derivation", () => {
 		});
 		expect(mapEffortToGoogleThinkingLevel(Effort.Low)).toBe("LOW");
 		expect(mapEffortToGoogleThinkingLevel(Effort.High)).toBe("HIGH");
-		expect(mapEffortToGoogleThinkingLevel(Effort.XHigh)).toBe("HIGH");
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 
@@ -616,6 +615,20 @@ describe("model thinking derivation", () => {
 					expect(getSupportedEfforts(gemini4)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, gemini4)).toBe("MEDIUM");
 				}
+			}
+		}
+
+		// Hydrogen adds XHIGH, which no other Gemini 4 line accepts.
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+		for (const [provider, api] of [
+			["google-vertex", "google-vertex"],
+			["google", "google-generative-ai"],
+		] as const) {
+			for (const reasoning of [true, false]) {
+				const hydrogen = createModel({ id: "gemini-4-hydrogen", api, provider, reasoning });
+				expect(hydrogen.thinking?.mode).toBe("google-level");
+				expect(getSupportedEfforts(hydrogen)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+				expect(mapEffortToGoogleThinkingLevel(Effort.XHigh, hydrogen)).toBe("XHIGH");
 			}
 		}
 
