@@ -266,10 +266,11 @@ impl<'a> Runtime<'a> {
 			// A callout's script is host-generated ([`trace::Unit::callout`]):
 			// its setters are not the command's.
 			let generated = || {
-				[key, producer]
-					.into_iter()
-					.flatten()
-					.any(|key| source.unit(key.unit as usize).is_some_and(|unit| unit.callout))
+				[key, producer].into_iter().flatten().any(|key| {
+					source
+						.unit(key.unit as usize)
+						.is_some_and(|unit| unit.callout)
+				})
 			};
 			match &event.data {
 				HistoryData::Branch { construct, taken, status } => {
