@@ -329,7 +329,12 @@ impl Overlay {
 		self
 			.records
 			.values()
-			.chain(self.snapshot.iter().flat_map(|snapshot| snapshot.0.records.values()))
+			.chain(
+				self
+					.snapshot
+					.iter()
+					.flat_map(|snapshot| snapshot.0.records.values()),
+			)
 			.flatten()
 			.filter(|record| matches!(record, Record::Func { .. }))
 	}

@@ -74,10 +74,9 @@ fn background_children_keep_function_definitions_and_shell_options() {
 #[test]
 fn background_children_keep_aliases_traps_umask_and_command_hashes() {
 	let (out, err) = run(
-		"alias tag='echo old'; trap 'echo old' USR1; umask 022; hash -p /old tool; \
-		 ( alias tag; trap -p USR1; umask; hash -t tool; type -t printf ) & \
-		 alias tag='echo new'; trap 'echo new' USR1; umask 077; hash -p /new tool; \
-		 enable -n printf; wait",
+		"alias tag='echo old'; trap 'echo old' USR1; umask 022; hash -p /old tool; ( alias tag; \
+		 trap -p USR1; umask; hash -t tool; type -t printf ) & alias tag='echo new'; trap 'echo \
+		 new' USR1; umask 077; hash -p /new tool; enable -n printf; wait",
 	);
 	assert_eq!(out, "alias tag='echo old'\ntrap -- 'echo old' SIGUSR1\n0022\n/old\nbuiltin\n");
 	assert_eq!(err, "");
@@ -85,9 +84,7 @@ fn background_children_keep_aliases_traps_umask_and_command_hashes() {
 
 #[test]
 fn background_self_referencing_local_reads_the_fork_global() {
-	let (out, err) = run(
-		"v=before; f() { local -n v=v; ( echo \"$v\" ) & }; f; v=after; wait",
-	);
+	let (out, err) = run("v=before; f() { local -n v=v; ( echo \"$v\" ) & }; f; v=after; wait");
 	assert_eq!(out, "before\n");
 	assert!(err.contains("circular name reference"), "{err}");
 }

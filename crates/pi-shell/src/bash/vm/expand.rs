@@ -2471,13 +2471,8 @@ impl<'e, 'c> Expander<'e, 'c> {
 				if !self_ref {
 					return Ok(Val::Unset);
 				}
-				let global = state::binding(
-					&self.k.root,
-					self.cx.store,
-					self.vp,
-					name,
-					state::Level::Global,
-				)?;
+				let global =
+					state::binding(&self.k.root, self.cx.store, self.vp, name, state::Level::Global)?;
 				return Ok(global
 					.filter(|v| !v.attrs.contains(Attrs::INVISIBLE) && !v.attrs.contains(Attrs::NAMEREF))
 					.map_or(Val::Unset, |v| plain_element(v, index, list)));
