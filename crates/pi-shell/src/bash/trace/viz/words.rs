@@ -23,7 +23,9 @@ fn text(bytes: &[u8]) -> String {
 fn expands(parts: Seq<'_, WordPart<'_>>) -> bool {
 	parts.iter().any(|p| match p.get() {
 		Part::DQuote(v) | Part::Locale(v) => expands(v),
-		Part::Lit(_) | Part::Escaped(_) | Part::SQuote(_) | Part::AnsiC(_) | Part::DroppedQuote => false,
+		Part::Lit(_) | Part::Escaped(_) | Part::SQuote(_) | Part::AnsiC(_) | Part::DroppedQuote => {
+			false
+		},
 		_ => true,
 	})
 }
@@ -94,7 +96,8 @@ impl WordPrinter<'_> {
 	}
 
 	/// Adjacent parts as one Python string: `f"…{expr}…"` when any part expands,
-	/// a plain literal otherwise. Nested double quotes merge into the same string.
+	/// a plain literal otherwise. Nested double quotes merge into the same
+	/// string.
 	fn interpolation(&self, parts: Seq<'_, WordPart<'_>>) -> String {
 		let dynamic = expands(parts);
 		let mut content = String::new();
