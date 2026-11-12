@@ -122,37 +122,44 @@ impl Drop for StopOnDrop {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
 	/// Include dot-prefixed entries.
-	pub hidden:            bool,
+	pub hidden:              bool,
 	/// Honour `.ignore`, `.gitignore`, `.git/info/exclude`, and git's global
 	/// excludes ([`crate::ignore`]).
-	pub gitignore:         bool,
+	pub gitignore:           bool,
+	/// One more ignore file read in every directory and in the root's
+	/// ancestors up to the filesystem root (`fd`'s `.fdignore`): it beats
+	/// the files of [`Self::gitignore`] and applies with or without them.
+	pub ignore_file:         Option<&'static str>,
+	/// Read no ignore files above the root (`fd --no-ignore-parent`).
+	pub skip_parent_ignores: bool,
 	/// Prune entries named `.git`.
-	pub skip_git:          bool,
+	pub skip_git:            bool,
 	/// Prune entries named `node_modules`.
-	pub skip_node_modules: bool,
+	pub skip_node_modules:   bool,
 	/// Report symlinks as their targets (type, size, mtime) and descend into
 	/// linked directories. Dangling links, links to special files, and links
 	/// to a directory enclosing them (which would loop) are left out. The
 	/// root itself is always resolved through symlinks.
-	pub follow_links:      bool,
+	pub follow_links:        bool,
 	/// Listing metadata; [`Detail::Full`] is needed for sizes and mtimes.
-	pub detail:            Detail,
+	pub detail:              Detail,
 	/// Deepest entry depth reported (root's children are depth 1); `None`
 	/// is unlimited.
-	pub max_depth:         Option<usize>,
+	pub max_depth:           Option<usize>,
 	/// Do not descend into directories on another filesystem than the root
 	/// (they are still reported).
-	pub same_file_system:  bool,
+	pub same_file_system:    bool,
 	/// Directories listed at once; `None` (or 0) picks `PI_WALK_WORKERS` when
 	/// set, else [`Fs::workers`].
-	pub workers:           Option<usize>,
+	pub workers:             Option<usize>,
 	/// Reuse unchanged directories' listings from earlier walks ([`cache`]).
-	/// Only [`Detail::Minimal`] native walks consult it.
-	pub cache:             bool,
+	/// Only [`Detail::Minimal`] native walks without an
+	/// [`Self::ignore_file`] consult it.
+	pub cache:               bool,
 	/// The flag this walk ends on, when the caller wants to hold a clone and
 	/// end the walk from its own frame ([`Stop`]). The walk makes its own
 	/// otherwise.
-	pub stop:              Option<Stop>,
+	pub stop:                Option<Stop>,
 }
 
 impl Options {
@@ -467,7 +474,10 @@ where
 
 /// The process-wide cache when `opts` asks for it and the walk can use it.
 fn default_cache(fs: &Fs, opts: &Options) -> Option<&'static cache::Cache> {
-	opts.cache.then(cache::global).filter(|_| fs.is_native())
+	opts
+		.cache
+		.then(cache::global)
+		.filter(|_| fs.is_native() && opts.ignore_file.is_none())
 }
 
 /// Whether `name` is pruned by the hidden, `.git`, and `node_modules` rules.

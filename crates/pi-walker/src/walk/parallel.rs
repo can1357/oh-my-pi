@@ -44,7 +44,7 @@ use super::{
 };
 use crate::{
 	fs::{Detail, Dir, FileId, FileInfo, FileType, Fs, Listing, Session, mounts::Fences},
-	ignore::{DirIgnores, Frame, Ignorer, Names},
+	ignore::{DirIgnores, Frame, Ignorer, Names, Sources},
 };
 
 /// Directory handles kept open so pending children can open relative to
@@ -521,13 +521,18 @@ pub(super) async fn start<K: Sink>(
 		let workers = opts.parallelism(&fs);
 		let mut st = Scratch::new(&fs, sink.state());
 		let root_dir = st.session.open_dir(&abs_root).await.map_err(root_error)?;
-		let cache = cache
-			.filter(|_| opts.detail == Detail::Minimal && fs.is_native() && !opts.same_file_system);
-		let (ignorer, root_frame) = if opts.gitignore {
-			let (ignorer, frame) = Ignorer::new(&mut st.session, &fs, &abs_root).await;
-			(Some(ignorer), frame)
-		} else {
-			(None, None)
+		let cache = cache.filter(|_| {
+			opts.detail == Detail::Minimal
+				&& fs.is_native()
+				&& !opts.same_file_system
+				&& opts.ignore_file.is_none()
+		});
+		let (ignorer, root_frame) = match Sources::of(&opts) {
+			Some(sources) => {
+				let (ignorer, frame) = Ignorer::new(&mut st.session, &fs, &abs_root, sources).await;
+				(Some(ignorer), frame)
+			},
+			None => (None, None),
 		};
 		let root_dev = if opts.same_file_system {
 			st.session.identify_dir(&root_dir).await.ok()
@@ -827,15 +832,16 @@ impl<K: Sink> Ctx<K> {
 		let mut names = Names::default();
 		if self.ignorer.is_some() || stamp.is_some() {
 			for record in listing.records() {
-				names.record(listing.name(record), record.file_type);
+				names.record(listing.name(record), record.file_type, self.opts.ignore_file);
 			}
 		}
-		let ignores = if self.ignorer.is_none() {
-			None
-		} else if names.is_empty() {
-			Some(DirIgnores::default())
-		} else {
-			Some(DirIgnores::load(&mut st.session, &dir, names, stamp.is_some()).await)
+		let ignores = match &self.ignorer {
+			None => None,
+			Some(_) if names.is_empty() => Some(DirIgnores::default()),
+			Some(ignorer) => Some(
+				DirIgnores::load(&mut st.session, &dir, names, ignorer.sources(), stamp.is_some())
+					.await,
+			),
 		};
 		let frame = match &ignores {
 			Some(ignores) => ignores.frame(frame.as_ref(), names, rel),

@@ -53,7 +53,7 @@ use super::{
 };
 use crate::{
 	fs::{Detail, Dir, FileId, FileType, Fs, Listing, Record, Session, mounts::Fences},
-	ignore::{DirIgnores, Frame as IgnoreFrame, Ignorer, Names},
+	ignore::{DirIgnores, Frame as IgnoreFrame, Ignorer, Names, Sources},
 };
 
 /// Which symlinks a [`Tree`] follows.
@@ -289,8 +289,8 @@ struct ListSpec {
 	detail:   Detail,
 	children: u32,
 	order:    Order,
-	/// Load the directory's ignore files.
-	ignores:  bool,
+	/// The ignore files to load from the directory.
+	ignores:  Option<Sources>,
 	/// Leave the directory unlisted unless it is on this device.
 	device:   Option<FileId>,
 	/// Identify the directory, for loop detection.
@@ -324,12 +324,12 @@ async fn list(
 	sort(&mut listing, spec.order);
 	let mut names = Names::default();
 	let mut ignores = DirIgnores::default();
-	if spec.ignores {
+	if let Some(sources) = spec.ignores {
 		for record in listing.records() {
-			names.record(listing.name(record), record.file_type);
+			names.record(listing.name(record), record.file_type, sources.custom);
 		}
 		if !names.is_empty() {
-			ignores = DirIgnores::load(session, &dir, names, false).await;
+			ignores = DirIgnores::load(session, &dir, names, sources, false).await;
 		}
 	}
 	let id = if spec.identify {
@@ -823,7 +823,9 @@ impl Cx {
 			self.root_dev = self.session.identify(&self.root).await.ok();
 		}
 		let inherited = if self.opts.gitignore {
-			let (ignorer, frame) = Ignorer::new(&mut self.session, &self.fs, &self.root).await;
+			let sources = Sources { vcs: true, custom: None, parents: true };
+			let (ignorer, frame) =
+				Ignorer::new(&mut self.session, &self.fs, &self.root, sources).await;
 			self.ignorer = Some(ignorer);
 			frame
 		} else {
@@ -978,7 +980,7 @@ impl Cx {
 			detail: self.detail(depth),
 			children,
 			order: self.opts.order,
-			ignores: self.ignorer.is_some(),
+			ignores: self.ignorer.as_ref().map(Ignorer::sources),
 			device,
 			identify: self.opts.follow == Follow::Always,
 		}
