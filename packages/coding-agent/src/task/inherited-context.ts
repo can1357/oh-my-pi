@@ -6,8 +6,9 @@
  * text sidecar of the exact identifiers (hashes, paths, flags, numbers) found in it. The child
  * persists both as text, as an agent-authored user turn (background, never developer authority).
  * On each request to a vision model, {@link InheritedContextFrames} swaps the tail for at most
- * two snapcompact frames and lists the identifiers of the part those frames hold: frame readers
- * recover gist well but misread long hashes and paths, so the sidecar carries those verbatim.
+ * two snapcompact frames and, for readers it helps, lists the identifiers of the part those
+ * frames hold: frame readers recover gist well but misread long hashes and paths, so the sidecar
+ * carries those verbatim.
  * Like other snapcompact frames, these are built per request and never reach session.jsonl, so
  * a text-only model, blocked images, or a model switch get the text instead.
  *
@@ -18,6 +19,7 @@
  */
 import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import inheritedContextTemplate from "../prompts/system/subagent-inherited-context.md" with { type: "text" };
@@ -29,8 +31,13 @@ import { PLACEHOLDER_RE } from "../secrets/placeholder";
 export const INHERITED_CONTEXT_CHARS = 27_832;
 /** Frames kept from the end of the rendered tail. */
 export const INHERITED_CONTEXT_MAX_FRAMES = 2;
-/** Most recent distinct identifiers listed in the sidecar. */
-export const INHERITED_CONTEXT_MAX_IDENTIFIERS = 120;
+/**
+ * Sidecar budget in chars, one line per identifier: 15% of a full tail (~190 identifiers), the
+ * sidecar measured to cut Claude's exact-string errors from 5.9% to 2.7%. Fixed rather than a
+ * share of each text, so a short tail still lists every identifier it has.
+ */
+export const INHERITED_CONTEXT_IDENTIFIER_CHARS = Math.floor(INHERITED_CONTEXT_CHARS * 0.15);
+/** Longer tokens are skipped: one would otherwise spend the whole budget and end the list. */
 const IDENTIFIER_MAX_CHARS = 240;
 /** A tail cut mid-line advances to the next line start when one is this close. */
 const LINE_SNAP_CHARS = 400;
@@ -41,63 +48,110 @@ export interface InheritedContext {
 	identifiers: string[];
 }
 
-const IDENTIFIER_PATTERNS: readonly RegExp[] = [
-	// URLs.
-	/\bhttps?:\/\/[^\s"'`<>()[\]{}]+/g,
-	// Paths with at least one separator, optionally ~ / ./ ../ rooted, with an optional :line(-line) suffix.
-	/(?:~|\.{1,2})?\/?[\w.@+-]+(?:\/[\w.@+-]+)+\/?(?::\d+(?:-\d+)?)?/g,
-	// Bare file names with an extension, optionally with :line(-line).
-	/\b[\w-]{2,}(?:\.[\w-]+)*\.[A-Za-z][A-Za-z0-9]{0,5}(?::\d+(?:-\d+)?)?\b/g,
-	// Hex digests and commit ids (checked below for mixed letters/digits).
-	/\b[0-9a-fA-F]{7,128}\b/g,
-	// Long CLI flags, with an inline value when present.
-	/(?<![\w-])--[A-Za-z][\w-]*(?:=[^\s"'`]+)?/g,
-	// Numbers with at least four digits, or decimals: counts, sizes, ports, scores.
-	/(?<![\w.])\d[\d,_]*(?:\.\d+)?(?![\w.]*\w)/g,
-	// Secret placeholders (`$$NAME_HASH:CASE$$`): drawn into frames once the child's boundary encodes,
-	// and only an exact copy decodes.
-	new RegExp(PLACEHOLDER_RE.source, "g"),
-];
+const FILE_EXTENSIONS =
+	"ts|tsx|js|jsx|mjs|cjs|json|jsonl|md|mdx|py|rs|go|toml|yaml|yml|sh|bash|zsh|txt|png|jpg|jpeg|gif|svg|html|css|lock|xlsx|xlsm|xls|csv|tsv|pdf|sql|c|h|cc|cpp|hpp|swift|kt|java|rb|zig|wasm|log|env|ini|cfg|conf|xml|db|sqlite|plist|docx|pptx|zip|tar|gz";
+const LINE_REF = "(?::\\d+(?:-\\d+)?)?";
+const TRAILING_PUNCTUATION = /[.,;:!?)\]}>'"]+$/;
+const VALUE_LIKE = /[\d/._=:~$@]/;
+const IDENTIFIER_RE = {
+	url: /\bhttps?:\/\/[^\s<>"'`]+/g,
+	backtick: /`([^`\n]{1,120})`/g,
+	path: new RegExp(
+		`(?<![\\w@~./:$\\\\-])(?:(?:~|\\.{1,2})?(?:\\/[\\w@.+$-]+)+\\/?|[\\w@.+$-]+(?:\\/[\\w@.+$-]+)+\\/?)${LINE_REF}`,
+		"g",
+	),
+	file: new RegExp(`(?<![\\w@~./-])[\\w@+-][\\w@.+-]*\\.(?:${FILE_EXTENSIONS})${LINE_REF}(?![\\w])`, "g"),
+	longFlag: /(?<![\w-])--[A-Za-z][\w-]*(?:=([^\s'"`<>]+)|[ \t]+([^\s'"`<>-][^\s'"`<>]*))?/g,
+	shortFlag: /(?<![\w-])-[A-Za-z]([^\s'"`<>]*)(?:[ \t]+([^\s'"`<>-][^\s'"`<>]*))?/g,
+	version: /(?<![\w.])(?:v?\d+\.\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]*[0-9A-Za-z])?|v\d+(?:\.\d+)+)(?![\w])/g,
+	number: /(?<![\w.])\d+(?:[.,:/-]\d+)*(?!\d)/g,
+	hex: /(?<![0-9A-Za-z])[0-9a-fA-F]{7,}(?![0-9A-Za-z])/g,
+	dotted: /(?<![\w$.:\\])[A-Za-z_$][\w$]*(?:(?:\.|::)[A-Za-z_$][\w$]*)+/g,
+	underscore: /(?<![\w$\\])[\w$]*_[\w$]*(?![\w$])/g,
+	camel: /(?<![\w$\\])[A-Za-z][A-Za-z0-9]{7,}(?![\w$])/g,
+	// Secret placeholders (`$$NAME_HASH:CASE$$`): drawn into frames once the child's boundary
+	// encodes, and only an exact copy decodes.
+	placeholder: new RegExp(PLACEHOLDER_RE.source, "g"),
+};
 
-function isIdentifier(token: string, patternIndex: number): boolean {
-	if (token.length > IDENTIFIER_MAX_CHARS) return false;
-	switch (patternIndex) {
-		case 1:
-			// Prose writes "jobs/services" and "status/output"; an unrooted path needs three
-			// segments or a character words lack (digit, dot, dash, underscore, @, +).
-			return /^[~./]/.test(token) || token.split("/").filter(Boolean).length >= 3 || /[\d._@+-]/.test(token);
-		case 3:
-			// A hex run needs both a digit and a letter; pure digits are numbers, pure letters words.
-			return /\d/.test(token) && /[a-fA-F]/.test(token);
-		case 5: {
-			const digits = token.replace(/\D/g, "").length;
-			return token.includes(".") ? digits >= 3 : digits >= 4;
-		}
-		default:
-			return true;
+const trimTrailing = (token: string) => token.replace(TRAILING_PUNCTUATION, "");
+
+/** Every identifier occurrence in `text` with the offset its match ends at. */
+function identifierHits(text: string): { token: string; end: number }[] {
+	const hits: { token: string; end: number }[] = [];
+	const push = (token: string, match: RegExpMatchArray) => {
+		if (token) hits.push({ token, end: match.index! + match[0].length });
+	};
+	const re = IDENTIFIER_RE;
+	for (const m of text.matchAll(re.url)) push(trimTrailing(m[0]), m);
+	for (const m of text.matchAll(re.backtick)) push(m[1]!.trim(), m);
+	for (const m of text.matchAll(re.path)) {
+		const token = trimTrailing(m[0]);
+		// Fractions such as 2/3.
+		if (!/^[\d/]+$/.test(token)) push(token, m);
 	}
+	for (const m of text.matchAll(re.file)) push(m[0], m);
+	for (const m of text.matchAll(re.longFlag)) {
+		const flag = m[0].match(/^--[A-Za-z][\w-]*/)![0];
+		if (m[1] !== undefined) {
+			push(`${flag}=${trimTrailing(m[1])}`.replace(/=$/, ""), m);
+		} else {
+			const value = m[2] !== undefined ? trimTrailing(m[2]) : "";
+			push(value && VALUE_LIKE.test(value) ? `${flag} ${value}` : trimTrailing(flag), m);
+		}
+	}
+	for (const m of text.matchAll(re.shortFlag)) {
+		// A short flag alone (`-v`, or prose such as "-based") is noise; listed only with a value.
+		const flag = m[0].slice(0, 2);
+		const attached = trimTrailing(m[1] ?? "");
+		const value = m[2] !== undefined ? trimTrailing(m[2]) : "";
+		const valueLike = value !== "" && VALUE_LIKE.test(value);
+		if (attached && (VALUE_LIKE.test(attached) || attached.startsWith("="))) {
+			push(`${flag}${attached}${valueLike ? ` ${value}` : ""}`, m);
+		} else if (!attached && valueLike) {
+			push(`${flag} ${value}`, m);
+		}
+	}
+	for (const m of text.matchAll(re.version)) push(m[0], m);
+	for (const m of text.matchAll(re.number)) {
+		// Counts, sizes, ports, scores: four digits or a decimal.
+		if (m[0].replace(/\D/g, "").length >= 4 || /\d\.\d/.test(m[0])) push(m[0], m);
+	}
+	// A letters-only run is a word.
+	for (const m of text.matchAll(re.hex)) if (/\d/.test(m[0])) push(m[0], m);
+	for (const m of text.matchAll(re.dotted)) if (m[0].length >= 4) push(m[0], m);
+	for (const m of text.matchAll(re.underscore)) if (m[0].length >= 3 && /[A-Za-z]/.test(m[0])) push(m[0], m);
+	for (const m of text.matchAll(re.camel)) if (/[a-z][A-Z]/.test(m[0])) push(m[0], m);
+	for (const m of text.matchAll(re.placeholder)) push(m[0], m);
+	return hits;
 }
 
 /**
- * Exact identifiers in `text`, most recent {@link INHERITED_CONTEXT_MAX_IDENTIFIERS} kept, in order
- * of last appearance. A token contained in a longer kept token (a hash inside a path) is dropped.
+ * Exact identifiers in `text` (URLs, backtick spans, paths and `file:line` refs, flags with values,
+ * versions, numbers, hex runs, dotted, `::`, underscore and camelCase names, secret placeholders),
+ * in order of last mention. Walks back from the most recent, skips a token contained in a more
+ * recent kept one (a hash inside its path), and stops at the first that would pass `budget` chars
+ * (one line per token), so the list is the latest run of the conversation's identifiers.
  */
-export function extractIdentifiers(text: string, limit: number = INHERITED_CONTEXT_MAX_IDENTIFIERS): string[] {
-	const lastSeen = new Map<string, number>();
-	IDENTIFIER_PATTERNS.forEach((pattern, index) => {
-		for (const match of text.matchAll(pattern)) {
-			const token = match[0].replace(/[.,:;]+$/, "");
-			if (!token || !isIdentifier(token, index)) continue;
-			const end = (match.index ?? 0) + token.length;
-			if ((lastSeen.get(token) ?? -1) < end) lastSeen.set(token, end);
-		}
-	});
-	const byLength = [...lastSeen.keys()].sort((a, b) => b.length - a.length);
-	const kept: string[] = [];
-	for (const token of byLength) {
-		if (!kept.some(longer => longer.includes(token))) kept.push(token);
+export function extractIdentifiers(text: string, budget: number = INHERITED_CONTEXT_IDENTIFIER_CHARS): string[] {
+	const lastEnd = new Map<string, number>();
+	for (const { token, end } of identifierHits(text)) {
+		if (token.length <= IDENTIFIER_MAX_CHARS && (lastEnd.get(token) ?? -1) < end) lastEnd.set(token, end);
 	}
-	return kept.sort((a, b) => lastSeen.get(a)! - lastSeen.get(b)!).slice(-limit);
+	// Ascending by last mention; at one end offset the shorter first, so the walk back meets the longer first.
+	const ordered = [...lastEnd].sort(
+		([a, aEnd], [b, bEnd]) => aEnd - bEnd || a.length - b.length || (a < b ? -1 : a > b ? 1 : 0),
+	);
+	const kept: string[] = [];
+	let chars = 0;
+	for (let index = ordered.length - 1; index >= 0; index--) {
+		const token = ordered[index]![0];
+		if (kept.some(recent => recent.includes(token))) continue;
+		if (chars + token.length + 1 > budget) break;
+		kept.push(token);
+		chars += token.length + 1;
+	}
+	return kept.reverse();
 }
 
 /** The last `chars` of `text`, advanced to a line start when the cut lands mid-line. */
@@ -203,6 +257,36 @@ export function inheritedContextMessage(context: InheritedContext): InheritedCon
 /** The `snapcompact.shape` setting: a named frame shape, or `auto` to resolve one per model. */
 export type ShapeSetting = snapcompact.ShapeVariantName | "auto";
 
+/**
+ * Frame shape and sidecar per model class under `auto`, measured on inherited tails rather than
+ * taken from snapcompact's compaction shapes (each fits a full tail in exactly two 1568px frames).
+ * Claude: `8x13-bw` read 0.94 of the context vs 0.93 for `11on16-bw`, with 2.7% exact-string
+ * errors vs 2.2%, on 0.76x the prompt tokens (0.55x the text). Gemini: `11on16-bw` without the
+ * sidecar, which left exact-string errors unchanged (6/93 either way); one larger frame billed the
+ * same but lost 0.15-0.18 of the context. Other classes keep snapcompact's own shape and the sidecar.
+ */
+const AUTO_PROFILES: Partial<Record<string, { variant: snapcompact.ShapeVariantName; sidecar: boolean }>> = {
+	anthropic: { variant: "8x13-bw", sidecar: true },
+	gemini: { variant: "11on16-bw", sidecar: false },
+};
+
+interface FrameProfile {
+	shape: snapcompact.Shape;
+	/** Whether the preamble lists the frames' identifiers. */
+	sidecar: boolean;
+}
+
+/** An explicit `snapcompact.shape` wins; `auto` uses {@link AUTO_PROFILES} where measured. */
+function frameProfile(text: string, model: Model, setting: ShapeSetting): FrameProfile {
+	const shape = snapcompact.resolveShapeForText(text, model, setting);
+	const profile =
+		setting === "auto" ? AUTO_PROFILES[classifyModel(model.provider, model.id, { lenient: true }).class] : undefined;
+	if (!profile) return { shape, sidecar: true };
+	// Auto's CJK grid stays: both profiles draw the default font, which cannot hold that text.
+	if (shape.font === "silver") return { shape, sidecar: profile.sidecar };
+	return { shape: snapcompact.resolveShape(model, profile.variant), sidecar: profile.sidecar };
+}
+
 /** Most re-cuts while fitting the tail into {@link INHERITED_CONTEXT_MAX_FRAMES} frames. */
 const FIT_ATTEMPTS = 6;
 
@@ -215,13 +299,13 @@ const FIT_ATTEMPTS = 6;
 function fitTail(
 	text: string,
 	model: Model,
-	variant: ShapeSetting,
-): { text: string; shape: snapcompact.Shape; frames: number } | undefined {
+	setting: ShapeSetting,
+): ({ text: string; frames: number } & FrameProfile) | undefined {
 	let fitted = text;
 	for (let attempt = 0; attempt < FIT_ATTEMPTS && fitted; attempt++) {
-		const shape = snapcompact.resolveShapeForText(fitted, model, variant);
-		const frames = snapcompact.frames(fitted, { shape });
-		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, shape, frames };
+		const profile = frameProfile(fitted, model, setting);
+		const frames = snapcompact.frames(fitted, { shape: profile.shape });
+		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, frames, ...profile };
 		// Proportional cut with a margin: line snapping and wrapping make capacity uneven.
 		fitted = tailText(fitted, Math.floor(((fitted.length * INHERITED_CONTEXT_MAX_FRAMES) / frames) * 0.95));
 	}
@@ -303,7 +387,10 @@ export class InheritedContextFrames {
 		}
 		if (frames.length === 0) return undefined;
 		const content = [
-			{ type: "text", text: renderPreamble(frames.length, extractIdentifiers(fit.text)) } satisfies TextContent,
+			{
+				type: "text",
+				text: renderPreamble(frames.length, fit.sidecar ? extractIdentifiers(fit.text) : []),
+			} satisfies TextContent,
 			...frames,
 		];
 		this.#last = { key, content };

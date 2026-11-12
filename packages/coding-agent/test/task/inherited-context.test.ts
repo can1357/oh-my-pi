@@ -1,10 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { Context, Message, Model } from "@oh-my-pi/pi-ai";
 import {
 	type CustomMessage,
 	convertToLlm,
 	INHERITED_CONTEXT_MESSAGE_TYPE,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import {
@@ -14,18 +15,26 @@ import {
 	INHERITED_CONTEXT_MAX_FRAMES,
 	InheritedContextFrames,
 	type InheritedContext,
+	type ShapeSetting,
 	inheritedContextMessage,
 	restoreEvictedFrames,
 } from "@oh-my-pi/pi-coding-agent/task/inherited-context";
 
 const HASH = "40cf59cf8a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293c17051";
 
-function visionModel(input: Model["input"]): Model {
-	return {
+function visionModel(
+	input: Model["input"],
+	{ id, api, provider }: Pick<Model, "id" | "api" | "provider"> = {
 		id: "claude-sonnet-4-5",
-		name: "Sonnet",
 		api: "anthropic-messages",
 		provider: "anthropic",
+	},
+): Model {
+	return {
+		id,
+		name: id,
+		api,
+		provider,
 		baseUrl: "https://api.anthropic.com",
 		reasoning: true,
 		input,
@@ -44,8 +53,8 @@ describe("extractIdentifiers", () => {
 		const text = [
 			`The final build hash is ${HASH}.`,
 			"Fix lives in crates/image/src/resample.rs:358-384 and ~/Projects/oh-my-pi/packages/x.ts.",
-			"Run `cargo test --release --features=simd` on port 4317; score 0.91 vs 27,832 chars.",
-			"Commit bcd5b0b996 landed. The year 12, word deadbeef, and jobs/services are not identifiers; src/task-a is.",
+			"Run cargo test --release --features=simd on port 4317; score 0.91 vs 27,832 chars.",
+			"Commit bcd5b0b996 landed. The year 12 and the word deadbeef are not identifiers; src/task-a is.",
 		].join("\n");
 		const ids = extractIdentifiers(text);
 		expect(ids).toContain(HASH);
@@ -59,15 +68,42 @@ describe("extractIdentifiers", () => {
 		expect(ids).toContain("bcd5b0b996");
 		expect(ids).not.toContain("12");
 		expect(ids).not.toContain("deadbeef");
-		expect(ids).not.toContain("jobs/services");
 		expect(ids).toContain("src/task-a");
 		// Contained in the longer path, so not listed separately.
 		expect(ids).not.toContain("resample.rs:358-384");
 	});
 
-	it("keeps the most recently mentioned identifiers when over the limit", () => {
+	it("keeps backtick spans, short flags with values, versions, and code names", () => {
+		const text = [
+			"Ran `bun test --watch` with -n 4 and -j8 against v1.2.3-beta.1; plain -v and well-known stay out.",
+			"Then SnapcompactInline, INHERITED_CONTEXT_CHARS, snapcompact.resolveShape, and Foo::bar changed.",
+		].join("\n");
+		const ids = extractIdentifiers(text);
+		for (const id of [
+			"bun test --watch",
+			"-n 4",
+			"-j8",
+			"v1.2.3-beta.1",
+			"SnapcompactInline",
+			"INHERITED_CONTEXT_CHARS",
+			"snapcompact.resolveShape",
+			"Foo::bar",
+		]) {
+			expect(ids).toContain(id);
+		}
+		expect(ids).not.toContain("-v");
+		// Inside the more recent backtick span.
+		expect(ids).not.toContain("--watch");
+	});
+
+	it("keeps the latest run of identifiers that fits the budget, 15% of a full tail by default", () => {
 		const text = Array.from({ length: 10 }, (_, i) => `step ${1000 + i}`).join("\n");
-		expect(extractIdentifiers(text, 3)).toEqual(["1007", "1008", "1009"]);
+		// Each costs its length plus a line break.
+		expect(extractIdentifiers(text, 15)).toEqual(["1007", "1008", "1009"]);
+		const full = Array.from({ length: 4_000 }, (_, i) => `step ${10_000 + i}`).join("\n");
+		const listed = extractIdentifiers(full);
+		expect(listed.at(-1)).toBe("13999");
+		expect(listed.length).toBe(Math.floor((INHERITED_CONTEXT_CHARS * 0.15) / 6));
 	});
 });
 
@@ -305,5 +341,81 @@ describe("inherited context turn", () => {
 		const built = childContext(context);
 		const sent = await new InheritedContextFrames().transform(built, visionModel(["text", "image"]), false);
 		expect(restoreEvictedFrames(sent, built, sent)).toBe(sent);
+	});
+});
+
+describe("inherited frame profile", () => {
+	const context = { text: `Build ${HASH} passed.\n`.repeat(40), identifiers: [HASH] };
+	const claude = { id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic" } as const;
+	const opus = { id: "claude-opus-4-7", api: "anthropic-messages", provider: "anthropic" } as const;
+	const gemini = { id: "gemini-3.8-flash", api: "google-generative-ai", provider: "google" } as const;
+	const gpt = { id: "gpt-5.4", api: "openai-responses", provider: "openai" } as const;
+
+	async function sent(target: Pick<Model, "id" | "api" | "provider">, shape: ShapeSetting = "auto") {
+		const render = vi.spyOn(snapcompact, "renderMany");
+		try {
+			const framed = await new InheritedContextFrames().transform(
+				childContext(context),
+				visionModel(["text", "image"], target),
+				false,
+				shape,
+			);
+			const { cellWidth, cellHeight, frameSize } = render.mock.calls[0]![1]!.shape!;
+			return { geometry: { cellWidth, cellHeight, frameSize }, sidecar: preambleText(framed).includes(HASH) };
+		} finally {
+			render.mockRestore();
+		}
+	}
+
+	it.each([
+		["Claude", claude],
+		// Not snapcompact's high-res compaction frame.
+		["Opus 4.7", opus],
+	])("draws %s frames in 8x13-bw at 1568px with the sidecar", async (_, target) => {
+		expect(await sent(target)).toEqual({
+			geometry: { cellWidth: 8, cellHeight: 13, frameSize: 1568 },
+			sidecar: true,
+		});
+	});
+
+	it("draws Gemini frames in 11on16-bw at 1568px without the sidecar", async () => {
+		expect(await sent(gemini)).toEqual({
+			geometry: { cellWidth: 11, cellHeight: 16, frameSize: 1568 },
+			sidecar: false,
+		});
+	});
+
+	it("keeps snapcompact's shape and the sidecar for an unmeasured model class", async () => {
+		const { cellWidth, cellHeight, frameSize } = snapcompact.resolveShapeForText(
+			context.text,
+			visionModel(["text", "image"], gpt),
+			"auto",
+		);
+		expect(await sent(gpt)).toEqual({ geometry: { cellWidth, cellHeight, frameSize }, sidecar: true });
+	});
+
+	it("keeps auto's CJK grid for text the measured shapes' font cannot draw", async () => {
+		const cjk = { text: "检查构建结果并记录每一步的输出。\n".repeat(200), identifiers: [] };
+		const render = vi.spyOn(snapcompact, "renderMany");
+		try {
+			for (const target of [claude, gemini]) {
+				await new InheritedContextFrames().transform(
+					childContext(cjk),
+					visionModel(["text", "image"], target),
+					false,
+				);
+			}
+			expect(render.mock.calls.map(call => call[1]!.shape!.font)).toEqual(["silver", "silver"]);
+		} finally {
+			render.mockRestore();
+		}
+	});
+
+	it("lets an explicit snapcompact.shape win, sidecar included", async () => {
+		for (const target of [claude, gemini]) {
+			const { geometry, sidecar } = await sent(target, "8on22-bw");
+			expect(geometry).toMatchObject({ cellWidth: 8, cellHeight: 22 });
+			expect(sidecar).toBe(true);
+		}
 	});
 });
