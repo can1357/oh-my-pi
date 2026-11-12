@@ -1240,7 +1240,10 @@ pub(crate) fn text_readback(
 /// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
 /// toolkits fall back on.
 // Unused on Windows until it has a caller of `text_readback`.
-#[cfg_attr(not(any(target_os = "macos", target_os = "linux", test)), allow(dead_code))]
+#[cfg_attr(
+	not(any(target_os = "macos", target_os = "linux", test)),
+	allow(dead_code, reason = "Windows has no caller of text_readback yet")
+)]
 pub(crate) fn masked(actual: &str) -> bool {
 	let mut chars = actual.chars();
 	chars.next().is_some_and(|first| {
