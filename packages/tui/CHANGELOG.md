@@ -17,6 +17,10 @@
 - Chart row names keep a number with the name before it (`EmbeddingGemma 2`, `Jev 15`) instead of nesting them under a bare `EmbeddingGemma` or `Jev,`
 - `read` accepts a line list written with colons as range dashes (`file.ts:20:40,85:100`) and shows it as one row, instead of failing with a `Path 'file.ts:20:40,85' not found` error split across rows
 
+### Fixed
+
+- The `/resume` picker deletes sessions through the `app.session.delete` action (default Delete or Backspace) and shows its keys in the hints, so `keybindings.yml` can replace the shortcut, for example with Ctrl+D, or disable it with `[]`; Backspace still edits a typed search query ([#17938](https://github.com/can1357/oh-my-pi/issues/17938))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
