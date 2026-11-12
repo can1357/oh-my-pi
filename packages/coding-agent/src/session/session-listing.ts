@@ -828,6 +828,11 @@ async function indexedSessions(files: readonly string[], titles: ReadonlyMap<str
 	if (titles.size === 0) return [];
 	const titled = new Map<string, { file: string; title: string }>();
 	for (const file of files) {
+		try {
+			assertSessionBoundary(file);
+		} catch {
+			continue;
+		}
 		const id = sessionIdFromSessionPath(file);
 		if (!id || titled.has(id)) continue;
 		const title = sanitizeSessionName(titles.get(id));
@@ -962,6 +967,7 @@ async function lastActivity(session: SessionInfo, storage: SessionStorage): Prom
 	for (let window = ACTIVITY_TAIL_BYTES; ; window *= 4) {
 		let suffix: string;
 		try {
+			assertSessionBoundary(session.path);
 			[, suffix] = await storage.readTextSlices(session.path, 0, window);
 		} catch {
 			return { time: Number.NEGATIVE_INFINITY, id: undefined };
@@ -1076,6 +1082,7 @@ export async function findSessionContinuation(
 	storage: SessionStorage = new FileSessionStorage(),
 	options: FindSessionContinuationOptions = {},
 ): Promise<SessionContinuation | undefined> {
+	assertSessionBoundary(sessionPath);
 	const target = path.resolve(sessionPath);
 	const start = await scanSessionFile(target, storage, false);
 	const named = parseSessionFileName(target);
@@ -1218,6 +1225,7 @@ export async function findRecentSessionContinuation(
 	sessionPath: string,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<SessionContinuation | undefined> {
+	assertSessionBoundary(sessionPath);
 	const target = path.resolve(sessionPath);
 	const picked = await scanSessionFile(target, storage, false);
 	if (!picked) return undefined;
@@ -1338,6 +1346,7 @@ async function filterContinuationFiles(files: string[], storage: SessionStorage)
 	const continues = async (file: string): Promise<boolean> => {
 		let stat: SessionStorageStat;
 		try {
+			assertSessionBoundary(file);
 			stat = storage.statSync(file);
 		} catch {
 			return false;
@@ -1640,6 +1649,11 @@ export async function getRecentSessions(
 	const recent: RecentSessionInfo[] = [];
 	for (const { file, stat } of await newestSessionFiles(sessionDir, "*.jsonl", storage)) {
 		if (recent.length >= limit) break;
+		try {
+			assertSessionBoundary(file);
+		} catch {
+			continue;
+		}
 		const id = useIndex ? sessionIdFromSessionPath(file) : undefined;
 		const indexed = id ? lookupSessionTitle(id) : undefined;
 		if (indexed) {

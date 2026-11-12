@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { __resetDirsFromEnvForTests, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { type Args, parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, SessionResolutionError, writeStartupNotice } from "@oh-my-pi/pi-coding-agent/main";
@@ -17,6 +18,7 @@ import {
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { configureSessionBoundaryRoot } from "@oh-my-pi/pi-coding-agent/session/session-boundary";
+import * as sessionIndexModule from "@oh-my-pi/pi-coding-agent/session/session-index";
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile, loadSessionFile, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { ForkSourceNotFoundError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -504,9 +506,11 @@ describe("session boundary before transcript loading", () => {
 		async source => {
 			const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-"));
 			const root = path.join(cwd, "owned");
-			const foreign = path.join(cwd, "foreign.jsonl");
+			const foreign = path.join(cwd, "2026-11-13T00-00-00-000Z_foreign.jsonl");
 			await fsp.mkdir(root);
 			await fsp.writeFile(foreign, `${JSON.stringify({ type: "session", id: "foreign", cwd })}\n`);
+			await fsp.writeFile(path.join(cwd, "2026-11-13T00-00-01-000Z_sibling.jsonl"),
+				`${JSON.stringify({ type: "session", id: "sibling", cwd, continuationOf: "foreign" })}\n`);
 			const release = configureSessionBoundaryRoot();
 			const previousEnv = process.env.OMP_SESSION_BOUNDARY_ROOT;
 			if (source === "config") delete process.env.OMP_SESSION_BOUNDARY_ROOT;
@@ -534,6 +538,61 @@ describe("session boundary before transcript loading", () => {
 			}
 		},
 	);
+
+	it("excludes foreign continuation prefixes and indexed picker rows before reads", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-listing-"));
+		const root = path.join(cwd, "owned");
+		await fsp.mkdir(root);
+		const owned = path.join(root, "2026-11-13T00-00-00-000Z_owned.jsonl");
+		const foreignDir = path.join(cwd, "foreign");
+		await fsp.mkdir(foreignDir);
+		const foreign = path.join(foreignDir, "2026-11-13T00-00-01-000Z_foreign.jsonl");
+		const alias = path.join(root, path.basename(foreign));
+		await fsp.writeFile(owned, `${JSON.stringify({
+			type: "session", version: 3, id: "owned", cwd, timestamp: "2026-11-13T00:00:00.000Z",
+		})}\n`);
+		await fsp.appendFile(owned, `${JSON.stringify({
+			type: "message", id: "owned-turn", timestamp: "2026-11-13T00:00:00.001Z",
+			message: { role: "user", content: "Owned prompt", timestamp: Date.now() },
+		})}\n`);
+		await fsp.writeFile(foreign, `${JSON.stringify({
+			type: "session", version: 3, id: "foreign", cwd, continuationOf: "owned",
+			timestamp: "2026-11-13T00:00:01.000Z",
+		})}\n`);
+		await fsp.symlink(foreign, alias);
+		const release = configureSessionBoundaryRoot(root);
+		const slices = vi.spyOn(FileSessionStorage.prototype, "readTextSlices");
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		setAgentDir(path.join(cwd, "agent"));
+		sessionIndexModule.recordSessionTitle("owned", "Owned title");
+		sessionIndexModule.recordSessionTitle("foreign", "Foreign private title");
+		try {
+			const storage = new FileSessionStorage();
+			expect(sessionIndexModule.lookupSessionTitle("foreign")).toBe("Foreign private title");
+			expect(await sessionListingModule.findSessionContinuation(owned, storage)).toBeUndefined();
+			const listing = await sessionListingModule.listSessionsForPicker(root, storage, new Set());
+			expect(listing.sessions.map(session => session.id)).toEqual(["owned"]);
+			expect((await listing.complete).map(session => session.id)).toEqual(["owned"]);
+			const all = await sessionListingModule.listAllSessionsForPicker(storage, new Set(), cwd);
+			expect(all.sessions.map(session => session.id)).toEqual(["owned"]);
+			expect((await all.complete).map(session => session.id)).toEqual(["owned"]);
+			const outside = await sessionListingModule.listSessionsForPicker(foreignDir, storage, new Set());
+			expect(outside.sessions).toEqual([]);
+			expect(await outside.complete).toEqual([]);
+			expect(await sessionListingModule.getRecentSessions(foreignDir, 4, storage)).toEqual([]);
+			expect((await sessionListingModule.getRecentSessions(root, 4, storage)).map(session => session.path))
+				.toEqual([owned]);
+			expect(slices.mock.calls.every(([file]) => file !== foreign && file !== alias)).toBe(true);
+		} finally {
+			vi.restoreAllMocks();
+			sessionIndexModule.closeSessionIndex();
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			__resetDirsFromEnvForTests();
+			release();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
 
 	it("latches inherited environment for SDK opens before main or SDK bootstrap", async () => {
 		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-env-"));
