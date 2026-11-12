@@ -576,8 +576,6 @@ export interface CompiledAuthProvider {
 	loginSubscription?: boolean;
 	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
 	orgScopedIdentity?: boolean;
-	/** A successful interactive login replaces every stored credential for this provider instead of upserting alongside them. */
-	loginReplacesCredentials?: boolean;
 	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
 	oauthTokenEnv?: string[];
 	/** APIs whose provider transport resolves credentials without a stored account. */

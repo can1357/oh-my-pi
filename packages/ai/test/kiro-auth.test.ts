@@ -177,21 +177,18 @@ describe("Kiro login", () => {
 		expect(sent).toEqual([1, 2, 3].map(n => ({ ...base, ...sdk, "amz-sdk-request": `attempt=${n}; max=3` })));
 	});
 
-	it("stores an ARN-safe label and endpoint, and re-login replaces the stored credential", async () => {
+	it("stores an ARN-safe label and endpoint, and each login adds an account", async () => {
 		await withStorage(async (auth, store) => {
 			for (let i = 0; i < 2; i++) {
 				const onPrompt = answers("1", START, "us-east-1");
 				const login = { ...noAuth, onPrompt, fetch: queued(idcResponses()).fetch };
-				expect(await auth.oauth.login("kiro", login)).toMatchObject({ orgId: PROFILE_TWO, orgName: "two" });
+				expect(await auth.oauth.login("kiro", login)).toMatchObject({ orgName: "two" });
 			}
-			const rows = store.listAuthCredentials("kiro");
-			expect(rows.map(row => row.credential)).toEqual([expect.objectContaining({ kiroTokenEndpoint: US_TOKEN })]);
-
-			const fetch: FetchImpl = async input => (String(input).includes("eu-central") ? json(CATALOG) : json({}, 403));
-			await auth.oauth.login("kiro", { ...noAuth, onPrompt: answers("3", "ksk_replacement"), fetch });
-			expect(store.listAuthCredentials("kiro").map(row => row.credential.type)).toEqual(["api_key"]);
-			const peeked = decodeKiroCredential((await auth.keys.peek("kiro")) ?? "", {});
-			expect(peeked).toMatchObject({ kind: "api_key", token: "ksk_replacement" });
+			const rows = store.listAuthCredentials("kiro").map(row => row.credential);
+			expect(rows).toEqual([
+				expect.objectContaining({ kiroTokenEndpoint: US_TOKEN }),
+				expect.objectContaining({ kiroTokenEndpoint: US_TOKEN }),
+			]);
 		});
 	});
 

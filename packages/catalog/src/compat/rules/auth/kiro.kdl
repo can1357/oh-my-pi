@@ -7,8 +7,4 @@ auth "kiro" {
     // request key is the Kiro credential codec's encoding (`registry/kiro.ts`).
     login "custom" hook="kiro-login"
     refresh hook="kiro-refresh"
-    // A re-login names exactly one account or key, so it replaces every stored
-    // Kiro credential instead of accumulating rows (device grants carry no
-    // email/account claim to dedupe on).
-    login-replaces-credentials #true
 }

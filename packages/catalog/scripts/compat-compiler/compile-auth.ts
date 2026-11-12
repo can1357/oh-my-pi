@@ -721,9 +721,6 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "login-subscription":
 				result.loginSubscription = singleBool(child);
 				break;
-			case "login-replaces-credentials":
-				result.loginReplacesCredentials = singleBool(child);
-				break;
 			case "oauth-token-env": {
 				leaf(child, []);
 				const vars = positionalStrings(child);
