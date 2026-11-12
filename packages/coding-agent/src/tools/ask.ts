@@ -3,7 +3,8 @@
  *
  * Hosts with a form surface (`ui.formDialog`: the interactive TUI, ACP) render
  * the form whole; every other host walks its named fields one prompt at a time
- * through `select`/`input`/`editor`. The model receives the submitted form data
+ * through `select`/`input`/`editor`, each prompt titled with the form text
+ * around its field and then its question. The model receives the submitted form data
  * as JSON. Outside plan mode a configurable timeout submits the form's
  * preselected values.
  */
@@ -16,6 +17,7 @@ import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints"
 import {
 	choiceValue,
 	defaultFormData,
+	fieldContexts,
 	fieldQuestions,
 	fieldError,
 	formAnswers,
@@ -89,6 +91,17 @@ interface ChoiceAnswer {
 	other?: string;
 }
 
+/** One field's prompt text: its question and the form text around it ({@link fieldContexts}). */
+interface FieldText {
+	question: string;
+	context: string;
+}
+
+/** Title of a field's prompt: the form context, then `line` (the question, maybe annotated). */
+function promptTitle(text: FieldText, line: string): string {
+	return text.context ? `${text.context}\n\n${line}` : line;
+}
+
 /** Row a radio or checkbox group's free-text "Other" answer takes in the fallback select. */
 const OTHER_ROW = `${OTHER_LABEL} (type your own)`;
 
@@ -158,10 +171,11 @@ async function promptWithTimeout<T>(
 async function askChoice(
 	ui: FallbackUI,
 	field: ChoiceField,
-	question: string,
+	text: FieldText,
 	timeout: number | undefined,
 	signal: AbortSignal,
 ): Promise<PromptOutcome<ChoiceAnswer>> {
+	const { question } = text;
 	// The options the user can pick, by index, with one-line labels.
 	const options = field.options.flatMap((option, index) =>
 		option.disabled ? [] : [{ index, label: spansText(option.label).replace(/\s+/g, " ").trim() || option.value }],
@@ -182,7 +196,7 @@ async function askChoice(
 		);
 		while (true) {
 			const outcome = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
-				ui.select(question, choiceRows, {
+				ui.select(promptTitle(text, question), choiceRows, {
 					...dialogOptions,
 					initialIndex,
 					outline: true,
@@ -192,7 +206,7 @@ async function askChoice(
 			);
 			if (otherRow !== undefined && outcome.value === otherRow) {
 				const typed = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
-					ui.input(question, undefined, dialogOptions),
+					ui.input(promptTitle(text, question), undefined, dialogOptions),
 				);
 				if (typed.timedOut) return { value: undefined, timedOut: true };
 				initialIndex = labels.length;
@@ -220,7 +234,7 @@ async function askChoice(
 		if (other !== undefined) checkedIndices.push(labels.length);
 		const prefix = answered > 0 ? `(${answered} selected) ` : "";
 		const outcome = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
-			ui.select(`${prefix}${question}`, rows, {
+			ui.select(promptTitle(text, `${prefix}${question}`), rows, {
 				...dialogOptions,
 				initialIndex: cursor,
 				outline: true,
@@ -241,7 +255,7 @@ async function askChoice(
 				continue;
 			}
 			const typed = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
-				ui.input(question, undefined, dialogOptions),
+				ui.input(promptTitle(text, question), undefined, dialogOptions),
 			);
 			if (typed.timedOut) return { value: { checked }, timedOut: true };
 			// A blank or cancelled answer leaves Other unchecked.
@@ -266,7 +280,7 @@ async function askChoice(
 async function askText(
 	ui: FallbackUI,
 	field: TextField,
-	question: string,
+	text: FieldText,
 	timeout: number | undefined,
 	signal: AbortSignal,
 ): Promise<PromptOutcome<string>> {
@@ -274,7 +288,7 @@ async function askText(
 	let error: string | undefined;
 	let current = field.value;
 	while (true) {
-		const title = error ? `${question} (${error})` : question;
+		const title = promptTitle(text, error ? `${text.question} (${error})` : text.question);
 		let outcome: PromptOutcome<string>;
 		if (useEditor) {
 			// The editor has no countdown: typing a long answer must not race a deadline.
@@ -307,11 +321,12 @@ async function askFieldByField(
 ): Promise<{ data: HtmlFormData; timedOut: boolean } | undefined> {
 	const data = defaultFormData(form);
 	const questions = fieldQuestions(form);
+	const contexts = fieldContexts(form);
 	for (const field of form.fields) {
 		if (!field.name) continue;
-		const question = questions.get(field) ?? field.name;
+		const text = { question: questions.get(field) ?? field.name, context: contexts.get(field) ?? "" };
 		if (field.kind === "choice") {
-			const outcome = await askChoice(ui, field, question, timeout, signal);
+			const outcome = await askChoice(ui, field, text, timeout, signal);
 			if (outcome.value !== undefined) {
 				const value = choiceValue(field, outcome.value.checked, outcome.value.other);
 				if (value === undefined) delete data[field.name];
@@ -321,7 +336,7 @@ async function askFieldByField(
 			if (outcome.value === undefined) return undefined;
 			continue;
 		}
-		const outcome = await askText(ui, field, question, timeout, signal);
+		const outcome = await askText(ui, field, text, timeout, signal);
 		if (outcome.timedOut) return { data, timedOut: true };
 		if (outcome.value === undefined) return undefined;
 		data[field.name] = textValue(field, outcome.value);
