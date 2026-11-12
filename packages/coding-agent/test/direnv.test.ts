@@ -9,11 +9,12 @@ import {
 	loadDirenvEnv,
 	parseDirenvExport,
 } from "@oh-my-pi/pi-coding-agent/exec/direnv";
-import { $which, TempDir } from "@oh-my-pi/pi-utils";
+import { $which, hasFsCode, isEnoent, TempDir } from "@oh-my-pi/pi-utils";
 
 /** Real-direnv cases need the binary on PATH; skip cleanly when it's absent so
  *  the graceful-degradation code path (returns `null`) isn't asserted against. */
 const hasDirenv = $which("direnv") !== null;
+const isWindows = process.platform === "win32";
 
 const tmpDirs: TempDir[] = [];
 function tmp(): string {
@@ -456,5 +457,109 @@ describe.skipIf(!hasDirenv)("applyDirenvPreflight (shared all-backends preflight
 
 		expect(command).toBe("noop");
 		expect(env).toBe(callerEnv);
+	});
+});
+
+describe.skipIf(isWindows)("direnv process-tree cleanup", () => {
+	// `direnv export json` runs the `.envrc` through a stdlib bash, and `use devenv`
+	// adds `devenv direnv-export` below that: grandchildren of the direnv pid that
+	// inherit its stdout/stderr. The stand-in `direnv` keeps one such grandchild
+	// alive for 60s, holding the write end of a FIFO: the FIFO reads "started" once
+	// the tree is up and reaches EOF only when its last member is gone, so the tests
+	// await the tree's death instead of polling for it.
+	let savedPath: string | undefined;
+	let standIn: TempDir | undefined;
+
+	beforeEach(() => {
+		savedPath = Bun.env.PATH;
+	});
+	afterEach(async () => {
+		if (savedPath === undefined) delete Bun.env.PATH;
+		else Bun.env.PATH = savedPath;
+		const dir = standIn;
+		standIn = undefined;
+		if (!dir) return;
+		try {
+			// A regression leaves the grandchild running; never leave it behind a failing run.
+			const pidFile = path.join(dir.path(), "grandchild.pid");
+			let pidText: string | undefined;
+			try {
+				pidText = await Bun.file(pidFile).text();
+			} catch (err) {
+				// The stand-in never got as far as starting a grandchild.
+				if (!isEnoent(err)) throw err;
+			}
+			if (pidText === undefined) return;
+			try {
+				process.kill(Number.parseInt(pidText, 10), "SIGKILL");
+			} catch (err) {
+				// Already gone: the tree was cleaned up as intended.
+				if (!hasFsCode(err, "ESRCH")) throw err;
+			}
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	/** Put the stand-in `direnv` first on PATH; returns the `.envrc` dir and the tree FIFO. */
+	async function stageStandIn(): Promise<{ root: string; tree: string }> {
+		standIn = TempDir.createSync("@pi-direnv-stand-in-");
+		const root = standIn.path();
+		const bin = path.join(root, "bin");
+		const tree = path.join(root, "tree.fifo");
+		const pidFile = path.join(root, "grandchild.pid");
+		expect(Bun.spawnSync(["mkfifo", tree]).exitCode).toBe(0);
+		await Bun.write(path.join(root, ".envrc"), "export STAND_IN=1\n");
+		const direnv = path.join(bin, "direnv");
+		await Bun.write(
+			direnv,
+			`#!/bin/sh
+( echo started >&3; exec sleep 60 ) 3> "${tree}" &
+echo $! > "${pidFile}"
+wait
+`,
+		);
+		await fs.chmod(direnv, 0o755);
+		Bun.env.PATH = `${bin}${path.delimiter}${savedPath ?? ""}`;
+		clearDirenvCachesForTests();
+		return { root, tree };
+	}
+
+	// Regression: the timeout killed only the direnv pid, so its stdlib bash and
+	// `devenv direnv-export` outlived it, kept the pipes open, and piled up per bash call.
+	it("leaves no grandchild behind when the export times out", async () => {
+		const { root, tree } = await stageStandIn();
+
+		const [diff, treeOutput] = await Promise.all([
+			loadDirenvEnv(root, { timeoutMs: 1_000 }),
+			fs.readFile(tree, "utf8"),
+		]);
+
+		expect(diff).toBeNull();
+		expect(treeOutput).toBe("started\n");
+	});
+
+	it("leaves no grandchild behind when the caller aborts the export", async () => {
+		const { root, tree } = await stageStandIn();
+		const controller = new AbortController();
+		const pending = loadDirenvEnv(root, {
+			timeoutMs: 60_000,
+			signal: controller.signal,
+		});
+		// `fs` reads block until the stand-in's grandchild holds the write end and report
+		// EOF once the last writer exits; `Bun.file(fifo).stream()` never surfaces that EOF.
+		const reader = await fs.open(tree);
+		const buffer = Buffer.alloc(16);
+		try {
+			const started = await reader.read(buffer, 0, buffer.length, null);
+			expect(buffer.toString("utf8", 0, started.bytesRead)).toBe("started\n");
+			controller.abort();
+
+			expect(await pending).toBeNull();
+			const eof = await reader.read(buffer, 0, buffer.length, null);
+			expect(eof.bytesRead).toBe(0);
+		} finally {
+			await reader.close();
+		}
 	});
 });

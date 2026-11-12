@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { inflateSync } from "node:zlib";
-import { $which, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $which, isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
 
 /** Default cap on a single `direnv` invocation. The first export for a devenv
  *  `.envrc` can build a shell; callers may raise this via `bash.direnvLoadTimeoutMs`. */
@@ -161,6 +161,7 @@ export function clearDirenvCachesForTests(): void {
 	envrcCache.clear();
 	exportCache.clear();
 	cleanSpawnEnvCache = undefined;
+	direnvLookup = undefined;
 }
 
 async function findEnvrcCached(startDir: string): Promise<string | null> {
@@ -220,27 +221,29 @@ async function runDirenv(
 	timeoutMs: number,
 	env: Record<string, string>,
 	signal?: AbortSignal,
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
 	// Bail on the caller's cancellation as well as the per-invocation cap so a
 	// cold `.envrc` load can't outlive an aborted / short-timeout bash call.
 	const abortSignal = signal
 		? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
 		: AbortSignal.timeout(timeoutMs);
-	const proc = Bun.spawn([bin, ...args], {
+	// direnv runs the `.envrc` in a stdlib bash and, under `use devenv`, `devenv
+	// direnv-export`: grandchildren that a signal to the direnv pid alone never
+	// reaches. Left running they hold direnv's pipes and outlive the abort, one
+	// orphan chain per bash call. `detached` makes direnv its own process-group
+	// leader, so ptree signals the whole group on abort and holds the result until
+	// the tree is gone. It drains stdout AND stderr concurrently, which a cold
+	// `use devenv`/Nix load needs: its diagnostics fill the stderr pipe and block
+	// the child forever if only stdout is read. An aborted export resolves with a
+	// null exit code.
+	const { exitCode, stdout, stderr } = await ptree.exec([bin, ...args], {
 		cwd,
 		env,
-		stdout: "pipe",
-		stderr: "pipe",
 		signal: abortSignal,
+		detached: true,
+		allowNonZero: true,
+		allowAbort: true,
 	});
-	// Drain stdout AND stderr concurrently: a cold `use devenv`/Nix load emits
-	// enough diagnostics to fill the stderr pipe and block the child forever if
-	// only stdout is read (it would then wait out `timeoutMs`).
-	const [stdout, stderr] = await Promise.all([
-		new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
-		new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
-	]);
-	const exitCode = await proc.exited;
 	return { exitCode, stdout, stderr };
 }
 
