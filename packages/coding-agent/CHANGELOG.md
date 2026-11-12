@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Browser page-script observations in Tern and WebKit now mask password values, including values used as accessible names or descriptions
+- Browser page-script observations in Tern and WebKit now mask password values, including values used as accessible names or descriptions ([#18983](https://github.com/can1357/oh-my-pi/pull/18983) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.19.0] - 2026-11-12
 
