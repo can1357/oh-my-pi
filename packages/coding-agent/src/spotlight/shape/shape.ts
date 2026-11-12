@@ -128,8 +128,8 @@ const VERBATIM = /[;,]\s*verbatim(?: copy)?: \S+\]$/;
 const WHOLE_READ = /^(?:agent|local|skill|rule):\/\//i;
 
 /**
- * Whether a result is shown whole besides page-backs: a {@link WHOLE_READ} target, or a `read` of Markdown or of
- * line ranges that all end (`file.ts:120-180`, `:5+30`, `:1-10,40-60`, `:raw:5-40`, `:-30`): the agent named the
+ * Whether a result is shown whole besides page-backs and `:raw` reads: a {@link WHOLE_READ} target, or a `read` of
+ * Markdown or of line ranges that all end (`file.ts:120-180`, `:5+30`, `:1-10,40-60`, `:-30`): the agent named the
  * lines it wants, and cuts of them were mostly read back. An open-ended range (`:120`, `:120-`) pages the file and is
  * shaped.
  */
@@ -708,13 +708,14 @@ export async function shapeResult(
 	// Another tool's command is its arguments as JSON, which may name an artifact in passing: its `path` decides.
 	const target = shapesItself(input.tool) ? (input.command ?? input.path) : input.path;
 	const pageBack = isPageBack(target ?? "");
-	const wholeRead = !pageBack && isWholeRead(input);
+	const rawRead = !pageBack && input.raw === true;
+	const wholeRead = !pageBack && !rawRead && isWholeRead(input);
 	const short =
 		!pageBack &&
 		!shapesItself(input.tool) &&
 		input.text.length <= SHORT_CHARS &&
 		countNewlines(input.text) < SHORT_LINES;
-	const subject = pageBack || wholeRead ? undefined : subjectOf(input);
+	const subject = pageBack || rawRead || wholeRead ? undefined : subjectOf(input);
 	const own = subject ? (input.read?.lines ?? subject.view.lines) : [];
 	const run: Run = {
 		input,
@@ -735,6 +736,7 @@ export async function shapeResult(
 	let text = input.text;
 	let steps: string[] = [];
 	if (pageBack) bump(run, "pageBacks");
+	else if (rawRead) bump(run, "rawReads");
 	else if (wholeRead) bump(run, "wholeReads");
 	else if (short) {
 		bump(run, "short");

@@ -24,6 +24,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -431,6 +432,80 @@ describe("spotlight whole reads", () => {
 			expect(await read(shaped, target)).toBe(await read(plain, target));
 		}
 		expect(await read(shaped, "wide.ts:5-")).not.toBe(await read(plain, "wide.ts:5-"));
+	});
+});
+
+describe("spotlight raw reads and path lists", () => {
+	/** Twelve Python functions: long enough to be outlined and cut when shaped. */
+	const SOURCE = Array.from({ length: 12 }, (_, k) => [
+		`def handler${k}(payload, ledger):`,
+		...Array.from(
+			{ length: 20 },
+			(_, j) => `    total_${j} = payload["amount"] * ${j} + ledger[${k}][${j}]  # step ${j}`,
+		),
+		"    return total_0",
+		"",
+	])
+		.flat()
+		.join("\n");
+	/** Lines past the 400-character cap a cut read applies. */
+	const WIDE = Array.from({ length: 50 }, (_, i) => `const row${i} = "${String(i).repeat(600)}";`).join("\n");
+
+	async function sessions() {
+		const shaped = await experimentSession(undefined, {}, { scoreFree: 1 });
+		const plain = await plainSession();
+		for (const { session } of [shaped, plain]) {
+			await Bun.write(path.join(session.cwd, "raw.py"), SOURCE);
+			await Bun.write(path.join(session.cwd, "wide.ts"), WIDE);
+			await Bun.write(path.join(session.cwd, "b.txt"), "b\n");
+		}
+		return { shaped, plain };
+	}
+
+	it("returns a `:raw` read's bytes, also when repeated, and journals it as a raw read", async () => {
+		const { shaped, plain } = await sessions();
+		const tool = new ReadTool(shaped.session);
+
+		expect(resultText(await tool.execute("r1", { path: "raw.py:raw" }))).toBe(SOURCE);
+		expect(resultText(await tool.execute("r2", { path: "raw.py:raw" }))).toBe(SOURCE);
+		const ranged = await tool.execute("r3", { path: "raw.py:20-140:raw" });
+		const plainRanged = await new ReadTool(plain.session).execute("r3", { path: "raw.py:20-140:raw" });
+		expect(resultText(ranged)).toBe(resultText(plainRanged));
+		const journal = entries(shaped.manager, SPOTLIGHT_ENTRY.shape);
+		expect(journal.map(entry => (entry.stats as Record<string, number>).rawReads)).toEqual([1, 1, 1]);
+	});
+
+	it("returns a URL `:raw` read's fetched bytes", async () => {
+		const { shaped } = await sessions();
+		const body = Array.from({ length: 200 }, (_, i) => `row ${i}: the ledger reconciles against shard ${i % 4}`).join(
+			"\n",
+		);
+		vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => ({
+			ok: true,
+			status: 200,
+			finalUrl: requestedUrl,
+			contentType: "text/plain",
+			content: body,
+		}));
+
+		const result = await new ReadTool(shaped.session).execute("r1", { path: "https://example.test/data.txt:raw" });
+
+		expect(resultText(result)).toBe(body);
+		expect(entries(shaped.manager, SPOTLIGHT_ENTRY.shape)[0]?.stats).toMatchObject({ rawReads: 1 });
+	});
+
+	it("shapes each part of a path list once, under the list's call, and never the joined text again", async () => {
+		const { shaped, plain } = await sessions();
+		const targets = ["raw.py:raw;b.txt", "wide.ts:5-40;b.txt", "raw.py:raw,b.txt;wide.ts:1-10"];
+
+		for (const [index, target] of targets.entries()) {
+			const id = `list${index}`;
+			const text = resultText(await new ReadTool(shaped.session).execute(id, { path: target }));
+			expect(text).toBe(resultText(await new ReadTool(plain.session).execute(id, { path: target })));
+		}
+		// One journal entry per part, each under the call that read the list: the stats join entries to calls by id.
+		const ids = entries(shaped.manager, SPOTLIGHT_ENTRY.shape).map(entry => entry.toolCallId);
+		expect(ids).toEqual(["list0", "list0", "list1", "list1", "list2", "list2", "list2"]);
 	});
 });
 
