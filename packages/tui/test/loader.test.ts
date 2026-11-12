@@ -382,7 +382,7 @@ describe("Loader component", () => {
 		expect(container.children).toEqual([]);
 		tui.stop();
 	});
-	it("re-evaluates a dynamic message function on each spinner tick", () => {
+	it("re-evaluates a dynamic message on each clock tick even with a fixed glyph", () => {
 		vi.useFakeTimers({ now: 0 });
 		const ui = { requestDirectWrite: vi.fn(), requestComponentRender: vi.fn() };
 		let step = 0;
@@ -391,7 +391,7 @@ describe("Loader component", () => {
 			t => t,
 			t => t,
 			() => `step ${step}`,
-			["0", "1", "2", "3"],
+			["0"],
 		);
 
 		// Initial sync at construction evaluates the function once.
@@ -402,7 +402,7 @@ describe("Loader component", () => {
 		step = 1;
 		expect(loader.render(20).join("\n")).toContain("step 0");
 
-		vi.advanceTimersByTime(80); // first spinner advance re-evaluates the fn
+		vi.advanceTimersByTime(80); // clock advance re-evaluates the fn without changing the glyph
 		expect(loader.render(20).join("\n")).toContain("step 1");
 		expect(loader.render(20).join("\n")).not.toContain("step 0");
 
