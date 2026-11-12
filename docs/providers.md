@@ -215,7 +215,7 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 
 `liquid` serves Liquid AI's decision models (`liquid/d1.1` and `liquid/d1-ultra`) as `judge` models; assign one to the `judge` role to use it. `/login liquid` prompts for an API key from `https://console.liquid.ai/` (Dashboard > API Keys); to use an environment variable, set `LIQUID_API_KEY`. Images sent to Liquid are resized to fit its 10,000 patches of 32×32 pixels per request.
 
-`nace` serves Nace's Drex decision models (`nace/drex-max-v1.1`, `nace/drex-max-finance` and the text-only `nace/drex-v2.0`) as `judge` models; assign one to the `judge` role to use it. `/login nace` prompts for an API key from `https://console.nace.ai/dashboard/api-keys`; to use an environment variable, set `NACE_API_KEY`. The Drex Max models take up to 8 PNG, JPEG, or WebP images per request.
+`nace` serves Nace's Drex decision models (`nace/drex-max-v1.1`, `nace/drex-max-finance` and the text-only `nace/drex-v2.0`) as `judge` models; assign one to the `judge` role to use it. `/login nace` prompts for an API key from `https://console.nace.ai/dashboard/api-keys`; to use an environment variable, set `NACE_API_KEY`. The Drex Max models take up to 8 PNG, JPEG, or WebP images per request. Drex rejects any text that holds a base64 image, audio, video, or PDF data URL, so OMP replaces each one in the state, instructions, and criteria with a description such as `[image/png base64 data URL]`.
 
 `/login snowflake` prompts for your Snowflake account identifier or account URL, then signs in through the browser with Snowflake's built-in local-application OAuth integration and stores the account with the token. To use environment variables instead, set both `SNOWFLAKE_PAT` and `SNOWFLAKE_ACCOUNT`.
 

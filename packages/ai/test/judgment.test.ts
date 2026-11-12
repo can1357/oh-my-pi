@@ -1937,6 +1937,68 @@ describe("NativeJudge Nace Drex dialect", () => {
 		});
 		expect(result.answers.urgent.noul).toBe(0.95);
 	});
+
+	it("describes the media data URLs Drex rejects in state, instructions and criteria, keeping other text verbatim", async () => {
+		let body: unknown;
+		const judge = createNativeJudge(drex, {
+			apiKey: "nace_sk_test",
+			fetch: async (_url, init) => {
+				body = JSON.parse(String(init?.body));
+				return Response.json({
+					model: "drex-max-v1.1",
+					answers: {
+						relevant: { type: "noul", noul: 0.9, confidence: 0.9 },
+						kind: { type: "choice", choice: "image", confidence: 0.8, probabilities: { image: 0.8, other: 0.2 } },
+					},
+					usage: { input_tokens: 120, output_tokens: 12 },
+				});
+			},
+		});
+
+		// Each media data URL below is one Drex answers 422 `is media (<type> data URL)` for; `text/plain` passes.
+		const result = await judge.judge({
+			state: {
+				passages: {
+					p00: '{ type: "input_image", image_url: "data:image/png;base64,AAAA" },',
+					p01: '![](DATA:IMAGE/SVG+XML;charset=utf-8;base64,PHN2Zz4=) and "data:audio/wav;base64," + pcm',
+					p02: [
+						'const pdf = "data:application/pdf;base64,JVBERi0=";',
+						'const note = "data:text/plain;base64,aGk=";',
+					],
+				},
+			},
+			questions: {
+				relevant: { type: "noul", instructions: 'Does it build "data:image/png;base64," URLs?' },
+				kind: {
+					type: "choice",
+					instructions: "Which payload?",
+					criteria: { image: "An inline data:image/webp;base64,UklGRg== image", other: null },
+				},
+			},
+			images: IMAGE_REFS,
+		});
+
+		expect(body).toEqual({
+			state: {
+				passages: {
+					p00: '{ type: "input_image", image_url: "[image/png base64 data URL]" },',
+					p01: '![]([IMAGE/SVG+XML base64 data URL]) and "[audio/wav base64 data URL]" + pcm',
+					p02: ['const pdf = "[application/pdf base64 data URL]";', 'const note = "data:text/plain;base64,aGk=";'],
+				},
+			},
+			model: "drex-max-v1.1",
+			questions: {
+				relevant: { type: "noul", instructions: 'Does it build "[image/png base64 data URL]" URLs?' },
+				kind: {
+					type: "choice",
+					instructions: "Which payload?",
+					criteria: { image: "An inline [image/webp base64 data URL] image", other: null },
+				},
+			},
+			images: ["data:image/png;base64,AQID", "data:image/jpeg;base64,BAUG"],
+		});
+		expect(result.answers.kind.choice).toBe("image");
+	});
 });
 
 describe("chat judgment backend images", () => {
