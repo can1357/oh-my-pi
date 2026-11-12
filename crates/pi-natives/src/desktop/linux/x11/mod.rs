@@ -438,6 +438,46 @@ mod tests {
 		assert_eq!(steps, ["insert text", "read focus"]);
 	}
 
+	/// An insert that failed may still have reached the element (a timeout or
+	/// a cancel), so no keys follow it: they could type the text twice.
+	#[test]
+	fn a_failed_text_insert_sends_no_keys() {
+		struct Failing(Vec<&'static str>);
+
+		impl ElementKeys for Failing {
+			fn insert_text(&mut self) -> CoreResult<TextRoute> {
+				self.0.push("insert text");
+				Err(crate::desktop::linux::ax::not_answering())
+			}
+
+			fn focus_state(&mut self) -> CoreResult<ElementFocus> {
+				self.0.push("read focus");
+				Ok(ElementFocus {
+					focused: true,
+					toolkit: "gtk".to_owned(),
+					version: "3.24.41".to_owned(),
+				})
+			}
+
+			fn send_background(&mut self) -> CoreResult<()> {
+				self.0.push("background keys");
+				Ok(())
+			}
+
+			fn send_takeover(&mut self) -> CoreResult<()> {
+				self.0.push("takeover keys");
+				Ok(())
+			}
+		}
+
+		let mut route = Failing(Vec::new());
+		let Err(error) = deliver_element_keys("42", DeliveryMode::Background, &mut route) else {
+			panic!("keys followed a failed insert")
+		};
+		assert_eq!(error.code, ErrorCode::Timeout);
+		assert_eq!(route.0, ["insert text"]);
+	}
+
 	#[test]
 	fn background_element_keys_go_only_to_a_gtk3_window_focus_widget() {
 		let (delivered, steps) = deliver(DeliveryMode::Background, true, "gtk", "3.24.41");
