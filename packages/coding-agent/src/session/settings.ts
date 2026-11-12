@@ -1683,6 +1683,108 @@ export const cfgSessionWarnCost = register({
 	validate: validateCostThreshold("session.warnCost"),
 });
 
+/**
+ * Idle re-exec onto the latest omp inside herdr or tmux. Default on; a plain
+ * terminal never auto-restarts even when this is on. `/restart` still picks up
+ * the new binary either way.
+ */
+/** Master switch for live session hot-reload across all subsystems (`hotReload.enabled`). */
+export const cfgHotReloadEnabled = register({
+	id: "hotReload.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Hot Reload",
+		description:
+			"Master switch for live session hot-reloading across tools, skills, extensions, MCP config, stdio MCP server binaries, and the omp executable.",
+	},
+});
+
+/** Live custom tools hot-reload (`hotReload.tools`). */
+export const cfgHotReloadTools = register({
+	id: "hotReload.tools",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Hot Reload Tools",
+		description:
+			"Watch the tools/ directories and reload custom tools in the running session when their files change. A change that lands mid-turn is applied when the turn ends. `/reload-plugins` reloads them on demand regardless.",
+	},
+});
+
+/** Live skills hot-reload (`hotReload.skills`). */
+export const cfgHotReloadSkills = register({
+	id: "hotReload.skills",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Commands & Skills",
+		label: "Hot Reload Skills",
+		description:
+			"Watch the skills/ directories and reload skills and skill commands in the running session when their files change. A change that lands mid-turn is applied when the turn ends. `/reload-plugins` reloads them on demand regardless.",
+	},
+});
+
+/** Live extensions hot-reload (`hotReload.extensions`). */
+export const cfgHotReloadExtensions = register({
+	id: "hotReload.extensions",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Hot Reload Extensions",
+		description:
+			"Watch the extensions/ directories and reload extensions in the running session when their files change. Each extension swaps atomically: one that fails to load or start is reported and the previous version keeps running. A change that lands mid-turn is applied when the turn ends. `/reload-plugins` reloads them on demand regardless.",
+	},
+});
+
+/** Live MCP config file hot-reload (`hotReload.mcpConfig`). */
+export const cfgHotReloadMcpConfig = register({
+	id: "hotReload.mcpConfig",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Hot Reload MCP Config",
+		description:
+			"Watch mcp.json and .mcp.json files and reconcile added, updated, or removed MCP servers in the running session when idle.",
+	},
+});
+
+/** Live stdio MCP server binary/script hot-reload (`hotReload.mcpServers`). */
+export const cfgHotReloadMcpServers = register({
+	id: "hotReload.mcpServers",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Hot Reload MCP Stdio Servers",
+		description: "Reconnect a stdio MCP server when its executable or script changes on disk.",
+	},
+});
+
+/** Live omp binary hot-reload (`hotReload.binary`). */
+export const cfgHotReloadBinary = register({
+	id: "hotReload.binary",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Hot Reload Binary",
+		description:
+			"Inside herdr or tmux, re-exec the latest omp on PATH when it differs from the running binary. A change during a turn waits until the turn ends. A plain terminal never auto-restarts; /restart still picks up the new binary.",
+	},
+});
+
 /** Session-tree spend (USD) at which omp stops sending model requests; `--max-cost` overrides it for one run. */
 export const cfgSessionMaxCost = register({
 	id: "session.maxCost",

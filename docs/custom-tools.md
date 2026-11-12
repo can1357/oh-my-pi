@@ -199,6 +199,34 @@ Optional `onSession(event, ctx)` receives session lifecycle events, including:
 
 Use `ctx.sessionManager` to reconstruct state from history when branch/session context changes.
 
+## Reloading tools in a running session
+
+Tool modules are discovered and imported when a session starts. A top-level session (not a subagent) can re-read them while it runs, without restarting:
+
+- `/reload-plugins` (and the ACP and RPC reload commands) calls `AgentSession.refreshCustomTools({ retryFailed: true })`.
+- With `hotReload.tools` on (default on; `/settings` → Tools → "Hot Reload Tools", gated by `hotReload.enabled`), the session's `HotReloadCoordinator` polls the `tools/` directories every 2 seconds and reloads custom tools when their files change. `hotReload.skills` (default on; `/settings` → Tasks → "Hot Reload Skills") independently watches the `skills/` directories.
+- SDK consumers call `session.refreshCustomTools()` themselves. It resolves to `{ added, replaced, removed, errors }` (tool names, plus failed modules), or `undefined` for a session that does not load custom tools.
+
+A refresh re-runs tool discovery and compares it with what is loaded, by module file and tool name:
+
+| Situation                                                  | Result                                                                                                                                                                            |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New tool file                                              | The tool is registered and its `onSession` receives `start`.                                                                                                                      |
+| Tool file edited (mtime or size changed)                   | The module is re-imported (cache bypassed) and its factory re-run. The old tool's `onSession` receives `shutdown` first, then the new tool replaces it and receives `start`.      |
+| Tool file deleted, or its factory stopped returning a tool | The old tool's `onSession` receives `shutdown`, and the tool is removed from the registry (a built-in it shadowed is restored).                                                   |
+| Untouched tool file                                        | Nothing runs; its tool and state are kept.                                                                                                                                        |
+| Module throws on import, or returns an invalid tool        | The failure is reported and the other modules are applied. If the module was already loaded, its previous tool stays in place (a half-saved edit does not remove a working tool). |
+| Name collides with a built-in or another module's tool     | Reported as an error, same as at startup.                                                                                                                                         |
+
+The result is announced as a status line, for example `tools reloaded: +2 ~1 -0` (added, replaced, removed), followed by one line per failed module. Nothing is announced when nothing changed. A module that failed is not re-reported on later refreshes until it changes, except by `/reload-plugins`, which retries failed modules.
+
+Constraints:
+
+- Only the tool's entry file is watched and compared. A helper module the tool imports is re-evaluated when the entry file is re-imported, but editing only the helper does not trigger a reload; touch the entry file.
+- Module-level state in a replaced tool is lost; keep durable state in the session (see `onSession`) or on disk.
+- `hotReload.tools` and `hotReload.skills` apply changes only while the session is idle. A change that lands during a turn is announced as deferred and applied when the turn ends. `/reload-plugins` and `refreshCustomTools()` apply immediately because you asked for it.
+- Extension modules have their own hot-reload setting (`hotReload.extensions`).
+
 ## Failures and cancellation semantics
 
 ### Synchronous/async failures

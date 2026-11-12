@@ -9,6 +9,7 @@ export {
 	discoverExtensionPaths,
 	ExtensionRuntimeNotInitializedError,
 	extensionToolSourceInfo,
+	loadExtensionForReload,
 	loadExtensionFromFactory,
 	loadExtensions,
 } from "./loader";

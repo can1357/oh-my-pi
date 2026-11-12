@@ -2518,6 +2518,8 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
 	registersProviders?: boolean;
+	/** Unsubscribes everything this extension listened to on the shared event bus (`pi.events.on`). */
+	disposeEventSubscriptions?: () => void;
 }
 
 /**

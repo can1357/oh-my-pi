@@ -21,7 +21,16 @@ import { loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getCodingAgentApi } from "../host-api";
 import * as typebox from "../legacy-typebox";
 import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
-import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
+import type {
+	CustomToolAPI,
+	CustomToolFactory,
+	CustomToolsLoadResult,
+	CustomToolsRefresh,
+	CustomToolsRefreshOptions,
+	LoadedCustomTool,
+	ToolLoadError,
+	ToolPathWithSource,
+} from "./types";
 
 interface LoadToolResult {
 	tools: LoadedCustomTool[];
@@ -67,12 +76,30 @@ function customToolFactoryOf(module: { default?: unknown }): CustomToolFactory |
 }
 
 /**
+ * Identity of a tool module's entry file: changes when the file is edited,
+ * replaced, or deleted. `undefined` when the file cannot be stat'ed.
+ */
+async function moduleSignature(resolvedPath: string): Promise<string | undefined> {
+	try {
+		const stat = await Bun.file(resolvedPath).stat();
+		return `${stat.mtimeMs}:${stat.size}`;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Load a single tool module through the host-package loader.
+ *
+ * `reload: false` (startup) evaluates a module and its helpers once per process
+ * and shares them, as a native `import()` would. `reload: true` re-evaluates the
+ * entry and its relative imports so an edited module is picked up.
  */
 async function loadTool(
 	toolPath: string,
 	cwd: string,
 	sharedApi: CustomToolAPI,
+	reload: boolean,
 	source?: { provider: string; providerName: string; level: "user" | "project" },
 ): Promise<LoadToolResult> {
 	const resolvedPath = resolvePath(toolPath, cwd);
@@ -92,10 +119,8 @@ async function loadTool(
 	}
 
 	try {
-		// `reload: false`: a tool module and its helpers are evaluated once per
-		// process and shared, as with a native import; each session still calls
-		// the factory with its own API.
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload: false }))) as {
+		// Each session calls the factory with its own API regardless of `reload`.
+		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload }))) as {
 			default?: unknown;
 		};
 		const factory = customToolFactoryOf(module);
@@ -130,14 +155,6 @@ async function loadTool(
 	}
 }
 
-/** Tool path with optional source metadata, suitable for forwarding from a
- * parent session to a subagent so the subagent can re-bind tools to its own
- * `CustomToolAPI` without redoing the filesystem scan. */
-export interface ToolPathWithSource {
-	path: string;
-	source?: { provider: string; providerName: string; level: "user" | "project" };
-}
-
 /**
  * Loads custom tools from paths with conflict detection and error handling.
  *
@@ -149,7 +166,11 @@ export class CustomToolLoader {
 	tools: LoadedCustomTool[] = [];
 	errors: ToolLoadError[] = [];
 	#sharedApi: CustomToolAPI;
-	#seenNames: Set<string>;
+	#builtInToolNames: readonly string[];
+	/** Entry-file signature sampled at each module's last import attempt. */
+	#signatures = new Map<string, string | undefined>();
+	/** Modules whose last import attempt produced nothing but errors. */
+	#failedModules = new Set<string>();
 
 	constructor(
 		cwd: string,
@@ -186,29 +207,122 @@ export class CustomToolLoader {
 				});
 			},
 		};
-		this.#seenNames = new Set<string>(builtInToolNames);
+		this.#builtInToolNames = builtInToolNames;
 	}
 
 	async load(pathsWithSources: ToolPathWithSource[]): Promise<void> {
-		for (const { path: toolPath, source } of pathsWithSources) {
-			const { tools: loadedTools, errors } = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, source);
-			this.errors.push(...errors);
+		const takenNames = new Set<string>(this.#builtInToolNames);
+		for (const entry of pathsWithSources) {
+			const imported = await this.#importModule(entry, false, takenNames);
+			this.errors.push(...imported.errors);
+			this.tools.push(...imported.tools);
+		}
+	}
 
-			for (const loadedTool of loadedTools) {
-				// Check for name conflicts
-				if (this.#seenNames.has(loadedTool.tool.name)) {
-					this.errors.push({
-						path: toolPath,
-						error: `Tool name "${loadedTool.tool.name}" conflicts with existing tool`,
-						source,
-					});
-					continue;
-				}
-
-				this.#seenNames.add(loadedTool.tool.name);
-				this.tools.push(loadedTool);
+	/**
+	 * Re-read the tool sources against what is loaded. A module is re-imported (bypassing the
+	 * module cache) only when it is new, its entry file changed, or, with `retryFailed`, it failed
+	 * last time. Untouched modules keep their loaded tools, factories are not re-run, and a module
+	 * that no longer exists drops its tools. Helpers a module imports are not watched: touch the
+	 * entry file to pick up a helper edit.
+	 *
+	 * A module whose import fails outright keeps its previous tools, so a half-saved edit does not
+	 * remove a working tool; the failure is reported in {@link CustomToolsRefresh.errors}.
+	 */
+	async refresh(
+		pathsWithSources: ToolPathWithSource[],
+		options: CustomToolsRefreshOptions = {},
+	): Promise<CustomToolsRefresh> {
+		const cwd = this.#sharedApi.cwd;
+		const entries = pathsWithSources.map(entry => ({ entry, resolvedPath: resolvePath(entry.path, cwd) }));
+		const previousByPath = Map.groupBy(this.tools, loaded => loaded.resolvedPath);
+		const modulesToImport = new Set<string>();
+		for (const { resolvedPath } of entries) {
+			const unchanged =
+				this.#signatures.has(resolvedPath) &&
+				this.#signatures.get(resolvedPath) === (await moduleSignature(resolvedPath));
+			if (!unchanged || (options.retryFailed && this.#failedModules.has(resolvedPath))) {
+				modulesToImport.add(resolvedPath);
 			}
 		}
+
+		// Names held by modules that stay as they are, plus the built-ins, are off limits to re-imported modules.
+		const takenNames = new Set<string>(this.#builtInToolNames);
+		for (const { resolvedPath } of entries) {
+			if (modulesToImport.has(resolvedPath)) continue;
+			for (const loaded of previousByPath.get(resolvedPath) ?? []) takenNames.add(loaded.tool.name);
+		}
+
+		const errors: ToolLoadError[] = [];
+		const nextTools: LoadedCustomTool[] = [];
+		for (const { entry, resolvedPath } of entries) {
+			const previous = previousByPath.get(resolvedPath) ?? [];
+			if (!modulesToImport.has(resolvedPath)) {
+				nextTools.push(...previous);
+				continue;
+			}
+			const imported = await this.#importModule(entry, true, takenNames);
+			errors.push(...imported.errors);
+			if (imported.failed && previous.length > 0) {
+				for (const loaded of previous) takenNames.add(loaded.tool.name);
+				nextTools.push(...previous);
+			} else {
+				nextTools.push(...imported.tools);
+			}
+		}
+
+		const previousByName = new Map(this.tools.map(loaded => [loaded.tool.name, loaded]));
+		const nextByName = new Map(nextTools.map(loaded => [loaded.tool.name, loaded]));
+		const added = nextTools.filter(loaded => !previousByName.has(loaded.tool.name));
+		const removed = this.tools.filter(loaded => !nextByName.has(loaded.tool.name));
+		const replaced: Array<{ previous: LoadedCustomTool; next: LoadedCustomTool }> = [];
+		for (const previous of this.tools) {
+			const next = nextTools.find(loaded => loaded.tool.name === previous.tool.name);
+			if (next && next !== previous) replaced.push({ previous, next });
+		}
+
+		const knownPaths = new Set(entries.map(({ resolvedPath }) => resolvedPath));
+		for (const resolvedPath of this.#signatures.keys()) {
+			if (knownPaths.has(resolvedPath)) continue;
+			this.#signatures.delete(resolvedPath);
+			this.#failedModules.delete(resolvedPath);
+		}
+		this.tools = nextTools;
+		return { added, replaced, removed, errors };
+	}
+
+	/**
+	 * Import one tool module and admit its tools. Names in `takenNames` are rejected as conflicts;
+	 * admitted names are added to it. `failed` means the module produced nothing but errors.
+	 */
+	async #importModule(
+		{ path: toolPath, source }: ToolPathWithSource,
+		reload: boolean,
+		takenNames: Set<string>,
+	): Promise<{ tools: LoadedCustomTool[]; errors: ToolLoadError[]; failed: boolean }> {
+		const resolvedPath = resolvePath(toolPath, this.#sharedApi.cwd);
+		// Sampled before the import so an edit landing mid-import is seen as a change next time.
+		const signature = await moduleSignature(resolvedPath);
+		const result = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, reload, source);
+		const errors = [...result.errors];
+		const tools: LoadedCustomTool[] = [];
+		for (const loaded of result.tools) {
+			if (takenNames.has(loaded.tool.name)) {
+				errors.push({
+					path: toolPath,
+					error: `Tool name "${loaded.tool.name}" conflicts with existing tool`,
+					source,
+				});
+				continue;
+			}
+			takenNames.add(loaded.tool.name);
+			tools.push(loaded);
+		}
+		const failed = result.tools.length === 0 && errors.length > 0;
+		this.#signatures.set(resolvedPath, signature);
+		if (failed) this.#failedModules.add(resolvedPath);
+		else this.#failedModules.delete(resolvedPath);
+		return { tools, errors, failed };
 	}
 
 	setUIContext(uiContext: HookUIContext, hasUI: boolean): void {
@@ -233,15 +347,19 @@ export async function loadCustomTools(
 		apply(reason: string): Promise<AgentToolResult<unknown>>;
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
-) {
+): Promise<CustomToolsLoadResult> {
 	const loader = new CustomToolLoader(cwd, builtInToolNames, pushPendingAction);
 	await loader.load(pathsWithSources);
 	return {
-		tools: loader.tools,
+		// A getter: `refresh` replaces the loader's tool list.
+		get tools() {
+			return loader.tools;
+		},
 		errors: loader.errors,
 		setUIContext: (uiContext: HookUIContext, hasUI: boolean) => {
 			loader.setUIContext(uiContext, hasUI);
 		},
+		refresh: (paths, options) => loader.refresh(paths, options),
 	};
 }
 

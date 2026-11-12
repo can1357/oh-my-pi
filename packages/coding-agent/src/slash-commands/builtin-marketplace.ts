@@ -24,7 +24,7 @@ import type { SlashCommandSpec } from "./types";
 
 /**
  * Reload the interactive session's plugin runtime: invalidate fs/plugin-root
- * caches, rediscover skills, file slash commands, and task agents, reset the
+ * caches, rediscover skills, custom tools, file slash commands, and task agents, reset the
  * capability cache, and reconnect MCP servers (rebinding the session's MCP
  * tools). Shared by `/reload-plugins`'s TUI handler and the `handle`-adapter's
  * `reloadPlugins` hook so both honor the command's documented reload scope.
@@ -34,6 +34,8 @@ export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise
 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
 	await ctx.refreshSkillState();
+	await ctx.session.refreshCustomTools({ retryFailed: true });
+	await ctx.session.refreshExtensions();
 	await ctx.refreshSlashCommandState();
 	resetCapabilities();
 	if (ctx.mcpManager) {

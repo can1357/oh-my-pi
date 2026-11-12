@@ -12,6 +12,7 @@ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import { invalidateCommandConfig, isCommandConfigValue, resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
+import { McpBinaryWatcher } from "./binary-watch";
 import {
 	MCPConnectionTimeoutError,
 	connectToServer,
@@ -478,6 +479,25 @@ export class MCPManager implements MCPManagerApi {
 	/** Bumped whenever any session's view of the tools may have changed; starts above a worker's empty cache (0). */
 	#toolViewsRevision = 1;
 
+	/**
+	 * Respawns a stdio server whose executable or script changed on disk. A
+	 * deliberate rebuild is user-driven, so it resets the crash-burst window
+	 * like `/mcp reconnect`. Inert until {@link setBinaryHotReload} enables it.
+	 */
+	#binaryWatcher = new McpBinaryWatcher(name => {
+		if (this.#binaryReloadListener) {
+			this.#binaryReloadListener(name);
+			return;
+		}
+		logger.info("MCP server binary changed, reconnecting", { path: `mcp:${name}` });
+		void this.reconnectServer(name, { manual: true }).catch(error =>
+			logger.warn("MCP binary hot reload failed", { path: `mcp:${name}`, error }),
+		);
+	});
+	#binaryReloadListener: ((serverName: string) => void) | undefined;
+	#binaryHotReload = false;
+	#hasDiscovered = false;
+
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
@@ -733,6 +753,41 @@ export class MCPManager implements MCPManagerApi {
 			});
 	}
 
+	/**
+	 * Live `hotReload.mcpServers` switch: when on, a stdio server is reconnected as
+	 * soon as the bytes of its executable or script change on disk.
+	 */
+	setBinaryHotReload(enabled: boolean): void {
+		if (enabled === this.#binaryHotReload) return;
+		this.#binaryHotReload = enabled;
+		if (!enabled) {
+			this.#binaryWatcher.dispose();
+			return;
+		}
+		for (const [name, connection] of this.#connections) this.#watchBinary(name, connection.config);
+	}
+
+	/**
+	 * Hands stdio server binary change notifications to an external {@link HotReloadCoordinator}
+	 * and disables the standalone watcher interval so polling and turn-deferral are unified.
+	 */
+	attachBinaryHotReloadCoordinator(onChanged: ((serverName: string) => void) | undefined): void {
+		this.#binaryReloadListener = onChanged;
+		this.#binaryWatcher.setAutoPoll(onChanged === undefined);
+	}
+
+	/** Polls watched stdio server binaries once. */
+	pollBinaryChanges(): Promise<void> {
+		return this.#binaryWatcher.poll();
+	}
+
+	#watchBinary(name: string, config: MCPServerConfig): void {
+		if (!this.#binaryHotReload) return;
+		void this.#binaryWatcher
+			.watch(name, config)
+			.catch(error => logger.debug("MCP binary watch failed", { path: `mcp:${name}`, error }));
+	}
+
 	setNotificationsEnabled(enabled: boolean): void {
 		const wasEnabled = this.#notificationsEnabled;
 		this.#notificationsEnabled = enabled;
@@ -788,6 +843,7 @@ export class MCPManager implements MCPManagerApi {
 
 	async #discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
 		this.#discoverOptions = options ? { ...options } : undefined;
+		this.#hasDiscovered = true;
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
 			loadedConfigs = await this.loadConfigs(this.cwd, {
@@ -830,6 +886,107 @@ export class MCPManager implements MCPManagerApi {
 		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyProjectConfig(enabled));
 		this.#browserFilterMutationTail = reconcile.catch(() => undefined);
 		return reconcile;
+	}
+
+	/**
+	 * Re-read all MCP config files and reconcile added, changed, and removed
+	 * servers in place without restarting unchanged connections. Serialized with
+	 * project-config and browser-filter mutations; a no-op before initial discovery.
+	 */
+	reconcileConfigs(): Promise<{
+		added: string[];
+		updated: string[];
+		removed: string[];
+		errors: Array<{ server: string; error: string }>;
+	}> {
+		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyConfigReconcile());
+		this.#browserFilterMutationTail = reconcile.then(
+			() => undefined,
+			() => undefined,
+		);
+		return reconcile;
+	}
+
+	async #applyConfigReconcile(): Promise<{
+		added: string[];
+		updated: string[];
+		removed: string[];
+		errors: Array<{ server: string; error: string }>;
+	}> {
+		await this.#discoveryInFlight;
+		if (!this.#hasDiscovered) {
+			return { added: [], updated: [], removed: [], errors: [] };
+		}
+		const options = this.#discoverOptions ?? {};
+		const loaded = await this.loadConfigs(this.cwd, {
+			enableProjectConfig: options.enableProjectConfig,
+			filterExa: options.filterExa,
+			filterBrowser: options.filterBrowser,
+			extensionRoots: options.extensionRoots,
+		});
+
+		const existingNames = new Set(this.getAllServerNames());
+		const nextNames = new Set(Object.keys(loaded.configs));
+		const added: string[] = [];
+		const updated: string[] = [];
+		const removed: string[] = [];
+		const toDisconnect: string[] = [];
+		const toConnect: Record<string, MCPServerConfig> = {};
+		const toConnectSources: Record<string, SourceMeta> = {};
+
+		for (const name of existingNames) {
+			if (!nextNames.has(name)) {
+				removed.push(name);
+				toDisconnect.push(name);
+			}
+		}
+
+		for (const [name, nextConfig] of Object.entries(loaded.configs)) {
+			if (!existingNames.has(name)) {
+				added.push(name);
+				toConnect[name] = nextConfig;
+				if (loaded.sources[name]) toConnectSources[name] = loaded.sources[name];
+				continue;
+			}
+			const prevConfig = this.#serverConfigs.get(name);
+			const prevSource = this.#sources.get(name);
+			const nextSource = loaded.sources[name];
+			const sameConfig = JSON.stringify(prevConfig) === JSON.stringify(nextConfig);
+			const sameSource =
+				prevSource?.path === nextSource?.path &&
+				prevSource?.level === nextSource?.level &&
+				prevSource?.provider === nextSource?.provider;
+			if (!sameConfig || !sameSource) {
+				updated.push(name);
+				toDisconnect.push(name);
+				toConnect[name] = nextConfig;
+				if (nextSource) toConnectSources[name] = nextSource;
+			}
+		}
+
+		if (toDisconnect.length > 0) {
+			await Promise.all(toDisconnect.map(name => this.disconnectServer(name)));
+		}
+
+		const connectErrors: Array<{ server: string; error: string }> = [];
+		if (Object.keys(toConnect).length > 0) {
+			const connectResult = await this.connectServers(
+				toConnect,
+				toConnectSources,
+				options.onStatus,
+				options.startupTimeoutMs,
+			);
+			for (const [server, error] of Object.entries(connectResult.errors)) {
+				connectErrors.push({ server, error });
+			}
+		}
+
+		return {
+			added: added.filter(name => !connectErrors.some(entry => entry.server === name)),
+			updated: updated.filter(name => !connectErrors.some(entry => entry.server === name)),
+			removed,
+			errors: connectErrors,
+		};
 	}
 
 	async #applyProjectConfig(enabled: boolean): Promise<void> {
@@ -1012,6 +1169,7 @@ export class MCPManager implements MCPManagerApi {
 
 					this.#pendingConnections.delete(name);
 					this.#connections.set(name, connection);
+					this.#watchBinary(name, config);
 					this.#serverConfigs.set(name, config);
 
 					this.#wireAuthRefresh(connection, config);
@@ -1575,6 +1733,7 @@ export class MCPManager implements MCPManagerApi {
 		connection.transport.onClose = undefined;
 		if (this.#connections.get(name) === connection) {
 			this.#connections.delete(name);
+			this.#binaryWatcher.unwatch(name);
 		}
 	}
 
@@ -1938,6 +2097,7 @@ export class MCPManager implements MCPManagerApi {
 		}
 
 		this.#connections.set(name, connection);
+		this.#watchBinary(name, config);
 
 		this.#wireAuthRefresh(connection, config);
 		connection.transport.onClose = () => {

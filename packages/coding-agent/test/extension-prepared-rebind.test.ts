@@ -71,8 +71,15 @@ describe("prepared extension rebinding", () => {
 		const bindings = Reflect.get(globalThis, bindingsKey) as ExtensionAPI[];
 		expect(bindings).toHaveLength(2);
 		expect(bindings[0]).not.toBe(bindings[1]);
-		expect(bindings[0]?.events).toBe(parentEventBus);
-		expect(bindings[1]?.events).toBe(childEventBus);
+		// Each binding gets a scoped view of its own session's bus (so a reload can retire its listeners):
+		// a listener on the view hears that session's bus, and only that one.
+		const heard: string[] = [];
+		bindings[0]?.events.on("probe", () => heard.push("parent"));
+		bindings[1]?.events.on("probe", () => heard.push("child"));
+		parentEventBus.emit("probe", {});
+		expect(heard).toEqual(["parent"]);
+		childEventBus.emit("probe", {});
+		expect(heard).toEqual(["parent", "child"]);
 		// Print cwd via Bun, not `pwd`: on Windows Git-for-Windows' pwd.exe reports MSYS paths (`/tmp/...`).
 		const printCwd = ["-e", "process.stdout.write(process.cwd())"];
 		const [parentPwd, childPwd] = await Promise.all([

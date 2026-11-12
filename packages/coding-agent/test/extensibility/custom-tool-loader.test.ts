@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import { loadCustomTools, type ToolPathWithSource } from "../../src/extensibility/custom-tools/loader";
+import { loadCustomTools } from "../../src/extensibility/custom-tools/loader";
+import type { ToolPathWithSource } from "../../src/extensibility/custom-tools/types";
 
 let tempRoot: string | undefined;
 

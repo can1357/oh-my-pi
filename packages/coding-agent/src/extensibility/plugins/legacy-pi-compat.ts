@@ -2469,6 +2469,18 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 	};
 }
 
+/**
+ * The real paths of the source modules reachable from the extension entry `entryPath`
+ * (the entry itself and everything it imports), for deciding whether an extension changed.
+ * Includes third-party dependencies; callers decide which to watch. Rejects when the graph
+ * cannot be walked.
+ */
+export async function collectExtensionSourcePaths(entryPath: string): Promise<string[]> {
+	const entryRealPath = await realpathOrSelf(path.resolve(entryPath));
+	const graph = await collectExtensionModules(entryRealPath);
+	return [...graph.modules.keys()];
+}
+
 /** Test seam for compiled-binary dependency graph discovery and rewriting. */
 export async function __collectLegacyPiExtensionSourcesForTests(
 	entryPath: string,
