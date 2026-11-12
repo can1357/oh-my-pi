@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed omp never learning which other extension's frame the extension emptied and hid in a tab omp drives: the extension now reports the frame's page and that page's own title, checked by loading the page from the tab itself
+- Fixed omp never learning which other extension's frame the extension emptied and hid in a tab omp drives: the extension now reports the frame's page and that page's own title, checked by loading the page from the tab itself ([#19001](https://github.com/can1357/oh-my-pi/pull/19001) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.2] - 2026-11-08
 
