@@ -850,6 +850,22 @@ export function analyzeTable(header: readonly string[], rows: readonly (readonly
 	};
 }
 
+/**
+ * `table` read with `measures` (some of its own) as its only measures and
+ * `label` naming its rows: the table as a planner sees it once something
+ * that knows what the numbers mean (a judge) says which are results. A
+ * composition stands while every part is still a measure.
+ */
+export function withMeasures(
+	table: TableAnalysis,
+	measures: readonly TableColumn[],
+	label: TableColumn | undefined = table.label,
+): TableAnalysis {
+	const parts = table.composition?.parts ?? [];
+	const whole = parts.length > 0 && parts.every(index => measures.some(column => column.index === index));
+	return { ...table, label, measures, composition: whole ? table.composition : undefined };
+}
+
 /** A header with its numbers blanked: `scale 1 (200 tiles)` and `scale 8 (1600 tiles)` are one sweep. */
 const SWEEP_STEP = /\d+(?:\.\d+)?/g;
 
@@ -1059,12 +1075,25 @@ function findComposition(measures: readonly TableColumn[], rows: readonly number
 		}
 	}
 	if (sums.size > 0) {
-		// Parts are non-negative and non-zero somewhere, so no column sums into itself: the expansion ends.
-		const leaves = (index: number): number[] => sums.get(index)?.flatMap(part => leaves(part.index)) ?? [index];
+		// Rounding tolerance can admit both A ≈ B + C and B ≈ A + C; neither is a usable composition.
+		const active = new Set<number>();
+		const leaves = (index: number): number[] | undefined => {
+			if (active.has(index)) return undefined;
+			const parts = sums.get(index);
+			if (!parts) return [index];
+			active.add(index);
+			const branches = parts.map(part => leaves(part.index));
+			active.delete(index);
+			return branches.every((branch): branch is number[] => branch !== undefined) ? branches.flat() : undefined;
+		};
+		const expanded = new Map([...sums.keys()].map(index => [index, leaves(index)]));
+		if ([...expanded.values()].some(parts => parts === undefined)) return undefined;
+		// Acyclic now, so some whole is nobody's part.
 		const nested = new Set([...sums.values()].flatMap(parts => parts.map(part => part.index)));
-		const roots = [...sums.keys()].filter(index => !nested.has(index));
-		const root = roots.sort((a, b) => leaves(b).length - leaves(a).length)[0] ?? [...sums.keys()][0]!;
-		return { whole: root, parts: leaves(root).sort((a, b) => a - b), exact: true };
+		const root = [...sums.keys()]
+			.filter(index => !nested.has(index))
+			.sort((a, b) => expanded.get(b)!.length - expanded.get(a)!.length)[0]!;
+		return { whole: root, parts: expanded.get(root)!.sort((a, b) => a - b), exact: true };
 	}
 	const whole = pool.find(column => WHOLE_HEADER.test(column.header));
 	if (!whole) return undefined;

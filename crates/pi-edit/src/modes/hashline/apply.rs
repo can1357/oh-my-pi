@@ -1303,7 +1303,7 @@ pub fn apply_edits(
 	let baseline = parses_cleanly(options.path, text);
 	let authored_parses = parses_cleanly(options.path, &authored.0);
 	let finish = |result: (String, Option<u32>), mut warnings: Vec<String>| {
-		if !parses_cleanly(options.path, &result.0) && baseline {
+		if baseline && !parses_cleanly(options.path, &result.0) {
 			warnings.push(edit_broke_parse_warning(result.1));
 		}
 		ApplyResult {
@@ -1388,10 +1388,10 @@ fn lossy_echo_outcome(
 		} else if leading > 0 {
 			range_len > 1
 				|| annotation_echo(lines, path, group.start - leading as u32, group.start - 1)
-		} else if trailing > 0 {
-			range_len > 1 || annotation_echo(lines, path, group.end + 1, group.end + trailing as u32)
 		} else {
-			false
+			trailing > 0
+				&& (range_len > 1
+					|| annotation_echo(lines, path, group.end + 1, group.end + trailing as u32))
 		};
 		if !echo {
 			continue;

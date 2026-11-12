@@ -19,7 +19,7 @@ export const stateDefs = {
 		"'full' | 'delta'",
 		"`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.",
 	),
-	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned' | 'blocked'",
+	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned'",
 	GoalOp: "'get' | 'create' | 'resume' | 'pause' | 'drop'",
 	GoalStatus: "'active' | 'paused' | 'budget-limited' | 'complete' | 'dropped'",
 	SlashCommandSource: "'builtin' | 'skill' | 'extension' | 'custom' | 'mcp_prompt' | 'file'",
@@ -33,7 +33,6 @@ export const stateDefs = {
 	TodoItem: {
 		content: "string",
 		status: "TodoStatus",
-		"blocker?": doc("string", "What a `blocked` task is waiting on."),
 		"details?": "string",
 		"notes?": "string[]",
 	},
@@ -157,11 +156,34 @@ export const stateDefs = {
 		outputBytes: "number.integer",
 		"artifactId?": "string",
 		"artifactElidedBytes?": "number.integer",
+		"elidedBytes?": doc(
+			"number.integer",
+			"Bytes dropped from the middle of `output`, which keeps the head and tail.",
+		),
+		"elidedLines?": doc("number.integer", "Lines dropped from the middle of `output`."),
+		"columnDroppedBytes?": doc(
+			"number.integer",
+			"Bytes the per-line column cap cut from `output`, across all lines.",
+		),
+		"columnTruncatedLines?": doc(
+			"number.integer",
+			"Lines of `output` the per-line column cap cut; the artifact holds them whole.",
+		),
+		"columnTruncatedRange?": doc(
+			"LineRange",
+			"First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it.",
+		),
+		"columnMax?": doc("number.integer", "The per-line column cap in UTF-8 bytes, set when it cut a line."),
 		"artifactError?": JSON_OBJECT,
 		"minimized?": JSON_OBJECT,
 		"workingDir?": "string",
 		"images?": "ImageContent[]",
+		"trace?": doc(
+			JSON_OBJECT,
+			"The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.",
+		),
 	},
+	LineRange: { first: "number.integer", last: "number.integer" },
 	FastModeResult: { enabled: "boolean", active: "boolean" },
 	CompactionResult: {
 		summary: "string",

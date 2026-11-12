@@ -142,6 +142,7 @@ export function retainThoughtSignature(existing: string | undefined, incoming: s
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 
 export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+const SKIP_THOUGHT_SIGNATURE_BASE64 = Buffer.from(SKIP_THOUGHT_SIGNATURE).toString("base64");
 
 function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;
@@ -306,7 +307,10 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					const requiresFallback =
 						model.compat.requiresSkipThoughtSignature ||
 						(isFirstToolCall && model.compat.requiresSkipThoughtSignatureOnFirstFunctionCall);
-					const effectiveSignature = thoughtSignature || (requiresFallback ? SKIP_THOUGHT_SIGNATURE : undefined);
+					const skipSignature = model.compat.base64SkipThoughtSignature
+						? SKIP_THOUGHT_SIGNATURE_BASE64
+						: SKIP_THOUGHT_SIGNATURE;
+					const effectiveSignature = thoughtSignature || (requiresFallback ? skipSignature : undefined);
 					isFirstToolCall = false;
 
 					const part: Part = {
@@ -466,6 +470,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "OTHER":
 		case "LANGUAGE":
 		case "MALFORMED_FUNCTION_CALL":
+		case "MALFORMED_RESPONSE":
 		case "UNEXPECTED_TOOL_CALL":
 		case "NO_IMAGE":
 			return "error";
@@ -615,11 +620,18 @@ export type GoogleThoughtText = "healed" | "verbatim";
  * blocks, opening a new block whenever the part kind changes. A part's
  * `thoughtSignature` stays on the block it belongs to; the empty text part
  * Gemini sends after a reply's last chunk signs the open block.
+ *
+ * {@link push} folds whole parts. A route that rewrites visible text before it
+ * lands (Gemini CLI's planning-leak buffer and markup healing) feeds the
+ * rewritten text through {@link appendText}/{@link appendThinking} and
+ * signature-only parts through {@link sign}, so block and signature placement
+ * live only here.
  */
 export class GoogleTextBlocks {
 	readonly #output: AssistantMessage;
 	readonly #stream: AssistantMessageEventStream;
 	readonly #thoughtText: GoogleThoughtText;
+	readonly #onBlockStart: (() => void) | undefined;
 	#block: TextContent | ThinkingContent | null = null;
 	#contentIndex = -1;
 	// Heals a leaked reasoning-fence opener (```thinking / ``````thinking) that some
@@ -627,10 +639,17 @@ export class GoogleTextBlocks {
 	// stripper per thinking block; created lazily on first thinking delta.
 	#thinkingStripper: ThinkingFenceStripper | null = null;
 
-	constructor(output: AssistantMessage, stream: AssistantMessageEventStream, thoughtText: GoogleThoughtText) {
+	/** `onBlockStart` runs before each `text_start`/`thinking_start`, e.g. to emit the stream's `start` first. */
+	constructor(
+		output: AssistantMessage,
+		stream: AssistantMessageEventStream,
+		thoughtText: GoogleThoughtText,
+		onBlockStart?: () => void,
+	) {
 		this.#output = output;
 		this.#stream = stream;
 		this.#thoughtText = thoughtText;
+		this.#onBlockStart = onBlockStart;
 	}
 
 	/** Folds one response part; parts without text are ignored. */
@@ -639,31 +658,39 @@ export class GoogleTextBlocks {
 		if (text === undefined) return;
 		const isThinking = isThinkingPart(part);
 		if (text === "") {
-			// A signature-only part: an unmarked one signs the open block (Gemini's
-			// trailing part after a reply), a thought part signs thinking of its own.
-			if (!thoughtSignature || part.functionCall) return;
-			const signed = isThinking && this.#block?.type !== "thinking" ? this.#open(true) : this.#block;
-			if (signed) this.#sign(signed, thoughtSignature);
+			if (thoughtSignature && !part.functionCall) this.sign(thoughtSignature, isThinking);
 			return;
 		}
-		const block =
-			this.#block && (this.#block.type === "thinking") === isThinking ? this.#block : this.#open(isThinking);
-		this.#sign(block, thoughtSignature);
-		if (block.type === "thinking") {
-			if (this.#thoughtText === "healed") this.#thinkingStripper ??= new ThinkingFenceStripper();
-			const delta = this.#thinkingStripper ? this.#thinkingStripper.push(text) : text;
-			if (!delta) return;
-			block.thinking += delta;
-			this.#stream.push({ type: "thinking_delta", contentIndex: this.#contentIndex, delta, partial: this.#output });
-		} else {
-			block.text += text;
-			this.#stream.push({
-				type: "text_delta",
-				contentIndex: this.#contentIndex,
-				delta: text,
-				partial: this.#output,
-			});
-		}
+		if (isThinking) this.appendThinking(text, thoughtSignature);
+		else this.appendText(text, thoughtSignature);
+	}
+
+	/**
+	 * Places a signature-only part's signature: an unmarked one signs the open block
+	 * (Gemini's trailing part after a reply), a thought part signs thinking of its own.
+	 */
+	sign(signature: string, isThought: boolean): void {
+		const signed = isThought && this.#block?.type !== "thinking" ? this.#open(true) : this.#block;
+		if (signed) this.#sign(signed, signature);
+	}
+
+	/** Appends reply text to the open text block, opening one if needed. */
+	appendText(text: string, signature?: string): void {
+		const block = this.#block?.type === "text" ? this.#block : this.#open(false);
+		this.#sign(block, signature);
+		block.text += text;
+		this.#stream.push({ type: "text_delta", contentIndex: this.#contentIndex, delta: text, partial: this.#output });
+	}
+
+	/** Appends thought text to the open thinking block, opening one if needed. */
+	appendThinking(text: string, signature?: string): void {
+		const block = this.#block?.type === "thinking" ? this.#block : this.#open(true);
+		this.#sign(block, signature);
+		if (this.#thoughtText === "healed") this.#thinkingStripper ??= new ThinkingFenceStripper();
+		const delta = this.#thinkingStripper ? this.#thinkingStripper.push(text) : text;
+		if (!delta) return;
+		block.thinking += delta;
+		this.#stream.push({ type: "thinking_delta", contentIndex: this.#contentIndex, delta, partial: this.#output });
 	}
 
 	/** Ends the open block, releasing thinking text the fence stripper held back. */
@@ -687,9 +714,12 @@ export class GoogleTextBlocks {
 		pushBlockEndEvent(block, this.#contentIndex, this.#output, this.#stream);
 	}
 
+	#open(isThinking: true): ThinkingContent;
+	#open(isThinking: false): TextContent;
+	#open(isThinking: boolean): TextContent | ThinkingContent;
 	#open(isThinking: boolean): TextContent | ThinkingContent {
 		this.close();
-		const block = startTextOrThinkingBlock(isThinking, this.#output, this.#stream);
+		const block = startTextOrThinkingBlock(isThinking, this.#output, this.#stream, this.#onBlockStart);
 		this.#block = block;
 		this.#contentIndex = this.#output.content.length - 1;
 		return block;

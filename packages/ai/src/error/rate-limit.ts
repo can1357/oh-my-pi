@@ -141,7 +141,8 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
-function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
+/** Parse an embedded JSON object from an error message. */
+export function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
 	const start = errorMessage.indexOf("{");
 	const end = errorMessage.lastIndexOf("}");
 	if (start < 0 || end < start) return undefined;
@@ -420,6 +421,42 @@ export function is402BillingCapBody(message: string | undefined): boolean {
 	if (STATUS_402_QUOTA_PATTERN.test(message)) return true;
 	const reason = parseRateLimitReason(message);
 	return isQuotaExhaustedReason(reason) || reason === "CONCURRENT_LIMIT";
+}
+
+// Billing-cap wording: the account is out of money the user must add, as
+// opposed to a quota window that reopens on a clock. LithosAI answers
+// `402 the organization is out of credit, add more to continue
+// (type=insufficient_quota …)`; the rest are the same state on other
+// providers (DeepSeek "Insufficient Balance", OpenRouter credits, spend
+// ceilings, ChatGPT-style "out of credits").
+const OUT_OF_CREDIT_PATTERN = /\bout of credit|\badd (?:more )?credit|\btop ?up\b/i;
+
+/**
+ * Whether a usage-limit failure is a *billing* cap rather than a window that
+ * reopens on a clock: an out-of-credit balance (402), a spent prepaid
+ * balance, a credits wall, or a spend ceiling. Topping the account up clears
+ * it; waiting never does, so the retry loop must surface the error instead of
+ * sleeping the QUOTA_EXHAUSTED heuristic (30 min) — a `retry.maxDelayMs` at
+ * or above that heuristic would otherwise hold the session through the whole
+ * sleep while the user has no way to retry by hand.
+ *
+ * A DashScope/Bailian per-minute token throttle and a concurrency cap wear
+ * quota wording but are transient slots, so both stay out.
+ */
+export function isBillingCapUsageLimit(status: number | undefined, message: string | undefined): boolean {
+	if (message === undefined) return false;
+	if (isConcurrencyCapExclusion(status, message)) return false;
+	if (isDashScopeTokenLimitText(message)) return false;
+	if (status === 402) return is402BillingCapBody(message);
+	return (
+		OUT_OF_CREDIT_PATTERN.test(message) ||
+		INSUFFICIENT_BALANCE_PATTERN.test(message) ||
+		CREDITS_EXHAUSTED_PATTERN.test(message) ||
+		PREPAID_BALANCE_EXHAUSTED_PATTERN.test(message) ||
+		SPEND_LIMIT_PATTERN.test(message) ||
+		ANTHROPIC_CREDITS_REQUIRED_PATTERN.test(message) ||
+		/\binsufficient_quota\b/i.test(message)
+	);
 }
 
 /**

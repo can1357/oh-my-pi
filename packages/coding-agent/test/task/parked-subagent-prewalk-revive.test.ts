@@ -17,8 +17,9 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, setInteractiveHost } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "HandedOff";
 const MOCK_API_SOURCE = "test/parked-subagent-prewalk-revive";
@@ -31,6 +32,7 @@ const thinking = { mode: "effort", efforts: [Effort.Medium, Effort.High] } as co
 
 let savedEnv: Record<string, string | undefined> = {};
 let root: string;
+let savedInteractiveHost: boolean;
 
 function restoreEnvValue(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -43,6 +45,7 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 }
 
 beforeEach(async () => {
+	savedInteractiveHost = setInteractiveHost(false);
 	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prewalk-revive-"));
 	const home = path.join(root, "home");
@@ -65,6 +68,7 @@ afterEach(async () => {
 	__resetDirsFromEnvForTests();
 	AgentStorage.close();
 	closeModelCache();
+	setInteractiveHost(savedInteractiveHost);
 	await removeWithRetries(root);
 });
 
@@ -154,13 +158,14 @@ it("revives a parked subagent on its prewalk handoff target, keeping its todo li
 		});
 		expect(result.exitCode).toBe(0);
 
-		const live = AgentRegistry.global().get(AGENT_ID)?.session;
-		if (!live) throw new Error("Expected a kept-alive subagent session");
+		const handle = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!handle) throw new Error("Expected a kept-alive subagent session");
+		const live = localSession(handle);
 		expect(live.model?.id).toBe(TARGET);
 		expect(live.configuredThinkingLevel()).toBe(Effort.High);
 
 		await AgentLifecycleManager.global().park(AGENT_ID);
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 
 		expect(revived.model?.id).toBe(TARGET);
 		expect(revived.configuredThinkingLevel()).toBe(Effort.High);
@@ -227,15 +232,16 @@ it("revives a parked per-call worker on its exact model, not on a session-local 
 		});
 		expect(result.exitCode).toBe(0);
 
-		const live = AgentRegistry.global().get(AGENT_ID)?.session;
-		if (!live) throw new Error("Expected a kept-alive subagent session");
+		const handle = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!handle) throw new Error("Expected a kept-alive subagent session");
+		const live = localSession(handle);
 		expect(live.model?.id).toBe(PLANNER);
 		// A focused worker can still be switched by hand; that persists a session-local model change.
 		await live.setModelTemporary(switched);
 		expect(live.sessionManager.getSessionLocalModelChange()?.model).toBe(`mock/${TARGET}`);
 
 		await AgentLifecycleManager.global().park(AGENT_ID);
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 
 		expect(revived.model?.id).toBe(PLANNER);
 		expect(revived.configuredThinkingLevel()).toBe(Effort.Medium);

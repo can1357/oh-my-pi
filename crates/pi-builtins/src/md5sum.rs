@@ -2,13 +2,12 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 use uucore::checksum::AlgoKind;
 
 use crate::{
 	cksum,
-	host::{Host, Utility, matches_parser, util},
+	host::{Host, Utility, matches_parser},
 };
 
 /// Parsed `md5sum` invocation.
@@ -29,11 +28,6 @@ impl Utility for Md5sum {
 
 fn app() -> clap::Command {
 	cksum::command(Md5sum::NAME, false)
-}
-
-/// Creates the `md5sum` builtin registration.
-pub(crate) fn md5sum_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Md5sum, SE>()
 }
 
 #[cfg(test)]

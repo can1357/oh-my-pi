@@ -20,6 +20,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopDragResult,
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
@@ -29,6 +30,8 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { expandTilde } from "@oh-my-pi/pi-utils/path";
+import { truncate } from "@oh-my-pi/pi-utils/format";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -56,7 +59,7 @@ import {
 	screenStateNotice,
 	type ToolReply,
 } from "./protocol";
-import { describeWindowMiss } from "./window-miss";
+import { describeWindowMiss, matchesWindowApp } from "./window-miss";
 
 /** A native input call; resolves to its takeover focus report when it took over. */
 type InputCall = Promise<DesktopFocusReturn | null | void>;
@@ -82,7 +85,7 @@ export interface NativeDesktopSession {
 	holdDisplayUntilReleased(): void;
 	/** Let a turn's hold go now (activity outside a turn keeps its grace); later activity gets the grace again. */
 	releaseDisplayAwake(): void;
-	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause. */
+	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause (macOS) or for a Wayland permission prompt. */
 	setRunDeadline(remainingMs: number): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
@@ -101,7 +104,7 @@ export interface NativeDesktopSession {
 	bringToCurrentSpace(windowId: string): Promise<void>;
 	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
 	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<DesktopDragResult | null | void>;
 	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
 	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
 	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
@@ -334,17 +337,6 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 }
 
-function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
-	if (!filter) return true;
-	const app = filter.app?.toLocaleLowerCase();
-	const title = filter.title?.toLocaleLowerCase();
-	return (
-		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || window.app.toLocaleLowerCase().includes(app)) &&
-		(!title || window.title.toLocaleLowerCase().includes(title))
-	);
-}
-
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;
 	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
@@ -367,6 +359,24 @@ const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
 const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
+/** JSON-escaped characters of a drag's selected text its output line quotes; the returned selection keeps it whole. */
+const DRAG_SELECTION_PREVIEW_CHARS = 24;
+
+/**
+ * The native action `perform(action)` runs, as the key the refusals check and the name macOS native
+ * is sent, so the two cannot disagree: native `native_action_name` trims Unicode White_Space (unlike
+ * JS `trim`, it drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu`
+ * to `AXPress`, `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs
+ * whichever of the element's actions matches with only ASCII letters folded; on this key the
+ * steps before the match only uppercase the `AX` prefix.
+ */
+function nativeActionKey(action: string): string {
+	const name = action
+		.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "")
+		.replace(/[A-Z]/g, letter => letter.toLowerCase());
+	if (name === "show_menu") return "axshowmenu";
+	return name.startsWith("ax") ? name : `ax${name}`;
+}
 
 /**
  * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
@@ -394,12 +404,16 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
 /**
  * `apps.open`'s target or `app` selector, against the session's folder
  * `cwd` when it names a path there: one written as a relative path (`./a`,
- * `a/b`), even if missing, or a bare name of an existing entry. An exact
+ * `a/b`), even if missing, or a bare name of an existing entry. `~` and a
+ * leading `~/` are the user's home ([`expandTilde`]); `~name` stays a name or
+ * ID, since application IDs and names can start with `~`. An exact
  * application ID or native path (`listed`) keeps precedence over a same-named
  * entry; absolute paths, URLs and other names pass through to native
  * resolution.
  */
 async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
+	if (value === "~" || value.startsWith("~/") || value.startsWith(`~${path.sep}`))
+		return path.resolve(expandTilde(value));
 	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
 	const local = path.resolve(cwd, value);
 	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);
@@ -748,8 +762,8 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		// The names native `axPerform` runs as `AXRaise` (its `action_name` mapping).
-		if (action.trim().toLowerCase() === "raise" || action === "AXRaise") {
+		const native = nativeActionKey(action);
+		if (native === "axraise") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -758,11 +772,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		// The names native `axPerform` runs as `AXOpen` (`action_name` prefixes "AX"
-		// to any other name). On an item in Chrome's Open panel it brings the
-		// panel's application to the front, even when the action fails, and it
-		// stays there.
-		if (this.#session.capabilities.backend === "quartz" && (action === "AXOpen" || action === "Open")) {
+		// On an item in Chrome's Open panel `AXOpen` brings the panel's application to the front, even
+		// when the action fails, and it stays there.
+		if (this.#session.capabilities.backend === "quartz" && native === "axopen") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -772,8 +784,8 @@ class El {
 			);
 		}
 		const menu = menuOption(options);
-		// The names native `axPerform` runs as `AXShowMenu`, which opens the element's context menu.
-		if (["showmenu", "show_menu"].includes(action.trim().toLowerCase()) || action === "AXShowMenu") {
+		// `AXShowMenu` opens the element's context menu.
+		if (native === "axshowmenu") {
 			refuseMenu(
 				this.#session,
 				context,
@@ -785,8 +797,7 @@ class El {
 		}
 		if (menu !== undefined)
 			refuseMenu(this.#session, context, "perform with menu", "a menu", MENU_ROUTE, `element ${this.ref}`);
-		// The names native `axPerform` runs as `AXPress`.
-		if (action.trim().toLowerCase() === "press" || action === "AXPress") {
+		if (native === "axpress") {
 			refuseControlMenu(
 				this.#session,
 				context,
@@ -795,7 +806,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
+		// macOS runs the key the refusals checked; UIA and AT-SPI match their own action names as given.
+		const sent = this.#session.capabilities.backend === "quartz" ? native : action;
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, sent, menu));
 	}
 
 	/**
@@ -1104,24 +1117,36 @@ class Win {
 		);
 	}
 
-	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
+	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "drag", native, `window ${this.id}`);
 		refuseMenuPress(this.#session, context, native);
+		let selection: AxTextSelection | undefined;
 		await sendInput(
 			this.#session,
 			context,
 			"drag",
 			native.takeover,
-			fallback =>
-				this.#session.drag(
+			async fallback => {
+				const result = await this.#session.drag(
 					this.id,
 					points.map(([x, y]) => ({ x, y })),
 					{ ...native, ...fallback },
-				),
+				);
+				selection = result?.selection;
+				return result?.focusReturn;
+			},
 			this.pid,
 		);
+		if (!selection) return undefined;
+		// The returned selection keeps the whole text; the output line quotes its start.
+		const quoted = truncate(JSON.stringify(selection.text).slice(1, -1), DRAG_SELECTION_PREVIEW_CHARS);
+		context.output.push({
+			type: "text",
+			text: `drag selected "${quoted}" through accessibility instead of dragging; no mouse input was sent`,
+		});
+		return selection;
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
@@ -1705,6 +1730,44 @@ export class ComputerWorkerCore {
 		const getContext = this.#currentRunContext;
 		const makeWin = (window: DesktopWindow): Win => new Win(session, getContext, window);
 		const el = (node: AxNode): El => new El(session, getContext, node);
+		const listWindows = async (filter: WindowFilter | undefined, signal: AbortSignal) => {
+			const windows = await nativeCall(signal, () => session.listWindows());
+			let appPids: Set<number> | undefined;
+			const app = filter?.app?.toLocaleLowerCase();
+			// Decide before title/id filtering, so another app cannot substitute for the named app.
+			const exactApp = !!app && windows.some(window => window.app.toLocaleLowerCase() === app);
+			// An app filter that names no window's app is looked up as an application id or path.
+			if (
+				app &&
+				windows.some(window => window.pid !== undefined) &&
+				!windows.some(window => matchesWindowApp(window, app))
+			) {
+				const applications = await nativeCall(signal, () => session.listApplications({ runningOnly: true }));
+				appPids = new Set<number>();
+				for (const application of applications) {
+					if (
+						application.pid !== undefined &&
+						(application.id.toLocaleLowerCase() === app || application.path.toLocaleLowerCase() === app)
+					) {
+						appPids.add(application.pid);
+					}
+				}
+			}
+			const title = filter?.title?.toLocaleLowerCase();
+			return {
+				windows,
+				appPids,
+				matches: windows.filter(window => {
+					if (!filter) return true;
+					return (
+						(filter.id === undefined || window.id === String(filter.id)) &&
+						(!app ||
+							(exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
+						(!title || window.title.toLocaleLowerCase().includes(title))
+					);
+				}),
+			};
+		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",
 			app: "desktop",
@@ -1840,9 +1903,8 @@ export class ComputerWorkerCore {
 			},
 			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
 				const { signal } = getContext();
-				return (await nativeCall(signal, () => session.listWindows()))
-					.filter(window => matchesFilter(window, filter))
-					.slice(0, MAX_LISTED_WINDOWS);
+				const { matches } = await listWindows(filter, signal);
+				return matches.slice(0, MAX_LISTED_WINDOWS);
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
@@ -1852,11 +1914,10 @@ export class ComputerWorkerCore {
 				const deadline = performance.now() + wait;
 				let windows: DesktopWindow[];
 				let matches: DesktopWindow[];
+				let appPids: ReadonlySet<number> | undefined;
 				for (;;) {
-					windows = await nativeCall(signal, () => session.listWindows());
-					matches = windows.filter(window =>
-						id !== undefined ? window.id === id : matchesFilter(window, selector as WindowFilter),
-					);
+					const listed = await listWindows(id === undefined ? (selector as WindowFilter) : { id }, signal);
+					({ windows, matches, appPids } = listed);
 					// The last interval sleeps only what is left, so the final listing lands at the deadline.
 					const remaining = deadline - performance.now();
 					if (matches.length > 0 || remaining <= 0) break;
@@ -1874,7 +1935,7 @@ export class ComputerWorkerCore {
 					const lead = unfiltered
 						? `${unfiltered}, and none is open`
 						: `no window matches ${JSON.stringify(selector)}`;
-					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route)}`);
+					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route, appPids)}`);
 				}
 				if (matches.length > 1) {
 					const candidates = matches

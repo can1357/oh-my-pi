@@ -101,6 +101,13 @@ export interface SessionCompactEvent {
 	fromExtension: boolean;
 }
 
+/** Fired before the operator ends the session through a close the host can still refuse (can be cancelled). */
+export interface SessionBeforeShutdownEvent {
+	type: "session_before_shutdown";
+	/** Aborted when the close stops waiting: another close request, a signal, or the UI stopping. */
+	signal: AbortSignal;
+}
+
 /** Fired on process exit (SIGINT/SIGTERM) */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
@@ -172,6 +179,7 @@ export type SessionEvent =
 	| SessionCompactingEvent
 	| SessionCompactEvent
 	| SessionStopEvent
+	| SessionBeforeShutdownEvent
 	| SessionShutdownEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent
@@ -486,6 +494,12 @@ export interface SessionCompactingResult {
 	prompt?: string;
 	/** Custom data to store in compaction entry */
 	preserveData?: Record<string, unknown>;
+}
+
+/** Return type for `session_before_shutdown` handlers */
+export interface SessionBeforeShutdownResult {
+	/** If true, cancel this shutdown attempt. */
+	cancel?: boolean;
 }
 
 /** Return type for `session_stop` handlers */

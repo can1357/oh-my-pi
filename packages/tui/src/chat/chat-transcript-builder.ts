@@ -17,7 +17,7 @@ import { type Component, type TUI } from "../tui";
 import type { AdvisorMessageDetails } from "./messages";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "./messages";
 import { chatTranscriptDisplayPreferences as displayPreferences } from "./display-preferences";
-import type { MessageRenderer } from "./extension-types";
+import type { AssistantTextRenderer, MessageRenderer } from "./extension-types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "./messages";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -40,6 +40,7 @@ import {
 	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildParentIrcMessageCard,
 	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
@@ -67,7 +68,7 @@ import {
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
 import { isReplyWrite, ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "./reply-write";
 import { SkillMessageComponent } from "./skill-message";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "./tool-execution";
+import { toolRenderName, ToolExecutionComponent, type ToolExecutionHandle } from "./tool-execution";
 import { TranscriptContainer } from "../chrome/transcript-container";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
@@ -86,6 +87,8 @@ export interface ChatTranscriptBuilderDeps {
 	linkTargets?: ReadonlyMap<string, string>;
 	/** Draw charts under numeric tables; false for transcripts that are not the main session's. Default: true. */
 	tableCharts?: boolean;
+	/** Extension assistant text renderers the replayed replies draw with, as the live transcript does. */
+	textRenderers?: readonly AssistantTextRenderer[];
 	requestRender: () => void;
 }
 
@@ -246,6 +249,8 @@ export class ChatTranscriptBuilder {
 		if (!this.#readGroup) {
 			this.#readGroup = new ReadToolGroupComponent({
 				showContentPreview: displayPreferences.readToolResultPreview,
+				// Extension presenters draw only the live main transcript; every replay draws stock cards.
+				transcriptPresenters: false,
 			});
 			this.#trackExpandable(this.#readGroup);
 			this.container.addChild(this.#readGroup);
@@ -326,6 +331,12 @@ export class ChatTranscriptBuilder {
 				// A user prompt closes the poll-displacement window, same as the live path.
 				if (message.role === "user") this.#resolveWaitingPoll();
 				if (message.role === "user") this.#resolveTodoSnapshot();
+				if (message.role === "user" && message.parentIrc) {
+					this.container.addChild(
+						buildParentIrcMessageCard(message.parentIrc, message.timestamp, () => this.#expanded),
+					);
+					break;
+				}
 				const userText = message.role === "user" ? textContent(message.content) : "";
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
@@ -427,6 +438,7 @@ export class ChatTranscriptBuilder {
 			proseOnlyThinking,
 			this.#deps.linkTargets,
 			expandThinkingBlocks,
+			{ renderers: this.#deps.textRenderers ?? [], contentOffset: 0 },
 		);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.#mountProse(assistantComponent);
@@ -451,7 +463,10 @@ export class ChatTranscriptBuilder {
 		const errorPresentation = resolveAssistantErrorPresentation(message);
 		const hasErrorStop = errorPresentation.kind === "full";
 		const errorMessage = hasErrorStop ? errorPresentation.text : null;
-		const appendAssistantSegment = (segment: Extract<AgentMessage, { role: "assistant" }> | undefined) => {
+		const appendAssistantSegment = (
+			toolCallId: string,
+			segment: Extract<AgentMessage, { role: "assistant" }> | undefined,
+		) => {
 			if (!segment || !assistantHasVisibleContent(segment)) return;
 			const component = new AssistantMessageComponent(
 				segment,
@@ -462,6 +477,7 @@ export class ChatTranscriptBuilder {
 				proseOnlyThinking,
 				this.#deps.linkTargets,
 				expandThinkingBlocks,
+				{ renderers: this.#deps.textRenderers ?? [], contentOffset: timeline.contentOffsets.get(toolCallId) ?? 0 },
 			);
 			this.#mountProse(component);
 			lastAssistantComponent = component;
@@ -469,10 +485,16 @@ export class ChatTranscriptBuilder {
 
 		for (const content of message.content) {
 			if (content.type !== "toolCall") continue;
-			this.#resolveWaitingPoll(content.name);
+			// Mirror the live path (event-controller/ui-helpers): look the registry
+			// entry up by the wire name, then route and construct the card under
+			// the canonical name so `toolRenderers[toolName]` resolves identically
+			// live and rebuilt.
+			const tool = this.#deps.getTool?.(content.name);
+			const renderToolName = toolRenderName(content.name, tool);
+			this.#resolveWaitingPoll(renderToolName);
 
 			const afterToolSegment = timeline.afterToolCalls.get(content.id);
-			if (content.name === "read" && readArgsCollapseIntoGroup(content.arguments)) {
+			if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 				if (hasErrorStop && errorMessage) {
 					const group = this.#ensureReadGroup();
 					group.updateArgs(content.arguments, content.id);
@@ -489,15 +511,15 @@ export class ChatTranscriptBuilder {
 					const normalizedArgs = normalizeToolArgs(content.arguments);
 					this.#readArgs.set(content.id, normalizedArgs);
 				}
-				appendAssistantSegment(afterToolSegment);
+				appendAssistantSegment(content.id, afterToolSegment);
 				continue;
 			}
 
 			this.#readGroup?.seal();
 			this.#readGroup = null;
-			const builtIn = this.#deps.isBuiltInTool?.(content.name) ?? true;
+			const builtIn = this.#deps.isBuiltInTool?.(renderToolName) ?? true;
 			let component: ToolExecutionHandle;
-			if (builtIn && isReplyWrite(content.name, content.arguments) === true) {
+			if (builtIn && isReplyWrite(renderToolName, content.arguments) === true) {
 				const reply = new ReplyWriteComponent({
 					requestRender: () => this.#deps.requestRender(),
 					imageBudget: this.#deps.ui.imageBudget,
@@ -509,15 +531,16 @@ export class ChatTranscriptBuilder {
 				component = reply;
 			} else {
 				const card = new ToolExecutionComponent(
-					content.name,
+					renderToolName,
 					content.arguments,
 					{
 						useBuiltInRenderer: builtIn,
 						// Stable ids and Kitty placeholder cells keep images anchored
 						// while the transcript viewport scrolls and reflows.
 						showImages: displayPreferences.showImages,
+						transcriptPresenters: false,
 					},
-					this.#deps.getTool?.(content.name),
+					tool,
 					this.#deps.ui,
 					this.#deps.cwd,
 					content.id,
@@ -536,7 +559,7 @@ export class ChatTranscriptBuilder {
 			} else {
 				this.#pendingTools.set(content.id, component);
 			}
-			appendAssistantSegment(afterToolSegment);
+			appendAssistantSegment(content.id, afterToolSegment);
 		}
 		const turnUsage = this.#turnUsage.add(message, this.#turnStartedAt);
 		if (turnUsage) lastAssistantComponent.setTurnUsage(turnUsage);
@@ -553,7 +576,11 @@ export class ChatTranscriptBuilder {
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {
 		const pending = this.#pendingTools.get(message.toolCallId);
-		const isReadGroupResult = message.toolName === "read" && (!pending || pending instanceof ReadToolGroupComponent);
+		// Mirror the call side: resolve the wire toolName through the registry so
+		// aliased results route under the canonical name their call was built with.
+		const tool = this.#deps.getTool?.(message.toolName);
+		const renderToolName = toolRenderName(message.toolName, tool);
+		const isReadGroupResult = renderToolName === "read" && (!pending || pending instanceof ReadToolGroupComponent);
 		if (isReadGroupResult) {
 			let component = pending;
 			if (!component) {
@@ -583,10 +610,10 @@ export class ChatTranscriptBuilder {
 		if (!pending) return;
 		pending.updateResult(message, false, message.toolCallId);
 		this.#pendingTools.delete(message.toolCallId);
-		if (message.toolName === "wait" && pending instanceof ToolExecutionComponent && pending.isDisplaceableBlock()) {
+		if (renderToolName === "wait" && pending instanceof ToolExecutionComponent && pending.isDisplaceableBlock()) {
 			this.#waitingPoll = pending;
 		} else if (
-			message.toolName === "todo" &&
+			renderToolName === "todo" &&
 			pending instanceof ToolExecutionComponent &&
 			pending.canBeDisplacedBy("todo")
 		) {

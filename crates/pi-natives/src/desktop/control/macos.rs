@@ -465,7 +465,8 @@ fn input_target(
 		Some(Untargeted::Dropped) => None,
 		// Not a type the tap listens to, since each of those has a rule: counted
 		// against the front process, it at worst has the agent read that app
-		// again, where dropping it would let the agent act on what the user changed.
+		// again, where dropping it would let the agent act on what the user
+		// changed.
 		None => front(),
 	}
 }

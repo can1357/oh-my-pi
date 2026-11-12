@@ -166,7 +166,7 @@ describe("streamDevin router assignment", () => {
 			ideName: "devin-cli",
 			ideType: "chisel",
 			extensionName: "chisel",
-			extensionVersion: "3000.11.205",
+			extensionVersion: "3000.12.43",
 			apiKey: "devin-session-token$header.payload.signature",
 			userJwt: "",
 		});
@@ -475,5 +475,20 @@ describe("streamDevin router assignment", () => {
 			topP: Math.fround(0.8),
 			stopPatterns: ["END"],
 		});
+	});
+
+	it("raises temperature 0 to the wire floor Cascade accepts", async () => {
+		const edge = fakeDevin({});
+
+		// Session titles and memory extraction pin 0 for deterministic decoding;
+		// Cascade answers 0 with an opaque `invalid_argument` (issue #18423), so
+		// the frame must carry the catalog floor instead of 0.
+		await streamDevin(devinModel({}, "gpt-5-6-sol-medium"), context, {
+			apiKey: "token",
+			fetch: edge.fetch,
+			temperature: 0,
+		}).result();
+
+		expect(edge.recorded.chat?.configuration?.temperature).toBe(0.0001);
 	});
 });

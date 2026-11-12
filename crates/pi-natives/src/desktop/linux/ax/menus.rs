@@ -176,7 +176,7 @@ impl AtSpiAx {
 						.map_err(failure)?;
 					has_submenu |= menu_role(child_proxy.get_role().await.map_err(failure)?);
 				}
-				let shortcut = match Self::action(&self.connection, &object).await {
+				let shortcut = match Self::action(self.connection.connection(), &object).await {
 					Ok(action) => action
 						.get_key_binding(0)
 						.await
@@ -189,7 +189,7 @@ impl AtSpiAx {
 				items.push(DesktopMenuItem {
 					title,
 					path: item_path,
-					enabled: state.contains(State::Enabled) && state.contains(State::Sensitive),
+					enabled: state_enabled(state),
 					checked: state.contains(State::Checked),
 					has_submenu,
 					shortcut,
@@ -275,11 +275,11 @@ impl AtSpiAx {
 			if current_object != object {
 				return Err(failure("menu command changed during discovery"));
 			}
-			let action = Self::action(&self.connection, &object)
+			let action = Self::action(self.connection.connection(), &object)
 				.await
 				.map_err(failure)?;
-			let actions = action.get_actions().await.map_err(failure)?;
-			let index = command_index(actions.iter().map(|action| action.name.as_str()))?;
+			let actions = action_names(&action).await.map_err(failure)?;
+			let index = command_index(actions.iter().map(String::as_str))?;
 			control::check()?;
 			if !action.do_action(index).await.map_err(failure)? {
 				return Err(failure("application refused the menu command"));

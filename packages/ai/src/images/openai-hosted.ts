@@ -81,7 +81,6 @@ async function headers(
 		result.delete("x-api-key");
 		if (accountId) result.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
 		applyCodexResidencyHeader(result, key);
-		result.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 		result.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 		result.set("User-Agent", USER_AGENT);
 		if (sessionId) {

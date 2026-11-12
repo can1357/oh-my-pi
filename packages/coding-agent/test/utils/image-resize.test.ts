@@ -211,6 +211,29 @@ describe("resizeImage defaults", () => {
 		expect(Math.abs(result.width / result.height - 1600 / 400)).toBeLessThan(0.01);
 	});
 
+	it("pads a thin read-image strip to the provider's short-edge floor without distorting its content", async () => {
+		const pixels = new Uint8Array(320 * 8 * 4);
+		for (let i = 0; i < pixels.length; i += 4) pixels.set([255, 0, 0, 255], i);
+		pixels.set([0, 0, 255, 255], 0);
+
+		const result = await resizeImage(encodeRawPng(pixels, 320, 8, 4));
+		const decoded = decodePng(await new Bun.Image(result.buffer).png().bytes());
+		expect([decoded.width, decoded.height]).toEqual([1568, 200]);
+		expect([...decoded.pixels.subarray(800 * 4, 801 * 4)]).toEqual([0, 0, 255, 255]);
+		const center = (100 * decoded.width + 800) * 4;
+		expect([...decoded.pixels.subarray(center, center + 4)]).toEqual([255, 0, 0, 255]);
+		expect(formatDimensionNote(result)).toContain("Subtract padding offset (0, 80)");
+		const screenshot = formatScreenshot({
+			saveFullRes: false,
+			savedMimeType: result.mimeType,
+			savedByteLength: result.buffer.length,
+			dest: path.join(os.tmpdir(), "thin-strip.png"),
+			resized: result,
+			capture: { area: "viewport", scale: 2 },
+		});
+		expect(screenshot.find(line => line.startsWith("[Image:"))).toContain("multiply x by 0.10 and y by 0.10");
+	});
+
 	it("preserves inputs already within budget and dimensions (fast path)", async () => {
 		// 200x200 red square encodes to ~few hundred bytes — well below budget/4.
 		const result = await resizeImage({ type: "image", data: smallPng, mimeType: "image/png" });
@@ -406,20 +429,6 @@ describe("resizeImage minimum dimension", () => {
 		expect(result.width).toBe(64);
 		expect(result.height).toBe(64);
 	});
-
-	it("keeps the aspect ratio of a strip the cap stops short of the floor", async () => {
-		// 690x61 toolbar crop: the 1568 cap halts the uniform upscale at 1568x139;
-		// the short edge stays below the floor rather than being stretched to it.
-		const strip = await makeRedPng(690, 61);
-		const result = await resizeImage({ type: "image", data: strip, mimeType: "image/png" });
-
-		expect(result.width).toBe(1568);
-		expect(result.height).toBe(139);
-		const meta = await new Bun.Image(Buffer.from(result.data, "base64")).metadata();
-		expect(meta.width).toBe(1568);
-		expect(meta.height).toBe(139);
-		expect(formatDimensionNote(result)).toContain("Multiply coordinates by 0.44");
-	});
 });
 
 describe("fitImage", () => {
@@ -484,6 +493,16 @@ describe("fitImage", () => {
 		expect(image.mimeType).toBe("image/jpeg");
 		expect(Buffer.byteLength(image.data, "base64")).toBeLessThanOrEqual(maxBytes);
 		expect(await size(image.data)).toEqual([400, 400]);
+	});
+
+	it("trims a size within the patch area to whole 32x32 patches", async () => {
+		// 321x319 is under 100 patches of area but covers 11x10 patches; trimming the width to 320 covers 10x10.
+		const { image } = await fitImage(
+			{ type: "image", data: await makeRedPng(321, 319), mimeType: "image/png" },
+			{ maxPatches: 100 },
+		);
+
+		expect(await size(image.data)).toEqual([320, 319]);
 	});
 
 	it("throws when no encoding fits the byte cap", async () => {

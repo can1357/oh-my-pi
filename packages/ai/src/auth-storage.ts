@@ -13,12 +13,19 @@
  * - `resets` — saved rate-limit resets
  * - `blocks` — persisted rate-limit blocks (auth-broker server seam)
  *
+ * The namespaces come from an {@link AuthStorageBackend}. The default backend
+ * composes the modules over a local store; constructing an `AuthStorage` over
+ * another backend is the cross-thread seam (a worker thread's instance forwards
+ * every namespace call to the main thread's, so pins, restrictions, refresh
+ * single-flight, round-robin, and block/usage caches stay single-owner).
+ *
  * @example
  * const auth = await AuthStorage.create(getAgentDbPath());
  * await auth.credentials.reload();
  * const apiKey = await auth.keys.get("anthropic", sessionId, { modelId });
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import type { AuthAccountPolicyConfig } from "./auth-broker/discover";
 import { SessionAffinity, type SessionRestrictions } from "./auth/affinity";
 import { BlockStoreHealth, CredentialBlocks } from "./auth/blocks";
 import { KeyCascade, KeyOverrides } from "./auth/cascade";
@@ -33,7 +40,6 @@ import { CredentialSelector } from "./auth/select";
 import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 import type { AuthCredentialStore } from "./auth/store";
 import type {
-	AuthAccountPolicies,
 	AuthApiKeyOptions,
 	AuthCredential,
 	AuthStorageOptions,
@@ -78,6 +84,51 @@ interface AuthStorageModules {
 }
 
 /**
+ * Everything an {@link AuthStorage} delegates to: the namespaces plus store
+ * lifecycle. The local backend composes the `./auth/` modules over an
+ * {@link AuthCredentialStore}. Any other implementation passed to the
+ * {@link AuthStorage} constructor is the cross-thread seam: e.g. a worker
+ * thread's backend forwards every call to the main thread's `AuthStorage`.
+ *
+ * Namespace getters may return a different object after
+ * {@link AuthStorageBackend.replaceStore}; callers re-read them per use.
+ */
+export interface AuthStorageBackend {
+	/** Stored credential rows, change/disable events, broker snapshot. */
+	readonly credentials: CredentialsApi;
+	/** Provider auth cascade and key overrides. */
+	readonly keys: KeysApi;
+	/** OAuth login, account access, listings, refresh. */
+	readonly oauth: OAuthApi;
+	/** Session → account pins and restrictions. */
+	readonly sessions: SessionsApi;
+	/** Usage reports, header ingestion, history. */
+	readonly usage: UsageApi;
+	/** Model pool health and per-credential probes. */
+	readonly health: HealthApi;
+	/** Usage-limit marking and credential rotation. */
+	readonly limits: LimitsApi;
+	/** Saved rate-limit resets. */
+	readonly resets: ResetsApi;
+	/** Persisted rate-limit blocks (auth-broker server seam). */
+	readonly blocks: BlocksApi;
+	/** See {@link AuthStorage.setAccountPolicies}. */
+	setAccountPolicies(config: AuthAccountPolicyConfig): void;
+	/** See {@link AuthStorage.replaceStore}. */
+	replaceStore(store: AuthCredentialStore, options?: { sourceLabel?: string }): Promise<void>;
+	/** See {@link AuthStorage.close}. */
+	close(): void;
+}
+
+/** A backend has lifecycle methods no credential store declares. */
+function isAuthStorageBackend(source: AuthCredentialStore | AuthStorageBackend): source is AuthStorageBackend {
+	return (
+		typeof Reflect.get(source, "setAccountPolicies") === "function" &&
+		typeof Reflect.get(source, "replaceStore") === "function"
+	);
+}
+
+/**
  * Credential management over an {@link AuthCredentialStore}: multi-account
  * selection with usage-aware ranking, rate-limit blocks, OAuth refresh, and
  * usage reporting. See the module doc for the namespace layout.
@@ -86,55 +137,51 @@ interface AuthStorageModules {
  * this instance follow {@link AuthStorage.replaceStore} without re-wiring.
  */
 export class AuthStorage {
-	readonly #options: AuthStorageOptions;
-	readonly #overrides: KeyOverrides;
-	readonly #policies: AccountPolicies;
-	readonly #restrictions: SessionRestrictions = new Map();
-	#modules: AuthStorageModules;
+	readonly #backend: AuthStorageBackend;
 
-	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
-		this.#options = options;
-		this.#overrides = new KeyOverrides(options.configValueResolver);
-		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
-		this.#modules = this.#compose(store, options.sourceLabel);
-		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
+	/** Serve every namespace from `backend` (cross-thread seam; see {@link AuthStorageBackend}). */
+	constructor(backend: AuthStorageBackend);
+	/** Compose the credential modules over `store` (the local, single-process path). */
+	constructor(store: AuthCredentialStore, options?: AuthStorageOptions);
+	constructor(source: AuthCredentialStore | AuthStorageBackend, options: AuthStorageOptions = {}) {
+		this.#backend = isAuthStorageBackend(source) ? source : new LocalAuthStorageBackend(source, options);
 	}
 
 	/** Stored credential rows, change/disable events, broker snapshot. */
 	get credentials(): CredentialsApi {
-		return this.#modules.pool;
+		return this.#backend.credentials;
 	}
 	/** Provider auth cascade and key overrides. */
 	get keys(): KeysApi {
-		return this.#modules.keys;
+		return this.#backend.keys;
 	}
 	/** OAuth login, account access, listings, refresh. */
 	get oauth(): OAuthApi {
-		return this.#modules.oauth;
+		return this.#backend.oauth;
 	}
 	/** Session → account pins. */
 	get sessions(): SessionsApi {
-		return this.#modules.sessions;
+		return this.#backend.sessions;
 	}
 	/** Usage reports, header ingestion, history. */
 	get usage(): UsageApi {
-		return this.#modules.usage;
+		return this.#backend.usage;
 	}
 	/** Model pool health and per-credential probes. */
 	get health(): HealthApi {
-		return this.#modules.health;
+		return this.#backend.health;
 	}
 	/** Usage-limit marking and credential rotation. */
 	get limits(): LimitsApi {
-		return this.#modules.limits;
+		return this.#backend.limits;
 	}
 	/** Saved rate-limit resets. */
 	get resets(): ResetsApi {
-		return this.#modules.resets;
+		return this.#backend.resets;
 	}
 	/** Persisted rate-limit blocks (auth-broker server seam). */
 	get blocks(): BlocksApi {
-		return this.#modules.blocks;
+		return this.#backend.blocks;
 	}
 
 	/**
@@ -144,11 +191,8 @@ export class AuthStorage {
 	 * several stored OAuth accounts, or two policies claim the same account; a
 	 * policy naming an absent account stays inactive and logs a warning.
 	 */
-	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
-		const pool = this.#modules.pool;
-		const stored = new Map<string, AuthCredential[]>();
-		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
-		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
+	setAccountPolicies(config: AuthAccountPolicyConfig): void {
+		this.#backend.setAccountPolicies(config);
 	}
 
 	/**
@@ -160,6 +204,93 @@ export class AuthStorage {
 	 * subscribers carry over. On a load failure
 	 * `store` is closed and the current store stays active.
 	 */
+	replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
+		return this.#backend.replaceStore(store, options);
+	}
+
+	/** Open the SQLite store at `dbPath` and wrap it (standalone use, e.g. the pi-ai CLI). */
+	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		return new AuthStorage(store, options);
+	}
+
+	/**
+	 * Close the underlying credential store; the instance must not be reused.
+	 * New OAuth refreshes are refused at once; a token exchange already under way
+	 * keeps the store open until it has saved the rotated token.
+	 */
+	close(): void {
+		this.#backend.close();
+	}
+
+	/**
+	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
+	 * @deprecated Use {@link AuthStorage.keys}`.get`.
+	 */
+	getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+		return this.keys.get(provider, sessionId, options);
+	}
+
+	/**
+	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
+	 * @deprecated Use {@link AuthStorage.credentials}`.reload`.
+	 */
+	reload(): Promise<void> {
+		return this.credentials.reload();
+	}
+}
+
+/** The single-process backend: credential modules composed over one store. */
+class LocalAuthStorageBackend implements AuthStorageBackend {
+	readonly #options: AuthStorageOptions;
+	readonly #overrides: KeyOverrides;
+	readonly #policies: AccountPolicies;
+	readonly #restrictions: SessionRestrictions = new Map();
+	#modules: AuthStorageModules;
+
+	constructor(store: AuthCredentialStore, options: AuthStorageOptions) {
+		this.#options = options;
+		this.#overrides = new KeyOverrides(options.configValueResolver);
+		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
+		this.#modules = this.#compose(store, options.sourceLabel);
+		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
+	}
+
+	get credentials(): CredentialsApi {
+		return this.#modules.pool;
+	}
+	get keys(): KeysApi {
+		return this.#modules.keys;
+	}
+	get oauth(): OAuthApi {
+		return this.#modules.oauth;
+	}
+	get sessions(): SessionsApi {
+		return this.#modules.sessions;
+	}
+	get usage(): UsageApi {
+		return this.#modules.usage;
+	}
+	get health(): HealthApi {
+		return this.#modules.health;
+	}
+	get limits(): LimitsApi {
+		return this.#modules.limits;
+	}
+	get resets(): ResetsApi {
+		return this.#modules.resets;
+	}
+	get blocks(): BlocksApi {
+		return this.#modules.blocks;
+	}
+
+	setAccountPolicies(config: AuthAccountPolicyConfig): void {
+		const pool = this.#modules.pool;
+		const stored = new Map<string, AuthCredential[]>();
+		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
+		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
+	}
+
 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
 		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
 		try {
@@ -170,7 +301,7 @@ export class AuthStorage {
 		}
 		const previous = this.#modules;
 		next.pool.adoptSubscribers(previous.pool);
-		next.usage.adoptRuntimeProviders(previous.usage);
+		next.usage.adoptRegistrations(previous.usage);
 		this.#modules = next;
 		retire(previous);
 		next.pool.bump("store-replaced");
@@ -214,6 +345,7 @@ export class AuthStorage {
 			usageProviders,
 			fetch: options.usageFetch ?? fetch,
 			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
+			requestKey: provider => keys.peek(provider),
 			logger:
 				options.usageLogger ??
 				({
@@ -267,35 +399,8 @@ export class AuthStorage {
 		};
 	}
 
-	/** Open the SQLite store at `dbPath` and wrap it (standalone use, e.g. the pi-ai CLI). */
-	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
-		const store = await SqliteAuthCredentialStore.open(dbPath);
-		return new AuthStorage(store, options);
-	}
-
-	/**
-	 * Close the underlying credential store; the instance must not be reused.
-	 * New OAuth refreshes are refused at once; a token exchange already under way
-	 * keeps the store open until it has saved the rotated token.
-	 */
 	close(): void {
 		retire(this.#modules);
-	}
-
-	/**
-	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
-	 * @deprecated Use {@link AuthStorage.keys}`.get`.
-	 */
-	getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
-		return this.keys.get(provider, sessionId, options);
-	}
-
-	/**
-	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
-	 * @deprecated Use {@link AuthStorage.credentials}`.reload`.
-	 */
-	reload(): Promise<void> {
-		return this.credentials.reload();
 	}
 }
 

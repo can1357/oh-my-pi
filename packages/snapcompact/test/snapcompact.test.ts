@@ -1271,7 +1271,7 @@ describe("compact", () => {
 		expect(archive?.textTail ?? archive?.textHead).toContain("A short follow-up turn.");
 	});
 
-	it("keeps continuity for legacy frame-only archives by falling back to the prior summary", async () => {
+	it("keeps continuity for legacy frame-only archives by falling back to the prior summary, counting the frames as dropped", async () => {
 		const result = await snapcompact.compact(
 			makePreparation({
 				messagesToSummarize: [createUserMessage("New work after a legacy archive.")],
@@ -1297,6 +1297,8 @@ describe("compact", () => {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		expect(archive?.text).toContain("Legacy beginning summary");
 		expect(result.summary).toContain("condensed digest of still-older context");
+		// The frames hold history no re-render can recover: counted as dropped, which the summary reports.
+		expect(archive?.truncatedChars).toBe(12);
 	});
 
 	it("strips the OpenAI remote payload and preserves unrelated preserveData", async () => {
@@ -1609,9 +1611,12 @@ describe("archive helpers", () => {
 				},
 				{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
 			);
-			const source = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
+			const archive = snapcompact.getPreservedArchive(rendered.preserveData);
+			const source = archive?.text ?? "";
 			expect(source).not.toContain("secret");
 			expect(source).toContain("answer two");
+			// The frame and the left-out tail opening both count as dropped.
+			expect(archive?.truncatedChars).toBe(frame.chars + "secret continuation\n".length);
 		});
 
 		it("fails closed when the summary declares no reasoning scope but the archive's text keeps a thought", () => {

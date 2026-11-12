@@ -541,7 +541,7 @@
 			},
 			{
 				"name": "bash",
-				"doc": "Run a shell command.",
+				"doc": "Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.",
 				"params": "BashParams",
 				"result": "BashResult",
 				"nullable": false,
@@ -1170,6 +1170,25 @@
 			],
 			"x-open": true
 		},
+		"ParentIrc": {
+			"type": "object",
+			"properties": {
+				"from": {
+					"type": "string",
+					"description": "Sending parent agent id."
+				},
+				"body": {
+					"type": "string",
+					"description": "Message body as the parent wrote it."
+				}
+			},
+			"required": [
+				"from",
+				"body"
+			],
+			"description": "Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope.",
+			"x-open": true
+		},
 		"UserMessage": {
 			"type": "object",
 			"properties": {
@@ -1181,6 +1200,9 @@
 				},
 				"timestamp": {
 					"type": "number"
+				},
+				"parentIrc": {
+					"$ref": "#/$defs/ParentIrc"
 				},
 				"synthetic": {
 					"type": "boolean"
@@ -2274,8 +2296,7 @@
 				"pending",
 				"in_progress",
 				"completed",
-				"abandoned",
-				"blocked"
+				"abandoned"
 			],
 			"type": "string"
 		},
@@ -2345,10 +2366,6 @@
 				},
 				"status": {
 					"$ref": "#/$defs/TodoStatus"
-				},
-				"blocker": {
-					"type": "string",
-					"description": "What a `blocked` task is waiting on."
 				},
 				"details": {
 					"type": "string"
@@ -2790,6 +2807,30 @@
 				"artifactElidedBytes": {
 					"type": "integer"
 				},
+				"elidedBytes": {
+					"type": "integer",
+					"description": "Bytes dropped from the middle of `output`, which keeps the head and tail."
+				},
+				"elidedLines": {
+					"type": "integer",
+					"description": "Lines dropped from the middle of `output`."
+				},
+				"columnDroppedBytes": {
+					"type": "integer",
+					"description": "Bytes the per-line column cap cut from `output`, across all lines."
+				},
+				"columnTruncatedLines": {
+					"type": "integer",
+					"description": "Lines of `output` the per-line column cap cut; the artifact holds them whole."
+				},
+				"columnTruncatedRange": {
+					"$ref": "#/$defs/LineRange",
+					"description": "First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it."
+				},
+				"columnMax": {
+					"type": "integer",
+					"description": "The per-line column cap in UTF-8 bytes, set when it cut a line."
+				},
 				"artifactError": {
 					"type": "object",
 					"properties": {},
@@ -2808,6 +2849,12 @@
 					"items": {
 						"$ref": "#/$defs/ImageContent"
 					}
+				},
+				"trace": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {},
+					"description": "The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."
 				}
 			},
 			"required": [
@@ -2818,6 +2865,21 @@
 				"totalBytes",
 				"outputLines",
 				"outputBytes"
+			]
+		},
+		"LineRange": {
+			"type": "object",
+			"properties": {
+				"first": {
+					"type": "integer"
+				},
+				"last": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"first",
+				"last"
 			]
 		},
 		"FastModeResult": {
@@ -4483,6 +4545,10 @@
 				},
 				"maxReassembledFrameBytes": {
 					"type": "integer"
+				},
+				"supportsBashExcludeFromContext": {
+					"type": "boolean",
+					"description": "`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands."
 				}
 			},
 			"required": [
@@ -5266,7 +5332,7 @@
 				"method",
 				"questions"
 			],
-			"description": "Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it."
+			"description": "Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."
 		},
 		"CancelUiRequest": {
 			"type": "object",
@@ -5513,7 +5579,7 @@
 				"id",
 				"selectedOptions"
 			],
-			"description": "Answer to one `ask` question: exact option labels, plus optional free text."
+			"description": "Answer to one `ui.askDialog` question: exact option labels, plus optional free text."
 		},
 		"ValueUiResponse": {
 			"type": "object",
@@ -5576,7 +5642,7 @@
 				"id",
 				"cancelled"
 			],
-			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers)."
+			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers)."
 		},
 		"AnswersUiResponse": {
 			"type": "object",
@@ -6749,6 +6815,9 @@
 			"properties": {
 				"command": {
 					"type": "string"
+				},
+				"excludeFromContext": {
+					"type": "boolean"
 				}
 			},
 			"required": [

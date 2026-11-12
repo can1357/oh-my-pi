@@ -1,5 +1,6 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
+import type { Api, Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { describe, expect, it, spyOn } from "bun:test";
 import {
@@ -1116,6 +1117,56 @@ describe("NativeJudge", () => {
 		}
 	});
 
+	it("sends an OpenRouter Decisions model's compat routing and extraBody as the request's provider controls", async () => {
+		const pin = { only: ["typesafe"], allow_fallbacks: false, data_collection: "deny" };
+		// Judgment APIs share the chat compat vocabulary, as models.yml overrides apply it to every API.
+		const decisionsModel = (compat?: OpenAICompat) => {
+			const spec: ModelSpec<Api> = {
+				id: "typesafe/jev-1.14",
+				name: "Jev 1.14",
+				api: "openrouter-decisions",
+				provider: "openrouter",
+				// A relay base URL: the Decisions API is OpenRouter's own, so routing applies off openrouter.ai too.
+				baseUrl: "https://relay.example/agents/openrouter/api/alpha",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: null,
+				compat,
+			};
+			return buildModel(spec);
+		};
+		const send = async (model: Model) => {
+			let body: Record<string, unknown> = {};
+			const judge = createNativeJudge(model, {
+				apiKey: "or-key",
+				fetch: async (_url, init) => {
+					body = JSON.parse(String(init?.body));
+					return Response.json({
+						model: "typesafe/jev-1.14",
+						answers: { urgent: { type: "noul", noul: 0.7 } },
+						usage: { input_tokens: 10, output_tokens: 2 },
+					});
+				},
+			});
+			await judge.judge(request);
+			// The overlay keeps the encoded request intact.
+			expect(body).toMatchObject({ model: "typesafe/jev-1.14", questions: request.questions });
+			return body;
+		};
+
+		// `extraBody` overlays `openRouterRouting`, as on chat requests: privacy fields only fit there.
+		const configured = await send(
+			decisionsModel({ openRouterRouting: { only: ["fallback-host"] }, extraBody: { provider: pin } }),
+		);
+		expect(configured.provider).toEqual(pin);
+		const routed = await send(decisionsModel({ openRouterRouting: { only: ["typesafe"] } }));
+		expect(routed.provider).toEqual({ only: ["typesafe"] });
+		const unconfigured = await send(decisionsModel());
+		expect(unconfigured).not.toHaveProperty("provider");
+	});
+
 	it("rejects malformed OpenRouter image input before fetching", async () => {
 		let calls = 0;
 		const judge = new NativeJudge({
@@ -1768,6 +1819,75 @@ describe("NativeJudge Workers AI dialect", () => {
 			await expect(judge.judge(request)).rejects.toBeInstanceOf(ConfigurationError);
 		});
 		expect(calls).toBe(0);
+	});
+});
+
+describe("NativeJudge Liquid AI dialect", () => {
+	const d1 = buildModel({
+		id: "d1.1",
+		name: "d1.1",
+		api: "liquid-systemone",
+		provider: "liquid",
+		baseUrl: "https://api.liquid.ai",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0.02, output: 0, cacheRead: 0.02, cacheWrite: 0 },
+		contextWindow: 65_536,
+		maxTokens: null,
+	});
+	const request = {
+		state: "Checkout is down.",
+		questions: { urgent: { type: "noul", instructions: "Urgent?" } },
+	} as const;
+
+	it("posts the verbatim model to /decisions/v1/systemone with image data URLs at the top level", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = createNativeJudge(d1, {
+			apiKey: "liquid_key",
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					model: "d1.1",
+					answers: { urgent: { type: "noul", noul: 0.98 } },
+					usage: { input_tokens: 16, output_tokens: 0 },
+				});
+			},
+		});
+
+		const result = await judge.judge({ ...request, images: IMAGE_REFS });
+
+		expect(calls[0].url).toBe("https://api.liquid.ai/decisions/v1/systemone");
+		expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Bearer liquid_key");
+		expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+			...request,
+			model: "d1.1",
+			images: ["data:image/png;base64,AQID", "data:image/jpeg;base64,BAUG"],
+		});
+		expect(result.answers.urgent.noul).toBe(0.98);
+	});
+
+	it("caps 32x32 patches across the request, counting partial patches whole", async () => {
+		let calls = 0;
+		const judge = createNativeJudge(d1, {
+			apiKey: "liquid_key",
+			fetch: async () => {
+				calls++;
+				return new Response("unreachable", { status: 500 });
+			},
+		});
+		const cases: Array<[readonly ImageContent[], RegExp]> = [
+			// Each is 94x94 = 8836 patches, within the cap alone.
+			[[pngHeader(3000, 3000), pngHeader(3000, 3000)], /at most 10000 32x32 image patches per request, got 17672/],
+			// Under 10,240,000 pixels, but 101x100 patches.
+			[[pngHeader(3201, 3199)], /got 10100/],
+		];
+		for (const [images, message] of cases) {
+			const error = await judge.judge({ ...request, images }).catch((caught: unknown) => caught);
+			expect(error).toBeInstanceOf(ValidationError);
+			expect(String(error)).toMatch(message);
+		}
+		expect(calls).toBe(0);
+		expect(nativeJudgmentAcceptsImages(d1, [pngHeader(3200, 3200)])).toBe(true);
 	});
 });
 

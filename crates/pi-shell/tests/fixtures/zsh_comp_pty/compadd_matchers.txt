@@ -1,0 +1,13 @@
+### ": foob\u{14}"
+% : Fooba
+@ 0,9
+### "\u{14}"
+% : Fooba
+Foobar  FooBaz
+@ 0,9
+### "\u{15}: c.s.u\u{14}"
+% : comp.sources.unix
+@ 0,22
+### "\u{15}: .g\u{14}"
+% : comp.graphics.misc
+@ 0,23

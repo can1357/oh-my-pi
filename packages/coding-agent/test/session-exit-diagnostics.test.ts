@@ -403,7 +403,9 @@ describe("session exit diagnostics", () => {
 
 	it("keeps an interrupted ask question in resumed model context without replaying completed calls", () => {
 		const sessionManager = SessionManager.inMemory();
-		const question = { questions: [{ question: "Deploy now?", options: ["Yes", "No"], recommended: "Yes" }] };
+		const question = {
+			html: '<form><p>Deploy now?</p><label><input type="radio" name="deploy" value="yes" checked> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
+		};
 		sessionManager.appendMessage({ role: "user", content: "prepare deployment", timestamp: Date.now() });
 		sessionManager.appendMessage({
 			...pendingAssistant,

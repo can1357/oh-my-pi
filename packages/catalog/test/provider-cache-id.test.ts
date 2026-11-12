@@ -27,6 +27,23 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 	}
 });
 
+test("LiteLLM cache scope isolates credentials on the same proxy", () => {
+	const accountA = resolveModelCacheProviderId("litellm", {
+		apiKey: "sk-team-a",
+		baseUrl: "https://proxy.example/team/v1",
+	});
+	expect(accountA).toBe(
+		resolveModelCacheProviderId("litellm", { apiKey: "sk-team-a", baseUrl: "https://proxy.example/team/v1/" }),
+	);
+	expect(accountA).not.toBe(
+		resolveModelCacheProviderId("litellm", { apiKey: "sk-team-b", baseUrl: "https://proxy.example/team/v1" }),
+	);
+	expect(accountA).not.toBe(
+		resolveModelCacheProviderId("litellm", { apiKey: "sk-team-a", baseUrl: "https://proxy.example/other/v1" }),
+	);
+	expect(accountA).not.toContain("sk-team-a");
+});
+
 test("Muse Code cache scope changes with subscription credentials and endpoints", () => {
 	const accountA = resolveModelCacheProviderId("muse-code", {
 		apiKey: "account-a-key",

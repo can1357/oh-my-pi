@@ -169,7 +169,7 @@ it("eval applies a custom-wire patch exactly once through the canonical tool's A
 		"tools.approval": { edit: "prompt" },
 	});
 	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
-	toolSession.getEvalBridgeToolNames = () => session!.getEvalBridgeToolNames();
+	toolSession.getAdvertisedEvalToolNames = () => session!.getAdvertisedEvalToolNames();
 	await Bun.write(tempDir.join("eval-wire-old.txt"), "old\n");
 	const input =
 		"*** Begin Patch\n*** Add File: eval-wire.txt\n+ok\n*** Delete File: eval-wire-old.txt\n*** End Patch\n";
@@ -183,7 +183,7 @@ it("eval applies a custom-wire patch exactly once through the canonical tool's A
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(session.getToolForEvalBridge("edit")?.name).toBe("edit");
 	expect(session.getEvalBridgeToolNames()).toEqual(["edit", "apply_patch"]);
-	expect(new EvalTool(toolSession).description).toContain("`edit`, `apply_patch`");
+	expect(new EvalTool(toolSession).description).toContain("edit, apply_patch");
 });
 
 it("eval refuses both canonical and wire names after their tool is disabled", async () => {
@@ -777,6 +777,7 @@ it("lets the computer display sleep while the ACP client asks the user for permi
 		releaseDisplay(turn) {
 			releases.push(turn);
 		},
+		async reset() {},
 		async close() {},
 	});
 	try {

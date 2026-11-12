@@ -14,6 +14,15 @@ import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
+import {
+	mergeRanges,
+	type SpotlightCallResultLink,
+	type SpotlightCallRow,
+	type SpotlightNeedRow,
+	type SpotlightRequestRow,
+	type SpotlightSessionRow,
+	type SpotlightShapeRow,
+} from "./spotlight-ingest";
 import type {
 	AgentType,
 	DailyActivityPoint,
@@ -89,7 +98,7 @@ export function currentDb(): Database | null {
 
 const BACKFILL_COMPLETE = "complete";
 const BACKFILL_PENDING = "pending";
-const USER_MESSAGES_BACKFILL_KEY = "user_messages_v9";
+const USER_MESSAGES_BACKFILL_KEY = "user_messages_v10";
 const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 // v2: the parser also records the served service tier per message, so a full
 // re-parse fills `service_tier` and re-derives ultrafast premium counts that the
@@ -120,6 +129,27 @@ const NO_CACHE_INPUT_BACKFILL_KEY = "cost_no_cache_input_v1";
 // value stored is the version that ran it), since only a catalog update can
 // price a model it could not price before.
 const CATALOG_COST_BACKFILL_KEY = "catalog_cost_backfill";
+// The Spotlight tables are filled by the parser; transcripts ingested before
+// they existed are re-parsed once. Only files modified since the experiment
+// shipped can hold its entries, so older cursors stay put.
+const SPOTLIGHT_BACKFILL_KEY = "spotlight_v1";
+const SPOTLIGHT_SINCE_MS = Date.parse("2026-10-28T00:00:00Z");
+// Experiment sessions parsed before `spotlight_calls.edits` existed are
+// re-parsed once (only them: they are few) so recovery detection sees edits.
+// (`v3`: a build that ran the `v2` pass may have had its sessions re-parsed
+// again by an older build, which records no edits.)
+const SPOTLIGHT_EDITS_BACKFILL_KEY = "spotlight_v3_edits";
+// Experiment sessions parsed before results carried heat, kept runs, plain sizes
+// and needed lines are re-parsed once (only them, never the whole history).
+const SPOTLIGHT_NEEDS_BACKFILL_KEY = "spotlight_v4_needs";
+// Experiment sessions parsed before calls carried argument tokens (the generic
+// rerun rule for every tool beyond read and bash) are re-parsed once.
+const SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY = "spotlight_v5_arg_tokens";
+// The experiment became a toggle: sessions are marked by `spotlight:session`
+// (which older builds did not read) and legacy `spotlight:assignment` sessions
+// count only with the arm that shipped. Every transcript that can hold
+// Spotlight entries is re-parsed once by the new rules.
+const SPOTLIGHT_TOGGLE_BACKFILL_KEY = "spotlight_v6_toggle";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -273,11 +303,130 @@ export async function initDb(): Promise<Database> {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);
+
+		-- Spotlight experiment sessions: the first Spotlight marker of each transcript.
+		CREATE TABLE IF NOT EXISTS spotlight_sessions (
+			session_file TEXT PRIMARY KEY,
+			folder TEXT NOT NULL,
+			marked_at INTEGER NOT NULL,
+			cwd TEXT,
+			title TEXT
+		) WITHOUT ROWID;
+
+		-- One evaluated tool result: its spotlight:shape entry and its result's details.spotlight, upserted.
+		CREATE TABLE IF NOT EXISTS spotlight_results (
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			tool TEXT NOT NULL,
+			in_chars INTEGER NOT NULL,
+			out_chars INTEGER NOT NULL,
+			in_tokens INTEGER NOT NULL,
+			out_tokens INTEGER NOT NULL,
+			steps TEXT NOT NULL,
+			has_details INTEGER NOT NULL,
+			holdout INTEGER NOT NULL DEFAULT 0,
+			original_url TEXT,
+			path TEXT,
+			start_line INTEGER,
+			lines INTEGER,
+			hidden TEXT,
+			hidden_lines INTEGER NOT NULL DEFAULT 0,
+			artifacts TEXT,
+			sp_calls INTEGER,
+			sp_failures INTEGER,
+			sp_failure_causes TEXT,
+			sp_ms REAL,
+			sp_cost REAL,
+			shape_ms REAL,
+			plain_chars INTEGER,
+			plain_tokens INTEGER,
+			capped_tokens INTEGER,
+			score_free INTEGER NOT NULL DEFAULT 0,
+			heat TEXT,
+			kept TEXT,
+			gated INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (session_file, tool_call_id)
+		) WITHOUT ROWID;
+		CREATE INDEX IF NOT EXISTS idx_spotlight_results_call ON spotlight_results(tool_call_id);
+
+		-- Every tool call of an experiment session from its marker on, in order.
+		CREATE TABLE IF NOT EXISTS spotlight_calls (
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			seq INTEGER NOT NULL,
+			tool_name TEXT NOT NULL,
+			calls_in_turn INTEGER NOT NULL,
+			target TEXT NOT NULL,
+			result_chars INTEGER,
+			artifacts TEXT,
+			edits TEXT,
+			arg_tokens TEXT,
+			PRIMARY KEY (session_file, tool_call_id)
+		) WITHOUT ROWID;
+		CREATE INDEX IF NOT EXISTS idx_spotlight_calls_entry ON spotlight_calls(entry_id, timestamp);
+
+		-- Main-loop requests of an experiment session (side requests journaled as model_usage excluded).
+		CREATE TABLE IF NOT EXISTS spotlight_requests (
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			PRIMARY KEY (session_file, entry_id)
+		) WITHOUT ROWID;
+		CREATE INDEX IF NOT EXISTS idx_spotlight_requests_entry ON spotlight_requests(entry_id, timestamp);
+
+		-- Original lines (1-based positions) a shaped read's later calls needed; open while still collecting.
+		CREATE TABLE IF NOT EXISTS spotlight_needs (
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			file TEXT NOT NULL,
+			open INTEGER NOT NULL,
+			reread TEXT NOT NULL,
+			edit TEXT NOT NULL,
+			PRIMARY KEY (session_file, tool_call_id)
+		) WITHOUT ROWID;
 	`);
 
 	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
 	if (!offsetColumns.some(column => column.name === "parser_state")) {
 		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
+	}
+	dropSpotlightArms(db);
+	// No result was held out before this column existed, so the default is exact for old rows.
+	const spotlightResultColumns = db.query<{ name: string }, []>("PRAGMA table_info(spotlight_results)").all();
+	if (!spotlightResultColumns.some(column => column.name === "holdout")) {
+		db.run("ALTER TABLE spotlight_results ADD COLUMN holdout INTEGER NOT NULL DEFAULT 0");
+	}
+	// Filled for existing rows by the `spotlight_v4_needs` re-parse; until then plain sizes are estimated.
+	for (const [column, type] of [
+		["plain_chars", "INTEGER"],
+		["plain_tokens", "INTEGER"],
+		["capped_tokens", "INTEGER"],
+		["score_free", "INTEGER NOT NULL DEFAULT 0"],
+		["heat", "TEXT"],
+		["kept", "TEXT"],
+		// No read was gated before this existed: the default is exact.
+		["gated", "INTEGER NOT NULL DEFAULT 0"],
+		// Failed calls by cause (JSON); shape entries before pi journaled it leave it NULL.
+		["sp_failure_causes", "TEXT"],
+	] as const) {
+		if (!spotlightResultColumns.some(existing => existing.name === column)) {
+			db.run(`ALTER TABLE spotlight_results ADD COLUMN ${column} ${type}`);
+		}
+	}
+	// pi's read mark went with its former edit gate.
+	if (spotlightResultColumns.some(column => column.name === "edit_likely")) {
+		db.run("ALTER TABLE spotlight_results DROP COLUMN edit_likely");
+	}
+	const spotlightCallColumns = db.query<{ name: string }, []>("PRAGMA table_info(spotlight_calls)").all();
+	if (!spotlightCallColumns.some(column => column.name === "edits")) {
+		db.run("ALTER TABLE spotlight_calls ADD COLUMN edits TEXT");
+	}
+	// Filled for existing rows by the `spotlight_v5_arg_tokens` re-parse; until then no generic rerun is detected.
+	if (!spotlightCallColumns.some(column => column.name === "arg_tokens")) {
+		db.run("ALTER TABLE spotlight_calls ADD COLUMN arg_tokens TEXT");
 	}
 	const messageColumns = db.query("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
@@ -389,6 +538,11 @@ export async function initDb(): Promise<Database> {
 	backfillMissingCatalogCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
+	backfillSpotlight(db, SPOTLIGHT_BACKFILL_KEY);
+	reparseSpotlightSessions(db, SPOTLIGHT_EDITS_BACKFILL_KEY);
+	reparseSpotlightSessions(db, SPOTLIGHT_NEEDS_BACKFILL_KEY);
+	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
+	backfillSpotlight(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -625,6 +779,67 @@ function backfillNoCacheInputCosts(database: Database): void {
 	applyBackfill();
 }
 
+/**
+ * Re-parse, once per key, the transcripts that can hold Spotlight entries
+ * (modified since {@link SPOTLIGHT_SINCE_MS}) by dropping their cursors; every
+ * older cursor stays, so this never triggers a full-history re-parse. The next
+ * sync rebuilds those files from byte zero, replacing their Spotlight rows.
+ * Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the tables are new),
+ * {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became a toggle).
+ */
+function backfillSpotlight(database: Database, key: string): void {
+	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	database.transaction(() => {
+		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(SPOTLIGHT_SINCE_MS);
+		database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, BACKFILL_COMPLETE);
+	})();
+}
+
+/**
+ * Drop the arm columns of a database written while sessions drew arms, once
+ * (while `spotlight_sessions.arm` exists). Sessions of any arm but the one that shipped
+ * were never shaped with the shipped algorithm: their Spotlight rows go now,
+ * so the dashboard leaves them out before the {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY}
+ * re-parse (which also clears their parser state) runs.
+ */
+function dropSpotlightArms(database: Database): void {
+	const columns = database.query<{ name: string }, []>("PRAGMA table_info(spotlight_sessions)").all();
+	if (!columns.some(column => column.name === "arm")) return;
+	database.transaction(() => {
+		const legacy = "SELECT session_file FROM spotlight_sessions WHERE arm <> 'vylv5'";
+		// `spotlight_sessions` (first in the list) goes last: the other deletes select through it.
+		for (const table of SPOTLIGHT_TABLES.toReversed()) {
+			database.run(`DELETE FROM ${table} WHERE session_file IN (${legacy})`);
+		}
+		for (const column of ["arm", "find_ranker", "source"]) {
+			database.run(`ALTER TABLE spotlight_sessions DROP COLUMN ${column}`);
+		}
+		database.run("ALTER TABLE spotlight_sessions RENAME COLUMN assigned_at TO marked_at");
+		database.run("ALTER TABLE spotlight_results DROP COLUMN arm");
+		// The retired guard-rail comparison cached its history reference here.
+		database.run("DELETE FROM meta WHERE key LIKE 'spotlight_guard_history:%'");
+	})();
+}
+
+/**
+ * Re-parse, once per key, every experiment session (the transcripts
+ * `spotlight_sessions` names, never the whole history) by dropping their
+ * cursors; the next sync rebuilds them from byte zero, replacing their
+ * Spotlight rows. Keys: {@link SPOTLIGHT_EDITS_BACKFILL_KEY} (calls get
+ * `edits`), {@link SPOTLIGHT_NEEDS_BACKFILL_KEY} (results get heat, kept runs,
+ * plain sizes and the score-free flag, shaped reads needed lines),
+ * {@link SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY} (calls get argument tokens).
+ */
+function reparseSpotlightSessions(database: Database, key: string): void {
+	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	database.transaction(() => {
+		database.run("DELETE FROM file_offsets WHERE session_file IN (SELECT session_file FROM spotlight_sessions)");
+		database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, BACKFILL_COMPLETE);
+	})();
+}
+
 /** Persisted transcript identity and parser cursor used to resume stats ingestion. */
 export interface FileOffset {
 	offset: number;
@@ -841,6 +1056,9 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					}
 				}
 				if (replace) {
+					for (const table of SPOTLIGHT_TABLES) {
+						changes += database.query(`DELETE FROM ${table} WHERE session_file = ?`).run(sessionFile).changes;
+					}
 					if (messages.length > 0) {
 						changes += database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile).changes;
 					}
@@ -865,7 +1083,14 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			insertUserMessageStats(parsedRows(writes, result => result.userStats)) +
 			updateUserMessageLinks(parsedRows(writes, result => result.userLinks)) +
 			insertToolCalls(parsedRows(writes, result => result.toolCalls)) +
-			updateToolResults(parsedRows(writes, result => result.toolResults));
+			updateToolResults(parsedRows(writes, result => result.toolResults)) +
+			insertSpotlightSessions(parsedRows(writes, result => result.spotlight.sessions)) +
+			updateSpotlightTitles(parsedRows(writes, result => result.spotlight.titles)) +
+			upsertSpotlightShapes(parsedRows(writes, result => result.spotlight.shapes)) +
+			insertSpotlightCalls(parsedRows(writes, result => result.spotlight.calls)) +
+			updateSpotlightCallResults(parsedRows(writes, result => result.spotlight.callResults)) +
+			insertSpotlightRequests(parsedRows(writes, result => result.spotlight.requests)) +
+			upsertSpotlightNeeds(parsedRows(writes, result => result.spotlight.needs));
 		for (const { sessionFile, result } of sessions) {
 			if (result.parserState) {
 				setFileOffset(sessionFile, result.newOffset, result.parserState.mtimeMs, result.parserState);
@@ -1160,6 +1385,8 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
  * - v9: stored judge prose (`prose` / `prose_hash`) for the frustration
  *   judge, so every session re-parses once to populate it. Verdicts live in
  *   `frustration_verdicts`, keyed by prose hash, which this reset never touches.
+ * - v10: excluded agent-attributed user-role messages, which diluted user
+ *   frustration rates and could be judged as user complaints.
  *
  * Existing `messages` rows are unaffected - `INSERT OR IGNORE` keeps them.
  */
@@ -1701,4 +1928,260 @@ export function updateToolResults(links: Iterable<ToolResultLink>): number {
 		}
 	});
 	return updated;
+}
+
+/** Tables the parser fills for the Spotlight dashboard, all keyed by `session_file`. */
+const SPOTLIGHT_TABLES = [
+	"spotlight_sessions",
+	"spotlight_results",
+	"spotlight_calls",
+	"spotlight_requests",
+	"spotlight_needs",
+] as const;
+
+/** Record each experiment session's first Spotlight marker; a later one (a resumed session) never replaces it. */
+export function insertSpotlightSessions(rows: Iterable<SpotlightSessionRow>): number {
+	if (!db) return 0;
+	const stmt = db.query(`
+		INSERT OR IGNORE INTO spotlight_sessions (session_file, folder, marked_at, cwd, title)
+		VALUES (?, ?, ?, ?, ?)
+	`);
+	let changes = 0;
+	atomically(db, () => {
+		for (const r of rows) {
+			changes += stmt.run(r.sessionFile, r.folder, r.markedAt, r.cwd, r.title).changes;
+		}
+	});
+	return changes;
+}
+
+export function updateSpotlightTitles(rows: Iterable<{ sessionFile: string; title: string }>): number {
+	if (!db) return 0;
+	const stmt = db.query("UPDATE spotlight_sessions SET title = ? WHERE session_file = ?");
+	let changes = 0;
+	atomically(db, () => {
+		for (const r of rows) changes += stmt.run(r.title, r.sessionFile).changes;
+	});
+	return changes;
+}
+
+/**
+ * Upsert evaluated results. The shape entry and the result message can land in
+ * different tail parses: the shape entry brings Spotlight's usage and timing,
+ * the result's details the hidden lines and named artifacts, and either may
+ * come first. Fork copies of a call (same tool call id under another
+ * transcript) are skipped, first writer wins.
+ */
+export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number {
+	if (!db) return 0;
+	const fromDetails = (column: string) =>
+		`${column} = CASE WHEN excluded.has_details = 1 THEN excluded.${column} ELSE spotlight_results.${column} END`;
+	const coalesce = (column: string) => `${column} = COALESCE(excluded.${column}, spotlight_results.${column})`;
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT",
+		table: "spotlight_results",
+		columns: [
+			"session_file",
+			"tool_call_id",
+			"timestamp",
+			"tool",
+			"in_chars",
+			"out_chars",
+			"in_tokens",
+			"out_tokens",
+			"steps",
+			"has_details",
+			"holdout",
+			"original_url",
+			"path",
+			"start_line",
+			"lines",
+			"hidden",
+			"hidden_lines",
+			"artifacts",
+			"sp_calls",
+			"sp_failures",
+			"sp_failure_causes",
+			"sp_ms",
+			"sp_cost",
+			"shape_ms",
+			"plain_chars",
+			"plain_tokens",
+			"capped_tokens",
+			"score_free",
+			"heat",
+			"kept",
+			"gated",
+		],
+		identity: ["tool_call_id"],
+		upsert: `ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
+			${["tool", "in_chars", "out_chars", "in_tokens", "out_tokens", "steps", "hidden_lines"].map(fromDetails).join(",\n")},
+			${["original_url", "path", "start_line", "lines", "hidden", "artifacts", "sp_calls", "sp_failures", "sp_failure_causes", "sp_ms", "sp_cost", "shape_ms", "plain_chars", "plain_tokens", "capped_tokens", "heat", "kept"].map(coalesce).join(",\n")},
+			has_details = MAX(spotlight_results.has_details, excluded.has_details),
+			holdout = MAX(spotlight_results.holdout, excluded.holdout),
+			score_free = MAX(spotlight_results.score_free, excluded.score_free),
+			gated = MAX(spotlight_results.gated, excluded.gated)`,
+	});
+	return atomically(db, () => {
+		for (const r of rows) {
+			const o = r.original;
+			writer.add(
+				r.sessionFile,
+				[r.toolCallId],
+				[
+					r.sessionFile,
+					r.toolCallId,
+					r.timestamp,
+					r.tool,
+					r.inChars,
+					r.outChars,
+					r.inTokens,
+					r.outTokens,
+					JSON.stringify(r.steps),
+					r.hasDetails ? 1 : 0,
+					r.holdout ? 1 : 0,
+					o?.url ?? null,
+					o?.path ?? null,
+					o ? o.start : null,
+					o ? o.lines : null,
+					o ? JSON.stringify(o.hidden) : null,
+					o?.hiddenLines ?? 0,
+					r.artifacts ? JSON.stringify(r.artifacts) : null,
+					r.spotlight?.calls ?? null,
+					r.spotlight?.failures ?? null,
+					r.spotlight?.failureCauses ? JSON.stringify(r.spotlight.failureCauses) : null,
+					r.spotlight?.ms ?? null,
+					r.spotlight?.costUsd ?? null,
+					r.shapeMs,
+					r.plainChars,
+					r.plainTokens,
+					r.cappedTokens,
+					r.scoreFree ? 1 : 0,
+					o?.heat ?? null,
+					o ? JSON.stringify(o.kept) : null,
+					r.gated ? 1 : 0,
+				],
+			);
+		}
+		return writer.finish();
+	});
+}
+
+/**
+ * Merge needed lines of shaped reads: ranges add to the stored ones (a tail parse brings only its own calls'),
+ * `open` takes the latest. A fork's copy of another transcript's read is skipped, first writer wins.
+ */
+export function upsertSpotlightNeeds(rows: Iterable<SpotlightNeedRow>): number {
+	if (!db) return 0;
+	const database = db;
+	const claimed = database.query<{ one: number }, [string, string]>(
+		"SELECT 1 AS one FROM spotlight_needs WHERE tool_call_id = ? AND session_file <> ? LIMIT 1",
+	);
+	const stored = database.query<{ reread: string; edit: string }, [string, string]>(
+		"SELECT reread, edit FROM spotlight_needs WHERE session_file = ? AND tool_call_id = ?",
+	);
+	const write = database.query(
+		"INSERT OR REPLACE INTO spotlight_needs (session_file, tool_call_id, file, open, reread, edit) VALUES (?, ?, ?, ?, ?, ?)",
+	);
+	const ranges = (json: string | undefined): [number, number][] => {
+		if (!json) return [];
+		const value: unknown = JSON.parse(json);
+		return Array.isArray(value)
+			? value.filter(
+					(pair): pair is [number, number] =>
+						Array.isArray(pair) && typeof pair[0] === "number" && typeof pair[1] === "number",
+				)
+			: [];
+	};
+	let changes = 0;
+	atomically(database, () => {
+		for (const r of rows) {
+			if (claimed.get(r.toolCallId, r.sessionFile)) continue;
+			const old = stored.get(r.sessionFile, r.toolCallId);
+			changes += write.run(
+				r.sessionFile,
+				r.toolCallId,
+				r.file,
+				r.open ? 1 : 0,
+				JSON.stringify(mergeRanges([...ranges(old?.reread), ...r.reread])),
+				JSON.stringify(mergeRanges([...ranges(old?.edit), ...r.edit])),
+			).changes;
+		}
+	});
+	return changes;
+}
+
+/** Insert experiment-session tool calls; fork copies are skipped as for `tool_calls`. */
+export function insertSpotlightCalls(rows: Iterable<SpotlightCallRow>): number {
+	if (!db) return 0;
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "spotlight_calls",
+		columns: [
+			"session_file",
+			"tool_call_id",
+			"entry_id",
+			"timestamp",
+			"seq",
+			"tool_name",
+			"calls_in_turn",
+			"target",
+			"edits",
+			"arg_tokens",
+		],
+		identity: ["entry_id", "timestamp", "tool_call_id"],
+	});
+	return atomically(db, () => {
+		for (const r of rows) {
+			writer.add(
+				r.sessionFile,
+				[r.entryId, r.timestamp, r.toolCallId],
+				[
+					r.sessionFile,
+					r.toolCallId,
+					r.entryId,
+					r.timestamp,
+					r.seq,
+					r.toolName,
+					r.callsInTurn,
+					r.target,
+					r.edits ? JSON.stringify(r.edits) : null,
+					r.argTokens ? JSON.stringify(r.argTokens) : null,
+				],
+			);
+		}
+		return writer.finish();
+	});
+}
+
+/** Attach result size and named artifacts to recorded calls (results can land in a later tail parse). */
+export function updateSpotlightCallResults(links: Iterable<SpotlightCallResultLink>): number {
+	if (!db) return 0;
+	const stmt = db.query(`
+		UPDATE spotlight_calls SET result_chars = ?, artifacts = ?
+		WHERE session_file = ? AND tool_call_id = ? AND result_chars IS NULL
+	`);
+	let changes = 0;
+	atomically(db, () => {
+		for (const l of links) {
+			changes += stmt.run(l.resultChars, JSON.stringify(l.artifacts), l.sessionFile, l.toolCallId).changes;
+		}
+	});
+	return changes;
+}
+
+/** Insert experiment-session main-loop requests; fork copies are skipped as for `messages`. */
+export function insertSpotlightRequests(rows: Iterable<SpotlightRequestRow>): number {
+	if (!db) return 0;
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "spotlight_requests",
+		columns: ["session_file", "entry_id", "timestamp"],
+		identity: ["entry_id", "timestamp"],
+	});
+	return atomically(db, () => {
+		for (const r of rows)
+			writer.add(r.sessionFile, [r.entryId, r.timestamp], [r.sessionFile, r.entryId, r.timestamp]);
+		return writer.finish();
+	});
 }

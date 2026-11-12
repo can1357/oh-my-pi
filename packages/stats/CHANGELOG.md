@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [18.18.9] - 2026-11-11
+
+### Added
+
+- The Spotlight dashboard's Overhead card breaks failed results down by cause (not signed in, timeout, rate limited, HTTP status, …) and, when results failed for lack of a Stencil sign-in, says how to sign in ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.18.4] - 2026-11-09
+
+### Fixed
+
+- Fixed `omp stats` re-parsing every unchanged session after a filesystem's device number changes, such as across ZFS remounts ([#14736](https://github.com/can1357/oh-my-pi/issues/14736)) ([#18536](https://github.com/can1357/oh-my-pi/pull/18536) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
+
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
+- Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
+
 ## [18.16.0] - 2026-11-02
 
 ### Fixed

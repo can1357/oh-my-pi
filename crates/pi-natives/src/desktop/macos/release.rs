@@ -402,15 +402,16 @@ impl Observation {
 
 /// Device-independent flag, and the left and right virtual key codes with
 /// their device-dependent flags, of each modifier a held key can carry.
-const MODIFIERS: [(u64, [(u16, u64); 2]); 4] = [
+pub(crate) const MODIFIERS: [(u64, [(u16, u64); 2]); 4] = [
 	(0x40000, [(59, 0x1), (62, 0x2000)]), // control
 	(0x80000, [(58, 0x20), (61, 0x40)]),  // option
 	(0x20000, [(56, 0x2), (60, 0x4)]),    // shift
 	(0x100000, [(55, 0x8), (54, 0x10)]),  // command
 ];
-/// Every device-dependent modifier flag: hardware sets them, the addon never
-/// does.
-const DEVICE_FLAGS: u64 = 0x207f;
+/// Every device-dependent modifier flag: hardware sets them, and so do the
+/// addon's bare keys for remote screens (`input::BareModifiers`); its other
+/// events never do.
+pub(crate) const DEVICE_FLAGS: u64 = 0x207f;
 
 fn modifier(code: u16) -> Option<(u64, [(u16, u64); 2])> {
 	MODIFIERS

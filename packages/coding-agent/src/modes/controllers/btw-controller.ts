@@ -15,10 +15,12 @@ import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { focusActiveEditorArea } from "./selector-controller";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import type { BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import type { AgentViewSession, AgentViewSessionManager } from "../../session/agent-session-handle";
 import type { DroppedPrompt } from "../../session/agent-session-types";
 import { cfgBtwInject } from "../settings";
 import type { InteractiveModeContext } from "../types";
@@ -30,9 +32,9 @@ interface BtwRequest {
 	images?: ImageContent[];
 	leafId: string | null;
 	sessionId: string;
-	session: InteractiveModeContext["session"];
+	session: AgentViewSession;
 	/** Manager of the view that asked; the request outlives focus changes. */
-	sessionManager: InteractiveModeContext["sessionManager"];
+	sessionManager: AgentViewSessionManager;
 	store: BtwHistoryStore;
 	record: BtwHistoryRecord;
 	history?: readonly BtwHistoryTurn[];
@@ -115,7 +117,7 @@ export class BtwController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	/** /btw asks about the transcript on screen: the focused agent's session, else main. */
-	get #sessionManager(): InteractiveModeContext["sessionManager"] {
+	get #sessionManager(): AgentViewSessionManager {
 		return this.ctx.focusedAgentId ? this.ctx.viewSession.sessionManager : this.ctx.sessionManager;
 	}
 
@@ -764,6 +766,7 @@ export class BtwController {
 		this.#historyPanel = undefined;
 		if (!overlay) return;
 		overlay.hide();
+		focusActiveEditorArea(this.ctx);
 		// Closing while a BTW still answers keeps it running: text mode returns
 		// to its inline panel; Tern has none, so it says how to get back.
 		const request = this.#activeRequest;

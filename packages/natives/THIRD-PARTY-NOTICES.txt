@@ -10,56 +10,6 @@ VENDORED SOURCE AND DATA
 ========================
 
 -------------------------------------------------------------------------------
-brush-core 0.5.0 — crates/vendor/brush-core
-
-This directory contains a vendored, locally-patched copy of brush-core from the
-brush shell project (https://github.com/reubeno/brush), used under the MIT
-License. It is wired into the workspace via `[patch.crates-io]` so these
-modifications can be maintained against the published release (brush-core
-0.5.0).
-
-  Copyright (c) 2024 reuben olinsky
-
-Local modifications include: Windows path handling fixes (drive-alias and
-rooted-path normalization in globs), an async background-PID fix for the nohup
-wrapper, treating `/dev/null` as poll-ready to avoid an infinite poll on macOS,
-and indentation/formatting standardization. The remaining logic tracks upstream
-so behavior matches the published crate.
-
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-brush-builtins — crates/pi-builtins
-
-The POSIX/bash builtins began as a locally-patched copy of brush-builtins from
-the brush shell project (https://github.com/reubeno/brush), used under the MIT
-License; the full license text is reproduced with brush-core above.
-
-  Copyright (c) 2024 reuben olinsky
-
-Local modifications include: implementing previously-stubbed builtins, the
-`wait` builtin (PID targeting plus the `-f`/`-n`/`-p` flags), and cancellation
-support for the `read` builtin via poll.
-
--------------------------------------------------------------------------------
 Command-line utilities — crates/pi-builtins
 
 ================================================================================
@@ -11858,35 +11808,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- brush-parser 0.4.0 (https://github.com/reubeno/brush)
-
-Full license text:
-
-MIT License
-
-Copyright (c) 2024 reuben olinsky
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - archery 1.2.3 (https://github.com/orium/archery)
 - rpds 1.2.1 (https://github.com/orium/rpds)
 
@@ -12098,7 +12019,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- brush-core 0.5.0 (https://github.com/reubeno/brush)
 - napi 3.14.2 (https://github.com/napi-rs/napi-rs)
 - asn1-rs-impl 0.2.0 (https://github.com/rusticata/asn1-rs.git)
 - ast-grep-core 0.39.9 (https://github.com/ast-grep/ast-grep)
@@ -12164,7 +12084,7 @@ Used by:
 - tree-sitter-html 0.23.2 (https://github.com/tree-sitter/tree-sitter-html)
 - tree-sitter-java 0.23.5 (https://github.com/tree-sitter/tree-sitter-java)
 - tree-sitter-json 0.24.8 (https://github.com/tree-sitter/tree-sitter-json)
-- tree-sitter-md 0.5.3 (https://github.com/tree-sitter-grammars/tree-sitter-markdown)
+- tree-sitter-md 0.5.4 (https://github.com/tree-sitter-grammars/tree-sitter-markdown)
 - tree-sitter-toml-ng 0.7.0 (https://github.com/tree-sitter-grammars/tree-sitter-toml)
 - tree-sitter-typescript 0.23.2 (https://github.com/tree-sitter/tree-sitter-typescript)
 - tree-sitter 0.25.10 (https://github.com/tree-sitter/tree-sitter)

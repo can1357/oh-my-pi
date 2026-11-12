@@ -36,7 +36,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
 | `--resume`                                | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                                                                                |
 | `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory                                                                                   | None                                                                                |
-| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh                                                                                            | None                                                                                |
+| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; restores a materialized session (`--restore`), otherwise starts fresh                                                                             | None                                                                                |
 | `--continue`                              | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists                                                                                             | None                                                                                |
 
 ## Export and dump
@@ -478,10 +478,16 @@ replaced under a session that went on in a sibling (see above).
 
 `--restore [value]` selects and opens its session exactly as `--resume [value]`
 does, then, once the interactive TUI is up, goes on with what the session's last
-process left unfinished when it died (`task/restore.ts`, `restoreSession`). Tern's
+process left unfinished when it ended (`task/restore.ts`, `restoreSession`). Tern's
 session daemon relaunches omp panes with it after a crash: omp reports
 `omp_restore=1` (OSC 1337 user variable) beside its session file to say it
-understands the flag.
+understands the flag. `/restart` relaunches with it too.
+
+A subagent whose turn the process teardown cut off counts as left mid-turn, even
+though the teardown was clean: its owner's shutdown aborts the run with
+`INTERRUPTED_TURN_ERROR` and records its `session_exit` as a process exit
+(`postmortem.Reason.EXIT`), both for a first run the task executor drives and for
+a revived agent's turn the lifecycle teardown disposes.
 
 1. **Subagents first.** Every persisted subagent transcript under the session
    (`<session>/<AgentId>.jsonl`, nested ones included) that its process left
@@ -503,7 +509,8 @@ Nothing is continued when the last turn finished, failed, or the user interrupte
 it, or when a normal exit was recorded after it (the user quit with it
 interrupted). `--restore` is interactive only, takes no prompt, and cannot be
 combined with `--continue`, `--fork`, imports, `--goal` or `--no-session`.
-`/restart` drops it like the other one-shot selectors.
+`/restart` drops a launch `--restore` like the other one-shot selectors and adds
+its own for the current session.
 
 ## CLI `--continue`
 
@@ -528,9 +535,11 @@ This is startup-only behavior; there is no interactive `/continue` slash command
 Interactive `/restart` performs normal teardown, flushes postmortem cleanup and
 stdout, then relaunches the CLI. `restartArgv()` preserves launch configuration
 flags but strips original prompts/`@file` positionals and one-shot session
-selectors (`--session`, `--resume`, `--continue`, `--fork`, and foreign imports).
-It adds `--resume <current-id>` only when the session actually exists on disk;
-an in-memory or never-materialized session restarts fresh.
+selectors (`--session`, `--resume`, `--restore`, `--continue`, `--fork`, and
+foreign imports). It adds `--restore <session-file>` only when the session
+actually exists on disk, so the subagents the teardown cut off mid-turn go on in
+the new process (see [CLI `--restore`](#cli---restore)); an in-memory or
+never-materialized session restarts fresh.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.
