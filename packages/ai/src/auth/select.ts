@@ -1,7 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
-import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
+import type { OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import { isWithinUsageReserve } from "../usage";

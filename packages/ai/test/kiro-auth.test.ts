@@ -261,7 +261,12 @@ describe("Kiro token refresh", () => {
 	});
 
 	it("projects route and login id without the refresh token, and peek shares its cache scope", async () => {
-		const live = { access: "access-token", expires: Date.now() + 3e6, kiroProfileArn: PROFILE_ONE, kiroLoginId: "l1" };
+		const live = {
+			access: "access-token",
+			expires: Date.now() + 3e6,
+			kiroProfileArn: PROFILE_ONE,
+			kiroLoginId: "l1",
+		};
 		const row = clientCredentials(live);
 		const projected = (await getOAuthApiKey("kiro", { kiro: row }))?.apiKey;
 		const decoded = { kind: "oauth" as const, token: "access-token", apiEndpoint: RUNTIME, loginId: "l1" };
