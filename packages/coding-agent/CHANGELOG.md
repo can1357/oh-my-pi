@@ -44,6 +44,10 @@
 - Saving each session entry no longer blocks the UI for several milliseconds on Windows, where on-access scanning delayed the two re-opens of the session file that every write performed ([#18819](https://github.com/can1357/oh-my-pi/pull/18819))
 - `tui.autoGraph` `smart`/`auto` no longer draws charts whose kind and columns make no sense together (factors of unrelated columns, scatters of two arbitrary measures, dumbbells joining different quantities): the judge now reads the table first, then chooses among whole charts described as they would be drawn, and leaves sample sizes and p-values out of the plot
 
+### Fixed
+
+- Language servers no longer run their own file watchers: omp watches the files they register and reports changes, including ones made outside omp. TypeScript 7 on Linux now sees edits from other tools instead of keeping stale diagnostics, and its watcher no longer loops on network drives such as ovnfs checkouts, where it kept the drive's file server busy and stalled every checkout on it
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

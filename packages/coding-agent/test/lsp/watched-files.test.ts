@@ -1,0 +1,151 @@
+import { afterEach, describe, expect, it } from "bun:test";
+import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { FileChangeType, type FileEvent } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { WatchedFilesForwarder } from "@oh-my-pi/pi-coding-agent/lsp/watched-files";
+import { TempDir } from "@oh-my-pi/pi-utils";
+
+/** Real filesystem events need a wall-clock bound; every wait ends as soon as the event arrives. */
+const EVENT_TIMEOUT_MS = 5_000;
+/**
+ * How long a change must stay unreported to count as filtered, well past the forwarder's batch
+ * window. The events come from the OS watcher, so fake timers cannot stand in for this wait.
+ */
+const QUIET_MS = 600;
+
+describe("WatchedFilesForwarder", () => {
+	const cleanups: Array<() => void> = [];
+	afterEach(() => {
+		for (const cleanup of cleanups.splice(0)) cleanup();
+	});
+
+	function setup(): { root: string; sent: FileEvent[]; forwarder: WatchedFilesForwarder } {
+		const tempDir = TempDir.createSync("@omp-lsp-watched-files-");
+		const root = tempDir.path();
+		const sent: FileEvent[] = [];
+		const forwarder = new WatchedFilesForwarder({ roots: () => [root], send: changes => void sent.push(...changes) });
+		cleanups.push(() => {
+			forwarder.close();
+			tempDir.removeSync();
+		});
+		return { root, sent, forwarder };
+	}
+
+	async function waitForEvent(sent: FileEvent[], event: FileEvent): Promise<void> {
+		const deadline = Date.now() + EVENT_TIMEOUT_MS;
+		while (!sent.some(change => change.uri === event.uri && change.type === event.type)) {
+			if (Date.now() > deadline) {
+				throw new Error(`no ${JSON.stringify(event)} among ${JSON.stringify(sent)}`);
+			}
+			await Bun.sleep(20);
+		}
+	}
+
+	it("reports only changes whose path and type the registered watcher asked for", async () => {
+		const { root, sent, forwarder } = setup();
+		// Creates and deletes of TypeScript files only: kind 5 = Create | Delete.
+		forwarder.register("ts", { watchers: [{ globPattern: `${root.replaceAll("\\", "/")}/**/*.ts`, kind: 5 }] });
+		const file = path.join(root, "src", "a.ts");
+		await fs.mkdir(path.dirname(file));
+
+		await Bun.write(file, "export {};\n");
+		await Bun.write(path.join(root, "src", "notes.txt"), "ignored\n");
+		await waitForEvent(sent, { uri: fileToUri(file), type: FileChangeType.Created });
+
+		sent.length = 0;
+		await Bun.write(file, "export const changed = 1;\n");
+		await Bun.sleep(QUIET_MS);
+		await fs.rm(file);
+		await waitForEvent(sent, { uri: fileToUri(file), type: FileChangeType.Deleted });
+
+		expect(sent.some(change => change.type === FileChangeType.Changed)).toBe(false);
+		expect(sent.some(change => change.uri.endsWith("notes.txt"))).toBe(false);
+	});
+
+	it("starts reporting below a base directory once it is created", async () => {
+		const { root, sent, forwarder } = setup();
+		const later = path.join(root, "later", "deep");
+		forwarder.register("later", { watchers: [{ globPattern: { baseUri: fileToUri(later), pattern: "**/*" } }] });
+
+		await fs.mkdir(later, { recursive: true });
+		const file = path.join(later, "x.ts");
+		// The watch moves from the nearest existing ancestor to the base shortly after it appears.
+		const deadline = Date.now() + EVENT_TIMEOUT_MS;
+		while (!sent.some(change => change.uri === fileToUri(file))) {
+			if (Date.now() > deadline) throw new Error(`no event for ${file} among ${JSON.stringify(sent)}`);
+			await Bun.write(file, `export const at = ${Date.now()};\n`);
+			await Bun.sleep(100);
+		}
+	});
+
+	it("does not report a directory as changed when only its entries changed", async () => {
+		const { root, sent, forwarder } = setup();
+		const dir = path.join(root, "src");
+		await fs.mkdir(dir);
+		forwarder.register("all", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*" } }] });
+
+		const file = path.join(dir, "a.ts");
+		await Bun.write(file, "export {};\n");
+		await waitForEvent(sent, { uri: fileToUri(file), type: FileChangeType.Created });
+		await Bun.write(file, "export const changed = 1;\n");
+		await waitForEvent(sent, { uri: fileToUri(file), type: FileChangeType.Changed });
+		await Bun.sleep(QUIET_MS);
+
+		expect(sent.filter(change => change.uri === fileToUri(dir))).toEqual([]);
+	});
+
+	it("reports every file of a burst written while the event loop is busy", async () => {
+		const { root, sent, forwarder } = setup();
+		forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		// Written synchronously, as a package install would from another process: the
+		// watcher must keep reading while JS is busy (libuv's Windows watcher drops most of these).
+		const files: string[] = [];
+		for (let d = 0; d < 20; d++) {
+			const dir = path.join(root, "node_modules", `pkg${d}`);
+			fsSync.mkdirSync(dir, { recursive: true });
+			for (let f = 0; f < 100; f++) {
+				const file = path.join(dir, `f${f}.ts`);
+				fsSync.writeFileSync(file, "export {};\n");
+				files.push(file);
+			}
+		}
+		const expected = new Set(files.map(file => fileToUri(file)));
+		const deadline = Date.now() + EVENT_TIMEOUT_MS;
+		const created = () => new Set(sent.filter(change => change.type === FileChangeType.Created).map(c => c.uri));
+		while (created().size < expected.size && Date.now() < deadline) await Bun.sleep(50);
+		expect([...expected].filter(uri => !created().has(uri))).toEqual([]);
+	}, 15_000);
+
+	it("does not report a file created and removed within one batch as existing", async () => {
+		const { root, sent, forwarder } = setup();
+		forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		const transient = path.join(root, "transient.ts");
+		const kept = path.join(root, "kept.ts");
+		fsSync.writeFileSync(transient, "export {};\n");
+		fsSync.rmSync(transient);
+		fsSync.writeFileSync(kept, "export {};\n");
+		await waitForEvent(sent, { uri: fileToUri(kept), type: FileChangeType.Created });
+		await Bun.sleep(QUIET_MS);
+
+		// `fs.watch` cannot tell a create-then-delete from a delete, so a Deleted may follow; nothing may claim it exists.
+		expect(
+			sent.filter(change => change.uri === fileToUri(transient) && change.type !== FileChangeType.Deleted),
+		).toEqual([]);
+	});
+
+	it("resolves relative glob patterns against the workspace roots and stops after unregister", async () => {
+		const { root, sent, forwarder } = setup();
+		forwarder.register("rel", { watchers: [{ globPattern: "**/*.py" }] });
+		const first = path.join(root, "one.py");
+		await Bun.write(first, "x = 1\n");
+		await waitForEvent(sent, { uri: fileToUri(first), type: FileChangeType.Created });
+
+		forwarder.unregister("rel");
+		sent.length = 0;
+		await Bun.write(path.join(root, "two.py"), "y = 2\n");
+		await Bun.sleep(QUIET_MS);
+		expect(sent).toEqual([]);
+	});
+});

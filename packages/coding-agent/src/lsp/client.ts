@@ -12,18 +12,19 @@ import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
-import type {
-	DocumentBuildStatus,
-	LspClient,
-	LspJsonRpcId,
-	LspJsonRpcNotification,
-	LspJsonRpcRequest,
-	LspJsonRpcResponse,
-	LspTransport,
-	LspWriteSink,
-	PublishDiagnosticsParams,
-	ServerConfig,
-	WorkspaceEdit,
+import {
+	type DocumentBuildStatus,
+	FileChangeType,
+	type LspClient,
+	type LspJsonRpcId,
+	type LspJsonRpcNotification,
+	type LspJsonRpcRequest,
+	type LspJsonRpcResponse,
+	type LspTransport,
+	type LspWriteSink,
+	type PublishDiagnosticsParams,
+	type ServerConfig,
+	type WorkspaceEdit,
 } from "./types";
 import {
 	detectLanguageId,
@@ -33,6 +34,7 @@ import {
 	readTextFromDisk,
 	uriToFile,
 } from "./utils";
+import { WATCHED_FILES_METHOD, WatchedFilesForwarder } from "./watched-files";
 
 /**
  * A JSON-RPC error response to one of our requests. The message keeps the code, so
@@ -357,6 +359,13 @@ const CLIENT_CAPABILITIES = {
 		},
 		configuration: true,
 		workspaceFolders: true,
+		// The client watches files for the server (see watched-files.ts); a server's
+		// own watcher can fail in ways the client cannot contain (tsgo re-arms in a
+		// tight loop on SMB drives).
+		didChangeWatchedFiles: {
+			dynamicRegistration: true,
+			relativePatternSupport: true,
+		},
 		symbol: {
 			dynamicRegistration: false,
 			symbolKind: {
@@ -374,13 +383,6 @@ const CLIENT_CAPABILITIES = {
 		},
 	},
 };
-
-/** LSP `FileChangeType` values for workspace/didChangeWatchedFiles notifications. */
-export enum FileChangeType {
-	Created = 1,
-	Changed = 2,
-	Deleted = 3,
-}
 
 /** Filesystem change authored by the harness and announced to active LSP clients. */
 export interface WatchedFileChange {
@@ -789,6 +791,7 @@ async function addWorkspaceFolders(
 		undoLoad();
 		throw err;
 	}
+	client.watchedFiles?.refresh();
 	rustAnalyzerReadyClients.delete(client);
 }
 
@@ -950,12 +953,32 @@ export async function applyWorkspaceEditWithLsp(
 interface DynamicCapabilityRegistration {
 	id?: unknown;
 	method?: unknown;
+	registerOptions?: unknown;
 }
 
 interface DynamicCapabilityParams {
 	registrations?: DynamicCapabilityRegistration[];
 	unregisterations?: DynamicCapabilityRegistration[];
 	unregistrations?: DynamicCapabilityRegistration[];
+}
+
+/**
+ * The watcher of a server this client spawned. A mux-shared server's watcher
+ * belongs to the mux, which outlives and is shared by every attached client.
+ */
+function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
+	if (client.proc.sharedMux) return undefined;
+	client.watchedFiles ??= new WatchedFilesForwarder({
+		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
+		send: changes =>
+			sendNotification(
+				client,
+				WATCHED_FILES_METHOD,
+				{ changes },
+				AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
+			),
+	});
+	return client.watchedFiles;
 }
 
 function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest): void {
@@ -970,6 +993,9 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 		for (const registration of params.registrations) {
 			if (typeof registration.id === "string" && typeof registration.method === "string") {
 				registrations.set(registration.id, registration.method);
+				if (registration.method === WATCHED_FILES_METHOD) {
+					ownWatchedFiles(client)?.register(registration.id, registration.registerOptions);
+				}
 			}
 		}
 		return;
@@ -982,6 +1008,7 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 	for (const registration of unregistrations) {
 		if (typeof registration.id === "string") {
 			registrations.delete(registration.id);
+			client.watchedFiles?.unregister(registration.id);
 		}
 	}
 }
@@ -1461,6 +1488,7 @@ export async function getOrCreateClient(
 			maybeStopIdleChecker();
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
+			client.watchedFiles?.close();
 
 			// Reject any pending requests — the server is gone, they will never complete.
 			if (client.pendingRequests.size > 0) {

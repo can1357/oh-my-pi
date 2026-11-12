@@ -12,6 +12,8 @@ import {
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
 import { LspMuxServer } from "../src/lsp/mux/server";
+import { FileChangeType, type FileEvent } from "../src/lsp/types";
+import { fileToUri } from "../src/lsp/utils";
 
 interface RpcMessage {
 	jsonrpc: "2.0";
@@ -31,6 +33,7 @@ interface FakeState {
 	didClose: string[];
 	notifications: string[];
 	workspaceFolders: string[];
+	watchedFileChanges: FileEvent[];
 }
 
 class MuxTestClient {
@@ -292,5 +295,35 @@ describe("LspMuxServer", () => {
 		expect(second.connected.spawned).toBe(false);
 		await initialize(second.client);
 		expect((await state(second.client)).workspaceFolders).toEqual([]);
+	}, 10_000);
+
+	it("watches the files a shared server registers and reports their changes to it", async () => {
+		const { client } = await link();
+		await initialize(client);
+		await client.request("test/serverRequest", {
+			method: "client/registerCapability",
+			params: {
+				registrations: [
+					{
+						id: "ts-files",
+						method: "workspace/didChangeWatchedFiles",
+						registerOptions: { watchers: [{ globPattern: { baseUri: fileToUri(tmpDir), pattern: "**/*.ts" } }] },
+					},
+				],
+			},
+		});
+
+		const created = path.join(tmpDir, "created.ts");
+		await Bun.write(created, "export {};\n");
+		const expected = { uri: fileToUri(created), type: FileChangeType.Created };
+		// Filesystem events arrive on the OS's schedule; poll the server's record until they do.
+		const deadline = Date.now() + 5_000;
+		let changes = (await state(client)).watchedFileChanges;
+		while (!changes.some(change => change.uri === expected.uri && change.type === expected.type)) {
+			if (Date.now() > deadline) throw new Error(`no ${JSON.stringify(expected)} among ${JSON.stringify(changes)}`);
+			await Bun.sleep(50);
+			changes = (await state(client)).watchedFileChanges;
+		}
+		expect(changes).toContainEqual(expected);
 	}, 10_000);
 });
