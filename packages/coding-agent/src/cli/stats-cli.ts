@@ -61,6 +61,8 @@ function shortenSessionFile(p: string): string {
 export interface StatsCommandArgs {
 	port: number;
 	host: string;
+	/** Extra Host names the dashboard answers to beyond loopback and the bind address. */
+	allowedHosts: string[];
 	json: boolean;
 	summary: boolean;
 }
@@ -109,6 +111,7 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	const cwd = process.cwd();
 	const { hostname, port, reused } = await startServer(cmd.port, cmd.host, {
 		judge: async () => (await openStandaloneJudge(cwd, "stats_frustration")).judge,
+		allowedHosts: cmd.allowedHosts,
 	});
 	const url = formatStatsDashboardUrl(hostname, port);
 	console.log(chalk.green(`Dashboard available at: ${url}`));

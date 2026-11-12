@@ -34,12 +34,24 @@ omp stats
 # Custom port
 omp stats --port 8080
 
+# Bind every interface and serve it under a LAN or Tailscale name (repeatable;
+# `*.example.net` matches subdomains; also OMP_STATS_ALLOWED_HOSTS=a,b; standalone: omp-stats --allowed-host)
+omp stats --host 0.0.0.0 --allowed-host mybox.tailnet.ts.net
+
 # Print summary to console
 omp stats --summary
 
 # Output as JSON (for scripting)
 omp stats --json
 ```
+
+### Allowed hosts
+
+The dashboard answers only requests whose `Host` is loopback (`127.0.0.1`, `localhost`, `[::1]`), its bind address, or a name allowed with `--allowed-host` / `OMP_STATS_ALLOWED_HOSTS`; any other `Host` gets `421`. Entries are bare names or `*.suffix` — never URLs, and no port, since the dashboard listens on one — and a malformed entry stops startup. On a wildcard bind (`0.0.0.0`, `::`), loopback names are accepted only from this machine, so reaching it from elsewhere needs an allowed host.
+
+A dashboard already running on the port is reused only when it serves the same allowed hosts; otherwise it keeps running and the new one listens on another port.
+
+Cross-site browser requests to `/api/*` (`Sec-Fetch-Site: cross-site`, or an `Origin` other than the dashboard's own) get `403`. Actions (`/api/sync`, `/api/close`, Frustration runs) also need `POST` with the `X-Omp-Stats-Action: 1` header.
 
 ### Programmatic
 
@@ -65,7 +77,7 @@ console.log(stats.byModel[0].avgTokensPerSecond);
 | `GET /api/stats/timeseries` | Hourly time series data                                              |
 | `GET /api/events`           | Server-sent live status: sync progress, data version, rollup backlog |
 | `GET /api/status`           | Current live status (same shape as the events)                       |
-| `POST /api/sync`            | Start a background sync; progress arrives on `/api/events`           |
+| `POST /api/sync`            | Start a background sync (needs `X-Omp-Stats-Action: 1`)              |
 
 ## Data Storage
 

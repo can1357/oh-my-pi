@@ -7,12 +7,22 @@ export const DEFAULT_STATS_DASHBOARD_PORT = 3847;
 interface StatsDashboardServer {
 	hostname: string;
 	port: number;
+	/** The `allowedHosts` it was started with: part of its in-process reuse key, so later calls pass them back. */
+	allowedHosts: readonly string[];
 	stop: () => void;
+}
+
+function sameHostList(a: readonly string[], b: readonly string[]): boolean {
+	const left = a.map(name => name.trim().toLowerCase()).sort();
+	const right = b.map(name => name.trim().toLowerCase()).sort();
+	return left.length === right.length && left.every((name, index) => name === right[index]);
 }
 
 export interface StatsDashboardArgs {
 	port: number;
 	host: string;
+	/** Extra Host names the dashboard answers to (`--allowed-host`, repeatable). */
+	allowedHosts: string[];
 }
 
 export interface StatsDashboardLaunchResult {
@@ -22,7 +32,7 @@ export interface StatsDashboardLaunchResult {
 
 let activeStatsServer: StatsDashboardServer | undefined;
 
-const STATS_DASHBOARD_USAGE = "Usage: /stats [--port <port>] [--host <host>]";
+const STATS_DASHBOARD_USAGE = "Usage: /stats [--port <port>] [--host <host>] [--allowed-host <name>]...";
 
 function parsePort(value: string | undefined): number | string {
 	if (!value) return `Missing port. ${STATS_DASHBOARD_USAGE}`;
@@ -36,6 +46,7 @@ export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { er
 	const tokens = args.split(/\s+/).filter(Boolean);
 	let port = DEFAULT_STATS_DASHBOARD_PORT;
 	let host = "127.0.0.1";
+	const allowedHosts: string[] = [];
 
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
@@ -63,10 +74,16 @@ export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { er
 			host = value;
 			continue;
 		}
+		if (token === "--allowed-host" || token.startsWith("--allowed-host=")) {
+			const value = token === "--allowed-host" ? tokens[++i] : token.slice("--allowed-host=".length);
+			if (!value) return { error: `Missing allowed host. ${STATS_DASHBOARD_USAGE}` };
+			allowedHosts.push(value);
+			continue;
+		}
 		return { error: `Unknown option: ${token}. ${STATS_DASHBOARD_USAGE}` };
 	}
 
-	return { port, host };
+	return { port, host, allowedHosts };
 }
 
 /**
@@ -84,11 +101,20 @@ export async function launchStatsDashboard(
 	let requestedAddressIgnored = false;
 
 	if (!activeStatsServer) {
-		activeStatsServer = await stats.startServer(args.port, args.host, { judge });
+		const server = await stats.startServer(args.port, args.host, { judge, allowedHosts: args.allowedHosts });
+		activeStatsServer = { ...server, allowedHosts: args.allowedHosts };
 	} else {
-		requestedAddressIgnored = args.port !== activeStatsServer.port || args.host !== activeStatsServer.hostname;
-		// Resolves to the live in-process server; only re-registers the judge.
-		if (judge) await stats.startServer(activeStatsServer.port, activeStatsServer.hostname, { judge });
+		requestedAddressIgnored =
+			args.port !== activeStatsServer.port ||
+			args.host !== activeStatsServer.hostname ||
+			!sameHostList(args.allowedHosts, activeStatsServer.allowedHosts);
+		// Resolves to the live in-process server (its reuse key includes the allowed hosts); only re-registers the judge.
+		if (judge) {
+			await stats.startServer(activeStatsServer.port, activeStatsServer.hostname, {
+				judge,
+				allowedHosts: [...activeStatsServer.allowedHosts],
+			});
+		}
 	}
 
 	const url = stats.formatStatsDashboardUrl(activeStatsServer.hostname, activeStatsServer.port);
@@ -96,8 +122,11 @@ export async function launchStatsDashboard(
 	if (page) page.disconnect();
 	else openUtils.openPath(url);
 
+	const requested = [`${args.host}:${args.port}`, ...args.allowedHosts.map(name => `--allowed-host ${name}`)].join(
+		" ",
+	);
 	const serverLine = requestedAddressIgnored
-		? `Dashboard already running at: ${url} (requested ${args.host}:${args.port} ignored)`
+		? `Dashboard already running at: ${url} (requested ${requested} ignored)`
 		: `Dashboard available at: ${url}`;
 
 	return { url, message: `${serverLine} (sessions sync in the background)` };

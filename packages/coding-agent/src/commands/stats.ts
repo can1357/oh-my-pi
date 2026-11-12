@@ -13,6 +13,11 @@ export default class Stats extends Command {
 	static flags = {
 		port: Flags.integer({ char: "p", description: "Port for the dashboard server", default: 3847 }),
 		host: Flags.string({ description: "Host to bind", default: "127.0.0.1" }),
+		"allowed-host": Flags.string({
+			description:
+				"Extra Host name to serve, e.g. a Tailscale Serve name (repeatable; *.example.net for subdomains)",
+			multiple: true,
+		}),
 		json: Flags.boolean({ char: "j", description: "Output stats as JSON", default: false }),
 		summary: Flags.boolean({ char: "s", description: "Print summary to console", default: false }),
 	};
@@ -23,6 +28,7 @@ export default class Stats extends Command {
 		const cmd: StatsCommandArgs = {
 			port: flags.port,
 			host: flags.host ?? "127.0.0.1",
+			allowedHosts: flags["allowed-host"] ?? [],
 			json: flags.json,
 			summary: flags.summary,
 		};
