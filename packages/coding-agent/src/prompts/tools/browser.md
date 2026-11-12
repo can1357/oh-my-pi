@@ -4,6 +4,7 @@ Drive real browser tabs.
 - Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
 - Python: same names and awaits; keyword arguments become the trailing options object (`await browser.open(name=…, url=…)`).
 - `timeout`: seconds on `open`, `close`, `run` (default 30, clamped to 1–300, capped by `tools.maxTimeout` when set); milliseconds on `waitFor*`.
+- A `run` without `timeout`, and each direct helper call such as `tab.evaluate(…)`, gets the Eval cell's `timeout` when that is longer; for long page work, raise the cell's `timeout`.
 
 ```
 await browser.open({name, url, app, argv, target, viewport, wait_until, dialogs, allowed_domains, init_scripts, downloads, user_agent, insecure, headed, timeout, persist}) → BrowserTab

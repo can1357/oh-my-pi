@@ -32,6 +32,7 @@ describe("renderAdvisorDeltaChunks obfuscation", () => {
 			wip: false,
 			includeThinking: true,
 			obfuscator: makeObfuscator(),
+			advisorRegexSecretValues: new Set(),
 		});
 		const text = chunksToText(chunks) ?? "";
 		expect(text).not.toContain("SECRETVALUE123");
@@ -48,6 +49,7 @@ describe("renderAdvisorDeltaChunks obfuscation", () => {
 			wip: false,
 			includeThinking: true,
 			obfuscator: makeObfuscator(),
+			advisorRegexSecretValues: new Set(),
 		});
 		const text = chunksToText(chunks) ?? "";
 		expect(text).not.toContain("SECRETVALUE123");
@@ -67,6 +69,7 @@ describe("renderAdvisorDeltaChunks obfuscation", () => {
 				wip: false,
 				includeThinking: true,
 				obfuscator: crossChunkObfuscator,
+				advisorRegexSecretValues: new Set(),
 			},
 		);
 
