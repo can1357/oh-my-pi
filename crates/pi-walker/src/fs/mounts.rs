@@ -6,7 +6,9 @@
 //! round trip per directory, and one mounted under `$HOME` (`OrbStack`'s
 //! Docker store, a NAS share, an autofs trigger) can hold millions of
 //! entries. A walk rooted on a network filesystem walks it like any other.
-//! ovnfs mounts are never fenced: their daemon runs on this host.
+//! ovnfs mounts are never fenced: their daemon runs on this host, and
+//! searches below one of its checkouts are answered by the daemon itself
+//! ([`ovnfs_root`]).
 //!
 //! The table is read without touching any mounted filesystem (`getfsstat`
 //! with `MNT_NOWAIT` on macOS, `/proc/self/mountinfo` on Linux) and shared by
@@ -34,7 +36,8 @@ pub(crate) struct Mount {
 	pub(crate) remote: bool,
 	/// Admin socket of the ovnfs daemon that may serve it: named by the
 	/// mount source for a Unix-socket NFS mount, else found in ovnfs's state
-	/// directory for a loopback NFS or SMB mount.
+	/// directory for a loopback NFS or SMB mount. The daemon confirms the
+	/// mount before answering for it.
 	pub(crate) ovnfs:  Option<PathBuf>,
 }
 
@@ -125,6 +128,24 @@ fn walk_spelling(rel: &[u8]) -> Box<[u8]> {
 	} else {
 		rel.into()
 	}
+}
+
+/// The admin socket of the ovnfs daemon that answers for `root`, with
+/// `root`'s canonical spelling, when `root` lies strictly below an ovnfs
+/// mount (in a checkout; the daemon does not search the folder listing
+/// them). `None` for providers, other roots, and when no ovnfs mount exists.
+pub(crate) fn ovnfs_root(fs: &Fs, root: &Path) -> Option<(PathBuf, PathBuf)> {
+	if !fs.is_native() {
+		return None;
+	}
+	let mounts = Mounts::current();
+	if mounts.0.iter().all(|mount| mount.ovnfs.is_none()) {
+		return None;
+	}
+	let root = std::fs::canonicalize(root).ok()?;
+	let mount = mounts.holding(&root)?;
+	let socket = mount.ovnfs.clone()?;
+	(root != mount.point).then_some((socket, root))
 }
 
 /// Network filesystem types (Linux `mountinfo` names; FUSE ones by subtype).
