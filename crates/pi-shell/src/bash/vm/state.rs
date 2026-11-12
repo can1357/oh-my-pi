@@ -257,7 +257,7 @@ pub struct Overlay {
 	pub vars:       VarMap,
 	/// Other records (functions, aliases, options, misc) written or removed.
 	pub records:    HashMap<KeyBuf, Option<Record>, DefaultHashBuilder>,
-	/// Positional parameters pinned at the fork, then replaced by `set --`.
+	/// Positional parameters replaced by `set --`; otherwise in the snapshot.
 	pub positional: Option<Box<[BString]>>,
 	/// Root bindings at the fork, shared by children until a root write.
 	snapshot:       Option<ForkSnapshot>,
@@ -307,7 +307,7 @@ impl ForkBindings {
 					self.vars.insert(name.into(), record.clone());
 				},
 				None => {
-					self.vars.remove(&name[..]);
+					self.vars.remove(name);
 				},
 			}
 		} else {
@@ -348,9 +348,6 @@ impl Overlay {
 		let mut overlay = parent.overlay.clone().unwrap_or_default();
 		if overlay.snapshot.is_none() {
 			overlay.snapshot = Some(root.fork_snapshot(store)?);
-		}
-		if overlay.positional.is_none() {
-			overlay.positional = Some(root_positional(store)?.into());
 		}
 		Ok(overlay)
 	}
@@ -2670,7 +2667,11 @@ pub fn positional_ref<'a>(
 	if let Some(p) = vp.overlay.as_ref().and_then(|o| o.positional.as_deref()) {
 		return Ok(p);
 	}
-	root_positional(store)
+	match record(store, vp, Key::Misc(MiscKey::Positional))? {
+		Some(Record::Words(words)) => Ok(words),
+		Some(_) => Err(StoreError::Shape { table: Table::Misc }),
+		None => Ok(&[]),
+	}
 }
 
 /// Replace the positional parameters of `vp`'s current level.

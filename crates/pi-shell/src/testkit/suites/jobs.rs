@@ -32,11 +32,11 @@ fn queued_children_keep_positional_values_and_counts() {
 
 #[test]
 fn background_fork_bindings_survive_restoring_running_frames() {
-	let src = b"v=before; set -- one; f() { echo old; }; \
+	let src = b"\n\nf() {\n echo \"old:$LINENO\"\n}\nv=before; set -- one; \
 	            ( f; echo \"$v:$1:${later-absent}\" ) & \
 	            f() { echo new; }; v=after; set -- two; later=new; wait";
 	let out = run_script(FakeHost::new(), src, &[], Fault::Snapshot { every: 1 });
-	assert_eq!(out.stdout, b"old\nbefore:one:absent\n");
+	assert_eq!(out.stdout, b"old:4\nbefore:one:absent\n");
 	assert!(out.stderr.is_empty());
 	assert_eq!(out.status, 0);
 	assert!(out.snapshots > 0);

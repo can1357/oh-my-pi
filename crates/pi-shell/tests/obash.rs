@@ -36,9 +36,12 @@ fn background_commands_keep_fork_environment_positionals_and_cwd() {
 		r#"for h in alpha beta; do ( echo "bg:$h" ) & done; wait
 for h in one two; do set -- $h; ( sleep 0.1; echo "pos:$1" ) & done; wait
 export FORK_VALUE=before; unset FORK_LATER
+f() { echo exported:before; }; export -f f
 ( /bin/sh -c 'echo "env:$FORK_VALUE:${FORK_LATER-absent}"'; /bin/pwd
+  bash -c f
   [ "$(dirs -p)" = "$PWD" ] && echo stack:before ) &
-export FORK_VALUE=after FORK_LATER=after; pushd / >/dev/null; wait"#,
+export FORK_VALUE=after FORK_LATER=after; f() { echo exported:after; }
+pushd / >/dev/null; wait"#,
 	]));
 	let text = String::from_utf8_lossy(&out.stdout);
 	let mut lines: Vec<_> = text.lines().collect();
@@ -50,6 +53,7 @@ export FORK_VALUE=after FORK_LATER=after; pushd / >/dev/null; wait"#,
 		"pos:one",
 		"pos:two",
 		"env:before:absent",
+		"exported:before",
 		"stack:before",
 		cwd.to_str().unwrap(),
 	];
