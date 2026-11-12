@@ -378,7 +378,7 @@ export class NativeJudge implements Judge {
 		this.model = options.model ?? typesafeModel();
 		this.#headers = options.headers;
 		this.#fetch = options.fetch ?? fetch;
-		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+		this.#timeoutMs = options.timeoutMs ?? this.#wire.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		if (options.maxQuestions !== undefined && !(Number.isInteger(options.maxQuestions) && options.maxQuestions > 0)) {
 			throw new RangeError(`NativeJudge maxQuestions must be a positive integer, got ${options.maxQuestions}`);
 		}

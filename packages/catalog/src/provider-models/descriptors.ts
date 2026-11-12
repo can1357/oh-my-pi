@@ -142,7 +142,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"muse-code": config => museCodeModelManagerOptions(config),
 	meta: config => metaModelManagerOptions(config),
 	moonshot: config => moonshotModelManagerOptions(config),
-	nace: () => naceModelManagerOptions(),
+	nace: config => naceModelManagerOptions(config),
 	nanogpt: config => nanoGptModelManagerOptions(config),
 	nvidia: config => nvidiaModelManagerOptions(config),
 	novita: config => novitaModelManagerOptions(config),

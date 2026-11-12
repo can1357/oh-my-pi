@@ -2119,6 +2119,64 @@ describe("NativeJudge Nace Drex dialect", () => {
 		});
 		expect(result.answers.kind.choice).toBe("image");
 	});
+
+	it("uses a 60_000 ms default attempt timeout and honors explicit timeoutMs overrides", async () => {
+		const timeoutSpy = spyOn(AbortSignal, "timeout");
+		try {
+			const okResponse = () =>
+				Response.json({
+					model: "drex-max-v1.1",
+					answers: { urgent: { type: "noul", noul: 0.9, confidence: 0.9 } },
+					usage: { input_tokens: 10, output_tokens: 2 },
+				});
+			const defaultJudge = createNativeJudge(drex, {
+				apiKey: "nace_sk_test",
+				fetch: async () => okResponse(),
+			});
+			await defaultJudge.judge(request);
+			expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+
+			timeoutSpy.mockClear();
+			const customJudge = new NativeJudge({
+				api: "nace-systemone",
+				provider: "nace",
+				baseUrl: "https://console.nace.ai",
+				model: "drex-max-v1.1",
+				apiKey: "nace_sk_test",
+				timeoutMs: 12_345,
+				fetch: async () => okResponse(),
+			});
+			await customJudge.judge(request);
+			expect(timeoutSpy).toHaveBeenCalledWith(12_345);
+		} finally {
+			timeoutSpy.mockRestore();
+		}
+	});
+
+	it("rejects serialized request bodies over 4 MiB locally before sending", async () => {
+		let fetched = false;
+		const judge = createNativeJudge(drex, {
+			apiKey: "nace_sk_test",
+			fetch: async () => {
+				fetched = true;
+				throw new Error("should not reach fetch");
+			},
+		});
+		const oversizedState = "a".repeat(4_194_305);
+		await expect(
+			judge.judge({
+				state: oversizedState,
+				questions: request.questions,
+			}),
+		).rejects.toThrow(ValidationError);
+		await expect(
+			judge.judge({
+				state: oversizedState,
+				questions: request.questions,
+			}),
+		).rejects.toThrow(/4194304 bytes/);
+		expect(fetched).toBe(false);
+	});
 });
 
 describe("chat judgment backend images", () => {

@@ -50,6 +50,9 @@ on-api "openrouter-decisions" {
 	models "cloudflare/clef*" {
 		judgment-questions-max 64
 	}
+	models "nace-ai/*" {
+		judgment-questions-max 512
+	}
 }
 // Nace Drex rejects more than 512 questions with `at most 512 questions
 // allowed` (console.nace.ai/docs/drex/guides/questions#batch-questions-into-one-call).

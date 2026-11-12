@@ -255,9 +255,12 @@ function describeMediaDataUrls(value: unknown): unknown {
 	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, describeMediaDataUrls(item)]));
 }
 
+const NACE_MAX_BODY_BYTES = 4_194_304;
+
 /** Nace Drex decision models (`drex-max-v1.1`, `drex-max-finance`, `drex-v2.0`). */
 export const naceWire: JudgmentWire = {
 	...systemOneWire("/v1/systemone"),
+	timeoutMs: 60_000,
 	// https://console.nace.ai/docs/drex/api-reference/systemone: at most 8 images of at most 40 megapixels,
 	// with state, questions and images serialized together at most 4 MiB; 3 MB of images is 4 MB as base64,
 	// leaving room for state and questions.
@@ -267,13 +270,22 @@ export const naceWire: JudgmentWire = {
 		maxTotalBytes: 3_000_000,
 		maxPixels: 40_000_000,
 	},
-	encode: (request, model) =>
-		encodeWithImageDataUrls(
+	encode(request, model) {
+		const body = encodeWithImageDataUrls(
 			{
 				...request,
 				state: describeMediaDataUrls(request.state) as JudgmentRequest["state"],
 				questions: describeMediaDataUrls(request.questions) as Questions,
 			},
 			model,
-		),
+		);
+		const { model: _model, ...counted } = body;
+		const bodyBytes = Buffer.byteLength(JSON.stringify(counted));
+		if (bodyBytes > NACE_MAX_BODY_BYTES) {
+			throw new AIError.ValidationError(
+				`Nace Drex request body must be at most ${NACE_MAX_BODY_BYTES} bytes (${bodyBytes} bytes)`,
+			);
+		}
+		return body;
+	},
 };

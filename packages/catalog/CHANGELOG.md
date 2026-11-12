@@ -6,6 +6,8 @@
 
 - Added the Gemini Decision 1 judge model (`google/gemini-decision-1`, `GEMINI_API_KEY`); assign it to the `judge` role to use it ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
+- Added `DREX_API_KEY` fallback, `NACE_BASE_URL` override, `drex-latest` / `drex-max` seeds, live `GET /v1/models` discovery, and `131,072` state-context metadata for `drex-v2.0` ([#19043](https://github.com/can1357/oh-my-pi/pull/19043) by [@SuperUserA](https://github.com/SuperUserA))
+- Added OpenRouter `nace-ai/*` judge models (`nace-ai/drex-max`, `nace-ai/drex-max-finance`, `nace-ai/drex-v2.0`, `nace-ai/drex-v1.5`) with 4-image, 3 MB inline image-byte, and 512-question limits ([#19043](https://github.com/can1357/oh-my-pi/pull/19043) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Fixed
 

@@ -13,7 +13,13 @@ const base = {
 describe("judgment-questions-max", () => {
 	const judge = (
 		id: string,
-		api: "typesafe" | "openrouter-decisions" | "workers-ai-systemone" | "openai-decisions" | "google-decisions",
+		api:
+			| "typesafe"
+			| "openrouter-decisions"
+			| "workers-ai-systemone"
+			| "openai-decisions"
+			| "nace-systemone"
+			| "google-decisions",
 		provider: string,
 	) => buildModel({ ...base, id, name: id, api, provider, baseUrl: "http://localhost:8000" });
 
@@ -50,5 +56,14 @@ describe("judgment-questions-max", () => {
 
 	test("caps Gemini Decisions at the API's 1,000 questions", () => {
 		expect(resolveJudgmentQuestionsMax(judge("gemini-decision-1", "google-decisions", "google"))).toBe(1000);
+	});
+
+	test("caps Nace Drex at 512 questions on nace-systemone and OpenRouter nace-ai/*", () => {
+		for (const id of ["drex-max-v1.1", "drex-max-finance", "drex-v2.0", "drex-latest", "drex-max"]) {
+			expect(resolveJudgmentQuestionsMax(judge(id, "nace-systemone", "nace"))).toBe(512);
+		}
+		for (const id of ["nace-ai/drex-max", "nace-ai/drex-max-finance", "nace-ai/drex-v2.0", "nace-ai/drex-v1.5"]) {
+			expect(resolveJudgmentQuestionsMax(judge(id, "openrouter-decisions", "openrouter"))).toBe(512);
+		}
 	});
 });

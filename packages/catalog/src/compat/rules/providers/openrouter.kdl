@@ -32,6 +32,34 @@ provider "openrouter" {
 			cost input=0.042 output=0 cache-read=0 cache-write=0
 			limits context=32000 max-tokens=28800
 		}
+		model "nace-ai/drex-max" name="Nace.AI: Drex Max" {
+			reasoning #false
+			input "text"
+			cost input=0.06 output=0 cache-read=0.06 cache-write=0
+			limits context=262144 max-tokens=235929
+			supports-tools #false
+		}
+		model "nace-ai/drex-max-finance" name="Nace.AI: Drex Max Finance" {
+			reasoning #false
+			input "text"
+			cost input=0.06 output=0 cache-read=0.06 cache-write=0
+			limits context=262144 max-tokens=235929
+			supports-tools #false
+		}
+		model "nace-ai/drex-v2.0" name="Nace.AI: Drex v2.0" {
+			reasoning #false
+			input "text"
+			cost input=0.06 output=0 cache-read=0 cache-write=0
+			limits context=131072 max-tokens=117964
+			supports-tools #false
+		}
+		model "nace-ai/drex-v1.5" name="Nace.AI: Drex v1.5" {
+			reasoning #false
+			input "text"
+			cost input=0.04 output=0 cache-read=0 cache-write=0
+			limits context=131072 max-tokens=117964
+			supports-tools #false
+		}
 
 		// OpenRouter's STT roster mixes per-token and duration-based prices.
 		// Token-priced GPT rows map per-token rates to catalog per-million costs;
@@ -123,7 +151,7 @@ provider "openrouter" {
 			supports-tools #false
 		}
 	}
-	models "~typesafe/*" "typesafe/*" {
+	models "~typesafe/*" "typesafe/*" "nace-ai/*" {
 		kind "judge"
 	}
 	models "~typesafe/jev-latest" "typesafe/jev-1.13" "typesafe/jev-1.14" {
@@ -135,6 +163,15 @@ provider "openrouter" {
 			max-pixels 2458624
 			min-side 280
 			max-side 1568
+		}
+	}
+	models "nace-ai/drex-max" "nace-ai/drex-max-finance" {
+		input-modalities "text" "image"
+		judgment-image-input {
+			mime-types "image/png,image/jpeg,image/webp"
+			max-count 4
+			max-total-bytes 3000000
+			max-pixels 40000000
 		}
 	}
 	models "cohere/rerank-v3.5" {

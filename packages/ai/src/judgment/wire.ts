@@ -50,6 +50,8 @@ export interface JudgmentWire {
 	ignoresImageDetail?: boolean;
 	/** Whether this dialect forwards `box` questions; others reject them before sending. */
 	boxes?: boolean;
+	/** Default per-attempt timeout in milliseconds when the caller does not specify one. */
+	timeoutMs?: number;
 	/** The response's answers and usage for `request`; `undefined` when the payload is not this API's response shape. */
 	decode(payload: unknown, request: JudgmentRequest): DecodedJudgment | undefined;
 }
