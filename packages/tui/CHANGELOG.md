@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `grep` tool results in ANSI and native Tern views to show a `binary matches` warning on both zero-match and matching searches ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the working-row shimmer dropping to a few frames a second while omp waits on a tool or the model, on terminals without synchronized output such as tmux 3.6 ([#19032](https://github.com/can1357/oh-my-pi/pull/19032) by [@nategriffin26](https://github.com/nategriffin26))
 
 ## [18.19.0] - 2026-11-12
 
