@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `edit` responses now show inserted runs of up to 41 rows in full, so a follow-up edit can use the returned tag and row numbers without a `never displayed` rejection.
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

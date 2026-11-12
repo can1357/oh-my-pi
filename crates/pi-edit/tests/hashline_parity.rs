@@ -1038,6 +1038,38 @@ async fn edit_results_register_displayed_lines_as_snapshot_provenance() {
 }
 
 #[tokio::test]
+async fn edit_response_displays_inserted_rows_before_the_next_edit() {
+	let source = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", source);
+	let tag = workspace.snapshot("a.txt", source, Some(&[1, 2, 3, 4, 5, 6]));
+	let writer = common::DiskWriter::default();
+	let first = workspace
+		.apply_json(
+			&json!({ "input": format!(
+				"[a.txt#{tag}]\nPUT >3:\n+new a\n+new b\n+new c\n+new d\n+new e\n+new f\n+new g\n+new h"
+			) }),
+			&writer,
+		)
+		.await
+		.expect("inserts eight rows");
+
+	let response_header = first.text.lines().next().expect("edit result header");
+	workspace
+		.apply_json(&json!({ "input": format!("{response_header}\nPUT 7.=7:\n+new D") }), &writer)
+		.await
+		.expect("re-edits the displayed inserted row");
+	assert!(first.text.contains("7:new d"), "inserted row missing: {}", first.text);
+	assert!(
+		workspace
+			.read("a.txt")
+			.unwrap()
+			.contains("new c\nnew D\nnew e")
+	);
+}
+
+#[tokio::test]
 async fn edit_results_carry_unshifted_prior_provenance_only() {
 	let source = (1..=40)
 		.map(|n| format!("line{n}\n"))

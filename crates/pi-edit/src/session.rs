@@ -543,6 +543,10 @@ fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Ve
 	carried
 }
 
+// Keep short inserted blocks fully visible so their numbered rows can be
+// re-edited under the response tag.
+const RESPONSE_ADDED_RUN_CONTEXT_LINES: usize = 20;
+
 /// Model-facing text for one file (`formatEditResultText`).
 fn format_file_text(file: &StagedFile, header: &str) -> String {
 	if let Some(text) = &file.text_override {
@@ -552,8 +556,11 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 		format!("Deleted {}", file.display)
 	} else {
 		let preview_source = file.preview_diff.as_deref().unwrap_or(&file.diff);
-		let preview =
-			build_compact_diff_preview(preview_source, &CompactDiffOptions::default()).preview;
+		let preview = build_compact_diff_preview(preview_source, &CompactDiffOptions {
+			max_added_run_context: Some(RESPONSE_ADDED_RUN_CONTEXT_LINES),
+			..CompactDiffOptions::default()
+		})
+		.preview;
 		let mut lines: Vec<&str> = vec![header];
 		lines.extend(file.before_preview.iter().map(String::as_str));
 		let moved = file
