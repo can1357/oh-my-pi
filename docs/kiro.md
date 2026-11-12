@@ -1,6 +1,6 @@
 # Kiro
 
-Kiro is a native provider backed by the Kiro API (`kiro-api`). It is built into OMP rather than supplied by an extension. Do not enable the legacy `omp-provider-kiro` extension alongside the native provider: the native `kiro` provider and `kiro-api` transport reject shadow registrations.
+Kiro is a native provider backed by the Kiro API (`kiro-api`). It is built into OMP rather than supplied by an extension. The legacy `omp-provider-kiro` extension is no longer needed: its `baseUrl` and header overrides still apply, but a registration that brings its own transport or login is ignored with a warning naming the extension.
 
 For general credential precedence and provider configuration, see [Providers](./providers.md).
 
@@ -10,7 +10,7 @@ For general credential precedence and provider configuration, see [Providers](./
 2. Choose **Identity Center** for an AWS organization, **Builder ID** for a personal free account, **API key** for a `ksk_...` key, or **Google** / **GitHub** to sign in with that account.
 3. After authentication, choose a `kiro/<model-id>` model from the discovered catalog.
 
-Kiro login uses replacement semantics. Logging in again replaces the stored Kiro credential with the newly selected account or key.
+Kiro login uses replacement semantics. Logging in again replaces every stored Kiro credential, OAuth logins and stored API keys alike, with the newly selected account or key. See [Several Kiro accounts](#several-kiro-accounts) for the only ways more than one can be stored.
 
 ## AWS IAM Identity Center device login
 
@@ -48,7 +48,7 @@ export KIRO_API_KEY=ksk_...
 export KIRO_API_REGION=us-east-1
 ```
 
-`KIRO_API_KEY` is the environment fallback for the provider. `KIRO_API_REGION` pins an API key without a stored endpoint (such as `KIRO_API_KEY`) to that region for both model discovery and requests, with no probing of other regions. Without it, OMP probes the bootstrap regions and uses the key only when exactly one accepts it; set it when that probe is ambiguous or the key is tied to another region. An invalid region is an error rather than a silent fallback.
+`KIRO_API_KEY` is the environment fallback for the provider. `KIRO_API_REGION` pins an API key without a stored endpoint (such as `KIRO_API_KEY`) to that region for both model discovery and requests, with no probing of other regions. Without it, OMP probes the bootstrap regions (`us-east-1`, `eu-central-1`) and uses the key only when exactly one accepts it; set it when that probe is ambiguous or the key is tied to another region. An invalid region is an error rather than a silent fallback.
 
 ## Profile selection and model discovery
 
@@ -63,7 +63,7 @@ The roster is never bundled into OMP's model catalog, because it depends on the 
 
 ## Builder ID
 
-**Builder** signs in with a personal AWS Builder ID instead of an IAM Identity Center organization. It runs the same OIDC device grant, pinned to the public Builder portal (`https://view.awsapps.com/start`) and `us-east-1`, so it asks for no Start URL, region, or profile.
+**Builder ID** signs in with a personal AWS Builder ID instead of an IAM Identity Center organization. It runs the same OIDC device grant, pinned to the public Builder portal (`https://view.awsapps.com/start`) and `us-east-1`, so it asks for no Start URL, region, or profile.
 
 Because a Builder ID has no organization, the stored credential carries no profile ARN and the service infers the profile from the bearer token. The runtime region comes from the login region. Model discovery behaves the same as for Identity Center, and the model cache is scoped to the login, so two Builder ID accounts in the same region keep separate caches, including after their tokens expire.
 
@@ -71,7 +71,7 @@ Choose **Identity Center** when you sign in through an IAM Identity Center Start
 
 ## Logout and re-login
 
-Use `/logout` and select Kiro. Logging out removes the stored Kiro credential; it does not remove an environment-provided `KIRO_API_KEY` or another configured credential source.
+Use `/logout` and select Kiro. Logging out removes the stored Kiro credentials; it does not remove an environment-provided `KIRO_API_KEY` or another configured credential source.
 
 Run `/login kiro` again when:
 
@@ -102,7 +102,22 @@ The normal size of a tool result is governed by OMP's tool output limit (`tools.
 
 ## Credits in `/usage`
 
-`/usage` and `omp usage` show each Kiro login's monthly plan credits (for example **Kiro Pro credits**) with the reset date, each active bonus grant such as trial credits with its expiry, and, when overage billing is on, overage credits used against the cap with the charges so far. A plan with no credits left shows as exhausted only when no bonus credits remain and overage is off; otherwise it is a warning. With several Kiro accounts, requests prefer one with free credits (plan or bonus) left; an account that can only draw paid overage yields to any account with free credits but still serves when it is the only one. OMP never enables overage: it spends overage only when you enabled it in your Kiro account, and only after the free credits on every Kiro account are used. An API key gets a report only when the key has a stored endpoint (or `KIRO_API_REGION` is set) and the service answers for it.
+`/usage` and `omp usage` show each Kiro login's monthly plan credits (for example **Kiro Pro credits**) with the reset date, each active bonus grant such as trial credits with its expiry, and, when overage billing is on, overage credits used against the cap with the charges so far. A plan with no credits left shows as exhausted only when no bonus credits remain and overage is off; otherwise it is a warning. OMP never enables overage: it spends overage only when you enabled it in your Kiro account. An API key gets a report only when the key has a stored endpoint (or `KIRO_API_REGION` is set) and the service answers for it.
+
+With `retry.usageAwareFallback` on, the pre-turn check measures stored Kiro logins and `/login kiro` API keys by their free credits (plan plus active bonus): an account that can only draw paid overage counts as inside the reserve (`retry.usageReservePct`), and one with no free credits and no overage left as depleted, so `retry.usageReservePolicy` decides whether to move to a fallback model. `KIRO_API_KEY` from the environment is never measured, so the check leaves it alone.
+
+## Several Kiro accounts
+
+`/login kiro` keeps one Kiro credential, also when the store is an [auth broker](./auth-broker-gateway.md): a login from a broker client replaces every Kiro credential that client can see. `KIRO_API_KEY` is not a second account; a stored Kiro credential always wins over it. Several Kiro accounts exist only on a broker that received them as uploads, such as `omp auth-broker migrate --from-local --include-oauth` run on several machines that each signed in once. Kiro credentials carry no account identity, so the broker cannot tell that an upload repeats a login it already holds: re-running `migrate` on the same machine stores that login a second time.
+
+With several accounts, requests prefer one with free credits (plan or bonus) left; an account that can only draw paid overage yields to any account with free credits but still serves when it is the only one, so overage is spent only after the free credits on every Kiro account are used.
+
+Because a Kiro login has no identity key (`omp usage accounts` lists it without one), nothing that selects accounts by identity can name it:
+
+- `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` can show or hide Kiro as a whole (`"kiro": true`, `false`, or `{ "apiKeys": … }`), but an `accounts` list for `kiro` hides every Kiro login.
+- `task.agentAccountPools` and gateway client `accounts` that list `kiro` leave that agent or client with no usable Kiro credential.
+- `auth.accountPolicies` cannot match a Kiro account, so per-account `priority`, `reservePct`, and `reclaimAbovePct` do not apply; `retry.usageReservePct` does.
+- `omp token kiro --list` numbers the stored OAuth logins as `credential #<id>`, followed by the profile name when the login has one, and `omp token kiro --account <n>` prints that login's raw access token. `omp bench --account <n>` sends that raw token, which the Kiro transport rejects, so benchmark Kiro without `--account`.
 
 ## Troubleshooting
 
@@ -112,9 +127,9 @@ Use the Start URL copied from IAM Identity Center. It must be an HTTPS `*.awsapp
 
 ### `Kiro API key did not resolve to exactly one route`
 
-Set `KIRO_API_REGION` to the region that issued the key, then run `/login kiro` again and choose API. A region is also required when the key is valid in a route that cannot be discovered from the bootstrap probes.
+Set `KIRO_API_REGION` to the region that issued the key, then run `/login kiro` again and choose **API key**. A region is also required when the key is valid in a route that cannot be discovered from the bootstrap probes.
 
-### `Kiro response has an invalid tokenEndpoint`
+### `Kiro returned an invalid tokenEndpoint`
 
 A present registration endpoint must be the HTTPS regional AWS OIDC token endpoint with no query, fragment, port, or credentials. OMP uses the canonical regional endpoint only when the registration response omits the property. Re-run `/login kiro` after correcting a stale or invalid cached registration.
 
