@@ -6,6 +6,10 @@
 
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
 
+### Fixed
+
+- Fixed prewalk handing off to the cheaper model on exec-tier `xd://` device calls (test runners, remote commands, extension devices) and on `proc://` service stdin or mode writes, before any file was changed ([#19002](https://github.com/can1357/oh-my-pi/issues/19002))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
