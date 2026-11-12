@@ -172,7 +172,7 @@ describe("createModelMentionSource", () => {
 		]);
 	});
 
-	test("lists a model's effort pins on its bare row, before a colon is typed", async () => {
+	test("lists a model's effort pins on its bare row, except levels that name another available model", async () => {
 		await initTheme();
 		const glm = buildModel({
 			id: "glm",
@@ -188,9 +188,11 @@ describe("createModelMentionSource", () => {
 			maxTokens: 1024,
 		});
 		const plain = makeModel("a", "glm-plain");
+		const glmMax = makeModel("a", "glm:max");
+		const available = [glm, plain, glmMax];
 		const candidates = createModelMentionSource({
 			source: createModelBrowserSource(Settings.isolated()),
-			registry: { getError: () => undefined, getAvailable: () => [glm, plain], getAll: () => [glm, plain] },
+			registry: { getError: () => undefined, getAvailable: () => available, getAll: () => available },
 			scopedModels: () => [glm, plain],
 		});
 
@@ -199,7 +201,7 @@ describe("createModelMentionSource", () => {
 			completion.kind === "matched"
 				? Object.fromEntries(completion.suggestions.items.map(item => [item.value, item.description]))
 				: {};
-		expect(descriptions["a/glm"]).toBe("GLM · :low/:high/:max");
+		expect(descriptions["a/glm"]).toBe("GLM · :low/:high");
 		expect(descriptions["a/glm-plain"]).not.toContain(":");
 	});
 });

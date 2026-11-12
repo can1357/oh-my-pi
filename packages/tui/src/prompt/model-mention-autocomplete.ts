@@ -47,10 +47,14 @@ function mentionRow(value: string, description: string): AutocompleteItem {
 /**
  * A bare model row's description: its display name, then the `:level` pins it accepts
  * (`Claude Sonnet 4.5 · :low/:medium/:high`), so the pin syntax shows up before a `:` is typed.
+ * A level whose selector names another available model is left out, as in the level rows.
  */
-function modelRowDescription(model: Model): string {
+function modelRowDescription(
+	{ selector, model }: ModelBrowserItem,
+	available: ReadonlySet<string> | undefined,
+): string {
 	const name = modelMentionDisplayName(model);
-	const efforts = getSupportedEfforts(model);
+	const efforts = getSupportedEfforts(model).filter(effort => !available?.has(`${selector}:${effort}`));
 	return efforts.length > 0 ? `${name} · :${efforts.join("/:")}` : name;
 }
 
@@ -60,6 +64,7 @@ function modelRowDescription(model: Model): string {
  */
 function mentionRows(query: string, candidates: ModelMentionCandidateSource): AutocompleteItem[] {
 	const colon = query.lastIndexOf(":");
+	const available = candidates.availableModelIds?.();
 	if (colon > 0) {
 		const typed = query.slice(colon + 1).toLowerCase();
 		const levelRows: AutocompleteItem[] = [];
@@ -77,11 +82,10 @@ function mentionRows(query: string, candidates: ModelMentionCandidateSource): Au
 			for (const item of candidates(query)) {
 				if (literalRows.length === MAX_MODEL_MENTION_SUGGESTIONS) break;
 				if (item.selector.toLowerCase().includes(lowered)) {
-					literalRows.push(mentionRow(item.selector, modelRowDescription(item.model)));
+					literalRows.push(mentionRow(item.selector, modelRowDescription(item, available)));
 				}
 			}
 			const literalValues = new Set(literalRows.map(row => row.value));
-			const available = candidates.availableModelIds?.();
 			return [
 				...literalRows,
 				...levelRows.filter(row => !literalValues.has(row.value) && !available?.has(row.value)),
@@ -90,7 +94,7 @@ function mentionRows(query: string, candidates: ModelMentionCandidateSource): Au
 	}
 	return candidates(query)
 		.slice(0, MAX_MODEL_MENTION_SUGGESTIONS)
-		.map(item => mentionRow(item.selector, modelRowDescription(item.model)));
+		.map(item => mentionRow(item.selector, modelRowDescription(item, available)));
 }
 
 /** Build model mention choices for the whitespace-delimited token at the cursor. */
