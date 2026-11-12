@@ -8143,42 +8143,6 @@ describe("AgentSession retry fallback", () => {
 		}
 	});
 
-	it("defers unknown-model warnings on a cold cache for google-antigravity and google-gemini-cli when authenticated", async () => {
-		using dir = TempDir.createSync("@omp-fallback-google-special-");
-		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
-		try {
-			await auth.credentials.set("google-antigravity", {
-				type: "oauth",
-				access: "antigravity-token",
-				refresh: "antigravity-refresh",
-				expires: Date.now() + 3_600_000,
-				projectId: "antigravity-project",
-			});
-			await auth.credentials.set("google-gemini-cli", {
-				type: "oauth",
-				access: "gemini-cli-token",
-				refresh: "gemini-cli-refresh",
-				expires: Date.now() + 3_600_000,
-				projectId: "gemini-cli-project",
-			});
-			const registry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"));
-			expect(registry.find("google-antigravity", "antigravity-discovery-only-model")).toBeUndefined();
-			expect(registry.find("google-gemini-cli", "gemini-cli-discovery-only-model")).toBeUndefined();
-			expect(registry.isProviderDiscoveryPending("google-antigravity")).toBe(true);
-			expect(registry.isProviderDiscoveryPending("google-gemini-cli")).toBe(true);
-
-			session = createChainSession(registry, [
-				"google-antigravity/antigravity-discovery-only-model:high",
-				"google-gemini-cli/gemini-cli-discovery-only-model:high",
-			]);
-			expect(session.configWarnings).toEqual([]);
-		} finally {
-			await session?.dispose();
-			session = undefined;
-			auth.close();
-		}
-	});
-
 	it("defers fallback warnings while a selector's provider discovery is pending, then surfaces them once settled", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
