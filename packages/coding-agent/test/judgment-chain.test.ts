@@ -5,7 +5,11 @@ import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, ChoiceQuestion, ImageContent, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { cfgJudgmentAttemptTimeoutMs, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import {
+	cfgJudgmentAttemptTimeoutMs,
+	cfgJudgmentHedgeAfterMs,
+	cfgModelRoles,
+} from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
@@ -214,6 +218,109 @@ function hangNativeSetup(registry: ModelRegistry, stage: "credentials" | "header
 		},
 	};
 }
+
+const HEDGE_ANSWER = {
+	answers: { level: { type: "choice", choice: "high", probabilities: { low: 0, high: 1 }, confidence: 1 } },
+	usage: { input_tokens: 4, output_tokens: 1 },
+};
+
+/**
+ * Native judges on a loopback server for hedging: each primary request stays open until `answerPrimary`
+ * and records its cancellation; the backup answers at once. Attempt deadlines are far beyond the test.
+ * Without a configured fallback the backup takes the id of a built-in judge default, so it stays in the
+ * chain as an implicit candidate.
+ */
+function hedgeLoopback({
+	hedgeAfterMs,
+	configuredFallback = true,
+}: {
+	hedgeAfterMs: number;
+	configuredFallback?: boolean;
+}) {
+	const backupId = configuredFallback ? "loopback-backup" : "typesafe/jev-1.14";
+	const attempted: string[] = [];
+	const credentialed: string[] = [];
+	const usages: { model: string; stopReason: string }[] = [];
+	let primaryStarted = Promise.withResolvers<void>();
+	let primaryResponse = Promise.withResolvers<Response>();
+	const primaryCancelled = Promise.withResolvers<void>();
+	const primaryUsage = Promise.withResolvers<void>();
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		idleTimeout: 0,
+		async fetch(request) {
+			const { model } = (await request.json()) as { model: string };
+			attempted.push(model);
+			if (model !== "loopback-primary") return Response.json({ model, ...HEDGE_ANSWER });
+			request.signal.addEventListener("abort", () => primaryCancelled.resolve(), { once: true });
+			primaryStarted.resolve();
+			return primaryResponse.promise;
+		},
+	});
+	const models = ["loopback-primary", backupId].map(
+		id =>
+			({
+				...ONLINE,
+				id,
+				name: id,
+				api: "openrouter-decisions",
+				provider: "openrouter",
+				baseUrl: `http://127.0.0.1:${server.port}`,
+				kind: "judge",
+				reasoning: false,
+				input: ["text"],
+			}) as Model,
+	);
+	const settings = Settings.isolated({
+		modelRoles: { judge: "openrouter/loopback-primary" },
+		...(configuredFallback ? { "retry.fallbackChains": { judge: ["openrouter/loopback-backup"] } } : {}),
+	});
+	cfgJudgmentAttemptTimeoutMs.override(settings, 600_000);
+	cfgJudgmentHedgeAfterMs.override(settings, hedgeAfterMs);
+	const registry = makeRegistry(models, { openrouter: "loopback-key" });
+	// Credentials resolve synchronously once a hedge fires, before any network reply can arrive.
+	const getApiKey = registry.getApiKey.bind(registry);
+	vi.spyOn(registry, "getApiKey").mockImplementation((model, sessionId, options) => {
+		credentialed.push(model.id);
+		return getApiKey(model, sessionId, options);
+	});
+	return {
+		judge: new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			sessionId: "hedge-session",
+			onUsage: usage => {
+				usages.push({ model: usage.model, stopReason: usage.stopReason });
+				if (usage.model === "loopback-primary") primaryUsage.resolve();
+			},
+		}),
+		attempted,
+		credentialed,
+		usages,
+		primaryStarted: () => primaryStarted.promise,
+		primaryCancelled: primaryCancelled.promise,
+		primaryUsage: primaryUsage.promise,
+		/** Reply to the open primary request: an answer, or a failure that is not retried. */
+		answerPrimary(ok: boolean) {
+			primaryResponse.resolve(
+				ok
+					? Response.json({ model: "loopback-primary", ...HEDGE_ANSWER })
+					: new Response("bad request", { status: 400 }),
+			);
+			primaryStarted = Promise.withResolvers<void>();
+			primaryResponse = Promise.withResolvers<Response>();
+		},
+		[Symbol.dispose]() {
+			vi.useRealTimers();
+			primaryResponse.resolve(new Response("fixture stopped", { status: 400 }));
+			server.stop(true);
+		},
+	};
+}
+
+const HEDGE_REQUEST = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
 
 function reply(model: Model<Api>, text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
 	return {
@@ -1574,5 +1681,54 @@ describe("ChainJudge", () => {
 			["judgment", { usd: 0.01, inputUsd: 0.01, outputUsd: 0 }],
 			["judgment", { usd: 0.01, inputUsd: 0.01, outputUsd: 0 }],
 		]);
+	});
+});
+
+describe("ChainJudge hedging", () => {
+	it("races a pending native judge against the configured native fallback after the delay and aborts the loser", async () => {
+		using fixture = hedgeLoopback({ hedgeAfterMs: 500 });
+		vi.useFakeTimers();
+		const pending = fixture.judge.judge(HEDGE_REQUEST);
+		await fixture.primaryStarted();
+		vi.advanceTimersByTime(500);
+		const result = await pending;
+		expect(result.model).toBe("loopback-backup");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
+		await fixture.primaryCancelled;
+		await fixture.primaryUsage;
+		expect(fixture.usages).toEqual([
+			{ model: "loopback-backup", stopReason: "stop" },
+			{ model: "loopback-primary", stopReason: "aborted" },
+		]);
+	});
+
+	it("does not hedge when the setting is off", async () => {
+		using fixture = hedgeLoopback({ hedgeAfterMs: 0 });
+		vi.useFakeTimers();
+		const pending = fixture.judge.judge(HEDGE_REQUEST);
+		await fixture.primaryStarted();
+		// Well past any hedge delay, within the native request's own 10-second deadline.
+		vi.advanceTimersByTime(5_000);
+		fixture.answerPrimary(true);
+		expect((await pending).model).toBe("loopback-primary");
+		expect(fixture.credentialed).toEqual(["loopback-primary"]);
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+	});
+
+	it("never hedges to an implicit candidate, which still takes over after a failure", async () => {
+		using fixture = hedgeLoopback({ hedgeAfterMs: 500, configuredFallback: false });
+		vi.useFakeTimers();
+		const slow = fixture.judge.judge(HEDGE_REQUEST);
+		await fixture.primaryStarted();
+		vi.advanceTimersByTime(5_000);
+		fixture.answerPrimary(true);
+		expect((await slow).model).toBe("loopback-primary");
+		expect(fixture.credentialed).toEqual(["loopback-primary"]);
+
+		const failed = fixture.judge.judge(HEDGE_REQUEST);
+		await fixture.primaryStarted();
+		fixture.answerPrimary(false);
+		expect((await failed).model).toBe("typesafe/jev-1.14");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-primary", "typesafe/jev-1.14"]);
 	});
 });

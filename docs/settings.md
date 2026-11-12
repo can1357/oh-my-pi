@@ -474,10 +474,13 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 | Key                         | Type   | Default | Notes |
 | --------------------------- | ------ | ------- | ----- |
 | `judgment.attemptTimeoutMs` | number | `3000` | Positive integer milliseconds allowed for one native judge candidate, including credentials, headers, retries, and response-body reading, while a `retry.fallbackChains.judge` entry remains to try. Local image preparation is excluded; prompted and on-device judges are unchanged. |
+| `judgment.hedgeAfterMs`     | number | `0`    | Non-negative integer milliseconds after which a judge candidate that has not answered is raced against the next candidate when that one is a native judge you configured; `0` turns hedging off. |
 
 The deadline only applies when you configured a judge fallback: a timed-out candidate is cancelled and the next configured fallback is tried, and its route is skipped for 30 seconds in the same session and model registry (judges without a session ID keep their own cooldown). A timeout never hands the judgment to a model you did not configure, such as a built-in default or the session model; without a configured fallback, a slow native judge runs to completion. The caller's own cancellation always ends the judgment without failover.
 
 The 3-second default leaves `find`'s 20-second budget room to reach a second and third candidate. A slow but healthy candidate can time out and fall through too; the cooldown does not remove it from the chain. For consistently slower judges, raise the budget with `omp config set judgment.attemptTimeoutMs 10000`. Raising the setting does not extend an enclosing tool or caller deadline.
+
+With `judgment.hedgeAfterMs` set, a candidate still pending after that delay keeps running while the next candidate in the chain starts beside it, but only when that candidate is a native judge you configured (`modelRoles.judge` or a `retry.fallbackChains.judge` entry), never a built-in default or the session model. At most one extra request is in flight: the first answer wins and the other request is cancelled, its usage still recorded. A candidate that fails before the delay falls through to the next one as before; each request keeps its own `judgment.attemptTimeoutMs` deadline and cooldowns, and the caller's cancellation stops both. Hedging trades a second billed request for latency, e.g. `omp config set judgment.hedgeAfterMs 1500`.
 
 ### Advisor
 
