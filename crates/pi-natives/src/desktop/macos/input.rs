@@ -287,31 +287,37 @@ impl MacInput {
 				})
 			},
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-				skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
-					control::wait(first_key_settle(activated))?;
-					element_keys(pid, element, || {
-						if remote.is_some() {
-							// A remote screen may read modifiers from the keyboard
-							// state, which only bare key
-							// transitions at the HID tap move. They
-							// post globally, so every press first checks that the
-							// target still has focus.
-							post_bare_keys(&bare_transitions(&keys), gap, || {
-								skylight::require_front_window(pid, wid)
-							})
-						} else {
-							// Stop rather than typing into a newly user-selected app
-							// or window.
-							type_keys(
-								&self.source,
-								&keys,
-								gap,
-								|| skylight::require_front_window(pid, wid),
-								post_global,
-							)
-						}
-					})
-				})
+				skylight::with_foreground(
+					pid,
+					wid,
+					returns_focus(mode),
+					skylight::ForegroundInput::Keys,
+					|activated| {
+						control::wait(first_key_settle(activated))?;
+						element_keys(pid, element, || {
+							if remote.is_some() {
+								// A remote screen may read modifiers from the keyboard
+								// state, which only bare key
+								// transitions at the HID tap move. They
+								// post globally, so every press first checks that the
+								// target still has focus.
+								post_bare_keys(&bare_transitions(&keys), gap, || {
+									skylight::require_front_window(pid, wid)
+								})
+							} else {
+								// Stop rather than typing into a newly user-selected
+								// app or window.
+								type_keys(
+									&self.source,
+									&keys,
+									gap,
+									|| skylight::require_front_window(pid, wid),
+									post_global,
+								)
+							}
+						})
+					},
+				)
 			},
 		}
 	}
@@ -369,22 +375,28 @@ impl MacInput {
 				Ok(delivery)
 			},
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-				skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
-					control::wait(first_key_settle(activated))?;
-					element_keys(pid, element, || {
-						let chord = chord_keys(window, keys, remote, layout_strokes)?;
-						if remote.is_some() {
-							// As for typed text: a remote screen may read modifiers
-							// from the keyboard state, which only
-							// bare transitions move.
-							press_bare_chord(&chord, gap, || skylight::require_front_window(pid, wid))
-						} else {
-							press_chord(&self.source, &chord, gap, |event| {
-								post_takeover_key(pid, wid, event)
-							})
-						}
-					})
-				})
+				skylight::with_foreground(
+					pid,
+					wid,
+					returns_focus(mode),
+					skylight::ForegroundInput::Keys,
+					|activated| {
+						control::wait(first_key_settle(activated))?;
+						element_keys(pid, element, || {
+							let chord = chord_keys(window, keys, remote, layout_strokes)?;
+							if remote.is_some() {
+								// As for typed text: a remote screen may read modifiers
+								// from the keyboard state, which only
+								// bare transitions move.
+								press_bare_chord(&chord, gap, || skylight::require_front_window(pid, wid))
+							} else {
+								press_chord(&self.source, &chord, gap, |event| {
+									post_takeover_key(pid, wid, event)
+								})
+							}
+						})
+					},
+				)
 			},
 		}
 	}
@@ -448,27 +460,33 @@ impl MacInput {
 						)
 					},
 					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-						skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
-							control::wait(first_key_settle(activated))?;
-							let held = chord_keys(&window, keys, remote, layout_strokes)?;
-							let body = || control::wait(duration);
-							if remote.is_some() {
-								hold_bare_keys(
-									&held,
-									gap,
-									|| skylight::require_front_window(pid, wid),
-									body,
-								)
-							} else {
-								hold_presses(
-									&self.source,
-									&held,
-									gap,
-									|event| post_takeover_key(pid, wid, event),
-									body,
-								)
-							}
-						})
+						skylight::with_foreground(
+							pid,
+							wid,
+							returns_focus(mode),
+							skylight::ForegroundInput::Keys,
+							|activated| {
+								control::wait(first_key_settle(activated))?;
+								let held = chord_keys(&window, keys, remote, layout_strokes)?;
+								let body = || control::wait(duration);
+								if remote.is_some() {
+									hold_bare_keys(
+										&held,
+										gap,
+										|| skylight::require_front_window(pid, wid),
+										body,
+									)
+								} else {
+									hold_presses(
+										&self.source,
+										&held,
+										gap,
+										|event| post_takeover_key(pid, wid, event),
+										body,
+									)
+								}
+							},
+						)
 					},
 				}
 			},
@@ -4064,7 +4082,7 @@ fn foreground_pointer(
 		ax::open_menu::CONTROL_MENU_TIMEOUT
 	};
 	preserving_cursor(source, || {
-		skylight::with_foreground(pid, wid, return_focus, |_| {
+		skylight::with_foreground(pid, wid, return_focus, skylight::ForegroundInput::Pointer, |_| {
 			let choices = control::user_choices();
 			let mut occluder = None;
 			let result = uncover(window, pid, wid, &event, &mut occluder)
@@ -4140,7 +4158,7 @@ fn uncover(
 		let mut first = None;
 		for (x, y) in points.into_iter().flatten() {
 			control::check()?;
-			let owner = ax::point_owner(x, y).ok_or_else(|| {
+			let (owner, element) = ax::point_owner(x, y).ok_or_else(|| {
 				DesktopError::input_failed(format!(
 					"cannot determine which window owns takeover point ({x}, {y}); no input was sent"
 				))
@@ -4148,7 +4166,7 @@ fn uncover(
 			if owner.window.is_none() {
 				return Err(DesktopError::input_failed(unowned_point(
 					owner.pid,
-					ax::listed_window_at(x, y),
+					ax::listed_window_id(owner.pid, &element),
 					pid,
 					wid,
 					skylight::window_parent,

@@ -751,19 +751,11 @@ pub(in crate::desktop) fn ax_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
 }
 
 /// Hit-tests the global point `(x, y)` the way the pointer would, returning
-/// the process and window that own the frontmost surface there.
-pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
+/// the surface and its owner together so refusal lookups use the same hit.
+pub(super) fn point_owner(x: f64, y: f64) -> Option<(PointOwner, CFRetained<AXUIElement>)> {
 	let (pid, element) = element_at_point(x, y)?;
 	let window = element_window(&element);
-	Some(PointOwner { pid, window: window.as_deref().and_then(window_id) })
-}
-
-/// For a refusal only: the window listing the surface at `(x, y)` among its
-/// application's `AXWindows` ([`listed_window_id`]), such as a suggestion
-/// list, which [`point_owner`] finds no window for.
-pub(super) fn listed_window_at(x: f64, y: f64) -> Option<u32> {
-	let (pid, element) = element_at_point(x, y)?;
-	listed_window_id(pid, &element)
+	Some((PointOwner { pid, window: window.as_deref().and_then(window_id) }, element))
 }
 
 /// The frontmost element at the global point `(x, y)`, and its process.
@@ -845,7 +837,7 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 /// `AXWindow` and sit below that element. [`find_window`] resolves the same
 /// window id to the same listed element, so an element is owned by the window
 /// whose `ax()` shows it.
-fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
+pub(super) fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
 	let app = probe_application(pid)?;
 	let windows = copy_elements(&app, "AXWindows").ok()?;
 	let listed = nearest_matching(
