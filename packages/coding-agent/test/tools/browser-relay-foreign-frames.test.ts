@@ -4,39 +4,86 @@ import {
 	ensureChromiumExecutable,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import type { HiddenFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import puppeteer from "puppeteer-core";
-import { pastForeignFrames } from "../../../browser-relay/extension/foreign-frames";
+import { onForeignFramesHidden, pastForeignFrames } from "../../../browser-relay/extension/foreign-frames";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 const REFUSAL = new Error("Cannot access a chrome-extension:// URL of different extension");
+/** Another installed extension, as Chrome names extension ids: 32 letters a-p. */
+const OTHER_ID = "abcdefghijklmnopabcdefghijklmnop";
+const OTHER_MENU = `chrome-extension://${OTHER_ID}/inline/menu.html?token=secret#type=menu`;
+const OTHER_CARD = `chrome-extension://${OTHER_ID}/inline/notification.html`;
+const OTHER_TITLE = `Other vault ${"menu ".repeat(20)}`;
+/** The relay extension's own id. */
+const RELAY_ID = "ponmlkjihgfedcbaponmlkjihgfedcba";
 
 /**
- * Install a `chrome` global whose `scripting.executeScript` reports `emptied` frames changed, or throws when the
- * page cannot be scripted (`null`); returns the sweeps it ran. The real sweep runs in Chrome in
- * `browser-relay-tab-isolation.test.ts`.
+ * What the page loads for a frame `src`: another extension's exposed page, with its title, the relay's own page (its
+ * world may load it, under the URL Chrome normalises), or nothing.
  */
-function sweepsEmptying(emptied: number | null): number[] {
+function loadInPage(url: string): { url: string; title?: string } | null {
+	if (url.toLowerCase().startsWith(`chrome-extension://${RELAY_ID}/`)) return { url: url.toLowerCase(), title: "omp" };
+	return url.startsWith(`chrome-extension://${OTHER_ID}/inline/`) ? { url, title: OTHER_TITLE } : null;
+}
+
+/**
+ * Install a `chrome` global whose `scripting.executeScript` reports `found` foreign frames, the first sweep emptying
+ * `emptiedByFrame`, or throws when the page cannot be scripted (`null`); returns the sweeps it ran. A frame-targeted
+ * call is the report's probe, answered by `loadInPage` once `probe(frameId)` settles. The real sweep and probe run in
+ * Chrome in `browser-relay-tab-isolation.test.ts`.
+ */
+function sweepsEmptying(
+	found: number | null,
+	emptiedByFrame = (): Record<number, string[]> => ({ 0: Array.from({ length: found ?? 0 }, () => OTHER_MENU) }),
+	probe: (frameId: number) => Promise<void> = async () => {},
+): number[] {
 	const sweeps: number[] = [];
+	let emptiedBefore = 0;
 	Reflect.set(globalThis, "chrome", {
-		runtime: { id: "selfextensionid" },
+		runtime: { id: RELAY_ID },
 		scripting: {
-			executeScript: async (injection: { target: { tabId: number } }) => {
+			executeScript: async (injection: { target: { tabId: number; frameIds?: number[] }; args: unknown[] }) => {
+				if (injection.target.frameIds) {
+					const [frameId] = injection.target.frameIds;
+					await probe(frameId);
+					return [{ frameId, result: (injection.args[0] as string[]).map(loadInPage) }];
+				}
 				sweeps.push(injection.target.tabId);
-				if (emptied === null) throw new Error("Cannot access contents of the page");
-				return [{ frameId: 0, result: emptied }];
+				if (found === null) throw new Error("Cannot access contents of the page");
+				const emptied = Object.entries(sweeps.length === 1 ? emptiedByFrame() : {});
+				emptiedBefore += emptied.reduce((count, [, srcs]) => count + srcs.length, 0);
+				// The first frame carries every frame found, emptied now or before.
+				const total = { found: Math.max(found, emptiedBefore), emptied: [] as string[] };
+				if (emptied.length === 0) return [{ frameId: 0, result: total }];
+				return emptied.map(([frameId, srcs], i) => ({
+					frameId: Number(frameId),
+					result: { found: i === 0 ? total.found : 0, emptied: srcs },
+				}));
 			},
 		},
 	});
 	return sweeps;
 }
 
+/** A request Chrome refuses `times` times for a foreign frame, then runs; `onRetry` sees each later attempt. */
+function refused(times: number, onRetry: () => void = () => {}): () => Promise<string> {
+	let attempts = 0;
+	return async () => {
+		if (attempts++ < times) throw REFUSAL;
+		onRetry();
+		return "attached";
+	};
+}
+
 describe("pastForeignFrames", () => {
 	const saved = Reflect.get(globalThis, "chrome");
 	afterEach(() => {
 		Reflect.set(globalThis, "chrome", saved);
+		onForeignFramesHidden(() => {});
 	});
 
 	it("shares one sweep among the commands of a refused burst, then retries each", async () => {
@@ -73,6 +120,64 @@ describe("pastForeignFrames", () => {
 		expect(await rejectionOf(pastForeignFrames(1, () => Promise.reject(REFUSAL)))).toBe(REFUSAL);
 	});
 
+	it("reports each emptied page the page itself can load once, by id, path and cut title, and skips the rest", async () => {
+		// A page can add frames of its own whose `src` only looks like another extension's; it cannot load them. One
+		// names the relay's own page with its id upper-cased, past the sweep's own-id check; the relay never hides those.
+		const decoys = [
+			"chrome-extension://a b/x",
+			"chrome-extension://pppppppppppppppppppppppppppppppp/x",
+			`chrome-extension://${OTHER_ID}/private.html`,
+			`chrome-extension://${RELAY_ID.toUpperCase()}/options.html`,
+		];
+		const sweeps = sweepsEmptying(0, () => ({ 0: [OTHER_MENU, OTHER_MENU, ...decoys] }));
+		const reports: Array<[number, HiddenFrame[]]> = [];
+		const reported = Promise.withResolvers<void>();
+		onForeignFramesHidden((tabId, frames) => {
+			reports.push([tabId, frames]);
+			reported.resolve();
+		});
+		// The second refusal's sweep finds the same frames already emptied: nothing new to report.
+		expect(await pastForeignFrames(7, refused(2))).toBe("attached");
+		expect(sweeps).toEqual([7, 7]);
+		await reported.promise;
+		expect(reports).toEqual([
+			[7, [{ extensionId: OTHER_ID, path: "inline/menu.html", title: OTHER_TITLE.slice(0, 60) }]],
+		]);
+	});
+
+	it("retries without waiting for the report of what the sweep emptied", async () => {
+		// The probe answers only once the retry ran; a sweep that held the retry for it would report nothing.
+		const probe = Promise.withResolvers<void>();
+		sweepsEmptying(1, undefined, () => probe.promise);
+		const reported = Promise.withResolvers<HiddenFrame[]>();
+		onForeignFramesHidden((_, frames) => reported.resolve(frames));
+		expect(await pastForeignFrames(3, refused(1, probe.resolve))).toBe("attached");
+		expect(await reported.promise).toEqual([
+			{ extensionId: OTHER_ID, path: "inline/menu.html", title: OTHER_TITLE.slice(0, 60) },
+		]);
+	});
+
+	it("still retries when the report fails", async () => {
+		sweepsEmptying(1, undefined, () => Promise.reject(new Error("Frame with ID 0 was removed.")));
+		expect(await pastForeignFrames(4, refused(1))).toBe("attached");
+	});
+
+	it("reports the frames whose probe ran when another frame's document is gone", async () => {
+		sweepsEmptying(
+			0,
+			() => ({ 0: [OTHER_MENU], 4: [OTHER_CARD] }),
+			async frameId => {
+				if (frameId === 0) throw new Error("Frame with ID 0 was removed.");
+			},
+		);
+		const reported = Promise.withResolvers<HiddenFrame[]>();
+		onForeignFramesHidden((_, frames) => reported.resolve(frames));
+		expect(await pastForeignFrames(5, refused(1))).toBe("attached");
+		expect(await reported.promise).toEqual([
+			{ extensionId: OTHER_ID, path: "inline/notification.html", title: OTHER_TITLE.slice(0, 60) },
+		]);
+	});
+
 	it("never sweeps for other errors", async () => {
 		const sweeps = sweepsEmptying(1);
 		const other = new Error("No tab with given id 1.");
@@ -92,7 +197,7 @@ describe("pastForeignFrames", () => {
 				const page = await browser.newPage();
 				// A password manager's inline menu, drawn below the field over the page's Next button.
 				await page.setContent(`<input type="password"><br><button>Next</button>
-<iframe src="chrome-extension://otherextensionid/menu.html"
+<iframe src="chrome-extension://${OTHER_ID}/menu.html"
   style="position: absolute; left: 0; top: 0; width: 300px; height: 200px; z-index: 2147483647"></iframe>`);
 				// The injected function runs in the page, as `chrome.scripting.executeScript` runs it.
 				Reflect.set(globalThis, "chrome", {
