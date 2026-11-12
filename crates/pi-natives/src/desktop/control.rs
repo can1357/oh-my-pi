@@ -1059,6 +1059,14 @@ impl KernelLease {
 	/// locked. Best effort: input never waits on the record.
 	fn record(&self, agent: &str) {
 		use std::os::unix::fs::FileExt;
+		// Dotted ids put the most specific name last; bound the record before
+		// writing so even a long parent chain leaves that suffix readable.
+		let start = agent
+			.char_indices()
+			.rev()
+			.nth(63)
+			.map_or(0, |(index, _)| index);
+		let agent = &agent[start..];
 		let _ = self
 			.file
 			.write_all_at(format!("{}\n{agent}", std::process::id()).as_bytes(), 0);
@@ -1068,7 +1076,7 @@ impl KernelLease {
 	/// for no record, an unreadable one or one whose process is gone.
 	fn holder(file: &std::fs::File) -> Option<(u32, String)> {
 		use std::os::unix::fs::FileExt;
-		let mut buffer = [0u8; 256];
+		let mut buffer = [0u8; 10 + 1 + 64 * 4];
 		let length = file.read_at(&mut buffer, 0).ok()?;
 		let record = String::from_utf8_lossy(&buffer[..length]);
 		let (pid, agent) = record.split_once('\n')?;
@@ -1839,6 +1847,13 @@ mod tests {
 			panic!("busy while held")
 		};
 		assert_eq!(stale.message, busy().message, "a stale record is not named");
+		let agent = format!("{}.Scout", "Parent.".repeat(50));
+		first.record(&agent);
+		let Err(named) = KernelLease::at(&path) else {
+			panic!("busy while held")
+		};
+		assert!(named.message.contains(&agent[agent.len() - 64..]));
+		assert!(named.message.contains("Scout"));
 		drop(first);
 		assert_eq!(
 			std::fs::metadata(&path).expect("lock file").len(),

@@ -19,14 +19,6 @@ export const AGENT_COLOR_HEX: Readonly<Record<AgentColor, string>> = {
 /** Colours subagents hash into; blue is the main agent's alone. */
 const SUBAGENT_COLORS: readonly AgentColor[] = ["orange", "yellow", "green", "teal", "purple", "pink"];
 
-/** How omp shows an agent: its registry id, the name it goes by, and a colour it cannot choose. */
-export interface AgentIdentity {
-	id: string;
-	/** Last dotted segment of `id` (`CursorChecks.Scout` → `Scout`). */
-	label: string;
-	color: AgentColor;
-}
-
 const utf8 = new TextEncoder();
 
 /** FNV-1a, 32-bit, over the UTF-8 bytes of `text`. */
@@ -38,14 +30,13 @@ function fnv1a(text: string): number {
 	return hash;
 }
 
-/** Identity of a registry agent id: Main is blue, every other id hashes to a stable non-red colour. */
-export function agentIdentity(agentId: string): AgentIdentity {
-	const color = agentId === MAIN_AGENT_ID ? "blue" : SUBAGENT_COLORS[fnv1a(agentId) % SUBAGENT_COLORS.length]!;
-	return { id: agentId, label: agentId.slice(agentId.lastIndexOf(".") + 1), color };
+/** Main is blue; every other registry id hashes to a stable non-red colour. */
+export function agentColor(agentId: string): AgentColor {
+	return agentId === MAIN_AGENT_ID ? "blue" : SUBAGENT_COLORS[fnv1a(agentId) % SUBAGENT_COLORS.length]!;
 }
 
 /** `text` in the foreground colour of `agentId`'s identity. */
 export function agentColored(agentId: string, text: string): string {
-	const ansi = getSessionAccentAnsi(AGENT_COLOR_HEX[agentIdentity(agentId).color]);
+	const ansi = getSessionAccentAnsi(AGENT_COLOR_HEX[agentColor(agentId)]);
 	return ansi ? `${ansi}${text}${FG_RESET}` : text;
 }

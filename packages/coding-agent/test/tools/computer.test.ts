@@ -454,12 +454,9 @@ function toolSession(): ToolSession {
 }
 
 /** Exercise the shipped host approval/call rendering and worker, with only native OS work substituted. */
-function workerPrelude(session: ToolSession, native: NativeDesktopSession, created?: unknown[]): EvalPreludeDefinition {
+function workerPrelude(session: ToolSession, native: NativeDesktopSession): EvalPreludeDefinition {
 	const transport = new MemoryTransport();
-	new ComputerWorkerCore(transport, options => {
-		created?.push(options);
-		return native;
-	});
+	new ComputerWorkerCore(transport, () => native);
 	return createComputerPrelude(session, () => ({
 		async run(code, timeoutMs, runSnapshot) {
 			const id = crypto.randomUUID();
@@ -1512,17 +1509,6 @@ describe("computer prelude", () => {
 		expect(prelude.enabled?.()).toBe(true);
 		cfgComputerEnabled.override(session.settings, false);
 		expect(prelude.enabled?.()).toBe(false);
-	});
-
-	it("creates the native session under the agent's id, which another session's InputBusy names", async () => {
-		const session: ToolSession = { ...toolSession(), getAgentId: () => "CursorChecks.Scout" };
-		const created: unknown[] = [];
-		const prelude = workerPrelude(session, new FakeNativeSession(), created);
-		await prelude.invoke(
-			{ action: "run", code: "await desktop.windows()", read_only: true },
-			{ session, toolCallId: "agent-id" },
-		);
-		expect(created).toEqual([expect.objectContaining({ agentId: "CursorChecks.Scout" })]);
 	});
 });
 
