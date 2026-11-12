@@ -21,9 +21,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::bash::{
 	cow_map::CowMap,
-	image::Image,
+	ids::UnitId,
+	image::{Image, ImageDiff},
 	store::{
-		Attrs, BlobSlot, Change, Elem, Key, KeyBuf, Record, StateStore, StoreError, Table, VarValue,
+		Attrs, BlobSlot, Change, Elem, Key, KeyBuf, MiscKey, Record, StateStore, StoreError, Table,
+		VarValue,
 	},
 };
 
@@ -62,6 +64,16 @@ struct StoreImage {
 	epoch:   u64,
 }
 
+/// What a root shell's process state changed since an earlier one
+/// ([`MemStore::process_diff`]).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProcessDiff {
+	image: ImageDiff,
+	misc:  Vec<(MiscKey, Option<Record>)>,
+	/// The compiled bodies of the functions `image` sets.
+	units: Vec<(UnitId, Vec<u8>)>,
+}
+
 /// Equal stores hold the same records, blobs and epoch; the local-name
 /// bloom is an index (a deleted local leaves its bits) and does not count.
 impl PartialEq for MemStore {
@@ -75,6 +87,11 @@ impl PartialEq for MemStore {
 }
 
 impl Eq for MemStore {}
+
+/// The records outside the image that are process state
+/// ([`MemStore::process_state`]): the root vproc's working directory, mode
+/// and `ulimit` values.
+const PROCESS_MISC: [MiscKey; 3] = [MiscKey::Cwd, MiscKey::Mode, MiscKey::Rlimits];
 
 /// The shape error of `key`'s table.
 const fn shape(key: Key<'_>) -> StoreError {
@@ -136,6 +153,83 @@ impl MemStore {
 	/// Delete a record out of band; bumps the epoch.
 	pub fn del_out_of_band(&mut self, key: Key<'_>) {
 		self.del(key);
+		self.epoch += 1;
+	}
+
+	/// The records that are the root shell's process state: its image
+	/// (variables, functions, options, …), its compiled function bodies, and
+	/// of the records outside it the working directory, mode and `ulimit`
+	/// values ([`PROCESS_MISC`]). Left out: jobs, processes, counters and
+	/// the last statuses, which belong to the running process. O(1) in the
+	/// image.
+	pub fn process_state(&self) -> Self {
+		let other = PROCESS_MISC
+			.iter()
+			.filter_map(|&k| Some((KeyBuf::Misc(k), self.other.get(&Key::Misc(k))?.clone())))
+			.collect();
+		Self { image: self.image.clone(), other, blobs: self.blobs.clone(), ..Self::default() }
+	}
+
+	/// Whether `self` and `other` hold the same [`Self::process_state`] as
+	/// far as sharing tells (`false` says nothing).
+	pub fn same_process_state(&self, other: &Self) -> bool {
+		self.image.same_as(&other.image)
+			&& self.blobs.same_as(&other.blobs)
+			&& PROCESS_MISC
+				.iter()
+				.all(|&k| self.other.get(&Key::Misc(k)) == other.other.get(&Key::Misc(k)))
+	}
+
+	/// What `self`'s [`Self::process_state`] changed relative to `base`'s
+	/// (an earlier state of the same shell): records set or removed (the
+	/// command hash table and `$_` aside), and the compiled bodies of the
+	/// functions it sets. Shared records cost nothing to
+	/// skip.
+	pub fn process_diff(&self, base: &Self) -> ProcessDiff {
+		let misc = PROCESS_MISC
+			.iter()
+			.filter_map(|&k| {
+				let now = self.other.get(&Key::Misc(k));
+				(now != base.other.get(&Key::Misc(k))).then(|| (k, now.cloned()))
+			})
+			.collect();
+		let image = self.image.diff(&base.image).without_process_local();
+		// The body of every function the diff sets, and no other: one
+		// `base` holds too (same text, same unit) is kept, as the base a
+		// replay lands on is a later setup's, which may no longer compile it;
+		// the bodies of functions since redefined or removed are left behind.
+		let mut units: Vec<(UnitId, Vec<u8>)> = image
+			.records()
+			.filter_map(|record| {
+				let Record::Func { unit, .. } = record else {
+					return None;
+				};
+				Some((*unit, self.blobs.get(&BlobSlot::Unit(*unit))?.clone()))
+			})
+			.collect();
+		units.sort_unstable_by_key(|(unit, _)| *unit);
+		units.dedup_by_key(|(unit, _)| *unit);
+		ProcessDiff { image, misc, units }
+	}
+
+	/// Apply `diff` ([`Self::process_diff`]) as writes the engine did not
+	/// make: the epoch moves, so a shell over this store re-derives what it
+	/// knew of it.
+	pub fn apply_process_diff(&mut self, diff: ProcessDiff) {
+		self.image = Image::patched(std::mem::take(&mut self.image), diff.image);
+		for (key, record) in diff.misc {
+			match record {
+				Some(r) => {
+					self.other.insert(KeyBuf::Misc(key), r);
+				},
+				None => {
+					self.other.remove(&Key::Misc(key));
+				},
+			}
+		}
+		for (unit, bytes) in diff.units {
+			self.blobs.insert(BlobSlot::Unit(unit), bytes);
+		}
 		self.epoch += 1;
 	}
 

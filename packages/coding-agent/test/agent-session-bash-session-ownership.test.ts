@@ -15,7 +15,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { cfgBashPersistShellState, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 const bashResult = {
 	output: "old-output",
@@ -479,7 +479,7 @@ describe("AgentSession bash session ownership", () => {
 		return sessionFile;
 	}
 
-	it("starts a fresh shell when it returns to a session it left", async () => {
+	it("resumes its shell state when it returns to a session it left", async () => {
 		const oldSessionFile = await createSwitchableSession();
 		const oldSessionId = session.sessionId;
 		await session.executeBash("PI_LEFT_SESSION_MARK=kept");
@@ -489,10 +489,22 @@ describe("AgentSession bash session ownership", () => {
 
 		expect(session.sessionId).toBe(oldSessionId);
 		const result = await session.executeBash('printf "[%s]" "$PI_LEFT_SESSION_MARK"');
+		expect(result.output).toBe("[kept]");
+	});
+
+	it("starts a fresh shell on return when bash.persistShellState is off", async () => {
+		const oldSessionFile = await createSwitchableSession();
+		cfgBashPersistShellState.set(session.settings, false);
+		await session.executeBash("PI_LEFT_SESSION_MARK=kept");
+
+		await session.newSession();
+		await session.switchSession(oldSessionFile);
+
+		const result = await session.executeBash('printf "[%s]" "$PI_LEFT_SESSION_MARK"');
 		expect(result.output).toBe("[]");
 	});
 
-	it("starts a fresh shell after a command that was pending when its session was left", async () => {
+	it("resumes the state of a command that was pending when its session was left", async () => {
 		const hook = Promise.withResolvers<undefined>();
 		const extensionRunner = {
 			hasHandlers: vi.fn((eventType: string) => eventType === "user_bash"),
@@ -510,7 +522,7 @@ describe("AgentSession bash session ownership", () => {
 		await session.switchSession(oldSessionFile);
 
 		const result = await session.executeBash('printf "[%s]" "$PI_LEFT_SESSION_MARK"');
-		expect(result.output).toBe("[]");
+		expect(result.output).toBe("[kept]");
 	});
 
 	it("stores minimized bash output with the originating session", async () => {

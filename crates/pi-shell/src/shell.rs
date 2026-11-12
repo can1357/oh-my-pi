@@ -34,8 +34,8 @@ use crate::{
 	minimizer,
 	output_decode::CaptureDecoder,
 	session::{
-		Children, Image, LatestImage, RunOptions, RunOutcome, RunStdio, Session, SessionConfig,
-		SessionError,
+		Children, Image, LatestImage, RunOptions, RunOutcome, RunStdio, SavedState, Session,
+		SessionConfig, SessionError,
 	},
 	taps::PipeTaps,
 	vfs::VfsFs,
@@ -52,6 +52,9 @@ struct ShellSessionCore {
 	filesystem: Fs,
 	/// The shell's working directory after the last command.
 	cwd:        BString,
+	/// The state its setup left (environment fallback, shell-config
+	/// snapshot): what [`Shell::save_state`] saves the changes since.
+	baseline:   Image,
 }
 
 #[derive(Clone, Default)]
@@ -140,9 +143,19 @@ struct ShellConfig {
 	snapshot_path: Option<String>,
 	minimizer:     Option<minimizer::MinimizerConfig>,
 	filesystem:    Fs,
-	/// The state a forked shell's session starts from ([`Shell::fork`]);
-	/// it replaces the env fallback and snapshot sourcing of a new session.
-	seed:          Option<Image>,
+	/// The state the session starts from.
+	seed:          Option<Seed>,
+}
+
+/// Where a session's starting state comes from.
+#[derive(Clone)]
+enum Seed {
+	/// The forked shell's ([`Shell::fork`]), as it is: it replaces the env
+	/// fallback and snapshot sourcing.
+	Fork(Image),
+	/// A saved state ([`ShellOptions::state`]), replayed after them
+	/// ([`Session::apply_state`]).
+	Saved(SavedState),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -152,6 +165,9 @@ pub struct ShellOptions {
 	pub minimizer:     Option<minimizer::MinimizerOptions>,
 	/// Filesystem backing every run of the session (native by default).
 	pub filesystem:    Fs,
+	/// A saved state the session replays after its own setup
+	/// ([`Shell::save_state`], [`SavedState::from_bytes`]).
+	pub state:         Option<SavedState>,
 }
 
 struct ShellRunConfig {
@@ -225,11 +241,17 @@ struct SessionHandles {
 	children: Children,
 	/// The session's state at its last command boundary.
 	image:    LatestImage,
+	/// The state the session's setup left ([`ShellSessionCore::baseline`]).
+	baseline: Image,
 }
 
 impl SessionHandles {
-	fn of(session: &Session) -> Self {
-		Self { children: session.children(), image: session.latest_image() }
+	fn of(core: &ShellSessionCore) -> Self {
+		Self {
+			children: core.session.children(),
+			image:    core.session.latest_image(),
+			baseline: core.baseline.clone(),
+		}
 	}
 }
 
@@ -238,6 +260,8 @@ pub struct Shell {
 	abort_state: ShellAbortState,
 	config:      ShellConfig,
 	active:      ActiveSession,
+	/// The state [`Self::save_state`] last returned.
+	saved:       parking_lot::Mutex<Option<(Image, Vec<u8>)>>,
 }
 
 impl Shell {
@@ -261,7 +285,7 @@ impl Shell {
 					snapshot_path: opt.snapshot_path,
 					minimizer,
 					filesystem: opt.filesystem,
-					seed: None,
+					seed: opt.state.map(Seed::Saved),
 				}
 			},
 		};
@@ -274,6 +298,7 @@ impl Shell {
 			abort_state: ShellAbortState::default(),
 			config,
 			active: ActiveSession::default(),
+			saved: parking_lot::Mutex::default(),
 		}
 	}
 
@@ -286,11 +311,41 @@ impl Shell {
 	/// shell.
 	#[must_use]
 	pub fn fork(&self) -> Self {
-		let latest = self.active.lock().as_ref().map(|active| active.image.get());
-		Self::with_config(ShellConfig {
-			seed: latest.or_else(|| self.config.seed.clone()),
-			..self.config.clone()
-		})
+		// Before its session starts, a shell created from a saved state forks
+		// as that state, resumed under the fork's environment.
+		let seed = match self.active.lock().as_ref() {
+			Some(active) => Some(Seed::Fork(active.image.get())),
+			None => self.config.seed.clone(),
+		};
+		Self::with_config(ShellConfig { seed, ..self.config.clone() })
+	}
+
+	/// What this shell changed since its setup, as of its last command
+	/// boundary (while a command runs, the state that command started
+	/// from), as bytes for [`ShellOptions::state`] in a later process
+	/// ([`Image::to_bytes`]).
+	/// `None` before the shell has a session, and when the state is the
+	/// one the last call returned (checked by sharing, then by bytes). Never
+	/// waits for a running command.
+	pub fn save_state(&self) -> Option<Vec<u8>> {
+		let (image, baseline) = {
+			let active = self.active.lock();
+			let active = active.as_ref()?;
+			(active.image.get(), active.baseline.clone())
+		};
+		let mut saved = self.saved.lock();
+		if saved
+			.as_ref()
+			.is_some_and(|(last, _)| last.same_state(&image))
+		{
+			return None;
+		}
+		let bytes = image.to_bytes(&baseline);
+		// A run that rewrote values without changing them (its env overlay,
+		// `PWD`) saves the same bytes.
+		let unchanged = saved.as_ref().is_some_and(|(_, last)| *last == bytes);
+		*saved = Some((image, bytes.clone()));
+		(!unchanged).then_some(bytes)
 	}
 
 	pub async fn run(
@@ -505,7 +560,7 @@ async fn run_shell_session(
 				core
 			} else {
 				let core = create_session_for_run(&config, Some(&tokio_cancel)).await?;
-				*active.lock() = Some(SessionHandles::of(&core.session));
+				*active.lock() = Some(SessionHandles::of(&core));
 				session_guard.insert(core)
 			};
 			abort_state.set(at).await;
@@ -858,7 +913,11 @@ async fn create_session_for_run(
 		.into_iter()
 		.map(|(key, value)| (BString::from(key), BString::from(value)))
 		.collect();
-	let cwd = config.seed.as_ref().map_or_else(initial_cwd, Image::cwd);
+	// A saved state's working directory comes back with the rest, after setup.
+	let cwd = match &config.seed {
+		Some(Seed::Fork(image)) => image.cwd(),
+		Some(Seed::Saved(_)) | None => initial_cwd(),
+	};
 	// The pi utilities (and their `PI_DISABLE_*` gates), the process
 	// builtins, `nohup`, `timeout` and the `git` layers are the session's
 	// commands (`crate::tools`), configured from this environment; `exec`
@@ -872,14 +931,16 @@ async fn create_session_for_run(
 		output_decoding: None,
 	};
 	let session = match &config.seed {
-		Some(image) => Session::restore(session_config, image),
-		None => Session::new(session_config),
+		Some(Seed::Fork(image)) => Session::restore(session_config, image),
+		Some(Seed::Saved(_)) | None => Session::new(session_config),
 	}
 	.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
-	let mut core = ShellSessionCore { session, slot, filesystem: config.filesystem.clone(), cwd };
+	let baseline = session.latest_image().get();
+	let mut core =
+		ShellSessionCore { session, slot, filesystem: config.filesystem.clone(), cwd, baseline };
 
-	// A seed already holds both.
-	if config.seed.is_none() {
+	// A fork's seed already holds both; a saved state is replayed on them.
+	if !matches!(config.seed, Some(Seed::Fork(_))) {
 		if !has_env_var {
 			apply_env_fallback(&mut core, &cancel)
 				.await
@@ -891,6 +952,15 @@ async fn create_session_for_run(
 				.await
 				.map_err(|err| Error::msg(format!("Failed to source snapshot: {err}")))?;
 		}
+	}
+	core.baseline = core.session.latest_image().get();
+	if let Some(Seed::Saved(state)) = &config.seed {
+		core
+			.session
+			.apply_state(state)
+			.await
+			.map_err(|err| Error::msg(format!("Failed to resume shell state: {err}")))?;
+		core.cwd = core.session.latest_image().get().cwd();
 	}
 	restore_session_filesystem(&core);
 	if cancel.is_cancelled() {

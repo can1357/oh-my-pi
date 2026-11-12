@@ -1088,6 +1088,127 @@ async fn fork_starts_from_the_state_before_the_running_command() {
 	assert_eq!(run(&shell, "printf %s \"$PI_FORK_VAR\"").await, "during");
 }
 
+/// A shell's saved state resumes in a new shell (as in a later process):
+/// variables, functions, aliases, options and the working directory come
+/// back. Environment variables the shell left as its session's environment
+/// set them stay off the saved bytes (a forwarded secret is not written)
+/// and come from the resuming session's environment, keeping an attribute
+/// the shell gave one; one the shell changed keeps its value, and one it
+/// unset stays unset. A fork of the resumed shell taken before it ran
+/// resumes the same way. A run that changed nothing (its cwd and env given
+/// again) is not saved twice; bytes that are no saved state are refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_state_resumes_under_the_new_environment_and_config() {
+	use crate::session::{STATE_MAGIC, SavedState, SavedStateError};
+
+	async fn run(shell: &Shell, command: &str, cwd: Option<&str>) -> String {
+		let (tx, rx) = flume::unbounded();
+		let options = ShellRunOptions {
+			command: command.into(),
+			cwd: cwd.map(str::to_owned),
+			..Default::default()
+		};
+		let result = shell
+			.run(options, Some(tx), CancelToken::default())
+			.await
+			.expect("run");
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		rx.drain().collect()
+	}
+	fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+		pairs
+			.iter()
+			.map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+			.collect()
+	}
+
+	let _guard = shell_test_lock().lock().await;
+	let dir = tempfile::tempdir().expect("scratch directory");
+	let dir_path = dir.path().canonicalize().expect("canonical dir");
+	// The run's cwd as a host gives it (no Windows `\\?\` prefix).
+	let dir_path = dir_path.to_string_lossy();
+	let dir_path = dir_path.trim_start_matches(r"\\?\");
+	let first_env = env(&[
+		("PI_SECRET", "sk-not-a-real-secret"),
+		("PI_CHANGED", "host"),
+		("PI_UNSET", "host"),
+		("PI_LOCKED", "host"),
+		("PI_RC_PATH", "host"),
+	]);
+	// The user's shell configuration, as a snapshot sourced at setup: it is
+	// sourced again on resume, so its edits and the new environment reach a
+	// resumed shell even where it rewrites an inherited value.
+	let snapshot = dir.path().join("snapshot.sh");
+	std::fs::write(&snapshot, "export PI_RC_PATH=\"rc:$PI_RC_PATH\"; pi_rc_fn() { printf one; }")
+		.expect("write snapshot");
+	let snapshot_path = Some(snapshot.to_string_lossy().into_owned());
+	let shell = Shell::new(Some(ShellOptions {
+		session_env: Some(first_env),
+		snapshot_path: snapshot_path.clone(),
+		..Default::default()
+	}));
+	assert!(shell.save_state().is_none(), "no session yet");
+	run(
+		&shell,
+		"PI_SAVED=kept; export PI_CHANGED=mine; unset PI_UNSET; readonly PI_LOCKED; pi_saved_fn() { \
+		 printf 'fn:%s' \"$1\"; }; shopt -s expand_aliases; alias pi_saved_alias='printf alias'; \
+		 set -o pipefail",
+		Some(dir_path),
+	)
+	.await;
+	// A body compiles with the command that defines it: one of its own.
+	run(&shell, "pi_redefined_fn() { printf pi-replaced-body; }", None).await;
+	run(&shell, "pi_redefined_fn() { :; }", None).await;
+	run(&shell, "hash -p /pi-old-path/pi-tool pi_hashed_tool", None).await;
+	let bytes = shell.save_state().expect("state after a command");
+	assert!(!bytes.windows(20).any(|w| w == b"sk-not-a-real-secret"), "environment left out");
+	assert!(
+		!bytes.windows(16).any(|w| w == b"pi-replaced-body"),
+		"a replaced function body is not saved"
+	);
+	run(&shell, "true", Some(dir_path)).await;
+	assert!(shell.save_state().is_none(), "nothing changed since the last save");
+	drop(shell);
+
+	let second_env = env(&[
+		("PI_SECRET", "rotated"),
+		("PI_CHANGED", "host2"),
+		("PI_UNSET", "host2"),
+		("PI_LOCKED", "host2"),
+		("PI_RC_PATH", "host2"),
+	]);
+	std::fs::write(&snapshot, "export PI_RC_PATH=\"rc:$PI_RC_PATH\"; pi_rc_fn() { printf two; }")
+		.expect("edit snapshot");
+	let resumed = Shell::new(Some(ShellOptions {
+		session_env: Some(second_env),
+		snapshot_path,
+		state: Some(SavedState::from_bytes(&bytes).expect("saved state decodes")),
+		..Default::default()
+	}));
+	let check = "printf '%s|%s|%s|[%s]|%s|%s|' \"$PI_SAVED\" \"$PI_SECRET\" \"$PI_CHANGED\" \
+	             \"${PI_UNSET-unset}\" \"$(declare -p PI_LOCKED)\" \"$(pi_saved_fn x)\"; \
+	             pi_saved_alias; printf '|%s|%s|%s|%s' \"$(set -o | grep pipefail)\" \"$PWD\" \
+	             \"$PI_RC_PATH\" \"$(pi_rc_fn)\"";
+	// A variable the shell changed keeps its value, attributes included.
+	let want = format!(
+		"kept|rotated|mine|[unset]|declare -rx PI_LOCKED=\"host\"|fn:x|alias|pipefail       \
+		 \ton|{dir_path}|rc:host2|two"
+	);
+	// A fork taken before the resumed shell ran resumes the saved state too.
+	assert_eq!(run(&resumed.fork(), check, None).await, want);
+	assert_eq!(run(&resumed, check, None).await, want);
+	// Where an earlier process found a command is not taken over.
+	assert_eq!(
+		run(&resumed, "hash -t pi_hashed_tool 2>/dev/null || printf unhashed", None).await,
+		"unhashed"
+	);
+	assert!(matches!(SavedState::from_bytes(b"not a state"), Err(SavedStateError::Format)));
+	// Another engine build's (every release): refused, not misread.
+	let mut other_build = bytes.clone();
+	other_build[STATE_MAGIC.len()] ^= 1;
+	assert!(matches!(SavedState::from_bytes(&other_build), Err(SavedStateError::Incompatible)));
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn segmented_minimizer_trace_spans_submissions_without_early_completion() {

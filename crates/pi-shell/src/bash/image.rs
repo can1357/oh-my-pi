@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bash::{
 	cow_map::{CowMap, WeakCowMap},
-	store::{Attrs, Key, KeyBuf, Record, Table, Var, VarValue},
+	store::{Attrs, Key, KeyBuf, MiscKey, Record, Table, Var, VarValue},
 };
 
 /// A host default whose lookup waits until a reader observes it
@@ -246,6 +246,12 @@ impl Image {
 		base
 	}
 
+	/// Whether `self` and `other` share every record: equal without looking
+	/// at one (`false` says nothing).
+	pub fn same_as(&self, other: &Self) -> bool {
+		self.vars.same_as(&other.vars) && self.records.same_as(&other.records)
+	}
+
 	/// A handle on the image's records other than variables (O(1)), to
 	/// recognise and reuse them ([`Self::shares_records`],
 	/// [`Self::set_records`]). It does not keep them shared: once no image
@@ -306,12 +312,23 @@ impl ImageDiff {
 	pub fn records(&self) -> impl Iterator<Item = &Record> {
 		self.records.iter().filter_map(|(_, r)| r.as_ref())
 	}
+
+	/// Leave out what a later process must not take over: the command hash
+	/// table (`hash`, where `PATH` found each command: another `PATH`, tools
+	/// moved or upgraded) and `$_` (the last command's last argument, which
+	/// changes with every command and may be a token passed on a command
+	/// line).
+	pub fn without_process_local(mut self) -> Self {
+		self
+			.records
+			.retain(|(key, _)| !matches!(key, KeyBuf::CmdHash(_) | KeyBuf::Misc(MiscKey::LastArg)));
+		self
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::bash::store::MiscKey;
 
 	fn scalar(v: &str) -> Record {
 		Record::Var(Var::scalar(v, Attrs::NONE))

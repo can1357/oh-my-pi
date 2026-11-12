@@ -74,8 +74,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
 	bash::{
 		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, MemStore, PipeTap,
-		Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit, Signal,
-		Step, ToolCall, VprocSel,
+		ProcessDiff, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit,
+		Signal, Step, ToolCall, VprocSel,
 		store::{Key, MiscKey, Record},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -295,6 +295,98 @@ impl Image {
 	pub fn cwd(&self) -> BString {
 		store_cwd(&self.0)
 	}
+
+	/// What this state changed since `base` (an earlier state of the same
+	/// session: the one its setup left), as bytes for a later process to
+	/// replay on a new session's setup ([`SavedState::from_bytes`],
+	/// [`Session::apply_state`]). The environment and the user's shell
+	/// configuration the setup brings are left out unless the shell changed
+	/// them, so a resumed session takes them fresh (and the secrets a host
+	/// forwards stay off disk). A header names this engine build and the
+	/// record schema.
+	pub fn to_bytes(&self, base: &Self) -> Vec<u8> {
+		let diff = self.0.process_diff(&base.0);
+		let mut bytes = Vec::from(STATE_MAGIC);
+		bytes.extend_from_slice(&Engine::build_id());
+		bytes.extend_from_slice(&*STATE_SCHEMA);
+		postcard::to_extend(&diff, bytes).expect("encoding to a vector is infallible")
+	}
+
+	/// Whether `self` and `other` hold the same process state
+	/// ([`MemStore::process_state`]) as far as sharing tells: `true` only
+	/// when nothing changed between them (`false` says nothing). O(1) in
+	/// the records.
+	pub fn same_state(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.0, &other.0) || self.0.same_process_state(&other.0)
+	}
+}
+
+/// A state [`Image::to_bytes`] saved: what a session changed after its
+/// setup, to replay on a new one ([`Session::apply_state`]).
+#[derive(Clone, Debug)]
+pub struct SavedState(Arc<ProcessDiff>);
+
+impl SavedState {
+	/// The state in `bytes`.
+	///
+	/// # Errors
+	/// [`SavedStateError::Format`] for bytes that are no shell state,
+	/// [`SavedStateError::Incompatible`] for one another engine build or record
+	/// schema wrote (its records and compiled bodies may not decode the
+	/// same), [`SavedStateError::Corrupt`] when the records do not decode.
+	pub fn from_bytes(bytes: &[u8]) -> Result<Self, SavedStateError> {
+		let rest = bytes
+			.strip_prefix(&STATE_MAGIC)
+			.ok_or(SavedStateError::Format)?;
+		let (build, rest) = rest.split_at_checked(32).ok_or(SavedStateError::Format)?;
+		let (schema, rest) = rest.split_at_checked(32).ok_or(SavedStateError::Format)?;
+		if build != Engine::build_id() || schema != *STATE_SCHEMA {
+			return Err(SavedStateError::Incompatible);
+		}
+		let diff = postcard::from_bytes(rest)
+			.map_err(|err| SavedStateError::Corrupt(crate::bash::StoreError::Image(err)))?;
+		Ok(Self(Arc::new(diff)))
+	}
+}
+
+/// Fingerprint of the saved records' schema: the source of the modules
+/// defining what they encode (records, keys, attributes, ids, options,
+/// signals, compiled units). postcard encodes enums by variant index and
+/// structs by field order, so any change there must refuse an older state;
+/// hashing the definitions makes that automatic, at the cost of refusing
+/// one after an unrelated edit to them (a dev build; a release changes the
+/// build id anyway).
+static STATE_SCHEMA: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(|| {
+	let mut h = blake3::Hasher::new();
+	for source in [
+		include_str!("bash/store.rs"),
+		include_str!("bash/image.rs"),
+		include_str!("bash/mem_store.rs"),
+		include_str!("bash/ids.rs"),
+		include_str!("bash/zshopt.rs"),
+		include_str!("bash/signal.rs"),
+		include_str!("bash/ir/mod.rs"),
+	] {
+		h.update(source.as_bytes());
+	}
+	*h.finalize().as_bytes()
+});
+
+/// Leading bytes of a saved state ([`Image::to_bytes`]).
+pub(crate) const STATE_MAGIC: [u8; 4] = *b"OBSI";
+
+/// Why [`SavedState::from_bytes`] refused a saved state.
+#[derive(Debug, thiserror::Error)]
+pub enum SavedStateError {
+	/// The bytes are no saved shell state.
+	#[error("not a saved shell state")]
+	Format,
+	/// Another engine build saved it.
+	#[error("the shell state was saved by another build")]
+	Incompatible,
+	/// Its records do not decode.
+	#[error("the saved shell state is corrupt")]
+	Corrupt(#[source] crate::bash::StoreError),
 }
 
 /// The [`Image`] a [`Session`] published at its last command boundary.
@@ -471,6 +563,27 @@ impl Session {
 			.map_err(|_| SessionError::Closed)
 	}
 
+	/// Replay `state` (what an earlier session changed after its setup) on
+	/// this one, between commands: run it after this session's own setup
+	/// (environment fallback, shell-config snapshot), so the environment and
+	/// configuration it left out come fresh.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Closed`] when the session is closed.
+	pub async fn apply_state(&self, state: &SavedState) -> Result<(), SessionError> {
+		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
+		let (reply_tx, reply_rx) = flume::bounded(1);
+		jobs
+			.send(Request::Apply(ProcessDiff::clone(&state.0), reply_tx))
+			.map_err(|_| SessionError::Closed)?;
+		self.waker.wake_by_ref();
+		reply_rx
+			.recv_async()
+			.await
+			.map_err(|_| SessionError::Closed)
+	}
+
 	/// Run `command` with `stdio`; see [`Session::run_with`].
 	///
 	/// # Errors
@@ -617,6 +730,8 @@ enum Request {
 	Run(Job),
 	/// Count the background jobs running an external.
 	LiveJobs(flume::Sender<usize>),
+	/// Replay a saved state ([`Session::apply_state`]).
+	Apply(ProcessDiff, flume::Sender<()>),
 }
 
 /// One command for the driver.
@@ -650,6 +765,13 @@ impl Driver {
 				Ok(Request::Run(job)) => self.run(job).await,
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs());
+				},
+				Ok(Request::Apply(diff, reply)) => {
+					// Out-of-band writes: the shell re-derives what it knew of the
+					// store (options, locale, working directory) at its next step.
+					self.store.apply_process_diff(diff);
+					self.image.publish(&self.store);
+					let _ = reply.send(());
 				},
 				Err(flume::TryRecvError::Disconnected) => break,
 				Err(flume::TryRecvError::Empty) => self.idle_turn().await,
@@ -778,6 +900,10 @@ impl Driver {
 	fn restore_overlay(&mut self, saved: Vec<(BString, Option<Record>)>) {
 		for (name, record) in saved.into_iter().rev() {
 			let key = Key::Var(name.as_bstr());
+			// Unchanged (the run's env held the value it had): no write.
+			if self.store.record(key) == record.as_ref() {
+				continue;
+			}
 			match record {
 				// A variable record always fits a variable key.
 				Some(record) => drop(self.store.put_out_of_band(key, record)),

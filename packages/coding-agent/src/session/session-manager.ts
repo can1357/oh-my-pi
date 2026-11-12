@@ -29,6 +29,7 @@ import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
+import { SHELL_STATE_DIR } from "./shell-state";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
 import { ArtifactManager, type ArtifactManagerApi } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -203,6 +204,9 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 				recursive: true,
 				force: false,
 				errorOnExist: false,
+				// Saved shell states are keyed by session id, so a copy is never read (a fork starts a
+				// fresh shell), and they hold the shell's variables: tokens it fetched stay in one place.
+				filter: source => path.relative(sourceArtifactsDir, source).split(path.sep)[0] !== SHELL_STATE_DIR,
 			});
 		}
 	} catch (error) {
