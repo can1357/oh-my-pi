@@ -607,7 +607,7 @@ it("xd wire aliases keep edit's approval tier and cannot bypass ACP rejection", 
 	const content = JSON.stringify({ input });
 
 	for (const name of ["edit", "apply_patch"]) {
-		expect(write.approval({ path: `xd://${name}`, content })).toEqual({ tier: "write", policyKey: name });
+		expect(write.approval({ path: `xd://${name}`, content })).toEqual({ tier: "write", policyKey: "edit" });
 		const result = await write.execute(`xd-permission-${name}`, { path: `xd://${name}`, content });
 		expect(result.isError).toBe(true);
 		expect(result.content.find(entry => entry.type === "text")?.text).toContain("rejected by user");
