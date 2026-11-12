@@ -56,6 +56,10 @@ export function queuedEntryRank(entry: object): number {
 	return rank;
 }
 
+function hasQueuedEntryRank(entry: object): boolean {
+	return queuedEntryRanks.has(entry);
+}
+
 /**
  * Restored blocks per editor, kept while they still head the editor text.
  * Successive restores merge into the block set by rank (oldest first, draft
@@ -66,31 +70,40 @@ const editorRestoreBlocks = new WeakMap<CustomEditor, { text: string; rank: numb
 
 export function restoreQueuedDraftOrdered(editor: CustomEditor, entries: readonly RestoredQueuedMessage[]): number {
 	if (entries.length === 0) return 0;
-	// Assign first-seen ranks in array order before comparing: assigning ranks
-	// inside the comparator would let the sort decide the chronology.
-	for (const entry of entries) queuedEntryRank(entry);
-	const ordered = [...entries].sort((left, right) => queuedEntryRank(left) - queuedEntryRank(right));
-	const batchText = queuedDraftText(editor, ordered);
-	const batch = { text: batchText, rank: queuedEntryRank(ordered[ordered.length - 1]!) };
-	const blocks = editorRestoreBlocks.get(editor) ?? [];
-	const prefix = blocks.map(block => block.text).join("\n\n");
-	const expanded = editor.getExpandedText();
-	if (blocks.length > 0 && prefix && expanded.startsWith(prefix)) {
-		// Tracked blocks still head the draft: shift and merge only this batch,
-		// rebuild every restored block by rank, and keep the residual draft last.
-		const residual = expanded.slice(prefix.length).replace(/^\n+/, "");
-		restoreQueuedDraft(editor, ordered, residual);
-		const union = [...blocks, batch].sort((left, right) => left.rank - right.rank);
-		const merged = [union.map(block => block.text).join("\n\n"), residual]
-			.filter(text => text.trim())
-			.join("\n\n");
-		editor.setCollapsedText(merged);
-		editorRestoreBlocks.set(editor, union);
-	} else {
-		// No tracked blocks (or the user edited them away): plain prepend.
-		restoreQueuedDraft(editor, ordered);
-		editorRestoreBlocks.set(editor, [batch]);
+	const ranked = entries.every(entry => hasQueuedEntryRank(entry));
+	if (ranked) {
+		// Entries carry their enqueue chronology: merge into the tracked blocks by rank.
+		const ordered = [...entries].sort((left, right) => queuedEntryRank(left) - queuedEntryRank(right));
+		const batchText = queuedDraftText(editor, ordered);
+		const batch = { text: batchText, rank: queuedEntryRank(ordered[ordered.length - 1]!) };
+		const blocks = editorRestoreBlocks.get(editor) ?? [];
+		const prefix = blocks.map(block => block.text).join("\n\n");
+		const expanded = editor.getExpandedText();
+		if (blocks.length > 0 && prefix && expanded.startsWith(prefix)) {
+			// Tracked blocks still head the draft: shift and merge only this batch,
+			// rebuild every restored block by rank, and keep the residual draft last.
+			const residual = expanded.slice(prefix.length).replace(/^\n+/, "");
+			restoreQueuedDraft(editor, ordered, residual);
+			const union = [...blocks, batch].sort((left, right) => left.rank - right.rank);
+			const merged = [union.map(block => block.text).join("\n\n"), residual]
+				.filter(text => text.trim())
+				.join("\n\n");
+			editor.setCollapsedText(merged);
+			editorRestoreBlocks.set(editor, union);
+		} else {
+			// No tracked blocks (or the user edited them away): plain prepend.
+			restoreQueuedDraft(editor, ordered);
+			editorRestoreBlocks.set(editor, [batch]);
+		}
+		return entries.length;
 	}
+	// Freshly mapped entries (session-queue pops, yield requests) carry no enqueue
+	// chronology; dequeues arrive newest-first, so prepend the array as given and
+	// rank it now only to keep later queue-path comparisons monotonic.
+	const batchText = queuedDraftText(editor, entries);
+	restoreQueuedDraft(editor, entries);
+	for (const entry of entries) queuedEntryRank(entry);
+	editorRestoreBlocks.set(editor, [{ text: batchText, rank: nextQueuedEntryRank - 1 }]);
 	return entries.length;
 }
 

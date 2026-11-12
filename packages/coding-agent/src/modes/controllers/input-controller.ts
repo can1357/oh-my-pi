@@ -63,7 +63,7 @@ import {
 	guestRefusesSlashCommand,
 	lookupBuiltinSlashCommand,
 } from "../../slash-commands/builtin-registry";
-import { restoreDetachedDraft, restoreQueuedDraft, restoreQueuedDraftOrdered } from "../../slash-commands/helpers/draft";
+import { queuedEntryRank, restoreDetachedDraft, restoreQueuedDraft, restoreQueuedDraftOrdered } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -2466,10 +2466,10 @@ export class InputController {
 		this.ctx.yieldCompaction = undefined;
 		const allQueued = [
 			...steering,
-			...compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images })),
+			...compactionQueued.filter(e => e.mode === "steer"),
 			...followUp,
 			...(yieldCompaction ? [{ text: yieldCompaction.text }] : []),
-			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
+			...compactionQueued.filter(e => e.mode === "followUp"),
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
 		if (options?.abort) {

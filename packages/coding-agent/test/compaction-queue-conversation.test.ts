@@ -295,6 +295,26 @@ describe("compaction queue conversation ownership", () => {
 		expect(h.editor.getExpandedText()).toBe("older queued\n\nnewer queued\n\ncurrent draft");
 	});
 
+	it("restores repeated Alt+Up dequeues of session-queue follow-ups in submission order", async () => {
+		const h = await harness(pi => {
+			pi.on("provider_request", () => new Promise<void>(() => {}));
+		});
+		const running = h.session.prompt("streaming turn");
+		try {
+			await Bun.sleep(10);
+			await h.session.followUp("older follow-up");
+			await h.session.followUp("newer follow-up");
+			h.editor.setText("current draft");
+			h.input.handleDequeue();
+			h.input.handleDequeue();
+			expect(h.session.getQueuedMessages()).toMatchObject({ steering: [], followUp: [] });
+			expect(h.editor.getExpandedText()).toBe("older follow-up\n\nnewer follow-up\n\ncurrent draft");
+		} finally {
+			h.session.abort({ reason: "test teardown" });
+			await running.catch(() => {});
+		}
+	});
+
 	it("merges three overlapping restores and a controller-path restore in submission order", async () => {
 		const h = await harness();
 		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
