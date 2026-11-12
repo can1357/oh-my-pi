@@ -1291,7 +1291,7 @@ async fn insert_typed_text(
 	let length = before.chars().count();
 	// A field showing a mask hides its text (a GTK 4 entry with visibility off
 	// is a plain `Text`), so where its caret falls cannot be checked.
-	if masked(&before) || length != before.encode_utf16().count() {
+	if crate::desktop::ax::masked(&before) || length != before.encode_utf16().count() {
 		return ABSENT;
 	}
 	// Focusing a GTK single-line entry selects its whole text
