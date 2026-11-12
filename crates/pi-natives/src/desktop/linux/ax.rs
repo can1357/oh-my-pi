@@ -2569,9 +2569,16 @@ mod tests {
 				..field("/backward", "hello world", 3, Outcome::Taken("hello AB", 8), 2)
 			},
 			Case { edits: Edits::Ignored, ..field("/gecko", "hello", 5, Outcome::NotTaken, 1) },
+			// The read-back repeats the written text, which an error never quotes.
 			Case {
 				edits: Edits::Garbled,
-				..field("/garbled", "hello", 5, Outcome::Reads(r#"now reads "helloAB?""#), 1)
+				..field(
+					"/garbled",
+					"hello",
+					5,
+					Outcome::Reads(r#"now reads "hello<the written text>?""#),
+					1,
+				)
 			},
 			// The selection went, the text did not: the field changed.
 			Case {
