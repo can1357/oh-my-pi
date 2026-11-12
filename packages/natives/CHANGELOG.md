@@ -30,6 +30,7 @@
 - Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS key presses on non-US keyboard layouts pressing the wrong key: on French AZERTY `cmd+a` quit the app and `cmd+z` closed the window; shortcuts now use the keys your layout puts those letters on, and a failed layout read stops before sending keys ([#18897](https://github.com/can1357/oh-my-pi/pull/18897) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows background shortcuts such as `ctrl+s` and `ctrl+a`, and Ctrl- or Shift-clicks, reporting success while classic Win32, WinForms and Qt apps got the plain key or click; background input holding Ctrl, Alt, Shift or the Windows key now throws `BackgroundUnavailable` with nothing sent, and the default `backgroundFallback` reruns it in takeover ([#18895](https://github.com/can1357/oh-my-pi/pull/18895) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
