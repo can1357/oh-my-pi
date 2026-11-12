@@ -154,9 +154,13 @@ await win.click(120, 48, button="right")
   Desktop capture defaults to the monitor containing the focused window, with primary-monitor fallback; an explicit `all` setting captures the combined desktop.
 - An element keeps its `[ref=eN]` across `.ax()`/`find()` reads until its role or label changes;
   a ref whose element is missing from the window's last two `.ax()` snapshots throws `StaleRef`. Re-snapshot; NEVER guess.
+  - On macOS, an element action also refuses with `StaleRef`, sending nothing, if its element now reads with another role or label;
+    the error gives that element a new ref (`eN now reads as textfield "Street" [ref=eM]`).
   - On macOS, when the app destroyed the element, `StaleRef` may name a candidate
     (`eN destroyed; eM is the one element in the window with the role, labels and value eN was read with`),
     only for a ref from a read of the whole window (never one cut short by `maxDepth` or a node limit).
+  - A relabelled-element refusal may instead name the one other candidate this read of the window found with the original role and label,
+    even if the read was cut short by `maxDepth` or a node limit; unseen matches may exist.
   - Equal fields do not prove `eM` is the same control: check it before acting on it.
 - Window input runs in the background without moving the user's pointer or activating the target, with or without acquired control.
   Pass `takeover` only in the one case below.
@@ -196,8 +200,9 @@ await win.click(120, 48, button="right")
   and every other spelling `perform()` takes for `AXOpen` and `AXShowMenu` are refused too.
 - On macOS, `AxUnconfirmed` means an AX action may already have taken effect.
   Inspect fresh AX or a screenshot before repeating it; NEVER retry blindly.
-- `UserIntervened` (macOS): the user came to that app, or typed or clicked in it, during the call;
-  nothing more was sent, and the tool never reruns it in takeover.
+- `UserIntervened` (macOS or X11): on macOS the user came to that app, or typed or clicked in it;
+  on X11 they kept typing or clicking until the takeover's admission deadline, or pressed a key or button during takeover.
+  Nothing more was sent, and the tool never reruns it in takeover.
   - The user's edits stand: NEVER undo or retype over them.
   - Read that window again (`win.ax()`, `win.observe()` or `win.screenshot()`) and continue the task from what it shows.
 - After changing the UI, verify the expected state with fresh AX evidence or a screenshot.

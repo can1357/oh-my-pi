@@ -13,6 +13,8 @@ mod menus;
 mod session;
 #[cfg(target_os = "windows")]
 pub(super) use session::screen_state;
+#[cfg(any(target_os = "windows", test))]
+mod value_write;
 #[cfg(target_os = "windows")]
 mod window;
 

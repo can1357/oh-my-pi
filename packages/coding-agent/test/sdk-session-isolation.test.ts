@@ -521,13 +521,85 @@ describe("createAgentSession session storage isolation", () => {
 					enableLsp: false,
 				});
 				try {
-					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(
-						"token sdk-secret-token-123456",
-					);
+					const displayed = () =>
+						getAssistantText(
+							session.buildTranscriptSessionContext().messages.at(-1) as AssistantMessage | undefined,
+						);
+					// The agent replays the model's placeholder form; the transcript shows the value.
+					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(placeholder);
+					expect(displayed()).toBe("token sdk-secret-token-123456");
 					await session.reload();
-					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(
-						"token sdk-secret-token-123456",
-					);
+					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(placeholder);
+					expect(displayed()).toBe("token sdk-secret-token-123456");
+				} finally {
+					await session.dispose();
+				}
+			});
+		});
+	});
+
+	it("restores a regex-found value after its plaintext was compacted out and the session resumed", async () => {
+		await withClearedSecretEnv(async () => {
+			await withTempConfigRoot(async () => {
+				const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-session-compacted-${Snowflake.next()}-`));
+				tempDirs.push(tempDir);
+				const cwd = path.join(tempDir, "project");
+				const agentDir = path.join(tempDir, "agent");
+				fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
+				fs.writeFileSync(path.join(cwd, ".omp", "secrets.yml"), '- type: regex\n  content: "tok_[a-z0-9]{12}"\n');
+
+				const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+				if (!model) throw new Error("Expected anthropic model");
+				const secret = "tok_abcdef123456";
+				const placeholder = new secrets.SecretObfuscator(
+					[{ type: "regex", content: "tok_[a-z0-9]{12}" }],
+					await secrets.getSecretPlaceholderKey(agentDir),
+				).obfuscate(secret);
+				const initialManager = SessionManager.create(cwd, path.join(agentDir, "sessions"));
+				initialManager.appendMessage({ role: "user", content: `use ${secret}`, timestamp: Date.now() });
+				const keptId = initialManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				});
+				initialManager.appendCompaction(`The user gave ${placeholder}.`, undefined, keptId, 100);
+				await initialManager.flush();
+				const sessionFile = initialManager.getSessionFile();
+				if (!sessionFile) throw new Error("Expected persisted session file");
+				await initialManager.close();
+
+				const { session } = await createAgentSession({
+					cwd,
+					agentDir,
+					modelRegistry: sharedModelRegistry,
+					sessionManager: await SessionManager.open(sessionFile, path.dirname(sessionFile)),
+					model,
+					settings: Settings.isolated({ "secrets.enabled": true }),
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+				});
+				try {
+					// The plaintext is no longer in the context the agent replays...
+					expect(JSON.stringify(session.messages)).not.toContain(secret);
+					// ...but the summary's placeholder still restores where a tool would run it.
+					expect(session.obfuscator?.deobfuscate(`echo ${placeholder}`)).toBe(`echo ${secret}`);
 				} finally {
 					await session.dispose();
 				}

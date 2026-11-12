@@ -14,7 +14,8 @@ import type { Settings } from "../config/settings";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-widget-system.md" with { type: "text" };
 import userPrompt from "../prompts/system/job-widget-user.md" with { type: "text" };
-import { CREDENTIAL_PATTERNS } from "../secrets/patterns";
+import { compiledCredentialPatterns } from "../secrets/patterns";
+import { replaceSecretMatches } from "../secrets/regex";
 import type { CostGateApi } from "../session/cost-gate";
 import type { JobWidgetSourceSample } from "./runtime";
 import { JOB_WIDGET_SPEC_SCHEMA, type JobWidgetSpec } from "./spec";
@@ -48,11 +49,6 @@ const MAX_SHAPE_REPEATS = 3;
 /** Output cap of a spec request: the largest valid spec stays well under it, a runaway answer does not. */
 const MAX_SPEC_TOKENS = 3000;
 
-const CREDENTIAL_REGEXES = CREDENTIAL_PATTERNS.map(pattern => ({
-	name: pattern.name,
-	regex: new RegExp(pattern.source, `g${pattern.flags ?? ""}`),
-}));
-
 /**
  * Text bound for the author model with secrets removed: the session's secret
  * obfuscator when it has secrets, then the built-in credential shapes
@@ -60,9 +56,8 @@ const CREDENTIAL_REGEXES = CREDENTIAL_PATTERNS.map(pattern => ({
  */
 export function redactWidgetSample(text: string, obfuscate?: (text: string) => string): string {
 	let out = obfuscate ? obfuscate(text) : text;
-	for (const { name, regex } of CREDENTIAL_REGEXES) {
-		regex.lastIndex = 0;
-		if (regex.test(out)) out = out.replace(regex, `[${name} redacted]`);
+	for (const { name, regex } of compiledCredentialPatterns()) {
+		out = replaceSecretMatches(regex, out, `[${name} redacted]`);
 	}
 	return out;
 }

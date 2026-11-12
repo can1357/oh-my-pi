@@ -57,6 +57,7 @@ pub mod oauth_callback;
 /// PDF inspection and Markdown conversion.
 pub mod pdf;
 pub mod predict;
+pub mod secret_scan;
 pub mod sixel;
 pub mod snapcompact;
 pub mod spelling;
