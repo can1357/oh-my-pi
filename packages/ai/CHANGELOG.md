@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Added
 
 - Added the `liquid-systemone` judgment API for Liquid AI decision models, including validation that rejects image sets exceeding Liquid’s 10,000 32×32-patch request limit before submission.

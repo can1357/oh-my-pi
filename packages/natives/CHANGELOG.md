@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Added
 
 - Added `shellBuiltins(sessionEnv?)` to list commands provided by the embedded shell, including process controls and utilities.

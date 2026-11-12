@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Added
 
 - GitHub Actions watch cards now show current-step progress and can be expanded with Ctrl+O to display ordered step states and durations in ANSI and native Tern views.

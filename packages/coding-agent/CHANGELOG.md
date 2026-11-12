@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Breaking Changes
 
 - Changed the browser `open` API: `ignore_https_errors` is now `insecure`, `allow_file_access` has been removed, and `file:` pages can access other local files.

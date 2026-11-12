@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Added
 
 - Added browser utilities exposing trusted browser archive extraction limits and the installed WebKit host executable path.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Added
 
 - Added Liquid AI provider support with the d1.1 and d1-ultra judge models and Liquid authentication via `/login liquid` using `LIQUID_API_KEY`.

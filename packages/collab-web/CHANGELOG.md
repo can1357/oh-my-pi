@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Fixed
 
 - Fixed `task` tool cards so spawned tasks consistently display their name, assigned agent, and instructions, with `steps` spawns shown as numbered stages.
