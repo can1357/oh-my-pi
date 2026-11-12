@@ -536,6 +536,7 @@ const observeStates = (el, role, focused) => {
 };
 const observeValue = (el, role) => {
 	const tag = el.localName;
+	if (tag === "input" && inputType(el) === "password") return el.value ? "•".repeat(String(el.value).length) : undefined;
 	if (tag === "select" && role === "combobox") {
 		return el.selectedOptions[0] ? normalizeSpace(el.selectedOptions[0].text) : undefined;
 	}
