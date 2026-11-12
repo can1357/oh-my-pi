@@ -423,7 +423,7 @@ describe("running task progress in wait and jobs rows", () => {
 		);
 	});
 
-	test("#given a retry whose delay has elapsed and whose error runs long #when wait renders #then the row says the retry was sent and cuts the error to one short line", async () => {
+	test("#given a retry whose delay has elapsed and whose error runs long #when wait renders #then the row says the retry is due and cuts the error to one short line", async () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const jobId = await registerRunningJob(manager, "task", "Overdue", {
 			retryState: {
@@ -439,6 +439,6 @@ describe("running task progress in wait and jobs rows", () => {
 			.split("\n")
 			.find(line => line.startsWith(`- \`${jobId}\``));
 
-		expect(row).toMatch(new RegExp(` — \\S+ · retry 1/10 sent, last error: x{79}…$`));
+		expect(row).toMatch(new RegExp(` — \\S+ · retry 1/10 due, last error: x{79}…$`));
 	});
 });

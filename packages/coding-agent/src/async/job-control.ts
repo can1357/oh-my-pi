@@ -22,7 +22,7 @@ import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 
 import { formatDuration, formatNumber, previewLine } from "@oh-my-pi/pi-tui/render/render-utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type {
 	AgentActivitySnapshot,
 	CancelOutcome,
@@ -267,9 +267,8 @@ const RETRY_ERROR_MAX_WIDTH = 80;
  * snapshot time so rows built from one snapshot agree, and the provider error
  * is sanitized, collapsed to one line and capped before it is stored.
  */
-function retrySnapshot(value: unknown, now: number): JobSnapshot["retry"] {
-	if (typeof value !== "object" || value === null) return undefined;
-	const state = value as Record<string, unknown>;
+function retrySnapshot(state: unknown, now: number): JobSnapshot["retry"] {
+	if (!isRecord(state)) return undefined;
 	const attempt = finiteNumber(state.attempt);
 	const maxAttempts = finiteNumber(state.maxAttempts);
 	if (attempt === undefined || maxAttempts === undefined) return undefined;
@@ -294,8 +293,9 @@ function retrySnapshot(value: unknown, now: number): JobSnapshot["retry"] {
  * A task in an automatic retry leads with it, so a row that is only
  * re-sending a failed request does not read as work:
  * ` — 6m15s · retrying 7/10 in 45s: usage limit reached · 7 req` while it
- * waits, then ` — 6m16s · retry 7/10 sent, last error: usage limit reached`
- * once the delay has elapsed and the retried request is in flight.
+ * waits, then ` — 6m16s · retry 7/10 due, last error: usage limit reached`
+ * once the delay has elapsed. The record does not say whether the retried
+ * request has gone out yet, so the row claims only that the wait is over.
  * Returns `""` for any other row and for a running task without progress
  * fields, so those rows keep their plain shape; duration alone never makes a
  * suffix. Pass `duration: false` where the row already shows the run time.
@@ -308,7 +308,7 @@ export function runningTaskProgressSuffix(job: JobSnapshot, options: { duration:
 		parts.push(
 			remainingMs > 0
 				? `retrying ${attempt}/${maxAttempts} in ${formatDuration(remainingMs)}${errorMessage ? `: ${errorMessage}` : ""}`
-				: `retry ${attempt}/${maxAttempts} sent${errorMessage ? `, last error: ${errorMessage}` : ""}`,
+				: `retry ${attempt}/${maxAttempts} due${errorMessage ? `, last error: ${errorMessage}` : ""}`,
 		);
 	}
 	if (job.requests !== undefined && job.requests > 0) parts.push(`${job.requests} req`);
