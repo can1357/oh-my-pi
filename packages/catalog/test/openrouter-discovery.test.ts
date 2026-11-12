@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 
 const CHAT_PAYLOAD = {
 	data: [
@@ -283,10 +284,14 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		const result = await resolveProviderModels(
 			{
 				...openrouterModelManagerOptions({
-					fetch: async input =>
-						String(input).endsWith("/models?output_modalities=decisions")
-							? Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] })
-							: new Response(null, { status: 404 }),
+					fetch: async input => {
+						const url = String(input);
+						if (url.endsWith("/models?output_modalities=decisions")) {
+							return Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] });
+						}
+						if (url === "https://openrouter.ai/api/v1/models") return Response.json(CHAT_PAYLOAD);
+						return new Response(null, { status: 404 });
+					},
 				}),
 				staticModels: [],
 				cacheDbPath: ":memory:",
@@ -300,5 +305,45 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			contextWindow: null,
 			maxTokens: null,
 		});
+	});
+
+	it("limits chat models to the keyed roster, dropping bundled rows guardrails hide", async () => {
+		// A key whose workspace guardrails allow-list one model gets a one-row `/models`.
+		const result = await resolveProviderModels(
+			{
+				...openrouterModelManagerOptions({
+					apiKey: "sk-or-test",
+					fetch: async input =>
+						String(input) === "https://openrouter.ai/api/v1/models"
+							? Response.json({ data: [CHAT_PAYLOAD.data[0]] })
+							: new Response(null, { status: 404 }),
+				}),
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+
+		expect(result.models.filter(model => modelKind(model) === "chat").map(model => model.id)).toEqual([
+			"openrouter/auto",
+		]);
+	});
+
+	it("keeps the bundled chat roster when only the chat endpoint fails", async () => {
+		const result = await resolveProviderModels(
+			{
+				...openrouterModelManagerOptions({
+					fetch: async input => {
+						const url = String(input);
+						if (url.endsWith("/images/models")) return Response.json(IMAGE_PAYLOAD);
+						if (url === "https://openrouter.ai/api/v1/models") throw new Error("chat endpoint unavailable");
+						return new Response(null, { status: 404 });
+					},
+				}),
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+
+		expect(result.models.some(model => model.id === "openai/gpt-5.5" && model.api === "openrouter")).toBe(true);
 	});
 });
