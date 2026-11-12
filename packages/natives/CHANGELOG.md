@@ -7,6 +7,7 @@
 - Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
 ### Added
 
+- Added the secret-rule engine: `SecretRegex` runs a Rust `regex` secret rule over a `SecretText` and reports the span it redacts (its `secret` group, else the whole match) in UTF-16 offsets, and `SecretScanner` answers in one Aho-Corasick pass which rules match a text and whether a configured literal occurs, with `scanMany` scanning a batch across cores ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
 - `DirectoryWatcher` changes say whether their entry is a directory, and `close()` returns without waiting for the watcher thread to cancel its reads (a network round trip on shares)
 ### Fixed
