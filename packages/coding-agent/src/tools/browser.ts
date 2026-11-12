@@ -265,10 +265,7 @@ export function resolveBrowserKind(
 		if (ternKind) return ternKind;
 	}
 	if (!subagent) {
-		const cmuxKind = resolveCmuxKind(
-			{ settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings) },
-			env,
-		);
+		const cmuxKind = resolveCmuxKind({ settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings) }, env);
 		if (cmuxKind) return cmuxKind;
 	}
 	return ownBrowserKind(params, session, env);
