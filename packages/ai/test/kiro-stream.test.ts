@@ -232,7 +232,7 @@ test("releases the stalled HTTP connection on first-event and idle timeouts, dis
 		const fetch: FetchImpl = (_input, init) => globalThis.fetch(server.url, init);
 		for (const [index, [message, frame]] of cases.entries()) {
 			head = frame;
-			const { result } = await run(recovered, { fetch, streamFirstEventTimeoutMs: 50, streamIdleTimeoutMs: 50 });
+			const { result } = await run(recovered, { fetch, streamFirstEventTimeoutMs: 250, streamIdleTimeoutMs: 250 });
 			expect(result.errorMessage).toContain(message);
 			expect(AIError.is(result.errorId, AIError.Flag.Timeout)).toBe(true);
 			// Resolves only once the server sees the connection closed.
