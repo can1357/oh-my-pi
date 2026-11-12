@@ -117,6 +117,12 @@ const APPROVE_OPTION = "Approve and execute";
 const REFINE_OPTION = "Refine plan";
 /** Title of the free-text property each `askDialog` question gets beside its options. */
 const OTHER_OPTION = "Other (type your own)";
+/**
+ * Suffix of the free-text "Other" property beside a choice property, shared by
+ * `askDialog` and HTML forms; clients such as Orca merge `<key>__other` into
+ * the `<key>` choice instead of rendering it as a separate question.
+ */
+const OTHER_SUFFIX = "__other";
 const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
@@ -667,14 +673,15 @@ function formElicitationMessage(form: HtmlForm): string {
 
 /**
  * Property holding each "Other" choice field's free-text answer:
- * `<name>_other`, with more underscores while another control already uses it.
+ * `<name>__other` ({@link OTHER_SUFFIX}), with more underscores while another
+ * control already uses it.
  */
 function otherProperties(form: HtmlForm): Map<ChoiceField, string> {
 	const taken = new Set([...form.fields.map(field => field.name), ...form.hidden.map(([name]) => name)]);
 	const properties = new Map<ChoiceField, string>();
 	for (const field of form.fields) {
 		if (field.kind !== "choice" || !field.other || !field.name) continue;
-		let property = `${field.name}_other`;
+		let property = `${field.name}${OTHER_SUFFIX}`;
 		while (taken.has(property)) property += "_";
 		taken.add(property);
 		properties.set(field, property);
@@ -894,7 +901,7 @@ export function createAcpExtensionUiContext(
 						};
 					}
 				}
-				properties[`${key}__other`] = { type: "string", title: OTHER_OPTION };
+				properties[`${key}${OTHER_SUFFIX}`] = { type: "string", title: OTHER_OPTION };
 			}
 
 			let timedOut = false;
@@ -920,7 +927,7 @@ export function createAcpExtensionUiContext(
 				kind: "submit",
 				results: questions.map((question, index) => {
 					const key = `q${index}`;
-					const otherKey = `${key}__other`;
+					const otherKey = `${key}${OTHER_SUFFIX}`;
 					const labels = question.options.map(option => option.label);
 					const otherValue = content[otherKey];
 					const customInput = typeof otherValue === "string" && otherValue.trim() ? otherValue.trim() : undefined;
