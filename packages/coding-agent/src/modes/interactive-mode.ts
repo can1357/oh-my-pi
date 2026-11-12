@@ -4241,7 +4241,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		setTableCharts("smart", request =>
-			mode === "auto" && !hasNativeJudge(this.settings, this.session.modelRegistry)
+			mode === "auto" && !hasNativeJudge(this.settings, this.session.modelRegistry, this.session.model)
 				? undefined
 				: pickTableChart(request, this.session.tableChartJudge()),
 		);
@@ -9411,6 +9411,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			settings: this.settings,
 			registry: this.session.modelRegistry,
 			getSessionId: () => this.session.sessionId,
+			getSessionProvider: () => this.session.model?.provider,
 		});
 		return this.#sttController;
 	}
