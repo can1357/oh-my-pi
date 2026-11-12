@@ -233,6 +233,7 @@ impl Backend for Win32Backend {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
 	use std::{
+		fmt::Write as _,
 		io::{BufRead, BufReader, Write},
 		process::{Child, Command, Stdio},
 		time::Duration,
@@ -241,14 +242,14 @@ mod tests {
 	use windows_sys::Win32::{
 		Foundation::HWND,
 		UI::WindowsAndMessaging::{
-			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetForegroundWindow, GetMessageW, MSG,
-			SendMessageW, SetForegroundWindow, TranslateMessage, WM_GETTEXT, WS_OVERLAPPEDWINDOW,
-			WS_VISIBLE,
+			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, ES_AUTOHSCROLL, GetForegroundWindow,
+			GetMessageW, MSG, PostMessageW, SendMessageW, SetForegroundWindow, TranslateMessage,
+			WM_APP, WM_GETTEXT, WM_KEYDOWN, WM_SETTEXT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 		},
 	};
 
 	use super::*;
-	use crate::desktop::control::CancellationSource;
+	use crate::desktop::control::{self, CancellationSource};
 
 	fn wide(text: &str) -> Vec<u16> {
 		text.encode_utf16().chain(Some(0)).collect()
@@ -259,11 +260,17 @@ mod tests {
 	/// Set for the copy of this test binary that hosts the windows.
 	const HOST: &str = "OMP_TAKEOVER_TEST_WINDOWS";
 
+	/// Posted to the target window: once its thread reads the next key-down,
+	/// it stops reading messages for `wParam` milliseconds, as a busy app's
+	/// does, and the rest of the keys wait in its queue.
+	const HANG: u32 = WM_APP;
+
 	/// Two top-level edit windows in another process, as another app's would
-	/// be: the user's window and the takeover target. `windows()` leaves out
-	/// this process's own windows, so a copy of this test binary running
-	/// `takeover_test_windows` opens them and pumps their messages until it is
-	/// killed. Their text is their title, which `windows()` needs to list them.
+	/// be: the user's window and the takeover target, each on its own thread.
+	/// `windows()` leaves out this process's own windows, so a copy of this
+	/// test binary running `takeover_test_windows` opens them and pumps their
+	/// messages until it is killed. Their text is their title, which
+	/// `windows()` needs to list them.
 	struct Windows {
 		user:   HWND,
 		target: HWND,
@@ -297,7 +304,7 @@ mod tests {
 		}
 
 		fn text(window: HWND) -> String {
-			let mut buffer = [0u16; 256];
+			let mut buffer = [0u16; 1024];
 			// SAFETY: `buffer` holds the length WM_GETTEXT is told.
 			let length =
 				unsafe { SendMessageW(window, WM_GETTEXT, buffer.len(), buffer.as_mut_ptr() as isize) };
@@ -316,12 +323,12 @@ mod tests {
 	/// handles and pumps their messages until it is killed. Run any other way,
 	/// it returns at once.
 	#[test]
-	#[ignore = "the window host of element_takeover_hands_the_foreground_back_to_the_users_window"]
+	#[ignore = "the window host of the takeover tests"]
 	fn takeover_test_windows() {
 		if std::env::var_os(HOST).is_none() {
 			return;
 		}
-		let create = |title: &str| {
+		fn create(title: &str) -> HWND {
 			let (class, text) = (wide("EDIT"), wide(title));
 			// SAFETY: both strings are NUL-terminated and outlive the call;
 			// EDIT is a system class, so no instance handle is needed.
@@ -330,7 +337,7 @@ mod tests {
 					0,
 					class.as_ptr(),
 					text.as_ptr(),
-					WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+					WS_OVERLAPPEDWINDOW | WS_VISIBLE | ES_AUTOHSCROLL as u32,
 					CW_USEDEFAULT,
 					CW_USEDEFAULT,
 					400,
@@ -341,19 +348,41 @@ mod tests {
 					std::ptr::null(),
 				)
 			}
-		};
-		let (user, target) = (create(USER), create(TARGET));
-		assert!(!user.is_null() && !target.is_null());
-		println!("windows {} {}", user as usize, target as usize);
-		std::io::stdout().flush().unwrap();
-		// SAFETY: `message` is writable for each call.
-		unsafe {
-			let mut message: MSG = std::mem::zeroed();
-			while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
-				TranslateMessage(&message);
-				DispatchMessageW(&message);
+		}
+		/// Pumps this thread's messages; [`HANG`] stops it for a while at the
+		/// next key-down.
+		fn pump() {
+			let mut hang = 0;
+			// SAFETY: `message` is writable for each call.
+			unsafe {
+				let mut message: MSG = std::mem::zeroed();
+				while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+					if message.message == HANG {
+						hang = message.wParam as u64;
+						continue;
+					}
+					if message.message == WM_KEYDOWN && hang != 0 {
+						std::thread::sleep(Duration::from_millis(hang));
+						hang = 0;
+					}
+					TranslateMessage(&message);
+					DispatchMessageW(&message);
+				}
 			}
 		}
+
+		let (sender, receiver) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let user = create(USER);
+			sender.send(user as usize).unwrap();
+			pump();
+		});
+		let user = receiver.recv().unwrap();
+		let target = create(TARGET);
+		assert!(user != 0 && !target.is_null());
+		println!("windows {user} {}", target as usize);
+		std::io::stdout().flush().unwrap();
+		pump();
 	}
 
 	#[test]
@@ -392,5 +421,72 @@ mod tests {
 		let typed = Windows::text(windows.target);
 		assert!(typed != TARGET && typed.contains('x'), "target text {typed:?}");
 		assert_eq!(Windows::text(windows.user), USER);
+	}
+
+	/// 240 characters, each block numbered so a dropped one shows.
+	fn long_text() -> String {
+		(0..30).fold(String::new(), |mut text, k| {
+			let _ = write!(text, "t{k:03}-ab ");
+			text
+		})
+	}
+
+	/// Types [`long_text`] in takeover into the emptied target, whose thread
+	/// stops reading messages for `hang` at the first key, starting with the
+	/// user's window in front; returns the call's result and its unconfirmed
+	/// report.
+	fn type_into_busy_target(windows: &Windows, hang: Duration) -> (CoreResult<()>, Option<String>) {
+		let mut backend = Win32Backend::new(DisplaySelector::Active).unwrap();
+		let empty = wide("");
+		// SAFETY: WM_SETTEXT copies the NUL-terminated string before it
+		// returns; the handles are windows this test's host created.
+		unsafe {
+			SendMessageW(windows.target, WM_SETTEXT, 0, empty.as_ptr() as isize);
+			SetForegroundWindow(windows.user);
+		}
+		assert!(
+			window::wait_for_foreground(windows.user, Duration::from_secs(2)).unwrap(),
+			"this process cannot take the foreground; run it from a focused terminal"
+		);
+		// SAFETY: posts a plain message to a window this test's host created.
+		unsafe { PostMessageW(windows.target, HANG, usize::try_from(hang.as_millis()).unwrap(), 0) };
+		let token = CancellationSource::default().token();
+		control::take_text_unconfirmed();
+		let result = backend.type_text(
+			&Target::Window((windows.target as usize).to_string()),
+			&long_text(),
+			DeliveryMode::ForegroundReturnFocus,
+			&token,
+		);
+		(result, control::take_text_unconfirmed())
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn takeover_typing_hands_the_foreground_back_once_a_busy_target_read_the_text() {
+		let windows = Windows::open();
+		let (result, unconfirmed) = type_into_busy_target(&windows, Duration::from_millis(1500));
+		result.unwrap();
+		assert_eq!(unconfirmed, None);
+		// SAFETY: no preconditions.
+		assert_eq!(unsafe { GetForegroundWindow() }, windows.user);
+		// The target read every key before the foreground went back: none
+		// reached the user's window.
+		assert_eq!(Windows::text(windows.target), long_text());
+		assert_eq!(Windows::text(windows.user), USER);
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn takeover_typing_into_a_hung_target_says_the_text_is_unconfirmed() {
+		let windows = Windows::open();
+		let (result, unconfirmed) = type_into_busy_target(&windows, Duration::from_secs(8));
+		result.unwrap();
+		// The 5 s wait runs out, or Windows puts a ghost window in front of
+		// the hung one first.
+		let reason = unconfirmed.expect("the call reported the text unconfirmed");
+		assert!(reason.contains("read all the typed text"), "{reason}");
 	}
 }
