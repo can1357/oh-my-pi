@@ -22,6 +22,7 @@ import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import type {
 	AgentActivitySnapshot,
 	CancelOutcome,
@@ -257,13 +258,14 @@ function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-/** Longest retry error kept on a job row; provider messages can run to paragraphs. */
+/** Longest retry error kept on a job snapshot and its row; provider messages can run to paragraphs. */
 const RETRY_ERROR_MAX_CHARS = 80;
 
 /**
- * The automatic retry a task agent is waiting on, read from its progress
- * record's `retryState` (see `AgentProgress.retryState`). The remaining wait is
- * fixed at snapshot time so rows built from one snapshot agree.
+ * The automatic retry a task agent is in, read from its progress record's
+ * `retryState` (see `AgentProgress.retryState`). The remaining wait is fixed at
+ * snapshot time so rows built from one snapshot agree, and the provider error
+ * is sanitized, collapsed to one line and capped before it is stored.
  */
 function retrySnapshot(value: unknown, now: number): JobSnapshot["retry"] {
 	if (typeof value !== "object" || value === null) return undefined;
@@ -273,7 +275,10 @@ function retrySnapshot(value: unknown, now: number): JobSnapshot["retry"] {
 	if (attempt === undefined || maxAttempts === undefined) return undefined;
 	const startedAtMs = finiteNumber(state.startedAtMs) ?? now;
 	const delayMs = finiteNumber(state.delayMs) ?? 0;
-	const errorMessage = typeof state.errorMessage === "string" ? state.errorMessage.replace(/\s+/g, " ").trim() : "";
+	const errorMessage =
+		typeof state.errorMessage === "string"
+			? truncate(sanitizeText(state.errorMessage).replace(/\s+/g, " ").trim(), RETRY_ERROR_MAX_CHARS)
+			: "";
 	return {
 		attempt,
 		maxAttempts,
@@ -286,9 +291,11 @@ function retrySnapshot(value: unknown, now: number): JobSnapshot["retry"] {
  * Progress suffix for a running task row, e.g.
  * ` — 5h7m · 90 req · $18.40 · ctx 160K/1M · stage: implementing`, from the
  * fields {@link snapshotJobs} copies out of the task's latest progress record.
- * A task waiting on an automatic retry leads with it, e.g.
- * ` — 6m15s · retrying 7/10 in 45s: usage limit reached · 7 req`, so a row
- * that is only re-sending a failed request does not read as work.
+ * A task in an automatic retry leads with it, so a row that is only
+ * re-sending a failed request does not read as work:
+ * ` — 6m15s · retrying 7/10 in 45s: usage limit reached · 7 req` while it
+ * waits, then ` — 6m16s · retry 7/10 sent, last error: usage limit reached`
+ * once the delay has elapsed and the retried request is in flight.
  * Returns `""` for any other row and for a running task without progress
  * fields, so those rows keep their plain shape; duration alone never makes a
  * suffix. Pass `duration: false` where the row already shows the run time.
@@ -297,12 +304,12 @@ export function runningTaskProgressSuffix(job: JobSnapshot, options: { duration:
 	if (job.type !== "task" || job.status !== "running") return "";
 	const parts: string[] = [];
 	if (job.retry) {
-		const wait = job.retry.remainingMs > 0 ? `in ${formatDuration(job.retry.remainingMs)}` : "now";
-		const error = job.retry.errorMessage;
-		const reason = error
-			? `: ${error.length > RETRY_ERROR_MAX_CHARS ? `${error.slice(0, RETRY_ERROR_MAX_CHARS - 1)}…` : error}`
-			: "";
-		parts.push(`retrying ${job.retry.attempt}/${job.retry.maxAttempts} ${wait}${reason}`);
+		const { attempt, maxAttempts, remainingMs, errorMessage } = job.retry;
+		parts.push(
+			remainingMs > 0
+				? `retrying ${attempt}/${maxAttempts} in ${formatDuration(remainingMs)}${errorMessage ? `: ${errorMessage}` : ""}`
+				: `retry ${attempt}/${maxAttempts} sent${errorMessage ? `, last error: ${errorMessage}` : ""}`,
+		);
 	}
 	if (job.requests !== undefined && job.requests > 0) parts.push(`${job.requests} req`);
 	if (job.cost !== undefined && job.cost > 0) parts.push(job.cost < 0.005 ? "<$0.01" : `$${job.cost.toFixed(2)}`);
