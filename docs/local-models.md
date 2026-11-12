@@ -214,6 +214,8 @@ The `speech` role accepts TTS catalog models and the `dictation` role accepts ST
 
 Kokoro voice selection remains independent of the model role. Set `tts.localVoice` for the `tts` tool and `speech.voice` for assistant-output vocalization. Available local voice ids are `af_heart` (default), `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`. Changing voices does not download another model. Speaking rate is likewise split: `tts.localSpeed` for the `tts` tool and `omp say`, `speech.speed` for vocalization (both default `1`, clamped to `0.5`–`2.5`).
 
+Enhanced vocalization (`speech.enhanced`) rewrites each block of the final reply into spoken prose with the tiny/smol model. To add instructions to that rewrite prompt without replacing it, set `speech.promptAppendFile` to a Markdown file; its contents are appended to the bundled prompt and read for each rewritten block. For example, a file containing `Keep every spoken reply to one to three sentences.` makes each spoken block a short summary. Relative paths resolve against the working directory and `~` expands to the home directory.
+
 ### Speech to text
 
 Use these canonical catalog model ids:

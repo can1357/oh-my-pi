@@ -55,6 +55,53 @@ describe("SpeechEnhancer rewriting", () => {
 		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1536 });
 	});
 
+	it("re-reads speech.promptAppendFile per rewrite and falls back when it is missing", async () => {
+		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!baseModel) throw new Error("Expected bundled Claude Sonnet 4.5 model");
+		const promptDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-speech-prompt-"));
+		modelConfigDirs.push(promptDir);
+		const promptFile = path.join(promptDir, "speech.md");
+		fs.writeFileSync(promptFile, "First instruction.\n");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${baseModel.provider}/${baseModel.id}` },
+			speech: { promptAppendFile: promptFile },
+		});
+		const registry = await createRegistry(settings, [baseModel]);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "Spoken text" }],
+		} as never);
+		const enhancer = new SpeechEnhancer({ settings, registry, sessionId: "session-prompt" });
+
+		await enhancer.rewrite("**Spoken text**");
+		fs.writeFileSync(promptFile, "Second instruction.\n");
+		await enhancer.rewrite("**Spoken text**");
+
+		const missingSettings = Settings.isolated({
+			modelRoles: { tiny: `${baseModel.provider}/${baseModel.id}` },
+			speech: { promptAppendFile: path.join(promptDir, "missing.md") },
+		});
+		const missingRegistry = await createRegistry(missingSettings, [baseModel]);
+		await new SpeechEnhancer({
+			settings: missingSettings,
+			registry: missingRegistry,
+			sessionId: "session-prompt-missing",
+		}).rewrite("**Spoken text**");
+
+		const [first, second, missing] = completeSimpleMock.mock.calls.map(call => {
+			const context = call[1] as { systemPrompt?: string[] } | undefined;
+			return context?.systemPrompt?.join("\n") ?? "";
+		});
+
+		expect(first).toContain("Rewrite coding-assistant replies");
+		expect(first).toContain("First instruction.");
+		expect(second).toContain("Second instruction.");
+		expect(second).not.toContain("First instruction.");
+		expect(missing).toContain("Rewrite coding-assistant replies");
+		expect(missing).not.toContain("First instruction.");
+		expect(missing).not.toContain("Second instruction.");
+	});
+
 	it("selects an available local-inference tiny model", async () => {
 		const localModel = getBundledModel("local", "lfm2.5-230m");
 		if (!localModel) throw new Error("Expected bundled local tiny model");
