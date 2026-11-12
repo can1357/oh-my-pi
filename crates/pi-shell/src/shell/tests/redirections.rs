@@ -1,7 +1,7 @@
-//! Where an external command's standard streams go under redirections,
-//! measured against Bash 5.2.21 and 5.3.0 running each script with `bash -c`
-//! (the bash tool runs a command string). Each script runs through
-//! [`Shell::run`] in a fresh directory.
+//! Where the shell's own diagnostics and an external command's standard
+//! streams go under redirections, measured against Bash 5.2.21 and 5.3.0
+//! running each script with `bash -c` (the bash tool runs a command string).
+//! Each script runs through [`Shell::run`] in a fresh directory.
 
 #![cfg(unix)]
 
@@ -86,6 +86,75 @@ async fn check(rows: &[Row]) {
 	);
 }
 
+const BOOM: Option<&str> = Some("missing: BOOM\n");
+
+/// A fatal expansion error in the body of a redirected compound command,
+/// function, `[[ ]]`, coprocess or process substitution goes through the
+/// redirection in force when it happens, as Bash writes it, not to the
+/// shell's own standard error after the redirection was undone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fatal_expansion_error_goes_through_the_redirection_in_force() {
+	let row = |script, output, status, files| Row { script, fifos: &[], output, status, files };
+	check(&[
+		row(r#"{ : "${missing:?BOOM}"; } 2>err; echo after"#, "", 127, &[("err", BOOM)]),
+		row(r#"{ : "${missing:?BOOM}"; } 2>err & wait %1; echo s=$?"#, "s=1\n", 0, &[("err", BOOM)]),
+		row(r#"if : "${missing:?BOOM}"; then :; fi 2>err; echo after"#, "", 127, &[("err", BOOM)]),
+		row(r#"while : "${missing:?BOOM}"; do break; done 2>err; echo after"#, "", 127, &[(
+			"err", BOOM,
+		)]),
+		row(r#"until : "${missing:?BOOM}"; do break; done 2>err; echo after"#, "", 127, &[(
+			"err", BOOM,
+		)]),
+		row(r#"for i in 1; do : "${missing:?BOOM}"; done 2>err; echo after"#, "", 127, &[(
+			"err", BOOM,
+		)]),
+		row(r#"case x in x) : "${missing:?BOOM}";; esac 2>err; echo after"#, "", 127, &[(
+			"err", BOOM,
+		)]),
+		row(r#"f(){ : "${missing:?BOOM}"; } 2>err; f; echo after"#, "", 127, &[("err", BOOM)]),
+		row(r#"f(){ : "${missing:?BOOM}"; }; f 2>err; echo after"#, "", 127, &[("err", BOOM)]),
+		row(r#"[[ "${missing:?BOOM}" = x ]] 2>err; echo after"#, "", 127, &[("err", BOOM)]),
+		row(r#"[[ "${missing:?BOOM}" = x ]] 2>err & wait %1; echo s=$?"#, "s=1\n", 0, &[(
+			"err", BOOM,
+		)]),
+		row(r#"coproc { : "${missing:?BOOM}"; } 2>err; wait $!; echo P=$?"#, "P=1\n", 0, &[(
+			"err", BOOM,
+		)]),
+		row(r#"cat <({ : "${missing:?BOOM}"; } 2>err); echo P=$?"#, "P=0\n", 0, &[("err", BOOM)]),
+		row(r#"eval ': "${missing:?BOOM}"' 2>err; echo after"#, "", 127, &[("err", BOOM)]),
+		row(r#"set -u; { : "$unset_var"; } 2>err; echo after"#, "", 127, &[(
+			"err",
+			Some("unset_var: unbound variable\n"),
+		)]),
+		row(r"{ : $((1/0)); } 2>err; echo after", "", 1, &[(
+			"err",
+			Some("1/0: division by 0 (error token is \"0\")\n"),
+		)]),
+		// The simple command's own redirection is never made: its words
+		// expand first.
+		row(r#"{ 2>inner : "${missing:?BOOM}"; } 2>outer & wait; echo s=$?"#, "s=0\n", 0, &[
+			("outer", BOOM),
+			("inner", None),
+		]),
+		row(r#"{ { : "${missing:?BOOM}"; } 2>inner; } 2>outer & wait %1; echo s=$?"#, "s=1\n", 0, &[
+			("inner", BOOM),
+			("outer", Some("")),
+		]),
+		// Already right before this change: a subshell's own descriptor table.
+		row(r#"( : "${missing:?BOOM}" ) 2>err; echo after s=$?"#, "after s=1\n", 0, &[("err", BOOM)]),
+		// A diagnostic larger than a pipe's buffer, bound to a pipe whose reader
+		// is slow: it is delivered whole after the subshell ends, and the run
+		// finishes.
+		row(
+			r#"m=$(head -c 100000 /dev/zero | tr "\0" x); { : "${missing:?$m}"; } 2>&1 | { /bin/sleep .2; /bin/cat; } | tail -c 6; echo done"#,
+			"xxxxx\ndone\n",
+			0,
+			&[],
+		),
+	])
+	.await;
+}
+
 /// An external command gets a standard descriptor the script closed, or any
 /// other descriptor it closed, closed, as in Bash, not the null device: a
 /// write to it fails.
@@ -158,5 +227,46 @@ async fn a_closed_descriptor_stays_closed_in_a_script_the_kernel_refused() {
 		status: 0,
 		files:  &[("out", Some("fd2-closed\n"))],
 	}])
+	.await;
+}
+
+/// A nonfatal expansion diagnostic queued before a simple command's own
+/// redirections are installed stays on the caller's stream, not the
+/// command's redirected one. Bash 5.2.21 and 5.3.0 both write the warning
+/// to the caller's stderr and leave `err` empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_redirection_diagnostic_stays_on_the_callers_stream() {
+	let row = |script, output, status, files| Row { script, fifos: &[], output, status, files };
+	check(&[
+		// Assignment-only command: the expansion diagnostic is queued before
+		// the command's own `2>err` is installed.
+		row(
+			r#"declare -A a; x=; y=${a[$x]} 2>err; echo "s=$?""#,
+			"a: bad array subscript\ns=0\n",
+			0,
+			&[("err", Some(""))],
+		),
+		// Multiple assignments: same class.
+		row(
+			r#"declare -A a; x=; z=1 y=${a[$x]} 2>err; echo "s=$?""#,
+			"a: bad array subscript\ns=0\n",
+			0,
+			&[("err", Some(""))],
+		),
+		// `declare` with argv: the expansion diagnostic is still pre-redirect.
+		row(
+			r#"declare -A a; x=; declare y=${a[$x]} 2>err; echo "s=$?""#,
+			"a: bad array subscript\ns=0\n",
+			0,
+			&[("err", Some(""))],
+		),
+		// Contrast: a compound command's redirect sees the diagnostic.
+		row(
+			r#"declare -A a; x=; { y=${a[$x]}; } 2>err; echo "s=$?""#,
+			"s=0\n",
+			0,
+			&[("err", Some("a: bad array subscript\n"))],
+		),
+	])
 	.await;
 }

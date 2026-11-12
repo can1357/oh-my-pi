@@ -60,6 +60,8 @@
 
 ### Fixed
 
+- Fixed the bash tool's shell writing a fatal expansion error (`${missing:?BOOM}`, an unset variable under `set -u`, a bad arithmetic word) from inside a redirected `{ }`, `if`, loop, `case`, function, `[[ ]]`, coprocess, process substitution or `eval` to its own standard error instead of through that redirection, as Bash does ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- A suspended shell image written by an incompatible build is now rejected rather than decoded, so a restore fails with a clear error instead of misreading execution frames ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 - Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
 - Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
 - Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.

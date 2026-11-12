@@ -146,7 +146,7 @@ pub fn emit(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, body: &[
 pub fn write(k: &Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, bytes: Vec<u8>) {
 	let fd = trace_fd(k, cx, vp);
 	vp.out
-		.push_back(PendingWrite { fd, bytes: BString::from(bytes), off: 0 });
+		.push_back(PendingWrite::new(fd, BString::from(bytes)));
 }
 
 /// The trace prefix for a command on `line`: `PS4` expanded (zsh

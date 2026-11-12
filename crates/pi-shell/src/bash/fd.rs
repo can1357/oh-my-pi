@@ -325,6 +325,18 @@ impl FdRef {
 		output.base.clone()
 	}
 
+	/// The command tag this handle carries, if any.
+	pub(crate) fn command_tag(&self) -> Option<crate::bash::ids::CmdTag> {
+		if !self.is_tagged() {
+			return None;
+		}
+		let state = self.0.state.lock();
+		let FdState::Tagged(output) = &*state else {
+			unreachable!("tagged fd state")
+		};
+		Some(output.tag)
+	}
+
 	/// Write with a known execution identity without allocating a handle.
 	pub fn poll_write_tagged(
 		&self,

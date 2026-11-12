@@ -344,8 +344,12 @@ fn zsh_target(
 	Ok(fields)
 }
 
-/// Set fd `fd` to `h` (or close it), saving the previous object.
+/// Set fd `fd` to `h` (or close it), saving the previous object. Writes
+/// already queued on `fd` are pinned to the handle it holds NOW, before it
+/// changes: they were produced before this redirection, so they stay on
+/// the stream the script had when they were queued, as Bash writes them.
 fn set_fd(vp: &mut Vproc, fd: i32, h: Option<FdRef>) {
+	vp.pin_pending(fd);
 	let prev = vp.fds.get(fd).cloned();
 	io(vp).saved.push(Saved { fd, prev });
 	vp.fds.set(fd, h);
@@ -543,7 +547,7 @@ fn install(
 				let mut msg = k.argv0.to_vec();
 				msg.extend_from_slice(b": redirection error: cannot duplicate fd: Invalid argument\n");
 				vp.out
-					.push_back(super::proc::PendingWrite { fd: 2, bytes: msg.into(), off: 0 });
+					.push_back(super::proc::PendingWrite::new(2, msg.into()));
 				let err = std::io::Error::from(std::io::ErrorKind::InvalidInput);
 				return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
 			}

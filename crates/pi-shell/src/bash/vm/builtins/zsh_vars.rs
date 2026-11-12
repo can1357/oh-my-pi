@@ -652,9 +652,7 @@ fn read_input(
 				if part == 0
 					&& let Some(p) = prompt
 				{
-					ctx.vp
-						.out
-						.push_back(PendingWrite { fd: 2, bytes: p.into(), off: 0 });
+					ctx.vp.out.push_back(PendingWrite::new(2, p.into()));
 				}
 				return Err(need);
 			},
@@ -774,9 +772,7 @@ fn read_zle(
 	if !reading_bytes(ctx.vp)
 		&& let Some(p) = prompt
 	{
-		ctx.vp
-			.out
-			.push_back(PendingWrite { fd: 2, bytes: p.into(), off: 0 });
+		ctx.vp.out.push_back(PendingWrite::new(2, p.into()));
 	}
 	// zsh: the timeout in hundredths of a second, rounded up.
 	let timeout_cs = timeout_ns.map(|ns| {
