@@ -200,6 +200,10 @@
 
 - `omp update` runs mise, Homebrew, bun, and npm on the terminal's own output, so their progress bars redraw in place instead of printing every frame as a new line ([#18874](https://github.com/can1357/oh-my-pi/pull/18874) by [@a-glapinski](https://github.com/a-glapinski))
 
+### Fixed
+
+- A running `!` command on zsh or fish now keeps the composer editable while it works and takes the keyboard only once it prints something that ends like a prompt (`Password: `, `Choose [Y/n]: `), so a command that never reads stdin no longer swallows a typed draft ([#18844](https://github.com/can1357/oh-my-pi/pull/18844) by [@iacore](https://github.com/iacore))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
