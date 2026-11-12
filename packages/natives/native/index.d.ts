@@ -3511,6 +3511,15 @@ export interface SearchResult {
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
 /**
+ * The commands the embedded shell adds to bash's own builtins, sorted.
+ *
+ * For a session started with `sessionEnv` over this process's environment,
+ * whose `PI_DISABLE_*` switches gate them. omp's bash tool lists them to the
+ * model.
+ */
+export declare function shellBuiltins(sessionEnv?: Record<string, string>): Array<string>
+
+/**
  * Options for executing a shell command via the embedded bash engine
  * (pi-shell).
  */

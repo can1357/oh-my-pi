@@ -390,7 +390,7 @@ export type CacheWarmingMode = "off" | "streaming" | "idle";
 /** `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches. */
 export type MessageUpdates = "full" | "delta";
 
-export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 export type GoalOp = "get" | "create" | "resume" | "pause" | "drop";
 
@@ -408,8 +408,6 @@ export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "a
 export interface TodoItem {
 	content: string;
 	status: TodoStatus;
-	/** What a `blocked` task is waiting on. */
-	blocker?: string;
 	details?: string;
 	notes?: string[];
 }
@@ -1326,7 +1324,7 @@ export interface EditorUiRequest {
 	promptStyle?: boolean;
 }
 
-/** Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it. */
+/** Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it. */
 export interface AskUiRequest {
 	type: "extension_ui_request";
 	id: string;
@@ -1395,7 +1393,7 @@ export interface OpenUrlUiRequest {
 /** Extension UI request, discriminated by `method`. */
 export type ExtensionUiRequest = SelectUiRequest | ConfirmUiRequest | InputUiRequest | EditorUiRequest | AskUiRequest | CancelUiRequest | NotifyUiRequest | SetStatusUiRequest | SetWidgetUiRequest | SetTitleUiRequest | SetEditorTextUiRequest | OpenUrlUiRequest;
 
-/** Answer to one `ask` question: exact option labels, plus optional free text. */
+/** Answer to one `ui.askDialog` question: exact option labels, plus optional free text. */
 export interface AskAnswer {
 	id: string;
 	selectedOptions: string[];
@@ -1416,7 +1414,7 @@ export interface ConfirmUiResponse {
 	confirmed: boolean;
 }
 
-/** Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers). */
+/** Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers). */
 export interface CancelUiResponse {
 	type: "extension_ui_response";
 	id: string;

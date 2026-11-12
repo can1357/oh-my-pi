@@ -598,6 +598,8 @@ def _make_browser():
             name=None,
             url=None,
             app=None,
+            argv=None,
+            target=None,
             viewport=None,
             wait_until=None,
             dialogs=None,
@@ -605,8 +607,7 @@ def _make_browser():
             init_scripts=None,
             downloads=None,
             user_agent=None,
-            ignore_https_errors=None,
-            allow_file_access=None,
+            insecure=None,
             headed=None,
             timeout=None,
             persist=None,
@@ -620,6 +621,8 @@ def _make_browser():
                     "name": name,
                     "url": url,
                     "app": app,
+                    "argv": argv,
+                    "target": target,
                     "viewport": viewport,
                     "wait_until": wait_until,
                     "dialogs": dialogs,
@@ -627,8 +630,7 @@ def _make_browser():
                     "init_scripts": init_scripts,
                     "downloads": downloads,
                     "user_agent": user_agent,
-                    "ignore_https_errors": ignore_https_errors,
-                    "allow_file_access": allow_file_access,
+                    "insecure": insecure,
                     "headed": headed,
                     "timeout": timeout,
                     "persist": persist,
@@ -650,7 +652,7 @@ def _make_browser():
             return value if isinstance(value, list) else []
 
         async def targets(self, *, app=None, timeout=None):
-            """List the user's own pages app.target can adopt (Tern browser blocks or relay Chrome tabs)."""
+            """List the user's own pages `target` can adopt (Tern browser blocks or relay Chrome tabs)."""
             details = await _invoke("targets", {"app": app, "timeout": timeout})
             value = details.get("value")
             return value if isinstance(value, list) else []

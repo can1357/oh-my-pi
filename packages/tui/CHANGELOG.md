@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions watch cards show current-step progress and expand with Ctrl+O to reveal ordered step states and durations in ANSI and native Tern views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+### Removed
+
+- `TodoStatus` no longer includes `blocked`, `TodoItem` no longer has `blocker`, and `TodoOperation` no longer includes `block` and `unblock`
+
+### Fixed
+
+- Table charts of factors against a rival column (`omp | ksh93 | bash`) are titled as gaps to it (`18× more vs omp`) rather than as improvements or regressions, however the chart was picked
+- In Tern, an edit's diff no longer opens with stray one-line hunks of far-off lines (the section heading or closing brace around the change), so a collapsed edit shows the change itself; lines after a second, distant change in the same edit carry their real line numbers
+- Table charts no longer read `with`, `to` or `from` inside a column name (`Runs with ≥10`) as a before/after condition, which turned unrelated columns into factors of each other
+- Chart row names keep a number with the name before it (`EmbeddingGemma 2`, `Jev 15`) instead of nesting them under a bare `EmbeddingGemma` or `Jev,`
+- `read` accepts a line list written with colons as range dashes (`file.ts:20:40,85:100`) and shows it as one row, instead of failing with a `Path 'file.ts:20:40,85' not found` error split across rows
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
@@ -9,6 +24,10 @@
 - Added the Sofya label for `sofya` web search results ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+
+### Changed
+
+- Retired tool cards release their cached sanitized output strings, shell presentations, and width-formatted card rows on transcript commit while regenerating them on demand during resize replay ([#18820](https://github.com/can1357/oh-my-pi/pull/18820) by [@iliaal](https://github.com/iliaal))
 
 ### Fixed
 

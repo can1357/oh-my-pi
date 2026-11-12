@@ -458,10 +458,12 @@ describe("FileSessionStorage.writeTextSync", () => {
 			// A rewrite renames a fresh inode over the path; a writer opened before
 			// it would otherwise keep appending to the orphaned file and lose the
 			// turn. Re-opening the live path under the publish lock must place the
-			// line in the replaced file.
-			storage.writeTextSync(sessionPath, "rewritten\n");
+			// line in the replaced file, also after an earlier append recorded the
+			// path's identity.
 			const appendSync = writer.appendSync?.bind(writer);
 			if (!appendSync) throw new Error("File writer must expose appendSync");
+			appendSync("before\n");
+			storage.writeTextSync(sessionPath, "rewritten\n");
 			appendSync("appended\n");
 			expect(await Bun.file(sessionPath).text()).toBe("rewritten\nappended\n");
 			const files = await fsp.readdir(tempDir);

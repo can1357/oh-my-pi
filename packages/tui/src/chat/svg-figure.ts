@@ -260,6 +260,13 @@ export class SvgFigure implements Component {
 		this.#fallback = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#placeholder = undefined;
+		this.#image?.component.releaseRenderCaches();
+		this.#fallback?.md.releaseRenderCaches();
+		if (this.#fallback) this.#fallback.clip = undefined;
+	}
+
 	dispose(): void {
 		this.#disposed = true;
 		clearTimeout(this.#timer);

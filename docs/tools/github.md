@@ -259,6 +259,8 @@ Watch flow:
 - Inline result includes only the last `tail` captured lines per failed job. The saved artifact contains the captured logs (`mode: "full"`) and identifies any jobs without logs, with the same failure reasons. The subprocess capture's structured truncation flag marks logs exceeding 8 MiB as partial in both the artifact label and its contents.
 - In commit mode, success is intentionally double-checked: once all known runs are successful, the tool waits one more poll interval and succeeds only if the set of run IDs is unchanged. This avoids returning before late workflow runs appear for the same commit.
 - `details.watch` drives a specialized renderer in `packages/tui/src/tools/github.ts`; unavailable-log reasons are sanitized and flattened to one display row. Non-watch results use the fallback summary renderer.
+- Job snapshots retain the ordered steps returned by the same jobs API call (number, name, status, conclusion, timestamps); no extra step requests are made. GitHub's zero-date timestamps on steps that have not run are dropped at ingestion. `details.watch` projects step durations for both live and completed run/commit watches. The text result names only each failed job's failed step.
+- Collapsed job views show current-step progress or the failed step. **Ctrl+O** expands the card to show every reported step with its state and duration. Tern Surface Protocol views use native keyed job disclosures and step lists; native disclosure clicks and the existing tool-card expansion state remain available. Results without step data retain the job-only view.
 
 ## Side Effects
 
@@ -329,4 +331,4 @@ Watch flow:
 - Checkout write serialization is in-process and keyed by the primary repo root, not the current worktree path, because git worktrees share `.git/config`, `packed-refs`, commit-graph, and worktree metadata files.
 - `search_repos` is the only search op that never forwards `repo`; repository scoping must be expressed in the query itself.
 - `run_watch` success on commit mode means “all observed runs succeeded and no additional runs appeared one poll later”, not merely “latest poll looked green”.
-- The TUI renderer collapses failed log previews unless the result view is expanded; the underlying text result still contains the same tailed lines plus any artifact reference.
+- The TUI renderer collapses step details and failed log previews unless the result view is expanded; the underlying text result includes each failed job's failed step, the same tailed log lines, and any artifact reference.
