@@ -246,6 +246,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/goog
 ### Catalog model handling
 
 - **Provider entry (`google`)**: `packages/catalog/src/compat/rules/providers/google.kdl` declares default model `gemini-3.1-pro-preview`. Environment keys: `GEMINI_API_KEY`.
+- **Authored seeds**: `gemini-decision-1`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows. `gemini-decision-1` is a `judge` row on the `google-decisions` API (`POST /v1beta/decisions`, key in `x-goog-api-key`).
 
 ## Google Vertex AI
 
