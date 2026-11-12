@@ -21,8 +21,8 @@ import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 import type { ToolSession } from "../tools";
 
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-tui/render/render-utils";
-import { sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, previewLine } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type {
 	AgentActivitySnapshot,
 	CancelOutcome,
@@ -258,8 +258,8 @@ function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-/** Longest retry error kept on a job snapshot and its row; provider messages can run to paragraphs. */
-const RETRY_ERROR_MAX_CHARS = 80;
+/** Widest retry error kept on a job snapshot and its row; provider messages can run to paragraphs. */
+const RETRY_ERROR_MAX_WIDTH = 80;
 
 /**
  * The automatic retry a task agent is in, read from its progress record's
@@ -277,7 +277,7 @@ function retrySnapshot(value: unknown, now: number): JobSnapshot["retry"] {
 	const delayMs = finiteNumber(state.delayMs) ?? 0;
 	const errorMessage =
 		typeof state.errorMessage === "string"
-			? truncate(sanitizeText(state.errorMessage).replace(/\s+/g, " ").trim(), RETRY_ERROR_MAX_CHARS)
+			? previewLine(sanitizeText(state.errorMessage), RETRY_ERROR_MAX_WIDTH)
 			: "";
 	return {
 		attempt,

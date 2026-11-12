@@ -7,6 +7,9 @@
 ### Added
 
 - The Spotlight sheet of a `;`/`,` path `read` shows each part as its own section, numbered from its file's lines with its own ranking ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+### Added
+
+- The `wait` result's `JobSnapshot` now carries `retry` (attempt, maximum attempts, remaining wait and a one-line provider error) while a running subagent is in an automatic retry ([#19015](https://github.com/can1357/oh-my-pi/pull/19015) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 
