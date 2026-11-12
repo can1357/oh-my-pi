@@ -284,6 +284,52 @@ describe("compaction queue conversation ownership", () => {
 		}
 	});
 
+	it("merges three overlapping restores and a controller-path restore in submission order", async () => {
+		const h = await harness();
+		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		let dispatched = 0;
+		vi.spyOn(h.session, "prompt").mockImplementation(async (_text, options) => {
+			const index = dispatched++;
+			options?.onPromptAdmitted?.();
+			entered[index].resolve();
+			await release[index].promise;
+			throw new Error("Credential lookup failed");
+		});
+		try {
+			h.helpers.queueCompactionMessage("first detached batch", "followUp");
+			await h.helpers.flushCompactionQueue({ willRetry: false });
+			await entered[0].promise;
+			h.helpers.queueCompactionMessage("second detached batch", "followUp");
+			await h.helpers.flushCompactionQueue({ willRetry: false });
+			await entered[1].promise;
+			h.helpers.queueCompactionMessage("third detached batch", "followUp");
+			await h.helpers.flushCompactionQueue({ willRetry: false });
+			await entered[2].promise;
+			await h.session.newSession();
+			h.editor.setText("current draft");
+			// A yielded `/compact` for the new conversation returns through the
+			// controller path first; the three queued batches fail afterwards in
+			// B, A, C order — every restored block must still land oldest-first,
+			// and the flush batches above the controller block.
+			h.ctx.yieldCompaction = { sessionId: h.manager.getSessionId(), leafId: h.manager.getLeafId() ?? "", text: "/compact" };
+			h.input.restoreCompactionQueueToEditor();
+			release[1]!.resolve();
+			await Bun.sleep(20);
+			release[0]!.resolve();
+			await Bun.sleep(20);
+			release[2]!.resolve();
+			await h.session.waitForAdmittedSubmissions();
+			await Bun.sleep(20);
+			expect(h.ctx.compactionQueuedMessages).toEqual([]);
+			expect(h.editor.getExpandedText()).toBe(
+				"first detached batch\n\nsecond detached batch\n\nthird detached batch\n\n/compact\n\ncurrent draft",
+			);
+		} finally {
+			for (const gate of release) gate?.resolve();
+		}
+	});
+
 	it("consumes a real queued /new once and restores only its old-conversation remainder", async () => {
 		const h = await harness();
 		const oldId = h.manager.getSessionId();

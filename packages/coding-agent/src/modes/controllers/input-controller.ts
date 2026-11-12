@@ -63,7 +63,7 @@ import {
 	guestRefusesSlashCommand,
 	lookupBuiltinSlashCommand,
 } from "../../slash-commands/builtin-registry";
-import { restoreDetachedDraft, restoreQueuedDraft } from "../../slash-commands/helpers/draft";
+import { restoreDetachedDraft, restoreQueuedDraft, restoreQueuedDraftOrdered } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -2534,7 +2534,13 @@ export class InputController {
 	 * Returns the number of entries restored.
 	 */
 	#restoreEntriesToEditor(entries: RestoredQueuedMessage[], currentText?: string): number {
-		const count = restoreQueuedDraft(this.ctx.editor, entries, currentText);
+		// Without an explicit text override the restore joins the shared per-editor
+		// block chronology, so a controller restore never prepends ahead of an
+		// older batch the flush path already returned.
+		const count =
+			currentText === undefined
+				? restoreQueuedDraftOrdered(this.ctx.editor, entries)
+				: restoreQueuedDraft(this.ctx.editor, entries, currentText);
 		this.ctx.updatePendingMessagesDisplay();
 		return count;
 	}

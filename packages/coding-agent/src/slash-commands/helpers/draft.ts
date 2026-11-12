@@ -44,6 +44,56 @@ export function queuedDraftText(editor: CustomEditor, entries: readonly Restored
 	return parts.join("\n\n");
 }
 
+/** Stable submission rank for queued entries, first-seen first. */
+const queuedEntryRanks = new WeakMap<object, number>();
+let nextQueuedEntryRank = 0;
+export function queuedEntryRank(entry: object): number {
+	let rank = queuedEntryRanks.get(entry);
+	if (rank === undefined) {
+		rank = nextQueuedEntryRank++;
+		queuedEntryRanks.set(entry, rank);
+	}
+	return rank;
+}
+
+/**
+ * Restored blocks per editor, kept while they still head the editor text.
+ * Successive restores merge into the block set by rank (oldest first, draft
+ * last) so a later-failing newer batch never prepends ahead of an older
+ * restored one. The set is dropped when the user edits the blocks away.
+ */
+const editorRestoreBlocks = new WeakMap<CustomEditor, { text: string; rank: number }[]>();
+
+export function restoreQueuedDraftOrdered(editor: CustomEditor, entries: readonly RestoredQueuedMessage[]): number {
+	if (entries.length === 0) return 0;
+	// Assign first-seen ranks in array order before comparing: assigning ranks
+	// inside the comparator would let the sort decide the chronology.
+	for (const entry of entries) queuedEntryRank(entry);
+	const ordered = [...entries].sort((left, right) => queuedEntryRank(left) - queuedEntryRank(right));
+	const batchText = queuedDraftText(editor, ordered);
+	const batch = { text: batchText, rank: queuedEntryRank(ordered[ordered.length - 1]!) };
+	const blocks = editorRestoreBlocks.get(editor) ?? [];
+	const prefix = blocks.map(block => block.text).join("\n\n");
+	const expanded = editor.getExpandedText();
+	if (blocks.length > 0 && prefix && expanded.startsWith(prefix)) {
+		// Tracked blocks still head the draft: shift and merge only this batch,
+		// rebuild every restored block by rank, and keep the residual draft last.
+		const residual = expanded.slice(prefix.length).replace(/^\n+/, "");
+		restoreQueuedDraft(editor, ordered, residual);
+		const union = [...blocks, batch].sort((left, right) => left.rank - right.rank);
+		const merged = [union.map(block => block.text).join("\n\n"), residual]
+			.filter(text => text.trim())
+			.join("\n\n");
+		editor.setCollapsedText(merged);
+		editorRestoreBlocks.set(editor, union);
+	} else {
+		// No tracked blocks (or the user edited them away): plain prepend.
+		restoreQueuedDraft(editor, ordered);
+		editorRestoreBlocks.set(editor, [batch]);
+	}
+	return entries.length;
+}
+
 /**
  * Merge explicit queued entries, oldest first, ahead of the current draft.
  * Existing draft images keep their positions; queued attachments append.

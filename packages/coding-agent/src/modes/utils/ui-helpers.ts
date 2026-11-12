@@ -20,7 +20,7 @@ import {
 	continuesConversation,
 	conversationPosition,
 } from "../../session/conversation-position";
-import { queuedDraftText, restoreQueuedDraft } from "../../slash-commands/helpers/draft";
+import { queuedEntryRank, restoreQueuedDraftOrdered } from "../../slash-commands/helpers/draft";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
@@ -264,17 +264,6 @@ export class UiHelpers {
 	#textRendererSetVersion = 0;
 	/** The text renderer set changed while a replay was in flight; the commit retires stale scrollback. */
 	#textRendererSetChangedDuringReplay = false;
-	/** Stable chronology across detached drains and their late first-prompt callbacks. */
-	#compactionEntryOrder = new WeakMap<CompactionQueuedMessage, number>();
-	#nextCompactionEntryOrder = 0;
-	/**
-	 * Block the most recent editor restore prepended, plus its newest entry rank.
-	 * A second, newer batch that fails later must land after that block (oldest
-	 * first), not prepended ahead of it. Dropped whenever the prefix no longer
-	 * heads the editor text (the user edited or resubmitted it).
-	 */
-	#editorRestorePrefix: string | undefined;
-	#editorRestoreNewestRank: number | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -1538,40 +1527,10 @@ export class UiHelpers {
 		if (!this.ctx.collabGuest) this.#assertQueuedLocalConversation(origin);
 	}
 
-	#rememberCompactionOrder(entries: readonly CompactionQueuedMessage[]): void {
-		for (const entry of entries) {
-			if (!this.#compactionEntryOrder.has(entry)) {
-				this.#compactionEntryOrder.set(entry, this.#nextCompactionEntryOrder++);
-			}
-		}
-	}
-
 	/** Prepend a rejected batch to the editor, keeping successive restores in submission order. */
 	#restoreEditorEntries(entries: readonly CompactionQueuedMessage[]): void {
-		if (entries.length === 0) return;
-		this.#rememberCompactionOrder(entries);
-		const rankOf = (entry: CompactionQueuedMessage) => this.#compactionEntryOrder.get(entry)!;
-		const ordered = [...entries].sort((left, right) => rankOf(left) - rankOf(right));
-		const batchText = queuedDraftText(this.ctx.editor, ordered);
-		const prior = this.#editorRestorePrefix;
-		const priorRank = this.#editorRestoreNewestRank;
-		if (prior && priorRank !== undefined && priorRank < rankOf(ordered[0]!)) {
-			const expanded = this.ctx.editor.getExpandedText();
-			if (expanded.startsWith(prior)) {
-				// Older batch already heads the draft: insert this newer one after it.
-				const residual = expanded.slice(prior.length).replace(/^\n+/, "");
-				restoreQueuedDraft(this.ctx.editor, ordered, residual);
-				const merged = [prior, this.ctx.editor.getExpandedText()].filter(text => text.trim()).join("\n\n");
-				this.ctx.editor.setCollapsedText(merged);
-				this.#editorRestorePrefix = [prior, batchText].filter(text => text.trim()).join("\n\n");
-				this.#editorRestoreNewestRank = rankOf(ordered[ordered.length - 1]!);
-				this.ctx.updatePendingMessagesDisplay();
-				return;
-			}
-		}
-		restoreQueuedDraft(this.ctx.editor, ordered);
-		this.#editorRestorePrefix = batchText;
-		this.#editorRestoreNewestRank = rankOf(ordered[ordered.length - 1]!);
+		restoreQueuedDraftOrdered(this.ctx.editor, entries);
+		this.ctx.updatePendingMessagesDisplay();
 	}
 
 	/** Return an explicit batch without borrowing or replacing a newer queue's origin. */
@@ -1587,9 +1546,9 @@ export class UiHelpers {
 			this.ctx.updatePendingMessagesDisplay();
 			return false;
 		}
-		this.#rememberCompactionOrder(live);
+		for (const entry of live) queuedEntryRank(entry);
 		this.ctx.compactionQueuedMessages = [...new Set([...entries, ...live])].sort(
-			(left, right) => this.#compactionEntryOrder.get(left)! - this.#compactionEntryOrder.get(right)!,
+			(left, right) => queuedEntryRank(left) - queuedEntryRank(right),
 		);
 		if (live.length === 0) this.ctx.compactionQueueOrigin = origin;
 		this.ctx.updatePendingMessagesDisplay();
@@ -1624,7 +1583,7 @@ export class UiHelpers {
 		const origin = this.ctx.compactionQueueOrigin ?? conversationPosition(this.ctx.sessionManager);
 		const queuedMessages = this.ctx.compactionQueuedMessages;
 		// Tag before detaching: another drain and its late callbacks can overlap this one.
-		this.#rememberCompactionOrder(queuedMessages);
+		for (const entry of queuedMessages) queuedEntryRank(entry);
 		this.ctx.compactionQueuedMessages = [];
 		this.ctx.compactionQueueOrigin = undefined;
 		this.ctx.updatePendingMessagesDisplay();
