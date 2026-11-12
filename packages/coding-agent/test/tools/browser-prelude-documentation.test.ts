@@ -39,7 +39,8 @@ describe("browserDocumentation", () => {
 /** Identifiers inside the inline code spans of a Markdown document (`tab.click(selector)` → tab, click, selector). */
 function codeIdentifiers(markdown: string): Set<string> {
 	const names = new Set<string>();
-	for (const [, span] of markdown.matchAll(/`([^`\n]+)`/g)) {
+	for (const [, block, inline] of markdown.matchAll(/```\n([\s\S]*?)```|`([^`\n]+)`/g)) {
+		const span = block ?? inline;
 		if (span.startsWith("xd://")) continue;
 		for (const [name] of span.matchAll(/[A-Za-z_$][\w$]*/g)) names.add(name);
 	}
