@@ -612,9 +612,9 @@ fn item_names(path: &Path) -> Vec<String> {
 /// a page in an existing window whose title changes, or a new document
 /// window (not an Open dialog when AX can classify it), so either is a
 /// candidate, returned once its title has held for [`SETTLE_POLLS`] polls, or
-/// at `timeout` with whatever it changed to. For a URL (no `names`) the frontmost
-/// window is returned at `timeout` if none changed, as for a page that kept the
-/// old tab's title; for a file, none is.
+/// at `timeout` with whatever it changed to. For a URL (no `names`) the
+/// frontmost window is returned at `timeout` if none changed, as for a page
+/// that kept the old tab's title; for a file, none is.
 fn shown_window(
 	timeout: Duration,
 	names: &[String],
