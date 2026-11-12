@@ -293,7 +293,7 @@ impl X11Input {
 		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
 			this.check_user()?;
 			prepare()?;
-			this.xtest_steps(&steps, keys.duration(), matches!(keys, Keys::Text(_)))
+			this.xtest_steps(&steps, keys)
 		})
 	}
 
@@ -396,13 +396,13 @@ impl X11Input {
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => {
 				let steps = keys.plan(&self.keymap)?;
-				self.xtest_steps(&steps, keys.duration(), matches!(keys, Keys::Text(_)))
+				self.xtest_steps(&steps, keys)
 			},
 			(Target::Window(id), DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus) => {
 				let window = parse_window(id)?;
 				let steps = keys.plan(&self.keymap)?;
 				self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
-					this.xtest_steps(&steps, keys.duration(), matches!(keys, Keys::Text(_)))
+					this.xtest_steps(&steps, keys)
 				})
 			},
 			(Target::Window(id), DeliveryMode::Background) => {
@@ -858,17 +858,17 @@ impl X11Input {
 	/// [`NeutralKeyboard`], so the user's locks, latches and layout group do not
 	/// change the characters; chords and holds keep them, so a Caps Lock or
 	/// layout-switch chord still toggles them.
-	fn xtest_steps(&self, steps: &[KeyStep], duration: Duration, text: bool) -> CoreResult<()> {
+	fn xtest_steps(&self, steps: &[KeyStep], keys: Keys<'_>) -> CoreResult<()> {
 		self.check_released_keys(
 			steps
 				.iter()
 				.filter(|step| step.press)
 				.map(|step| step.keycode),
 		)?;
-		let neutral = (text && self.xkb)
+		let neutral = (matches!(keys, Keys::Text(_)) && self.xkb)
 			.then(|| NeutralKeyboard::clear(&self.conn, self.keymap.num_lock_mask()))
 			.transpose()?;
-		let sent = keymap::run_steps_with_hold(steps, duration, |step| {
+		let sent = keymap::run_steps_with_hold(steps, keys.duration(), |step| {
 			self.xtest_key(step.keycode, step.press)
 		})
 		.and_then(|()| self.conn.flush().map_err(input_failed));
