@@ -26,6 +26,7 @@ import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { ArtifactManagerApi } from "../session/artifacts";
 import type { CostGateApi } from "../session/cost-gate";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
+import { resolveSessionStorage } from "../session/session-storage-env";
 import type { AuthStorage } from "../session/auth-storage";
 import { revivePersistedPlaced } from "../thread/executor-routing";
 import { subagentWorkerPool } from "../thread/subagent-worker";
@@ -168,7 +169,8 @@ export function createPersistedSubagentReviverFactory(
 	return async ref => {
 		const sessionFile = ref.sessionFile;
 		if (!sessionFile) return undefined;
-		const peek = await SessionManager.peekSessionInit(sessionFile);
+		const storage = ctx.session?.sessionManager?.getStorage?.() ?? (await resolveSessionStorage());
+		const peek = await SessionManager.peekSessionInit(sessionFile, storage);
 		// No persisted contract (pre-session_init file) or the recorded workspace
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
@@ -255,7 +257,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const registry = AgentRegistry.global();
 	// Re-open fresh on every revive: park closes the writer, so this takes
 	// the single-writer lock cleanly and restores the full message history.
-	const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+	const reopened = await SessionManager.open(sessionFile, undefined, await resolveSessionStorage(), {
 		suppressBreadcrumb: true,
 		throwIfMissing: true,
 	});
