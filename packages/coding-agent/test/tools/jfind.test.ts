@@ -329,6 +329,11 @@ describe("jfind cascade", () => {
 			expect(result.stats.requests).toBe(judge.requests.length + verifyJudge.requests.length);
 			expect(result.stats.inputTokens).toBe(100 * result.stats.requests);
 			expect(result.coverage).toBe("complete");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("finds an owner in an explicit file when a sketch lacks the surrounding explanation", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-single-file-"));
 		try {
@@ -405,6 +410,11 @@ describe("jfind cascade", () => {
 			expect(result.coverage).toBe("partial");
 			expect(result.stats.failures).toContain("verification: verifier down");
 			expect(judge.requests.some(request => "file" in stateOf(request))).toBe(false);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("verifies the final passage of an explicitly named file past the per-file window budget", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-long-file-"));
 		try {
