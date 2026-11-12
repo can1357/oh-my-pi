@@ -8,6 +8,20 @@ provider "google-vertex" {
 	// `google-vertex/claude-opus-4-8` names that model exactly.
 	selector-revision-suffix "@default"
 
+	// Gemini 4 Hydrogen answers on the Vertex global endpoint ahead of
+	// models.dev and Google's model pages (verified 2026-11-12: text and image
+	// input, thinkingLevel LOW/MEDIUM/HIGH). Google has published no price or
+	// limits for it: the cost stays 0 until upstream catalogs the model, whose
+	// same-id row then wins dedup, and the limits are the Gemini 4 Argon row's.
+	seed api="google-vertex" base-url="https://{location}-aiplatform.googleapis.com" bundle="always" {
+		model "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+	}
+
 	// Replaces google-shared.ts stripping functionCall/functionResponse ids for Vertex.
 	supports-function-part-id #false
 	// Replaces the hard-coded provider exclusion in anthropic.ts context_management gating.

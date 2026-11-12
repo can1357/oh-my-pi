@@ -68,6 +68,17 @@ collapse {
 		efforts "low" "medium" "high"
 		requires-effort #true
 	}
+	// Gemini 4 Hydrogen: the same `-low`/`-medium`/`-high` split. Vertex rejects
+	// MINIMAL and `thinkingBudget` for it like the rest of Gemini 4.
+	variant-family "google-antigravity" "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high"
+		route "low" "gemini-4-hydrogen-low"
+		route "medium" "gemini-4-hydrogen-medium"
+		route "high" "gemini-4-hydrogen-high"
+		mode "google-level"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
 		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
 		route "off" "gemini-3.5-flash-extra-low"
