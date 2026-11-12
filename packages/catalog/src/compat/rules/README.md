@@ -406,6 +406,7 @@ auth "anthropic" {
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
     allows-missing-api-key #true
     org-scoped-identity #true                   // qualify credential/report identity by org (one email can have multiple subscriptions)
+    login-replaces-credentials #true            // a successful login replaces every stored credential for this provider
     oauth-token-env "PROVIDER_OAUTH_TOKEN"      // dedicated OAuth bearer env vars, excluding borrowed API-key aliases in provider env
     native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
@@ -415,7 +416,7 @@ auth "anthropic" {
 }
 ```
 
-`org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
+`org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior. `login-replaces-credentials #true` makes a successful login delete every stored credential for the provider before saving the new one, for flows whose credentials carry no stable account claim to deduplicate on (Kiro device grants and API keys); absent or `#false` keeps the ordinary per-account upsert.
 
 `login-subscription #true` marks login-sourced API keys as subscription billing, leaving pasted and environment keys metered; absent or `#false` keeps all API keys metered.
 
@@ -444,6 +445,7 @@ provider "sakana" {
     allow-unauthenticated #true                   // runtime manager without a key
     skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere
     keep-bundled-names #true                      // discovery never renames a bundled row
+    native-transport-only "kiro-api"              // only the built-in transport and login may serve this provider
     discovery label="Sakana AI" oauth-provider="sakana" allow-unauthenticated=#true {
         env "SAKANA_GEN_KEY"                      // generation-time keys; defaults to the provider env
     }
@@ -473,6 +475,8 @@ provider "muse-code" {
 Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
 
 `automatic-default #false` keeps a provider available for explicit selection but excludes it from startup fallback and automatic model presets. The default is `#true`; `apple` opts out because its on-device context cannot accommodate the standard coding-agent prompt in many projects.
+
+`native-transport-only "<api>"` names the built-in API that alone serves the provider (Kiro). An extension registering the provider may still override `baseUrl`/headers and add models of its own, but a registration that brings its own `api`, `streamSimple`, `oauth`, or a provider-level `transport` without models of its own is ignored with a configuration warning; neither the provider id nor the API can be registered as a custom OAuth provider or custom API; and a provider `transport` override never reroutes rows on that API. Absent, extensions may shadow the provider as before.
 
 `kind-apis { <kind> "<api>" }` maps each non-chat kind (`image`, `tts`, `stt`, `embedding`, `rerank`, `video`) to the API discovery assigns rows of that kind. A runner API must sit under the kind it serves (`RUNNER_API_KINDS` in `src/types.ts`); chat APIs, which serve hosted image generation, and multi-kind `local-inference` may back any kind.
 

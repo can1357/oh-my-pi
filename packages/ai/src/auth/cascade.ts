@@ -1,4 +1,5 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { encodeKiroOAuthRow, KiroCredentialError } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
 import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey, resolveAfterRotation } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
@@ -16,6 +17,7 @@ import type {
 	AuthSourceOptions,
 	KeysApi,
 	LimitsApi,
+	OAuthCredential,
 	OAuthRequestIdentity,
 } from "./types";
 
@@ -154,9 +156,25 @@ export interface KeyCascadeDeps {
 /** The provider auth precedence cascade (runtime → config → OAuth → login key → env → stored key). */
 export class KeyCascade implements KeysApi {
 	#deps: KeyCascadeDeps;
+	/** Kiro rows already reported as undecodable, so repeated discovery peeks log each once. */
+	#reportedUndecodableKiroRows = new WeakSet<AuthCredential>();
 
 	constructor(deps: KeyCascadeDeps) {
 		this.#deps = deps;
+	}
+
+	/** The encoded Kiro `apiKey` for a stored OAuth row, or undefined when the row is incomplete. */
+	#kiroOAuthApiKey(credential: OAuthCredential): string | undefined {
+		try {
+			return encodeKiroOAuthRow(credential);
+		} catch (error) {
+			if (!(error instanceof KiroCredentialError)) throw error;
+			if (!this.#reportedUndecodableKiroRows.has(credential)) {
+				this.#reportedUndecodableKiroRows.add(credential);
+				logger.warn("Kiro OAuth credential skipped: stored login is incomplete", { error: error.message });
+			}
+			return undefined;
+		}
 	}
 
 	/**
@@ -275,14 +293,21 @@ export class KeyCascade implements KeysApi {
 		// Peek never refreshes, so only an unexpired OAuth access token is usable
 		// unless the caller only needs the account it names.
 		const now = Date.now();
+		// A Kiro row the codec cannot encode (an incomplete login without its
+		// endpoint or login id) carries no usable credential: skip it so discovery
+		// moves on, as `get()` does when the same row fails to resolve.
+		const servable = (credential: AuthCredential): credential is OAuthCredential =>
+			credential.type === "oauth" && (provider !== "kiro" || this.#kiroOAuthApiKey(credential) !== undefined);
 		const oauthSelection =
 			this.#deps.selector.selectByType(
 				provider,
 				"oauth",
 				undefined,
-				credential =>
-					credential.type === "oauth" && Number.isFinite(credential.expires) && credential.expires > now,
-			) ?? (options?.includeExpired ? this.#deps.selector.selectByType(provider, "oauth") : undefined);
+				credential => servable(credential) && Number.isFinite(credential.expires) && credential.expires > now,
+			) ??
+			(options?.includeExpired
+				? this.#deps.selector.selectByType(provider, "oauth", undefined, servable)
+				: undefined);
 		if (oauthSelection) {
 			if (provider === "github-copilot") {
 				return JSON.stringify({
@@ -290,6 +315,11 @@ export class KeyCascade implements KeysApi {
 					enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 					apiEndpoint: oauthSelection.credential.apiEndpoint,
 				});
+			}
+			// Kiro: the same codec `getOAuthApiKey` uses, so a peek and a refresh
+			// of one stored row route and cache identically.
+			if (provider === "kiro") {
+				return this.#kiroOAuthApiKey(oauthSelection.credential);
 			}
 			return oauthSelection.credential.access;
 		}

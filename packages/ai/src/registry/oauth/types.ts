@@ -1,3 +1,4 @@
+import type { KiroSocialLoginProvider } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import type { FetchImpl } from "../../types";
 import type { OAuthProviderUnion } from "../registry";
 
@@ -29,6 +30,27 @@ export type OAuthCredentials = {
 	inferenceRegion?: "global" | "eu" | "us";
 	/** WorkOS selected organization; never used as a Factory API organization header. */
 	activeOrganizationId?: string;
+	/**
+	 * Kiro IAM Identity Center device-grant binding. The OIDC client
+	 * registration is per-region and server-issued, so refresh must reuse the
+	 * exact client; these fields persist that binding alongside the grant.
+	 */
+	kiroClientId?: string;
+	kiroClientSecret?: string;
+	kiroClientSecretExpiresAt?: number;
+	kiroTokenEndpoint?: string;
+	kiroOidcRegion?: string;
+	/**
+	 * Random id minted at each Kiro login. Survives token refresh; keys the
+	 * model cache per login so a second account on the same endpoint cannot inherit
+	 * the first account's catalog.
+	 */
+	kiroLoginId?: string;
+	/**
+	 * Identity provider of a Kiro Google/GitHub sign-in. Its presence selects the
+	 * Kiro auth service's `/refreshToken` grant instead of the OIDC client binding.
+	 */
+	kiroLoginProvider?: KiroSocialLoginProvider;
 	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an

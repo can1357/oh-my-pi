@@ -576,6 +576,8 @@ export interface CompiledAuthProvider {
 	loginSubscription?: boolean;
 	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
 	orgScopedIdentity?: boolean;
+	/** A successful interactive login replaces every stored credential for this provider instead of upserting alongside them. */
+	loginReplacesCredentials?: boolean;
 	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
 	oauthTokenEnv?: string[];
 	/** APIs whose provider transport resolves credentials without a stored account. */
@@ -682,6 +684,14 @@ export interface CompiledProvider {
 	skipCrossProviderReferenceFills?: boolean;
 	/** Runtime discovery keeps a bundled row's display name instead of the live one. */
 	keepBundledNames?: boolean;
+	/**
+	 * The built-in API that alone serves this provider. An extension registration
+	 * of the provider that brings its own `api`, `streamSimple`, `oauth`, or a
+	 * provider-level `transport` without models of its own is ignored with a
+	 * warning, the provider id cannot be registered as a custom OAuth provider,
+	 * and a provider `transport` override never reroutes rows on this API.
+	 */
+	nativeTransportOnly?: Api;
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */

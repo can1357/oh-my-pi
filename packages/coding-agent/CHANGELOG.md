@@ -13,6 +13,13 @@
 - The `bash` tool's shell now has its own `awk`, `tar`, `lsof`, `shasum`, `md5` and `strings`, so they work the same on every platform (including Windows without Git Bash) and accept internal-URI paths; `PI_DISABLE_UUTILS_DESTRUCTIVE` also hands `tar` to the system
 - `task.steps`: task items take ordered `steps` instead of one `task`; the subagent gets the first step, and each later step only after it finishes the previous one (past four steps, the earlier messages carry two or more). The last step's result is the task's result, and `omp --restore` goes on with the steps an interrupted subagent had left
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+- Added Kiro as a built-in provider: run `/login kiro`, pick Identity Center, Builder ID, or an API key, and choose a discovered `kiro/<model-id>` model. Signing in again replaces the previous Kiro account instead of adding another one ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Added Google and GitHub to `/login kiro`: approve a one-time code at `app.kiro.dev`, then sign in with that account
+- `/usage` and `omp usage` now show Kiro credits: the monthly plan credits with their reset date, active bonus credits with their expiry, and overage credits and charges when overage is enabled
+
+### Changed
+
+- A legacy `omp-provider-kiro` extension no longer conflicts with the built-in Kiro provider: its `baseUrl`/header overrides apply, and a registration that brings its own transport or login is ignored with a warning instead of stopping startup
 - GitHub Actions watches now show per-step progress, states, and durations, with Ctrl+O expansion and native Tern Surface Protocol views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Changed

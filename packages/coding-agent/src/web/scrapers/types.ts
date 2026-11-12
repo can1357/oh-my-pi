@@ -3,13 +3,14 @@
  */
 import { scheduler } from "node:timers/promises";
 import { ptree } from "@oh-my-pi/pi-utils";
+import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
 import { decodeEntities } from "@oh-my-pi/pi-utils/dom/parser";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
 import type { AgentStorageApi } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";
-import { decodeBody, readBodyCapped } from "../response-body";
+import { decodeBody } from "../response-body";
 
 export { formatNumber } from "@oh-my-pi/pi-utils";
 
@@ -239,7 +240,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				return { content: "", contentType, finalUrl, ok: true, status: response.status, bodySkipped: true };
 			}
 
-			const responseBody = await readBodyCapped(response, maxBytes);
+			const responseBody = await readBoundedBody(response, maxBytes);
 			if (!responseBody) {
 				// Once a wall is known, an error under another agent only means trying the next one.
 				if (!response.ok && lastBlockedResponse) {

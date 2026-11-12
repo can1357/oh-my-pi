@@ -3,6 +3,7 @@ import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { decodeKiroCredential, kiroCredentialCacheScope } from "../wire/kiro-credential";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -12,6 +13,22 @@ import {
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
 	baseUrl?: string;
+}
+
+/**
+ * Resolve the privacy-safe cache namespace for one Kiro credential: OAuth
+ * logins by login id, API keys by a hash of key and endpoint. A credential
+ * that does not decode gets its own namespace and never a shared one.
+ */
+export function resolveKiroModelCacheProviderId(apiKey?: string): string {
+	if (!apiKey) return "kiro";
+	let scope: string;
+	try {
+		scope = kiroCredentialCacheScope(decodeKiroCredential(apiKey));
+	} catch {
+		scope = `invalid:${apiKey}`;
+	}
+	return `kiro:models-v2:${Bun.hash(scope).toString(36)}`;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -35,6 +52,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	otari: true,
 	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
 	litellm: true,
+	// resolveKiroModelCacheProviderId scopes the namespace per login (OAuth) or
+	// per key and endpoint (API key), so a synchronous bare-provider read would
+	// leak another credential's catalog or hide the scoped one.
+	kiro: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -113,6 +134,8 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${CODEX_CLIENT_VERSION}`;
 			return `${providerId}:${CODEX_CLIENT_VERSION}:${Bun.hash(baseUrl).toString(36)}`;
 		}
+		case "kiro":
+			return resolveKiroModelCacheProviderId(options.apiKey);
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor": {

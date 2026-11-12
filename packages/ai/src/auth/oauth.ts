@@ -1,3 +1,4 @@
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
@@ -99,13 +100,24 @@ export class OAuthAccounts implements OAuthApi {
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
 		});
+		const storeAs = def.storeCredentialsAs ?? provider;
+		// Providers whose login names exactly one account or key (declared via
+		// `login-replaces-credentials` in the auth policy tree) replace every
+		// stored credential instead of upserting alongside them. `pool.set`
+		// clears session affinity through `onReset`, so running sessions drop
+		// the previous account.
+		const replaceOnLogin = authPolicyFor(provider)?.loginReplacesCredentials === true;
 		if (typeof result === "string") {
 			// Some flows (e.g. ollama) return "" to signal that no key was entered.
 			if (!result) {
 				return undefined;
 			}
-			// `store-as` routes API-key logins too, not only OAuth credentials.
-			await this.#deps.pool.storeLoginApiKey(def.storeCredentialsAs ?? provider, result);
+			if (replaceOnLogin) {
+				await this.#deps.pool.set(storeAs, { type: "api_key", key: result, source: "login" });
+			} else {
+				// `store-as` routes API-key logins too, not only OAuth credentials.
+				await this.#deps.pool.storeLoginApiKey(storeAs, result);
+			}
 			return { type: "api_key" };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant
@@ -116,10 +128,14 @@ export class OAuthAccounts implements OAuthApi {
 			...result,
 			authorizedAt: Date.now(),
 		};
-		// Use pool.upsertOAuth to upsert the new credential.
-		// Any legacy api_key rows from older versions will be cleaned up so they do not
-		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
+		if (replaceOnLogin) {
+			await this.#deps.pool.set(storeAs, newCredential);
+		} else {
+			// Use pool.upsertOAuth to upsert the new credential.
+			// Any legacy api_key rows from older versions will be cleaned up so they do not
+			// shadow the new OAuth row, while preserving other active OAuth credentials.
+			await this.#deps.pool.upsertOAuth(storeAs, newCredential);
+		}
 		return {
 			type: "oauth",
 			email: newCredential.email,
@@ -128,7 +144,6 @@ export class OAuthAccounts implements OAuthApi {
 			orgName: newCredential.orgName,
 		};
 	}
-
 	/**
 	 * Resolve the OAuth credential for `provider`, refreshing through the same
 	 * pipeline as API-key resolution but returning the refreshed

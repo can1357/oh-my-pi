@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `readBoundedJson` and `readBoundedBytes` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Added `readBoundedBody`, which reads a response body up to a byte cap and returns the head with a `truncated` flag instead of failing
 - Added `getWebKitHostPath()`, where the WebKit browser engine's host executable is installed (`~/.o2/lib/abkit/ABHost`, `ABHost.exe` on Windows; shared with Tern)
 - Exported `BROWSER_ARCHIVE_LIMITS` from `@oh-my-pi/pi-utils/browsers`: the extraction ceilings for trusted browser engine archives
 

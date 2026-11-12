@@ -1,0 +1,1 @@
+[Tool result truncated: only the first {{keptBytes}} of {{totalBytes}} UTF-8 bytes were sent. Re-run the tool with a narrower scope if the omitted part is needed.]

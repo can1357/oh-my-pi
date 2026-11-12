@@ -1,8 +1,9 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
-import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { nativeTransportShadowMessage, registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { nativeTransportOwner } from "@oh-my-pi/pi-catalog/compat/providers";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
@@ -3084,8 +3085,22 @@ export class ModelRegistry {
 		return models.map(model => {
 			const override = this.#runtimeProviderOverrides.get(model.provider);
 			if (!override) return model;
-			return this.#applyProviderTransportOverrideToModel(model, override);
+			return this.#applyRuntimeProviderOverrideToModel(model, override);
 		});
+	}
+	/**
+	 * Apply an extension's provider override. Its transport reaches only rows the
+	 * extension can own: rows on a `native-transport-only` API keep their native
+	 * transport (an extension may re-point their baseUrl, never route them
+	 * through a gateway).
+	 */
+	#applyRuntimeProviderOverrideToModel(model: Model<Api>, override: ProviderOverride): Model<Api> {
+		return this.#applyProviderTransportOverrideToModel(
+			model,
+			override.transport !== undefined && nativeTransportOwner(model.api) !== undefined
+				? { ...override, transport: undefined }
+				: override,
+		);
 	}
 	#resolveLiveModelOverride(model: Model<Api>): ModelOverride | undefined {
 		const providerOverrides = this.#modelOverrides.get(model.provider);
@@ -3932,6 +3947,33 @@ export class ModelRegistry {
 	 */
 	registerProvider(providerName: string, config: ProviderConfigInput, sourceId?: string): void {
 		if (this.#ignoreMirrorLocalChange("registerProvider")) return;
+		// A `native-transport-only` provider (catalog rules) may be overridden by
+		// an extension like any built-in (baseUrl, headers, models of its own),
+		// but supplying its own transport or login would shadow the native one,
+		// and so would a provider-level `transport` with no models of its own to
+		// carry it. Refuse that registration with a surfaced warning rather than
+		// throwing, so one stale extension cannot abort startup or `omp models`.
+		const native = nativeTransportOwner(providerName);
+		if (native !== undefined) {
+			const ownsModels = (config.models?.length ?? 0) > 0 || config.fetchDynamicModels !== undefined;
+			const shadowing = [
+				config.api !== undefined && config.api !== native.api ? "api" : undefined,
+				config.streamSimple ? "streamSimple" : undefined,
+				config.oauth ? "oauth" : undefined,
+				config.transport !== undefined && !ownsModels ? "transport" : undefined,
+			].filter(field => field !== undefined);
+			if (shadowing.length > 0) {
+				logger.warn("Extension provider registration ignored: it would shadow a native-transport-only provider", {
+					provider: providerName,
+					sourceId,
+					fields: shadowing,
+				});
+				this.#configWarnings.push(
+					`Ignored the ${providerName} provider registered by ${sourceId ?? "an extension"} (it supplies its own ${shadowing.join(", ")}). ${nativeTransportShadowMessage(native.provider)}`,
+				);
+				return;
+			}
+		}
 		this.#runtimeChange({ kind: "register", name: providerName, config, sourceId }, () =>
 			this.#registerProvider(providerName, config, sourceId),
 		);
@@ -4091,7 +4133,7 @@ export class ModelRegistry {
 			const nextModelsWithTransport = runtimeTransportOverride
 				? nextModels.map(model => {
 						if (model.provider !== providerName) return model;
-						return this.#applyProviderTransportOverrideToModel(model, runtimeTransportOverride);
+						return this.#applyRuntimeProviderOverrideToModel(model, runtimeTransportOverride);
 					})
 				: nextModels;
 			this.#unprojectedModels = this.#applyProviderBedrockOverrides(nextModelsWithTransport);
@@ -4186,7 +4228,7 @@ export class ModelRegistry {
 				this.#unprojectedModels = this.#applyDiscoveryPolicies(
 					this.#unprojectedModels.map(model => {
 						if (model.provider !== providerName) return model;
-						return this.#applyProviderTransportOverrideToModel(model, transportOverride);
+						return this.#applyRuntimeProviderOverrideToModel(model, transportOverride);
 					}),
 				);
 				this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));

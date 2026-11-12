@@ -73,6 +73,13 @@ export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 	"inferenceRegion?": "'global' | 'eu' | 'us'",
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
+	"kiroClientId?": "string",
+	"kiroClientSecret?": "string",
+	"kiroClientSecretExpiresAt?": "number",
+	"kiroTokenEndpoint?": "string",
+	"kiroOidcRegion?": "string",
+	"kiroLoginId?": "string",
+	"kiroLoginProvider?": "'Google' | 'Github'",
 });
 
 /** OAuth credential as it appears in broker snapshots — refresh replaced with sentinel. */
@@ -92,6 +99,13 @@ export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = ty
 	"inferenceRegion?": "'global' | 'eu' | 'us'",
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
+	"kiroClientId?": "string",
+	"kiroClientSecret?": "string",
+	"kiroClientSecretExpiresAt?": "number",
+	"kiroTokenEndpoint?": "string",
+	"kiroOidcRegion?": "string",
+	"kiroLoginId?": "string",
+	"kiroLoginProvider?": "'Google' | 'Github'",
 });
 
 export const apiKeyCredentialSchema: FluentType<ApiKeyCredential> = type({

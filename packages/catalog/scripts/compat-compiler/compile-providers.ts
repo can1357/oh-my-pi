@@ -56,6 +56,7 @@ const KNOWN_APIS = [
 	"google-generative-ai",
 	"google-gemini-cli",
 	"google-vertex",
+	"kiro-api",
 	"ollama-chat",
 	"cursor-agent",
 	"gitlab-duo-agent",
@@ -83,6 +84,7 @@ export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"dynamic-models-authoritative",
 	"skip-cross-provider-reference-fills",
 	"keep-bundled-names",
+	"native-transport-only",
 	"discovery",
 	"kind-apis",
 	"seed",
@@ -396,6 +398,12 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "keep-bundled-names":
 				if (provider.keepBundledNames !== undefined) malformed(child);
 				provider.keepBundledNames = singleBoolean(child);
+				break;
+			case "native-transport-only":
+				if (provider.nativeTransportOnly !== undefined) malformed(child);
+				validateProps(child, []);
+				if (child.children) malformed(child);
+				provider.nativeTransportOnly = validateApi(child, requiredName(child));
 				break;
 			case "discovery":
 				if (provider.discovery !== undefined) malformed(child);
