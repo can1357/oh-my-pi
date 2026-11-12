@@ -390,7 +390,7 @@ export type CacheWarmingMode = "off" | "streaming" | "idle";
 /** `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches. */
 export type MessageUpdates = "full" | "delta";
 
-export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 export type GoalOp = "get" | "create" | "resume" | "pause" | "drop";
 
@@ -408,8 +408,6 @@ export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "a
 export interface TodoItem {
 	content: string;
 	status: TodoStatus;
-	/** What a `blocked` task is waiting on. */
-	blocker?: string;
 	details?: string;
 	notes?: string[];
 }

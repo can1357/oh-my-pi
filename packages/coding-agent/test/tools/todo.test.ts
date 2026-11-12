@@ -234,10 +234,10 @@ describe("TodoTool operations", () => {
 		]);
 	});
 
-	it("uses the first pending phase when no task is active, skipping blocked tasks", async () => {
+	it("uses the first pending phase when no task is active, skipping closed phases", async () => {
 		const tool = new TodoTool(
 			createSession([
-				{ name: "Waiting", tasks: [{ content: "wait", status: "blocked", blocker: "approval" }] },
+				{ name: "Done", tasks: [{ content: "wait", status: "completed" }] },
 				{ name: "Next", tasks: [{ content: "next", status: "pending" }] },
 				{ name: "Later", tasks: [{ content: "later", status: "pending" }] },
 			]),
@@ -245,7 +245,7 @@ describe("TodoTool operations", () => {
 		const result = await tool.execute("append", { op: "append", items: ["new"] });
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.phases).toEqual([
-			{ name: "Waiting", tasks: [{ content: "wait", status: "blocked", blocker: "approval" }] },
+			{ name: "Done", tasks: [{ content: "wait", status: "completed" }] },
 			{
 				name: "Next",
 				tasks: [
@@ -299,53 +299,10 @@ describe("TodoTool operations", () => {
 		]);
 	});
 
-	it("surfaces a host-blocked task outside the remaining set and drops its note once the agent starts it", async () => {
-		const tool = new TodoTool(
-			createSession([
-				{
-					name: "Work",
-					tasks: [
-						{ content: "a", status: "in_progress" },
-						{ content: "b", status: "blocked", blocker: "waiting on sign-off" },
-					],
-				},
-			]),
-		);
-
-		const viewed = await tool.execute("call-1", { op: "view" });
-		const summary = viewed.content.find(part => part.type === "text");
-		if (summary?.type !== "text") throw new Error("Expected text summary from todo");
-		// `a` stays the only open item; `b` leaves the remaining/open set but is surfaced as blocked.
-		expect(summary.text).toContain("Remaining items (1):");
-		expect(summary.text).toContain("1 blocked");
-
-		// The tool has no unblock op: starting the task is how the agent resumes it, and the note must not outlive the wait.
-		const started = await tool.execute("call-2", { op: "start", task: "b" });
-		expect(started.details?.phases[0]?.tasks.find(task => task.content === "b")).toEqual({
-			content: "b",
-			status: "in_progress",
-		});
-	});
-
-	it("preserves blocked status across the markdown round-trip", () => {
-		const phases: TodoPhase[] = [
-			{
-				name: "Work",
-				tasks: [
-					{ content: "a", status: "blocked", blocker: "x" },
-					{ content: "b", status: "completed" },
-				],
-			},
-		];
-		const md = phasesToMarkdown(phases);
-		expect(md).toContain("- [!] a");
-
-		const { phases: parsed, errors } = markdownToPhases(md);
-		expect(errors).toEqual([]);
-		const parsedA = parsed[0]?.tasks.find(task => task.content === "a");
-		expect(parsedA?.status).toBe("blocked");
-		// The blocker reason must survive the round-trip, not just the status.
-		expect(parsedA?.blocker).toBe("x");
+	it("rejects the retired [!] checklist marker from /todo edit", () => {
+		const { phases, errors } = markdownToPhases("# Work\n- [!] a\n- [ ] b\n");
+		expect(errors).toEqual(['Line 2: unknown status marker "[!]" (use [ ], [x], [/], [-])']);
+		expect(phases[0]?.tasks.map(task => task.content)).toEqual(["b"]);
 	});
 
 	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
@@ -983,18 +940,6 @@ describe("todoToolRenderer.renderResult label sanitization", () => {
 		expect(Bun.stripANSI(rendered)).toContain("screen");
 	});
 
-	it("strips control sequences from a blocker note", () => {
-		const rendered = renderPhases([
-			{
-				name: "Execution",
-				tasks: [{ content: "ship it", status: "blocked", blocker: "waiting\u001b[2Jhere" }],
-			},
-		] as unknown as TodoPhase[]);
-
-		expect(rendered).not.toContain("\u001b[2J");
-		expect(Bun.stripANSI(rendered)).toContain("waiting");
-	});
-
 	it("keeps a completed label intact under the strikethrough path", () => {
 		// The completed branch runs the label through `strikethroughText`, which
 		// splices per character — sanitizing first keeps that from interleaving
@@ -1039,13 +984,12 @@ describe("todoToolRenderer.renderResult label sanitization", () => {
 		// `sanitizeText` deliberately preserves tabs, and a raw tab punches holes
 		// in bordered TUI output — so the display path must replace them too.
 		const rendered = renderPhases([
-			{ name: "Set\tup", tasks: [{ content: "ship\tit", status: "blocked", blocker: "waiting\there" }] },
+			{ name: "Set\tup", tasks: [{ content: "ship\tit", status: "in_progress" }] },
 			{ name: "Ship", tasks: [{ content: "b", status: "pending" }] },
 		] as unknown as TodoPhase[]);
 
 		expect(rendered).not.toContain("\t");
 		expect(Bun.stripANSI(rendered)).toContain("ship");
-		expect(Bun.stripANSI(rendered)).toContain("waiting");
 		expect(Bun.stripANSI(rendered)).toContain("Set");
 	});
 

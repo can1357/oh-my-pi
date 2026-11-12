@@ -40,7 +40,7 @@ The params object **is** a single op — the discriminator and its fields live a
 
 For `init`, an absent or empty phase name becomes `Tasks`; duplicate phase names are rejected after this default applies.
 
-For `append`, an omitted `phase` selects the in-progress task's phase, otherwise the first pending task's phase. If no task is actionable (including when all tasks are blocked), it uses the last phase; if no phases exist, it creates `Tasks`. An explicit phase overrides this selection, but an explicit empty string is rejected. Omitting `op` as well as `phase` remains ambiguous when a list exists and is not inferred as `append`.
+For `append`, an omitted `phase` selects the in-progress task's phase, otherwise the first pending task's phase. If no task is actionable, it uses the last phase; if no phases exist, it creates `Tasks`. An explicit phase overrides this selection, but an explicit empty string is rejected. Omitting `op` as well as `phase` remains ambiguous when a list exists and is not inferred as `append`.
 
 ## Outputs
 
@@ -59,9 +59,7 @@ The tool returns a single-shot `AgentToolResult`:
 `TodoPhase` / `TodoItem` state model:
 
 - `TodoPhase`: `{ name: string, tasks: TodoItem[] }`
-- `TodoItem`: `{ content: string, status: "pending" | "in_progress" | "completed" | "abandoned" | "blocked", blocker?: string }`
-
-The tool has no op that sets `blocked`: a host marks a task blocked through RPC `set_todos`, the user through `/todo edit` (`[!]`). `start`, `done`, and `drop` move a blocked task like any other and clear its `blocker` note.
+- `TodoItem`: `{ content: string, status: "pending" | "in_progress" | "completed" | "abandoned" }`
 
 The TUI renderer (`todoToolRenderer`) merges call and result into one transcript block and renders phases as a tree. Collapsed transcript previews cap tree items at `PREVIEW_LIMITS.COLLAPSED_ITEMS` (`8`).
 
@@ -80,7 +78,6 @@ The TUI renderer (`todoToolRenderer`) merges call and result into one transcript
 6. After a successful mutation, `normalizeInProgressTask(...)` enforces the single-active-task invariant:
    - if multiple tasks are `in_progress`, only the first stays active and the rest become `pending`;
    - if none are `in_progress`, the first `pending` task in phase/task order is auto-promoted to `in_progress`;
-   - blocked tasks are skipped, so a list may have no active task when all open work is blocked.
 7. `execute(...)` stores the updated phases with `session.setTodoPhases?.(...)` only when the op produced no errors and was not a `view`; a failed op is discarded. `storage` is `"session"` when `session.getSessionFile()` exists, else `"memory"`.
 8. `getCompletionTransitions(...)` compares the previous and updated phases (skipped for failed or `view` calls); newly completed tasks are returned in `details.completedTasks`.
 9. Details include the resolved `op` on success or op-specific failure, including an op inferred from omitted input. A payload that cannot be schema-validated returns before an op is available.
@@ -95,7 +92,6 @@ The TUI renderer (`todoToolRenderer`) merges call and result into one transcript
 | -------------- | -------------------------------------------------------------------- | ------------------------------- | ------------------------------- | ------- | ---------------------------- |
 | `pending`      | `in_progress` on target                                              | `completed`                     | `abandoned`                     | Removed | New tasks enter as `pending` |
 | `in_progress`  | Target stays `in_progress`; non-target active tasks become `pending` | `completed`                     | `abandoned`                     | Removed | No status change             |
-| `blocked`      | `in_progress` if targeted, note cleared                              | `completed`, note cleared       | `abandoned`, note cleared       | Removed | No status change             |
 | `completed`    | Can be set back to `in_progress` if targeted                         | Stays `completed`               | Becomes `abandoned` if targeted | Removed | No status change             |
 | `abandoned`    | Can be set back to `in_progress` if targeted                         | Becomes `completed` if targeted | Stays `abandoned`               | Removed | No status change             |
 
@@ -114,8 +110,8 @@ Normalization then re-applies the single-active-task rule after the op runs.
 
 The same file also exposes non-tool helpers used by `/todo`:
 
-- `phasesToMarkdown(...)` serializes phases as headings plus checklist items (`[ ]`, `[/]`, `[x]`, `[-]`, `[!]`). A blocked reason is preserved in a trailing `<!-- blocker: ... -->` comment.
-- `markdownToPhases(...)` parses that format, defaults orphan tasks into a `Todos` phase, also accepts `>` as `in_progress` and `~` as `abandoned`, restores blocked notes, and runs the same normalization step.
+- `phasesToMarkdown(...)` serializes phases as headings plus checklist items (`[ ]`, `[/]`, `[x]`, `[-]`).
+- `markdownToPhases(...)` parses that format, defaults orphan tasks into a `Todos` phase, also accepts `>` as `in_progress` and `~` as `abandoned` and runs the same normalization step.
 
 ## Side Effects
 
@@ -142,7 +138,7 @@ The same file also exposes non-tool helpers used by `/todo`:
 - Flat `init.items` and `append.items`: the shared schema allows any array length, but op-specific execution rejects missing/empty lists.
 - Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/tui/src/render/render-utils.ts`).
 - Execution-time repair: an omitted `op` is inferred only for the unambiguous payloads described above; the schema itself still requires `op`.
-- HUD auto-hide delay: `tasks.todoClearDelay` default `60` seconds; `< 0` disables hiding, `0` hides immediately. Applies only when all tasks are closed; blocked or pending work keeps the HUD visible. Canonical state survives the display change and session resume.
+- HUD auto-hide delay: `tasks.todoClearDelay` default `60` seconds; `< 0` disables hiding, `0` hides immediately. Applies only when all tasks are closed; pending or in-progress work keeps the HUD visible. Canonical state survives the display change and session resume.
 - Tool execution mode: `concurrency = "exclusive"`, `strict = true`, `loadMode = "discoverable"`.
 
 ## Errors

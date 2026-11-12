@@ -372,38 +372,6 @@ describe("InteractiveMode todo HUD persistence", () => {
 		}
 	});
 
-	it("completes a blocked todo when the detached subagent it waits on finishes", async () => {
-		await replaceMode();
-		setTodoClearDelay(-1);
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		// A todo blocked while waiting on a detached subagent. Blocked todos are
-		// excluded from the stop reminder, so if reconciliation skipped them this
-		// would strand silently after the subagent completes.
-		session.setTodoPhases([
-			{
-				name: "Implementation",
-				tasks: [{ content: "Fix review comments", status: "blocked", blocker: "waiting on ReviewFixer" }],
-			},
-		]);
-		mode.setTodos(session.getTodoPhases());
-
-		await mode.init();
-		vi.useFakeTimers();
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id: "ReviewFixer",
-			index: 0,
-			agent: "task",
-			description: "Fix review comments",
-			status: "completed",
-			detached: true,
-		});
-		vi.advanceTimersByTime(100);
-
-		const task = session.getTodoPhases()[0]?.tasks[0];
-		expect(task?.status).toBe("completed");
-		// The blocker note is dropped with the blocked status — the wait is over.
-		expect(task?.blocker).toBeUndefined();
-	});
 	it("does not persist a stale reveal after the owning snapshot changes", async () => {
 		await replaceMode();
 		vi.useFakeTimers();

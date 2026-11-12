@@ -7,7 +7,7 @@
 - GitHub Actions watch cards show current-step progress and expand with Ctrl+O to reveal ordered step states and durations in ANSI and native Tern views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 ### Removed
 
-- `TodoOperation` no longer includes `block` and `unblock`, which the `todo` tool dropped
+- `TodoStatus` no longer includes `blocked`, `TodoItem` no longer has `blocker`, and `TodoOperation` no longer includes `block` and `unblock`
 
 ### Fixed
 
@@ -15,6 +15,7 @@
 - In Tern, an edit's diff no longer opens with stray one-line hunks of far-off lines (the section heading or closing brace around the change), so a collapsed edit shows the change itself; lines after a second, distant change in the same edit carry their real line numbers
 - Table charts no longer read `with`, `to` or `from` inside a column name (`Runs with ≥10`) as a before/after condition, which turned unrelated columns into factors of each other
 - Chart row names keep a number with the name before it (`EmbeddingGemma 2`, `Jev 15`) instead of nesting them under a bare `EmbeddingGemma` or `Jev,`
+- `read` accepts a line list written with colons as range dashes (`file.ts:20:40,85:100`) and shows it as one row, instead of failing with a `Path 'file.ts:20:40,85' not found` error split across rows
 
 ## [18.18.9] - 2026-11-11
 

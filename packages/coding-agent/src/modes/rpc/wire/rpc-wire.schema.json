@@ -2296,8 +2296,7 @@
 				"pending",
 				"in_progress",
 				"completed",
-				"abandoned",
-				"blocked"
+				"abandoned"
 			],
 			"type": "string"
 		},
@@ -2367,10 +2366,6 @@
 				},
 				"status": {
 					"$ref": "#/$defs/TodoStatus"
-				},
-				"blocker": {
-					"type": "string",
-					"description": "What a `blocked` task is waiting on."
 				},
 				"details": {
 					"type": "string"

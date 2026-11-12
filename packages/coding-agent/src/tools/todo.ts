@@ -27,8 +27,7 @@ export function isTodoPhase(value: unknown): value is TodoPhase {
 			(task.status === "pending" ||
 				task.status === "in_progress" ||
 				task.status === "completed" ||
-				task.status === "abandoned" ||
-				task.status === "blocked"),
+				task.status === "abandoned"),
 	);
 }
 
@@ -90,9 +89,7 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 }
 
 function cloneTask(task: TodoItem): TodoItem {
-	return task.blocker !== undefined
-		? { content: task.content, status: task.status, blocker: task.blocker }
-		: { content: task.content, status: task.status };
+	return { content: task.content, status: task.status };
 }
 
 function clonePhases(phases: TodoPhase[]): TodoPhase[] {
@@ -172,19 +169,26 @@ function todoPhasesFingerprint(phases: readonly TodoPhase[]): string {
 	return JSON.stringify(
 		phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker === undefined
-					? { content: task.content, status: task.status }
-					: { content: task.content, status: task.status, blocker: task.blocker },
-			),
+			tasks: phase.tasks.map(task => ({ content: task.content, status: task.status })),
 		})),
 	);
+}
+
+/** Snapshots saved before the `blocked` status was removed read back with those tasks `pending`. */
+function withoutBlocked(phases: TodoPhase[]): TodoPhase[] {
+	return phases.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task => {
+			const status: string = task.status;
+			return status === "blocked" ? { content: task.content, status: "pending" } : task;
+		}),
+	}));
 }
 
 function canonicalTodoPhases(entry: SessionEntry): TodoPhase[] | undefined {
 	if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
 		const phases = (entry.data as { phases?: unknown } | undefined)?.phases;
-		return Array.isArray(phases) ? (phases as TodoPhase[]) : undefined;
+		return Array.isArray(phases) ? withoutBlocked(phases as TodoPhase[]) : undefined;
 	}
 	if (entry.type !== "message") return undefined;
 	const message = entry.message as {
@@ -196,7 +200,7 @@ function canonicalTodoPhases(entry: SessionEntry): TodoPhase[] | undefined {
 	if (message.role !== "toolResult" || message.toolName !== "todo" || message.isError) return undefined;
 	if (message.details?.op === "view") return undefined;
 	const phases = message.details?.phases;
-	return Array.isArray(phases) ? (phases as TodoPhase[]) : undefined;
+	return Array.isArray(phases) ? withoutBlocked(phases as TodoPhase[]) : undefined;
 }
 
 /** Identify the latest durable canonical todo snapshot on the active branch. */
@@ -401,15 +405,6 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
-/**
- * Move a task to `status`. A `blocked` task (set by a host through `set_todos` or by the
- * user in `/todo edit`) leaves that state here, so its blocker note goes with it.
- */
-function setStatus(task: TodoItem, status: TodoStatus): void {
-	task.status = status;
-	delete task.blocker;
-}
-
 function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	switch (entry.op) {
 		case "init":
@@ -424,18 +419,18 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 					}
 				}
 			}
-			setStatus(hit.task, "in_progress");
+			hit.task.status = "in_progress";
 			return phases;
 		}
 		case "done": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
-				setStatus(task, "completed");
+				task.status = "completed";
 			}
 			return phases;
 		}
 		case "drop": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
-				setStatus(task, "abandoned");
+				task.status = "abandoned";
 			}
 			return phases;
 		}
@@ -517,7 +512,6 @@ const STATUS_TO_MARKER: Record<TodoStatus, string> = {
 	in_progress: "/",
 	completed: "x",
 	abandoned: "-",
-	blocked: "!",
 };
 
 export function resolveTodoMarkdownPath(input: string, cwd: string): string {
@@ -533,12 +527,7 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		if (i > 0) out.push("");
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
-			// A blocked task's reason rides in a trailing HTML comment: invisible in
-			// rendered markdown, unambiguous to parse back (task content can't
-			// contain the comment delimiters), so the note survives `/todo edit` and
-			// export/import round-trips.
-			const blockerNote = task.status === "blocked" && task.blocker ? ` <!-- blocker: ${task.blocker} -->` : "";
-			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}${blockerNote}`);
+			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}`);
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -553,7 +542,6 @@ const MARKER_TO_STATUS: Record<string, TodoStatus> = {
 	">": "in_progress",
 	"-": "abandoned",
 	"~": "abandoned",
-	"!": "blocked",
 };
 
 /** Parse a Markdown checklist back into todo phases. */
@@ -588,18 +576,10 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 			const marker = taskMatch[1];
 			const status = MARKER_TO_STATUS[marker];
 			if (!status) {
-				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-], [!])`);
+				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-])`);
 				continue;
 			}
-			// Recover a blocked task's reason from its trailing HTML comment (see
-			// phasesToMarkdown), then strip the comment from the visible content.
-			const rawContent = taskMatch[2].trim();
-			const blockerMatch = /^(.*?)\s*<!--\s*blocker:\s*(.*?)\s*-->$/.exec(rawContent);
-			if (status === "blocked" && blockerMatch) {
-				currentPhase.tasks.push({ content: blockerMatch[1].trim(), status, blocker: blockerMatch[2].trim() });
-			} else {
-				currentPhase.tasks.push({ content: rawContent, status });
-			}
+			currentPhase.tasks.push({ content: taskMatch[2].trim(), status });
 			continue;
 		}
 
@@ -644,7 +624,6 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	}
 	// Closed = completed + abandoned, mirroring the per-phase `done` count.
 	const closedAll = tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
-	const blockedAll = tasks.filter(task => task.status === "blocked").length;
 	// The active phase is the EARLIEST one still holding open work, so the
 	// in-progress pointer can sit in a phase whose successors already have
 	// completed tasks. Detect that "worked ahead" case to explain the
@@ -654,9 +633,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 		(phase, idx) =>
 			idx > currentIdx && phase.tasks.some(task => task.status === "completed" || task.status === "abandoned"),
 	);
-	lines.push(
-		`Overall: ${closedAll}/${tasks.length} done, ${remainingTasks.length} open${blockedAll > 0 ? `, ${blockedAll} blocked` : ""}.`,
-	);
+	lines.push(`Overall: ${closedAll}/${tasks.length} done, ${remainingTasks.length} open.`);
 	lines.push(
 		`Active phase ${currentIdx + 1}/${phases.length} "${current.name}" (${done}/${current.tasks.length})${
 			workedAhead
@@ -668,16 +645,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 		lines.push(`  ${phase.name}:`);
 		for (const task of phase.tasks) {
 			const checkbox = task.status === "completed" ? "[X]" : "[ ]";
-			const tag =
-				task.status === "in_progress"
-					? " (in progress)"
-					: task.status === "abandoned"
-						? " (dropped)"
-						: task.status === "blocked"
-							? task.blocker
-								? ` (blocked: ${task.blocker})`
-								: " (blocked)"
-							: "";
+			const tag = task.status === "in_progress" ? " (in progress)" : task.status === "abandoned" ? " (dropped)" : "";
 			lines.push(`    - ${checkbox} ${task.content}${tag}`);
 		}
 	}
