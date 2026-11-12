@@ -5,7 +5,7 @@ import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
 import { rustPrefilterPattern } from "@oh-my-pi/pi-coding-agent/secrets/regex-prefilter";
 
 function rule(regex: RegExp) {
-	return { source: rustPrefilterPattern(regex) ?? undefined, unicodeCase: regex.unicode && regex.ignoreCase };
+	return { source: rustPrefilterPattern(regex) ?? undefined };
 }
 
 /** JavaScript's own verdict, as the obfuscator's collector reads it: a non-empty match exists. */
@@ -87,6 +87,12 @@ const cases: Array<{ name: string; regex: RegExp; matching: string[]; clean: str
 		regex: /key=[0-9]{4}/iu,
 		matching: ["\u212Aey=1234", "KEY=1234"],
 		clean: "kez=1234",
+	},
+	{
+		name: "a rule spelling the Kelvin sign or long s without u matches them as themselves",
+		regex: /\u212Aey-\u017Fecret=[0-9]{4}/i,
+		matching: ["\u212Aey-\u017Fecret=1234", "\u212AEY-\u017FECRET=1234"],
+		clean: "\u212Aey-\u017Fecret=12",
 	},
 	{
 		name: "a literal brace outside a quantifier",

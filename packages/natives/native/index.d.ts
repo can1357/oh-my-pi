@@ -621,13 +621,17 @@ export declare class SecretScanner {
    */
   constructor(rules: Array<SecretScanRule>, literals: Array<string>)
   /**
-   * Replaces the configured literals (plain secrets, the placeholder key, `$$`).
+   * Replaces the configured literals (plain secrets, the placeholder key,
+   * `$$`).
    *
    * # Errors
    * Returns an error when the literal automaton cannot be built.
    */
   setLiterals(literals: Array<string>): void
-  /** Rule indices the scanner cannot filter; the caller runs them on every text. */
+  /**
+   * Rule indices the scanner cannot filter; the caller runs them on every
+   * text.
+   */
   unfiltered(): Array<number>
   /**
    * Literal hit and possibly-matching rules of one text; `null` when the
@@ -3548,8 +3552,6 @@ export interface SecretScanRule {
    * rule cannot be translated, which leaves it to JavaScript.
    */
   source?: string
-  /** Whether the JavaScript rule folds case with Unicode rules (`iu`). */
-  unicodeCase: boolean
 }
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void

@@ -55,11 +55,45 @@ fn cross(a: &Seq, b: &Seq) -> Option<Seq> {
 	dedup(out)
 }
 
-/// The ASCII chars a class stands for, lower-cased, when it is small. Unicode
-/// case folding adds KELVIN SIGN, LONG S and ANGSTROM SIGN to `k`, `s` and
-/// `å`; without `unicode_case` the JavaScript rule cannot match them, so they
-/// are ignored, and any other non-ASCII member makes the class unusable.
-fn class_chars(class: &Class, unicode_case: bool) -> Option<Vec<u8>> {
+/// The only non-ASCII chars Unicode simple case folding relates to ASCII
+/// letters: KELVIN SIGN folds with `k`, LONG S with `s`. Factors are spelled in
+/// a folded alphabet where these read as their letters, and a text holding
+/// either is also scanned folded, so ASCII-case-insensitive factor matching
+/// stays sound whether or not the JavaScript rule folds case with Unicode
+/// rules, and whether the rule or the text spells the letter.
+const FOLDED: [(&str, u8); 2] = [("\u{212A}", b'k'), ("\u{017F}", b's')];
+
+/// `c` in the folded factor alphabet as a lower-case ASCII byte; `None` for
+/// other non-ASCII chars.
+fn fold_char(c: u32) -> Option<u8> {
+	#[allow(clippy::cast_possible_truncation, reason = "checked ASCII")]
+	if c < 0x80 {
+		return Some((c as u8).to_ascii_lowercase());
+	}
+	FOLDED
+		.iter()
+		.find(|(ch, _)| ch.chars().next().map(u32::from) == Some(c))
+		.map(|&(_, ascii)| ascii)
+}
+
+/// UTF-8 `bytes` in the folded factor alphabet.
+fn fold_bytes(bytes: &[u8]) -> Vec<u8> {
+	let Ok(text) = std::str::from_utf8(bytes) else {
+		return bytes.to_ascii_lowercase();
+	};
+	let mut out = Vec::with_capacity(bytes.len());
+	for c in text.chars() {
+		match fold_char(u32::from(c)) {
+			Some(ascii) => out.push(ascii),
+			None => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+		}
+	}
+	out
+}
+
+/// The folded chars a class stands for, when it is small and every member has
+/// a folded ASCII form.
+fn class_chars(class: &Class) -> Option<Vec<u8>> {
 	let mut chars: Vec<u32> = Vec::new();
 	match class {
 		Class::Unicode(u) => {
@@ -80,41 +114,35 @@ fn class_chars(class: &Class, unicode_case: bool) -> Option<Vec<u8>> {
 			}
 		},
 	}
-	let fold_variant = |c: u32| !unicode_case && matches!(c, 0x212a | 0x017f | 0x212b);
-	if chars.iter().any(|&c| c >= 0x80 && !fold_variant(c)) {
-		return None;
-	}
-	#[allow(clippy::cast_possible_truncation, reason = "filtered to ASCII")]
-	let mut lowered: Vec<u8> = chars
-		.iter()
-		.filter(|&&c| c < 0x80)
-		.map(|&c| (c as u8).to_ascii_lowercase())
-		.collect();
-	lowered.sort_unstable();
-	lowered.dedup();
-	(!lowered.is_empty() && lowered.len() <= MAX_CLASS).then_some(lowered)
+	let mut folded = chars
+		.into_iter()
+		.map(fold_char)
+		.collect::<Option<Vec<u8>>>()?;
+	folded.sort_unstable();
+	folded.dedup();
+	(!folded.is_empty() && folded.len() <= MAX_CLASS).then_some(folded)
 }
 
-/// Every string `h` matches, when that set is small and finite.
-fn exact(h: &Hir, unicode_case: bool) -> Option<Seq> {
+/// Every string `h` matches, folded, when that set is small and finite.
+fn exact(h: &Hir) -> Option<Seq> {
 	match h.kind() {
 		HirKind::Empty | HirKind::Look(_) => Some(vec![Vec::new()]),
-		HirKind::Literal(lit) => Some(vec![lit.0.to_ascii_lowercase()]),
+		HirKind::Literal(lit) => Some(vec![fold_bytes(&lit.0)]),
 		HirKind::Class(class) => {
-			class_chars(class, unicode_case).map(|chars| chars.into_iter().map(|c| vec![c]).collect())
+			class_chars(class).map(|chars| chars.into_iter().map(|c| vec![c]).collect())
 		},
-		HirKind::Capture(cap) => exact(&cap.sub, unicode_case),
+		HirKind::Capture(cap) => exact(&cap.sub),
 		HirKind::Concat(subs) => {
 			let mut acc: Seq = vec![Vec::new()];
 			for sub in subs {
-				acc = cross(&acc, &exact(sub, unicode_case)?)?;
+				acc = cross(&acc, &exact(sub)?)?;
 			}
 			Some(acc)
 		},
 		HirKind::Alternation(subs) => {
 			let mut out = Vec::new();
 			for sub in subs {
-				out.extend(exact(sub, unicode_case)?);
+				out.extend(exact(sub)?);
 				if out.len() > MAX_SEQ {
 					return None;
 				}
@@ -126,7 +154,7 @@ fn exact(h: &Hir, unicode_case: bool) -> Option<Seq> {
 			if max != rep.min || max > 8 {
 				return None;
 			}
-			let one = exact(&rep.sub, unicode_case)?;
+			let one = exact(&rep.sub)?;
 			let mut acc: Seq = vec![Vec::new()];
 			for _ in 0..max {
 				acc = cross(&acc, &one)?;
@@ -146,17 +174,17 @@ fn score(seq: &Seq) -> (usize, usize) {
 }
 
 /// Literals at least one of which every match of `h` contains, or `None`.
-fn necessary_factors(h: &Hir, unicode_case: bool) -> Option<Seq> {
-	if let Some(seq) = exact(h, unicode_case) {
+fn necessary_factors(h: &Hir) -> Option<Seq> {
+	if let Some(seq) = exact(h) {
 		return usable(seq);
 	}
 	match h.kind() {
-		HirKind::Capture(cap) => necessary_factors(&cap.sub, unicode_case),
-		HirKind::Repetition(rep) if rep.min >= 1 => necessary_factors(&rep.sub, unicode_case),
+		HirKind::Capture(cap) => necessary_factors(&cap.sub),
+		HirKind::Repetition(rep) if rep.min >= 1 => necessary_factors(&rep.sub),
 		HirKind::Alternation(subs) => {
 			let mut out = Vec::new();
 			for sub in subs {
-				out.extend(necessary_factors(sub, unicode_case)?);
+				out.extend(necessary_factors(sub)?);
 			}
 			dedup(out).and_then(usable)
 		},
@@ -170,13 +198,13 @@ fn necessary_factors(h: &Hir, unicode_case: bool) -> Option<Seq> {
 				}
 			};
 			for sub in subs {
-				consider(necessary_factors(sub, unicode_case));
+				consider(necessary_factors(sub));
 			}
 			// Runs of consecutive finite children spell longer literals.
 			for start in 0..subs.len() {
 				let mut run: Option<Seq> = None;
 				for sub in &subs[start..] {
-					let Some(next) = exact(sub, unicode_case) else {
+					let Some(next) = exact(sub) else {
 						break;
 					};
 					let joined = match &run {
@@ -206,7 +234,7 @@ pub struct SecretScannerCore {
 	/// Indexed like the caller's rules; `None` cannot be filtered natively.
 	rules:     Vec<Option<Rule>>,
 	/// Factor literals and their rule, in automaton pattern order after the
-	/// literals.
+	/// literals and the [`FOLDED`] markers.
 	factors:   Vec<(Vec<u8>, u32)>,
 	/// Configured literals, matched exactly; automaton patterns
 	/// `0..literals.len()`.
@@ -223,13 +251,8 @@ pub struct ScanHits {
 
 impl SecretScannerCore {
 	/// `rules[i]` is rule `i`'s Rust superset pattern (`None`: not
-	/// translatable); `unicode_case[i]` whether the JavaScript rule folds case
-	/// with Unicode rules.
-	pub fn new(
-		rules: &[Option<String>],
-		unicode_case: &[bool],
-		literals: &[String],
-	) -> Result<Self, String> {
+	/// translatable).
+	pub fn new(rules: &[Option<String>], literals: &[String]) -> Result<Self, String> {
 		let mut compiled = Vec::with_capacity(rules.len());
 		let mut factors = Vec::new();
 		for (index, source) in rules.iter().enumerate() {
@@ -242,7 +265,7 @@ impl SecretScannerCore {
 					.build()
 					.parse(source)
 					.ok()?;
-				let found = necessary_factors(&hir, unicode_case.get(index).copied().unwrap_or(true));
+				let found = necessary_factors(&hir);
 				let always = found.is_none();
 				#[allow(clippy::cast_possible_truncation, reason = "rule counts are tiny")]
 				for literal in found.unwrap_or_default() {
@@ -291,7 +314,9 @@ impl SecretScannerCore {
 	#[must_use]
 	pub fn scan(&self, text: &str) -> Option<ScanHits> {
 		let bytes = text.as_bytes();
+		let factor_base = self.literals.len() + FOLDED.len();
 		let mut literal = false;
+		let mut folds = false;
 		let mut marked = vec![false; self.rules.len()];
 		for m in self.automaton.find_overlapping_iter(text) {
 			let id = m.pattern().as_usize();
@@ -299,8 +324,22 @@ impl SecretScannerCore {
 				// The automaton folds ASCII case for the factors; literals are
 				// exact.
 				literal = literal || &bytes[m.range()] == expected.as_slice();
+			} else if id < factor_base {
+				folds = true;
 			} else {
-				marked[self.factors[id - self.literals.len()].1 as usize] = true;
+				marked[self.factors[id - factor_base].1 as usize] = true;
+			}
+		}
+		if folds {
+			// Factors are spelled folded; so must the text be to match them.
+			let mut folded = text.to_owned();
+			for (ch, ascii) in FOLDED {
+				folded = folded.replace(ch, &char::from(ascii).to_string());
+			}
+			for m in self.automaton.find_overlapping_iter(&folded) {
+				if let Some(factor) = m.pattern().as_usize().checked_sub(factor_base) {
+					marked[self.factors[factor].1 as usize] = true;
+				}
 			}
 		}
 		#[allow(clippy::cast_possible_truncation, reason = "rule counts are tiny")]
@@ -321,27 +360,24 @@ fn build_automaton(
 	literals: &[Vec<u8>],
 	factors: &[(Vec<u8>, u32)],
 ) -> Result<AhoCorasick, String> {
+	let patterns = || {
+		literals
+			.iter()
+			.map(Vec::as_slice)
+			.chain(FOLDED.iter().map(|(ch, _)| ch.as_bytes()))
+			.chain(factors.iter().map(|(f, _)| f.as_slice()))
+	};
 	AhoCorasick::builder()
 		.kind(Some(AhoCorasickKind::DFA))
 		.match_kind(MatchKind::Standard)
 		.ascii_case_insensitive(true)
-		.build(
-			literals
-				.iter()
-				.map(Vec::as_slice)
-				.chain(factors.iter().map(|(f, _)| f.as_slice())),
-		)
+		.build(patterns())
 		.or_else(|_| {
 			// A literal set too large for a DFA still works as an NFA.
 			AhoCorasick::builder()
 				.match_kind(MatchKind::Standard)
 				.ascii_case_insensitive(true)
-				.build(
-					literals
-						.iter()
-						.map(Vec::as_slice)
-						.chain(factors.iter().map(|(f, _)| f.as_slice())),
-				)
+				.build(patterns())
 		})
 		.map_err(|error| error.to_string())
 }
@@ -351,9 +387,7 @@ fn build_automaton(
 pub struct SecretScanRule {
 	/// Rust pattern matching a superset of the JavaScript rule; absent when the
 	/// rule cannot be translated, which leaves it to JavaScript.
-	pub source:       Option<String>,
-	/// Whether the JavaScript rule folds case with Unicode rules (`iu`).
-	pub unicode_case: bool,
+	pub source: Option<String>,
 }
 
 /// What [`SecretScanner::scan`] found in a text.
@@ -383,9 +417,8 @@ impl SecretScanner {
 	/// Returns an error when the literal automaton cannot be built.
 	#[napi(constructor)]
 	pub fn new(rules: Vec<SecretScanRule>, literals: Vec<String>) -> napi::Result<Self> {
-		let unicode_case: Vec<bool> = rules.iter().map(|r| r.unicode_case).collect();
 		let sources: Vec<Option<String>> = rules.into_iter().map(|r| r.source).collect();
-		SecretScannerCore::new(&sources, &unicode_case, &literals)
+		SecretScannerCore::new(&sources, &literals)
 			.map(|core| Self { core })
 			.map_err(|error| Error::new(Status::InvalidArg, error))
 	}
@@ -436,9 +469,8 @@ mod tests {
 
 	fn core(rules: &[&str], literals: &[&str]) -> SecretScannerCore {
 		let rules: Vec<Option<String>> = rules.iter().map(|r| Some((*r).to_owned())).collect();
-		let unicode_case = vec![false; rules.len()];
 		let literals: Vec<String> = literals.iter().map(|l| (*l).to_owned()).collect();
-		SecretScannerCore::new(&rules, &unicode_case, &literals).unwrap()
+		SecretScannerCore::new(&rules, &literals).unwrap()
 	}
 
 	#[test]
@@ -473,7 +505,7 @@ mod tests {
 	#[test]
 	fn untranslatable_and_invalid_rules_are_left_unfiltered() {
 		let rules = vec![None, Some("(".to_owned()), Some("abc".to_owned())];
-		let scanner = SecretScannerCore::new(&rules, &[false; 3], &[]).unwrap();
+		let scanner = SecretScannerCore::new(&rules, &[]).unwrap();
 		assert_eq!(scanner.unfiltered(), vec![0, 1]);
 		assert_eq!(scanner.scan("xxabcxx"), Some(ScanHits { literal: false, rules: vec![2] }));
 	}
@@ -494,5 +526,26 @@ mod tests {
 		scanner.set_literals(&["second-secret".to_owned()]).unwrap();
 		assert_eq!(scanner.scan("first-secret"), None);
 		assert!(scanner.scan("second-secret").is_some());
+	}
+
+	#[test]
+	fn kelvin_sign_and_long_s_match_their_letters_either_way() {
+		// A rule spelling KELVIN SIGN / LONG S (JavaScript `/i` without `u`
+		// matches them only as themselves) still finds them in text.
+		let spelled = core(&["(?i:\u{212A}ey-)[0-9]{4}", "(?i:pa\u{017F}\u{017F})=[0-9]{4}"], &[]);
+		assert_eq!(
+			spelled.scan("\u{212A}ey-1234"),
+			Some(ScanHits { literal: false, rules: vec![0] })
+		);
+		assert_eq!(
+			spelled.scan("pa\u{017F}\u{017F}=1234"),
+			Some(ScanHits { literal: false, rules: vec![1] })
+		);
+		// An ASCII rule folding case with Unicode rules matches them in text.
+		let ascii = core(&["(?i:key-)[0-9]{4}"], &["\u{017F}ecret"]);
+		assert_eq!(ascii.scan("\u{212A}EY-1234"), Some(ScanHits { literal: false, rules: vec![0] }));
+		// Configured literals stay exact: folding never invents one.
+		assert_eq!(ascii.scan("secret"), None);
+		assert_eq!(ascii.scan("\u{017F}ecret"), Some(ScanHits { literal: true, rules: vec![] }));
 	}
 }

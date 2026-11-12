@@ -100,10 +100,7 @@ function createNativeScanner(entries: readonly CompiledRegexEntry[]): SecretScan
 	if (typeof SecretScanner !== "function") return undefined;
 	try {
 		return new SecretScanner(
-			entries.map(entry => ({
-				source: rustPrefilterPattern(entry.regex) ?? undefined,
-				unicodeCase: entry.regex.unicode && entry.regex.ignoreCase,
-			})),
+			entries.map(entry => ({ source: rustPrefilterPattern(entry.regex) ?? undefined })),
 			["$$"],
 		);
 	} catch {
