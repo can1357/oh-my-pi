@@ -343,6 +343,20 @@ describe("inherited context turn", () => {
 		expect(restoreEvictedFrames(sent, built, sent)).toBe(sent);
 	});
 
+	it("renders a failing tail once, then keeps sending text without retrying", async () => {
+		const render = vi.spyOn(snapcompact, "renderMany").mockRejectedValue(new Error("no rasterizer"));
+		try {
+			const frames = new InheritedContextFrames();
+			const built = childContext(context);
+			for (let request = 0; request < 3; request++) {
+				expect(await frames.transform(built, visionModel(["text", "image"]), false)).toBe(built);
+			}
+			expect(render).toHaveBeenCalledTimes(1);
+		} finally {
+			render.mockRestore();
+		}
+	});
+
 	it("judges and replaces only its own part when inline snapcompact prepended system-prompt frames", async () => {
 		const built = childContext(context);
 		const sent = await new InheritedContextFrames().transform(built, visionModel(["text", "image"]), false);

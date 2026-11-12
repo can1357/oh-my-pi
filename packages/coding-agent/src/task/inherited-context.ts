@@ -313,7 +313,8 @@ function isInheritedContextTurn(message: Message): message is UserMessage & { co
  * identical bytes (prompt caches stay warm) without re-rasterizing.
  */
 export class InheritedContextFrames {
-	#last?: { key: string; content: (TextContent | ImageContent)[] };
+	/** The latest fit and its render (`null` once it failed), so a failure is not redone or logged per request. */
+	#last?: { key: string; fit: ReturnType<typeof fitTail>; content?: (TextContent | ImageContent)[] | null };
 
 	/** `context` itself when the turn stays text. */
 	async transform(
@@ -342,9 +343,11 @@ export class InheritedContextFrames {
 	): Promise<(TextContent | ImageContent)[] | undefined> {
 		// The fit depends only on the tail, the shape setting, and the model; reuse it before re-wrapping ~28k chars.
 		const key = `${model.provider}\0${model.id}\0${shape}\0${tail}`;
-		if (this.#last?.key === key) return this.#last.content.length - 1 > room ? undefined : this.#last.content;
-		const fit = fitTail(tail, model, shape);
+		if (this.#last?.key !== key) this.#last = { key, fit: fitTail(tail, model, shape) };
+		const last = this.#last;
+		const { fit } = last;
 		if (!fit || fit.frames > room) return undefined;
+		if (last.content !== undefined) return last.content ?? undefined;
 		let frames: ImageContent[];
 		try {
 			frames = await snapcompact.renderMany(fit.text, { shape: fit.shape, maxFrames: INHERITED_CONTEXT_MAX_FRAMES });
@@ -353,18 +356,20 @@ export class InheritedContextFrames {
 			logger.warn("task: inherited context frames failed to render; sending text", {
 				error: error instanceof Error ? error.message : String(error),
 			});
+			last.content = null;
 			return undefined;
 		}
-		if (frames.length === 0) return undefined;
-		const content = [
-			{
-				type: "text",
-				text: renderPreamble(frames.length, fit.identifierList ? extractIdentifiers(fit.text) : []),
-			} satisfies TextContent,
-			...frames,
-		];
-		this.#last = { key, content };
-		return content;
+		last.content =
+			frames.length === 0
+				? null
+				: [
+						{
+							type: "text",
+							text: renderPreamble(frames.length, fit.identifierList ? extractIdentifiers(fit.text) : []),
+						} satisfies TextContent,
+						...frames,
+					];
+		return last.content ?? undefined;
 	}
 }
 
@@ -373,7 +378,8 @@ export class InheritedContextFrames {
  * swapped into `framed` (its result for `unframed`), send the text tail instead, so the child
  * keeps the tail rather than a preamble without it. Only this turn's own part counts and is
  * replaced: inline snapcompact prepends its system-prompt note and frames to the first user turn,
- * which in a child is this one, and those stay whichever images a clamp evicts. Stateless, so
+ * which is this one unless the child's autoloaded skills come first, and those stay whichever images
+ * a clamp evicts. Stateless, so
  * overlapping requests on one transform (side requests, compaction) cannot mix up each other's turns.
  */
 export function restoreEvictedFrames(context: Context, unframed: Context, framed: Context): Context {

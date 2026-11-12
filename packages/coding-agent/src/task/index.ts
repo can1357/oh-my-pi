@@ -1312,14 +1312,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// call returns (the async subset). Blocking items have already completed
 		// by then, so a "coordinate while they run" hint would misfire.
 		const advisory = spawnAdvisory(asyncItems.length > 0);
-		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> =>
-			withNotes(
-				result,
-				droppedContextNote(
-					spawns.filter(spawn => droppedContexts.includes(spawn.index)).map(spawn => spawn.agentId),
-				),
-				advisory,
-			);
 		const outputManager = this.#outputManager();
 		const callStartedAt = Date.now();
 		const spawns: Array<{
@@ -1365,6 +1357,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				},
 			});
 		}
+		// After the loop: the note names each child by the id allocated above.
+		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> =>
+			withNotes(
+				result,
+				droppedContextNote(
+					spawns.filter(spawn => droppedContexts.includes(spawn.index)).map(spawn => spawn.agentId),
+				),
+				advisory,
+			);
 		const asyncSpawns = spawns.filter(spawn => !spawn.blocking);
 		const syncSpawns = spawns.filter(spawn => spawn.blocking);
 		const agentLabel = [...new Set(asyncSpawns.map(spawn => spawn.progress.agent))].join(", ");

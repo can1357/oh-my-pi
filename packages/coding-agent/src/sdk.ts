@@ -5112,11 +5112,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return toolSession.skills;
 			},
-			// Live too: Hide Secrets can turn on after launch, and the advisor's task captures must encode.
-			get providerSecrets() {
-				return toolSession.providerSecrets;
-			},
-			// `getContextMessages` above is the primary's transcript, not the advisor's own reasoning.
+			// The spread `getContextMessages` reads the primary's transcript, not the advisor's own, so its task spawns never inherit.
 			withholdInheritedContext: true,
 			hasEditTool: true,
 			requireYieldTool: false,
