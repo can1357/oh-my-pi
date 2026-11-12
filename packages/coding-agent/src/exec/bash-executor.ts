@@ -550,7 +550,8 @@ function isShellSessionOwnedBy(key: string, agentSessionKey: string): boolean {
  */
 export function releaseShellSessions(agentSessionKey: string | undefined): void {
 	if (!agentSessionKey) return;
-	const owners = new Set([agentSessionKey, `eval:${agentSessionKey}`]);
+	// `files:` is the host that performs the session's contained file-tool mutations.
+	const owners = new Set([agentSessionKey, `eval:${agentSessionKey}`, `files:${agentSessionKey}`]);
 	for (const [key, shell] of shellSessions) {
 		if (!isShellSessionOwnedBy(key, agentSessionKey)) continue;
 		owners.add(key.split("\n", 1)[0]);

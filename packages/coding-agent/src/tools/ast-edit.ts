@@ -8,13 +8,21 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
+import {
+	type AstReplaceChange,
+	type AstReplaceFileChange,
+	type AstReplaceOptions,
+	type AstReplaceResult,
+	astEdit,
+	type ShellFilesystem,
+} from "@oh-my-pi/pi-natives";
 
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
+import { containedFileMutations, withContainedFileMutations } from "../sandbox/file-mutations";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
@@ -80,6 +88,12 @@ interface AstEditAggregatedResult {
 	missingGrammars?: string[];
 }
 
+/** `astEdit`, run in the contained host when it writes and the running call's mutations are contained. */
+function nativeAstEdit(options: AstReplaceOptions): Promise<AstReplaceResult> {
+	const contained = options.dryRun ? undefined : containedFileMutations();
+	return contained ? contained.astEdit(options) : astEdit(options);
+}
+
 async function runAstEditTargets(
 	targets: Array<{ basePath: string; glob?: string }>,
 	commonBasePath: string,
@@ -94,7 +108,7 @@ async function runAstEditTargets(
 	let limitReached = false;
 	let applied = !options.dryRun;
 	for (const target of targets) {
-		const targetResult = await astEdit({
+		const targetResult = await nativeAstEdit({
 			rewrites: options.rewrites,
 			path: target.basePath,
 			glob: target.glob,
@@ -146,7 +160,7 @@ function runAstEditOnce(
 	if (targets) {
 		return runAstEditTargets(targets, resolvedSearchPath, options);
 	}
-	return astEdit({
+	return nativeAstEdit({
 		rewrites: options.rewrites,
 		path: resolvedSearchPath,
 		glob: globFilter,
@@ -472,13 +486,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					apply: async (_reason: string) => {
 						// The apply outlives the preview call: its filesystem carries no signal.
 						const applyContext = sessionResolveContext(this.session);
-						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
-							rewrites: normalizedRewrites,
-							dryRun: false,
-							maxFiles,
-							failOnParseError: false,
-							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
-						});
+						// Under the OS sandbox the rewrite runs in the contained host, which writes the files.
+						const applyResult = await withContainedFileMutations(this.session, () =>
+							runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+								rewrites: normalizedRewrites,
+								dryRun: false,
+								maxFiles,
+								failOnParseError: false,
+								filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
+							}),
+						);
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
 							applyResult.parseErrors,
 						);

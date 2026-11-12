@@ -32,6 +32,7 @@ import {
 	type HostRequest,
 	type HostResults,
 	type HostShellOptions,
+	MAX_HOST_LINE_BYTES,
 	readHostLines,
 	SANDBOX_HOST_PROTOCOL_VERSION,
 } from "./host-protocol";
@@ -205,15 +206,21 @@ export class SandboxHostConnection {
 	request<M extends HostCall>(message: M, run?: RunRoutes): Promise<HostResults[M["op"]]> {
 		if (this.#failure) return Promise.reject(this.#failure);
 		const id = ++this.#nextId;
+		const call: HostCall = message;
+		const line = encodeHostMessage({ ...call, id });
+		// The host drops (and exits on) a line over the cap; refuse it here so the host survives.
+		if (Buffer.byteLength(line) > MAX_HOST_LINE_BYTES) {
+			const error = new Error(`Sandbox host request too large (${message.op}, over ${MAX_HOST_LINE_BYTES} bytes)`);
+			return Promise.reject(Object.assign(error, { code: "E2BIG" }));
+		}
 		const { promise, resolve, reject } = Promise.withResolvers<HostResults[M["op"]]>();
 		this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, run });
-		const call: HostCall = message;
-		this.#write({ ...call, id });
+		this.#write(line);
 		return promise;
 	}
 
 	notify(message: Notification): void {
-		if (!this.#failure) this.#write(message);
+		if (!this.#failure) this.#write(encodeHostMessage(message));
 	}
 
 	/** Routes `pty.data`/`pty.exit` of `pty` until it exits. */
@@ -261,9 +268,10 @@ export class SandboxHostConnection {
 		});
 	}
 
-	#write(message: HostRequest): void {
+	/** Sends one encoded protocol line. */
+	#write(line: string): void {
 		try {
-			this.#child.stdin.write(encodeHostMessage(message));
+			this.#child.stdin.write(line);
 			this.#child.stdin.flush();
 		} catch (error) {
 			this.kill(`Sandbox host stdin failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -339,7 +347,9 @@ export class SandboxHostConnection {
 			if (!pending) return;
 			this.#pending.delete(event.id);
 			if (event.ok) pending.resolve(event.result);
-			else pending.reject(new Error(event.error));
+			// Keep the errno name, so file tools classify a contained denial or missing path as natively.
+			else
+				pending.reject(Object.assign(new Error(event.error), event.code === undefined ? {} : { code: event.code }));
 			this.#closeIfIdle();
 			return;
 		}
@@ -402,7 +412,7 @@ export interface SandboxHostScope {
 	cwd: string;
 	/** Host-side paths the contained shell must read (the rc snapshot). */
 	extraRead?: readonly string[];
-	/** Host-side paths the contained shell may write besides the policy's (the session's `local://` root). */
+	/** omp-owned roots the contained shell may write in every sandbox mode (the session's `local://` root). */
 	extraWrite?: readonly string[];
 }
 
@@ -442,7 +452,7 @@ export async function startSandboxHost(
  * The pooled host for `scope` under `runtime`'s current policy. Hosts of the same agent session
  * under another policy are retired (they exit once their in-flight calls settle).
  */
-function acquireHost(runtime: SandboxRuntime, scope: SandboxHostScope): Promise<SandboxHostConnection> {
+export function acquireSandboxHost(runtime: SandboxRuntime, scope: SandboxHostScope): Promise<SandboxHostConnection> {
 	const prefix = poolPrefix(scope.agentSessionKey);
 	const extra = [...(scope.extraRead ?? []), "\0", ...(scope.extraWrite ?? [])].join("\0");
 	const key = `${prefix}${runtime.fingerprint()}\n${extra}`;
@@ -658,7 +668,7 @@ export interface SandboxShellFactory {
 /** Shells served by the pooled host of `scope` under `runtime`. */
 export function sandboxShellFactory(runtime: SandboxRuntime, scope: SandboxHostScope): SandboxShellFactory {
 	return {
-		create: options => new SandboxedShell(acquireHost(runtime, scope), { options }),
+		create: options => new SandboxedShell(acquireSandboxHost(runtime, scope), { options }),
 		trace: () => new SandboxRunTrace(),
 	};
 }

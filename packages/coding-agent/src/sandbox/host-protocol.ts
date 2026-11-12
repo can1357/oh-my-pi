@@ -9,6 +9,8 @@
  * {@link readHostLines} frames incoming streams, capping a line at {@link MAX_HOST_LINE_BYTES}.
  */
 import type {
+	AstReplaceOptions,
+	AstReplaceResult,
 	MinimizerOptions,
 	PtyRunResult,
 	PtyStartOptions,
@@ -20,7 +22,7 @@ import type { LogEvent } from "@oh-my-pi/pi-utils/logger";
 import { readLines } from "@oh-my-pi/pi-utils/stream";
 
 /** Bumped on every incompatible message change; the client refuses a host announcing another. */
-export const SANDBOX_HOST_PROTOCOL_VERSION = 1;
+export const SANDBOX_HOST_PROTOCOL_VERSION = 2;
 
 /** `ShellOptions` minus `filesystem` (a parent-side callback; runs bridge it per call instead). */
 export interface HostShellOptions {
@@ -45,6 +47,32 @@ export interface HostRunFs {
 	nativeLocalPaths?: boolean;
 }
 
+/**
+ * A file mutation an in-process file tool (`write`, `edit`, `ast_edit`) delegates to the host, so
+ * the OS sandbox decides it at the syscall. `write` creates missing parent directories, like
+ * `Bun.write`; `mkdir` is recursive.
+ */
+export type HostFileMutation =
+	| { kind: "write"; path: string; data: string | Uint8Array }
+	/** Appends `data` to an existing file: the later chunks of a write too large for one line. */
+	| { kind: "append"; path: string; data: Uint8Array }
+	| { kind: "unlink"; path: string }
+	| { kind: "mkdir"; path: string }
+	| { kind: "rename"; from: string; to: string }
+	| { kind: "rm"; path: string; recursive: boolean; force: boolean }
+	| { kind: "chmod"; path: string; mode: number };
+
+/** `astEdit` options minus the parent-side callbacks (the filesystem is bridged per request). */
+export type HostAstEditOptions = Omit<AstReplaceOptions, "filesystem" | "signal">;
+
+/** One `write`-tool row write into an existing SQLite database (empty `content`: delete the row). */
+export interface HostSqliteWrite {
+	dbPath: string;
+	table: string;
+	key: string | undefined;
+	content: string;
+}
+
 export type HostRequest =
 	| { id: number; op: "shell.create"; shell: number; options: HostShellOptions }
 	| { id: number; op: "shell.fork"; shell: number; from: number }
@@ -56,7 +84,10 @@ export type HostRequest =
 	| { op: "pty.write"; pty: number; data: string }
 	| { op: "pty.resize"; pty: number; cols: number; rows: number }
 	| { id: number; op: "pty.kill"; pty: number }
-	| { op: "fs.reply"; req: number; response: ShellFsResponse };
+	| { op: "fs.reply"; req: number; response: ShellFsResponse }
+	| { id: number; op: "file.mutate"; mutation: HostFileMutation }
+	| { id: number; op: "ast.edit"; options: HostAstEditOptions; fs: HostRunFs | null }
+	| { id: number; op: "sqlite.write"; write: HostSqliteWrite };
 
 /** Result payload of each request op. */
 export interface HostResults {
@@ -68,6 +99,11 @@ export interface HostResults {
 	"shell.dispose": null;
 	"pty.start": { pid: number };
 	"pty.kill": null;
+	"file.mutate": null;
+	/** `changes` is empty: an applied rewrite is reported by `fileChanges`. */
+	"ast.edit": AstReplaceResult;
+	/** The write tool's result line. */
+	"sqlite.write": string;
 }
 
 /** Log record forwarded from the host's logger; `timestamp` is epoch milliseconds. */
@@ -76,14 +112,15 @@ export type HostLogRecord = Omit<LogEvent, "timestamp"> & { timestamp: number };
 export type HostEvent =
 	| { ev: "ready"; version: number }
 	| { id: number; ok: true; result: HostResults[keyof HostResults] }
-	| { id: number; ok: false; error: string }
+	/** `code`: the errno name (`EACCES`, `ENOENT`, …) of a failed filesystem call, when there was one. */
+	| { id: number; ok: false; error: string; code?: string }
 	/** Output of the run started by request `id`. */
 	| { ev: "shell.chunk"; id: number; data: string }
 	/** Changed `RunTrace` snapshot (JSON text) of the run started by request `id`. */
 	| { ev: "shell.trace"; id: number; snapshot: string }
 	/** Changed live pids of the run started by request `id`. */
 	| { ev: "shell.pids"; id: number; pids: number[] }
-	/** URL-path filesystem operation of the run started by request `id`; answered by `fs.reply`. */
+	/** URL-path filesystem operation of the run or `ast.edit` started by request `id`; answered by `fs.reply`. */
 	| { ev: "fs.request"; id: number; req: number; request: ShellFsRequest }
 	| { ev: "pty.data"; pty: number; data: string }
 	| { ev: "pty.exit"; pty: number; result: PtyRunResult; error?: string }

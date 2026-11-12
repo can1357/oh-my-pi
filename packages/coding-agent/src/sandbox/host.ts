@@ -1,7 +1,9 @@
 /**
  * The in-sandbox host (`omp __omp_sandbox_host`): owns the embedded `Shell` and `PtySession`
  * instances of one agent session inside an MXC container and serves them to the trusted parent
- * over the JSONL protocol of {@link ./host-protocol}. Exits when stdin closes.
+ * over the JSONL protocol of {@link ./host-protocol}. It also performs the file mutations of the
+ * parent's in-process file tools (`file.mutate`, `ast.edit`, `sqlite.write`), so the container
+ * decides those at the syscall too. Exits when stdin closes.
  *
  * stdout carries protocol lines only. `cli.ts` rebinds `process.stdout` and the console to stderr
  * before this module loads; protocol lines go through a dedicated `Bun.stdout` writer, and the
@@ -9,6 +11,7 @@
  * not writable in here).
  */
 import {
+	astEdit,
 	Process,
 	PtySession,
 	RunTrace,
@@ -18,12 +21,15 @@ import {
 	type ShellFsResponse,
 } from "@oh-my-pi/pi-natives";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { writeSqliteRow } from "../tools/sqlite-reader";
+import { applyFileMutation } from "./file-mutation-ops";
 import {
 	decodeHostMessage,
 	encodeHostMessage,
 	type HostEvent,
 	type HostRequest,
 	type HostResults,
+	MAX_HOST_LINE_BYTES,
 	readHostLines,
 	SANDBOX_HOST_PROTOCOL_VERSION,
 } from "./host-protocol";
@@ -99,11 +105,22 @@ class SandboxHost {
 	}
 
 	async #reply(id: number, run: () => Promise<HostResults[keyof HostResults]>): Promise<void> {
+		let line: string;
 		try {
-			this.send({ id, ok: true, result: await run() });
+			line = encodeHostMessage({ id, ok: true, result: await run() });
 		} catch (error) {
-			this.send({ id, ok: false, error: errorMessage(error) });
+			// The errno name lets the parent's file tools tell a denial from a missing path.
+			const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+			this.send({ id, ok: false, error: errorMessage(error), ...(typeof code === "string" ? { code } : {}) });
+			return;
 		}
+		// The parent drops the connection on a line over the cap; answer with an error instead.
+		if (Buffer.byteLength(line) > MAX_HOST_LINE_BYTES) {
+			this.send({ id, ok: false, error: `Sandbox host reply too large (over ${MAX_HOST_LINE_BYTES} bytes)` });
+			return;
+		}
+		this.#out.write(line);
+		this.#out.flush();
 	}
 
 	#shell(id: number): Shell {
@@ -136,6 +153,22 @@ class SandboxHost {
 			case "pty.kill":
 				this.#ptys.get(message.pty)?.kill();
 				return null;
+			case "file.mutate":
+				await applyFileMutation(message.mutation);
+				return null;
+			case "ast.edit": {
+				const result = await astEdit({
+					...message.options,
+					filesystem: message.fs ? this.#bridgeFilesystem(message.id, message.fs.nativeLocalPaths) : undefined,
+				});
+				// An applied rewrite is reported by its per-file counts; the before/after text of every
+				// change could outgrow a protocol line.
+				return { ...result, changes: [] };
+			}
+			case "sqlite.write": {
+				const { dbPath, table, key, content } = message.write;
+				return writeSqliteRow(dbPath, table, key, content);
+			}
 		}
 	}
 

@@ -1,6 +1,7 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isRecord } from "@oh-my-pi/pi-utils";
 
 const SQLITE_MAGIC = new Uint8Array([
 	0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00,
@@ -932,6 +933,56 @@ export function deleteRowByRowId(db: Database, table: string, key: string): numb
 		`DELETE FROM ${quoteSqliteIdentifier(table)} WHERE ${resolveRowIdColumn(db, table)} = ?`,
 	);
 	return statement.run(binding).changes;
+}
+
+/**
+ * The `write` tool's row write into the existing database at `dbPath`: empty `content` deletes the
+ * row `key`, a JSON5 object updates it (or inserts one when `key` is absent). Returns the result
+ * line; throws `ToolError` for bad input and the driver's error (`ENOENT` included) otherwise.
+ * Shared by the tool and the sandbox host, which runs it contained.
+ */
+export function writeSqliteRow(dbPath: string, table: string, key: string | undefined, content: string): string {
+	const db = new Database(dbPath, { create: false, strict: true });
+	try {
+		db.run("PRAGMA busy_timeout = 3000");
+		// FK enforcement is per-connection and off by default; enable it so edits
+		// honor the schema's REFERENCES constraints and ON DELETE/UPDATE actions.
+		db.run("PRAGMA foreign_keys = ON");
+
+		if (content.trim().length === 0) {
+			if (!key) {
+				throw new ToolError("SQLite deletes require a row key in the path");
+			}
+			const lookup = resolveTableRowLookup(db, table);
+			const deleted =
+				lookup.kind === "pk" ? deleteRowByKey(db, table, lookup, key) : deleteRowByRowId(db, table, key);
+			return deleted > 0 ? `Deleted row '${key}' from ${table}` : `No row deleted from ${table} for key '${key}'`;
+		}
+
+		let parsedContent: unknown;
+		try {
+			parsedContent = Bun.JSON5.parse(content);
+		} catch (error) {
+			throw new ToolError(
+				`SQLite write content must be valid JSON5: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (!isRecord(parsedContent)) {
+			throw new ToolError("SQLite write content must be a JSON object");
+		}
+		if (key) {
+			const lookup = resolveTableRowLookup(db, table);
+			const updated =
+				lookup.kind === "pk"
+					? updateRowByKey(db, table, lookup, key, parsedContent)
+					: updateRowByRowId(db, table, key, parsedContent);
+			return updated > 0 ? `Updated row '${key}' in ${table}` : `No row updated in ${table} for key '${key}'`;
+		}
+		insertRow(db, table, parsedContent);
+		return `Inserted row into ${table}`;
+	} finally {
+		db.close();
+	}
 }
 
 function formatRowCount(count: TableRowCount): string {

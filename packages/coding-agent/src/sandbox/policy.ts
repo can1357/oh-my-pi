@@ -116,7 +116,13 @@ export interface SandboxPolicyContext {
 	rootEntries: readonly string[];
 	discovered: { readonlyPaths: readonly string[]; readwritePaths: readonly string[] };
 	runtimePaths: readonly string[];
+	/** Writable in `workspace-write` mode only (git metadata, session grants). */
 	extraWrite?: readonly string[];
+	/**
+	 * Roots omp itself owns for the session (its `local://` directory): writable in every mode,
+	 * `read-only` included, since omp chose their location and the agent cannot name another.
+	 */
+	harnessWrite?: readonly string[];
 	extraRead?: readonly string[];
 	/** omp's credential database, the `${authDb}` token; defaults to this process's `getAgentDbPath()`. */
 	authDb?: string;
@@ -156,7 +162,8 @@ export function expandSandboxPath(
 
 /**
  * Filesystem policy for `config` in `ctx`. `workspace-write` writes the workspace, the private
- * tmpdir, `allowWrite` and `extraWrite`; `read-only` writes the private tmpdir only. Readable: the
+ * tmpdir, `allowWrite` and `extraWrite`; `read-only` writes the private tmpdir only. Both modes
+ * write `harnessWrite`. Readable: the
  * workspace, the read roots, `allowRead`, `extraRead` and the runtime paths, minus anything
  * writable. Denied: `denyRead`.
  * Every list is de-duplicated, never holds a filesystem root, and drops entries nested under
@@ -166,9 +173,12 @@ export function resolveFsPolicy(config: SandboxConfig, ctx: SandboxPolicyContext
 	const { platform } = ctx;
 	const expandAll = (entries: readonly string[]): string[] => entries.map(entry => expandSandboxPath(entry, ctx));
 	const readwritePaths = compactPaths(
-		config.mode === "workspace-write"
-			? [ctx.workspace, ctx.tmpdir, ...expandAll(config.allowWrite), ...expandAll(ctx.extraWrite ?? [])]
-			: [ctx.tmpdir],
+		[
+			...(config.mode === "workspace-write"
+				? [ctx.workspace, ctx.tmpdir, ...expandAll(config.allowWrite), ...expandAll(ctx.extraWrite ?? [])]
+				: [ctx.tmpdir]),
+			...expandAll(ctx.harnessWrite ?? []),
+		],
 		platform,
 	);
 	const readable = compactPaths(

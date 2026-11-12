@@ -2,11 +2,13 @@
  * The sandbox host protocol against a host started as a plain (unsandboxed) subprocess: what the
  * parent sees through `SandboxHostConnection` / `SandboxedShell` regardless of containment.
  */
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SandboxChild } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
+import { SANDBOX_HOST_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/sandbox/host-protocol";
 import {
 	SandboxedShell,
 	SandboxHostConnection,
@@ -240,6 +242,53 @@ describe("sandbox host protocol (plain subprocess)", () => {
 		expect([...memory.written()]).toEqual([0x78, 0x00, 0x79, 0xff]);
 	});
 
+	it("performs file mutations and reports a failed one's errno", async () => {
+		const file = path.join(tmp, "mutate", "f.txt");
+		await host.connection.request({ op: "file.mutate", mutation: { kind: "mkdir", path: path.dirname(file) } });
+		const bytes = Uint8Array.from([0x61, 0x00, 0xff]);
+		await host.connection.request({ op: "file.mutate", mutation: { kind: "write", path: file, data: bytes } });
+		await host.connection.request({ op: "file.mutate", mutation: { kind: "append", path: file, data: bytes } });
+		expect([...fs.readFileSync(file)]).toEqual([0x61, 0x00, 0xff, 0x61, 0x00, 0xff]);
+		await host.connection.request({ op: "file.mutate", mutation: { kind: "unlink", path: file } });
+		// Settled before `expect`: its `rejects` drains microtasks only, never the host's reply I/O.
+		const missing = await host.connection
+			.request({ op: "file.mutate", mutation: { kind: "unlink", path: file } })
+			.catch((error: unknown) => error);
+		expect(missing).toMatchObject({ code: "ENOENT" });
+		// A failed mutation leaves the connection usable.
+		expect(host.connection.closed).toBe(false);
+	});
+
+	it("applies an AST rewrite and reports it by per-file counts", async () => {
+		const file = path.join(tmp, "rewrite.ts");
+		fs.writeFileSync(file, "a(); a();\n");
+		const result = await host.connection.request({
+			op: "ast.edit",
+			options: { rewrites: { "a()": "b()" }, path: file, lang: "typescript", dryRun: false },
+			fs: null,
+		});
+		expect(fs.readFileSync(file, "utf8")).toBe("b(); b();\n");
+		expect(result.totalReplacements).toBe(2);
+		expect(result.fileChanges.map(change => change.count)).toEqual([2]);
+		expect(result.changes).toEqual([]);
+	});
+
+	it("writes a SQLite row and surfaces a bad payload as an error", async () => {
+		const dbPath = path.join(tmp, "rows.db");
+		const db = new Database(dbPath);
+		db.run("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)");
+		db.close();
+		const write = { dbPath, table: "notes", key: undefined };
+		expect(
+			await host.connection.request({ op: "sqlite.write", write: { ...write, content: "{ body: 'hi' }" } }),
+		).toBe("Inserted row into notes");
+		const refused = await host.connection
+			.request({ op: "sqlite.write", write: { ...write, content: "[1]" } })
+			.catch((error: unknown) => error);
+		expect(refused).toBeInstanceOf(Error);
+		expect((refused as Error).message).toBe("SQLite write content must be a JSON object");
+	});
+
 	it("counts live background jobs", async () => {
 		const shell = newShell(host.connection);
 		// An external process: the builtin `sleep` runs in-process and leaves no job child.
@@ -310,7 +359,7 @@ describe("sandbox host connection", () => {
 		for (const garbage of ["not json", JSON.stringify({ ev: "shell.chunk" }), JSON.stringify(null)]) {
 			const fake = fakeHost();
 			const connecting = SandboxHostConnection.connect(fake.child);
-			fake.emit(JSON.stringify({ ev: "ready", version: 1 }));
+			fake.emit(JSON.stringify({ ev: "ready", version: SANDBOX_HOST_PROTOCOL_VERSION }));
 			const connection = await connecting;
 			const pending = connection.request({ op: "shell.jobs", shell: 1 });
 			fake.emit(garbage);
@@ -322,7 +371,7 @@ describe("sandbox host connection", () => {
 	it("answers a filesystem request of a run without a filesystem with ENOTSUP", async () => {
 		const fake = fakeHost();
 		const connecting = SandboxHostConnection.connect(fake.child);
-		fake.emit(JSON.stringify({ ev: "ready", version: 1 }));
+		fake.emit(JSON.stringify({ ev: "ready", version: SANDBOX_HOST_PROTOCOL_VERSION }));
 		const connection = await connecting;
 		const requestSent = fake.nextWrite();
 		void connection.request({ op: "shell.jobs", shell: 1 }).catch(() => {});

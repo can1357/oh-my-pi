@@ -56,6 +56,7 @@ export interface SandboxSpawnRequest {
 	argv: string[];
 	cwd: string;
 	env: Record<string, string>;
+	/** Roots omp owns for the session (its `local://` directory), writable in every sandbox mode. */
 	extraWrite?: readonly string[];
 	extraRead?: readonly string[];
 	/** Override the configured network mode (MCP servers). */
@@ -1288,16 +1289,23 @@ export class SandboxRuntime {
 		const sessionWrites = this.#intactSessionWrites();
 		const pin = (entries: readonly string[]) => entries.flatMap(entry => this.#pinnedWrite(entry, context));
 		const allowWrite = pin(config.allowWrite);
-		const pinnedExtra = pin([...(git?.write ?? []), ...(extraWrite ?? [])]);
-		const write = [...sessionWrites, ...pinnedExtra];
-		// Readable too: read-only mode drops `extraWrite`, and `readScope: workspace` would hide it.
+		const write = [...sessionWrites, ...pin(git?.write ?? [])];
+		// omp-owned roots (`local://`) stay writable in read-only mode too.
+		const harnessWrite = pin(extraWrite ?? []);
+		// Readable too: read-only mode drops `write`, and `readScope: workspace` would hide it.
 		const read = [...(git ? [git.read] : []), ...sessionWrites, ...sessionPathGrants.read, ...(extraRead ?? [])];
 		const resolved = materialize(
-			resolveFsPolicy({ ...config, allowWrite }, { ...context, extraWrite: write, extraRead: read }),
+			resolveFsPolicy({ ...config, allowWrite }, { ...context, extraWrite: write, harnessWrite, extraRead: read }),
 			platform,
 		);
 		const workspaceIntact = stillCanonical(this.#workspace);
-		const pinned = new Set([tempDir, ...allowWrite, ...write, ...(workspaceIntact ? [this.#workspace] : [])]);
+		const pinned = new Set([
+			tempDir,
+			...allowWrite,
+			...write,
+			...harnessWrite,
+			...(workspaceIntact ? [this.#workspace] : []),
+		]);
 		const replacedWorkspace = workspaceIntact ? undefined : realpathIfExists(this.#workspace);
 		return {
 			readwritePaths: resolved.readwritePaths.filter(entry => pinned.has(entry)),

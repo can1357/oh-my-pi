@@ -5,6 +5,7 @@
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
+import { mutateFile } from "../../sandbox/file-mutations";
 
 // =============================================================================
 // Biome JSON Output Types
@@ -116,8 +117,9 @@ export class BiomeClient implements LinterClient {
 
 	async format(filePath: string, content: string): Promise<string> {
 		// Keep the standalone LinterClient contract: callers supply the content to
-		// format, regardless of what is currently on disk.
-		await Bun.write(filePath, content);
+		// format, regardless of what is currently on disk. Contained under the OS
+		// sandbox like the `write`/`edit` call that formats.
+		await mutateFile({ kind: "write", path: filePath, data: content });
 
 		const result = await runBiome(["format", "--write", filePath], this.cwd, this.config.resolvedCommand);
 

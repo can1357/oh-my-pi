@@ -40,6 +40,11 @@
  * (`edit`'s `REM`) and `HashlineFilesystem.move`'s source unlink, plus
  * `LspFileSystem.delete` and `defaultFileSystem.delete` for `apply_patch`.
  *
+ * Inside a tool call whose mutations are contained (the OS sandbox is active; see
+ * `sandbox/file-mutations.ts`), the write, unlink and recovery `mkdir` below run in
+ * the session's sandbox host instead of this process, so the container decides them.
+ * A denial there reaches the handlers like an in-process one.
+ *
  * ## What is NOT routed
  *
  * This is deliberately not an exhaustive interception of every syscall the tools
@@ -132,6 +137,7 @@ import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import type { BunFile } from "bun";
 import type { ExtensionContext } from "../extensibility/extensions/types";
+import { containedFileMutations, mutateFile } from "../sandbox/file-mutations";
 import { resolveSyscallTarget } from "./path-utils";
 
 /** A denied write, captured for a registered fallback to retry through a privileged channel. */
@@ -304,8 +310,11 @@ export function withFileMutationSession<T>(sessionId: string | undefined, fn: ()
  * must propagate — `edit`'s `REM` turns it into a `NotFoundError`.
  */
 export async function deleteFileWithFallback(dst: string, file?: BunFile): Promise<void> {
+	const contained = containedFileMutations();
 	try {
-		if (file) {
+		if (contained) {
+			await contained.mutate({ kind: "unlink", path: dst });
+		} else if (file) {
 			await file.unlink();
 		} else {
 			await fs.unlink(dst);
@@ -386,7 +395,7 @@ async function classifyWriteFailure(dst: string, error: unknown): Promise<WriteF
 	if (isPermissionDeniedError(error)) return { kind: "denied", cause: error };
 	if (!isEnoent(error)) return { kind: "rethrow" };
 	try {
-		await fs.mkdir(path.dirname(dst), { recursive: true });
+		await mutateFile({ kind: "mkdir", path: path.dirname(dst) });
 	} catch (mkdirError) {
 		// A denied `mkdir` is the boundary the write hid; anything else (`ENOTDIR`
 		// for a file used as a directory, ...) is a genuine bad path.
@@ -406,9 +415,12 @@ export async function writeFileWithFallback(dst: string, content: string, file?:
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,
 	// which bounds the loop at two writes.
+	const contained = containedFileMutations();
 	for (let attempt = 0; ; attempt++) {
 		try {
-			if (file) {
+			if (contained) {
+				await contained.mutate({ kind: "write", path: dst, data: content });
+			} else if (file) {
 				await file.write(content);
 			} else {
 				await Bun.write(dst, content);

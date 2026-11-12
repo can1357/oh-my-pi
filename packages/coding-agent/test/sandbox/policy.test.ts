@@ -114,12 +114,13 @@ describe("resolveFsPolicy", () => {
 		expect(policy.readonlyPaths).not.toContain("/work/repo");
 	});
 
-	it("read-only writes only tmpdir and keeps the workspace readable", () => {
+	it("read-only writes only tmpdir and omp's own roots, and keeps the workspace readable", () => {
 		const policy = resolveFsPolicy(config({ mode: "read-only", allowWrite: ["~/.cache/tool"] }), {
 			...POSIX_CTX,
 			extraWrite: ["/srv/git-common"],
+			harnessWrite: ["/home/u/.omp/agent/sessions/s1/local"],
 		});
-		expect(policy.readwritePaths).toEqual(["/scratch/tmp"]);
+		expect(policy.readwritePaths).toEqual(["/scratch/tmp", "/home/u/.omp/agent/sessions/s1/local"]);
 		expect(policy.readonlyPaths).toContain("/work/repo");
 	});
 
