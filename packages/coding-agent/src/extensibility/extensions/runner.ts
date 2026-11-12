@@ -646,6 +646,14 @@ export class ExtensionRunner {
 	#suspendedExtensions = new Set<Extension>();
 	/** Per-extension listener factories from {@link onToolRegistered}, applied to late-added extensions too. */
 	#toolRegistrationSubscribers = new Set<(extension: Extension) => ToolRegistrationListener>();
+	/**
+	 * What each persisted history message looked like on the previous
+	 * {@link emitContext} pass, keyed by the history message itself: the hash of
+	 * a hook's rewrite, or `null` when no hook touched it. A hook that rewrites a
+	 * message the same way every call (e.g. a stable tag prefix) leaves its bytes
+	 * unchanged across requests, so that message is not per-call.
+	 */
+	#contextProjections = new WeakMap<AgentMessage, number | bigint | null>();
 	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
 	#sessionStartEvent: RunnerEmitEvent | undefined;
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
@@ -2537,13 +2545,38 @@ export class ExtensionRunner {
 			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
 			clearContextHistoryIndex(message);
 			if (historyMessage) clearContextHistoryIndex(historyMessage);
-			if (!unchanged) markPerCallContextMessage(message);
+			if (unchanged) {
+				this.#contextProjections.set(historyMessage, null);
+				continue;
+			}
+			if (!historyMessage || !this.#isRepeatedProjection(historyMessage, message)) {
+				markPerCallContextMessage(message);
+			}
 		}
 		for (const message of messages) clearContextHistoryIndex(message);
 		// An aborted handler is skipped and its input kept unchanged. Never hand that
 		// untransformed (possibly unredacted) context back to a caller as if every hook ran.
 		signal?.throwIfAborted();
 		return currentMessages;
+	}
+
+	/**
+	 * Whether a hook-rewritten history message carries the same bytes it carried
+	 * on the previous pass. A first sighting counts as repeated: the message is
+	 * new to the tail, and treating it as volatile would keep the rolling
+	 * Anthropic breakpoint off every message a tool loop appends. A projection
+	 * that later differs is marked per-call from then on, call by call.
+	 */
+	#isRepeatedProjection(historyMessage: AgentMessage, message: AgentMessage): boolean {
+		let projection: number | bigint;
+		try {
+			projection = Bun.hash(JSON.stringify(message));
+		} catch {
+			return false;
+		}
+		const previous = this.#contextProjections.get(historyMessage);
+		this.#contextProjections.set(historyMessage, projection);
+		return previous === undefined || previous === projection;
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */
