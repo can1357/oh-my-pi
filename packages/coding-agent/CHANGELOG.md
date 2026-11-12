@@ -60,6 +60,7 @@
 
 ### Fixed
 
+- MCP tools called through `write` to `xd://` devices now honor their device names in `model.toolCallLoopGuard.exemptTools`, in both the main agent and advisor ([#18860](https://github.com/can1357/oh-my-pi/issues/18860))
 - Fixed `computer.close()` so subsequent computer-control calls start a fresh desktop session instead of failing.
 - Fixed extension providers with `oauth.modifyModels` so they do not load the full model catalog before login.
 - Fixed resuming sessions so it no longer scans unrelated later session transcripts.

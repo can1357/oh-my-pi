@@ -385,7 +385,8 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Exempt Tools",
-		description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
+		description:
+			"Tool names, or xd:// device names of write dispatches (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
 	},
 });
 
