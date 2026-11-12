@@ -1419,72 +1419,110 @@ fn perform_choosing(
 	// ([`input::EntryFront`]).
 	let entry_front = input::EntryFront::now();
 	let actions = copy_strings_from_action_names(element)?;
-	let Some(native) = supported_action(&actions, action).cloned() else {
-		return Err(unsupported_action(&native_action_name(action), &actions));
-	};
-	// AXRaise is an explicit request to change stacking, including the
-	// takeover preparation path. Other semantic actions must stay background.
-	if is_raise_action(action) {
-		if path.is_some() {
-			return Err(DesktopError::invalid_target("AXRaise opens no menu to choose an item from"));
-		}
-		return element_action_result(&native, send_action(element, &native));
-	}
-	let pid = element_pid(element)?;
-	let scroll = scroll_before_press(&native, &actions, || process::is_uikit(pid));
-	let perform = || press_into_view(&native, scroll, |action| send_action(element, action));
-	// A menu that a background application opens takes the keyboard from the
-	// user's app, so it is closed before the action returns; a frontmost
-	// application's menu stays open for the next call unless an item is asked
-	// for.
-	let background = entry_front.behind(pid);
-	let watch = path.is_some()
-		|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
-	skylight::with_background_watch(pid, |visit| {
-		// A popup in a system Open or Save panel opens its menu in the
-		// process that draws the panel.
-		let drawn = if watch {
-			innermost_window_id(element).map(|(id, _)| id)
-		} else {
-			None
-		};
-		let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
-		let before = if watch {
-			let before = capture::menu_windows(menu_pid).ok_or_else(|| {
-				DesktopError::ax_failed(format!(
-					"cannot list the open menus of process {menu_pid}, so a menu that {native} opens \
-					 could not be closed; nothing was performed"
-				))
-			})?;
-			if background {
-				activate_for_menu(element, pid, entry_front, visit)?;
+	choose_action(
+		&actions,
+		action,
+		|| copy_bool(element, "AXEnabled"),
+		|native| {
+			// AXRaise is an explicit request to change stacking, including the
+			// takeover preparation path. Other semantic actions must stay
+			// background.
+			if is_raise_action(action) {
+				if path.is_some() {
+					return Err(DesktopError::invalid_target(
+						"AXRaise opens no menu to choose an item from",
+					));
+				}
+				return element_action_result(native, send_action(element, native));
 			}
-			Some(before)
-		} else {
-			None
-		};
-		open_menu::guard(
-			open_menu::Press::Action(&native),
-			before.as_deref(),
-			path,
-			perform,
-			|before, path| {
-				// The user may have brought the target forward while its menu
-				// appeared.
-				let holds = || {
-					input::recheck_background(
-						background,
-						pid,
-						drawn.unwrap_or_default(),
-						skylight::front_pid,
-						|| visit.happened(),
-						|| Ok(()),
-					)
+			let pid = element_pid(element)?;
+			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
+			let perform = || press_into_view(native, scroll, |action| send_action(element, action));
+			// A menu that a background application opens takes the keyboard from
+			// the user's app, so it is closed before the action returns; a
+			// frontmost application's menu stays open for the next call unless an
+			// item is asked for.
+			let background = entry_front.behind(pid);
+			let watch = path.is_some()
+				|| (background && open_menu::may_open(native, || copy_string(element, "AXRole")));
+			skylight::with_background_watch(pid, |visit| {
+				// A popup in a system Open or Save panel opens its menu in the
+				// process that draws the panel.
+				let drawn = if watch {
+					innermost_window_id(element).map(|(id, _)| id)
+				} else {
+					None
 				};
-				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT, holds)
-			},
-		)
-	})
+				let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
+				let before = if watch {
+					let before = capture::menu_windows(menu_pid).ok_or_else(|| {
+						DesktopError::ax_failed(format!(
+							"cannot list the open menus of process {menu_pid}, so a menu that {native} \
+							 opens could not be closed; nothing was performed"
+						))
+					})?;
+					if background {
+						activate_for_menu(element, pid, entry_front, visit)?;
+					}
+					Some(before)
+				} else {
+					None
+				};
+				open_menu::guard(
+					open_menu::Press::Action(native),
+					before.as_deref(),
+					path,
+					perform,
+					|before, path| {
+						// The user may have brought the target forward while its menu
+						// appeared.
+						let holds = || {
+							input::recheck_background(
+								background,
+								pid,
+								drawn.unwrap_or_default(),
+								skylight::front_pid,
+								|| visit.happened(),
+								|| Ok(()),
+							)
+						};
+						open_menu::settle(
+							menu_pid,
+							pid,
+							before,
+							path,
+							open_menu::CONTROL_MENU_TIMEOUT,
+							holds,
+						)
+					},
+				)
+			})
+		},
+	)
+}
+
+/// Chooses the element's spelling of `action` and dispatches it through
+/// `perform`. A press of an element that reports itself disabled (`enabled`
+/// reads its `AXEnabled`, `None` when it reports none) is refused before
+/// anything is sent: a disabled `AppKit` button still lists `AXPress` and
+/// answers it with success while its action never runs. Other actions, such as
+/// a scroll into view or a raise, still act on a disabled element.
+fn choose_action(
+	actions: &[String],
+	action: &str,
+	enabled: impl FnOnce() -> Option<bool>,
+	perform: impl FnOnce(&String) -> CoreResult<()>,
+) -> CoreResult<()> {
+	let Some(native) = supported_action(actions, action) else {
+		return Err(unsupported_action(&native_action_name(action), actions));
+	};
+	if native.eq_ignore_ascii_case("AXPress") && enabled() == Some(false) {
+		return Err(DesktopError::ax_failed(
+			"the element reports itself disabled, so nothing was sent: wait for it to become \
+			 enabled, or do what enables it first",
+		));
+	}
+	perform(native)
 }
 
 /// The refusal of `native`, an action the element does not list among
@@ -2748,6 +2786,42 @@ mod tests {
 			element_action_result("AXPressAction", AXError::AttributeUnsupported).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
 		assert!(error.message.contains("observe the window"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_press_of_a_disabled_element_is_refused_before_anything_is_sent() {
+		let actions = ["AXPress", "AXScrollToVisible", "AXShowMenu"].map(String::from);
+		let mut sent = Vec::new();
+		let mut perform = |action, enabled| {
+			let result = super::choose_action(
+				&actions,
+				action,
+				|| enabled,
+				|native| {
+					sent.push(native.clone());
+					Ok(())
+				},
+			);
+			(result.map_err(|error| (error.code, error.message)), std::mem::take(&mut sent))
+		};
+		let (result, sent) = perform("press", Some(false));
+		let refused = result.unwrap_err();
+		assert_eq!(refused.0, ErrorCode::AxFailed);
+		assert!(refused.1.contains("disabled"), "{}", refused.1);
+		assert!(sent.is_empty(), "{sent:?}");
+		// Enabled, or silent about it: the press is dispatched.
+		assert_eq!(perform("press", Some(true)), (Ok(()), vec!["AXPress".to_owned()]));
+		assert_eq!(perform("press", None), (Ok(()), vec!["AXPress".to_owned()]));
+		// Other actions still dispatch on a disabled element.
+		assert_eq!(
+			perform("AXScrollToVisible", Some(false)),
+			(Ok(()), vec!["AXScrollToVisible".to_owned()])
+		);
+		assert_eq!(perform("showMenu", Some(false)), (Ok(()), vec!["AXShowMenu".to_owned()]));
+		// An action the element lacks is refused as unsupported, with no send.
+		let (result, sent) = perform("AXRaise", Some(false));
+		assert!(!result.unwrap_err().1.contains("disabled"));
+		assert!(sent.is_empty(), "{sent:?}");
 	}
 
 	#[test]
