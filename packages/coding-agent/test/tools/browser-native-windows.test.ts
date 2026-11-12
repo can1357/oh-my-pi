@@ -150,90 +150,93 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("page-backed native-window candidates", () 
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE || process.platform !== "darwin")("native notices in worker output", () => {
-	test.each(["success", "failure", "timeout"] as const)("handles %s results without delaying aborted cleanup", async outcome => {
-		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({ headless: true });
-		const begin = vi.spyOn(NativeWindowWatch.prototype, "beginCall").mockImplementation(() => {});
-		const end = vi.spyOn(NativeWindowWatch.prototype, "endCall").mockResolvedValue(["native notice"]);
-		const timeout = new AbortController();
-		const originalTimeout = AbortSignal.timeout;
-		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
-			outcome === "timeout" && ms === 30_000 ? timeout.signal : originalTimeout(ms),
-		);
-		const ready = Promise.withResolvers<WorkerOutbound>();
-		const result = Promise.withResolvers<Extract<WorkerOutbound, { type: "result" }>>();
-		const closed = Promise.withResolvers<void>();
-		let receive!: (message: WorkerInbound | WorkerOutbound) => void;
-		new WorkerCore(
-			{
-				send(message) {
-					if (message.type === "ready" || message.type === "init-failed") ready.resolve(message);
-					if (message.type === "result") result.resolve(message);
-					if (message.type === "tool-call") timeout.abort(new DOMException("Timed out", "TimeoutError"));
+	test.each(["success", "failure", "timeout"] as const)(
+		"handles %s results without delaying aborted cleanup",
+		async outcome => {
+			const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({ headless: true });
+			const begin = vi.spyOn(NativeWindowWatch.prototype, "beginCall").mockImplementation(() => {});
+			const end = vi.spyOn(NativeWindowWatch.prototype, "endCall").mockResolvedValue(["native notice"]);
+			const timeout = new AbortController();
+			const originalTimeout = AbortSignal.timeout;
+			const timeoutSpy = vi
+				.spyOn(AbortSignal, "timeout")
+				.mockImplementation(ms => (outcome === "timeout" && ms === 30_000 ? timeout.signal : originalTimeout(ms)));
+			const ready = Promise.withResolvers<WorkerOutbound>();
+			const result = Promise.withResolvers<Extract<WorkerOutbound, { type: "result" }>>();
+			const closed = Promise.withResolvers<void>();
+			let receive!: (message: WorkerInbound | WorkerOutbound) => void;
+			new WorkerCore(
+				{
+					send(message) {
+						if (message.type === "ready" || message.type === "init-failed") ready.resolve(message);
+						if (message.type === "result") result.resolve(message);
+						if (message.type === "tool-call") timeout.abort(new DOMException("Timed out", "TimeoutError"));
+					},
+					onMessage(handler) {
+						receive = handler;
+						return () => {};
+					},
+					close() {
+						closed.resolve();
+					},
 				},
-				onMessage(handler) {
-					receive = handler;
-					return () => {};
-				},
-				close() {
-					closed.resolve();
-				},
-			},
-			false,
-		);
-		try {
-			if (!userDataDir) throw new Error("Expected an isolated browser profile");
-			receive({
-				type: "init",
-				payload: {
-					mode: "headless",
-					browserWSEndpoint: wsEndpoint,
-					safeDir: getPuppeteerDir(),
-					uploadDir: `${userDataDir}/uploads`,
-					showsWindows: true,
-				},
-			});
-			expect((await ready.promise).type).toBe("ready");
-			receive({
-				type: "run",
-				id: "notice",
-				name: "notice",
-				code:
-					outcome === "timeout"
-						? 'await page.setRequestInterception(true); await __omp_call_tool__("timeout", {});'
-						: outcome === "success"
-							? 'process.stdout.write("progress");'
-							: 'throw new Error("page failed");',
-				timeoutMs: 30_000,
-				session: { cwd: process.cwd() },
-			});
-			const reply = await result.promise;
-			if (outcome === "timeout") {
-				expect(reply.ok).toBe(false);
-				if (reply.ok) throw new Error("Expected the run to time out");
-				expect(reply.error.message).toContain("timed out");
-				expect(end).not.toHaveBeenCalled();
-			} else if (outcome === "failure") {
-				expect(reply.ok).toBe(false);
-				if (reply.ok) throw new Error("Expected the run to fail");
-				expect(reply.error.message).toContain("native notice");
-				expect(reply.error.stack ?? reply.error.message).toContain("native notice");
-			} else {
-				if (!reply.ok) throw new Error(reply.error.message);
-				expect(reply.payload.displays).toEqual([
-					{ type: "text", text: "progress" },
-					{ type: "text", text: "native notice" },
-				]);
+				false,
+			);
+			try {
+				if (!userDataDir) throw new Error("Expected an isolated browser profile");
+				receive({
+					type: "init",
+					payload: {
+						mode: "headless",
+						browserWSEndpoint: wsEndpoint,
+						safeDir: getPuppeteerDir(),
+						uploadDir: `${userDataDir}/uploads`,
+						showsWindows: true,
+					},
+				});
+				expect((await ready.promise).type).toBe("ready");
+				receive({
+					type: "run",
+					id: "notice",
+					name: "notice",
+					code:
+						outcome === "timeout"
+							? 'await page.setRequestInterception(true); await __omp_call_tool__("timeout", {});'
+							: outcome === "success"
+								? 'process.stdout.write("progress");'
+								: 'throw new Error("page failed");',
+					timeoutMs: 30_000,
+					session: { cwd: process.cwd() },
+				});
+				const reply = await result.promise;
+				if (outcome === "timeout") {
+					expect(reply.ok).toBe(false);
+					if (reply.ok) throw new Error("Expected the run to time out");
+					expect(reply.error.message).toContain("timed out");
+					expect(end).not.toHaveBeenCalled();
+				} else if (outcome === "failure") {
+					expect(reply.ok).toBe(false);
+					if (reply.ok) throw new Error("Expected the run to fail");
+					expect(reply.error.message).toContain("native notice");
+					expect(reply.error.stack ?? reply.error.message).toContain("native notice");
+				} else {
+					if (!reply.ok) throw new Error(reply.error.message);
+					expect(reply.payload.displays).toEqual([
+						{ type: "text", text: "progress" },
+						{ type: "text", text: "native notice" },
+					]);
+				}
+			} finally {
+				receive({ type: "close" });
+				await closed.promise;
+				begin.mockRestore();
+				end.mockRestore();
+				timeoutSpy.mockRestore();
+				await closeLaunchedBrowser(browser);
+				if (userDataDir) await removeUserDataDir(userDataDir);
 			}
-		} finally {
-			receive({ type: "close" });
-			await closed.promise;
-			begin.mockRestore();
-			end.mockRestore();
-			timeoutSpy.mockRestore();
-			await closeLaunchedBrowser(browser);
-			if (userDataDir) await removeUserDataDir(userDataDir);
-		}
-	});
+		},
+	);
 });
 
 describe("browser native-window report", () => {
