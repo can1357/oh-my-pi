@@ -347,6 +347,51 @@ describe("browser facade in real Eval runtimes", () => {
 		expect(calls).toContainEqual({ action: "run", name: "real-py", code: "return 42;", timeout: 2 });
 	});
 
+	it("keeps text a cell enters out of the status events the session keeps", async () => {
+		const calls: unknown[] = [];
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(() => definitions);
+		definitions = [recorderDefinition(session, calls)];
+		const secret = "sentinel-password-4f9Q";
+		const pin = 482913;
+		const result = await executeJs(
+			[
+				'const tab = await browser.open({ name: "status-js" });',
+				`const secret = ${JSON.stringify(secret)};`,
+				'await tab.fill("#password", secret);',
+				`await tab.type("#otp", ${pin}, { delay: 5 });`,
+				"await tab.id(5).fill(secret);",
+				'await tab.frame("#login").fill("#password", secret);',
+				"await tab.clipboardWrite(secret);",
+				"await tab.handleDialog({ accept: true, text: secret });",
+				'await tab.click("#submit");',
+			].join("\n"),
+			{
+				cwd: process.cwd(),
+				sessionId: `browser-status-js-${crypto.randomUUID()}`,
+				session,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		const details = (result.displayOutputs ?? []).flatMap(output =>
+			output.type === "status" ? [String(field(output.event, "detail"))] : [],
+		);
+		expect(details.join("\n")).not.toContain(secret);
+		expect(details.join("\n")).not.toContain(String(pin));
+		expect(details).toContain('status-js.fill("#password", <hidden>)');
+		expect(details).toContain('status-js.click("#submit")');
+
+		// Python passes keyword arguments as a trailing object.
+		const status = createBrowserPrelude(session).status;
+		expect(
+			status?.(
+				{ action: "call", name: "py", chain: [{ method: "fill", args: ["#password", { value: secret }] }] },
+				{ content: [] },
+			),
+		).toBe('py.fill("#password", <hidden>)');
+	});
+
 	it("forwards Python open timeout and persist side by side (issue #8246 review)", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];

@@ -49,7 +49,7 @@ import {
 } from "./browser/tab-supervisor";
 import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
-import { renderCallChain, renderFunctionRun } from "./run-code";
+import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -340,12 +340,31 @@ function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknow
 			return parsed.all ? "close all" : `close ${name}`;
 		case "run":
 			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
-		case "call":
-			return `${name}.${renderCallChain(parsed.chain ?? [])}`;
+		case "call": {
+			const chain = parsed.chain ?? [];
+			return `${name}.${renderStatusCallChain(chain, (step, index) => browserTextStart(step.method, chain[index - 1]?.method))}`;
+		}
 		case "tabs":
 			return "tabs";
 		case "targets":
 			return "targets";
+	}
+}
+
+/**
+ * Where the text a browser helper enters starts in its arguments: after the selector of a tab or
+ * frame `fill`/`type`, first on an element handle and for clipboard and dialog text.
+ */
+function browserTextStart(method: string, previous: string | undefined): number | undefined {
+	switch (method) {
+		case "fill":
+		case "type":
+			return previous === undefined || previous === "frame" ? 1 : 0;
+		case "clipboardWrite":
+		case "handleDialog":
+			return 0;
+		default:
+			return undefined;
 	}
 }
 

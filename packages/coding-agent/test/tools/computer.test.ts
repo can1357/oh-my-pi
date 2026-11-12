@@ -537,6 +537,38 @@ describe("computer prelude", () => {
 		await prelude.invoke({ action: "close" }, context);
 	});
 
+	it("keeps text it types, sets or copies out of status lines", () => {
+		const prelude = createComputerPrelude(toolSession(), () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async reset() {},
+			async close() {},
+		}));
+		const done = { content: [] };
+		const status = (chain: Array<{ method: string; args: unknown[] }>) =>
+			prelude.status?.({ action: "call", chain }, done);
+		const secret = "sentinel-password-4f9Q";
+		const lines = [
+			status([
+				{ method: "ref", args: ["e5"] },
+				{ method: "setValue", args: [secret] },
+			]),
+			status([
+				{ method: "window", args: [42] },
+				{ method: "type", args: [secret, { delayMs: 5 }] },
+			]),
+			status([{ method: "clipboard.write", args: [secret] }]),
+		];
+
+		expect(lines.join("\n")).not.toContain(secret);
+		expect(lines[0]).toBe('desktop.ref("e5").setValue(<hidden>)');
+		expect(status([{ method: "press", args: ["cmd+s"] }])).toBe('desktop.press("cmd+s")');
+	});
+
 	it("routes run, capabilities, images, and cancellation inputs through one host controller", async () => {
 		const calls: Array<{
 			code: string;
