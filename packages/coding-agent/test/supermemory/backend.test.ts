@@ -353,6 +353,33 @@ describe("supermemoryBackend", () => {
 		expect(cleared).toBe(true);
 	});
 
+	it("the pending-write barrier that /memory clear and dispose wait on includes in-flight memory edits", async () => {
+		const reply = Promise.withResolvers<void>();
+		const sent = Promise.withResolvers<void>();
+		vi.spyOn(SupermemoryClient.prototype, "forgetMemory").mockImplementation(() => {
+			sent.resolve();
+			return reply.promise;
+		});
+		const session = makeSession();
+		await start(session);
+		const state = session.getSupermemorySessionState();
+		// Settle the start-up outbox drain so the edit is the only pending write.
+		await state?.flush();
+		// A subagent's `memory_edit forget` runs through the parent state.
+		const forgetting = state?.forgetMemory("m1", undefined);
+		await sent.promise;
+		let flushed = false;
+		const flushing = state?.flush().then(() => {
+			flushed = true;
+		});
+		// One macrotask turn lets an unblocked barrier settle while the edit is still pending.
+		await Bun.sleep(0);
+		expect(flushed).toBe(false);
+		reply.resolve();
+		await Promise.all([flushing, forgetting]);
+		expect(flushed).toBe(true);
+	});
+
 	it("re-upserts the last window when a manual continuation adds an answer without a new user turn", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "createDocument")

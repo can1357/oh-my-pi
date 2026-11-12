@@ -39,10 +39,6 @@ export interface SupermemoryConfig {
 
 export type ConfiguredSupermemoryConfig = SupermemoryConfig & { baseUrl: string; apiKey: string };
 
-function clamp(value: number, min: number, max: number): number {
-	return Math.min(max, Math.max(min, value));
-}
-
 /**
  * The API key travels as a bearer token, so only a plain `https:` origin, or `http:` on a
  * literal loopback host, is accepted; userinfo, query and fragment are rejected. Anything
@@ -65,9 +61,9 @@ export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
 		scoping: cfgSupermemoryScoping.get(settings),
 		autoRecall: cfgSupermemoryAutoRecall.get(settings),
 		autoRetain: cfgSupermemoryAutoRetain.get(settings),
-		retainEveryNTurns: Math.floor(clamp(cfgSupermemoryRetainEveryNTurns.get(settings), 1, 100)),
-		recallLimit: Math.floor(clamp(cfgSupermemoryRecallLimit.get(settings), 1, 50)),
-		threshold: clamp(cfgSupermemoryThreshold.get(settings), 0, 1),
+		retainEveryNTurns: Math.floor(Math.min(100, Math.max(1, cfgSupermemoryRetainEveryNTurns.get(settings)))),
+		recallLimit: Math.floor(Math.min(50, Math.max(1, cfgSupermemoryRecallLimit.get(settings)))),
+		threshold: Math.min(1, Math.max(0, cfgSupermemoryThreshold.get(settings))),
 		searchMode: cfgSupermemorySearchMode.get(settings),
 	};
 }

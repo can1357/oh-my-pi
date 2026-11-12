@@ -376,9 +376,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined> {
 		if (this.aliasOf) return this.aliasOf.updateMemory(id, content, signal);
 		if (this.#disposed) return Promise.reject(closedError());
-		return this.#local().client.updateMemory(
-			{ id, containerTag: this.containerTag, newContent: this.#redact(content) },
-			signal,
+		return this.#track(
+			this.#local().client.updateMemory(
+				{ id, containerTag: this.containerTag, newContent: this.#redact(content) },
+				signal,
+			),
 		);
 	}
 
@@ -386,9 +388,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void> {
 		if (this.aliasOf) return this.aliasOf.forgetMemory(id, reason, signal);
 		if (this.#disposed) return Promise.reject(closedError());
-		return this.#local().client.forgetMemory(
-			{ id, containerTag: this.containerTag, reason: reason === undefined ? undefined : this.#redact(reason) },
-			signal,
+		return this.#track(
+			this.#local().client.forgetMemory(
+				{ id, containerTag: this.containerTag, reason: reason === undefined ? undefined : this.#redact(reason) },
+				signal,
+			),
 		);
 	}
 
