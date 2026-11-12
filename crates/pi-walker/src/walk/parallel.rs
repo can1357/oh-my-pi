@@ -43,7 +43,7 @@ use super::{
 	give_session, join_child_into, join_into, pruned, take_session,
 };
 use crate::{
-	fs::{Detail, Dir, FileId, FileInfo, FileType, Fs, Listing, Session},
+	fs::{Detail, Dir, FileId, FileInfo, FileType, Fs, Listing, Session, mounts::Fences},
 	ignore::{DirIgnores, Frame, Ignorer, Names},
 };
 
@@ -410,6 +410,8 @@ struct Ctx<K: Sink> {
 	cache:     Option<&'static Cache>,
 	/// Device of the root under `same_file_system`.
 	root_dev:  Option<FileId>,
+	/// Network mounts not descended into.
+	fences:    Fences,
 	retained:  Arc<AtomicUsize>,
 	/// Job queue; `None` tells a worker the walk is over.
 	jobs:      flume::Sender<Option<Job>>,
@@ -533,6 +535,7 @@ pub(super) async fn start<K: Sink>(
 			None
 		};
 		let (jobs, queue) = flume::unbounded();
+		let fences = Fences::of(&fs, &abs_root);
 		let ctx = Arc::new(Ctx {
 			fs,
 			root: abs_root,
@@ -541,6 +544,7 @@ pub(super) async fn start<K: Sink>(
 			ignorer,
 			cache,
 			root_dev,
+			fences,
 			retained: Arc::new(AtomicUsize::new(0)),
 			jobs,
 			workers,
@@ -952,7 +956,7 @@ impl<K: Sink> Ctx<K> {
 					}
 				},
 			}
-			if !is_dir || !descend {
+			if !is_dir || !descend || self.fences.contains(path) {
 				continue;
 			}
 			let Some(bytes) = kept else { continue };

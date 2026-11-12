@@ -90,6 +90,8 @@ Three search-related builtins are worth calling out:
 - `fd` is backed by `pi-walker`'s ordered `walk::tree` traversal, `globset`, and `regex`.
 - `ast-grep` (also `sg`) runs ast-grep 0.50's `run` command (`-p`/`-r`/`-U`, `--json`, context, `--heading`, `--files-with-matches`, `--stdin`) on the `pi-ast` search engine with ast-grep's piped (uncolored) output; `scan`, `test`, `new`, `lsp`, `outline`, `--config`, `--interactive`, `--kind`, `--debug-query`, and `--inspect` exit 2 as unsupported.
 
+Walks rooted on a local filesystem (`find`, `fd`, `rg`, `grep -r`, and the `grep`/`glob` natives) list network mounts below the root (NFS, SMB, autofs, sshfs, …; read from the mount table in `crates/pi-walker/src/fs/mounts.rs`) but do not descend into them; name the mount as the search root to walk it. ovnfs mounts are always walked.
+
 Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated (`ExtrasGate` in `crates/pi-shell/src/extras.rs`, built in `crates/pi-shell/src/tools/mod.rs`):
 
 - `PI_DISABLE_UUTILS_BUILTINS` disables the whole utility set (bare names resolve to system binaries again),

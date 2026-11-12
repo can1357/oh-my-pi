@@ -6,6 +6,8 @@
 //! ignore chain, and pruning rules of [`super::walk`], but the caller drives
 //! it one event at a time, deciding each entry (and, with
 //! [`Tree::skip_dir`], pruning each directory) before its subtree is read.
+//! Network mounts met below a local root are reported but not descended
+//! into ([`crate::fs::mounts`]).
 //!
 //! ```ignore
 //! let opts = TreeOptions { emit_root: true, ..Default::default() };
@@ -32,7 +34,7 @@ use super::{
 	DirError, SEP, WalkError, absolute_root, give_session, is_separator, pruned, take_session,
 };
 use crate::{
-	fs::{Detail, Dir, FileId, FileType, Fs, Listing, Record, Session},
+	fs::{Detail, Dir, FileId, FileType, Fs, Listing, Record, Session, mounts::Fences},
 	ignore::{DirIgnores, Frame as IgnoreFrame, Ignorer, Names},
 };
 
@@ -319,6 +321,7 @@ impl Tree {
 			Phase::Root
 		};
 		let file_type = file_type.unwrap_or(FileType::File);
+		let fences = Fences::of(fs, &abs_root);
 		Ok(Self {
 			stack: Stack(Vec::new()),
 			phase,
@@ -329,20 +332,21 @@ impl Tree {
 				mtime: full.then_some(info.stamp.mtime),
 			},
 			cx: Cx {
-				abs:       abs_root.as_os_str().as_encoded_bytes().to_vec(),
-				fs:        fs.clone(),
-				opts:      opts.clone(),
-				session:   ManuallyDrop::new(session),
-				root:      abs_root,
-				ignorer:   None,
-				root_dev:  None,
+				abs: abs_root.as_os_str().as_encoded_bytes().to_vec(),
+				fs: fs.clone(),
+				opts: opts.clone(),
+				session: ManuallyDrop::new(session),
+				root: abs_root,
+				ignorer: None,
+				root_dev: None,
 				ancestors: Vec::new(),
-				pool:      Vec::new(),
-				ign:       Vec::new(),
-				rel:       Vec::new(),
+				pool: Vec::new(),
+				ign: Vec::new(),
+				rel: Vec::new(),
 				open_dirs: 0,
-				error:     None,
-				after:     After::Nothing,
+				error: None,
+				after: After::Nothing,
+				fences,
 			},
 		})
 	}
@@ -503,6 +507,8 @@ struct Cx {
 	/// The failure [`Emit::Error`] reports.
 	error:     Option<DirError>,
 	after:     After,
+	/// Network mounts not descended into.
+	fences:    Fences,
 }
 
 /// `bytes` (built from encoded `OsStr` pieces) as a path.
@@ -653,7 +659,9 @@ impl Cx {
 		}
 		let reported = depth >= self.opts.min_depth;
 		let report = Post { file_type, depth, size, mtime };
-		let descend = is_dir && self.opts.max_depth.is_none_or(|max| depth < max);
+		let descend = is_dir
+			&& self.opts.max_depth.is_none_or(|max| depth < max)
+			&& !self.fences.contains(&self.rel);
 		if reported && !self.opts.contents_first {
 			self.after = if descend {
 				After::Descend(Descent { index, followed, target, depth, saved })
