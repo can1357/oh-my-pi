@@ -5142,10 +5142,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Auto-complete any open todo (pending/in_progress/blocked) whose content
 	 * matches a subagent that has finished successfully. Fires on every observer
 	 * `onChange` so the visual state stays in sync with subagent lifecycle
-	 * without requiring the agent to issue a follow-up `todo`. A todo `block`ed
-	 * while waiting on a detached subagent is included: that subagent completing
-	 * is exactly the unblock signal, and blocked todos are excluded from the stop
-	 * reminder, so leaving it blocked would strand it silently. Failed and aborted
+	 * without requiring the agent to issue a follow-up `todo`. A todo a host or
+	 * the user marked blocked while waiting on a detached subagent is included:
+	 * that subagent completing ends the wait, and blocked todos are excluded from
+	 * the stop reminder, so leaving it blocked would strand it silently. Failed and aborted
 	 * subagents are intentionally NOT auto-completed — those stay open so the user
 	 * (or the next agent turn) can decide what to do.
 	 *

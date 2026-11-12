@@ -50,7 +50,7 @@ export function committedTodoPhases(result: AgentToolResult): TodoPhase[] | unde
 // Schema
 // =============================================================================
 
-const TodoOp = type('"init" | "start" | "done" | "rm" | "drop" | "block" | "unblock" | "append" | "view"');
+const TodoOp = type('"init" | "start" | "done" | "rm" | "drop" | "append" | "view"');
 
 const InitListEntry = type({
 	phase: type("string"),
@@ -66,7 +66,6 @@ const todoSchema = type({
 	// and both enforce non-empty with op-specific errors. A stray `items: []` on
 	// an op that ignores it (e.g. `view`) must not be a hard schema rejection.
 	"items?": type("string").array().describe("tasks for flat init or append"),
-	"reason?": type("string").describe("blocker note for block"),
 });
 
 type TodoParams = TodoSchema;
@@ -402,6 +401,15 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
+/**
+ * Move a task to `status`. A `blocked` task (set by a host through `set_todos` or by the
+ * user in `/todo edit`) leaves that state here, so its blocker note goes with it.
+ */
+function setStatus(task: TodoItem, status: TodoStatus): void {
+	task.status = status;
+	delete task.blocker;
+}
+
 function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	switch (entry.op) {
 		case "init":
@@ -416,53 +424,18 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 					}
 				}
 			}
-			hit.task.status = "in_progress";
+			setStatus(hit.task, "in_progress");
 			return phases;
 		}
 		case "done": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
-				task.status = "completed";
+				setStatus(task, "completed");
 			}
 			return phases;
 		}
 		case "drop": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
-				task.status = "abandoned";
-			}
-			return phases;
-		}
-		case "block": {
-			if (!entry.task && !entry.phase) {
-				errors.push("block requires a task or phase target");
-				return phases;
-			}
-			// Collapse whitespace runs (incl. newlines) to single spaces: a blocker
-			// note rides on one Markdown checklist line (as a trailing HTML comment)
-			// and one HUD/summary line, so an embedded newline from a multi-line
-			// external error or user question would corrupt the round-trip parse and
-			// the rendered line. Normalizing here keeps every consumer one-line-safe.
-			const reason = entry.reason?.replace(/\s+/g, " ").trim() || undefined;
-			for (const task of getTaskTargets(phases, entry, errors)) {
-				// Only actionable open work can be blocked: blocking a phase must not
-				// reopen completed/abandoned tasks or erase finished progress. An
-				// already-blocked task stays eligible so a later block can refine its
-				// blocker note (e.g. first blocked without a reason, then with one).
-				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") continue;
-				task.status = "blocked";
-				task.blocker = reason;
-			}
-			return phases;
-		}
-		case "unblock": {
-			if (!entry.task && !entry.phase) {
-				errors.push("unblock requires a task or phase target");
-				return phases;
-			}
-			for (const task of getTaskTargets(phases, entry, errors)) {
-				if (task.status === "blocked") {
-					task.status = "pending";
-					task.blocker = undefined;
-				}
+				setStatus(task, "abandoned");
 			}
 			return phases;
 		}

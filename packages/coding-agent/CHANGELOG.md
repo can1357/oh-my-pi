@@ -24,6 +24,7 @@
 ### Removed
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
+- The `todo` tool no longer has `block`/`unblock` ops or a `reason` field: the agent leaves a task that waits on something external open, where it counts toward the stop reminder. RPC `set_todos` and `[!]` in `/todo edit` still mark a task blocked, and `start`, `done` or `drop` on it now also clears its note
 
 ### Changed
 

@@ -26,13 +26,13 @@ import type { NativeToolView, ToolRenderResult } from "./renderer";
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
 
 /** Operation names accepted by the todo tool and echoed in successful result details. */
-export type TodoOperation = "init" | "start" | "done" | "rm" | "drop" | "block" | "unblock" | "append" | "view";
+export type TodoOperation = "init" | "start" | "done" | "rm" | "drop" | "append" | "view";
 
 /** A task displayed within a todo phase. */
 export interface TodoItem {
 	content: string;
 	status: TodoStatus;
-	/** When `status === "blocked"`, an optional note on what the task is waiting for. */
+	/** When `status === "blocked"` (set by a host or the user, never by the agent), an optional note on what the task is waiting for. */
 	blocker?: string;
 	details?: string;
 	notes?: string[];
