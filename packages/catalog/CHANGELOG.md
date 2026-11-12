@@ -8,7 +8,8 @@
 
 ### Fixed
 
-- Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
+ - Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
+ - Fixed Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) misrouting to the first-party Gemini endpoint; they now ride the `publishers/mistralai` raw-predict endpoint with ADC auth and an OpenAI-shaped body ([#19010](https://github.com/can1357/oh-my-pi/issues/19010)).
 
 ## [18.19.0] - 2026-11-12
 
