@@ -124,4 +124,23 @@ describe("read → edit seen-line guard under a stale tag", () => {
 		await edit.execute("edit-3", { input: stale });
 		expect(await Bun.file(file).text()).toBe(afterFirst.replace("line 3\n", "LINE THREE\n"));
 	});
+
+	it("retains an earlier read line after an outside change elsewhere", async () => {
+		const session = createSession(cwd);
+		const read = new ReadTool(session);
+		const whole = textOutput(await read.execute("read-1", { path: "list.txt" }));
+		expect(whole).toContain("3:line 3");
+
+		const changed = [...LINES];
+		changed[19] = "LINE TWENTY";
+		await fs.writeFile(file, `${changed.join("\n")}\n`);
+		const partial = textOutput(await read.execute("read-2", { path: "list.txt:18-22" }));
+		expect(partial).not.toContain("3:line 3");
+
+		const result = await new EditTool(session, "hashline").execute("edit", {
+			input: `${partial.split("\n")[0]}\nPUT 3.=3:\n+LINE THREE\n`,
+		});
+		expect(textOutput(result)).not.toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(`${changed.join("\n")}\n`.replace("line 3\n", "LINE THREE\n"));
+	});
 });

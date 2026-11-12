@@ -187,6 +187,12 @@ impl Default for StoreState {
 	}
 }
 
+#[derive(PartialEq, Eq)]
+enum SeenOrigin {
+	View,
+	Edit,
+}
+
 /// Thread-safe state shared for the lifetime of an edit session.
 #[derive(Default, Clone)]
 pub struct EditStore {
@@ -233,10 +239,31 @@ impl EditStore {
 			.iter()
 			.position(|version| version.snapshot.hash == hash && &*version.snapshot.text == text)
 		{
+			// Read first records the new tag without a view, then merges the
+			// displayed rows in a second call. Carry from the preceding version
+			// only when this tag has not acquired provenance yet.
+			let carried = if seen_lines.is_some()
+				&& index == 0
+				&& history.versions[0].snapshot.seen_lines.is_none()
+			{
+				carried_from_version(history, 1, text)
+			} else {
+				Vec::new()
+			};
 			let mut snapshot = history.versions.remove(index);
 			merge_seen(&mut snapshot.snapshot, seen_lines);
+			if !carried.is_empty() {
+				merge_seen(&mut snapshot.snapshot, Some(&carried));
+			}
 			history.versions.insert(0, snapshot);
 		} else if max_versions > 0 {
+			// A read after an outside write keeps previously displayed lines only
+			// where the content and line number still match.
+			let carried = if seen_lines.is_some() {
+				carried_from_version(history, 0, text)
+			} else {
+				Vec::new()
+			};
 			let mut snapshot = Snapshot {
 				path:       path.to_owned(),
 				text:       Arc::from(text),
@@ -244,6 +271,9 @@ impl EditStore {
 				seen_lines: None,
 			};
 			merge_seen(&mut snapshot, seen_lines);
+			if !carried.is_empty() {
+				merge_seen(&mut snapshot, Some(&carried));
+			}
 			history.versions.insert(0, StoredSnapshot { snapshot });
 			history.versions.truncate(max_versions);
 		}
@@ -268,21 +298,52 @@ impl EditStore {
 		Some(self.record(&key, &normalized, seen_lines))
 	}
 
-	/// Union displayed lines into the most recent version matching a tag.
+	/// Union displayed view lines into the most recent version matching a tag.
 	pub fn record_seen_lines(&self, path: &Path, hash: &str, lines: &[u32]) {
+		self.record_seen_lines_with_origin(path, hash, lines, SeenOrigin::View);
+	}
+
+	/// Union edit-result lines without redoing the edit's provenance carry.
+	pub(crate) fn record_edit_seen_lines(&self, path: &Path, hash: &str, lines: &[u32]) {
+		self.record_seen_lines_with_origin(path, hash, lines, SeenOrigin::Edit);
+	}
+
+	fn record_seen_lines_with_origin(
+		&self,
+		path: &Path,
+		hash: &str,
+		lines: &[u32],
+		origin: SeenOrigin,
+	) {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
-		if let Some(version) = state
-			.histories
-			.get_mut(path)
-			.and_then(|h| h.versions.iter_mut().find(|v| v.snapshot.hash == hash))
+		let Some(history) = state.histories.get_mut(path) else {
+			return;
+		};
+		let Some(index) = history
+			.versions
+			.iter()
+			.position(|v| v.snapshot.hash == hash)
+		else {
+			return;
+		};
+		let carried = if origin == SeenOrigin::View
+			&& index == 0
+			&& history.versions[0].snapshot.seen_lines.is_none()
 		{
-			let previous_bytes = version.retained_bytes();
-			merge_seen(&mut version.snapshot, Some(lines));
-			let current_bytes = version.retained_bytes();
-			state.retained_bytes = state.retained_bytes - previous_bytes + current_bytes;
-			evict(&mut state);
+			carried_from_version(history, 1, &history.versions[0].snapshot.text)
+		} else {
+			Vec::new()
+		};
+		let version = &mut history.versions[index];
+		let previous_bytes = version.retained_bytes();
+		merge_seen(&mut version.snapshot, Some(lines));
+		if !carried.is_empty() {
+			merge_seen(&mut version.snapshot, Some(&carried));
 		}
+		let current_bytes = version.retained_bytes();
+		state.retained_bytes = state.retained_bytes - previous_bytes + current_bytes;
+		evict(&mut state);
 	}
 
 	/// Return the current version and refresh path recency.
@@ -444,6 +505,53 @@ impl EditStore {
 	}
 }
 
+fn carried_from_version(history: &PathHistory, index: usize, text: &str) -> Vec<u32> {
+	let Some(prior) = history.versions.get(index).map(|version| &version.snapshot) else {
+		return Vec::new();
+	};
+	if prior.seen_lines.as_ref().is_none_or(|seen| seen.is_empty()) {
+		return Vec::new();
+	}
+	carried_seen_lines(&prior.text, text, Some(prior))
+}
+
+/// Prior-snapshot lines that keep both their number and content in `after`:
+/// every unchanged run the edit did not shift (the leading run, plus runs below
+/// line-neutral hunks), filtered by what `prior` displayed. A missing or
+/// unrestricted prior snapshot let the edit anchor anywhere, so every such run
+/// carries over. Shifted lines never carry: their old numbers name other
+/// content.
+pub(crate) fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Vec<u32> {
+	let seen = prior
+		.and_then(|snapshot| snapshot.seen_lines.as_ref())
+		.filter(|seen| !seen.is_empty());
+	let old_lines: Vec<&str> = before.split('\n').collect();
+	let new_lines: Vec<&str> = after.split('\n').collect();
+	let (old_ids, new_ids) = pi_diff::intern(&old_lines, &new_lines);
+	let mut carried = Vec::new();
+	let (mut old_line, mut new_line) = (1_u32, 1_u32);
+	for run in pi_diff::myers_diff(&old_ids, &new_ids) {
+		if run.added {
+			new_line += run.count;
+			continue;
+		}
+		if run.removed {
+			old_line += run.count;
+			continue;
+		}
+		if old_line == new_line {
+			let unshifted = old_line..old_line + run.count;
+			match seen {
+				Some(seen) => carried.extend(seen.range(unshifted)),
+				None => carried.extend(unshifted),
+			}
+		}
+		old_line += run.count;
+		new_line += run.count;
+	}
+	carried
+}
+
 fn merge_seen(snapshot: &mut Snapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
 	// Copies the set only while a lookup still holds the previous version.
@@ -539,6 +647,52 @@ mod tests {
 		let head = store.head(path).unwrap();
 		assert_eq!(&*head.text, "one");
 		assert_eq!(*head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+	}
+
+	#[test]
+	fn outside_change_carries_only_unchanged_lines_at_their_original_numbers() {
+		let store = EditStore::new();
+		let path = Path::new("source.rs");
+		let before = (1..=60).map(|n| format!("line {n}\n")).collect::<String>();
+		let after = before.replace("line 50\n", "line FIFTY\n");
+		store.record(path, &before, Some(&(1..=60).collect::<Vec<_>>()));
+		let tag = store.record(path, &after, None);
+		store.record_seen_lines(path, &tag, &(47..=55).collect::<Vec<_>>());
+		let seen = store.head(path).unwrap().seen_lines.unwrap();
+		assert!(seen.contains(&5));
+		assert!(seen.contains(&47));
+	}
+
+	#[test]
+	fn restricted_record_carries_only_unchanged_prior_lines() {
+		let store = EditStore::new();
+		let path = Path::new("source.rs");
+		store.record(path, "one\ntwo\nthree\n", Some(&[1, 2]));
+		store.record(path, "one\nchanged\nthree\n", Some(&[3]));
+		assert_eq!(*store.head(path).unwrap().seen_lines.unwrap(), BTreeSet::from([1, 3]));
+	}
+
+	#[test]
+	fn outside_change_does_not_carry_shifted_or_modified_lines() {
+		let path = Path::new("source.rs");
+		let before = "one\ntwo\nthree\nfour\nfive\nsix\n";
+		for after in [format!("new\n{before}"), before.replace("five\n", "changed\n")] {
+			let store = EditStore::new();
+			store.record(path, before, Some(&[5]));
+			let tag = store.record(path, &after, None);
+			store.record_seen_lines(path, &tag, &[1]);
+			assert!(!store.head(path).unwrap().seen_lines.unwrap().contains(&5));
+		}
+	}
+
+	#[test]
+	fn outside_change_does_not_inherit_unrestricted_provenance() {
+		let store = EditStore::new();
+		let path = Path::new("source.rs");
+		store.record(path, "one\ntwo\n", None);
+		let tag = store.record(path, "one\nchanged\n", None);
+		store.record_seen_lines(path, &tag, &[2]);
+		assert_eq!(*store.head(path).unwrap().seen_lines.unwrap(), BTreeSet::from([2]));
 	}
 
 	#[test]

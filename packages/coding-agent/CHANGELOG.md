@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `read` now keeps previously displayed lines editable after an outside change when their line numbers and content are unchanged ([#19092](https://github.com/can1357/oh-my-pi/issues/19092)).
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

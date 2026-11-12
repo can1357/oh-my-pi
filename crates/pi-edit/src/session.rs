@@ -20,7 +20,7 @@ use crate::{
 	modes::hashline::syntax::has_syntax_oracle,
 	notebook,
 	path_policy::{PathPolicy, UrlResolution, canonical_key},
-	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
+	store::{EditStore, carried_seen_lines, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
 };
@@ -443,7 +443,7 @@ impl Session {
 			if let (Some((key, mut seen_lines)), Some(tag)) = (provenance, &response_tag) {
 				seen_lines.extend(seen_lines_from_body(&text));
 				if !seen_lines.is_empty() {
-					self.store.record_seen_lines(&key, tag, &seen_lines);
+					self.store.record_edit_seen_lines(&key, tag, &seen_lines);
 				}
 			}
 			let parse_regressed = file.op != FileOp::Delete
@@ -504,43 +504,6 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 			.map_or_else(|_| file.after.clone(), |text| normalize_to_lf(&text).into_owned());
 	}
 	normalize_to_lf(strip_bom(written).1).into_owned()
-}
-
-/// Prior-snapshot lines that keep both their number and content in `after`:
-/// every unchanged run the edit did not shift (the leading run, plus runs below
-/// line-neutral hunks), filtered by what `prior` displayed. A missing or
-/// unrestricted prior snapshot let the edit anchor anywhere, so every such run
-/// carries over. Shifted lines never carry: their old numbers name other
-/// content.
-fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Vec<u32> {
-	let seen = prior
-		.and_then(|snapshot| snapshot.seen_lines.as_ref())
-		.filter(|seen| !seen.is_empty());
-	let old_lines: Vec<&str> = before.split('\n').collect();
-	let new_lines: Vec<&str> = after.split('\n').collect();
-	let (old_ids, new_ids) = pi_diff::intern(&old_lines, &new_lines);
-	let mut carried = Vec::new();
-	let (mut old_line, mut new_line) = (1_u32, 1_u32);
-	for run in pi_diff::myers_diff(&old_ids, &new_ids) {
-		if run.added {
-			new_line += run.count;
-			continue;
-		}
-		if run.removed {
-			old_line += run.count;
-			continue;
-		}
-		if old_line == new_line {
-			let unshifted = old_line..old_line + run.count;
-			match seen {
-				Some(seen) => carried.extend(seen.range(unshifted)),
-				None => carried.extend(unshifted),
-			}
-		}
-		old_line += run.count;
-		new_line += run.count;
-	}
-	carried
 }
 
 /// Model-facing text for one file (`formatEditResultText`).
