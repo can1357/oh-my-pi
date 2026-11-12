@@ -361,7 +361,7 @@ function unreselectable(): { role: string; name: string }[] {
 
 interface TernKitProbe {
 	observe(options: { includeAll: boolean }): {
-		elements: { id: number; role: string; name?: string; value?: string | number }[];
+		elements: { id: number; role: string; name?: string; value?: string | number; description?: string }[];
 	};
 	count(selector: unknown): number;
 	mark(selector: unknown): string;
@@ -374,8 +374,12 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
 		try {
 			const page = await browser.newPage();
-			await page.setContent('<input type="password" aria-label="Password"><input aria-label="Username">');
-			await page.locator('input[type="password"]').fill("SENTINEL-pw-123");
+			await page.setContent(`<input id="pw" type="password" aria-label="Password">
+				<input aria-label="Username">
+				<input aria-labelledby="pw">
+				<input aria-label="Described" aria-describedby="pw">
+				<button>Reveal <input type="password" value="SENTINEL-pw-123"></button>`);
+			await page.locator("#pw").fill("SENTINEL-pw-123");
 			await page.locator('input[aria-label="Username"]').fill("plain-text");
 			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
 			const observed = await page.evaluate(() => {
@@ -388,6 +392,9 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 				expect.arrayContaining([
 					expect.objectContaining({ role: "textbox", name: "Password", value: "•".repeat(15) }),
 					expect.objectContaining({ role: "textbox", name: "Username", value: "plain-text" }),
+					expect.objectContaining({ role: "textbox", name: "•".repeat(15) }),
+					expect.objectContaining({ role: "textbox", name: "Described", description: "•".repeat(15) }),
+					expect.objectContaining({ role: "button", name: "Reveal " + "•".repeat(15) }),
 				]),
 			);
 			expect(JSON.stringify(observed)).not.toContain("SENTINEL-pw-123");
