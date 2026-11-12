@@ -1,7 +1,6 @@
 use std::{collections::HashSet, ffi::c_void};
 
 use image::{Rgba, RgbaImage};
-use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use xcap::{Monitor, Window};
 
 use super::{
@@ -11,6 +10,7 @@ use super::{
 		types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 	},
 	geometry::PhysicalLayout,
+	window,
 };
 
 const MAX_LISTED_WINDOWS: usize = 48;
@@ -115,14 +115,6 @@ const fn hwnd_from_id(id: u32) -> *mut c_void {
 	std::ptr::with_exposed_provenance_mut(id as usize)
 }
 
-fn process_id(id: u32) -> Option<u32> {
-	let mut pid = 0;
-	// SAFETY: The HWND comes from xcap's current top-level window enumeration;
-	// this call only reads its owning process id and tolerates a teardown race.
-	unsafe { GetWindowThreadProcessId(hwnd_from_id(id), &mut pid) };
-	(pid != 0).then_some(pid)
-}
-
 pub(super) fn windows() -> CoreResult<Vec<DesktopWindow>> {
 	window_snapshots(false)
 }
@@ -159,7 +151,7 @@ fn window_snapshots(focused_only: bool) -> CoreResult<Vec<DesktopWindow>> {
 			id: id.to_string(),
 			title,
 			app,
-			pid: process_id(id),
+			pid: window::process_id(hwnd_from_id(id)),
 			x: physical_x,
 			y: physical_y,
 			width: physical_width,
