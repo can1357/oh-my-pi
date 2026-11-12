@@ -36,6 +36,17 @@ threads-required = "num-test-threads"
 filter = 'test(deeper_than_the_stack) + test(stopping_at_the_leaf_of_a_deep_ignore_chain_returns)'
 threads-required = "num-test-threads"
 
+# The Windows desktop tests (ignored unless run on a signed-in desktop) move
+# the foreground between windows they open, so two at once take it from each
+# other. Each takes every test thread, so it runs alone.
+[[profile.default.overrides]]
+filter = 'test(/^desktop::win32::tests::/)'
+threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+filter = 'test(/^desktop::win32::tests::/)'
+threads-required = "num-test-threads"
+
 # The rsync conformance tests diff the builtin against the external reference
 # rsync 3.5.1: they spawn its processes and daemons, run up to four scenarios
 # at once on their own threads, and copy multi-megabyte fixtures per run. The

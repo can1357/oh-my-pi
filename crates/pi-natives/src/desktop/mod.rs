@@ -165,10 +165,20 @@ enum Response {
 	/// An input call's takeover focus report; see
 	/// [`control::take_focus_return`].
 	Input(Option<DesktopFocusReturn>),
+	/// A typing call's result; see [`control::take_text_unconfirmed`].
+	Typed(DesktopTypeResult),
 	Nodes(Vec<AxNode>),
 	Node(Option<AxNode>),
 	Attributes(Vec<(String, String)>),
 	TextSelection(AxTextSelection),
+}
+
+/// The result of the typing call that just ran on this thread.
+fn typed() -> Response {
+	Response::Typed(DesktopTypeResult {
+		unconfirmed:  control::take_text_unconfirmed(),
+		focus_return: control::take_focus_return(),
+	})
 }
 
 type Reply = flume::Sender<CoreResult<Response>>;
@@ -1561,10 +1571,11 @@ impl Worker {
 			},
 			Request::TypeText { target, text, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
+				control::take_text_unconfirmed();
 				self
 					.backend()?
 					.type_text(target, text, takeover.mode(), token)?;
-				Ok(Response::Input(control::take_focus_return()))
+				Ok(typed())
 			},
 			Request::KeyChord { target, keys, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
@@ -1717,7 +1728,9 @@ impl Worker {
 			Request::AxInput { reference, input, takeover, .. } => {
 				let h = self.registry.resolve(reference)?;
 				let mode = takeover.mode();
+				control::take_text_unconfirmed();
 				match self.backend()?.element_input(&h, input, mode, token)? {
+					ElementDelivery::Delivered if matches!(input, ElementInput::Text(_)) => Ok(typed()),
 					ElementDelivery::Delivered => Ok(Response::Input(control::take_focus_return())),
 					ElementDelivery::Unfocused(focus) => {
 						Err(self.element_focus_refusal(reference, focus, mode))
@@ -2475,11 +2488,11 @@ impl DesktopSession {
 		target: String,
 		text: String,
 		opts: Option<PointerOptions>,
-	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
+	) -> Result<task::Promise<DesktopTypeResult>> {
 		let takeover = ParsedPointerOptions::parse(opts)
 			.map_err(napi::Error::from)?
 			.takeover;
-		Ok(self.input("desktop.typeText", move |reply| Request::TypeText {
+		Ok(self.typing("desktop.typeText", move |reply| Request::TypeText {
 			target: Target::parse(&target),
 			text,
 			takeover,
@@ -2683,11 +2696,11 @@ impl DesktopSession {
 		reference: String,
 		text: String,
 		opts: Option<PointerOptions>,
-	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
+	) -> Result<task::Promise<DesktopTypeResult>> {
 		let takeover = ParsedPointerOptions::parse(opts)
 			.map_err(napi::Error::from)?
 			.takeover;
-		Ok(self.input("desktop.axType", move |reply| Request::AxInput {
+		Ok(self.typing("desktop.axType", move |reply| Request::AxInput {
 			reference,
 			input: ElementInput::Text(text),
 			takeover,
@@ -2756,6 +2769,24 @@ impl DesktopSession {
 		task::blocking(label, (), move |_| {
 			match c.call(token, make)? {
 				Response::Input(report) => Ok(report),
+				_ => Err(DesktopError::internal("unexpected desktop worker response")),
+			}
+			.map_err(Into::into)
+		})
+	}
+
+	/// A typing call, resolving to whether its text was confirmed and where
+	/// its takeover left focus.
+	fn typing(
+		&self,
+		label: &'static str,
+		make: impl FnOnce(Reply) -> Request + Send + 'static,
+	) -> task::Promise<DesktopTypeResult> {
+		let c = Arc::clone(&self.core);
+		let token = c.cancellation.token();
+		task::blocking(label, (), move |_| {
+			match c.call(token, make)? {
+				Response::Typed(result) => Ok(result),
 				_ => Err(DesktopError::internal("unexpected desktop worker response")),
 			}
 			.map_err(Into::into)

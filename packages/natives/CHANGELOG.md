@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `typeText` and `axType` resolve to `{ unconfirmed, focusReturn }` on every platform instead of the takeover focus report; only Windows takeover typing sets `unconfirmed`, saying why the target was not seen reading the typed text ([#19037](https://github.com/can1357/oh-my-pi/pull/19037) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
@@ -25,6 +29,7 @@
 - Fixed `setValue` on macOS failing with `AxFailed` when a password field read back as a mask exactly as long as the text written, although the text had landed (KeePassXC's Qt field); it now succeeds. Typing into such a field by accessibility insertion (`el.type`, `win.type`) no longer fails either. A mask of another length still fails ([#19026](https://github.com/can1357/oh-my-pi/pull/19026) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 clicks, holds, drags and scrolls on a window, in the background and in takeover, reporting success while that app had a popup menu open, such as one an earlier session opened and left: the menu took the press and closed, and nothing reached the window. Such a call now fails with nothing sent, naming the popup (`BackgroundUnavailable` in the background, `InputFailed` in takeover); a press inside the popup or its submenus still goes through ([#19044](https://github.com/can1357/oh-my-pi/pull/19044) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Linux X11 background keys and clicks going into the window you were using, while reported delivered, after a screen lock or a switch to another virtual terminal and back ([#19023](https://github.com/can1357/oh-my-pi/pull/19023) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows takeover typing handing the foreground back before the target had read the typed keys, which sent the end of the text to the user's window while reporting success (a Chrome field kept 218 to 237 of 2,000 characters); typing now waits up to 5 s for the focused control's thread to read them, and `unconfirmed` says why when it could not see that ([#19037](https://github.com/can1357/oh-my-pi/pull/19037) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
