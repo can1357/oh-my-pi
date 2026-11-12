@@ -132,7 +132,7 @@ describe("WatchedFilesForwarder", () => {
 		// watcher must keep reading while JS is busy (libuv's Windows watcher drops most of these).
 		const files: string[] = [];
 		for (let d = 0; d < 20; d++) {
-			const dir = path.join(root, "node_modules", `pkg${d}`);
+			const dir = path.join(root, "generated", `pkg${d}`);
 			fsSync.mkdirSync(dir, { recursive: true });
 			for (let f = 0; f < 100; f++) {
 				const file = path.join(dir, `f${f}.ts`);
@@ -146,6 +146,75 @@ describe("WatchedFilesForwarder", () => {
 		while (created().size < expected.size && Date.now() < deadline) await Bun.sleep(50);
 		expect([...expected].filter(uri => !created().has(uri))).toEqual([]);
 	}, 15_000);
+
+	it("reports the files of a directory moved into the watched tree, and the directory when moved out", async () => {
+		const { root, sent, forwarder } = setup();
+		const watched = path.join(root, "watched");
+		const outside = path.join(root, "outside");
+		await fs.mkdir(path.join(watched, "src"), { recursive: true });
+		await fs.mkdir(path.join(outside, "pkg", "nested"), { recursive: true });
+		const files = ["a.ts", path.join("nested", "b.ts")];
+		for (const file of files) fsSync.writeFileSync(path.join(outside, "pkg", file), "export {};\n");
+		await forwarder.register("ts", {
+			watchers: [{ globPattern: { baseUri: fileToUri(watched), pattern: "**/*.ts" } }],
+		});
+
+		// Moving a directory raises one event for the directory, none for the files it holds.
+		const moved = path.join(watched, "src", "pkg");
+		await fs.rename(path.join(outside, "pkg"), moved);
+		for (const file of files) {
+			await waitForEvent(sent, { uri: fileToUri(path.join(moved, file)), type: FileChangeType.Created });
+		}
+		await Bun.sleep(QUIET_MS);
+		const reports = new Map<string, number>();
+		for (const change of sent) reports.set(change.uri, (reports.get(change.uri) ?? 0) + 1);
+		expect([...reports].filter(([, count]) => count > 1)).toEqual([]);
+
+		// Only Windows says a vanished entry was a directory; elsewhere it is gone before it can be asked.
+		if (process.platform !== "win32") return;
+		await fs.rename(moved, path.join(outside, "back"));
+		await waitForEvent(sent, { uri: fileToUri(moved), type: FileChangeType.Deleted });
+	});
+
+	// Only Windows pairs a directory's old and new names.
+	it.skipIf(process.platform !== "win32")(
+		"reports each file's old path deleted when a directory is renamed",
+		async () => {
+			const { root, sent, forwarder } = setup();
+			const before = path.join(root, "before");
+			await fs.mkdir(before);
+			fsSync.writeFileSync(path.join(before, "a.ts"), "export {};\n");
+			await forwarder.register("ts", {
+				watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }],
+			});
+
+			const after = path.join(root, "after");
+			await fs.rename(before, after);
+			await waitForEvent(sent, { uri: fileToUri(path.join(before, "a.ts")), type: FileChangeType.Deleted });
+			await waitForEvent(sent, { uri: fileToUri(path.join(after, "a.ts")), type: FileChangeType.Created });
+		},
+	);
+
+	it("skips package contents below a base unless a watcher registered a base inside them", async () => {
+		const { root, sent, forwarder } = setup();
+		const types = path.join(root, "node_modules", "@types");
+		await fs.mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+		await fs.mkdir(path.join(types, "foo"), { recursive: true });
+		await forwarder.register("ts", {
+			watchers: [
+				{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } },
+				{ globPattern: { baseUri: fileToUri(types), pattern: "**/*.d.ts" } },
+			],
+		});
+
+		const skipped = path.join(root, "node_modules", "pkg", "index.ts");
+		const wanted = path.join(types, "foo", "index.d.ts");
+		fsSync.writeFileSync(skipped, "export {};\n");
+		fsSync.writeFileSync(wanted, "export {};\n");
+		await waitForEvent(sent, { uri: fileToUri(wanted), type: FileChangeType.Created });
+		await Bun.sleep(QUIET_MS);
+		expect(sent.filter(change => change.uri === fileToUri(skipped))).toEqual([]);
+	});
 
 	it("does not report a file created and removed within one batch as existing", async () => {
 		const { root, sent, forwarder } = setup();

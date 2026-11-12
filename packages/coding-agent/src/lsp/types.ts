@@ -363,6 +363,7 @@ export interface ServerConfig {
 	/**
 	 * Advertise `workspace/didChangeWatchedFiles` dynamic registration, so the
 	 * server hands file watching to omp instead of running its own watcher.
+	 * On unless `false`.
 	 */
 	watchFiles?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */

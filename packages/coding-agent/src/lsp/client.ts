@@ -378,10 +378,11 @@ const CLIENT_CAPABILITIES = {
 };
 
 /**
- * Capabilities for servers configured with `watchFiles`: the client watches the
- * files they register (see watched-files.ts) instead of their own watcher,
- * which can fail in ways the client cannot contain (tsgo re-arms in a tight
- * loop on SMB drives, and does not watch at all on Linux).
+ * Capabilities for servers that hand file watching to the client (every server
+ * unless configured with `watchFiles: false`): the client watches the files
+ * they register (see watched-files.ts) instead of their own watcher, which can
+ * fail in ways the client cannot contain (tsgo re-arms in a tight loop on SMB
+ * drives, and does not watch at all on Linux).
  */
 const WATCHING_CLIENT_CAPABILITIES = {
 	...CLIENT_CAPABILITIES,
@@ -975,7 +976,8 @@ interface DynamicCapabilityParams {
  * outlives and is shared by every attached client.
  */
 function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
-	if (client.proc.sharedMux || !client.config.watchFiles) return undefined;
+	// `watchFiles` is on unless configured `false`.
+	if (client.proc.sharedMux || client.config.watchFiles === false) return undefined;
 	client.watchedFiles ??= new WatchedFilesForwarder({
 		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
 		send: changes =>
@@ -1532,7 +1534,7 @@ export async function getOrCreateClient(
 					processId: process.pid,
 					rootUri: fileToUri(cwd),
 					rootPath: cwd,
-					capabilities: client.config.watchFiles ? WATCHING_CLIENT_CAPABILITIES : CLIENT_CAPABILITIES,
+					capabilities: client.config.watchFiles === false ? CLIENT_CAPABILITIES : WATCHING_CLIENT_CAPABILITIES,
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},

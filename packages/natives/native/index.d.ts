@@ -199,8 +199,10 @@ export declare class DirectoryWatcher {
    */
   static start(dir: string, recursive: boolean, callback: (err: null | Error, changes: DirectoryChanges) => void): Promise<DirectoryWatcher>
   /**
-   * Stop watching and join the reader thread. Batches or an error it queued
-   * before stopping may still reach the callback afterwards; ignore them.
+   * Stop watching without waiting: the reader thread cancels its pending
+   * reads (a round trip on a network share) and exits on its own. Batches or
+   * an error it queued before stopping may still reach the callback
+   * afterwards; ignore them.
    */
   close(): void
 }
@@ -1861,6 +1863,11 @@ export interface DirectoryChange {
   /** Path relative to the watched directory, with the platform's separators. */
   path: string
   action: DirectoryChangeAction
+  /**
+   * The entry is a directory. Always false for `modified`, which may also
+   * name a directory whose entries changed.
+   */
+  directory: boolean
 }
 
 /** What happened to an entry, as reported by the file system. */
