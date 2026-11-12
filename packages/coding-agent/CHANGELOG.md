@@ -235,6 +235,10 @@
 - `wait` and `write proc://<id>/kill` now say how a settled job's result reached the caller: delivered by the call itself (it finished while the call ran), handed over by this snapshot (it superseded the job's queued completion push, so no duplicate follows), or genuinely late — the last keeps its "not auto-delivered; recovered by this snapshot" warning and adds how long before the call it had finished ([#16052](https://github.com/can1357/oh-my-pi/issues/16052), [#18635](https://github.com/can1357/oh-my-pi/pull/18635) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 
+### Fixed
+
+- ACP tool calls waiting on `session/request_permission` now emit `tool_approval_requested` / `tool_approval_resolved` to extensions, so status and hook extensions see the permission wait ([#18637](https://github.com/can1357/oh-my-pi/issues/18637))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

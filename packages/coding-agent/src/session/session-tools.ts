@@ -12,7 +12,13 @@ import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
-import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
+import type {
+	ExtensionRunner,
+	SourceInfo,
+	ToolApprovalRequestedEvent,
+	ToolApprovalResolvedEvent,
+	ToolInfo,
+} from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
@@ -40,6 +46,7 @@ import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" wit
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import {
+	type ApprovalMode,
 	approvalRestrictions,
 	denyError,
 	resolveApproval,
@@ -1228,13 +1235,14 @@ export class SessionTools {
 					const restrictions = approvalRestrictions(this.#host.settings, this.#host.sessionManager.getCwd());
 					// A restricted call is approved per call: a remembered ACP answer never covers it.
 					let cacheable = restrictedFolderReason(target, args, restrictions) === undefined;
+					const explicitAutoApprove = this.#isExplicitAutoApproveMode();
+					const { approvalMode, userPolicies } = resolveApprovalFromContext({
+						autoApprove: this.#autoApprove,
+						settings: this.#host.settings,
+					});
+					const mode = approvalMode === "yolo" && !explicitAutoApprove ? "always-ask" : approvalMode;
+					let approvalReason: string | undefined;
 					if (target.name === "bash") {
-						const explicitAutoApprove = this.#isExplicitAutoApproveMode();
-						const { approvalMode, userPolicies } = resolveApprovalFromContext({
-							autoApprove: this.#autoApprove,
-							settings: this.#host.settings,
-						});
-						const mode = approvalMode === "yolo" && !explicitAutoApprove ? "always-ask" : approvalMode;
 						const resolved = resolveApproval(
 							target,
 							args,
@@ -1251,6 +1259,7 @@ export class SessionTools {
 						// A prompt forced by a critical command or an explicit pattern
 						// remains per-call, even after the client selects Always allow.
 						cacheable = !resolved.override;
+						approvalReason = resolved.reason;
 					}
 					const permissionIntent = getPermissionIntent(target.name, args);
 					if (!permissionIntent) {
@@ -1372,67 +1381,74 @@ export class SessionTools {
 					} else {
 						arrivalSignal.addEventListener("abort", onArrival);
 					}
-					let raced: PermissionRaceResult;
+					const settleApproval = this.#announceAcpApproval(toolCallId, target.name, mode, approvalReason);
 					try {
-						raced = await this.#host.waitForUser(() => {
-							const permissionPromise = bridge.requestPermission!(
-								{
-									toolCallId,
-									toolName: target.name,
-									title: permissionIntent.title,
-									...(target.name === "bash" ? { kind: "execute" } : {}),
-									status: "pending",
-									rawInput: args,
-									...(commandContent ? { content: commandContent } : {}),
-									locations: extractPermissionLocations(
-										args,
-										this.#host.sessionManager.getCwd(),
-										permissionIntent.paths,
-									),
-								},
-								PERMISSION_OPTIONS,
-								signal,
-								// The bridge cancels its pending wire dialog when the
-								// steer wins; the gate's own race above classifies the
-								// outcome either way. The derived signal keeps the wire
-								// cancel on user steering only — an agent-authored or
-								// IRC steer that aborted the loop signal leaves the
-								// client's dialog open.
-								userSteering.signal,
-							).then(outcome => ({ kind: "permission" as const, outcome }));
-							return Promise.race([permissionPromise, abortPromise, steerPromise]);
-						});
-					} finally {
-						signal?.removeEventListener("abort", onAbort);
-						steeringSignal.removeEventListener("abort", onLoopSteer);
-						arrivalSignal.removeEventListener("abort", onArrival);
-						// The dialog is over; its park window can no longer
-						// read. Idempotent when a supersede's drain already
-						// released it.
-						this.#host.steeringArrivalRelease(arrivalParkSeq);
+						let raced: PermissionRaceResult;
+						try {
+							raced = await this.#host.waitForUser(() => {
+								const permissionPromise = bridge.requestPermission!(
+									{
+										toolCallId,
+										toolName: target.name,
+										title: permissionIntent.title,
+										...(target.name === "bash" ? { kind: "execute" } : {}),
+										status: "pending",
+										rawInput: args,
+										...(commandContent ? { content: commandContent } : {}),
+										locations: extractPermissionLocations(
+											args,
+											this.#host.sessionManager.getCwd(),
+											permissionIntent.paths,
+										),
+									},
+									PERMISSION_OPTIONS,
+									signal,
+									// The bridge cancels its pending wire dialog when the
+									// steer wins; the gate's own race above classifies the
+									// outcome either way. The derived signal keeps the wire
+									// cancel on user steering only — an agent-authored or
+									// IRC steer that aborted the loop signal leaves the
+									// client's dialog open.
+									userSteering.signal,
+								).then(outcome => ({ kind: "permission" as const, outcome }));
+								return Promise.race([permissionPromise, abortPromise, steerPromise]);
+							});
+						} finally {
+							signal?.removeEventListener("abort", onAbort);
+							steeringSignal.removeEventListener("abort", onLoopSteer);
+							arrivalSignal.removeEventListener("abort", onArrival);
+							// The dialog is over; its park window can no longer
+							// read. Idempotent when a supersede's drain already
+							// released it.
+							this.#host.steeringArrivalRelease(arrivalParkSeq);
+						}
+						if (raced.kind === "steered") {
+							throw new ToolAbortError("Permission request superseded by user steering");
+						}
+						if (raced.kind === "aborted" || signal?.aborted) {
+							throw new ToolAbortError("Permission request cancelled");
+						}
+						const outcome = raced.outcome;
+						if (outcome.outcome === "cancelled") {
+							throw new ToolAbortError("Permission request cancelled");
+						}
+						const selectedOption = PERMISSION_OPTIONS_BY_ID.get(outcome.optionId);
+						if (!selectedOption) {
+							throw new ToolError(`Tool permission response used unknown option ID: ${outcome.optionId}`);
+						}
+						if (cacheable && selectedOption.kind === "allow_always") {
+							this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "allow_always");
+						} else if (cacheable && selectedOption.kind === "reject_always") {
+							this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "reject_always");
+						}
+						if (selectedOption.kind === "reject_once" || selectedOption.kind === "reject_always") {
+							throw new ToolError(`Tool call rejected by user (${target.name})`);
+						}
+					} catch (error) {
+						settleApproval(false, error instanceof Error ? error.message : String(error));
+						throw error;
 					}
-					if (raced.kind === "steered") {
-						throw new ToolAbortError("Permission request superseded by user steering");
-					}
-					if (raced.kind === "aborted" || signal?.aborted) {
-						throw new ToolAbortError("Permission request cancelled");
-					}
-					const outcome = raced.outcome;
-					if (outcome.outcome === "cancelled") {
-						throw new ToolAbortError("Permission request cancelled");
-					}
-					const selectedOption = PERMISSION_OPTIONS_BY_ID.get(outcome.optionId);
-					if (!selectedOption) {
-						throw new ToolError(`Tool permission response used unknown option ID: ${outcome.optionId}`);
-					}
-					if (cacheable && selectedOption.kind === "allow_always") {
-						this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "allow_always");
-					} else if (cacheable && selectedOption.kind === "reject_always") {
-						this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "reject_always");
-					}
-					if (selectedOption.kind === "reject_once" || selectedOption.kind === "reject_always") {
-						throw new ToolError(`Tool call rejected by user (${target.name})`);
-					}
+					settleApproval(true);
 					return await target.execute(toolCallId, args as never, signal, onUpdate, approvedCtx);
 				};
 			},
@@ -1445,6 +1461,48 @@ export class SessionTools {
 			(cfgToolsApprovalMode.isConfigured(this.#host.settings) &&
 				cfgToolsApprovalMode.get(this.#host.settings) === "yolo")
 		);
+	}
+
+	/**
+	 * Reports an ACP permission wait to extensions as `tool_approval_requested` and returns the
+	 * reporter for its `tool_approval_resolved`, so status/hook extensions see the wait the same way
+	 * they see the interactive gate in `ExtensionToolWrapper`. Neither emission is awaited: a handler
+	 * that holds its turn must not delay the client's dialog or the approved call. The runner's
+	 * per-extension delivery order still hands each extension the resolution after the request.
+	 */
+	#announceAcpApproval(
+		toolCallId: string,
+		toolName: string,
+		approvalMode: ApprovalMode,
+		reason: string | undefined,
+	): (approved: boolean, reason?: string) => void {
+		const runner = this.#host.extensionRunner();
+		if (!runner?.hasHandlers("tool_approval_requested") && !runner?.hasHandlers("tool_approval_resolved")) {
+			return () => {};
+		}
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const report = (event: ToolApprovalRequestedEvent | ToolApprovalResolvedEvent): void => {
+			runner.emit(event).catch(error => {
+				logger.warn("Failed to emit ACP approval event", { type: event.type, toolCallId, error: String(error) });
+			});
+		};
+		report({
+			type: "tool_approval_requested",
+			sessionId,
+			toolCallId,
+			toolName,
+			...(reason ? { reason } : {}),
+			approvalMode,
+		});
+		return (approved, resolvedReason) =>
+			report({
+				type: "tool_approval_resolved",
+				sessionId,
+				toolCallId,
+				toolName,
+				approved,
+				...(resolvedReason ? { reason: resolvedReason } : {}),
+			});
 	}
 
 	/** Applies an enabled tool set and reconciles its `xd://` partition. */
