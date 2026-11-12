@@ -224,6 +224,103 @@ const NAMES = "(await tab.observe()).elements.map(element => element.name)";
 
 describe("browser observe after an action", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"waits for a click's fetch after clearing the readable request log",
+		async () => {
+			const pages = saveServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						await page.emulateNetworkConditions({ download: -1, upload: -1, latency: 600 });
+						await tab.click("#save");
+						await tab.clearRequests();
+						return ${NAMES};
+					`,
+				);
+				expect(result).toEqual(["Save", "Hang", "Saved"]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"joins an active look across a second action without dropping the first fetch",
+		async () => {
+			const pages = saveServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						await page.emulateNetworkConditions({ download: -1, upload: -1, latency: 900 });
+						await tab.click("#save");
+						const first = tab.observe();
+						await tab.click("body");
+						const second = tab.observe();
+						return (await Promise.all([first, second])).map(look => look.elements.map(element => element.name));
+					`,
+					10_000,
+				);
+				expect(result).toEqual([
+					["Save", "Hang", "Saved"],
+					["Save", "Hang", "Saved"],
+				]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"waits for quiet DOM in same-origin and cross-origin child frames",
+		async () => {
+			// Real Chromium mutation delivery and quiet-window timing cannot use the runner's fake clock.
+			const child = Bun.serve({
+				port: 0,
+				fetch: () =>
+					new Response(
+						`<button onclick="let n = 0; const timer = setInterval(() => { this.textContent = ++n === 6 ? 'Done' : 'Working ' + n; if (n === 6) clearInterval(timer); }, 80)">Start</button>`,
+						{ headers: { "content-type": "text/html" } },
+					),
+			});
+			const parent = Bun.serve({
+				port: 0,
+				fetch(request) {
+					if (new URL(request.url).pathname === "/child") return child.fetch(request);
+					return new Response(
+						`<iframe src="/child"></iframe><iframe src="http://localhost:${child.port}/"></iframe>`,
+						{ headers: { "content-type": "text/html" } },
+					);
+				},
+			});
+			try {
+				const result = await runOnPage(
+					`http://127.0.0.1:${parent.port}/`,
+					`
+						const frames = page.frames().filter(frame => frame !== page.mainFrame());
+						const results = [];
+						for (const frame of frames) {
+							await (await tab.frame(frame.url())).click("button");
+							results.push((await tab.observe()).elements.map(element => element.name));
+						}
+						return results;
+					`,
+				);
+				expect(result).toEqual([
+					["Done", "Start"],
+					["Done", "Done"],
+				]);
+			} finally {
+				parent.stop(true);
+				child.stop(true);
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"shows the result of a fetch the click started",
 		async () => {
 			const pages = saveServer();
@@ -306,6 +403,12 @@ describe("browser observe after an action", () => {
 					const started = page.waitForRequest(request => request.url().endsWith("/hold"));
 					await page.click("#hang");
 					await started;
+					expect(network.hasPendingRequests(since)).toBe(true);
+					network.requests({ clear: true });
+					expect(network.hasPendingRequests(since)).toBe(true);
+					await page.evaluate(() =>
+						Promise.all(Array.from({ length: 205 }, () => fetch("/saved").then(response => response.text()))),
+					);
 					expect(network.hasPendingRequests(since)).toBe(true);
 				} finally {
 					clock.mockRestore();
