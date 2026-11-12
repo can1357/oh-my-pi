@@ -5201,6 +5201,29 @@
 						"$ref": "#/$defs/SelectOptionDetail"
 					}
 				},
+				"initialIndex": {
+					"type": "integer",
+					"description": "Index into `options` to focus first."
+				},
+				"selectionMarker": {
+					"enum": [
+						"radio",
+						"checkbox"
+					],
+					"type": "string",
+					"description": "Marker style for the first `markableCount` options."
+				},
+				"checkedIndices": {
+					"type": "array",
+					"items": {
+						"type": "integer"
+					},
+					"description": "For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."
+				},
+				"markableCount": {
+					"type": "integer",
+					"description": "Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."
+				},
 				"timeout": {
 					"type": "integer"
 				}

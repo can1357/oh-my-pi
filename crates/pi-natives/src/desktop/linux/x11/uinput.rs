@@ -26,6 +26,11 @@ pub(super) struct UInputDevice {
 }
 
 impl UInputDevice {
+	#[cfg(test)]
+	pub(super) fn test_sink() -> Self {
+		Self { file: OpenOptions::new().write(true).open("/dev/null").unwrap(), created: false }
+	}
+
 	/// Relative pointer with the three standard buttons and both wheels.
 	pub(super) fn pointer(name: &str) -> CoreResult<Self> {
 		let file = open_uinput()?;

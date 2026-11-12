@@ -73,6 +73,7 @@ import {
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
 import { assertTabPressArgs } from "./tab-arguments";
+import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
 import {
 	type BrowserCookie,
 	type ClearCookiesOptions,
@@ -176,6 +177,7 @@ import {
 	dragBetween,
 	fillViaHandle,
 	highlightElement,
+	hoverElement,
 	type HighlightOptions,
 	type InteractionHandle,
 	installCancelledReleaseGuard,
@@ -415,10 +417,7 @@ interface TabApi {
 		pattern: string | RegExp | ((response: HTTPResponse) => boolean | Promise<boolean>),
 		opts?: { timeout?: number },
 	): Promise<HTTPResponse>;
-	waitForSelector(
-		selector: string,
-		opts?: { timeout?: number; visible?: boolean; hidden?: boolean },
-	): Promise<ActionableHandle | null>;
+	waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<ActionableHandle | null>;
 	waitForNavigation(opts?: {
 		waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 		timeout?: number;
@@ -886,6 +885,17 @@ export function toActionableHandle(
 				"handle.dblclick()",
 				signal,
 				() => clickElement(enriched, "handle.dblclick()", signal, { clickCount: 2 }),
+				invalidate,
+			),
+		);
+	enriched.hover = () =>
+		guard<void>("handle.hover()", signal =>
+			runGuardedHandleAction(
+				enriched,
+				originals,
+				"handle.hover()",
+				signal,
+				() => hoverElement(enriched, signal),
 				invalidate,
 			),
 		);
@@ -2689,13 +2699,22 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: opts?.timeout === undefined ? ZERO_MATCH_FAIL_FAST_MS : undefined },
 				);
 			},
-			waitForSelector: (selector, opts) => {
+			waitForSelector: async (selector, opts) => {
+				opts = selectorWaitOptions(opts);
 				const w = waitMs(opts?.timeout);
 				return act(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
-						if (parseAriaRefSelector(selector) !== null) return enrich(await this.#resolveAriaRef(selector));
+						const ref = parseAriaRefSelector(selector);
+						if (ref !== null) {
+							const handle = await waitForSelectorHandle(() => resolveAriaRefHandle(page, ref), opts, sig);
+							return handle ? enrich(handle) : null;
+						}
+						if (opts.state === "detached") {
+							const normalized = normalizeSelector(selector);
+							return await waitForDetached(() => page.$(normalized), sig);
+						}
 						const handle = (await untilAborted(sig, () =>
 							page.waitForSelector(normalizeSelector(selector), {
 								timeout: w,
@@ -2709,7 +2728,10 @@ export class WorkerCore {
 					{
 						selector,
 						// `hidden: true` waits for zero matches — that is success, never a fast-fail.
-						zeroMatchAfterMs: opts?.timeout === undefined && !opts?.hidden ? ZERO_MATCH_FAIL_FAST_MS : undefined,
+						zeroMatchAfterMs:
+							opts?.timeout === undefined && !opts?.hidden && opts?.state !== "detached"
+								? ZERO_MATCH_FAIL_FAST_MS
+								: undefined,
 					},
 				);
 			},
@@ -3072,7 +3094,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await untilAborted(sig, () => handle.hover());
+							await hoverElement(handle, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
@@ -3347,8 +3369,6 @@ export class WorkerCore {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: screenshotArea(opts), scale: captureScale },

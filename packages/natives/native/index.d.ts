@@ -188,6 +188,23 @@ export declare class DiffStream {
   finish(context?: number | undefined | null): Promise<DiffStreamResult>
 }
 
+/** Watches one directory for changes until closed. */
+export declare class DirectoryWatcher {
+  /**
+   * Start watching `dir`, its whole subtree when `recursive`. Changes that
+   * happen once the promise resolves are reported. Opening the directory and
+   * arming the first read run off the JS thread (each is a round trip on a
+   * network share). Rejects when the directory cannot be opened or watched;
+   * on platforms other than Windows, always.
+   */
+  static start(dir: string, recursive: boolean, callback: (err: null | Error, changes: DirectoryChanges) => void): Promise<DirectoryWatcher>
+  /**
+   * Stop watching and join the reader thread. Batches or an error it queued
+   * before stopping may still reach the callback afterwards; ignore them.
+   */
+  close(): void
+}
+
 /** One edit tool call's streaming session. */
 export declare class EditSession {
   /**
@@ -1540,16 +1557,25 @@ export interface DesktopCapabilities {
    * Native global Escape cancellation of takeover input (`takeover: true`,
    * held control, desktop/display-level input, raises, activating launches).
    * Without held control, background window input never watches the user's
-   * keys; it and Wayland stop only through the host interrupt.
+   * keys; it and Wayland stop only through the host interrupt. False on
+   * macOS while `secureInput` holds: the Escape monitor then sees no keys.
    */
   globalEscape: boolean
+  /**
+   * Secure Event Input is on (a focused password field, or a terminal's
+   * secure keyboard entry): macOS hides every key from event monitors, so
+   * the user's Escape and typing go unseen. Only macOS detects this.
+   */
+  secureInput: boolean
+  /** The app holding secure input, when macOS names its process. */
+  secureInputApp?: string
   capturePermission: string
   inputPermission: string
   axPermission: string
   displayCount: number
   /**
-   * The user session is locked (lock screen up). Only macOS detects this;
-   * other backends report `false`.
+   * The session is locked, or on Windows disconnected or on a secure
+   * desktop. Linux reports `false`.
    */
   screenLocked: boolean
   /**
@@ -1583,9 +1609,9 @@ export interface DesktopCapture {
   backend: string
   displayServer?: string
   /**
-   * The user session was locked when this frame was taken: a display
-   * capture shows the lock screen, and a window capture shows the window's
-   * last frame behind it. Only macOS detects this; others report `false`.
+   * The user session was unavailable when this frame was taken. On macOS,
+   * a display capture shows the lock screen and a window capture its last
+   * frame. Windows also detects disconnected sessions and secure desktops.
    */
   screenLocked: boolean
 }
@@ -1673,7 +1699,7 @@ export interface DesktopPoint {
 
 /**
  * Lock and display-sleep state of the user session, read live per call.
- * Only macOS detects either; other platforms report both as `false`.
+ * macOS detects both; Windows detects lock state; Linux reports both false.
  */
 export interface DesktopScreenState {
   screenLocked: boolean
@@ -1829,6 +1855,31 @@ export interface DiffStreamResult {
  * post-pass dedupes whitespace across change boundaries.
  */
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
+
+/** One change below the watched directory. */
+export interface DirectoryChange {
+  /** Path relative to the watched directory, with the platform's separators. */
+  path: string
+  action: DirectoryChangeAction
+}
+
+/** What happened to an entry, as reported by the file system. */
+export declare enum DirectoryChangeAction {
+  Added = 'added',
+  Removed = 'removed',
+  Modified = 'modified',
+  /** The entry's old name in a rename. */
+  RenamedFrom = 'renamedFrom',
+  /** The entry's new name in a rename. */
+  RenamedTo = 'renamedTo'
+}
+
+/** Changes gathered by one read, in the order they happened. */
+export interface DirectoryChanges {
+  changes: Array<DirectoryChange>
+  /** Changes were lost (the change buffer overflowed); rescan the directory. */
+  overflow: boolean
+}
 
 /**
  * Whole-call apply outcome. `is_error` carries the model-facing failure in

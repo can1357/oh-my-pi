@@ -341,6 +341,7 @@ pub(crate) fn bounded_hold(
 	}
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn key_modifiers(keys: &[super::keys::KeyName]) -> super::backend::Modifiers {
 	use super::keys::KeyName;
 	super::backend::Modifiers {

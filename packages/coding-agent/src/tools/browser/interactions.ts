@@ -486,6 +486,54 @@ export async function clickElement(
 }
 
 /**
+ * Page half of {@link hoverElement}: why the pointer cannot be put on `el` at all, or `null` once it has a layout box.
+ * `opacity:0`, `visibility:hidden` and `pointer-events:none` pass, since hovering may be what shows the element.
+ */
+function hoverLayoutRefusal(el: unknown): string | null {
+	const element = el as unknown as PageElement;
+	if (!element.isConnected) return "detached (the page replaced this element; look it up again)";
+	if ((globalThis as unknown as PageGlobals).getComputedStyle(element).display === "none") return "display:none";
+	const rects = Array.from(element.getClientRects());
+	if (rects.length === 0) return "no layout box";
+	return rects.some(rect => rect.width >= 1 && rect.height >= 1) ? null : "zero-size";
+}
+
+/**
+ * Hover an element with Puppeteer's own `hover()` once it has a layout box: a hidden, detached or off-canvas match
+ * waits and then fails with the reason, like a click. Past that it is Puppeteer's hover, as before: a covered target
+ * is hovered through its cover, and resolving means the pointer moved, not that the page reacted.
+ */
+export async function hoverElement(handle: ElementHandle, signal?: AbortSignal): Promise<void> {
+	// Handles from `toActionableHandle` replace `hover` with a call to this function; the prototype's is Puppeteer's.
+	const hover = Object.getPrototypeOf(handle).hover as ElementHandle["hover"];
+	// Why the pointer could not be put on it yet. A layout refusal clears once the box is back; `off-viewport` is what
+	// Puppeteer's own last attempt found, so it stands while the next attempt runs.
+	let refusal: string | undefined;
+	try {
+		for (;;) {
+			const reason = await untilAborted(signal, () => handle.evaluate(hoverLayoutRefusal));
+			if (reason !== null) {
+				refusal = reason;
+			} else {
+				if (refusal !== "off-viewport") refusal = undefined;
+				try {
+					return await untilAborted(signal, () => hover.call(handle));
+				} catch (error) {
+					// Puppeteer scrolled and still found no part of the box in view (an off-canvas drawer): wait as for a hidden one.
+					if (!(error instanceof Error) || error.message !== "Node is either not clickable or not an Element")
+						throw error;
+					refusal = "off-viewport";
+				}
+			}
+			await untilAborted(signal, () => Bun.sleep(50));
+		}
+	} catch (error) {
+		if (signal?.aborted && refusal !== undefined) throw new ClickRefusedError(refusal, { cause: signal.reason });
+		throw error;
+	}
+}
+
+/**
  * Focus a text-entry target, refusing one that cannot take keystrokes. A
  * disabled control ignores `focus()`, so they would land in whichever element
  * had focus; a read-only one drops them. The check runs after `focus()` so a
