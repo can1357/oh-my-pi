@@ -1014,6 +1014,24 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("keeps the source of functions defined in earlier inline cells for inspect.getsource", async () => {
+		using tempDir = TempDir.createSync("@python-runner-getsource-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "def first_helper(x):\n    return x + 1");
+			await executePythonWithKernel(kernel, "def second_helper(y):\n    return y * 2");
+			const result = await executePythonWithKernel(
+				kernel,
+				"import inspect\nprint(inspect.getsource(first_helper) + inspect.getsource(second_helper))",
+			);
+			expect(result.output).toContain("def first_helper(x):\n    return x + 1");
+			expect(result.output).toContain("def second_helper(y):\n    return y * 2");
+			expect(result.exitCode).toBe(0);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("reports cell syntax errors without runner-internal frames", async () => {
 		using tempDir = TempDir.createSync("@python-runner-syntax-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
