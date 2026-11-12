@@ -11,7 +11,7 @@ use atspi::{
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masked, normalize_role_atspi, text_readback},
+	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masks, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	control::cancellable,
 	error::{CoreResult, DesktopError, ErrorCode},
@@ -1169,14 +1169,6 @@ fn text_write_error(mut error: DesktopError, emptied: bool) -> DesktopError {
 	}
 	error
 }
-
-/// Whether `actual` masks `value`: one mask character per character, or per
-/// UTF-16 unit as Qt masks.
-fn masks(actual: &str, value: &str) -> bool {
-	let shown = actual.chars().count();
-	masked(actual) && (shown == value.chars().count() || shown == value.encode_utf16().count())
-}
-
 /// The whole text of an element with the `Text` interface.
 async fn text_contents(
 	connection: &atspi::zbus::Connection,
