@@ -1506,8 +1506,9 @@ fn perform_choosing(
 			let pid = element_pid(element)?;
 			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
 			let perform = || {
-				entry_front
-					.require_behind(skylight::front_pid, pid, || window_id(element).unwrap_or_default())?;
+				entry_front.require_behind(skylight::front_pid, pid, || {
+					window_id(element).unwrap_or_default()
+				})?;
 				press_into_view(native, scroll, |action| send_action(element, action))
 			};
 			// A menu that a background application opens takes the keyboard from
