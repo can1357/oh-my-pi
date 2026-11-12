@@ -1042,6 +1042,8 @@ export class SessionTools {
 				origin: "top-level",
 			};
 			const info: ToolInfo = { name, description: tool.description, parameters: tool.parameters, sourceInfo };
+			if (tool.loadMode !== undefined) info.loadMode = tool.loadMode;
+			if (tool.hidden !== undefined) info.hidden = tool.hidden;
 			// MCP-backed tools (MCPTool, DeferredMCPTool and their adapters) carry the
 			// server, original name and read-only annotation; expose them so
 			// extensions can act on the hint the runtime already keeps.
@@ -1458,7 +1460,7 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
-		let builtInWriteAvailable = this.#builtInToolNames.has("write");
+		let builtInWriteAvailable = this.#builtInToolNames.has("write") || this.#toolRegistry.has("write");
 		const fullWriteSelected =
 			toolNames.includes("write") &&
 			(this.#presentationPinnedToolNames?.has("write") === true ||

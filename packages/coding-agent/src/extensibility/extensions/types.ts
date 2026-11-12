@@ -1131,6 +1131,10 @@ export interface ToolInfo {
 	 *  extension tell a read-only MCP call from one that changes things (e.g.
 	 *  to allow only read-only tools in a restricted turn). */
 	mcpReadOnlyHint?: boolean;
+	/** Tool load mode: `essential` tools are always active, `discoverable` ones load on demand. */
+	loadMode?: "essential" | "discoverable";
+	/** True when the tool is hidden from the default inventory. */
+	hidden?: boolean;
 }
 
 // ============================================================================
