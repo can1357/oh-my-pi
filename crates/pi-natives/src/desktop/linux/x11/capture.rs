@@ -483,37 +483,42 @@ impl X11Capture {
 	}
 
 	fn capture_root(&self, x: i32, y: i32, width: u32, height: u32) -> CoreResult<RgbaImage> {
-		let x = i16::try_from(x).map_err(|_| {
-			DesktopError::capture_failed("capture origin exceeds the X11 coordinate space")
-		})?;
-		let y = i16::try_from(y).map_err(|_| {
-			DesktopError::capture_failed("capture origin exceeds the X11 coordinate space")
-		})?;
-		let reply = self
-			.conn
-			.get_image(ImageFormat::Z_PIXMAP, self.root, x, y, edge(width)?, edge(height)?, !0)
-			.map_err(request_failed)?
-			.reply()
-			.map_err(root_capture_failed)?;
-		self.decode(&reply, width, height, self.masks)
+		self.request_root(x, y, width, height)?.finish(self)
 	}
 
-	/// `client`'s pixels, with the server held from the stacking check through
-	/// the read, so nothing maps, raises or moves over the window in between:
-	/// from the pixmap a compositing manager keeps of it, which nothing over
-	/// the window reaches, and else from the screen, the only copy. `between`
-	/// runs there, after the check (a no-op but in tests).
+	/// The root rectangle at `x, y`, requested now and read by
+	/// [`ImageRead::finish`].
+	fn request_root(&self, x: i32, y: i32, width: u32, height: u32) -> CoreResult<ImageRead<'_>> {
+		let (x, y) = x11_origin(x, y)?;
+		let cookie = self
+			.conn
+			.as_ref()
+			.get_image(ImageFormat::Z_PIXMAP, self.root, x, y, edge(width)?, edge(height)?, !0)
+			.map_err(request_failed)?;
+		Ok(ImageRead { cookie, masks: self.masks, width, height, drawable: None })
+	}
+
+	/// `client`'s pixels, with the server held from the stacking check until
+	/// the reads are queued, so nothing maps, raises or moves over the window
+	/// in between: from the pixmap a compositing manager keeps of it, which
+	/// nothing over the window reaches, and else from the screen, the only
+	/// copy. `between` runs there, after the check (a no-op but in tests).
 	fn capture_held(
 		&self,
 		client: Window,
 		id: &str,
 		between: impl Fn(),
 	) -> CoreResult<(RgbaImage, Area)> {
-		let _grab = ServerGrab::new(&self.conn)?;
-		match self.capture_named(client, id, &between)? {
-			Some(capture) => Ok(capture),
-			None => self.capture_screen(client, id, between),
-		}
+		let grab = ServerGrab::new(&self.conn)?;
+		let pending = match self.capture_named(client, id, &between)? {
+			Some(pending) => pending,
+			None => self.capture_screen(client, id, between)?,
+		};
+		// The server runs this connection's queued reads before the ungrab
+		// behind them, so other clients wait for the reads only, not for the
+		// pixels to reach this process and be decoded.
+		drop(grab);
+		pending.finish(self, id)
 	}
 
 	/// `client` and its own popups, each read from the pixmap the server keeps
@@ -525,7 +530,7 @@ impl X11Capture {
 		client: Window,
 		id: &str,
 		between: &dyn Fn(),
-	) -> CoreResult<Option<(RgbaImage, Area)>> {
+	) -> CoreResult<Option<PendingCapture<'_>>> {
 		if !self.composite {
 			return Ok(None);
 		}
@@ -577,8 +582,21 @@ impl X11Capture {
 			)));
 		}
 		between();
+		// A popup inside the holder is in its pixmap already. A viewable one the
+		// server keeps no pixmap for means nobody redirects the root's children,
+		// the client being in a pixmap only for its depth: the screen then holds
+		// both, so it is read instead. Decided before the window's own read, so
+		// that fallback reads no pixels twice.
+		let mut popups = Vec::new();
+		for popup in above.popups.iter().filter(|popup| popup.level >= level) {
+			match self.request_popup((x, y), popup)? {
+				PopupRead::Gone => {},
+				PopupRead::Unredirected => return Ok(None),
+				PopupRead::Read(popup) => popups.push(popup),
+			}
+		}
 		let (holder_x, holder_y) = origins[level];
-		let mut image = self.read_drawable(
+		let image = self.request_drawable(
 			pixmap.1,
 			visual,
 			x - (holder_x - holder_border),
@@ -587,23 +605,12 @@ impl X11Capture {
 			height,
 		)?;
 		drop(pixmap);
-		for (&(window_x, window_y), shape) in origins.iter().zip(shapes) {
-			if let Some(shape) = shape
-				&& let Some(shape) = shape.reply().map_err(failed)?
-			{
-				clip_to_shape(&mut image, (x - window_x, y - window_y), &shape);
-			}
-		}
-		// A popup inside the holder is in its pixmap already. A viewable one the
-		// server keeps no pixmap for means nobody redirects the root's children,
-		// the client being in a pixmap only for its depth: the screen then holds
-		// both, so it is read instead.
-		for popup in above.popups.iter().filter(|popup| popup.level >= level) {
-			if !self.overlay_popup(&mut image, (x, y), popup)? {
-				return Ok(None);
-			}
-		}
-		Ok(Some((image, area)))
+		let clips = origins
+			.into_iter()
+			.zip(shapes)
+			.filter_map(|(origin, shape)| Some((origin, shape?)))
+			.collect();
+		Ok(Some(PendingCapture { area, image, clips, popups }))
 	}
 
 	/// Where no window from `client` up to the root is redirected, the screen
@@ -614,7 +621,7 @@ impl X11Capture {
 		client: Window,
 		id: &str,
 		between: impl FnOnce(),
-	) -> CoreResult<(RgbaImage, Area)> {
+	) -> CoreResult<PendingCapture<'_>> {
 		let attributes = self
 			.conn
 			.get_window_attributes(client)
@@ -647,7 +654,12 @@ impl X11Capture {
 		}
 		between();
 		let (x, y, width, height) = area;
-		Ok((self.capture_root(x, y, width, height)?, area))
+		Ok(PendingCapture {
+			area,
+			image: self.request_root(x, y, width, height)?,
+			clips: Vec::new(),
+			popups: Vec::new(),
+		})
 	}
 
 	fn root_area(&self, id: &str, (x, y): (i32, i32), width: u16, height: u16) -> CoreResult<Area> {
@@ -867,16 +879,12 @@ impl X11Capture {
 		Ok(false)
 	}
 
-	/// Draws `popup` over `image`, whose top-left is `(x, y)` on the root, from
-	/// the popup's own pixmap and cut to its shape. A popup unmapped or
-	/// destroyed since the tree was read is skipped; `false`, drawing nothing,
-	/// for a viewable one that is not redirected; any other failure fails.
-	fn overlay_popup(
-		&self,
-		image: &mut RgbaImage,
-		(x, y): (i32, i32),
-		popup: &Over,
-	) -> CoreResult<bool> {
+	/// Requests `popup`'s pixels from its own pixmap, to be drawn over the
+	/// image whose top-left is `(x, y)` on the root and cut to its shape. A
+	/// popup unmapped or destroyed since the tree was read is
+	/// [`PopupRead::Gone`]; a viewable one that is not redirected,
+	/// [`PopupRead::Unredirected`]; any other failure fails.
+	fn request_popup(&self, (x, y): (i32, i32), popup: &Over) -> CoreResult<PopupRead<'_>> {
 		let pixmap = self.conn.generate_id().map_err(request_failed)?;
 		let named = self
 			.conn
@@ -888,25 +896,24 @@ impl X11Capture {
 			.map_err(request_failed)?;
 		let shape = self.request_shape(popup.window)?;
 		let named = named.check().map(|()| NamedPixmap(&self.conn, pixmap));
-		let gone = |error: &ReplyError| matches!(error, ReplyError::X11Error(error) if error.error_kind == ErrorKind::Window);
 		let attributes = match attributes.reply() {
 			Ok(attributes) => attributes,
-			Err(error) if gone(&error) => return Ok(true),
+			Err(error) if gone(&error) => return Ok(PopupRead::Gone),
 			Err(error) => return Err(request_failed(error)),
 		};
 		let pixmap = match named {
 			Ok(pixmap) => pixmap,
 			Err(error) if gone(&error) || attributes.map_state != MapState::VIEWABLE => {
-				return Ok(true);
+				return Ok(PopupRead::Gone);
 			},
 			Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Match => {
-				return Ok(false);
+				return Ok(PopupRead::Unredirected);
 			},
 			Err(error) => return Err(request_failed(error)),
 		};
 		let (part_x, part_y, width, height) = popup.part;
 		let (origin_x, origin_y) = popup.origin;
-		let mut part = self.read_drawable(
+		let read = self.request_drawable(
 			pixmap.1,
 			attributes.visual,
 			part_x - (origin_x - popup.border),
@@ -914,24 +921,17 @@ impl X11Capture {
 			width,
 			height,
 		)?;
-		drop(pixmap);
-		if let Some(shape) = shape {
-			match shape.reply() {
-				Ok(Some(shape)) => {
-					clip_to_shape(&mut part, (part_x - origin_x, part_y - origin_y), &shape);
-				},
-				Ok(None) => {},
-				Err(error) if gone(&error) => return Ok(true),
-				Err(error) => return Err(request_failed(error)),
-			}
-		}
-		draw_over(image, &part, ((part_x - x) as u32, (part_y - y) as u32));
-		Ok(true)
+		Ok(PopupRead::Read(PendingPopup {
+			read,
+			shape,
+			clip: (part_x - origin_x, part_y - origin_y),
+			at: ((part_x - x) as u32, (part_y - y) as u32),
+		}))
 	}
 
-	/// The rectangle at `x, y` inside `drawable`, a window or pixmap holding
-	/// pixels of `visual`.
-	fn read_drawable(
+	/// Requests the rectangle at `x, y` inside `drawable`, a window or pixmap
+	/// holding pixels of `visual`, to be read by [`ImageRead::finish`].
+	fn request_drawable(
 		&self,
 		drawable: Drawable,
 		visual: Visualid,
@@ -939,21 +939,8 @@ impl X11Capture {
 		y: i32,
 		width: u32,
 		height: u32,
-	) -> CoreResult<RgbaImage> {
-		let x = i16::try_from(x).map_err(|_| {
-			DesktopError::capture_failed("capture origin exceeds the X11 coordinate space")
-		})?;
-		let y = i16::try_from(y).map_err(|_| {
-			DesktopError::capture_failed("capture origin exceeds the X11 coordinate space")
-		})?;
-		let reply = self
-			.conn
-			.get_image(ImageFormat::Z_PIXMAP, drawable, x, y, edge(width)?, edge(height)?, !0)
-			.map_err(request_failed)?
-			.reply()
-			.map_err(|error| {
-				DesktopError::capture_failed(format!("X11 GetImage of {drawable} failed: {error}"))
-			})?;
+	) -> CoreResult<ImageRead<'_>> {
+		let (x, y) = x11_origin(x, y)?;
 		let visual_type = self
 			.conn
 			.setup()
@@ -981,7 +968,12 @@ impl X11Capture {
 				.as_deref()
 				.map_or(0, |formats| visual_alpha(formats, visual)),
 		};
-		self.decode(&reply, width, height, masks)
+		let cookie = self
+			.conn
+			.as_ref()
+			.get_image(ImageFormat::Z_PIXMAP, drawable, x, y, edge(width)?, edge(height)?, !0)
+			.map_err(request_failed)?;
+		Ok(ImageRead { cookie, masks, width, height, drawable: Some(drawable) })
 	}
 
 	fn decode(
@@ -1306,6 +1298,104 @@ fn clip_to_shape(image: &mut RgbaImage, origin: (i32, i32), shape: &[Rectangle])
 		if !inside {
 			*pixel = Rgba([0; 4]);
 		}
+	}
+}
+
+/// `x, y` in the protocol's signed 16-bit coordinates.
+fn x11_origin(x: i32, y: i32) -> CoreResult<(i16, i16)> {
+	let outside =
+		|_| DesktopError::capture_failed("capture origin exceeds the X11 coordinate space");
+	Ok((i16::try_from(x).map_err(outside)?, i16::try_from(y).map_err(outside)?))
+}
+
+/// Whether `error` says the window was unmapped or destroyed.
+fn gone(error: &ReplyError) -> bool {
+	matches!(error, ReplyError::X11Error(error) if error.error_kind == ErrorKind::Window)
+}
+
+/// A `GetImage` already sent, read and decoded by [`Self::finish`].
+struct ImageRead<'a> {
+	cookie:   Cookie<'a, RustConnection, GetImageReply>,
+	masks:    ColorMasks,
+	width:    u32,
+	height:   u32,
+	/// The window or pixmap read; `None` for the root.
+	drawable: Option<Drawable>,
+}
+
+impl ImageRead<'_> {
+	fn finish(self, capture: &X11Capture) -> CoreResult<RgbaImage> {
+		let reply = self.cookie.reply().map_err(|error| match self.drawable {
+			None => root_capture_failed(error),
+			Some(drawable) => {
+				DesktopError::capture_failed(format!("X11 GetImage of {drawable} failed: {error}"))
+			},
+		})?;
+		capture.decode(&reply, self.width, self.height, self.masks)
+	}
+}
+
+/// A window capture whose reads were queued while the server was held:
+/// the window's image, the shapes to cut it to, and its popups.
+struct PendingCapture<'a> {
+	area:   Area,
+	image:  ImageRead<'a>,
+	/// Origins on the root of the windows whose bounding shapes cut the image.
+	clips:  Vec<((i32, i32), ShapeRequest<'a>)>,
+	popups: Vec<PendingPopup<'a>>,
+}
+
+impl PendingCapture<'_> {
+	fn finish(self, capture: &X11Capture, id: &str) -> CoreResult<(RgbaImage, Area)> {
+		let (x, y, ..) = self.area;
+		let mut image = self.image.finish(capture)?;
+		for ((window_x, window_y), shape) in self.clips {
+			if let Some(shape) = shape
+				.reply()
+				.map_err(|error| window_reply_failed(id, error))?
+			{
+				clip_to_shape(&mut image, (x - window_x, y - window_y), &shape);
+			}
+		}
+		for popup in self.popups {
+			popup.draw(capture, &mut image)?;
+		}
+		Ok((image, self.area))
+	}
+}
+
+/// What [`X11Capture::request_popup`] found.
+enum PopupRead<'a> {
+	/// Unmapped or destroyed since the tree was read: nothing to draw.
+	Gone,
+	/// Viewable but not redirected: only the screen holds its pixels.
+	Unredirected,
+	Read(PendingPopup<'a>),
+}
+
+/// A popup's pixels requested from its own pixmap.
+struct PendingPopup<'a> {
+	read:  ImageRead<'a>,
+	shape: Option<ShapeRequest<'a>>,
+	/// Where the read part starts inside the popup's shape.
+	clip:  (i32, i32),
+	/// Where the part goes in the window's image.
+	at:    (u32, u32),
+}
+
+impl PendingPopup<'_> {
+	fn draw(self, capture: &X11Capture, image: &mut RgbaImage) -> CoreResult<()> {
+		let mut part = self.read.finish(capture)?;
+		if let Some(shape) = self.shape {
+			match shape.reply() {
+				Ok(Some(shape)) => clip_to_shape(&mut part, self.clip, &shape),
+				Ok(None) => {},
+				Err(error) if gone(&error) => return Ok(()),
+				Err(error) => return Err(request_failed(error)),
+			}
+		}
+		draw_over(image, &part, self.at);
+		Ok(())
 	}
 }
 
@@ -1782,15 +1872,13 @@ mod tests {
 		let above = capture.above(red, area, &tree.siblings).expect("stacking");
 		assert_eq!(above.popups.len(), 1);
 		let popup = above.popups[0].window;
-		let mut image = RgbaImage::from_pixel(200, 150, Rgba([255, 0, 0, 255]));
 
 		wm.unmap_window(popup).expect("unmap popup");
 		wm.sync().expect("popup is unmapped before it is read");
 		let read = capture
-			.overlay_popup(&mut image, (0, 0), &above.popups[0])
+			.request_popup((0, 0), &above.popups[0])
 			.expect("capture without vanished popup");
-		assert!(read);
-		assert_eq!(pixel(&image, POPUP), [255, 0, 0, 255]);
+		assert!(matches!(read, PopupRead::Gone));
 
 		wm.map_window(popup).expect("remap popup");
 		wm.sync().expect("popup is mapped");
@@ -1801,10 +1889,9 @@ mod tests {
 		wm.destroy_window(popup).expect("destroy popup");
 		wm.sync().expect("popup is destroyed before it is read");
 		let read = capture
-			.overlay_popup(&mut image, (0, 0), &above.popups[0])
+			.request_popup((0, 0), &above.popups[0])
 			.expect("capture without destroyed popup");
-		assert!(read);
-		assert_eq!(pixel(&image, POPUP), [255, 0, 0, 255]);
+		assert!(matches!(read, PopupRead::Gone));
 	}
 
 	#[test]
@@ -1912,6 +1999,7 @@ mod tests {
 
 		let error = capture
 			.capture_named(gone, &gone.to_string(), &|| {})
+			.map(|_| ())
 			.expect_err("nothing to read");
 		assert_eq!(error.code, ErrorCode::WindowNotFound);
 	}
