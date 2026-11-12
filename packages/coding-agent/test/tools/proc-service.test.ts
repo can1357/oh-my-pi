@@ -1121,4 +1121,108 @@ describe("bash services via proc://", () => {
 			spy.mockRestore();
 		}
 	});
+
+	// The broker's readiness deadline and the client's request timer expire together when the host
+	// sleeps through the wait; the timer wins and the broker's answer never arrives.
+	describe("when the client stops waiting for the broker's readiness answer", () => {
+		function snapshot(name: string, startedAt: number, readyAt?: number): DaemonSnapshot {
+			return {
+				name,
+				id: name,
+				state: readyAt === undefined ? "starting" : "ready",
+				pid: 4242,
+				createdAt: startedAt,
+				startedAt,
+				readyAt,
+				restartCount: 0,
+				outputBytes: 0,
+				persist: false,
+				detached: false,
+			};
+		}
+
+		function brokerAnswering(
+			timedOutOp: "start" | "wait",
+			described: (name: string, launchedAt: number) => DaemonSnapshot,
+		): { client: DaemonBrokerClient; operations: DaemonOperation["op"][] } {
+			const operations: DaemonOperation["op"][] = [];
+			let launchedAt = 0;
+			const client = {
+				projectDir: process.cwd(),
+				onCompletion: () => () => {},
+				close() {},
+				async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
+					operations.push(operation.op);
+					if (operation.op === timedOutOp)
+						throw new daemonClient.DaemonRequestTimeoutError(`Daemon ${operation.op} request timed out`);
+					switch (operation.op) {
+						case "start":
+							launchedAt = Date.now();
+							return { op: "start", daemon: snapshot(operation.spec.name, launchedAt), readyTimedOut: false };
+						case "describe":
+							launchedAt ||= Date.now();
+							return {
+								op: "describe",
+								daemon: described(operation.name, launchedAt),
+								spec: {} as unknown as Extract<DaemonRpcResult, { op: "describe" }>["spec"],
+							};
+						case "logs":
+							return {
+								op: "logs",
+								name: operation.name,
+								text: "",
+								cursor: 0,
+								timedOut: false,
+								state: "ready",
+							};
+						default:
+							throw new Error(`Unexpected broker op ${operation.op}`);
+					}
+				},
+			} as unknown as DaemonBrokerClient;
+			return { client, operations };
+		}
+
+		it("reports a service that became ready instead of the start request timeout", async () => {
+			const { client, operations } = brokerAnswering("start", (name, launchedAt) =>
+				snapshot(name, launchedAt, launchedAt + 1),
+			);
+			const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+			try {
+				const result = await new BashTool(toolSession(process.cwd())).execute("service", {
+					command: "serve",
+					name: "slept-ready",
+					ready: { log: "listening", timeout: 60 },
+					pty: false,
+				});
+				const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+				expect(text).toStartWith("slept-ready: ready pid=4242 ready");
+				expect(text).not.toContain("timed out");
+				expect(result.details?.service).toMatchObject({ state: "ready", ready: true, timedOut: false });
+				expect(operations).toContain("describe");
+			} finally {
+				spy.mockRestore();
+			}
+		});
+
+		it("reports a service still starting as not ready instead of the wait request timeout", async () => {
+			const { client } = brokerAnswering("wait", (name, launchedAt) => snapshot(name, launchedAt));
+			const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+			try {
+				const result = await new BashTool(toolSession(process.cwd())).execute(
+					"service",
+					{ command: "serve", name: "slept-starting", ready: { log: "listening", timeout: 60 }, pty: false },
+					undefined,
+					undefined,
+					steeringContext(new AbortController().signal),
+				);
+				const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+				expect(text).toContain("NOT ready — readiness timed out after 60s; process state: starting.");
+				expect(text).not.toContain("request timed out");
+				expect(result.details?.service).toMatchObject({ state: "starting", ready: false, timedOut: true });
+			} finally {
+				spy.mockRestore();
+			}
+		});
+	});
 });
