@@ -266,4 +266,6 @@ On macOS the user can step into an app the agent is working in. A listen-only ta
 - Missing prelude: verify effective `computer.enabled`, that an Eval runtime is enabled, and `/computer status`; use `/computer on` or reload settings in an SDK host.
 - Permission/backend errors: inspect `computer.capabilities()` and grant the platform permissions listed above.
 
+While Secure Event Input is on (a password field has the keyboard, such as an authentication dialog's, or a terminal's secure keyboard entry is on), macOS hides every key from event taps: the Escape stop and the user-input tap above see none of the user's keys, so Escape does not stop takeover input and typing does not raise `UserIntervened`. Input the agent sends is still delivered. `capabilities()` then reports `secureInput: true`, `secureInputApp` (the app macOS names as the holder, when it names one) and `globalEscape: false`, and a run that ends with it on starts with a `Note:` text block. Only the host interrupt stops takeover input until it ends.
+
 For the exact prelude and host-runtime contract, see [`docs/tools/computer.md`](./tools/computer.md).

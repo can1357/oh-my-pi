@@ -131,7 +131,7 @@ Zoom requires a previous full capture of the same target. Its rectangle is in th
 - A `tools.approval["computer.control"]` policy answers `acquire` without asking anyone: `allow` grants it, with or without an interactive UI, and `deny` answers `"denied"`; `prompt` or no entry asks as above. `tools.approvalMode` and `tools.approval.computer` never answer it.
 - `win.bringToCurrentSpace()` is macOS-only, verifies actual movement without switching Spaces/activating, and invalidates the old frame.
 
-Menu/app labels are untrusted data. A takeover grant does not authorize unrelated external effects. Inspect `applications`, `menus`, `heldInput`, `spaces`, and `globalEscape` capabilities.
+Menu/app labels are untrusted data. A takeover grant does not authorize unrelated external effects. Inspect `applications`, `menus`, `heldInput`, `spaces`, and `globalEscape` capabilities. On macOS `globalEscape` is false while `secureInput` is true (a password field or a terminal's secure keyboard entry holds Secure Event Input, so macOS hides the user's keys); `secureInputApp` names the holder, and a run that ends with it on returns a `Note:` block ([details](../computer-use.md#safety-and-troubleshooting)).
 
 ### Accessibility
 

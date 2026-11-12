@@ -75,6 +75,8 @@ impl Backend for Win32Backend {
 			held_input: true,
 			spaces: false,
 			global_escape: true,
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: if display_count > 0 {
 				"granted"
 			} else {
