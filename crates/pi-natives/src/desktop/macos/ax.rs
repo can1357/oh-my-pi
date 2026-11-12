@@ -753,6 +753,21 @@ pub(in crate::desktop) fn ax_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
 /// Hit-tests the global point `(x, y)` the way the pointer would, returning
 /// the process and window that own the frontmost surface there.
 pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
+	let (pid, element) = element_at_point(x, y)?;
+	let window = element_window(&element);
+	Some(PointOwner { pid, window: window.as_deref().and_then(window_id) })
+}
+
+/// For a refusal only: the window listing the surface at `(x, y)` among its
+/// application's `AXWindows` ([`listed_window_id`]), such as a suggestion
+/// list, which [`point_owner`] finds no window for.
+pub(super) fn listed_window_at(x: f64, y: f64) -> Option<u32> {
+	let (pid, element) = element_at_point(x, y)?;
+	listed_window_id(pid, &element)
+}
+
+/// The frontmost element at the global point `(x, y)`, and its process.
+fn element_at_point(x: f64, y: f64) -> Option<(libc::pid_t, CFRetained<AXUIElement>)> {
 	if !x.is_finite() || !y.is_finite() {
 		return None;
 	}
@@ -772,8 +787,7 @@ pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
 	if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success {
 		return None;
 	}
-	let window = element_window(&element);
-	Some(PointOwner { pid, window: window.as_deref().and_then(window_id) })
+	Some((pid, element))
 }
 
 /// Raises a known window for explicit takeover or restoration.

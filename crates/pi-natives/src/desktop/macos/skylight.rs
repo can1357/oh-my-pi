@@ -2277,13 +2277,14 @@ pub(super) fn with_foreground<T>(
 			handed_back.set(true);
 			return Ok(());
 		}
-		await_window_focused(spi, previous_pid, previous_key, previous.psn)?;
+		// The user's own key window gets no route to it in the refusal.
+		await_window_focused(spi, previous_pid, previous_key, previous.psn, |_| None)?;
 		handed_back.set(true);
 		Ok(())
 	};
 	let prepare = set_front(spi, target, wid)
 		.and_then(|()| make_exact_window_key(spi, target, wid))
-		.and_then(|()| await_window_focused(spi, pid, wid, target));
+		.and_then(|()| await_window_focused(spi, pid, wid, target, window_parent));
 	let result = if let Err(error) = prepare {
 		after_cleanup(Err(error), control::cleanup(restore))
 	} else {
@@ -2527,6 +2528,7 @@ fn await_window_focused(
 	pid: pid_t,
 	wid: u32,
 	target: ProcessSerialNumber,
+	parent_of: impl Fn(u32) -> Option<u32>,
 ) -> CoreResult<()> {
 	let deadline = Instant::now() + ACTIVATION_TIMEOUT;
 	loop {
@@ -2543,7 +2545,7 @@ fn await_window_focused(
 				let pid = front.and_then(|front| front.pid);
 				KeyWindowSeen::Front { pid, name: pid.and_then(process::application_name) }
 			};
-			return Err(DesktopError::input_failed(unconfirmed_key_window(wid, &seen)));
+			return Err(DesktopError::input_failed(unconfirmed_key_window(wid, &seen, parent_of)));
 		}
 		control::wait(ACTIVATION_POLL)?;
 	}
@@ -2559,7 +2561,14 @@ enum KeyWindowSeen {
 	Focused(Option<ax::WindowLabel>),
 }
 
-fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
+/// The refusal for `wid`, never confirmed key. A window attached to the
+/// focused window, as a suggestion list is to the window it drops from, does
+/// not become key, so the refusal names the route that reaches it.
+fn unconfirmed_key_window(
+	wid: u32,
+	seen: &KeyWindowSeen,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> String {
 	let held = match seen {
 		KeyWindowSeen::Front { pid: Some(pid), name: Some(name) } => {
 			format!("{name} (pid {pid}) stayed the front application")
@@ -2581,7 +2590,21 @@ fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
 			}
 		},
 	};
-	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}")
+	let attached = match seen {
+		KeyWindowSeen::Focused(Some(ax::WindowLabel { id: Some(focused), .. })) => {
+			super::input::attached_under(wid, parent_of, |parent| parent == *focused)
+		},
+		_ => false,
+	};
+	let route = if attached {
+		format!(
+			"; window {wid} is attached to that window and does not become key, as a suggestion list \
+			 does not: a click without takeover reaches it in the background"
+		)
+	} else {
+		String::new()
+	};
+	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}{route}")
 }
 
 fn process_psn(lookup: PsnLookup, pid: pid_t, wid: u32) -> Option<ProcessSerialNumber> {
@@ -3962,7 +3985,7 @@ mod tests {
 				kind: Some(kind.to_owned()),
 			}))
 		};
-		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen);
+		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen, |_| None);
 		let prefix = "could not be confirmed as the exact frontmost key window: ";
 		// Calendar's untitled recurring-event alert held key over its window 66.
 		assert_eq!(
@@ -3999,6 +4022,27 @@ mod tests {
 			refusal(66, KeyWindowSeen::Front { pid: None, name: None }),
 			format!("window 66 {prefix}the front application could not be identified")
 		);
+	}
+
+	#[test]
+	fn a_suggestion_list_attached_to_the_focused_window_names_the_background_route() {
+		// Safari's autofill list, window 62, hangs off its page window 46,
+		// which keeps key.
+		let seen = KeyWindowSeen::Focused(Some(ax::WindowLabel {
+			id:    Some(46),
+			title: Some("Probe login".to_owned()),
+			kind:  None,
+		}));
+		let parents = |wid| (wid == 62).then_some(46);
+		assert_eq!(
+			unconfirmed_key_window(62, &seen, parents),
+			"window 62 could not be confirmed as the exact frontmost key window: its application's \
+			 focused window is window 46 \"Probe login\"; window 62 is attached to that window and \
+			 does not become key, as a suggestion list does not: a click without takeover reaches it \
+			 in the background"
+		);
+		// A window attached elsewhere gets no route.
+		assert!(!unconfirmed_key_window(70, &seen, |_| Some(50)).contains("without takeover"));
 	}
 
 	#[test]

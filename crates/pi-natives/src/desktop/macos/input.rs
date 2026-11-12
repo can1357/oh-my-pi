@@ -4146,9 +4146,13 @@ fn uncover(
 				))
 			})?;
 			if owner.window.is_none() {
-				return Err(DesktopError::input_failed(
-					"takeover point has no identifiable native window; no input was sent",
-				));
+				return Err(DesktopError::input_failed(unowned_point(
+					owner.pid,
+					ax::listed_window_at(x, y),
+					pid,
+					wid,
+					skylight::window_parent,
+				)));
 			}
 			if covers(&owner, pid, wid) && first.is_none() {
 				first = Some(owner);
@@ -4181,6 +4185,28 @@ fn uncover(
 			},
 			Some(_) => control::wait(Duration::from_millis(20))?,
 		}
+	}
+}
+
+/// The refusal for a takeover point whose surface, of process `owner`, AX
+/// places in no window. When the window that lists it (`listed`) is attached
+/// to the target, as a suggestion list is to the window it drops from, the
+/// refusal names the route that reaches it.
+fn unowned_point(
+	owner: libc::pid_t,
+	listed: Option<u32>,
+	pid: libc::pid_t,
+	wid: u32,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> String {
+	match listed
+		.filter(|&listed| owner == pid && attached_under(listed, parent_of, |parent| parent == wid))
+	{
+		Some(listed) => format!(
+			"takeover point is on window {listed}, which is attached to window {wid}; no input was \
+			 sent: a click without takeover reaches it in the background"
+		),
+		None => "takeover point has no identifiable native window; no input was sent".to_owned(),
 	}
 }
 
@@ -7010,6 +7036,22 @@ mod tests {
 		assert!(covers(&owner(7, None), 7, 42));
 		assert!(covers(&owner(8, Some(42)), 7, 42));
 		assert!(covers(&owner(8, None), 7, 42));
+	}
+
+	#[test]
+	fn a_takeover_point_on_an_attached_suggestion_list_names_the_background_route() {
+		// Safari's autofill list, window 62, hangs off its page window 46.
+		let parents = |wid| (wid == 62).then_some(46);
+		assert_eq!(
+			unowned_point(7, Some(62), 7, 46, parents),
+			"takeover point is on window 62, which is attached to window 46; no input was sent: a \
+			 click without takeover reaches it in the background"
+		);
+		let unowned = "takeover point has no identifiable native window; no input was sent";
+		// Another process's window, one attached elsewhere, or nothing listed.
+		assert_eq!(unowned_point(8, Some(62), 7, 46, parents), unowned);
+		assert_eq!(unowned_point(7, Some(62), 7, 50, parents), unowned);
+		assert_eq!(unowned_point(7, None, 7, 46, parents), unowned);
 	}
 
 	#[test]
