@@ -29,7 +29,7 @@ import { type CascadeResult, runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
 import { resolveSearchRoot } from "./tree";
 
-import { cfgFindEnabled } from "../settings";
+import { cfgFindEnabled, cfgFindHitThreshold } from "../settings";
 
 const findSchema = type({
 	query: "string",
@@ -125,6 +125,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				includeHidden: false,
 				signal,
 				deadline,
+				threshold: cfgFindHitThreshold.get(this.session.settings),
 				onProgress: message => {
 					phase = message;
 					onUpdate?.({ content: [{ type: "text", text: message }] });

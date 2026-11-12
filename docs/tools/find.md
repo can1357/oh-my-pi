@@ -34,6 +34,8 @@ Internal URLs are searched in place: the native listing and lexical scan and the
 
 `find.enabled` is `auto` by default: `find` is enabled only when the `judge` model role resolves first to a native System One model (TypeSafe `typesafe/jev-1.14.0`, directly or through OpenRouter), not a prompted on-device or chat model. `on` enables it whichever model judges; `off` disables it. Once enabled it is an essential (top-level) tool, never mounted under `xd://`.
 
+`find.hitThreshold` (a number above 0, up to 1; unset keeps `0.20`) sets τ, the verified-passage probability a file needs before it is reported as a hit, which is also the floor for the line ranges listed. It applies to the tool and to `omp find`. The default suits TypeSafe Jev. Decision models calibrate differently, and a judge whose probabilities run higher on unrelated passages needs a higher τ to keep the same precision.
+
 Use `find` first when the implementing location is unknown. Use `grep` for known literals, regexes, or symbols, and `glob` for names. Scope a known subsystem and batch related questions. Scores below about `0.4` are weak evidence: widen the description or use `grep` before concluding absence. The tool has no hidden-file option; the CLI's `--hidden` is not a tool parameter.
 
 ## Outputs
@@ -68,7 +70,7 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 
 ## Limits & Caps
 
-- Candidates judged by name: 128; files read: 20; windows per file: 24; window size: 8 KB; sketch: 384 B; passages verified: 40; sketch cutoff 0.45; hit threshold 0.20 (`packages/coding-agent/src/tools/jfind/cascade.ts`).
+- Candidates judged by name: 128; files read: 20; windows per file: 24; window size: 8 KB; sketch: 384 B; passages verified: 40; sketch cutoff 0.45; hit threshold 0.20, or `find.hitThreshold` (`packages/coding-agent/src/tools/jfind/cascade.ts`).
 - Native lexical scan timeout: 30 s. Native judgments use `NativeJudge` (10 s per attempt, up to three attempts); the tool's 20 s wall budget can abort them earlier.
 - Per-call wall-clock budget: `20_000ms` (`FIND_TIMEOUT_MS` in `packages/coding-agent/src/tools/jfind/index.ts`), so a stalled judge never blocks the turn. Running out during verification returns the hits verified so far, marked partial; running out earlier, or before any hit was verified, raises a timeout error. The `omp find` CLI is not bounded this way.
 - Files over 4 MB are scanned by the lexical pass only up to the native grep cap and read only up to 4 MB (trimmed to the last full line).
