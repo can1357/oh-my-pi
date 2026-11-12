@@ -9,6 +9,10 @@
 
 - `TodoOperation` no longer includes `block` and `unblock`, which the `todo` tool dropped
 
+### Fixed
+
+- In Tern, an edit's diff no longer opens with stray one-line hunks of far-off lines (the section heading or closing brace around the change), so a collapsed edit shows the change itself; lines after a second, distant change in the same edit carry their real line numbers
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
