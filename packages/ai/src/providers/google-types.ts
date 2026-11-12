@@ -35,7 +35,7 @@ export type FinishReason =
 export type FunctionCallingConfigMode = "MODE_UNSPECIFIED" | "AUTO" | "NONE" | "ANY" | "VALIDATED";
 
 /** Mirror of `@google/genai`'s `ThinkingLevel` string enum. */
-export type ThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type ThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH";
 
 /** Inline base64-encoded data part. */
 export interface InlineDataPart {

@@ -70,7 +70,7 @@ function convertGoogleImagePart(image: ImageContent): Part {
  * Defined here (not in any specific provider) so all Google providers can reference it
  * without inducing a circular dependency.
  */
-export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH";
 
 /**
  * Sampling/thinking options shared by `streamGoogle` and `streamGoogleVertex`.
