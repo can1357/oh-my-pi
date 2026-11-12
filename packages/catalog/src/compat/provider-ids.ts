@@ -54,6 +54,7 @@ export type KnownProvider =
 	| "modular"
 	| "moonshot"
 	| "muse-code"
+	| "nace"
 	| "nanogpt"
 	| "novita"
 	| "nvidia"
