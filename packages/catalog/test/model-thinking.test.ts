@@ -957,6 +957,8 @@ describe("model thinking derivation", () => {
 		}
 		// Accepts the control, but 400s on a replayed `max` control once thinking is switched off.
 		expect(runtime("eu.anthropic.claude-sonnet-5-5").compat.supportsPerMessageEffort).toBe(false);
+		// A later revision stays off until it is verified on this route.
+		expect(runtime("eu.anthropic.claude-opus-5-6").compat.supportsPerMessageEffort).toBe(false);
 		const mantle = createModel({
 			id: "anthropic.claude-opus-5-5",
 			api: "anthropic-messages",
