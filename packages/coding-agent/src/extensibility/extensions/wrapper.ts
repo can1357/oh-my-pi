@@ -29,7 +29,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import type { ExtensionRunner } from "./runner";
+import { RegisteredTaskInvocationError, type ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
@@ -125,18 +125,70 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
 		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
 		// aborted, and still streams native progress.
-		return this.registeredTool.definition.execute(
-			toolCallId,
-			params,
+		const extensionContext = this.runner.createContext(undefined, {
+			toolName: this.registeredTool.definition.name,
+			context,
 			signal,
 			onUpdate,
-			this.runner.createContext(undefined, {
-				toolName: this.registeredTool.definition.name,
-				context,
+		});
+		let available = true;
+		let active = true;
+		let taskPending = false;
+		let taskPromise: Promise<{ toolCallId: string; result: AgentToolResult }> | undefined;
+		const taskAbort = new AbortController();
+		const taskPrincipal =
+			this.registeredTool.extensionPath === "<sdk>"
+				? `<sdk>:${this.registeredTool.definition.name}`
+				: this.registeredTool.extensionPath;
+		if (this.runner.canInvokeRegisteredTask(taskPrincipal)) {
+			extensionContext.invokeRegisteredTask = params => {
+				if (!available) throw new Error("受控 task 调用已使用或已结束");
+				available = false;
+				taskPending = true;
+				const taskSignal = signal ? AbortSignal.any([signal, taskAbort.signal]) : taskAbort.signal;
+				taskPromise = this.runner
+					.invokeRegisteredTask(taskPrincipal, toolCallId, params, taskSignal)
+					.finally(() => {
+						taskPending = false;
+					});
+				void taskPromise.catch(() => undefined);
+				return taskPromise;
+			};
+			extensionContext.queryRegisteredTask = outerToolCallId => {
+				if (!active) throw new Error("受控 task 查询已结束");
+				return this.runner.queryRegisteredTask(taskPrincipal, outerToolCallId);
+			};
+		}
+		let executionResult: AgentToolResult | undefined;
+		let executionError: unknown;
+		try {
+			executionResult = await this.registeredTool.definition.execute(
+				toolCallId,
+				params,
 				signal,
 				onUpdate,
-			}),
-		);
+				extensionContext,
+			);
+		} catch (error) {
+			executionError = error;
+		}
+		available = false;
+		active = false;
+		if (taskPending && taskPromise) {
+			taskAbort.abort();
+			try {
+				const receipt = await taskPromise;
+				executionError = new RegisteredTaskInvocationError(
+					receipt.toolCallId,
+					new Error("外层工具未等待受控 task"),
+				);
+			} catch (error) {
+				executionError = error;
+			}
+		}
+		if (executionError) throw executionError;
+		if (!executionResult) throw new Error("扩展工具未返回结果");
+		return executionResult;
 	}
 }
 
@@ -351,6 +403,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				throw new Error(preflight.reason || "Tool execution was blocked by a preflight rule");
 			}
 		}
+		this.runner.checkRegisteredTaskInput(toolCallId, effectiveParams);
 
 		// 2. Full approval gate against the (possibly revised) input that will actually run — resolves
 		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
@@ -526,9 +579,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				details: undefined as TDetails,
 			};
 		}
+		const nativeTaskResult = this.runner.isRegisteredTask(toolCallId) ? structuredClone(result) : undefined;
 		if (!loopDispatchedToolCall) {
 			const postflight = await this.runner.runToolCallPreflightAfter?.(toolCallId, result, context);
 			if (postflight) result = postflight as AgentToolResult<TDetails, TParameters>;
+			if (nativeTaskResult && !Bun.deepEquals(nativeTaskResult, result)) {
+				throw new Error("受控 task 的原生回执被修改");
+			}
 		}
 
 		// Emit tool_result event - extensions can modify the result and error status
@@ -548,6 +605,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				},
 				this.#agent,
 			);
+			if (
+				nativeTaskResult &&
+				(!Bun.deepEquals(nativeTaskResult, result) ||
+					resultResult?.content !== undefined ||
+					resultResult?.details !== undefined ||
+					resultResult?.isError !== undefined)
+			) {
+				throw new Error("受控 task 的原生回执被修改");
+			}
 
 			// Handler context reports into this call's sink like tool-authored
 			// context: it is delivered even for a failed call (the handler saw

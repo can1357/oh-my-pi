@@ -148,6 +148,8 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
+	/** 启动作业的原生工具调用身份。 */
+	toolCallId?: string;
 	/**
 	 * Whether this job's turn published the agent's `<agentId>.md` output. A
 	 * follow-up turn that neither yielded nor produced a message result writes
@@ -289,6 +291,9 @@ export interface AsyncJobRegisterOptions {
 	ownerId?: string;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
+	toolCallId?: string;
+	/** 内部预留凭据，防止持久绑定期间作业标识被其他注册占用。 */
+	reservationToken?: string;
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
@@ -409,6 +414,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	readonly #jobs = new Map<string, AsyncJob>();
+	readonly #reservedJobIds = new Map<string, string>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
@@ -500,6 +506,25 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		return activeCount >= this.#maxRunningJobs;
 	}
 
+	/** 在落盘前同步预留最终 ID；未提交的预留可安全释放。 */
+	reserveTaskJobIds(preferredIds: string[]): { token: string; jobIds: string[] } {
+		if (this.#disposed) throw new Error("Async job manager is disposed");
+		const token = crypto.randomUUID();
+		const jobIds: string[] = [];
+		for (const preferredId of preferredIds) {
+			const id = this.#resolveJobId(preferredId);
+			this.#reservedJobIds.set(id, token);
+			jobIds.push(id);
+		}
+		return { token, jobIds };
+	}
+
+	releaseTaskJobIds(token: string): void {
+		for (const [id, owner] of this.#reservedJobIds) {
+			if (owner === token) this.#reservedJobIds.delete(id);
+		}
+	}
+
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
@@ -517,6 +542,12 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			);
 		}
 
+		if (options?.reservationToken !== undefined) {
+			if (!options.id || this.#reservedJobIds.get(options.id) !== options.reservationToken) {
+				throw new Error("作业 ID 预留无效");
+			}
+			this.#reservedJobIds.delete(options.id);
+		}
 		const id = this.#claimJobId(options?.id);
 		if (options?.foreground) this.#suppressedDeliveries.add(id);
 		const abortController = new AbortController();
@@ -534,6 +565,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
+			toolCallId: options?.toolCallId,
 			process: options?.process,
 			widgetInputs: options?.widgetInputs,
 			queued: options?.queued === true,
@@ -1080,16 +1112,16 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			while (true) {
 				const id = `bg_${this.#nextAutoId}`;
 				this.#nextAutoId += 1;
-				if (!this.#jobs.has(id)) return id;
+				if (!this.#jobs.has(id) && !this.#reservedJobIds.has(id)) return id;
 			}
 		}
 
 		const base = preferredId.trim();
-		if (!this.#jobs.has(base)) return base;
+		if (!this.#jobs.has(base) && !this.#reservedJobIds.has(base)) return base;
 
 		let suffix = 2;
 		let candidate = `${base}-${suffix}`;
-		while (this.#jobs.has(candidate)) {
+		while (this.#jobs.has(candidate) || this.#reservedJobIds.has(candidate)) {
 			suffix += 1;
 			candidate = `${base}-${suffix}`;
 		}

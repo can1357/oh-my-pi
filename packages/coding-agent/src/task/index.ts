@@ -46,7 +46,7 @@ import { isBundledSeance, seanceTaskGuidance, seanceTaskSchemaFields, validateSe
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { AsyncJobError, type AsyncJobManagerApi } from "../async";
+import { AsyncJobError, AsyncJobManager, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
@@ -1200,6 +1200,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		);
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 
+		if (this.session.isRegisteredTask?.(toolCallId) && (!manager || asyncItems.length !== spawnItems.length)) {
+			throw new Error("受控 task 必须全部使用后台作业");
+		}
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
 			// wired a job manager, or every item's agent type declares
@@ -1350,34 +1353,54 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		const started: Array<{ agentId: string; jobId: string }> = [];
 		const failedSchedules: string[] = [];
-		for (const spawn of asyncSpawns) {
-			try {
-				const jobId = this.#registerSpawnJob({
-					manager,
-					toolCallId,
-					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
-					agentId: spawn.agentId,
-					run: spawn.run,
-					progress: spawn.progress,
-					ircEnabled,
-					buildDetails: buildAsyncDetails,
-					onUpdate,
-					onSettled: failed => {
-						settledCount += 1;
-						if (failed) failedCount += 1;
-					},
-				});
-				if (started.length === 0) primaryJobId = jobId;
-				started.push({ agentId: spawn.agentId, jobId });
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				// An adopted run already executes; without its job nothing would own it.
-				spawn.run?.discard(`background job registration failed: ${message}`);
-				failedSchedules.push(`${spawn.agentId}: ${message}`);
-				spawn.progress.status = "failed";
-				settledCount += 1;
-				failedCount += 1;
+		const controlled = this.session.isRegisteredTask?.(toolCallId) === true;
+		if (controlled && !(manager instanceof AsyncJobManager)) throw new Error("受控 task 需要本机会话作业管理器");
+		const reservation =
+			controlled && manager instanceof AsyncJobManager
+				? manager.reserveTaskJobIds(asyncSpawns.map(spawn => spawn.agentId))
+				: undefined;
+		try {
+			if (reservation) {
+				if (!this.session.persistRegisteredTaskJobs) throw new Error("受控 task 持久绑定不可用");
+				await this.session.persistRegisteredTaskJobs(toolCallId, reservation.jobIds);
+				signal?.throwIfAborted();
 			}
+			for (const [index, spawn] of asyncSpawns.entries()) {
+				try {
+					const jobId = this.#registerSpawnJob({
+						manager,
+						toolCallId,
+						spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
+						agentId: spawn.agentId,
+						reservedJobId: reservation?.jobIds[index],
+						reservationToken: reservation?.token,
+						run: spawn.run,
+						progress: spawn.progress,
+						ircEnabled,
+						buildDetails: buildAsyncDetails,
+						onUpdate,
+						onSettled: failed => {
+							settledCount += 1;
+							if (failed) failedCount += 1;
+						},
+					});
+					if (started.length === 0) primaryJobId = jobId;
+					started.push({ agentId: spawn.agentId, jobId });
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					// An adopted run already executes; without its job nothing would own it.
+					spawn.run?.discard(`background job registration failed: ${message}`);
+					failedSchedules.push(`${spawn.agentId}: ${message}`);
+					spawn.progress.status = "failed";
+					settledCount += 1;
+					failedCount += 1;
+				}
+			}
+		} finally {
+			if (reservation && manager instanceof AsyncJobManager) manager.releaseTaskJobIds(reservation.token);
+		}
+		if (controlled && failedSchedules.length > 0) {
+			throw new Error(`受控 task 部分注册失败: ${failedSchedules.join("; ")}`);
 		}
 
 		if (started.length === 0 && syncSpawns.length === 0) {
@@ -1533,6 +1556,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		toolCallId: string;
 		spawnParams: TaskParams;
 		agentId: string;
+		reservedJobId?: string;
+		reservationToken?: string;
 		/** Run already started while the call streamed; the job adopts it instead of launching. */
 		run?: SpawnRun;
 		progress: AgentProgress;
@@ -1546,6 +1571,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			toolCallId,
 			spawnParams,
 			agentId,
+			reservedJobId,
+			reservationToken,
 			run,
 			progress,
 			ircEnabled,
@@ -1729,8 +1756,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			},
 			{
-				id: agentId,
+				id: reservedJobId ?? agentId,
 				agentId,
+				toolCallId,
+				reservationToken,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				widgetInputs: createTaskWidgetInputs({

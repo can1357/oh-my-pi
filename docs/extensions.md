@@ -1502,3 +1502,11 @@ Use the right surface:
 - **Custom-tools** (`src/extensibility/custom-tools/*`): tool-focused modules; when loaded alongside extensions they are adapted and still pass through extension interception wrappers.
 
 If you need one package that owns policy, tools, command UX, and rendering together, use extensions.
+
+## Controlled native task delegation
+
+An SDK host may explicitly grant a named SDK custom tool a hidden native `task` side-call in a restricted session by setting `trustedTaskDelegationTools` to that tool's exact name, with `restrictToolNames`, `allowRestrictedCustomTools`, and an explicit `toolNames` list. The task remains absent from the model's tool presentation, `getAllToolNames`, active-tool selection, and eval bridge; `ctx.invokeRegisteredTask` is available only to the named tool. The host reuses the native task wrapper and approval scope.
+
+The host records the outer and native call identities and final reserved job IDs in the current session's durable entries before registration. `ctx.queryRegisteredTask(outerToolCallId)` is read-only and reports `unknown` when a job row is absent, stale, or belongs to another native call; callers MUST NOT infer that an unknown operation was not submitted or retry it automatically. Registration requires a persisted session and a local job manager; volatile sessions and persistence failures fail closed.
+
+This is an in-process trust boundary, not a sandbox. Loaded extensions, the host, and same-UID processes are trusted actors and can access local files or session state. The capability limits model-visible tools and untrusted model input, but it does not prevent a trusted extension from intentionally tampering with the session or invoking unrelated host APIs. It does not provide a path allowlist: `task`'s configured agent tool policy and the subagent's own tool restrictions remain the only enforced resource boundaries. Soft request budgets and the shared session cost gate are not hard per-work-item limits.

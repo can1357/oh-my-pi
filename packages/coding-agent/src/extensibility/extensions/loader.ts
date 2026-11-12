@@ -40,6 +40,7 @@ import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loade
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
+import { REGISTERED_TASK_ENTRY } from "./types";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -381,6 +382,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	appendEntry(customType: string, data?: unknown): void {
+		if (customType === REGISTERED_TASK_ENTRY) throw new Error("受控 task 记录只能由宿主写入");
 		this.runtime.appendEntry(customType, data);
 	}
 

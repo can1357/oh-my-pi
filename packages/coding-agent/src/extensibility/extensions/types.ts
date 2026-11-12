@@ -788,6 +788,15 @@ export interface ExtensionLiveSession {
 	stop(): Promise<void>;
 }
 
+export const REGISTERED_TASK_ENTRY = "omp:registered-task:v1";
+
+export interface RegisteredTaskObservation {
+	toolCallId: string;
+	state: "unknown" | "observed";
+	jobIds: string[];
+	jobs: Array<{ id: string; status: "running" | "completed" | "failed" | "cancelled" | "unknown" }>;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -909,6 +918,10 @@ export interface ExtensionContext {
 	 * must stay in the ordinary tool result.
 	 */
 	addAdditionalContext?(context: string): void;
+	/** 经宿主显式授权的扩展工具可在当前调用期间提交一次原生 task。 */
+	invokeRegisteredTask?(params: Record<string, unknown>): Promise<{ toolCallId: string; result: AgentToolResult }>;
+	/** 只读查询此扩展发起的原外层调用；无作业记录时保持 unknown。 */
+	queryRegisteredTask?(outerToolCallId: string): RegisteredTaskObservation[];
 	/**
 	 * Run the NATIVE built-in implementation of the tool this handler re-registered, with `params`,
 	 * and return its result. Lets a tool that re-registers a built-in (e.g. wrapping `write` to add
