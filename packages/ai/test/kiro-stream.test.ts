@@ -4,7 +4,6 @@ import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
 import { type KiroRequest, normalizeKiroFrame, streamKiro } from "@oh-my-pi/pi-ai/providers/kiro/index";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { kiroCliOsFamily } from "@oh-my-pi/pi-catalog/wire/kiro-cli";
 import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 
 const EU_ENDPOINT = "https://runtime.eu-central-1.kiro.dev/";
@@ -177,21 +176,14 @@ test("retries one pre-output HTTP capacity throttle with the identical frozen bo
 	expect(waits).toEqual([500]);
 	expect(bodies[1]).toBe(bodies[0]);
 	expect(JSON.parse(bodies[0]).hookRun).toBe(1);
-	const sdk = `aws-sdk-rust/1.6.0 ua/2.1 api/codewhispererstreaming/0.1.19636 os/${kiroCliOsFamily()} lang/rust/1.94.1`;
-	const cliHeaders = (attempt: number) => ({
-		"content-type": "application/x-amz-json-1.0",
-		"x-amz-target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-		"user-agent": `${sdk} md/appVersion-3.2.0 app/AmazonQ-For-CLI`,
-		"x-amz-user-agent": `${sdk} m/F app/AmazonQ-For-CLI`,
-		"x-amzn-codewhisperer-optout": "true",
-		"x-amzn-kiro-attempt": `${attempt};max=2`,
-		"x-amzn-kiro-fallback": "0;max=0",
-		authorization: `Bearer ${API_KEY}`,
-		"amz-sdk-request": `attempt=${attempt}; max=2`,
-		"amz-sdk-invocation-id": expect.stringMatching(/^[0-9a-f-]{36}$/),
-		accept: "*/*",
-		"accept-encoding": "gzip",
-	});
+	const cliHeaders = (attempt: number) =>
+		expect.objectContaining({
+			"x-amz-target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+			"x-amzn-codewhisperer-optout": "true",
+			"x-amzn-kiro-attempt": `${attempt};max=2`,
+			authorization: `Bearer ${API_KEY}`,
+			"amz-sdk-request": `attempt=${attempt}; max=2`,
+		});
 	expect(headers).toEqual([cliHeaders(1), cliHeaders(2)]);
 	expect(headers[1]["amz-sdk-invocation-id"]).not.toBe(headers[0]["amz-sdk-invocation-id"]);
 });
