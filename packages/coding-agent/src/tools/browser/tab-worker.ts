@@ -177,6 +177,7 @@ import {
 	dragBetween,
 	fillViaHandle,
 	highlightElement,
+	hoverElement,
 	type HighlightOptions,
 	type InteractionHandle,
 	installCancelledReleaseGuard,
@@ -884,6 +885,17 @@ export function toActionableHandle(
 				"handle.dblclick()",
 				signal,
 				() => clickElement(enriched, "handle.dblclick()", signal, { clickCount: 2 }),
+				invalidate,
+			),
+		);
+	enriched.hover = () =>
+		guard<void>("handle.hover()", signal =>
+			runGuardedHandleAction(
+				enriched,
+				originals,
+				"handle.hover()",
+				signal,
+				() => hoverElement(enriched, signal),
 				invalidate,
 			),
 		);
@@ -3082,7 +3094,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await untilAborted(sig, () => handle.hover());
+							await hoverElement(handle, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}

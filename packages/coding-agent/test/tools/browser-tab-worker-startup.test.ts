@@ -599,6 +599,88 @@ describe("OMP-owned browser input", () => {
 		},
 		45_000,
 	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"waits for a hover target's layout box, then hovers it as Puppeteer does",
+		async () => {
+			const browser = headless();
+			const name = `hover-layout-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			const mark = `onmouseover="this.dataset.hovered = 'yes'"`;
+			// Responsive markup: the first `.menu` is the hidden desktop copy. A row's actions show only on hover.
+			const fixture = `<style>.del { opacity: 0 } .row:hover .del { opacity: 1 }
+				.edit { visibility: hidden } #edit-row:hover .edit { visibility: visible }
+				@keyframes drift { from { transform: translateX(0) } to { transform: translateX(200px) } }</style>
+				<a class="menu" href="#" style="display:none">Menu</a>
+				<a class="menu" id="mobile" href="#" ${mark}>Menu</a>
+				<div class="row">Row <button class="del" ${mark}>Delete</button></div>
+				<div id="edit-row">Row <button class="edit">Edit</button></div>
+				<span id="icon-host" ${mark}><svg id="icon" width="20" height="20" style="pointer-events:none"><rect width="20" height="20"/></svg></span>
+				<div><button id="drifting" style="animation: drift 1s linear infinite" ${mark}>Drifting</button></div>
+				<div style="margin-top:1500px"><button id="low" ${mark}>Low</button></div>
+				<div style="margin-top:2000px"><button id="far" ${mark}>Far</button></div>
+				<nav id="drawer" style="position:fixed;left:-300px;top:0;width:200px;height:100px">Drawer</nav>`;
+			try {
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent(fixture)}`,
+					timeoutMs: 30_000,
+				});
+				const run = async (code: string, timeoutMs = 10_000): Promise<unknown> =>
+					(
+						await runInTab(name, {
+							code: `try { ${code} } catch (error) { return error instanceof Error ? error.message : String(error); }`,
+							timeoutMs,
+							session,
+						})
+					).returnValue;
+
+				// A hidden match waits for a box, then says why it never got one, through a handle too.
+				expect(await run(`await tab.hover(".menu"); return "hovered";`, 3_000)).toContain(
+					"never became clickable (last check: display:none; selector matches 2 element(s))",
+				);
+				const viaHandle = await run(`await (await tab.waitForSelector(".menu")).hover(); return "hovered";`, 3_000);
+				expect(viaHandle).toContain("handle.hover() timed out");
+				expect(viaHandle).toContain("never became clickable (last check: display:none)");
+				// So does a copy parked off-canvas, where no scroll can bring it into view.
+				expect(await run(`await tab.hover("#drawer"); return "hovered";`, 3_000)).toContain(
+					"never became clickable (last check: off-viewport; selector matches 1 element(s))",
+				);
+				// What hovering may reveal is hovered at once.
+				expect(await run(`await tab.hover("#mobile"); return await tab.attr("#mobile", "data-hovered");`)).toBe(
+					"yes",
+				);
+				expect(await run(`await tab.hover(".del"); return await tab.attr(".del", "data-hovered");`)).toBe("yes");
+				expect(await run(`await tab.hover(".edit"); return await tab.isVisible(".edit");`)).toBe(true);
+				expect(await run(`await tab.hover("#icon"); return await tab.attr("#icon-host", "data-hovered");`)).toBe(
+					"yes",
+				);
+				// A target that keeps moving is not held back until it stops.
+				expect(await run(`await tab.hover("#drifting"); return "hovered";`)).toBe("hovered");
+				// Puppeteer scrolls only a target that is not fully in view, through a handle too.
+				expect(
+					await run(`const before = await tab.evaluate(() => {
+						const low = document.querySelector("#low");
+						window.scrollTo(0, low.offsetTop + low.offsetHeight + 8 - innerHeight);
+						return scrollY;
+					});
+					await tab.hover("#low");
+					return (await tab.evaluate(() => scrollY)) === before && before > 0;`),
+				).toBe(true);
+				expect(
+					await run(`await tab.evaluate(() => window.scrollTo(0, 0));
+					await (await tab.waitForSelector("#far")).hover();
+					return [await tab.attr("#far", "data-hovered"), await tab.evaluate(() => scrollY > 0)];`),
+				).toEqual(["yes", true]);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
 });
 
 describe("visible OMP-owned browser tabs", () => {
