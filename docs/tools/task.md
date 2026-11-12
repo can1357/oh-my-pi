@@ -78,13 +78,13 @@ The tool returns one text block plus `details: TaskToolDetails`.
 
 A stepped spawn's `assignment` (on `details.progress` items and `details.results` entries) lists every step as one Markdown brief; `task` is the initial prompt, carrying only the first.
 
-When `async.enabled=true`, the Task tool description supplies background-job guidance: results auto-deliver, blocked callers can use `wait` if the tool is active, `read proc://<id>` inspects without consuming delivery, `write proc://<id>/kill` cancels, and `write agent://<id>` coordinates when peer messaging is enabled. Spawn acknowledgments do not repeat these instructions.
+When `async.enabled=true`, the Task tool description supplies the delivery rules: results auto-deliver, blocked callers can use `wait` if the tool is active, and a `completed` result's claimed artifacts are unverified. The job-lifecycle reference (`read proc://<id>` inspects without consuming delivery, `write proc://<id>/kill` cancels, how long results and job IDs live, `write agent://<id>` when peer messaging is enabled) rides the first spawn result of each `TaskTool` instance only; later acknowledgments do not repeat it.
 
 Extensions that replace `task` inherit this guidance (the native tool's `delegationGuidance`) in their description for calls delegated through `ctx.invokeTool`, while keeping their own calling instructions and input schema.
 
 Background response (`async.enabled=true`):
 
-- `content`: ``Spawned agent `<id>` (job `<jobId>`).`` A batch call instead returns `Spawned N background agents using <agent types>. ...` (the deduped per-item agent types, comma-joined) with a per-agent `- `<id>`(job`<jobId>`)` listing.
+- `content`: ``Spawned agent `<id>` (job `<jobId>`).`` (the first spawn result of the session continues with the job-lifecycle reference). A batch call instead returns `Spawned N background agents using <agent types>. ...` (the deduped per-item agent types, comma-joined) with a per-agent `- `<id>`(job`<jobId>`)` listing.
 - `details`: `{ projectAgentsDir, results, totalDurationMs, progress: [<AgentProgress per spawn>], async: { state, jobId, type: "task" } }`. The call keeps one shared `progress[]` snapshot; `async.jobId` is the first started job and `async.state` aggregates over the async spawns ("running" until every job settles, "failed" if any spawn failed) — jobs that settled before the call returned are already reflected. A mixed call's `results` carries the blocking spawns' inline `SingleResult`s (pure background calls return `results: []`).
 - Live progress streams into the same tool block via `onUpdate(...)`; final results arrive as async-result injections. Non-isolated completions get an idle/follow-up hint when messaging is enabled. Aborted agents that can be resumed get a resume hint; isolated runs point at the transcript. The current `task-follow-up.md` template still labels isolated runs non-resumable, despite the retained-workspace lifecycle described below.
 

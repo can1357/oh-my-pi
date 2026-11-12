@@ -791,6 +791,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * spawns and work already parked in the semaphore queue.
 	 */
 	#spawnSemaphore: Semaphore | undefined;
+	/** Whether a spawn result already carried the job-lifecycle reference. */
+	#lifecycleShown = false;
 	readonly #permit: SpawnPermit = {
 		acquire: signal => this.#getSpawnSemaphore().acquire(signal),
 		release: () => this.#releaseSpawnSemaphore(),
@@ -1385,10 +1387,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const renderSpawnFeedback = (mixed: boolean): string =>
-			prompt
+		// Job lifecycle (proc://, expiry, agent://) rides the first spawn result only: later
+		// calls reuse it, and sessions that never spawn never pay for it.
+		const renderSpawnFeedback = (mixed: boolean): string => {
+			const lifecycle = !this.#lifecycleShown;
+			this.#lifecycleShown = true;
+			return prompt
 				.render(taskSpawnFeedbackTemplate, {
 					mixed,
+					lifecycle,
+					ircEnabled,
 					singular: started.length === 1,
 					singleCall: spawns.length === 1,
 					showListing: mixed || spawns.length > 1,
@@ -1400,6 +1408,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					scheduleFailureSummary,
 				})
 				.trim();
+		};
 
 		if (syncSpawns.length === 0) {
 			if (spawns.length === 1) {
