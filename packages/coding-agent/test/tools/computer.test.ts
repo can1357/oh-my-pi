@@ -537,7 +537,7 @@ describe("computer prelude", () => {
 		await prelude.invoke({ action: "close" }, context);
 	});
 
-	it("shows text it types, sets or copies only by its length in status lines", () => {
+	it("keeps text it types, sets or copies out of status lines", () => {
 		const prelude = createComputerPrelude(toolSession(), () => ({
 			async run() {
 				return { displays: [], returnValue: undefined, screenshots: [] };
@@ -552,14 +552,20 @@ describe("computer prelude", () => {
 		const status = (chain: Array<{ method: string; args: unknown[] }>) =>
 			prelude.status?.({ action: "call", chain }, done);
 		const secret = "sentinel-password-4f9Q";
+		const lines = [
+			status([
+				{ method: "ref", args: ["e5"] },
+				{ method: "setValue", args: [secret] },
+			]),
+			status([
+				{ method: "window", args: [42] },
+				{ method: "type", args: [secret, { delayMs: 5 }] },
+			]),
+			status([{ method: "clipboard.write", args: [secret] }]),
+		];
 
-		expect(status([{ method: "ref", args: ["e5"] }, { method: "setValue", args: [secret] }])).toBe(
-			'desktop.ref("e5").setValue(<22 chars>)',
-		);
-		expect(status([{ method: "window", args: [42] }, { method: "type", args: [secret] }])).toBe(
-			"desktop.window(42).type(<22 chars>)",
-		);
-		expect(status([{ method: "clipboard.write", args: [secret] }])).toBe("desktop.clipboard.write(<22 chars>)");
+		expect(lines.join("\n")).not.toContain(secret);
+		expect(lines[0]).toBe('desktop.ref("e5").setValue(<hidden>)');
 		expect(status([{ method: "press", args: ["cmd+s"] }])).toBe('desktop.press("cmd+s")');
 	});
 

@@ -166,7 +166,10 @@ function describeComputerCall(parameters: unknown): string | undefined {
 	if (parsed instanceof type.errors) return undefined;
 	switch (parsed.action) {
 		case "call":
-			return `desktop.${renderStatusCallChain(parsed.chain)}`;
+			// Text `type`, `setValue` and `clipboard.write` enter is their first argument.
+			return `desktop.${renderStatusCallChain(parsed.chain, step =>
+				step.method === "type" || step.method === "setValue" || step.method === "clipboard.write" ? 0 : undefined,
+			)}`;
 		case "run":
 			return `run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
 		case "capabilities":

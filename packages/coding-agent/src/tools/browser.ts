@@ -340,12 +340,31 @@ function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknow
 			return parsed.all ? "close all" : `close ${name}`;
 		case "run":
 			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
-		case "call":
-			return `${name}.${renderStatusCallChain(parsed.chain ?? [])}`;
+		case "call": {
+			const chain = parsed.chain ?? [];
+			return `${name}.${renderStatusCallChain(chain, (step, index) => browserTextStart(step.method, chain[index - 1]?.method))}`;
+		}
 		case "tabs":
 			return "tabs";
 		case "targets":
 			return "targets";
+	}
+}
+
+/**
+ * Where the text a browser helper enters starts in its arguments: after the selector of a tab or
+ * frame `fill`/`type`, first on an element handle and for clipboard and dialog text.
+ */
+function browserTextStart(method: string, previous: string | undefined): number | undefined {
+	switch (method) {
+		case "fill":
+		case "type":
+			return previous === undefined || previous === "frame" ? 1 : 0;
+		case "clipboardWrite":
+		case "handleDialog":
+			return 0;
+		default:
+			return undefined;
 	}
 }
 

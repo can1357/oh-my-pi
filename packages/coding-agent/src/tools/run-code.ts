@@ -60,27 +60,28 @@ export function renderCallChain(chain: readonly { method: string; args: readonly
 	return chain.map(step => `${step.method}(${step.args.map(renderRunArg).join(", ")})`).join(".");
 }
 
-/** Helpers whose last string argument is text entered into a page or an app, often a credential. */
-const ENTERED_TEXT_METHODS: Record<string, true> = {
-	fill: true,
-	type: true,
-	setValue: true,
-	clipboardWrite: true,
-	"clipboard.write": true,
-};
+/** One step of a helper call chain: `id(5)` in `id(5).click()`. */
+export interface CallStep {
+	method: string;
+	args: readonly unknown[];
+}
 
 /**
  * Renders a call chain for a status line, which the session file keeps and the terminal shows:
- * {@link renderCallChain}, except that entered text appears only as its length.
+ * {@link renderCallChain}, except that text a helper enters into a page or an app, often a
+ * credential, is shown as `<hidden>`. `textStart` gives the index of the first argument that
+ * carries entered text (every later one is hidden too, since Python passes keywords as a trailing
+ * object), or `undefined` for a step that enters none.
  */
-export function renderStatusCallChain(chain: readonly { method: string; args: readonly unknown[] }[]): string {
+export function renderStatusCallChain(
+	chain: readonly CallStep[],
+	textStart: (step: CallStep, index: number) => number | undefined,
+): string {
 	return chain
-		.map(step => {
-			const entered = ENTERED_TEXT_METHODS[step.method] === true
-				? step.args.findLastIndex(arg => typeof arg === "string")
-				: -1;
-			const args = step.args.map((arg, index) =>
-				index === entered && typeof arg === "string" ? `<${arg.length} chars>` : renderRunArg(arg),
+		.map((step, index) => {
+			const start = textStart(step, index);
+			const args = step.args.map((arg, position) =>
+				start !== undefined && position >= start ? "<hidden>" : renderRunArg(arg),
 			);
 			return `${step.method}(${args.join(", ")})`;
 		})
