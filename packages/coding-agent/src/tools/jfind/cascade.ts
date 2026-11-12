@@ -56,7 +56,7 @@ const SKETCH_BYTES = 384;
 const FULL_LIMIT = 40;
 /** Sketch probability below which a passage is not verified. */
 const CUTOFF = 0.45;
-/** Verified-passage probability at or above which a file is a hit. */
+/** Verified-passage probability at or above which a file is a hit, unless {@link CascadeOptions.threshold} sets one. */
 const THRESHOLD = 0.2;
 /** Bytes of a file read for windowing. */
 const READ_LIMIT = 4 * 1024 * 1024;
@@ -114,6 +114,8 @@ export interface CascadeOptions {
 	 * earlier, or a `signal` abort, rejects.
 	 */
 	deadline?: AbortSignal;
+	/** Verified-passage probability at or above which a file is a hit and a range is listed; defaults to 0.2. */
+	threshold?: number;
 	onProgress?: (message: string) => void;
 }
 
@@ -424,17 +426,18 @@ class Cascade {
 			timeout = { verified: this.stats.windowsJudged, passages: survivors.length };
 		}
 
+		const threshold = this.#options.threshold ?? THRESHOLD;
 		const hits: FindHit[] = [];
 		for (const [f, entry] of results) {
 			const plan = files[f]!;
 			this.stats.filesRead++;
 			this.stats.fileBytes += entry.bytes;
-			if (entry.score < THRESHOLD) continue;
+			if (entry.score < threshold) continue;
 			hits.push({
 				rel: entries[plan.node]!.rel,
 				nameScore: nameScore[plan.node],
 				contentScore: entry.score,
-				ranges: mergeHeat(entry.heat, THRESHOLD),
+				ranges: mergeHeat(entry.heat, threshold),
 				linesSeen: entry.lines,
 				truncated: plan.truncated || entry.lines < plan.total,
 			});
@@ -445,7 +448,7 @@ class Cascade {
 		const { requests, failed } = this.stats;
 		const coverage: FindCoverage =
 			failed > 0 && failed === requests ? "unavailable" : failed > 0 || timeout ? "partial" : "complete";
-		return { hits, coverage, threshold: THRESHOLD, keywords, stats: this.stats, ranking, timeout };
+		return { hits, coverage, threshold, keywords, stats: this.stats, ranking, timeout };
 	}
 
 	/**

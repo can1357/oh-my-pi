@@ -34,6 +34,8 @@ Internal URLs are searched in place: the native listing and lexical scan and the
 
 `find.enabled` is `auto` by default: `find` is enabled only when the `judge` model role resolves first to a native System One model (TypeSafe `typesafe/jev-1.14.0`, directly or through OpenRouter), not a prompted on-device or chat model. `on` enables it whichever model judges; `off` disables it. Once enabled it is an essential (top-level) tool, never mounted under `xd://`.
 
+`find.hitThreshold` (a number from 0 to 1; unset keeps `0.20`) sets τ, the verified-passage probability a file needs before it is reported as a hit, which is also the floor for the line ranges listed. It applies to the tool and to `omp find`. The default suits TypeSafe Jev. Decision models calibrate differently, and a judge whose probabilities run higher on unrelated passages needs a higher τ to keep the same precision.
+
 Use `find` first when the implementing location is unknown. Use `grep` for known literals, regexes, or symbols, and `glob` for names. Scope a known subsystem and batch related questions. Scores below about `0.4` are weak evidence: widen the description or use `grep` before concluding absence. The tool has no hidden-file option; the CLI's `--hidden` is not a tool parameter.
 
 ## Outputs

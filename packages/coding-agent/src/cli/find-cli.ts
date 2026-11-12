@@ -12,6 +12,7 @@ import { formatPathRelativeToCwd, resolveSearchResultPath } from "../tools/path-
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
 import { rankedHeat } from "../tools/jfind/passages";
 import { resolveSearchRoot, type SearchRoot } from "../tools/jfind/tree";
+import { cfgFindHitThreshold } from "../tools/settings";
 
 export interface FindCommandArgs {
 	query: string;
@@ -112,6 +113,7 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 			judge,
 			spotlight,
 			includeHidden: cmd.hidden,
+			threshold: cfgFindHitThreshold.get(settings),
 			onProgress: log,
 		});
 		// Hits print as paths usable from the caller's cwd: relative files or URLs.

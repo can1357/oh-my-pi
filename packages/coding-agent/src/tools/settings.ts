@@ -571,6 +571,29 @@ export const cfgFindEnabled = register({
 	},
 });
 
+/**
+ * Verified-passage probability at or above which `find` reports a file as a hit, and the floor for the
+ * line ranges it lists. Unset keeps the cascade's built-in threshold (0.2), which suits TypeSafe Jev; other
+ * decision models calibrate differently, so a judge that scores unrelated passages high needs a higher one.
+ */
+export const cfgFindHitThreshold = register({
+	id: "find.hitThreshold",
+	type: "number",
+	default: undefined,
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseProbability("find.hitThreshold", raw);
+	},
+	normalize: raw => (raw === undefined || raw === null ? raw : parseProbability("find.hitThreshold", raw)),
+});
+
+/** A probability from 0 to 1, given as a number or numeric text; throws on anything else. */
+function parseProbability(id: string, raw: unknown): number {
+	const text = typeof raw === "number" ? undefined : String(raw).trim();
+	const value = text === undefined ? (raw as number) : text === "" ? Number.NaN : Number(text);
+	if (Number.isFinite(value) && value >= 0 && value <= 1) return value;
+	throw new Error(`Invalid ${id}: expected a number from 0 to 1, got ${Bun.inspect(raw)}.`);
+}
+
 // Optional tools
 
 export const cfgDebugEnabled = register({
