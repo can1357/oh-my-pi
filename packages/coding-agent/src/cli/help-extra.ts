@@ -1,6 +1,11 @@
 import "@oh-my-pi/pi-utils/env";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { APP_NAME, CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { BUILTIN_TOOL_NAMES, BUILTIN_TOOL_SUMMARIES } from "../tools/builtin-names";
+
+function renderBuiltinTools(): string {
+	return BUILTIN_TOOL_NAMES.map(name => `  ${name.padEnd(14)}- ${BUILTIN_TOOL_SUMMARIES[name]}`).join("\n");
+}
 
 export function getExtraHelpText(): string {
 	return `${chalk.bold("Environment Variables:")}
@@ -78,22 +83,10 @@ export function getExtraHelpText(): string {
   PI_NO_PTY                  - Disable PTY-based interactive bash execution
   For complete environment variable reference, see:
   ${chalk.dim("docs/environment-variables.md")}
-${chalk.bold("Available Tools (default-enabled unless noted):")}
-  read          - Read file contents
-  bash          - Execute bash commands
-  edit          - Edit files with find/replace
-  write         - Write files (creates/overwrites)
-  grep          - Search file contents
-  glob          - Find files by glob pattern
-  lsp           - Language server protocol (code intelligence)
-  python        - Execute Python code (requires: ${APP_NAME} setup python)
-  notebook      - Edit Jupyter notebooks
-  browser       - Browser automation (Puppeteer)
-  computer      - Native host desktop capture and input (disabled by default)
-  task          - Launch sub-agents for parallel tasks
-  todo          - Manage todo/task lists
-  web_search    - Search the web
-  ask           - Ask user questions (interactive mode only)
+${chalk.bold("Built-in Tools (names accepted by --tools; some depend on settings or runtime support):")}
+${renderBuiltinTools()}
+  Python, browser, and computer use run inside eval: toggle with the eval.py,
+  browser.enabled, and computer.enabled (default off) settings.
 
 ${chalk.bold("Plugin Options:")}
   --plugin-dir <path>        Load plugin from directory (repeatable)
