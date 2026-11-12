@@ -554,6 +554,20 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "decision",
+		description: "Show decision-layer settings, judge availability, and recent decisions",
+		subcommands: [{ name: "status", description: "Show decision-layer status (default)" }],
+		subcommandOptional: true,
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const sub = command.args.trim();
+			await runtime.output(
+				sub === "" || sub === "status" ? runtime.session.decisionStatus() : "Usage: /decision [status]",
+			);
+			return commandConsumed();
+		},
+	},
+	{
 		name: "context",
 		icon: "context",
 		description: "Browse context usage and detailed content",

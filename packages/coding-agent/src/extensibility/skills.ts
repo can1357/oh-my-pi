@@ -55,6 +55,10 @@ export interface Skill {
 	 * prompt's `<skills>` listing.
 	 */
 	hide?: boolean;
+	/** Frontmatter `alwaysApply: true`: listed and preloaded under the progressive skill catalogue. */
+	alwaysApply?: boolean;
+	/** Frontmatter `requiresSkills`: exact names of skills loaded alongside this one by the decision layer. */
+	requiresSkills?: string[];
 	/**
 	 * Filesystem-resolved plugin root for Agent Plugin skills (spec §4.1):
 	 * every `skill://` resource access must realpath-resolve within it.
@@ -62,6 +66,20 @@ export interface Skill {
 	containRoot?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
+}
+
+/** The decision layer's frontmatter fields; a malformed `requiresSkills` entry is ignored. */
+function skillSelectionFields(
+	frontmatter: SkillFrontmatter | undefined,
+): Pick<Skill, "alwaysApply" | "requiresSkills"> {
+	const required = frontmatter?.requiresSkills;
+	const names = Array.isArray(required)
+		? required.filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+		: [];
+	return {
+		...(frontmatter?.alwaysApply === true && { alwaysApply: true }),
+		...(names.length > 0 && { requiresSkills: names }),
+	};
 }
 
 export interface SkillWarning {
@@ -278,6 +296,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...skillSelectionFields(capSkill.frontmatter),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -477,6 +496,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...skillSelectionFields(capSkill.frontmatter),
 			_source: capSkill._source,
 		};
 		if (admit(skill, capSkill.content, capSkill.frontmatter, skillNamespace(capSkill)) !== undefined)
@@ -520,6 +540,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					...skillSelectionFields(capSkill.frontmatter),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -603,6 +624,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...skillSelectionFields(capSkill.frontmatter),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);

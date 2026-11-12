@@ -35,7 +35,7 @@ You are omp's trusted coding assistant.
 {{/if}}
 
 ⁂ Runtime
-{{#ifAny skills.length alwaysApplyRules.length rules.length}}
+{{#ifAny skills.length alwaysApplyRules.length rules.length skillDiscoveryInstruction}}
 # Skills & Rules
 {{/ifAny}}
 {{#if skills.length}}
@@ -45,6 +45,9 @@ Matching skill → MUST read skill://<name> first.
 - {{name}}: {{description}}
 {{/each}}
 </skills>
+{{/if}}
+{{#if skillDiscoveryInstruction}}
+{{skillDiscoveryInstruction}}
 {{/if}}
 
 {{#if alwaysApplyRules.length}}
