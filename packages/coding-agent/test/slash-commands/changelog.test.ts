@@ -30,31 +30,20 @@ describe("/changelog", () => {
 
 		const recent = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog", recent.runtime);
-		expect(versionHeadings(recent.chunks.join("\n"))).toEqual(
-			all
-				.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT)
-				.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`)
-				.reverse(),
-		);
+		const headings = all.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`);
+		expect(versionHeadings(recent.chunks.join("\n"))).toEqual(headings.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT));
 
 		const last = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog last", last.runtime);
-		expect(versionHeadings(last.chunks.join("\n"))).toEqual([
-			`## [${all[0]!.major}.${all[0]!.minor}.${all[0]!.patch}]`,
-		]);
+		expect(versionHeadings(last.chunks.join("\n"))).toEqual(headings.slice(0, 1));
 
 		const lastTwo = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog last 2", lastTwo.runtime);
-		expect(versionHeadings(lastTwo.chunks.join("\n"))).toEqual(
-			all
-				.slice(0, 2)
-				.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`)
-				.reverse(),
-		);
+		expect(versionHeadings(lastTwo.chunks.join("\n"))).toEqual(headings.slice(0, 2));
 
 		const full = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog full", full.runtime);
-		expect(versionHeadings(full.chunks.join("\n")).length).toBe(all.length);
+		expect(versionHeadings(full.chunks.join("\n"))).toEqual(headings);
 	});
 
 	it("rejects a zero count and unknown subcommands", async () => {

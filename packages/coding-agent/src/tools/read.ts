@@ -29,6 +29,7 @@ import {
 	parseImageMetadata,
 	prompt,
 	readImageMetadata,
+	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import {
@@ -43,6 +44,7 @@ import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
+import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { McpResourceNotFoundError } from "../internal-urls/mcp-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -1093,6 +1095,17 @@ async function assessLocalReadSpeculation(
 	};
 }
 
+/** Whether `readPath` is one web URL, whose fetch reads nothing an earlier call could have changed. */
+function isSingleWebUrl(readPath: string): boolean {
+	if (readPath.includes(";")) return false;
+	try {
+		return parseReadUrlTarget(readPath) !== null;
+	} catch {
+		// A malformed URL selector: the read reports it.
+		return false;
+	}
+}
+
 /**
  * Read tool implementation.
  *
@@ -1154,6 +1167,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
 			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
 		});
+	}
+	/**
+	 * `xd://read/sources`: selector reference for the sources the description only names.
+	 * `xd://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
+	 */
+	docTopics(): Record<string, string> {
+		return {
+			sources: prompt.render(readSourcesDoc, { BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings) }),
+			urls: InternalUrlRouter.instance()
+				.reference()
+				.map(line => `- ${line}`)
+				.join("\n"),
+		};
 	}
 	readonly parameters = readSchema;
 	readonly strict = true;
@@ -1863,6 +1889,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		// Running beside an earlier call that may write (a `bash` before this read
+		// in the same message), the read could finish before that write lands. The
+		// model sees the batch's results only after every call ends, so waiting for
+		// those calls costs no turn latency. A single web fetch reads nothing on disk.
+		const earlierEffects = isSingleWebUrl(params.path) ? undefined : toolContext?.toolCall?.earlierEffectsSettled;
+		if (earlierEffects) await untilAborted(signal, earlierEffects);
 		const inner = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
 		const innerDetails: ReadDetailsWithWindow | undefined = inner.details;
 		const result = await shapeToolResult(

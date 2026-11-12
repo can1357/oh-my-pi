@@ -6,6 +6,7 @@
 
 - Entry: `packages/coding-agent/src/tools/read.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/read.md`
+- On-demand doc topics (`ReadTool.docTopics()`): `xd://read/sources` (`prompts/tools/read-sources.md`: SQLite, archive, JSON query, executable, video, SVG and merge-conflict selectors, plus `write` targets for archives and SQLite) and `xd://read/urls` (each internal URL scheme's `promptReference()`: sub-paths, queries and limits its one-line system-prompt entry leaves out).
 - Key collaborators:
    - `packages/coding-agent/src/tools/path-utils.ts` — prefer literal filenames; normalize local paths and recover accidental delimited path lists.
    - `packages/tui/src/tools/read.ts` / `line-ranges.ts` — split trailing selectors and parse line ranges; `packages/coding-agent/src/tools/read-selector.ts` resolves raw, range, and tail selectors.
@@ -24,7 +25,7 @@
 ## Registration / Visibility
 
 - Metadata: `strict = true`, `loadMode = "essential"`. Approval normally uses the internal scheme's read tier; PDF page screenshots require `"exec"`.
-- The model-facing prompt renders hashline guidance from the live display mode and executable-view guidance only when IDA is available.
+- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable views only when IDA is available.
 
 ## Inputs
 
@@ -403,3 +404,4 @@ Notes: ...
 - Raw SQLite `q=` execution is not keyword-restricted beyond “no bound parameters”; `PRAGMA query_only = ON` prevents database writes.
 - The file snapshot store is not a read acceleration cache. It exists to verify and recover hashline edits when the file changed after the read.
 - From the third identical successful text result for the same path, a per-session loop-breaking hint advises narrowing the selector or proceeding with the edit; tracking resets when the output changes.
+- A read that runs beside an earlier call of the same message that may write (its approval, asked with its arguments and no context, is not `read`, e.g. `bash`) gets `ctx.toolCall.earlierEffectsSettled` from the agent loop. `execute()` waits for those calls before reading, so it returns the file as they left it; an abort during the wait rejects the read. A single web URL (no `;`) does not wait.

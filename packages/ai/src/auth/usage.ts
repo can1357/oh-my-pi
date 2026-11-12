@@ -710,6 +710,24 @@ export class UsageService implements UsageApi {
 		return requests;
 	}
 
+	/**
+	 * Re-check a blocked credential against live usage when a healthy report
+	 * could lift its block; the fetch reconciles the block. Returns the report,
+	 * or `undefined` when nothing was probed: the credential is not blocked
+	 * under `blockScopes`, or no usage report can lift what blocks it.
+	 */
+	async probeBlocked(
+		provider: Provider,
+		providerKey: string,
+		credentialIndex: number,
+		credential: AuthCredential,
+		blockScopes: string | readonly string[] | undefined,
+		options?: { baseUrl?: string; signal?: AbortSignal },
+	): Promise<UsageReport | null | undefined> {
+		if (!this.#deps.blocks.canHeal(provider, providerKey, credentialIndex, blockScopes)) return undefined;
+		return this.report(provider, credential, { ...options, timeoutMs: this.requestTimeoutMs });
+	}
+
 	/** Fetch the best available report for one stored credential. */
 	async report(
 		provider: Provider,

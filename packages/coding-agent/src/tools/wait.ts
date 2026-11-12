@@ -6,14 +6,13 @@ import {
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
 import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
-import { IrcBus, ircWaitAccepts } from "../irc/bus";
+import { IrcBus } from "../irc/bus";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import type { ToolSession } from ".";
 import type { AsyncJob, AsyncJobManagerApi } from "../async/job-manager";
 import { buildJobResult, settledJobIds, snapshotJobs, undeliveredJobs } from "../async/job-control";
 import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
-import { drainPendingInbox, messageResult } from "../irc/messaging";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -53,22 +52,41 @@ interface WaitMessaging {
 }
 
 /**
- * Every message queued for the caller, oldest first: its bus mailbox and its
- * session inbox, plus `woke`, the message that ended the wait, if any. A wait
- * not already ending takes the inbox only when it holds a message that ends a
- * wait: broadcast legs and progress notes alone stay queued and inject as
- * asides once the wait returns. Mailbox mail (a failed live hand-off) reaches
- * the caller only through here, so it is always taken.
+ * Hands the caller's bus mail to its session, which injects each message as a
+ * user turn once the wait returns; a wait result never carries a message, so
+ * the model never mistakes one for tool output. The mail is `woke`, the
+ * message that ended the wait, plus mailbox mail (a failed live hand-off,
+ * which reaches the caller only through here). Returns the hand-off when a
+ * message that ends a wait now waits for the caller: mail handed over here,
+ * or a direct message already queued in its session. Broadcast legs and
+ * progress notes queued there alone end nothing; they inject once the wait
+ * returns. With no mail the check stays synchronous, so a wait registers its
+ * bus waiter before a message sent right after the call can slip past it.
  */
-function takeQueuedMessages(messaging: WaitMessaging, woke?: IrcMessage): IrcMessage[] {
-	const { registry, senderId } = messaging;
+function handOffMail(messaging: WaitMessaging, woke?: IrcMessage): Promise<void> | undefined {
+	const inbox = messaging.registry.get(messaging.senderId)?.session;
+	if (!inbox) return undefined;
 	const bus = IrcBus.global();
-	const queued = woke ? [woke] : [];
-	for (let msg = bus.take(senderId); msg; msg = bus.take(senderId)) queued.push(msg);
-	const wakes = queued.length > 0 ? undefined : (msg: IrcMessage) => ircWaitAccepts({ directOnly: true }, msg);
-	queued.push(...drainPendingInbox(registry, senderId, wakes));
+	const mail = woke ? [woke] : [];
+	for (let msg = bus.take(messaging.senderId); msg; msg = bus.take(messaging.senderId)) mail.push(msg);
+	if (mail.length === 0) return inbox.hasIrcInterrupts() ? Promise.resolve() : undefined;
 	// Bus ids are snowflakes: they order messages sent within one millisecond.
-	return queued.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	mail.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	return (async () => {
+		for (const msg of mail) await inbox.deliverIrcMessage(msg);
+	})();
+}
+
+/**
+ * A wait cut short by news that injects right after it as its own turn: a
+ * message, steering, or a completion notice. Not `useless`: the loop guard
+ * must count it as progress, not an idle poll.
+ */
+function interruptedResult(): AgentToolResult<CoordinationDetails> {
+	return {
+		content: [{ type: "text", text: "Wait interrupted by message." }],
+		details: { op: "wait", jobs: [], interrupted: true },
+	};
 }
 
 interface PendingReplies {
@@ -146,11 +164,13 @@ export function hasWaitTool(session: ToolSession): boolean {
  * itself (the cycle that would park both sides), or is waiting on the user.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
  * that climbs across back-to-back idle waits. A direct message arriving
- * mid-wait ends any wait, returning every message queued by then. Broadcast
- * legs and progress notes ask the caller nothing, so they never end a wait
- * and inject as asides once it returns; the exception is a broadcast from an
- * agent a reply wait asked, which answers it (see `IrcBus.unansweredSends`).
- * A progress note leaves its sender's reply owed, so the reply wait goes on.
+ * mid-wait ends any wait. Messages never ride in the wait's result: each one
+ * reaches the caller as a user turn right after it (see `handOffMail`).
+ * Broadcast legs and progress notes ask the caller nothing, so they never end
+ * a wait and inject as asides once it returns; the exception is a broadcast
+ * from an agent a reply wait asked, which answers it (see
+ * `IrcBus.unansweredSends`). A progress note leaves its sender's reply owed,
+ * so the reply wait goes on.
  */
 export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetails> {
 	readonly name = "wait";
@@ -186,9 +206,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const manager = this.session.asyncJobManager;
 		const settledAtEntry = manager ? settledJobIds(manager, senderId) : undefined;
 
-		if (messaging) {
-			const queued = takeQueuedMessages(messaging);
-			if (queued.length > 0) return messageResult(messaging.senderId, queued);
+		const handOff = messaging && handOffMail(messaging);
+		if (handOff) {
+			await handOff;
+			return interruptedResult();
 		}
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
 		// broker must not turn every wait into an error.
@@ -201,9 +222,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				// after it does: the checks below and the aborted wake path.
 				if (signal?.reason !== TOOL_INTERRUPT_ABORT_REASON) throw error;
 			}
-			if (messaging) {
-				const queued = takeQueuedMessages(messaging);
-				if (queued.length > 0) return messageResult(messaging.senderId, queued);
+			const handOff = messaging && handOffMail(messaging);
+			if (handOff) {
+				await handOff;
+				return interruptedResult();
 			}
 		}
 		const jobs = manager?.getRunningJobs({ ownerId: senderId }) ?? [];
@@ -274,7 +296,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const asked = replyWait ? pendingReplies(messaging).from : [];
 		const busAbort = new AbortController();
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
-		const busLeg = messaging
+		// Without a session to hand it to, a message the leg took would be lost.
+		const busLeg = messaging?.registry.get(messaging.senderId)?.session
 			? IrcBus.global()
 					.wait(messaging.senderId, { directOnly: true, repliesFrom: asked }, 0, busAbort.signal)
 					.catch(() => null)
@@ -369,25 +392,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			// A dequeued message wins a photo-finish with a job: the job remains
 			// deliverable, whereas a lost message cannot be recovered from the bus.
 			const message = await busLeg;
-			if (message && messaging) return messageResult(messaging.senderId, takeQueuedMessages(messaging, message));
+			if (message && messaging) {
+				await handOffMail(messaging, message);
+				return interruptedResult();
+			}
 			if (signal?.aborted) {
 				// Steering, a peer IRC, or a completion notice cut the wait short:
 				// the designed wake path, so the message injects after a normal
 				// result. Any other abort stops the run.
-				if (signal.reason === TOOL_INTERRUPT_ABORT_REASON) {
-					// A direct message queued in the session inbox (it missed the
-					// bus waiter) is returned here rather than injected after.
-					if (messaging) {
-						const queued = takeQueuedMessages(messaging);
-						if (queued.length > 0) return messageResult(messaging.senderId, queued);
-					}
-					// Not `useless`: a message woke the agent, which the loop guard
-					// must treat as progress rather than an idle poll.
-					return {
-						content: [{ type: "text", text: "Wait interrupted by message." }],
-						details: { op: "wait", jobs: [], interrupted: true },
-					};
-				}
+				if (signal.reason === TOOL_INTERRUPT_ABORT_REASON) return interruptedResult();
 				throwIfAborted(signal);
 			}
 			if (manager && jobs.length > 0) {

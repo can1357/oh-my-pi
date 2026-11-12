@@ -34,6 +34,8 @@ function browserHost(cwd: string = process.cwd(), settings: Record<string, unkno
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -59,23 +61,20 @@ afterAll(async () => {
 
 describe("browser open options CDP helpers", () => {
 	it("adds the per-open launch switches when requested", () => {
-		const args = buildHeadlessLaunchArgs(
-			{ width: 800, height: 600 },
-			{ ignoreHttpsErrors: true, allowFileAccess: true },
-		);
+		const args = buildHeadlessLaunchArgs({ width: 800, height: 600 }, { insecure: true });
 		expect(args).toContain("--hide-scrollbars");
 		expect(args).toContain("--enable-features=WebMCPTesting,DevToolsWebMCPSupport");
 		expect(args).toContain("--ignore-certificate-errors");
 		expect(args).toContain("--allow-file-access-from-files");
 	});
 
-	it("rejects ignore_https_errors and a downloads folder on the relay before opening a tab", async () => {
+	it("rejects insecure and a downloads folder on the relay before opening a tab", async () => {
 		// No relay listens here, so an option refused only after connecting fails differently, and no test reaches a real one.
 		const port = await findFreeCdpPort();
 		const host = browserHost(process.cwd(), { "browser.relayUrl": `http://127.0.0.1:${port}` });
-		for (const option of [{ ignore_https_errors: true }, { downloads: "relay-downloads" }]) {
+		for (const option of [{ insecure: true }, { downloads: "relay-downloads" }]) {
 			const name = `relay-option-${crypto.randomUUID()}`;
-			const error = await rejectionOf(host({ action: "open", name, app: { relay: true }, ...option }));
+			const error = await rejectionOf(host({ action: "open", name, app: "relay", ...option }));
 			expect(error).toBeInstanceOf(ToolError);
 			expect(error).toMatchObject({
 				message: expect.stringContaining(
@@ -86,9 +85,9 @@ describe("browser open options CDP helpers", () => {
 		}
 	});
 
-	it("omits per-open launch switches unless requested", () => {
+	it("enables file access always and certificate errors only when requested", () => {
 		const args = buildHeadlessLaunchArgs({ width: 800, height: 600 });
-		expect(args).not.toContain("--allow-file-access-from-files");
+		expect(args).toContain("--allow-file-access-from-files");
 		if (!process.env.PUPPETEER_PROXY_IGNORE_CERT_ERRORS) {
 			expect(args).not.toContain("--ignore-certificate-errors");
 		}
@@ -175,15 +174,29 @@ describe("browser open options CDP helpers", () => {
 		expect(await Bun.file(path.join(directory, "report.txt")).exists()).toBe(false);
 	});
 
-	it("leaves a directory named by a UUID GUID in place", async () => {
+	it("leaves a directory named by a UUID GUID in place and fails the wait, since no file was saved", async () => {
 		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
 		const folder = path.join(elsewhere, guid);
 		await Bun.write(path.join(folder, "notes.txt"), "notes");
 
-		expect(await complete(guid, folder)).toBe(folder);
+		const error = await rejectionOf(complete(guid, folder));
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain(`no file is at ${folder} on this machine`);
 		expect(await Bun.file(path.join(folder, "notes.txt")).text()).toBe("notes");
 		expect(await Bun.file(path.join(directory, "report.txt")).exists()).toBe(false);
+	});
+
+	// The wait gives Chromium's rename into place about a second before it fails.
+	it("fails the wait on a completed download whose file is not on this machine, as a remote browser's is", async () => {
+		const { directory, elsewhere, downloads, complete } = await fakeDownloads(async () => undefined, false);
+		const remote = path.join(elsewhere, "report.txt");
+
+		const error = await rejectionOf(complete(crypto.randomUUID(), remote));
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain(`no file is at ${remote} on this machine`);
+		expect(downloads.list()).toEqual([]);
+		expect(await fs.readdir(directory)).toEqual([]);
 	});
 
 	it("keeps a directory named like the download when the rename takes the Windows replacement path", async () => {
@@ -497,7 +510,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 		// Fresh origins after the recycle and after close: Chromium reuses an accepted connection to an origin.
 		const recycled = serveUntrusted();
 		const later = serveUntrusted();
-		// Launched without --ignore-certificate-errors and attached over app.cdp_url, as the shared
+		// Launched without --ignore-certificate-errors and attached over an app CDP URL, as the shared
 		// browser is: only the tab's CDP override can accept the certificate.
 		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({ headless: true });
 		try {
@@ -509,8 +522,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 				action: "open",
 				name,
 				url: server.url.href,
-				app: { cdp_url: `http://${new URL(wsEndpoint).host}` },
-				ignore_https_errors: true,
+				app: `http://${new URL(wsEndpoint).host}`,
+				insecure: true,
 			});
 			expect(
 				returnedValue(

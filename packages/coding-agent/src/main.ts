@@ -155,7 +155,7 @@ import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
-import { cfgAsyncPrintWake, cfgToolsApprovalMode } from "./tools/settings";
+import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
 import { claimTerminal } from "./tools/browser/terminal-owner";
 import {
 	cfgAutocompleteMaxVisible,
@@ -2056,6 +2056,12 @@ export async function runRootCommand(
 		// explicit --hide-thinking block display option still wins for output display.
 		if (parsedArgs.printThoughts && !isProtocolMode && !isInteractive) {
 			cfgOmitThinking.override(settingsInstance, false);
+		}
+		// Print, RPC and ACP hosts serve a caller (script, harness, editor) that outlives the
+		// session and uses the servers a run leaves running; keep them past this process's
+		// exit, as `nohup cmd &` is.
+		if (!isInteractive) {
+			cfgLaunchPersist.override(settingsInstance, true);
 		}
 		// Apply --hide-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.hideThinking) {

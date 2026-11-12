@@ -5,6 +5,14 @@
  * code and page instrumentation, the isolated world for omp's kit), trusted
  * `input` events at element centres, `capture`, `pdf` and the Tern-level ops;
  * what the page reports on its own arrives through `events` polling.
+ *
+ * A Tern whose engine answers DOM reads itself (the `dom` op, `dom.ts`) is
+ * read natively instead: observation, selector resolution, actionability,
+ * element reads and waits send no `eval`, and every action is trusted
+ * `input` at the point the engine resolved. The kit is then installed only
+ * when a helper needs what no read or input provides (`select`, `highlight`
+ * and screenshot annotations, `styles`, `uploadFile`, `ariaSnapshot`, frame
+ * listing, focusing an element that takes no text, element `evaluate`).
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -135,10 +143,30 @@ import {
 	type WebMcpListOptions,
 	type WebMcpListResult,
 } from "../webmcp";
+import {
+	type DomInclude,
+	type DomMatches,
+	type DomNode,
+	type DomObservation,
+	type DomQuery,
+	type DomRef,
+	type DomReply,
+	type DomRequest,
+	type DomResolveAction,
+	type DomWaitState,
+	describeDomNode,
+	domCandidateSelector,
+	domQueryFor,
+	domReply,
+	HANDLE_ATTRIBUTE,
+	innerHtmlOf,
+	observationFrom,
+} from "./dom";
 import { keyDownStep, keyUpStep, pressSteps, type TernInputStep, type TernModifier, ternKey, typeSteps } from "./keys";
 import { TernNetworkLog, type TernRequestEntry } from "./network-log";
 import { TERN_CAPTURE_GLOBAL, TERN_CAPTURE_INSTALLER, type TernPageEmulation, ternCaptureScript } from "./page-capture";
 import {
+	TERN_FRAME_ANNOUNCE_SOURCE,
 	TERN_KIT_SOURCE,
 	type TernAnnotation,
 	type TernFrameInfo,
@@ -146,6 +174,7 @@ import {
 	type TernKitApi,
 	type TernTarget,
 	type TernTargetAction,
+	type TernTargetFailure,
 } from "./page-kit";
 import { parseTernSelector, type TernSelector } from "./selectors";
 import type { TernBlockEntry } from "./blocks";
@@ -199,11 +228,17 @@ export interface TernOpenOptions {
 	/** User agent override. */
 	userAgent?: string;
 	/** Accept invalid TLS certificates. */
-	ignoreHttpsErrors?: boolean;
+	insecure?: boolean;
+	/**
+	 * Seed of the engine's fingerprinting noise, sent as the `identity` op
+	 * right after the open. Only omp's WebKit host answers that op: a Tern
+	 * open never sets this.
+	 */
+	identitySeed?: string;
 }
 
 /** Options of {@link TernTab.adopt}: like an open, but every page setting only when given. */
-export interface TernAdoptOptions extends Omit<TernOpenOptions, "pane" | "viewport"> {
+export interface TernAdoptOptions extends Omit<TernOpenOptions, "pane" | "viewport" | "identitySeed"> {
 	/** The user's browser block to drive. */
 	block: TernBlockEntry;
 	/** Page layout size for an adopted PiP; a docked block's page keeps the block's size. */
@@ -235,22 +270,54 @@ const CONSOLE_LIMIT = 500;
 const NAVIGATION_IDLE_MS = 500;
 const KIT_CALL =
 	"async function (method, args) { const kit = globalThis.__ompTernKit; if (!kit) return { missing: true }; return { value: await kit[method](...args) }; }";
-const HANDLE_ATTRIBUTE = "data-omp-tern-handle";
-const NO_TERN_WEBMCP = "WKWebView has no native WebMCP; open the tab with `app.tern: false` to use Chromium";
+/** Rendering updates an element's rect must hold still for before a native action aims at it. */
+const RESOLVE_STABLE_UPDATES = 2;
+/** How long one native `resolve` waits for a stable rect before omp asks again. */
+const RESOLVE_SETTLE_MS = 1_000;
+/** Wheels one native target may spend bringing its element into view. */
+const SCROLL_WHEEL_LIMIT = 8;
+/** How long past its own timeout a native `wait` may take to answer. */
+const WAIT_REPLY_GRACE_MS = 5_000;
+/** Matches `handlesFor` asks the native reads for (they stop at 100 by default). */
+const HANDLE_LIMIT = 10_000;
+/** The native `resolve` action checking what the kit's `target()` checks for each action. */
+const RESOLVE_ACTIONS: Record<TernTargetAction, DomResolveAction> = {
+	click: "click",
+	dblclick: "click",
+	check: "click",
+	upload: "click",
+	hover: "hover",
+	drag: "hover",
+	type: "type",
+	fill: "type",
+	focus: "none",
+	point: "none",
+};
+/** Input types whose value `fill` sets through the kit: it is picked, not typed. */
+const PICKED_INPUT_TYPES: Readonly<Record<string, true>> = {
+	date: true,
+	"datetime-local": true,
+	month: true,
+	week: true,
+	time: true,
+	color: true,
+	range: true,
+};
+/** Tags whose form value reads as an empty string, not null, when the engine reports none. */
+const FORM_VALUE_TAGS: Readonly<Record<string, true>> = { input: true, textarea: true, select: true };
+/** Why the WebMCP helpers throw on backend `product`, and the open option (`app: "chromium"`) that gets Chromium instead. */
+function noWebMcp(product: string): string {
+	return `the ${product} web view has no native WebMCP; open the tab with \`app: "chromium"\` to use Chromium`;
+}
 
 /** The tab-helper name for errors: `tab.pdf()`. */
 function helper(name: string): string {
 	return `tab.${name}()`;
 }
 
-/** A ToolError for a helper the Tern backend cannot provide. */
-function unsupported(name: string, reason: string): ToolError {
-	return new ToolError(`${helper(name)} is not supported on the Tern browser backend: ${reason}`);
-}
-
-/** The message of a page-side exception answered by Tern (`js` errors), without Tern's prefix. */
+/** The message of a page-side exception answered by the backend (`js` errors), without the client's `<product> browser <op> failed (js): ` prefix. */
 function pageErrorText(error: TernError): string {
-	return error.message.replace(/^Tern browser \w+ failed \(js\): /, "");
+	return error.message.replace(/^\S+ browser \w+ failed \(js\): /, "");
 }
 
 /**
@@ -272,6 +339,51 @@ export function userSourceFunction(source: string): string {
 		return `function () {\n${source}\n}`;
 	} catch {}
 	return `function () {\n${expression}\n}`;
+}
+
+/** Why an element never became actionable, as the kit's `target()` and the native `resolve` loop report it. */
+interface TargetFailure {
+	reason: TernTargetFailure;
+	count: number;
+	detail?: string;
+}
+
+/** The error of an action whose element did not become actionable within `elapsedMs`. */
+function targetTimeout(label: string, elapsedMs: number, failure: TargetFailure): ToolError {
+	const why =
+		failure.reason === "missing"
+			? "no element matches (wrong page or selector?)"
+			: failure.reason === "covered"
+				? `the element is covered by ${failure.detail ?? "another element"}`
+				: failure.reason === "hidden"
+					? "the element is not visible"
+					: failure.reason === "disabled"
+						? "the element is disabled"
+						: failure.reason === "notEditable"
+							? "the element is not editable"
+							: failure.reason === "offViewport"
+								? "the element is outside the viewport"
+								: "the element keeps moving";
+	return new ToolError(`${label} timed out after ${elapsedMs}ms: ${why} (${failure.count} match(es))`);
+}
+
+/** The error of an observation id whose element left the page. */
+function staleId(id: number): ToolError {
+	return new ToolError(`Element id ${id} is stale. Run tab.observe() again.`);
+}
+
+/** Whether `fill` sets this control's value through the kit instead of typing into it. */
+function isPickedControl(node: DomNode): boolean {
+	return (
+		node.tag === "select" ||
+		(node.tag === "input" && PICKED_INPUT_TYPES[(node.attributes?.type ?? "").toLowerCase()] === true)
+	);
+}
+
+/** An actionable element of the native reads: the point to act on, its size, and the node. */
+interface ResolvedTarget extends BoundingBox {
+	ref: DomRef;
+	node: DomNode;
 }
 
 /** The first line of a page-side exception, without the `Error: ` prefix: agent-readable kit failures. */
@@ -336,6 +448,9 @@ function cookieFromTern(value: unknown): BrowserCookie | null {
 	};
 }
 
+/** The capture installer for a document that may not have the capture: it only updates one that is there. */
+const TERN_CAPTURE_UPDATER = `function (config) { if (!globalThis[${JSON.stringify(TERN_CAPTURE_GLOBAL)}]) return false; return (${TERN_CAPTURE_INSTALLER})(config); }`;
+
 /** A captured console message's level (unknown levels read as `log`). */
 function consoleLevel(value: unknown): BrowserConsoleLevel {
 	return value === "info" || value === "warn" || value === "error" || value === "debug" ? value : "log";
@@ -347,8 +462,13 @@ function consoleLevel(value: unknown): BrowserConsoleLevel {
  * emulation, scripts, pointer and modifier state.
  */
 export class TernTab implements InProcessRunTab {
-	/** Guest file-name prefix of Tern runs. */
-	readonly runLabel = "tern-run";
+	/** Guest file-name prefix of this backend's runs (`tern-run`, `webkit-run`). */
+	readonly runLabel: string;
+	/**
+	 * The backend's display name (`Tern`, `WebKit`), from the connection: what
+	 * every message of this tab that a user or the model reads calls the backend.
+	 */
+	readonly product: string;
 	/** The PiP's block id (daemon-native). */
 	readonly block: number;
 	readonly #client: TernSocketClient;
@@ -378,7 +498,21 @@ export class TernTab implements InProcessRunTab {
 	readonly #unclaimedDownloads: BrowserDownload[] = [];
 	#downloadDir: string | undefined;
 	// Network, scripts and emulation.
-	readonly #network = new TernNetworkLog();
+	readonly #network: TernNetworkLog;
+	/** Whether the server reports console messages and uncaught exceptions itself (its welcome lists `console`). */
+	readonly #nativeConsole: boolean;
+	/** Whether the server reports every resource load itself (its welcome lists `network`); such loads keep no body. */
+	readonly nativeNetwork: boolean;
+	/**
+	 * Whether a page of this tab is observed without any omp script in its
+	 * world (both of the above): the capture and vitals scripts are then
+	 * installed only once a helper needs them ({@link #captureNeeded}, `vitals`).
+	 */
+	readonly #observesNatively: boolean;
+	/** Whether the Web Vitals observers are a document-start script. */
+	#vitalsScript: boolean;
+	/** Whether the current main document has (or is getting) the capture script. */
+	#captureInDocument = false;
 	readonly #initScripts: InitScript[] = [];
 	#nextInitScript = 1;
 	#allowedDomains: string[] = [];
@@ -392,6 +526,9 @@ export class TernTab implements InProcessRunTab {
 	readonly #buttons = new Set<"left" | "right" | "middle">();
 	readonly #mods: TernModifier[] = [];
 	// Screenshots, snapshots, recording.
+	// Native reads: what the last observe's ids stand for, and the owner element of each frame path.
+	#observed = new Map<number, DomRef>();
+	readonly #frameRoots = new Map<string, DomRef>();
 	readonly #screenshotHistory = new Map<string, ScreenshotHistory>();
 	readonly #ariaBaselines = new Map<string, AriaSnapshotBaseline>();
 	readonly #recording = new RecordingController();
@@ -404,6 +541,13 @@ export class TernTab implements InProcessRunTab {
 		adopted?: TernBlockEntry;
 	}) {
 		this.#client = opts.client;
+		this.product = opts.client.product;
+		this.runLabel = `${this.product.toLowerCase()}-run`;
+		this.#nativeConsole = opts.client.supports("console");
+		this.nativeNetwork = opts.client.supports("network");
+		this.#observesNatively = this.#nativeConsole && this.nativeNetwork;
+		this.#vitalsScript = !this.#observesNatively;
+		this.#network = new TernNetworkLog(this.product, this.nativeNetwork);
 		this.block = opts.block;
 		this.#name = opts.name;
 		this.#viewport = { ...opts.viewport };
@@ -438,7 +582,7 @@ export class TernTab implements InProcessRunTab {
 			},
 		);
 		if (!isRecord(opened) || typeof opened.block !== "number") {
-			throw new ToolError("Tern answered the browser open without a block id");
+			throw new ToolError(`${client.product} answered the browser open without a block id`);
 		}
 		const tab = new TernTab({ client, block: opened.block, name: opts.name, viewport: opts.viewport });
 		try {
@@ -594,6 +738,16 @@ export class TernTab implements InProcessRunTab {
 		return isRecord(answer) ? answer.value : undefined;
 	}
 
+	/** Whether this Tern's engine answers DOM reads itself (`dom` op), so the page kit stays out of them. */
+	get #native(): boolean {
+		return this.#client.supports("dom");
+	}
+
+	/** One native read; an engine `{ error }` reply throws a {@link TernError}. */
+	async #dom<R extends DomRequest>(request: R, timeoutMs?: number): Promise<DomReply<R>> {
+		return domReply(this.product, request, await this.#op("dom", { ...request }, timeoutMs));
+	}
+
 	/** Call a kit method in `frame`'s isolated world, installing the kit when the document lacks it. */
 	async #kit<T>(method: keyof TernKitApi, args: unknown[], frame: FramePath = null): Promise<T> {
 		for (let attempt = 0; attempt < 2; attempt++) {
@@ -610,7 +764,7 @@ export class TernTab implements InProcessRunTab {
 			}
 			return (isRecord(result) ? result.value : undefined) as T;
 		}
-		throw new ToolError("The Tern page kit could not be installed in this document");
+		throw new ToolError(`The ${this.product} page kit could not be installed in this document`);
 	}
 
 	/** Evaluate user code in the page world, surfacing page exceptions as ToolErrors. */
@@ -656,6 +810,7 @@ export class TernTab implements InProcessRunTab {
 			if (this.#events.length > EVENT_LOG_LIMIT) this.#events.splice(0, this.#events.length - EVENT_LOG_LIMIT);
 			if (typeof answer.dropped === "number" && answer.dropped > 0) {
 				logger.debug("Tern dropped browser events before omp read them", { dropped: answer.dropped });
+				this.#network.forgetInflight();
 			}
 		})();
 		this.#pulling = pulling;
@@ -675,6 +830,9 @@ export class TernTab implements InProcessRunTab {
 				if (event.type === "committed") {
 					this.#pendingDialog = undefined;
 					this.#frameUrls.clear();
+					// The new document runs the script list as it is now, and the old one's loads are gone.
+					this.#captureInDocument = this.#captureNeeded();
+					this.#network.forgetInflight();
 				}
 				return;
 			case "title":
@@ -697,7 +855,30 @@ export class TernTab implements InProcessRunTab {
 				this.#ingestDownload(event);
 				return;
 			case "response":
-				this.#network.ingestNavigationResponse(event);
+				if (this.nativeNetwork && typeof event.id === "number") this.#network.ingestNative(event);
+				else this.#network.ingestNavigationResponse(event);
+				return;
+			case "request":
+			case "requestFinished":
+				if (this.nativeNetwork) this.#network.ingestNative(event);
+				return;
+			case "requestFailed": {
+				if (!this.nativeNetwork) return;
+				const failed = this.#network.ingestNative(event);
+				if (failed) {
+					this.#pushConsole({
+						seq: 0,
+						ts: Date.now(),
+						type: "requestfailed",
+						level: "error",
+						text: `${failed.failureText ?? "request failed"}: ${failed.url}`,
+						location: failed.url || undefined,
+					});
+				}
+				return;
+			}
+			case "console":
+				if (this.#nativeConsole) this.#ingestConsole(event);
 				return;
 			case "blocked":
 				if (typeof event.url === "string") this.#network.ingestBlocked(event.url);
@@ -706,6 +887,32 @@ export class TernTab implements InProcessRunTab {
 				this.#ingestMessage(event);
 				return;
 		}
+	}
+
+	/**
+	 * A native `console` event: an uncaught exception (`source: "javascript"`,
+	 * `level: "error"`) is a page error, everything else a console message. The
+	 * engine gives the rendered text only, so `args` is that text.
+	 */
+	#ingestConsole(event: TernEvent): void {
+		const text = stringOr(event.text, "");
+		const location =
+			typeof event.url === "string" && event.url
+				? `${event.url}${typeof event.line === "number" ? `:${event.line}` : ""}`
+				: undefined;
+		if (event.source === "javascript" && event.level === "error") {
+			this.#pushConsole({ seq: 0, ts: Date.now(), type: "pageerror", level: "error", text, location });
+			return;
+		}
+		this.#pushConsole({
+			seq: 0,
+			ts: Date.now(),
+			type: "console",
+			level: event.level === "warning" ? "warn" : consoleLevel(event.level),
+			text,
+			location,
+			args: [text],
+		});
 	}
 
 	#ingestMessage(event: TernEvent): void {
@@ -720,6 +927,8 @@ export class TernTab implements InProcessRunTab {
 		if (typeof message.dropped === "number") this.#consoleDropped += message.dropped;
 		const ts = numberOr(message.ts, Date.now());
 		const location = typeof message.location === "string" ? message.location : undefined;
+		// A capture script installed for a route or an emulation still wraps the console: the engine's own report is the log's.
+		if (this.#nativeConsole && (message.kind === "console" || message.kind === "pageerror")) return;
 		switch (message.kind) {
 			case "console":
 				this.#pushConsole({
@@ -744,7 +953,8 @@ export class TernTab implements InProcessRunTab {
 				});
 				return;
 			case "requestfailed":
-				this.#network.ingestPageMessage(message);
+				// On a server that reports loads itself, only a request the capture failed itself is news.
+				if (!this.#network.ingestPageMessage(message)) return;
 				this.#pushConsole({
 					seq: 0,
 					ts,
@@ -839,10 +1049,12 @@ export class TernTab implements InProcessRunTab {
 	// ─── Configuration and scripts ────────────────────────────────────────
 
 	async #configure(opts: TernOpenOptions, timeoutMs: number): Promise<void> {
+		// Before any page script can read a canvas: the blank page runs none.
+		if (opts.identitySeed !== undefined) await this.#op("identity", { seed: opts.identitySeed });
 		// Tern answers `open` once the page takes calls, before its about:blank load reports. That load's
 		// late `committed`/`loaded` events would otherwise settle the first navigation before it loads.
 		await this.#poll(
-			"The Tern page's initial about:blank load",
+			`The ${this.product} page's initial about:blank load`,
 			timeoutMs,
 			() => (this.#events.some(event => event.type === "loaded" || event.type === "failed") ? true : undefined),
 			{ pull: true },
@@ -862,23 +1074,48 @@ export class TernTab implements InProcessRunTab {
 			this.#emulation.userAgent = opts.userAgent;
 			await this.#op("agent", { value: opts.userAgent });
 		}
-		if (opts.ignoreHttpsErrors) await this.#op("insecure", { value: true });
+		if (opts.insecure) await this.#op("insecure", { value: true });
 		if (opts.downloadsPath !== undefined) await this.#enableDownloads(opts.downloadsPath);
 		for (const source of opts.initScripts ?? []) {
 			this.#initScripts.push({ id: `tern-init-${this.#nextInitScript++}`, source });
 		}
 	}
 
+	/**
+	 * Whether the page-world capture script must run in this tab's documents.
+	 * Always on a server that leaves console or request observation to it;
+	 * on one that observes both natively only for what needs code in the page:
+	 * a route, or an emulation the capture implements (geolocation, locale, offline).
+	 */
+	#captureNeeded(): boolean {
+		if (!this.#observesNatively) return true;
+		const { geolocation, locale, offline } = this.#pageEmulation;
+		return this.#network.rules().length > 0 || geolocation !== undefined || locale !== undefined || offline === true;
+	}
+
 	/** Every document-start script this tab needs, in order. */
 	#scripts(): Array<{ source: string; world: World; frames: "main" | "all"; at: "start" | "end" }> {
 		return [
-			{
-				source: ternCaptureScript({ routes: this.#network.rules(), emulation: this.#pageEmulation }),
-				world: "page",
-				frames: "all",
-				at: "start",
-			},
-			{ source: `${VITALS_INIT_SOURCE};`, world: "page", frames: "main", at: "start" },
+			...(this.#captureNeeded()
+				? [
+						{
+							source: ternCaptureScript({ routes: this.#network.rules(), emulation: this.#pageEmulation }),
+							world: "page" as const,
+							frames: "all" as const,
+							at: "start" as const,
+						},
+					]
+				: []),
+			...(this.#vitalsScript
+				? [
+						{
+							source: `${VITALS_INIT_SOURCE};`,
+							world: "page" as const,
+							frames: "main" as const,
+							at: "start" as const,
+						},
+					]
+				: []),
 			...(this.#reactHook
 				? [
 						{
@@ -905,7 +1142,13 @@ export class TernTab implements InProcessRunTab {
 				frames: "all" as const,
 				at: "start" as const,
 			})),
-			{ source: TERN_KIT_SOURCE, world: "isolated", frames: "all", at: "start" },
+			// Native reads need no kit in every document, only the frame paths `eval` addresses.
+			{
+				source: this.#native ? TERN_FRAME_ANNOUNCE_SOURCE : TERN_KIT_SOURCE,
+				world: "isolated",
+				frames: "all",
+				at: "start",
+			},
 		];
 	}
 
@@ -914,13 +1157,23 @@ export class TernTab implements InProcessRunTab {
 		await this.#op("scripts", { scripts: this.#scripts() });
 	}
 
-	/** Re-apply the capture configuration: future documents and every frame of the current one. */
+	/**
+	 * Re-apply the capture configuration: future documents and every frame of
+	 * the current one. Where the capture is on demand ({@link #captureNeeded})
+	 * a document that never had it is left without it, and one that has it keeps
+	 * it (the page's wrapped built-ins cannot be unwrapped) with the new
+	 * configuration until the next navigation.
+	 */
 	async #applyCapture(): Promise<void> {
 		await this.#syncScripts();
+		const needed = this.#captureNeeded();
+		if (needed) this.#captureInDocument = true;
+		if (!this.#captureInDocument) return;
+		const installer = needed ? TERN_CAPTURE_INSTALLER : TERN_CAPTURE_UPDATER;
 		const config = { routes: this.#network.rules(), emulation: this.#pageEmulation };
 		const children = await this.#kit<TernFrameInfo[]>("frames", []).catch(() => []);
 		for (const frame of [null, ...children.map(child => child.path)]) {
-			await this.#eval(TERN_CAPTURE_INSTALLER, [config], "page", frame).catch(error => {
+			await this.#eval(installer, [config], "page", frame).catch(error => {
 				logger.debug("Tern capture update skipped for a frame", {
 					frame,
 					error: error instanceof Error ? error.message : String(error),
@@ -934,7 +1187,8 @@ export class TernTab implements InProcessRunTab {
 	/**
 	 * Wait for a navigation started after `since`: `load` = Tern's `loaded`
 	 * event, `domcontentloaded` = committed and parsed, `networkidle*` = loaded
-	 * and at most 0/2 page fetch/XHR in flight for 500 ms (page requests only).
+	 * and at most 0/2 page fetch/XHR in flight for 500 ms (page requests only;
+	 * every resource load on a server that reports loads itself).
 	 * A load failure or allowlist block throws. When a navigation reports no
 	 * events (same-document, cached), a settled `state` ends the wait.
 	 */
@@ -981,15 +1235,18 @@ export class TernTab implements InProcessRunTab {
 				}
 				if (!loaded) return undefined;
 				if (waitUntil === "load") return true;
-				const inflight = numberOr(
-					await this.#eval(
-						`function () { const capture = globalThis[${JSON.stringify(TERN_CAPTURE_GLOBAL)}]; return capture ? capture.inflight : 0; }`,
-						[],
-						"page",
-						null,
-					).catch(() => 0),
-					0,
-				);
+				// A server that reports loads itself counts every resource; the capture counts the page's fetch/XHR.
+				const inflight = this.nativeNetwork
+					? this.#network.inflight
+					: numberOr(
+							await this.#eval(
+								`function () { const capture = globalThis[${JSON.stringify(TERN_CAPTURE_GLOBAL)}]; return capture ? capture.inflight : 0; }`,
+								[],
+								"page",
+								null,
+							).catch(() => 0),
+							0,
+						);
 				if (inflight > (waitUntil === "networkidle0" ? 0 : 2)) {
 					idleSince = undefined;
 					return undefined;
@@ -1140,6 +1397,14 @@ export class TernTab implements InProcessRunTab {
 		return { ...this.#viewport };
 	}
 
+	/**
+	 * Whether `file:` pages may read other files (the `fileAccess` op of omp's
+	 * WebKit host; Tern has no such op). Documents loaded afterwards see it.
+	 */
+	async setFileAccess(allow: boolean): Promise<void> {
+		await this.#op("fileAccess", { value: allow });
+	}
+
 	/** Resize the PiP's page (`viewport` op); `deviceScaleFactor` scales captures. */
 	async setViewport(viewport: ViewportOptions): Promise<void> {
 		await this.#op("viewport", { width: Math.round(viewport.width), height: Math.round(viewport.height) });
@@ -1185,6 +1450,7 @@ export class TernTab implements InProcessRunTab {
 		explicitTimeout?: number,
 	): Promise<BoundingBox> {
 		const spec = this.#spec(selector);
+		if (this.#native) return await this.#resolveTarget(label, spec, action, frame, explicitTimeout);
 		const timeoutMs =
 			explicitTimeout === undefined
 				? resolveOpTimeouts(this.#cellMs).actionOpMs
@@ -1204,21 +1470,331 @@ export class TernTab implements InProcessRunTab {
 			await untilAborted(this.#signal, () => Bun.sleep(delay));
 			delay = Math.min(250, Math.round(delay * 1.5));
 		}
-		const why =
-			last.reason === "missing"
-				? "no element matches (wrong page or selector?)"
-				: last.reason === "covered"
-					? `the element is covered by ${last.detail ?? "another element"}`
-					: last.reason === "hidden"
-						? "the element is not visible"
-						: last.reason === "disabled"
-							? "the element is disabled"
-							: last.reason === "notEditable"
-								? "the element is not editable"
-								: last.reason === "offViewport"
-									? "the element is outside the viewport"
-									: "the element keeps moving";
-		throw new ToolError(`${label} timed out after ${Date.now() - started}ms: ${why} (${last.count} match(es))`);
+		throw targetTimeout(label, Date.now() - started, last);
+	}
+
+	// ─── Native reads ─────────────────────────────────────────────────────
+
+	/** The ref observation id `id` stands for. */
+	#observedRef(id: number): DomRef {
+		const ref = this.#observed.get(id);
+		if (ref === undefined) {
+			throw new ToolError(`Unknown element id ${id}. Run tab.observe() to refresh the element list.`);
+		}
+		return ref;
+	}
+
+	/** The ref of the element carrying kit handle `token`, or null. */
+	async #refOfToken(token: string): Promise<DomRef | null> {
+		const { nodes } = await this.#dom({ read: "query", ...domQueryFor({ engine: "handle", token }), limit: 1 });
+		return nodes[0]?.ref ?? null;
+	}
+
+	/**
+	 * The ref of the element the kit resolves `spec` to, or null: ARIA snapshot
+	 * refs live in the kit, which marks the element for the engine to find.
+	 */
+	async #refThroughKit(spec: TernSelector, frame: FramePath): Promise<DomRef | null> {
+		const token = await this.#kit<string | null>("mark", [spec], frame);
+		if (!token) return null;
+		try {
+			return await this.#refOfToken(token);
+		} finally {
+			await this.#kit("unmark", [token], frame).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * The owner element of frame path `frame`, which scopes a native read to
+	 * the frame's document. Frame paths are the kit's (`window.frames`
+	 * indices), so the parent's kit marks its frame elements once and the
+	 * engine names the one hosting the path; later calls only check the
+	 * remembered owner is still in the page.
+	 */
+	async #frameRoot(frame: string): Promise<DomRef> {
+		const known = this.#frameRoots.get(frame);
+		if (known !== undefined) {
+			if ((await this.#dom({ read: "query", by: "ref", value: known, limit: 1 })).nodes.length > 0) return known;
+			this.#frameRoots.delete(frame);
+		}
+		const cut = frame.lastIndexOf(".");
+		const parent = cut < 0 ? null : frame.slice(0, cut);
+		const index = frame.slice(cut + 1);
+		const tokens = await this.#kit<string[]>("markAll", [{ engine: "pierce", query: "iframe,frame" }], parent);
+		let owner: DomRef | null = null;
+		try {
+			for (const token of tokens) {
+				const hosted = await this.#kit<string | null>("frameOf", [{ engine: "handle", token }], parent);
+				if (hosted !== index) continue;
+				owner = await this.#refOfToken(token);
+				break;
+			}
+		} finally {
+			if (tokens.length > 0) await this.#kit("unmark", [tokens], parent).catch(() => undefined);
+		}
+		if (owner === null) throw new ToolError(`Frame ${frame} is no longer in the page`);
+		this.#frameRoots.set(frame, owner);
+		return owner;
+	}
+
+	/** The native query for `spec` inside `frame`; null when an ARIA ref no longer names an element. */
+	async #queryFor(spec: TernSelector, frame: FramePath): Promise<DomQuery | null> {
+		if (spec.engine === "id") return { by: "ref", value: this.#observedRef(spec.id) };
+		if (spec.engine === "ariaRef") {
+			const ref = await this.#refThroughKit(spec, frame);
+			return ref === null ? null : { by: "ref", value: ref };
+		}
+		const query = domQueryFor(spec);
+		return frame && query.by !== "ref" ? { ...query, root: await this.#frameRoot(frame) } : query;
+	}
+
+	/** The matches of `spec` inside `frame`. An observation id whose element left the page throws as stale. */
+	async #query(
+		spec: TernSelector,
+		frame: FramePath,
+		extra: Pick<DomQuery, "limit" | "include" | "visibleOnly"> = {},
+	): Promise<DomMatches> {
+		const query = await this.#queryFor(spec, frame);
+		if (!query) return { nodes: [], total: 0 };
+		const matches = await this.#dom({ read: "query", ...query, ...extra });
+		if (spec.engine === "id" && matches.nodes.length === 0) throw staleId(spec.id);
+		return matches;
+	}
+
+	/** The first match of `spec` with the `include`d extras, or undefined. */
+	async #first(spec: TernSelector, frame: FramePath, include?: DomInclude[]): Promise<DomNode | undefined> {
+		return (await this.#query(spec, frame, { limit: 1, ...(include ? { include } : {}) })).nodes[0];
+	}
+
+	/** The element `spec` names and how many elements match; a ref or an observation id needs no read. */
+	async #locate(spec: TernSelector, frame: FramePath): Promise<{ ref: DomRef; count: number } | null> {
+		if (spec.engine === "ref") return { ref: spec.ref, count: 1 };
+		if (spec.engine === "id") return { ref: this.#observedRef(spec.id), count: 1 };
+		const { nodes, total } = await this.#query(spec, frame, { limit: 1 });
+		const ref = nodes[0]?.ref;
+		return ref === undefined ? null : { ref, count: total };
+	}
+
+	/**
+	 * {@link #target} on native reads: find the element, then `resolve` it
+	 * until it is actionable. An element out of view is brought in with the
+	 * wheel the engine names (a bounded number of times), a covered one gets
+	 * the one re-centring wheel the engine offers. `enabled` also refuses a
+	 * disabled element for an action the engine does not check it for.
+	 */
+	async #resolveTarget(
+		label: string,
+		spec: TernSelector,
+		action: TernTargetAction,
+		frame: FramePath,
+		explicitTimeout?: number,
+		enabled = false,
+	): Promise<ResolvedTarget> {
+		const timeoutMs =
+			explicitTimeout === undefined
+				? resolveOpTimeouts(this.#cellMs).actionOpMs
+				: resolveWaitTimeout(this.#cellMs, explicitTimeout);
+		const resolveAction = RESOLVE_ACTIONS[action];
+		const started = Date.now();
+		let delay = 30;
+		let wheels = 0;
+		let recentred = false;
+		let last: TargetFailure;
+		for (;;) {
+			const found = await this.#locate(spec, frame);
+			if (!found) {
+				last = { reason: "missing", count: 0 };
+			} else {
+				const resolved = await this.#dom({
+					read: "resolve",
+					ref: found.ref,
+					action: resolveAction,
+					// A wheel omp just sent may still be moving the page under a read that checks nothing else.
+					stable: resolveAction !== "none" || wheels > 0 ? RESOLVE_STABLE_UPDATES : 0,
+					timeout: Math.max(1, Math.min(RESOLVE_SETTLE_MS, timeoutMs - (Date.now() - started))),
+				});
+				if (resolved.state === "ok") {
+					if (!resolved.point || !resolved.node) {
+						throw new TernError(
+							"protocol",
+							`${this.product} answered dom resolve \`ok\` without a point and node`,
+						);
+					}
+					if (!enabled || !resolved.node.states?.includes("disabled")) {
+						return {
+							x: resolved.point[0],
+							y: resolved.point[1],
+							width: resolved.node.rect[2],
+							height: resolved.node.rect[3],
+							ref: found.ref,
+							node: resolved.node,
+						};
+					}
+					last = { reason: "disabled", count: found.count };
+				} else if (
+					resolved.scroll &&
+					(resolved.state === "offViewport"
+						? wheels < SCROLL_WHEEL_LIMIT
+						: resolved.state === "covered" && !recentred)
+				) {
+					if (resolved.state === "covered") recentred = true;
+					wheels++;
+					const { at, dx, dy } = resolved.scroll;
+					await this.#input([{ type: "wheel", x: at[0], y: at[1], dx, dy, mods: [] }]);
+					continue;
+				} else if (resolved.state === "detached") {
+					if (spec.engine === "id") throw staleId(spec.id);
+					last = { reason: "missing", count: 0 };
+					// A dead ref never names an element again.
+					if (spec.engine === "ref") break;
+				} else if (resolved.state === "covered") {
+					last = {
+						reason: "covered",
+						count: found.count,
+						detail: resolved.coveredBy ? describeDomNode(resolved.coveredBy) : undefined,
+					};
+				} else {
+					last = { reason: resolved.state, count: found.count };
+				}
+			}
+			const elapsed = Date.now() - started;
+			if (elapsed >= timeoutMs) break;
+			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
+			await untilAborted(this.#signal, () => Bun.sleep(delay));
+			delay = Math.min(250, Math.round(delay * 1.5));
+		}
+		throw targetTimeout(label, Date.now() - started, last);
+	}
+
+	/**
+	 * Wait natively until the matches of `spec` reach `state`; resolves the
+	 * matches (of an `attached`/`visible` wait) and rejects on timeout as
+	 * {@link #poll} does.
+	 */
+	async #waitNative(
+		label: string,
+		spec: TernSelector,
+		frame: FramePath,
+		state: DomWaitState,
+		timeoutMs: number,
+	): Promise<DomNode[]> {
+		let left = timeoutMs;
+		let query = await this.#queryFor(spec, frame);
+		if (!query) {
+			// An ARIA ref the kit does not know matches nothing, and nothing to wait on until it does.
+			if (state === "hidden" || state === "detached") return [];
+			const started = Date.now();
+			query = await this.#poll(label, timeoutMs, async () => (await this.#queryFor(spec, frame)) ?? undefined);
+			left = Math.max(1, timeoutMs - (Date.now() - started));
+		}
+		const waited = await this.#dom({ read: "wait", for: query, state, timeout: left }, left + WAIT_REPLY_GRACE_MS);
+		if (!waited.matched) throw new ToolError(`${label} timed out after ${timeoutMs}ms`);
+		return waited.nodes ?? [];
+	}
+
+	/** What a handle holds for the element a native wait matched: its ref (of a `visible` wait, the first visible match's). */
+	async #waitedSpec(spec: TernSelector, frame: FramePath, nodes: DomNode[], visible: boolean): Promise<TernSelector> {
+		let ref = nodes[0]?.ref;
+		if (visible && nodes.length > 1) {
+			ref = (await this.#query(spec, frame, { limit: 1, visibleOnly: true })).nodes[0]?.ref ?? ref;
+		}
+		return ref === undefined ? spec : { engine: "ref", ref };
+	}
+
+	/**
+	 * Stamp a kit handle token on the node `ref`, for a helper only the kit
+	 * provides: the kit marks the elements with the node's tag and attributes,
+	 * the engine says which mark the node carries, and the other marks go
+	 * again. Looks in `frame`, or in the main frame and then its child frames.
+	 */
+	async #markRef(ref: DomRef, frame: FramePath): Promise<{ token: string; frame: FramePath }> {
+		const describeRef = async (): Promise<DomNode | undefined> =>
+			(await this.#dom({ read: "query", by: "ref", value: ref, include: ["attributes"] })).nodes[0];
+		const node = await describeRef();
+		if (!node) throw new ToolError("Element handle selector no longer resolves");
+		const candidates: TernSelector = { engine: "pierce", query: domCandidateSelector(node) };
+		const markIn = async (path: FramePath): Promise<string | undefined> => {
+			const tokens = await this.#kit<string[]>("markAll", [candidates], path);
+			if (tokens.length === 0) return undefined;
+			let own: string | undefined;
+			try {
+				const carried = ((await describeRef())?.attributes?.[HANDLE_ATTRIBUTE] ?? "").split(/\s+/);
+				own = tokens.find(token => carried.includes(token));
+			} finally {
+				const rest = tokens.filter(token => token !== own);
+				if (rest.length > 0) await this.#kit("unmark", [rest], path).catch(() => undefined);
+			}
+			return own;
+		};
+		const own = await markIn(frame);
+		if (own) return { token: own, frame };
+		if (frame === null) {
+			for (const child of await this.#kit<TernFrameInfo[]>("frames", [])) {
+				const token = await markIn(child.path).catch(() => undefined);
+				if (token) return { token, frame: child.path };
+			}
+		}
+		throw new ToolError(
+			"This helper runs in the page, and page script cannot reach the element (it sits in a closed shadow root or in a frame of another site)",
+		);
+	}
+
+	/**
+	 * Run a kit helper on the element `spec` names. The kit resolves its own
+	 * selectors; an element only the engine can name (a ref, an observation id
+	 * of a native observe) is marked for it first and unmarked after.
+	 */
+	async #onKit<T>(
+		spec: TernSelector,
+		frame: FramePath,
+		run: (spec: TernSelector, frame: FramePath) => Promise<T>,
+	): Promise<T> {
+		if (!this.#native || (spec.engine !== "ref" && spec.engine !== "id")) return await run(spec, frame);
+		const marked = await this.#markRef(spec.engine === "ref" ? spec.ref : this.#observedRef(spec.id), frame);
+		try {
+			return await run({ engine: "handle", token: marked.token }, marked.frame);
+		} finally {
+			await this.#kit("unmark", [marked.token], marked.frame).catch(() => undefined);
+		}
+	}
+
+	/** The layout viewport's size in CSS px. */
+	async #viewportSize(): Promise<{ width: number; height: number }> {
+		if (this.#native) {
+			const { viewport } = await this.#dom({ read: "snapshot", limit: 1 });
+			return { width: viewport.width, height: viewport.height };
+		}
+		const geometry = await this.#kit<TernGeometry>("geometry", []);
+		return { width: geometry.innerWidth, height: geometry.innerHeight };
+	}
+
+	/** Observe through a native snapshot; its ids replace the tab's id registry. */
+	async #observeNative(opts?: {
+		includeAll?: boolean;
+		viewportOnly?: boolean;
+		selector?: string;
+		compact?: boolean;
+	}): Promise<DomObservation> {
+		let root: DomRef | undefined;
+		if (opts?.selector) {
+			const spec = this.#spec(opts.selector);
+			root = (await this.#locate(spec, null))?.ref;
+			if (root === undefined) {
+				throw new ToolError(`tab.observe: selector ${JSON.stringify(spec)} matched no element`);
+			}
+		}
+		const snapshot = await this.#dom({
+			read: "snapshot",
+			...(root === undefined ? {} : { root }),
+			...(opts?.includeAll ? { includeAll: true } : {}),
+			...(opts?.viewportOnly ? { viewportOnly: true } : {}),
+		});
+		if (snapshot.truncated) logger.debug("Tern cut a DOM snapshot at its node limit", { url: snapshot.url });
+		const mapped = observationFrom(snapshot, { compact: opts?.compact === true });
+		this.#observed = mapped.refs;
+		this.#url = mapped.observation.url;
+		this.#title = snapshot.title;
+		return mapped;
 	}
 
 	#mouseStep(
@@ -1289,21 +1865,46 @@ export class TernTab implements InProcessRunTab {
 		await this.#input([this.#mouseStep("move", box, "left", 0)]);
 	}
 
-	/** Focus the element. */
+	/**
+	 * Focus the element. On native reads an editable control is focused by a
+	 * trusted click; any other element still takes the kit's `focus()`.
+	 */
 	async focus(selector: string | TernSelector, frame: FramePath = null): Promise<void> {
-		await this.#target(`tab.focus(${describe(selector)})`, selector, "focus", frame);
-		await this.#kit("focus", [this.#spec(selector)], frame);
+		const label = `tab.focus(${describe(selector)})`;
+		const spec = this.#spec(selector);
+		if (this.#native) {
+			const target = await this.#resolveTarget(label, spec, "focus", frame);
+			const states = target.node.states ?? [];
+			if (states.includes("editable") && !states.includes("disabled")) {
+				const editable = await this.#resolveTarget(label, { engine: "ref", ref: target.ref }, "type", frame);
+				await this.#clickAt(editable, "left", 1);
+				return;
+			}
+		} else {
+			await this.#target(label, spec, "focus", frame);
+		}
+		await this.#onKit(spec, frame, (kitSpec, kitFrame) => this.#kit("focus", [kitSpec], kitFrame));
+	}
+
+	/** Checked state of the checkable element `spec` names, by a native read. */
+	async #checkedState(spec: TernSelector, frame: FramePath): Promise<boolean> {
+		const node = await this.#first(spec, frame, ["checked"]);
+		if (!node) throw new ToolError(`No element matches ${JSON.stringify(spec)}`);
+		if (node.checked === undefined) throw new ToolError("tab.check() requires a checkbox, radio, or ARIA switch");
+		return node.checked === true;
 	}
 
 	async #setChecked(selector: string | TernSelector, desired: boolean, frame: FramePath): Promise<void> {
 		const label = `tab.${desired ? "check" : "uncheck"}(${describe(selector)})`;
 		const spec = this.#spec(selector);
 		const box = await this.#target(label, spec, "check", frame);
-		const before = await this.#kit<{ checked: boolean }>("checkState", [spec], frame);
-		if (before.checked === desired) return;
+		const checked = async (): Promise<boolean> =>
+			this.#native
+				? await this.#checkedState(spec, frame)
+				: (await this.#kit<{ checked: boolean }>("checkState", [spec], frame)).checked;
+		if ((await checked()) === desired) return;
 		await this.#clickAt(box, "left", 1);
-		const after = await this.#kit<{ checked: boolean }>("checkState", [spec], frame);
-		if (after.checked !== desired) {
+		if ((await checked()) !== desired) {
 			throw new ToolError(`${label} clicked the element but it is still ${desired ? "unchecked" : "checked"}`);
 		}
 	}
@@ -1318,21 +1919,44 @@ export class TernTab implements InProcessRunTab {
 		await this.#setChecked(selector, false, frame);
 	}
 
-	/** Type `text` at the end of the element's content with trusted key events. */
+	/**
+	 * Type `text` into the element with trusted key events: at the end of its
+	 * content, or on native reads at the caret a trusted click on it places.
+	 */
 	async type(selector: string | TernSelector, text: string, frame: FramePath = null): Promise<void> {
 		const spec = this.#spec(selector);
-		await this.#target(`tab.type(${describe(selector)})`, spec, "type", frame);
-		await this.#kit("caretToEnd", [spec], frame);
+		const box = await this.#target(`tab.type(${describe(selector)})`, spec, "type", frame);
+		if (this.#native) await this.#clickAt(box, "left", 1);
+		else await this.#kit("caretToEnd", [spec], frame);
 		await this.#input(typeSteps(String(text), this.#mods));
 	}
 
-	/** Replace the element's value (trusted text input for text controls). */
+	/**
+	 * Replace the element's value (trusted text input for text controls). On
+	 * native reads a text control is focused by a trusted click and its content
+	 * selected through the `edit` op; selects and date/time/color/range inputs
+	 * are still set by the kit.
+	 */
 	async fill(selector: string | TernSelector, value: string, frame: FramePath = null): Promise<void> {
 		const spec = this.#spec(selector);
 		const text = String(value);
-		await this.#target(`tab.fill(${describe(selector)})`, spec, "fill", frame);
-		const prepared = await this.#kit<{ mode: "insert" | "done" }>("prepareFill", [spec, text], frame);
-		if (prepared.mode === "done") return;
+		const label = `tab.fill(${describe(selector)})`;
+		if (this.#native) {
+			const first = await this.#first(spec, frame, ["attributes"]);
+			if (first && isPickedControl(first)) {
+				const picked = await this.#resolveTarget(label, spec, "point", frame, undefined, true);
+				await this.#onKit({ engine: "ref", ref: picked.ref }, frame, (kitSpec, kitFrame) =>
+					this.#kit("prepareFill", [kitSpec, text], kitFrame),
+				);
+				return;
+			}
+			await this.#clickAt(await this.#resolveTarget(label, spec, "fill", frame), "left", 1);
+			await this.#op("edit", { action: "selectAll" });
+		} else {
+			await this.#target(label, spec, "fill", frame);
+			const prepared = await this.#kit<{ mode: "insert" | "done" }>("prepareFill", [spec, text], frame);
+			if (prepared.mode === "done") return;
+		}
 		await this.#input(text.length > 0 ? [{ type: "text", text }] : pressSteps("Backspace", this.#mods));
 	}
 
@@ -1368,14 +1992,17 @@ export class TernTab implements InProcessRunTab {
 	#button(name: MouseButtonName | undefined): "left" | "right" | "middle" {
 		const button = name ?? "left";
 		if (button === "back" || button === "forward") {
-			throw unsupported("mouseDown", `the ${button} mouse button cannot be synthesised (left, right, middle only)`);
+			throw this.#unsupported(
+				"mouseDown",
+				`the ${button} mouse button cannot be synthesised (left, right, middle only)`,
+			);
 		}
 		return button;
 	}
 
 	async #viewportCentre(): Promise<{ x: number; y: number }> {
-		const geometry = await this.#kit<TernGeometry>("geometry", []);
-		return { x: geometry.innerWidth / 2, y: geometry.innerHeight / 2 };
+		const viewport = await this.#viewportSize();
+		return { x: viewport.width / 2, y: viewport.height / 2 };
 	}
 
 	/** Move the pointer (interpolated over `steps`); a held button drags. */
@@ -1424,11 +2051,18 @@ export class TernTab implements InProcessRunTab {
 		await this.#input([{ type: "wheel", x: point.x, y: point.y, dx: deltaX, dy: deltaY, mods: [...this.#mods] }]);
 	}
 
-	/** Scroll the page (trusted wheel at the viewport centre) or an element (`scrollBy`). */
+	/**
+	 * Scroll the page (trusted wheel at the viewport centre) or an element
+	 * (`scrollBy`; on native reads a trusted wheel over the element).
+	 */
 	async scroll(dx: number, dy: number, opts?: { selector?: string }): Promise<void> {
 		if (opts?.selector) {
 			const spec = this.#spec(opts.selector);
-			await this.#target(`tab.scroll(${describe(opts.selector)})`, spec, "point", null);
+			const box = await this.#target(`tab.scroll(${describe(opts.selector)})`, spec, "point", null);
+			if (this.#native) {
+				await this.#input([{ type: "wheel", x: box.x, y: box.y, dx, dy, mods: [...this.#mods] }]);
+				return;
+			}
 			await this.#kit("scrollBy", [spec, dx, dy]);
 			return;
 		}
@@ -1470,26 +2104,31 @@ export class TernTab implements InProcessRunTab {
 		const spec = this.#spec(selector);
 		await this.#target(`tab.highlight(${describe(selector)})`, spec, "point", null);
 		const id = `omp-highlight-${crypto.randomUUID()}`;
-		await this.#kit("highlight", [spec, id]);
+		const overlayFrame = await this.#onKit(spec, null, async (kitSpec, kitFrame) => {
+			await this.#kit("highlight", [kitSpec, id], kitFrame);
+			return kitFrame;
+		});
 		try {
 			await untilAborted(this.#signal, () => Bun.sleep(duration));
 		} finally {
-			await this.#kit("removeOverlay", [id]).catch(() => undefined);
+			await this.#kit("removeOverlay", [id], overlayFrame).catch(() => undefined);
 		}
 	}
 
-	/** Scroll the element into view. */
+	/** Scroll the element into view (on native reads with trusted wheels, and only when no part of it shows). */
 	async scrollIntoView(selector: string | TernSelector): Promise<void> {
 		const spec = this.#spec(selector);
 		await this.#target(`tab.scrollIntoView(${describe(selector)})`, spec, "point", null);
-		await this.#kit("scrollIntoView", [spec]);
+		if (!this.#native) await this.#kit("scrollIntoView", [spec]);
 	}
 
 	/** Select `<select>` options by value (then label). */
 	async select(selector: string | TernSelector, ...values: string[]): Promise<string[]> {
 		const spec = this.#spec(selector);
 		await this.#target(`tab.select(${describe(selector)})`, spec, "point", null);
-		return await this.#kit<string[]>("select", [spec, values.map(String)]);
+		return await this.#onKit(spec, null, (kitSpec, kitFrame) =>
+			this.#kit<string[]>("select", [kitSpec, values.map(String)], kitFrame),
+		);
 	}
 
 	/**
@@ -1509,23 +2148,25 @@ export class TernTab implements InProcessRunTab {
 		}
 		const spec = this.#spec(selector);
 		await this.#target(`tab.uploadFile(${describe(selector)})`, spec, "upload", null);
-		if (await this.#kit<boolean>("isFileInput", [spec])) {
-			await this.#pull();
-			const since = this.#cursor;
-			await this.#op("files", { paths: absolute });
-			if ((await this.#kit<string>("openChooser", [spec])) === "input") {
-				const answered = await this.#poll(
-					"tab.uploadFile() chooser",
-					3_000,
-					() => (this.#eventsSince(since).some(event => event.type === "chooser") ? true : undefined),
-					{ pull: true },
-				).catch(() => false);
-				if (answered) return;
+		await this.#onKit(spec, null, async (kitSpec, kitFrame) => {
+			if (await this.#kit<boolean>("isFileInput", [kitSpec], kitFrame)) {
+				await this.#pull();
+				const since = this.#cursor;
+				await this.#op("files", { paths: absolute });
+				if ((await this.#kit<string>("openChooser", [kitSpec], kitFrame)) === "input") {
+					const answered = await this.#poll(
+						"tab.uploadFile() chooser",
+						3_000,
+						() => (this.#eventsSince(since).some(event => event.type === "chooser") ? true : undefined),
+						{ pull: true },
+					).catch(() => false);
+					if (answered) return;
+				}
+				// No chooser asked for the preset: disarm it before dropping the files instead.
+				await this.#op("files", { paths: null });
 			}
-			// No chooser asked for the preset: disarm it before dropping the files instead.
-			await this.#op("files", { paths: null });
-		}
-		await this.#kit("setFiles", [spec, await readFilePayloads(absolute)]);
+			await this.#kit("setFiles", [kitSpec, await readFilePayloads(absolute)], kitFrame);
+		});
 	}
 
 	// ─── Queries ──────────────────────────────────────────────────────────
@@ -1536,36 +2177,60 @@ export class TernTab implements InProcessRunTab {
 		arg?: unknown,
 		frame: FramePath = null,
 	): Promise<T | null> {
-		return await this.#kit<T | null>("read", [this.#spec(selector), prop, arg], frame);
+		return await this.#onKit(this.#spec(selector), frame, (kitSpec, kitFrame) =>
+			this.#kit<T | null>("read", [kitSpec, prop, arg], kitFrame),
+		);
 	}
 
 	/** The element's rendered text (the page `<body>` without a selector), or null. */
 	async text(selector: string | TernSelector = "body", frame: FramePath = null): Promise<string | null> {
+		if (this.#native) {
+			const node = await this.#first(this.#spec(selector), frame, ["text"]);
+			return node ? (node.text ?? "").trim() : null;
+		}
 		return await this.#read<string>(selector, "text", undefined, frame);
 	}
 
 	/** The element's inner HTML (the page `<body>` without a selector), or null. */
 	async html(selector: string | TernSelector = "body", frame: FramePath = null): Promise<string | null> {
+		if (this.#native) {
+			const node = await this.#first(this.#spec(selector), frame, ["html"]);
+			return node ? innerHtmlOf(node.html ?? "", node.tag ?? "") : null;
+		}
 		return await this.#read<string>(selector, "html", undefined, frame);
 	}
 
 	/** The form element's value, or null. */
 	async value(selector: string | TernSelector, frame: FramePath = null): Promise<string | null> {
+		if (this.#native) {
+			const node = await this.#first(this.#spec(selector), frame, ["value"]);
+			if (!node) return null;
+			return node.value ?? (FORM_VALUE_TAGS[node.tag ?? ""] ? "" : null);
+		}
 		return await this.#read<string | null>(selector, "value", undefined, frame);
 	}
 
 	/** One attribute, or null. */
 	async attr(selector: string | TernSelector, name: string, frame: FramePath = null): Promise<string | null> {
+		if (this.#native) {
+			const node = await this.#first(this.#spec(selector), frame, ["attributes"]);
+			return node?.attributes?.[name] ?? null;
+		}
 		return await this.#read<string | null>(selector, "attr", name, frame);
 	}
 
 	/** How many elements match. */
 	async count(selector: string | TernSelector, frame: FramePath = null): Promise<number> {
+		if (this.#native) return (await this.#query(this.#spec(selector), frame, { limit: 1 })).total;
 		return await this.#kit<number>("count", [this.#spec(selector)], frame);
 	}
 
 	/** The element's box in main-frame viewport px, or null. */
 	async box(selector: string | TernSelector, frame: FramePath = null): Promise<BoundingBox | null> {
+		if (this.#native) {
+			const rect = (await this.#first(this.#spec(selector), frame))?.rect;
+			return rect && rect[2] > 0 && rect[3] > 0 ? { x: rect[0], y: rect[1], width: rect[2], height: rect[3] } : null;
+		}
 		const box = await this.#read<BoundingBox>(selector, "box", undefined, frame);
 		if (!box || !frame) return box;
 		const offset = await this.#frameOffset(frame);
@@ -1582,26 +2247,66 @@ export class TernTab implements InProcessRunTab {
 
 	/** Whether the element is visible. */
 	async isVisible(selector: string | TernSelector, frame: FramePath = null): Promise<boolean> {
+		if (this.#native) {
+			const found = await this.#locate(this.#spec(selector), frame);
+			if (!found) return false;
+			const { state } = await this.#dom({ read: "resolve", ref: found.ref, action: "none", stable: 0 });
+			return state !== "detached" && state !== "hidden";
+		}
 		return (await this.#read<boolean>(selector, "visible", undefined, frame)) === true;
 	}
 
 	/** Whether the element is enabled. */
 	async isEnabled(selector: string | TernSelector): Promise<boolean> {
+		if (this.#native) {
+			const node = await this.#first(this.#spec(selector), null);
+			return node !== undefined && !node.states?.includes("disabled");
+		}
 		return (await this.#read<boolean>(selector, "enabled")) === true;
 	}
 
 	/** Whether the element is checked. */
 	async isChecked(selector: string | TernSelector): Promise<boolean> {
+		if (this.#native) return (await this.#first(this.#spec(selector), null, ["checked"]))?.checked === true;
 		return (await this.#read<boolean>(selector, "checked")) === true;
 	}
 
-	/** Wait until `text` appears in the body (or a matching element). */
+	/**
+	 * Wait until `text` appears in the body (or a matching element). On native
+	 * reads: until an element's rendered text contains it (ignoring case), or
+	 * with `exact` equals it.
+	 */
 	async waitForText(text: string, opts: { timeout?: number; selector?: string; exact?: boolean } = {}): Promise<void> {
+		const label = `tab.waitForText(${JSON.stringify(text)})`;
+		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts.timeout);
 		const root = opts.selector ? this.#spec(opts.selector) : null;
-		await this.#poll(
-			`tab.waitForText(${JSON.stringify(text)})`,
-			resolveWaitTimeout(this.#cellMs, opts.timeout),
-			async () => ((await this.#kit<boolean>("hasText", [text, root, opts.exact === true])) ? true : undefined),
+		if (this.#native) {
+			let left = timeoutMs;
+			let within: DomRef | undefined;
+			if (root) {
+				const started = Date.now();
+				within = (await this.#waitNative(label, root, null, "attached", timeoutMs))[0]?.ref;
+				left = Math.max(1, timeoutMs - (Date.now() - started));
+			}
+			const waited = await this.#dom(
+				{
+					read: "wait",
+					for: {
+						by: "text",
+						value: text,
+						...(opts.exact ? { exact: true } : {}),
+						...(within === undefined ? {} : { root: within }),
+					},
+					state: "attached",
+					timeout: left,
+				},
+				left + WAIT_REPLY_GRACE_MS,
+			);
+			if (!waited.matched) throw new ToolError(`${label} timed out after ${timeoutMs}ms`);
+			return;
+		}
+		await this.#poll(label, timeoutMs, async () =>
+			(await this.#kit<boolean>("hasText", [text, root, opts.exact === true])) ? true : undefined,
 		);
 	}
 
@@ -1617,10 +2322,14 @@ export class TernTab implements InProcessRunTab {
 		frame: FramePath,
 	): Promise<TernElementHandle> {
 		const spec = this.#spec(selector);
-		await this.#poll(
-			`tab.waitFor(${describe(selector)})`,
-			resolveWaitTimeout(this.#cellMs, opts?.timeout),
-			async () => ((await this.#read<boolean>(spec, "visible", undefined, frame)) === true ? true : undefined),
+		const label = `tab.waitFor(${describe(selector)})`;
+		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts?.timeout);
+		if (this.#native) {
+			const nodes = await this.#waitNative(label, spec, frame, "visible", timeoutMs);
+			return new TernElementHandle(this, await this.#waitedSpec(spec, frame, nodes, true), frame);
+		}
+		await this.#poll(label, timeoutMs, async () =>
+			(await this.#read<boolean>(spec, "visible", undefined, frame)) === true ? true : undefined,
 		);
 		return new TernElementHandle(this, spec, frame);
 	}
@@ -1641,6 +2350,18 @@ export class TernTab implements InProcessRunTab {
 	): Promise<TernElementHandle | null> {
 		const spec = this.#spec(selector);
 		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts?.timeout);
+		if (this.#native) {
+			const state = opts?.hidden ? "hidden" : opts?.visible ? "visible" : "attached";
+			const nodes = await this.#waitNative(
+				`tab.waitForSelector(${describe(selector)})`,
+				spec,
+				frame,
+				state,
+				timeoutMs,
+			);
+			if (state === "hidden") return null;
+			return new TernElementHandle(this, await this.#waitedSpec(spec, frame, nodes, state === "visible"), frame);
+		}
 		const found = await this.#poll(`tab.waitForSelector(${describe(selector)})`, timeoutMs, async () => {
 			if (opts?.hidden) {
 				const count = await this.#kit<number>("count", [spec], frame);
@@ -1654,8 +2375,23 @@ export class TernTab implements InProcessRunTab {
 		return found ? new TernElementHandle(this, spec, frame) : null;
 	}
 
+	/** A handle for the first current match of `selector`, or null. */
+	async firstHandle(selector: string): Promise<TernElementHandle | null> {
+		if (this.#native) {
+			const ref = (await this.#first(this.#spec(selector), null))?.ref;
+			return ref === undefined ? null : new TernElementHandle(this, { engine: "ref", ref }, null);
+		}
+		return (await this.count(selector)) > 0 ? await this.waitForSelector(selector, { timeout: 1 }) : null;
+	}
+
 	/** One handle per current match of `selector`, in document order. */
 	async handlesFor(selector: string): Promise<TernElementHandle[]> {
+		if (this.#native) {
+			const { nodes } = await this.#query(this.#spec(selector), null, { limit: HANDLE_LIMIT });
+			return nodes.flatMap(node =>
+				node.ref === undefined ? [] : [new TernElementHandle(this, { engine: "ref", ref: node.ref }, null)],
+			);
+		}
 		const tokens = await this.#kit<string[]>("markAll", [this.#spec(selector)]);
 		return tokens.map(token => new TernElementHandle(this, { engine: "handle", token }, null));
 	}
@@ -1663,6 +2399,11 @@ export class TernTab implements InProcessRunTab {
 	/** Handle for observation id `id` (from the last `observe()`). */
 	async id(id: number): Promise<TernElementHandle> {
 		const spec: TernSelector = { engine: "id", id };
+		if (this.#native) {
+			// Throws for an id the last observe did not list, and for one whose element left the page.
+			await this.#query(spec, null, { limit: 1 });
+			return new TernElementHandle(this, { engine: "ref", ref: this.#observedRef(id) }, null);
+		}
 		await this.#kit("count", [spec]);
 		return new TernElementHandle(this, spec, null);
 	}
@@ -1671,12 +2412,13 @@ export class TernTab implements InProcessRunTab {
 	async ref(id: string): Promise<TernElementHandle> {
 		const ref = parseAriaRefSelector(id) ?? id.trim();
 		const spec: TernSelector = { engine: "ariaRef", ref };
-		if ((await this.#kit<number>("count", [spec])) === 0) {
+		const held = this.#native ? await this.#refThroughKit(spec, null) : null;
+		if (this.#native ? held === null : (await this.#kit<number>("count", [spec])) === 0) {
 			throw new ToolError(
 				`Unknown ARIA ref ${JSON.stringify(ref)}. Run tab.ariaSnapshot() to refresh refs (they renumber each snapshot).`,
 			);
 		}
-		return new TernElementHandle(this, spec, null);
+		return new TernElementHandle(this, held === null ? spec : { engine: "ref", ref: held }, null);
 	}
 
 	/** Type `text` into whatever has focus (trusted key events). */
@@ -1719,6 +2461,12 @@ export class TernTab implements InProcessRunTab {
 
 	/** Evaluate `fn(element, ...args)` in the page world for the element `spec` matches. */
 	async evaluateOnElement(spec: TernSelector, fn: unknown, args: unknown[], frame: FramePath): Promise<unknown> {
+		return await this.#onKit(spec, frame, (kitSpec, kitFrame) =>
+			this.#evaluateOnKitElement(kitSpec, fn, args, kitFrame),
+		);
+	}
+
+	async #evaluateOnKitElement(spec: TernSelector, fn: unknown, args: unknown[], frame: FramePath): Promise<unknown> {
 		const source = typeof fn === "function" ? fn.toString() : String(fn);
 		const token = await this.#kit<string | null>("mark", [spec], frame);
 		if (!token) throw new ToolError("Element handle selector no longer resolves");
@@ -1760,6 +2508,7 @@ export class TernTab implements InProcessRunTab {
 		selector?: string;
 		compact?: boolean;
 	}): Promise<Observation> {
+		if (this.#native) return (await this.#observeNative(opts)).observation;
 		const observation = await this.#kit<Observation>("observe", [
 			{
 				includeAll: opts?.includeAll,
@@ -1870,7 +2619,7 @@ export class TernTab implements InProcessRunTab {
 		).catch(() => undefined);
 		const answer = await this.#op("capture", fields, resolveOpTimeouts(this.#cellMs).quickOpMs);
 		if (!isRecord(answer) || typeof answer.data !== "string")
-			throw new ToolError("Tern capture answered without image data");
+			throw new ToolError(`${this.product} capture answered without image data`);
 		return Buffer.from(answer.data, "base64");
 	}
 
@@ -1890,8 +2639,24 @@ export class TernTab implements InProcessRunTab {
 		let annotation: TernAnnotation | undefined;
 		const legend: ScreenshotAnnotationTarget[] = [];
 		if (opts.annotate) {
-			const observation = await this.observe();
-			annotation = await this.#kit<TernAnnotation>("annotate", [observation.elements.map(element => element.id)]);
+			let observation: Observation;
+			let targets: Array<number | TernAnnotation["boxes"][number]>;
+			if (this.#native) {
+				// The kit draws the overlay; the boxes are the snapshot's, since its registry knows no native id.
+				const observed = await this.#observeNative();
+				observation = observed.observation;
+				targets = Array.from(observed.rects, ([id, rect]) => ({
+					id,
+					x: rect[0],
+					y: rect[1],
+					width: rect[2],
+					height: rect[3],
+				}));
+			} else {
+				observation = await this.observe();
+				targets = observation.elements.map(element => element.id);
+			}
+			annotation = await this.#kit<TernAnnotation>("annotate", [targets]);
 			for (const box of annotation.boxes) {
 				const element = observation.elements.find(candidate => candidate.id === box.id);
 				legend.push({ ...box, role: element?.role ?? "generic", name: element?.name });
@@ -2009,14 +2774,16 @@ export class TernTab implements InProcessRunTab {
 			key => opts[key] !== undefined,
 		);
 		if (ignored.length > 0) {
-			throw unsupported(
+			throw this.#unsupported(
 				"pdf",
-				`options ${ignored.join(", ")} are unavailable (WKWebView prints the whole document with its own pagination); only path is supported`,
+				`options ${ignored.join(", ")} are unavailable (the web view prints the whole document with its own pagination); only path is supported`,
 			);
 		}
 		const context = this.#requireRunContext("tab.pdf()");
 		const answer = await this.#op("pdf", {}, resolveOpTimeouts(this.#cellMs).budgetBound);
-		if (!isRecord(answer) || typeof answer.data !== "string") throw new ToolError("Tern pdf answered without data");
+		if (!isRecord(answer) || typeof answer.data !== "string") {
+			throw new ToolError(`${this.product} pdf answered without data`);
+		}
 		const dest = opts.path
 			? resolveToCwd(opts.path, context.session.cwd)
 			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.pdf`);
@@ -2110,22 +2877,28 @@ export class TernTab implements InProcessRunTab {
 	/** Merge emulation overrides; unsupported ones throw before anything applies. */
 	async emulate(options: BrowserEmulateOptions = {}): Promise<BrowserEmulateOptions> {
 		if (options.timezone !== undefined && options.timezone !== null) {
-			throw unsupported("emulate", "timezone cannot be overridden in WKWebView (Date keeps the system time zone)");
+			throw this.#unsupported(
+				"emulate",
+				"timezone cannot be overridden in the web view (Date keeps the system time zone)",
+			);
 		}
 		if (options.headers !== undefined && options.headers !== null && Object.keys(options.headers).length > 0) {
-			throw unsupported("emulate", "extra HTTP headers cannot be added to WKWebView navigations and subresources");
+			throw this.#unsupported(
+				"emulate",
+				"extra HTTP headers cannot be added to the web view's navigations and subresources",
+			);
 		}
 		if (options.reducedMotion !== undefined) {
-			throw unsupported(
+			throw this.#unsupported(
 				"emulate",
-				"prefers-reduced-motion cannot be overridden in WKWebView (CSS media queries follow the system)",
+				"prefers-reduced-motion cannot be overridden in the web view (CSS media queries follow the system)",
 			);
 		}
 		if (options.cpuThrottling !== undefined && options.cpuThrottling !== null && options.cpuThrottling !== 1) {
-			throw unsupported("emulate", "CPU throttling needs the Chromium DevTools protocol");
+			throw this.#unsupported("emulate", "CPU throttling needs the Chromium DevTools protocol");
 		}
 		if (options.network !== undefined && options.network !== null) {
-			throw unsupported(
+			throw this.#unsupported(
 				"emulate",
 				"network throttling needs the Chromium DevTools protocol (use offline: true for offline)",
 			);
@@ -2455,7 +3228,7 @@ export class TernTab implements InProcessRunTab {
 		this.#consoleDropped = 0;
 	}
 
-	/** Captured console messages (page world, from document start). */
+	/** Captured console messages (page world, from document start; the engine's own on a server that lists `console`). */
 	async console(options: BrowserConsoleOptions = {}): Promise<BrowserCaptureResult<BrowserConsoleEntry>> {
 		const result = await this.#capture("console", options);
 		return {
@@ -2636,8 +3409,17 @@ export class TernTab implements InProcessRunTab {
 		};
 	}
 
-	/** Web Vitals of the current document (observers run from document start). */
+	/**
+	 * Web Vitals of the current document (observers run from document start).
+	 * Where pages are observed natively the observers are no default script:
+	 * the first call makes them one, and `collectVitals` then installs them in
+	 * the current document and reloads it once so they see it from the start.
+	 */
 	async vitals(options: VitalsOptions = {}): Promise<VitalsResult> {
+		if (!this.#vitalsScript) {
+			this.#vitalsScript = true;
+			await this.#syncScripts();
+		}
 		return await collectVitals(this.#reactHost(), options, this.#signal);
 	}
 
@@ -2671,7 +3453,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Page-provided WebMCP tools: Chromium only. */
 	async webmcpList(_options: WebMcpListOptions = {}): Promise<WebMcpListResult> {
-		throw unsupported("webmcpList", NO_TERN_WEBMCP);
+		throw this.#unsupported("webmcpList", noWebMcp(this.product));
 	}
 
 	/** Invoke one page-provided WebMCP tool: Chromium only. */
@@ -2680,12 +3462,12 @@ export class TernTab implements InProcessRunTab {
 		_params: Record<string, unknown>,
 		_options: WebMcpInvokeOptions = {},
 	): Promise<WebMcpInvokeResult> {
-		throw unsupported("webmcpInvoke", NO_TERN_WEBMCP);
+		throw this.#unsupported("webmcpInvoke", noWebMcp(this.product));
 	}
 
 	/** WebMCP catalog changes: Chromium only. */
 	async webmcpEvents(_options: WebMcpEventsOptions = {}): Promise<WebMcpEventsResult> {
-		throw unsupported("webmcpEvents", NO_TERN_WEBMCP);
+		throw this.#unsupported("webmcpEvents", noWebMcp(this.product));
 	}
 
 	// ─── Recording ────────────────────────────────────────────────────────
@@ -2697,10 +3479,7 @@ export class TernTab implements InProcessRunTab {
 		const capture = async (quality: number): Promise<Uint8Array> =>
 			await tab.captureBytes({ format: "jpeg", quality: Math.max(1, Math.min(100, Math.round(quality))) });
 		return {
-			viewport: async () => {
-				const geometry = await tab.#kit<TernGeometry>("geometry", []);
-				return { width: geometry.innerWidth, height: geometry.innerHeight };
-			},
+			viewport: async () => await tab.#viewportSize(),
 			start: async (params: RecordingFrameSourceStartParams) => {
 				active = true;
 				const intervalMs = Math.max(33, (params.everyNthFrame ?? 2) * (1000 / 60));
@@ -2784,27 +3563,32 @@ export class TernTab implements InProcessRunTab {
 
 	/** Unsupported: WKWebView has no tracing protocol. */
 	async traceStart(_options: { screenshots?: boolean; categories?: string[] } = {}): Promise<never> {
-		throw unsupported("traceStart", "WKWebView exposes no performance-trace protocol");
+		throw this.#unsupported("traceStart", "the web view exposes no performance-trace protocol");
 	}
 
 	/** Unsupported: WKWebView has no tracing protocol. */
 	async traceStop(_options: { path?: string } = {}): Promise<never> {
-		throw unsupported("traceStop", "WKWebView exposes no performance-trace protocol");
+		throw this.#unsupported("traceStop", "the web view exposes no performance-trace protocol");
 	}
 
 	/** Unsupported: WKWebView has no CPU profiler protocol. */
 	async profileStart(): Promise<never> {
-		throw unsupported("profileStart", "WKWebView exposes no CPU-profiler protocol");
+		throw this.#unsupported("profileStart", "the web view exposes no CPU-profiler protocol");
 	}
 
 	/** Unsupported: WKWebView has no CPU profiler protocol. */
 	async profileStop(_options: { path?: string } = {}): Promise<never> {
-		throw unsupported("profileStop", "WKWebView exposes no CPU-profiler protocol");
+		throw this.#unsupported("profileStop", "the web view exposes no CPU-profiler protocol");
 	}
 
 	#requireRunContext(operation: string): InProcessRunContext {
-		if (!this.#runContext) throw new ToolError(`${operation} requires an active Tern browser run`);
+		if (!this.#runContext) throw new ToolError(`${operation} requires an active ${this.product} browser run`);
 		return this.#runContext;
+	}
+
+	/** A ToolError for helper `name`, which this backend cannot provide. */
+	#unsupported(name: string, reason: string): ToolError {
+		return new ToolError(`${helper(name)} is not supported on the ${this.product} browser backend: ${reason}`);
 	}
 }
 
@@ -2813,7 +3597,7 @@ function describe(selector: string | TernSelector): string {
 	return JSON.stringify(selector);
 }
 
-/** A response seen by the Tern tab: fetch/XHR (body from the page) or a navigation (no body). */
+/** A response seen by the Tern tab: fetch/XHR (body from the page), a navigation or a natively observed load (no body). */
 export class TernResponse {
 	readonly #record: TernRequestEntry;
 	readonly #tab: TernTab;
@@ -2859,7 +3643,9 @@ export class TernResponse {
 		const body = await this.#tab.loadBody(this.#record);
 		if (!body) {
 			throw new ToolError(
-				`The body of ${this.#record.url} is not available on the Tern backend (only fetch/XHR bodies of the current document are captured)`,
+				this.#tab.nativeNetwork
+					? `The body of ${this.#record.url} is not available on the ${this.#tab.product} backend (it observes requests in the engine and keeps no response bodies; read it in the page with tab.evaluate and fetch)`
+					: `The body of ${this.#record.url} is not available on the ${this.#tab.product} backend (only fetch/XHR bodies of the current document are captured)`,
 			);
 		}
 		return typeof body.value === "string" ? body.value : Buffer.from(body.value.base64, "base64").toString("utf8");
@@ -2871,7 +3657,12 @@ export class TernResponse {
 	}
 }
 
-/** Element handle of the Tern tab (`tab.id(n)`, `tab.ref(eN)`, `waitFor`). */
+/**
+ * Element handle of the Tern tab (`tab.id(n)`, `tab.ref(eN)`, `waitFor`). It
+ * holds a selector the tab resolves on every call: on native reads the
+ * engine ref of its element, so it keeps naming that element across
+ * re-observes and reports it missing once it leaves the page.
+ */
 export class TernElementHandle {
 	readonly #tab: TernTab;
 	readonly #spec: TernSelector;
@@ -3241,7 +4032,7 @@ export class TernPageFacade {
 	}
 
 	async $(selector: string): Promise<TernElementHandle | null> {
-		return (await this.#tab.count(selector)) > 0 ? await this.#tab.waitForSelector(selector, { timeout: 1 }) : null;
+		return await this.#tab.firstHandle(selector);
 	}
 
 	async $$(selector: string): Promise<TernElementHandle[]> {
@@ -3317,11 +4108,11 @@ export class TernBrowserFacade {
 	}
 
 	async version(): Promise<string> {
-		return "Tern WKWebView";
+		return `${this.#tab.product} web view`;
 	}
 
 	wsEndpoint(): string {
-		return `tern://block/${this.#tab.block}`;
+		return `${this.#tab.product.toLowerCase()}://block/${this.#tab.block}`;
 	}
 
 	disconnect(): void {

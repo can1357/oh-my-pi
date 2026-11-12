@@ -41,6 +41,14 @@ pub trait DataT: 'static {
     fn cancelled(_data: &Self::Data<'_>) -> bool {
         false
     }
+
+    /// Whether evaluation may enter one more filter. Evaluation recurses once
+    /// per nested filter and per recursive call, so a host that refuses here
+    /// (say, when its stack runs low) makes the filter fail with an error
+    /// instead of overflowing the stack on `def f: 1 + f; f`.
+    fn may_recurse(_data: &Self::Data<'_>) -> bool {
+        true
+    }
 }
 
 /// Types that provide an `'a`-lived LUT for the data types given in `D`.

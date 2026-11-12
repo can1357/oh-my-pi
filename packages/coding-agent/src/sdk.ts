@@ -245,7 +245,13 @@ import { SessionManager } from "./session/session-manager";
 import { SHAPE_RULE } from "./spotlight/shape";
 import { buildCallContext } from "./spotlight/context";
 import { type CalledToolShaper, shapeCalledTool } from "./spotlight";
-import { SPOTLIGHT_INTENT_DESCRIPTION, SPOTLIGHT_INTENT_GUIDANCE, startSpotlightExperiment } from "./spotlight/session";
+import {
+	NO_CREDENTIAL_NOTICE,
+	SPOTLIGHT_INTENT_DESCRIPTION,
+	SPOTLIGHT_INTENT_GUIDANCE,
+	SPOTLIGHT_NOTICE_SOURCE,
+	startSpotlightExperiment,
+} from "./spotlight/session";
 import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPXdevGuidance,
@@ -393,6 +399,7 @@ import {
 	cfgTierAnthropic,
 	cfgTierGoogle,
 	cfgTierOpenai,
+	systemPromptTemplatePatterns,
 } from "./session/settings";
 import { cfgInterruptMode } from "./modes/settings";
 import { cfgFollowUpMode } from "./modes/settings";
@@ -434,13 +441,7 @@ import {
 	cfgSnapcompactToolResults,
 	cfgWorkspaceAdditionalDirectories,
 } from "./session/context-settings";
-import {
-	cfgTaskBatch,
-	cfgTaskDisabledAgents,
-	cfgTaskEager,
-	cfgTaskMaxConcurrency,
-	ovnfsCommand,
-} from "./task/settings";
+import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskEager, ovnfsCommand } from "./task/settings";
 
 /** Agent-level tool-call switches, snapshotted by the agent loop per prompt run. */
 const cfgToolCallSwitches = combine({
@@ -2506,6 +2507,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						model: message.model,
 						usage: message.usage,
 						stopReason: message.stopReason,
+						errorMessage: message.errorMessage,
 					},
 					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
 				);
@@ -2672,6 +2674,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionSpawns: () => options.spawns ?? "*",
 			getSessionAgents: () => session?.getSessionAgents() ?? [],
 			advertisedSessionAgents: () => session?.getAdvertisedSessionAgents() ?? [],
+			advertisedPerCallModel: () => session?.getAdvertisedPerCallModel(),
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -4325,7 +4328,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
-			if (spotlightExperiment) appendParts.push(SHAPE_RULE);
 			// List each mounted MCP tool once. A routed tool that the xd:// catalog
 			// would list carries its catalog summary on the route line and gets no
 			// catalog line; a tool the route bound omits keeps its catalog line.
@@ -4399,6 +4401,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				systemPromptTemplate: options.systemPromptTemplate,
+				modelSystemPromptTemplates: systemPromptTemplatePatterns.get(settings),
 				skills: cfgSkillful.get(settings) ? (session?.promptSkills ?? skills) : [],
 				skillDescriptions,
 				contextFiles,
@@ -4417,7 +4420,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eagerTasks: agentKind === "main" && cfgTaskEager.get(settings) !== "default",
 				eagerTasksAlways: agentKind === "main" && cfgTaskEager.get(settings) === "always",
 				taskBatch: cfgTaskBatch.get(settings),
-				taskMaxConcurrency: cfgTaskMaxConcurrency.get(settings),
 				scoutAvailable: isScoutSpawnable(cfgTaskDisabledAgents.get(settings), options.spawns ?? "*"),
 				delegationBias: sessionDelegationBias(toolSession),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
@@ -4426,6 +4428,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
 				secretsEnabled: obfuscator?.obfuscates() === true,
+				resultShaping: spotlightExperiment ? SHAPE_RULE : undefined,
 				workspaceTree: workspaceTreePromise ?? emptyWorkspaceTree,
 				includeWorkspaceTree,
 				memoryBackend: memoryBackend?.id,
@@ -4450,6 +4453,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				// The viewer attributes only default blocks the callback left unchanged.
+				sources: defaultPrompt.sources,
 			};
 		};
 
@@ -4602,7 +4607,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, sources: systemPromptSources } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -5200,6 +5205,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorStreamFn: settingsAwareStreamFn,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			systemPromptSources,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,
@@ -5249,7 +5255,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
 			// context — the primary bridge passes the same store.
-			advisorGetToolContext: () => toolContextStore.getContext(),
+			advisorGetToolContext: toolCall => toolContextStore.getContext(toolCall),
 			// Same live connections the primary bridge reads; an advisor's
 			// resource frame would otherwise report every server as empty.
 			advisorMcpResources: cursorMcpResources,
@@ -5329,7 +5335,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// advisor transcript size (issue #9553).
 		session.beginInitialAdvisorCostRestore();
 		// Lines already seen follow the live context on their own (`getContextMessages`); a new session file starts over.
-		if (spotlightExperiment) session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
+		if (spotlightExperiment) {
+			session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
+			spotlightExperiment.client.onCredentialMissing = () =>
+				session.emitNotice("warning", NO_CREDENTIAL_NOTICE, SPOTLIGHT_NOTICE_SOURCE);
+		}
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a
 		// session_start handler. Install those late registrations into the live

@@ -123,14 +123,17 @@ async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame()
 			.count()
 	};
 	let shell = Shell::new(None);
-	// `timeout` and `xargs` run their operands through scripts of their own.
-	let trace = run(&shell, "timeout 5 true; echo a | xargs -n1 true").await;
+	// `timeout` and `xargs` run their operands through scripts of their own;
+	// `env -i`'s script forks (`$(declare -F)`) and assigns its loop names.
+	let trace = run(&shell, "timeout 5 true; echo a | xargs -n1 true; env -i X=1 true").await;
 	let live = present(&trace, &Options::default());
 	assert_eq!(frames(&live), 0, "{live}");
+	assert_eq!(live["watches"], serde_json::json!([]), "{live}");
 	let stored = StoredVisualization::from_snapshot_json(&trace.snapshot_json()).unwrap();
 	let restored: Value =
 		serde_json::from_str(&stored.presentation_json(&Options::default()).unwrap()).unwrap();
 	assert_eq!(frames(&restored), 0, "{restored}");
+	assert_eq!(restored["watches"], serde_json::json!([]), "{restored}");
 
 	let trace = run(&shell, "x=true; eval \"$x\"").await;
 	assert_eq!(frames(&present(&trace, &Options::default())), 1);
