@@ -10,7 +10,7 @@
 ### Fixed
 
 - Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
-- Google Antigravity now lists Gemini 4 Hydrogen once, with selectable low, medium, high, and xhigh thinking levels, instead of a separate entry per thinking tier; xhigh requests send Hydrogen's `XHIGH` level instead of `HIGH`
+- Google Antigravity now lists Gemini 4 Hydrogen once, with selectable low, medium, high, and xhigh thinking levels, instead of a separate entry per thinking tier; xhigh requests send Hydrogen's `XHIGH` level instead of `HIGH` ([#19070](https://github.com/can1357/oh-my-pi/pull/19070) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.19.0] - 2026-11-12
 
