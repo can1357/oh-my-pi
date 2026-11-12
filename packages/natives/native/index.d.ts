@@ -613,11 +613,31 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
-/** Native prefilter for outbound secret redaction; see the module docs. */
+/** One secret rule; see the module docs. */
+export declare class SecretRegex {
+  /**
+   * # Errors
+   * Returns the compile error when `pattern` or `flags` is not a valid rule.
+   */
+  constructor(pattern: string, flags?: string | undefined | null)
+  /**
+   * The first match starting at or after UTF-16 offset `from`, as UTF-16
+   * offsets `[start, end, matchStart]`: the range it redacts (the `secret`
+   * group when that participates, else the whole match) and where the whole
+   * match, context included, begins. `null` when there is none.
+   */
+  exec(text: SecretText, from: number): Array<number> | null
+}
+
+/**
+ * Which rules match a text and whether a configured literal occurs; see the
+ * module docs.
+ */
 export declare class SecretScanner {
   /**
    * # Errors
-   * Returns an error when the literal automaton cannot be built.
+   * Names the first rule that does not compile, or reports an automaton
+   * build failure.
    */
   constructor(rules: Array<SecretScanRule>, literals: Array<string>)
   /**
@@ -628,18 +648,20 @@ export declare class SecretScanner {
    * Returns an error when the literal automaton cannot be built.
    */
   setLiterals(literals: Array<string>): void
-  /**
-   * Rule indices the scanner cannot filter; the caller runs them on every
-   * text.
-   */
-  unfiltered(): Array<number>
-  /**
-   * Literal hit and possibly-matching rules of one text; `null` when the
-   * text needs no redaction work beyond the unfiltered rules.
-   */
+  /** Literal hit and matching rules of one text; `null` when neither. */
   scan(text: string): SecretScanHits | null
   /** [`Self::scan`] over many texts in parallel, in input order. */
   scanMany(texts: Array<string>): Array<SecretScanHits | undefined | null>
+}
+
+/**
+ * A text converted once for every [`SecretRegex`] that runs over it.
+ *
+ * It maps its UTF-8 bytes to the caller's UTF-16 offsets. Lone surrogates
+ * arrive as U+FFFD, one unit like the surrogate they replace.
+ */
+export declare class SecretText {
+  constructor(text: string)
 }
 
 /** Persistent embedded bash engine (pi-shell) shell session. */
@@ -3541,17 +3563,14 @@ export interface SearchResult {
 export interface SecretScanHits {
   /** A configured literal (or `$$`) occurs. */
   literal: boolean
-  /** Indices of the rules that may match. */
+  /** Indices of the rules that match. */
   rules: Array<number>
 }
 
-/** One rule for [`SecretScanner`]. */
+/** One rule for [`SecretScanner`]: its pattern and flags (see the module docs). */
 export interface SecretScanRule {
-  /**
-   * Rust pattern matching a superset of the JavaScript rule; absent when the
-   * rule cannot be translated, which leaves it to JavaScript.
-   */
-  source?: string
+  pattern: string
+  flags?: string
 }
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void

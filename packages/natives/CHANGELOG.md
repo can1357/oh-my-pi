@@ -6,7 +6,7 @@
 
 - Added `shellBuiltins(sessionEnv?)`: the commands the embedded shell adds to bash's builtins (`timeout`, `nohup`, process builtins, utilities), sorted, after its `PI_DISABLE_*` switches
 - Added `awk`, `tar`, `shasum`, `md5` and `strings` builtins and an `lsof` process builtin (Linux, macOS, Windows) to the embedded shell; `PI_DISABLE_UUTILS_DESTRUCTIVE` also hands `tar` to the system
-- Added `SecretScanner`, a single-pass prefilter for outbound secret redaction: one Aho-Corasick pass over every rule's required literals and the configured secrets, with `scanMany` scanning a batch of texts across cores ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
+- Added the secret-rule engine: `SecretRegex` runs a Rust `regex` secret rule over a `SecretText` and reports the span it redacts (its `secret` group, else the whole match) in UTF-16 offsets, and `SecretScanner` answers in one Aho-Corasick pass which rules match a text and whether a configured literal occurs, with `scanMany` scanning a batch across cores ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 

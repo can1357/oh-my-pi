@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `liquid-systemone` judgment API for Liquid AI's decision models, which rejects image sets over Liquid's 10,000 32×32-patch request cap before sending ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+- Exported `SENSITIVE_TOKEN_BODY` and `SENSITIVE_TOKEN_EDGE`, the credential-token alternation and boundary characters `SENSITIVE_TOKEN_RE` is built from, so hosts can build the same shapes for another regex engine ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 

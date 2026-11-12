@@ -6,6 +6,7 @@
 
 - Browser `open`: `ignore_https_errors` is now `insecure`, and `allow_file_access` is gone: `file:` pages can always read other local files, on WebKit, shared Chromium and executables launched through `app`
 - Browser `open`/`targets` `app` is now one string (`"relay"`, `"tern"`, `"webkit"`, `"chromium"`, `"own"`, `"auto"`, a CDP endpoint URL, or an executable path) instead of an object; `app.args` became `argv` and `app.target` became a top-level `target`
+- `secrets.yml` regex rules are now Rust `regex` patterns run natively, in linear time: lookarounds and backreferences are no longer supported, and a `(?P<secret>…)` group marks the part to redact (text around it is context that stays); `\d`, `\w` and `\s` are Unicode-aware. A regex rule that does not compile stops startup with an error naming the file and entry instead of being skipped. Migrate `(?<=password=)\S+` to `password=(?P<secret>\S+)`; see [docs/secrets.md](https://github.com/can1357/oh-my-pi/blob/main/docs/secrets.md) ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
 
 ### Added
 
@@ -35,7 +36,7 @@
 - `read`'s selectors for SQLite, archives, JSON queries, executables, video and SVG, and the sub-path grammar of `proc://`, `ssh://` and `issue://`/`pr://`, no longer ship with every request: the model reads them on demand at `xd://read/sources` and `xd://read/urls`, and they stay inline when `read` is off
 - `/browser visible` and `/browser headless` now show and hide the windows of omp's WebKit tabs at once instead of waiting for the next open: where the engine ships its viewer (macOS), each tab gets a window of its own that the user can also click, scroll and type in, and `headed: true` or `browser.headless` off keeps a tab on WebKit with a window instead of sending it to Chromium. Chromium tabs still change mode with the next open
 - In a Tern whose engine reads the DOM natively, browser `observe`, selectors, clicks, typing, element reads and waits no longer run script in the page: the engine finds elements (across frames and closed shadow roots) and every action is trusted input at the point it resolved; `type` then types at the caret its click places, and `text/` selectors ignore case
-- Secret redaction checks each outgoing text in one native pass for every configured secret and rule, instead of one JavaScript regex pass per rule; a request over a 6–8 MB session now takes about 7–15 ms instead of 20–260 ms, with byte-identical output ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
+- Secret redaction scans each outgoing text in one native pass for every configured secret and rule instead of one JavaScript regex pass per rule, cutting redaction time on large sessions about 2–3× with the built-in rules ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 

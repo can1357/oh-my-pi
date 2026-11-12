@@ -2626,8 +2626,8 @@ describe("advisor", () => {
 				{ type: "plain", content: spaced },
 				{ type: "plain", content: pulledIn },
 				{ type: "regex", content: "tok_[a-z0-9]+" },
-				{ type: "regex", content: "LOOKSECRET(?= LOOKTAIL)" },
-				{ type: "regex", content: "A{100}(?= x{40}END)", mode: "replace", replacement: "[redacted]" },
+				{ type: "regex", content: "(?P<secret>LOOKSECRET) LOOKTAIL" },
+				{ type: "regex", content: "(?P<secret>A{100}) x{40}END", mode: "replace", replacement: "[redacted]" },
 			]);
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);

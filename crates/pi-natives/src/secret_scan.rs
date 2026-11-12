@@ -1,17 +1,17 @@
-//! Prefilter for the coding agent's outbound secret redaction.
+//! The engine for the coding agent's secret regex rules.
 //!
-//! The agent redacts configured literal secrets and regex rules from every
-//! text it sends to a model. Running each JavaScript rule over each text costs
-//! one regex pass per rule; this module answers, in about one pass, which
-//! texts need any redaction work at all and which rules can match them.
+//! Secret rules are Rust `regex` patterns, run only here: one engine decides
+//! what a rule matches, in linear time. A rule redacts its `secret` named
+//! group when that participates in a match, else the whole match; text around
+//! the group is context that must be present but stays.
 //!
-//! Each rule arrives as a Rust pattern matching a superset of the JavaScript
-//! rule (see `regex-prefilter.ts`). From it a set of *necessary factors* is
-//! extracted: literals at least one of which every match contains. One
-//! Aho-Corasick automaton holds every rule's factors together with the
-//! configured literals and `$$`; a scan runs it once over the text, and only a
-//! rule whose factor occurred (or that has none) runs its regex to confirm.
-//! Answers are therefore supersets: a rule not reported cannot match the text.
+//! [`SecretRegex`] runs one rule over a [`SecretText`] (a text converted once
+//! and shared by every rule), in UTF-16 offsets. [`SecretScanner`] answers in
+//! about one pass which rules match a text and whether a configured literal
+//! occurs: from each rule a set of *necessary factors* is extracted (literals
+//! at least one of which every match contains), one Aho-Corasick automaton
+//! holds every rule's factors together with the configured literals and `$$`,
+//! and only a rule whose factor occurred (or that has none) runs its regex.
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use napi::{Error, Status};
@@ -20,8 +20,52 @@ use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 use regex_syntax::hir::{Class, Hir, HirKind};
 
-/// Compiled-program size cap per rule; a rule over it is left to JavaScript.
+/// Compiled-program size cap per rule; a rule over it is rejected.
 const SIZE_LIMIT: usize = 32 << 20;
+
+/// The capture group holding the part of a match a rule redacts.
+const SECRET_GROUP: &str = "secret";
+
+/// A rule compiled from its pattern and flags: `i` (case-insensitive), `m`
+/// (multi-line `^`/`$`), `s` (`.` matches newlines); `g` and `u` are accepted
+/// and mean nothing here.
+struct Compiled {
+	regex:  Regex,
+	hir:    Hir,
+	secret: Option<usize>,
+}
+
+fn compile(pattern: &str, flags: &str) -> Result<Compiled, String> {
+	let (mut case_insensitive, mut multi_line, mut dot_all) = (false, false, false);
+	for flag in flags.chars() {
+		match flag {
+			'i' => case_insensitive = true,
+			'm' => multi_line = true,
+			's' => dot_all = true,
+			'g' | 'u' => {},
+			other => return Err(format!("unsupported flag `{other}`")),
+		}
+	}
+	let regex = RegexBuilder::new(pattern)
+		.case_insensitive(case_insensitive)
+		.multi_line(multi_line)
+		.dot_matches_new_line(dot_all)
+		.size_limit(SIZE_LIMIT)
+		.build()
+		.map_err(|error| error.to_string())?;
+	let hir = regex_syntax::ParserBuilder::new()
+		.case_insensitive(case_insensitive)
+		.multi_line(multi_line)
+		.dot_matches_new_line(dot_all)
+		.build()
+		.parse(pattern)
+		.map_err(|error| error.to_string())?;
+	let secret = regex
+		.capture_names()
+		.position(|name| name == Some(SECRET_GROUP));
+	Ok(Compiled { regex, hir, secret })
+}
+
 /// Largest literal set kept for one node while extracting factors.
 const MAX_SEQ: usize = 64;
 /// Largest class expanded into literal alternatives.
@@ -231,8 +275,7 @@ struct Rule {
 
 /// Pure-Rust scanner core wrapped by [`SecretScanner`].
 pub struct SecretScannerCore {
-	/// Indexed like the caller's rules; `None` cannot be filtered natively.
-	rules:     Vec<Option<Rule>>,
+	rules:     Vec<Rule>,
 	/// Factor literals and their rule, in automaton pattern order after the
 	/// literals and the [`FOLDED`] markers.
 	factors:   Vec<(Vec<u8>, u32)>,
@@ -250,30 +293,23 @@ pub struct ScanHits {
 }
 
 impl SecretScannerCore {
-	/// `rules[i]` is rule `i`'s Rust superset pattern (`None`: not
-	/// translatable).
-	pub fn new(rules: &[Option<String>], literals: &[String]) -> Result<Self, String> {
+	/// `rules[i]` is rule `i`'s pattern and flags.
+	///
+	/// # Errors
+	/// Names the first rule that does not compile, or reports an automaton
+	/// build failure.
+	pub fn new(rules: &[(String, String)], literals: &[String]) -> Result<Self, String> {
 		let mut compiled = Vec::with_capacity(rules.len());
 		let mut factors = Vec::new();
-		for (index, source) in rules.iter().enumerate() {
-			let rule = source.as_deref().and_then(|source| {
-				let regex = RegexBuilder::new(source)
-					.size_limit(SIZE_LIMIT)
-					.build()
-					.ok()?;
-				let hir = regex_syntax::ParserBuilder::new()
-					.build()
-					.parse(source)
-					.ok()?;
-				let found = necessary_factors(&hir);
-				let always = found.is_none();
-				#[allow(clippy::cast_possible_truncation, reason = "rule counts are tiny")]
-				for literal in found.unwrap_or_default() {
-					factors.push((literal, index as u32));
-				}
-				Some(Rule { regex, always })
-			});
-			compiled.push(rule);
+		for (index, (pattern, flags)) in rules.iter().enumerate() {
+			let rule = compile(pattern, flags).map_err(|error| format!("rule {index}: {error}"))?;
+			let found = necessary_factors(&rule.hir);
+			let always = found.is_none();
+			#[allow(clippy::cast_possible_truncation, reason = "rule counts are tiny")]
+			for literal in found.unwrap_or_default() {
+				factors.push((literal, index as u32));
+			}
+			compiled.push(Rule { regex: rule.regex, always });
 		}
 		let literals: Vec<Vec<u8>> = literals
 			.iter()
@@ -296,21 +332,8 @@ impl SecretScannerCore {
 		Ok(())
 	}
 
-	/// Rules the native side cannot filter: the caller must always run them.
-	#[must_use]
-	pub fn unfiltered(&self) -> Vec<u32> {
-		#[allow(clippy::cast_possible_truncation, reason = "rule counts are tiny")]
-		self
-			.rules
-			.iter()
-			.enumerate()
-			.filter(|(_, r)| r.is_none())
-			.map(|(i, _)| i as u32)
-			.collect()
-	}
-
-	/// Whether `text` holds a configured literal, and the rules that may match
-	/// it; `None` when neither.
+	/// Whether `text` holds a configured literal, and the rules that match it;
+	/// `None` when neither.
 	#[must_use]
 	pub fn scan(&self, text: &str) -> Option<ScanHits> {
 		let bytes = text.as_bytes();
@@ -347,10 +370,8 @@ impl SecretScannerCore {
 			.rules
 			.iter()
 			.enumerate()
-			.filter_map(|(index, rule)| {
-				let rule = rule.as_ref()?;
-				((rule.always || marked[index]) && rule.regex.is_match(text)).then_some(index as u32)
-			})
+			.filter(|(index, rule)| (rule.always || marked[*index]) && rule.regex.is_match(text))
+			.map(|(index, _)| index as u32)
 			.collect();
 		(literal || !rules.is_empty()).then_some(ScanHits { literal, rules })
 	}
@@ -382,12 +403,11 @@ fn build_automaton(
 		.map_err(|error| error.to_string())
 }
 
-/// One rule for [`SecretScanner`].
+/// One rule for [`SecretScanner`]: its pattern and flags (see the module docs).
 #[napi(object)]
 pub struct SecretScanRule {
-	/// Rust pattern matching a superset of the JavaScript rule; absent when the
-	/// rule cannot be translated, which leaves it to JavaScript.
-	pub source: Option<String>,
+	pub pattern: String,
+	pub flags:   Option<String>,
 }
 
 /// What [`SecretScanner::scan`] found in a text.
@@ -395,7 +415,7 @@ pub struct SecretScanRule {
 pub struct SecretScanHits {
 	/// A configured literal (or `$$`) occurs.
 	pub literal: bool,
-	/// Indices of the rules that may match.
+	/// Indices of the rules that match.
 	pub rules:   Vec<u32>,
 }
 
@@ -405,7 +425,8 @@ impl From<ScanHits> for SecretScanHits {
 	}
 }
 
-/// Native prefilter for outbound secret redaction; see the module docs.
+/// Which rules match a text and whether a configured literal occurs; see the
+/// module docs.
 #[napi]
 pub struct SecretScanner {
 	core: SecretScannerCore,
@@ -414,11 +435,15 @@ pub struct SecretScanner {
 #[napi]
 impl SecretScanner {
 	/// # Errors
-	/// Returns an error when the literal automaton cannot be built.
+	/// Names the first rule that does not compile, or reports an automaton
+	/// build failure.
 	#[napi(constructor)]
 	pub fn new(rules: Vec<SecretScanRule>, literals: Vec<String>) -> napi::Result<Self> {
-		let sources: Vec<Option<String>> = rules.into_iter().map(|r| r.source).collect();
-		SecretScannerCore::new(&sources, &literals)
+		let rules: Vec<(String, String)> = rules
+			.into_iter()
+			.map(|r| (r.pattern, r.flags.unwrap_or_default()))
+			.collect();
+		SecretScannerCore::new(&rules, &literals)
 			.map(|core| Self { core })
 			.map_err(|error| Error::new(Status::InvalidArg, error))
 	}
@@ -436,16 +461,7 @@ impl SecretScanner {
 			.map_err(|error| Error::new(Status::InvalidArg, error))
 	}
 
-	/// Rule indices the scanner cannot filter; the caller runs them on every
-	/// text.
-	#[napi]
-	#[must_use]
-	pub fn unfiltered(&self) -> Vec<u32> {
-		self.core.unfiltered()
-	}
-
-	/// Literal hit and possibly-matching rules of one text; `null` when the
-	/// text needs no redaction work beyond the unfiltered rules.
+	/// Literal hit and matching rules of one text; `null` when neither.
 	#[napi]
 	#[must_use]
 	pub fn scan(&self, text: String) -> Option<SecretScanHits> {
@@ -463,12 +479,113 @@ impl SecretScanner {
 	}
 }
 
+/// A text converted once for every [`SecretRegex`] that runs over it.
+///
+/// It maps its UTF-8 bytes to the caller's UTF-16 offsets. Lone surrogates
+/// arrive as U+FFFD, one unit like the surrogate they replace.
+#[napi]
+pub struct SecretText {
+	text:  String,
+	/// UTF-16 offset of the char each byte belongs to, plus the end; empty for
+	/// ASCII text, where both offsets agree.
+	units: Vec<u32>,
+}
+
+#[napi]
+impl SecretText {
+	#[napi(constructor)]
+	#[must_use]
+	pub fn new(text: String) -> Self {
+		if text.is_ascii() {
+			return Self { text, units: Vec::new() };
+		}
+		let mut units = Vec::with_capacity(text.len() + 1);
+		let mut offset = 0u32;
+		for c in text.chars() {
+			units.extend(std::iter::repeat_n(offset, c.len_utf8()));
+			#[allow(clippy::cast_possible_truncation, reason = "a char is at most 2 units")]
+			{
+				offset += c.len_utf16() as u32;
+			}
+		}
+		units.push(offset);
+		Self { text, units }
+	}
+}
+
+impl SecretText {
+	#[allow(clippy::cast_possible_truncation, reason = "napi strings are under 4 GiB")]
+	fn to_units(&self, byte: usize) -> u32 {
+		if self.units.is_empty() {
+			byte as u32
+		} else {
+			self.units[byte]
+		}
+	}
+
+	/// The first char boundary at or after UTF-16 offset `unit` (one inside a
+	/// surrogate pair moves past the pair), or `None` past the end.
+	fn to_byte(&self, unit: u32) -> Option<usize> {
+		let byte = if self.units.is_empty() {
+			unit as usize
+		} else {
+			self.units.partition_point(|&u| u < unit)
+		};
+		(byte <= self.text.len()).then_some(byte)
+	}
+}
+
+/// One secret rule; see the module docs.
+#[napi]
+pub struct SecretRegex {
+	regex:  Regex,
+	secret: Option<usize>,
+}
+
+#[napi]
+impl SecretRegex {
+	/// # Errors
+	/// Returns the compile error when `pattern` or `flags` is not a valid rule.
+	#[napi(constructor)]
+	pub fn new(pattern: String, flags: Option<String>) -> napi::Result<Self> {
+		let rule = compile(&pattern, flags.as_deref().unwrap_or_default())
+			.map_err(|error| Error::new(Status::InvalidArg, error))?;
+		Ok(Self { regex: rule.regex, secret: rule.secret })
+	}
+
+	/// The first match starting at or after UTF-16 offset `from`, as UTF-16
+	/// offsets `[start, end, matchStart]`: the range it redacts (the `secret`
+	/// group when that participates, else the whole match) and where the whole
+	/// match, context included, begins. `null` when there is none.
+	#[napi]
+	#[must_use]
+	pub fn exec(&self, text: &SecretText, from: u32) -> Option<Vec<u32>> {
+		let start = text.to_byte(from)?;
+		let (span, whole) = if let Some(group) = self.secret {
+			let caps = self.regex.captures_at(&text.text, start)?;
+			let whole = caps.get(0)?;
+			(caps.get(group).unwrap_or(whole), whole)
+		} else {
+			let whole = self.regex.find_at(&text.text, start)?;
+			(whole, whole)
+		};
+		Some(vec![
+			text.to_units(span.start()),
+			text.to_units(span.end()),
+			text.to_units(whole.start()),
+		])
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	fn core(rules: &[&str], literals: &[&str]) -> SecretScannerCore {
-		let rules: Vec<Option<String>> = rules.iter().map(|r| Some((*r).to_owned())).collect();
+		let rules: Vec<(String, String)> = rules
+			.iter()
+			.map(|r| ((*r).to_owned(), String::new()))
+			.collect();
 		let literals: Vec<String> = literals.iter().map(|l| (*l).to_owned()).collect();
 		SecretScannerCore::new(&rules, &literals).unwrap()
 	}
@@ -503,11 +620,30 @@ mod tests {
 	}
 
 	#[test]
-	fn untranslatable_and_invalid_rules_are_left_unfiltered() {
-		let rules = vec![None, Some("(".to_owned()), Some("abc".to_owned())];
-		let scanner = SecretScannerCore::new(&rules, &[]).unwrap();
-		assert_eq!(scanner.unfiltered(), vec![0, 1]);
-		assert_eq!(scanner.scan("xxabcxx"), Some(ScanHits { literal: false, rules: vec![2] }));
+	fn an_invalid_rule_is_an_error_naming_it() {
+		let rules = vec![("abc".to_owned(), String::new()), ("(?<=x)y".to_owned(), String::new())];
+		let error = SecretScannerCore::new(&rules, &[]).err().unwrap();
+		assert!(error.starts_with("rule 1:"), "{error}");
+		let flagged = vec![("abc".to_owned(), "y".to_owned())];
+		assert!(SecretScannerCore::new(&flagged, &[]).is_err());
+	}
+
+	#[test]
+	fn secret_group_is_the_redacted_span_in_utf16_offsets() {
+		let rule = SecretRegex::new("password=(?P<secret>[^ ]+)".to_owned(), None).unwrap();
+		// "é" is one UTF-16 unit and two UTF-8 bytes; the emoji two units, four
+		// bytes.
+		let text = SecretText::new("é😀 password=hunter2 password=x".to_owned());
+		assert_eq!(rule.exec(&text, 0), Some(vec![13, 20, 4]));
+		// The next search starts at the secret's end; context may follow it.
+		assert_eq!(rule.exec(&text, 20), Some(vec![30, 31, 21]));
+		assert_eq!(rule.exec(&text, 31), None);
+		assert_eq!(rule.exec(&text, 99), None);
+		// Without the group the whole match is redacted; an offset inside the
+		// emoji's surrogate pair moves past the pair.
+		let whole = SecretRegex::new("[^ ]+".to_owned(), None).unwrap();
+		assert_eq!(whole.exec(&text, 0), Some(vec![0, 3, 0]));
+		assert_eq!(whole.exec(&text, 2), Some(vec![4, 20, 4]));
 	}
 
 	#[test]

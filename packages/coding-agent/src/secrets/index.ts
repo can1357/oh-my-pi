@@ -6,7 +6,7 @@ import { YAML } from "bun";
 import { type SecretEntry, SecretObfuscator } from "./obfuscator";
 import { CREDENTIAL_PATTERNS } from "./patterns";
 import { sanitizeSecretFriendlyName, secretEntriesNeedPlaceholderKey } from "./placeholder";
-import { compileSecretRegex } from "./regex";
+import { compileSecretRegex, type SecretPattern } from "./regex";
 import { regexHasUnresolvableShortMatchFallback } from "./replacement";
 
 const PLACEHOLDER_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -243,7 +243,6 @@ export function builtinCredentialSecretEntries(): SecretEntry[] {
 		flags: pattern.flags,
 		mode: "obfuscate",
 		friendlyName: pattern.name,
-		literalPrefixes: pattern.literalPrefixes,
 	}));
 }
 
@@ -292,34 +291,39 @@ export async function buildSecretObfuscator(
 	return obfuscator;
 }
 
+/**
+ * Entries of one secrets.yml. A malformed entry is skipped with a warning, but
+ * a regex entry that is not a valid rule throws: starting with it silently
+ * dropped would send the secrets it was meant to catch.
+ */
 async function loadSecretsFile(filePath: string): Promise<SecretEntry[]> {
+	let raw: unknown;
 	try {
-		const text = await Bun.file(filePath).text();
-		const raw = YAML.parse(text);
-		if (!Array.isArray(raw)) {
-			logger.warn("secrets.yml must be a YAML array", { path: filePath });
-			return [];
-		}
-		const entries: SecretEntry[] = [];
-		for (let i = 0; i < raw.length; i++) {
-			const entry = raw[i];
-			if (!validateEntry(entry, filePath, i)) continue;
-			const friendlyName = loadFriendlyName(entry, filePath, i);
-			entries.push({
-				type: entry.type,
-				content: entry.content,
-				mode: entry.mode ?? "obfuscate",
-				replacement: entry.replacement,
-				flags: entry.flags,
-				friendlyName,
-			});
-		}
-		return entries;
+		raw = YAML.parse(await Bun.file(filePath).text());
 	} catch (err) {
 		if (isEnoent(err)) return [];
 		logger.warn("Failed to load secrets.yml", { path: filePath, error: String(err) });
 		return [];
 	}
+	if (!Array.isArray(raw)) {
+		logger.warn("secrets.yml must be a YAML array", { path: filePath });
+		return [];
+	}
+	const entries: SecretEntry[] = [];
+	for (let i = 0; i < raw.length; i++) {
+		const entry = raw[i];
+		if (!validateEntry(entry, filePath, i)) continue;
+		const friendlyName = loadFriendlyName(entry, filePath, i);
+		entries.push({
+			type: entry.type,
+			content: entry.content,
+			mode: entry.mode ?? "obfuscate",
+			replacement: entry.replacement,
+			flags: entry.flags,
+			friendlyName,
+		});
+	}
+	return entries;
 }
 
 // Validates the friendlyName but returns it UNSANITIZED: `SecretObfuscator`'s
@@ -369,16 +373,13 @@ function validateEntry(entry: unknown, filePath: string, index: number): entry i
 		return false;
 	}
 	if (e.type === "regex") {
-		let regex: RegExp;
+		let regex: SecretPattern;
 		try {
 			regex = compileSecretRegex(e.content as string, e.flags as string | undefined);
 		} catch (error) {
-			logger.warn(`secrets.yml[${index}]: invalid regex pattern`, {
-				path: filePath,
-				pattern: e.content,
-				error: String(error),
-			});
-			return false;
+			throw new Error(
+				`${filePath}: secrets.yml[${index}] is not a valid secret rule (${error instanceof Error ? error.message : String(error)}). Rules are Rust regex patterns: lookarounds and backreferences are unsupported; mark the part to redact with (?P<secret>...).`,
+			);
 		}
 		const mode = (e.mode as "obfuscate" | "replace" | undefined) ?? "obfuscate";
 		if (mode === "replace" && e.replacement === undefined && regexHasUnresolvableShortMatchFallback(regex)) {

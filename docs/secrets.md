@@ -101,22 +101,26 @@ The 12-character hash base is an HMAC of the exact secret under a private per-in
 
 #### Regex secrets
 
+Regex rules use Rust [`regex`](https://docs.rs/regex/latest/regex/#syntax) syntax and run in the native engine, in time linear in the text. Lookarounds (`(?=`, `(?!`, `(?<=`, `(?<!`) and backreferences are not supported. To match a secret only in context, name the part to redact `secret`: the text around the group must be present but is not redacted. Without a `secret` group the whole match is redacted. A rule has at most one `secret` group; when several alternatives need it, share the group (`api=(?P<secret>[0-9]{8}|[A-Z]{8})`).
+
 ```yaml
 # Obfuscate any AWS-style key
 - type: regex
   content: "AKIA[0-9A-Z]{16}"
 
-# Case-insensitive match with explicit flags
+# Redact only the value after `api_key=`, case-insensitively
 - type: regex
-  content: "api[_-]?key\\s*=\\s*\\w+"
+  content: "api[_-]?key\\s*=\\s*(?P<secret>\\w+)"
   flags: "i"
 
 # Regex literal syntax (pattern and flags in one string)
 - type: regex
-  content: "/bearer\\s+[a-zA-Z0-9._~+\\/=-]+/i"
+  content: "/bearer\\s+(?P<secret>[a-zA-Z0-9._~+\\/=-]+)/i"
 ```
 
-Regex entries always scan globally (the `g` flag is enforced automatically). The regex literal syntax `/pattern/flags` is supported as an alternative to separate `content` + `flags` fields. Escaped slashes within the pattern (`\\/`) are handled correctly.
+Flags: `i` (case-insensitive), `m` (`^`/`$` match at line boundaries), `s` (`.` matches newlines); `g` and `u` are accepted and ignored. Character classes follow Rust: `\d`, `\w` and `\s` are Unicode-aware. The regex literal syntax `/pattern/flags` is supported as an alternative to separate `content` + `flags` fields. Escaped slashes within the pattern (`\\/`) are handled correctly.
+
+Migrating a JavaScript-syntax rule: `(?<=password=)\S+` becomes `password=(?P<secret>\S+)`, `\S+(?=")` becomes `(?P<secret>\S+)"`, and a word boundary written as `(?<![A-Za-z0-9])` becomes `(?:^|[^A-Za-z0-9])` before the group.
 
 #### Replace mode with regex
 
@@ -132,7 +136,8 @@ Regex entries always scan globally (the `g` flag is enforced automatically). The
 
 - A missing `secrets.yml` is treated as no entries.
 - A parse failure or non-array document is ignored with a warning.
-- Invalid entries are skipped individually with a warning. `type` must be `plain` or `regex`; `content` must be a non-empty string; `mode`, `replacement`, `flags`, and regex syntax are validated as shown above.
+- A regex entry whose pattern or flags the engine rejects stops startup with an error naming the file and entry, so a rule is never silently dropped while its secrets reach the provider.
+- Other invalid entries are skipped individually with a warning. `type` must be `plain` or `regex`; `content` must be a non-empty string; `mode`, `replacement`, and `flags` are validated as shown above.
 - Invalid optional `friendlyName` metadata is dropped without dropping an otherwise valid entry.
 
 ## Interaction with automatic detection

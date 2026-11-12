@@ -7,6 +7,7 @@ import {
 	resumePlaceholderScanAfterRejectedCandidate,
 	SecretValueSet,
 } from "./placeholder";
+import type { SecretPattern } from "./regex";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -321,12 +322,12 @@ export function textOutsidePlaceholderRanges(
 //    "ABCDEFGH" next to a placeholder token matches `\b[A-Z]{8}\b` because the
 //    token's leading `#` is a non-word byte — but that boundary disappears
 //    once the placeholder expands into more `[A-Z]` bytes with no separator.
-//  - Expanded scan context matters when a lookbehind/lookahead only resolves
-//    once the neighboring placeholder is expanded, e.g. a prior plain
-//    placeholder for `ABCDEFGH` next to raw `SECRET`, matched by
-//    `(?<=ABCDEFGH)SECRET`: the literal placeholder token before `SECRET`
-//    never satisfies the lookbehind, so literal-context alone wrongly reports
-//    no independent match.
+//  - Expanded scan context matters when a rule's context only resolves once
+//    the neighboring placeholder is expanded, e.g. a prior plain placeholder
+//    for `ABCDEFGH` next to raw `SECRET`, matched by
+//    `ABCDEFGH(?P<secret>SECRET)`: the literal placeholder token before
+//    `SECRET` never supplies that context, so literal-context alone wrongly
+//    reports no independent match.
 // A match only counts when it lies ENTIRELY within one outside chunk (in
 // whichever context it was tested); a match that reaches into the
 // placeholder itself is not evidence the outside chunk independently
@@ -338,7 +339,7 @@ export function outsidePlaceholderRangesAnyIndependentlyMatch(
 	start: number,
 	end: number,
 	ranges: ReadonlyArray<{ start: number; end: number }>,
-	regex: RegExp,
+	regex: SecretPattern,
 ): boolean {
 	// A text-space outside chunk lies entirely within one non-placeholder scan
 	// segment (placeholder ranges are exactly the gaps between such segments),
@@ -367,17 +368,25 @@ export function outsidePlaceholderRangesAnyIndependentlyMatch(
 	return cursor < end && chunkIndependentlyMatches(cursor, end);
 }
 
-// Whether `regex` (global) has a match fully contained in [chunkStart, chunkEnd)
-// when run against the full `text` — so lookbehind/lookahead see the actual
-// surrounding bytes rather than an isolated slice's edges.
-function chunkMatchesInSourceContext(text: string, chunkStart: number, chunkEnd: number, regex: RegExp): boolean {
-	regex.lastIndex = chunkStart;
+// Whether `regex` (global) redacts a span fully contained in [chunkStart,
+// chunkEnd) when run against the full `text`, so context around a `secret`
+// group sees the actual surrounding bytes rather than an isolated slice's
+// edges. The match at every start position is considered, from the text's
+// start, so context of any width before the chunk counts.
+function chunkMatchesInSourceContext(
+	text: string,
+	chunkStart: number,
+	chunkEnd: number,
+	regex: SecretPattern,
+): boolean {
+	let from = 0;
 	for (;;) {
+		regex.lastIndex = from;
 		const found = regex.exec(text);
-		if (found === null || found.index >= chunkEnd) return false;
+		if (found === null || found.matchIndex >= chunkEnd) return false;
 		const matchEnd = found.index + found[0].length;
-		if (matchEnd <= chunkEnd) return true;
-		regex.lastIndex = found[0].length === 0 ? found.index + 1 : matchEnd;
+		if (found.index >= chunkStart && matchEnd <= chunkEnd) return true;
+		from = found.matchIndex + 1;
 	}
 }
 

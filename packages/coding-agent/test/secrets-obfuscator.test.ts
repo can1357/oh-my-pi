@@ -51,16 +51,13 @@ import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
 import { getActiveProfile, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
 
 describe("compileSecretRegex", () => {
-	it("adds global flag when not provided", () => {
-		const regex = compileSecretRegex("api[_-]?key\\s*=\\s*\\w+", "i");
-		expect(regex.source).toBe("api[_-]?key\\s*=\\s*\\w+");
-		expect(regex.flags).toBe("gi");
-	});
-
-	it("defaults to global flag when no flags provided", () => {
-		const regex = compileSecretRegex("api[_-]?key\\s*=\\s*\\w+");
-		expect(regex.source).toBe("api[_-]?key\\s*=\\s*\\w+");
-		expect(regex.flags).toBe("g");
+	it("parses /pattern/flags literal syntax and redacts the secret group", () => {
+		const regex = compileSecretRegex("/api_key=(?P<secret>\\w+)/i");
+		expect(regex.source).toBe("api_key=(?P<secret>\\w+)");
+		expect(regex.flags).toBe("i");
+		const match = regex.exec("set API_KEY=abc123 now");
+		expect(match?.[0]).toBe("abc123");
+		expect(match?.index).toBe(12);
 	});
 
 	it("rejects invalid regex pattern", () => {
@@ -1353,31 +1350,30 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		expect(obf.obfuscate(second)).toBe(second);
 	});
 
-	it("redacts a lookbehind-anchored prefix tested in its real source context instead of leaking it", () => {
-		// `(?<=api=)[0-9]{8}[A-Z]{8}|(?<=api=)[0-9]{8}|[A-Z]{8}` combined with a
+	it("redacts a context-anchored prefix tested in its real source context instead of leaking it", () => {
+		// `api=(?P<secret>[0-9]{8}[A-Z]{8}|[0-9]{8})|[A-Z]{8}` combined with a
 		// prior-call placeholder for `ABCDEFGH` (independently matches the bare
 		// `[A-Z]{8}` alternative). Re-obfuscating `api=12345678` + placeholder makes
 		// the full match (placeholder expanded) `12345678ABCDEFGH`, preceded by the
 		// literal `api=`. The outside chunk is `12345678`. Testing that chunk as an
 		// ISOLATED slice (starting a fresh string at index 0) loses the real `api=`
-		// bytes immediately before it in the source, so `(?<=api=)[0-9]{8}` never
-		// fires, none of the three alternatives match a bare "12345678", and the
-		// digits were wrongly left verbatim — a lookbehind-blind leak. The fix tests
-		// the chunk against the regex at its REAL position in the full text, where
-		// the lookbehind correctly sees the preceding `api=` and the chunk is
-		// identified as an independent match, so it is redacted like any other
-		// secret-shaped content.
+		// bytes immediately before it in the source, so the `api=` context never
+		// matches, no alternative matches a bare "12345678", and the digits were
+		// wrongly left verbatim — a context-blind leak. The chunk is tested against
+		// the rule at its REAL position in the full text, where the context
+		// correctly sees the preceding `api=` and the chunk is identified as an
+		// independent match, so it is redacted like any other secret-shaped content.
 		const obf = new SecretObfuscator(
 			[
 				{ type: "plain", content: "ABCDEFGH" },
-				{ type: "regex", content: "(?<=api=)[0-9]{8}[A-Z]{8}|(?<=api=)[0-9]{8}|[A-Z]{8}" },
+				{ type: "regex", content: "api=(?P<secret>[0-9]{8}[A-Z]{8}|[0-9]{8})|[A-Z]{8}" },
 			],
 			"Q".repeat(43),
 		);
 		const placeholdered = obf.obfuscate("ABCDEFGH");
 		const second = obf.obfuscate(`api=12345678${placeholdered}`);
 
-		// Core regression: the lookbehind-qualified digits must not survive
+		// Core regression: the context-qualified digits must not survive
 		// verbatim in provider-visible output.
 		expect(second).not.toContain("12345678");
 		expect(second).not.toContain("ABCDEFGH");
@@ -1387,39 +1383,32 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		expect(obf.obfuscate(second)).toBe(second);
 	});
 
-	it("redacts a suffix whose lookbehind only resolves against the expanded scan context, not the literal placeholder token", () => {
-		// `ABCDEFGHSECRET|(?<=ABCDEFGH)SECRET|ABCDEFGH` combined with a prior-call
+	it("redacts a suffix whose context only resolves against the expanded scan context, not the literal placeholder token", () => {
+		// `ABCDEFGH(?P<secret>SECRETXY)|ABCDEFGH` combined with a prior-call
 		// placeholder for `ABCDEFGH` (independently matches the bare `ABCDEFGH`
-		// alternative). Re-obfuscating placeholder + `SECRET` makes the full match
-		// (placeholder expanded) `ABCDEFGHSECRET`; the outside chunk is `SECRET`.
-		// The ONLY way `SECRET` independently matches on its own is via the second
-		// alternative's lookbehind `(?<=ABCDEFGH)SECRET` — but the bytes immediately
-		// preceding it in the actual text are the LITERAL placeholder token (`#…#`),
-		// not `ABCDEFGH`, so testing the chunk in its literal-token context alone
-		// never satisfies the lookbehind and wrongly reports no independent match
-		// (unlike the two-sided-chunk test above, which literal context alone does
-		// catch). Testing the same chunk against the EXPANDED scan context — where
-		// the placeholder is resolved back to `ABCDEFGH` — lets the lookbehind see
-		// its real preceding bytes and correctly reports an independent match.
-		// Without that expanded-context check unioned with the literal-context one,
-		// `SECRET` was wrongly treated as spillover and leaked verbatim beside the
-		// placeholder.
+		// alternative). Re-obfuscating placeholder + `SECRETXY`: `SECRETXY` only
+		// matches with its `ABCDEFGH` context — but the bytes immediately
+		// preceding it in the actual text are the LITERAL placeholder token
+		// (`#…#`), not `ABCDEFGH`, so testing in the literal-token context alone
+		// never sees that context. Testing against the EXPANDED scan context —
+		// where the placeholder is resolved back to `ABCDEFGH` — supplies it, and
+		// `SECRETXY` must be redacted instead of left verbatim beside the placeholder.
 		const obf = new SecretObfuscator(
 			[
 				{ type: "plain", content: "ABCDEFGH" },
-				{ type: "regex", content: "ABCDEFGHSECRET|(?<=ABCDEFGH)SECRET|ABCDEFGH" },
+				{ type: "regex", content: "ABCDEFGH(?P<secret>SECRETXY)|ABCDEFGH" },
 			],
 			"Q".repeat(43),
 		);
 		const placeholdered = obf.obfuscate("ABCDEFGH");
-		const second = obf.obfuscate(`${placeholdered}SECRET`);
+		const second = obf.obfuscate(`${placeholdered}SECRETXY`);
 
-		// Core regression: the lookbehind-qualified suffix must not survive
+		// Core regression: the context-qualified suffix must not survive
 		// verbatim in provider-visible output.
-		expect(second).not.toContain("SECRET");
+		expect(second).not.toContain("SECRETXY");
 		expect(second).not.toContain("ABCDEFGH");
 		// Every byte must still round-trip.
-		expect(obf.deobfuscate(second)).toBe("ABCDEFGHSECRET");
+		expect(obf.deobfuscate(second)).toBe("ABCDEFGHSECRETXY");
 		// Redacting the suffix must itself be a fixed point.
 		expect(obf.obfuscate(second)).toBe(second);
 	});
@@ -1428,7 +1417,7 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		const obf = new SecretObfuscator(
 			[
 				{ type: "plain", content: "ABCDEFGH" },
-				{ type: "regex", content: "SECRETUVABCD|SECRETUV(?=ABCD)|[A-Z]{8}" },
+				{ type: "regex", content: "SECRETUVABCD|(?P<secret>SECRETUV)ABCD|[A-Z]{8}" },
 			],
 			"Q".repeat(43),
 		);
@@ -1447,7 +1436,7 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		const key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1n";
 		const entries = [
 			{ type: "plain" as const, content: "ABCDEFGH" },
-			{ type: "regex" as const, mode: "replace" as const, content: "(?<=ABCD)[A-Z]{8}" },
+			{ type: "regex" as const, mode: "replace" as const, content: "ABCD(?P<secret>[A-Z]{8})" },
 		];
 		const obf = new SecretObfuscator(entries, key);
 		const placeholdered = obf.obfuscate("ABCDEFGH");
@@ -1467,7 +1456,7 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		const obf = new SecretObfuscator(
 			[
 				{ type: "plain", content: "ABCDEFGH" },
-				{ type: "regex", content: "(?<=ABCD)[A-Z]{8}" },
+				{ type: "regex", content: "ABCD(?P<secret>[A-Z]{8})" },
 			],
 			"Q".repeat(43),
 		);
@@ -1479,14 +1468,14 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		expect(obf.obfuscate(second)).toBe(second);
 	});
 
-	it("keeps default replace markers stable when a lookbehind match spills into a prior placeholder", () => {
+	it("keeps default replace markers stable when a context-anchored match spills into a prior placeholder", () => {
 		const key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1n";
 		const entries = [
 			{ type: "plain" as const, content: "ABCDEFGH" },
 			{
 				type: "regex" as const,
 				mode: "replace" as const,
-				content: "(?<=api=)[0-9]{8}[A-Z]{8}|(?<=api=)[0-9]{8}|[A-Z]{8}",
+				content: "api=(?P<secret>[0-9]{8}[A-Z]{8}|[0-9]{8})|[A-Z]{8}",
 			},
 		];
 		const obf = new SecretObfuscator(entries, key);
@@ -1652,7 +1641,7 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 
 	it("keeps default replace markers stable when friendly placeholder aliases advance scan context", () => {
 		const sharedKey = "E".repeat(43);
-		const regex = "api_key=[a-z]{8}[A-Za-z0-9]{3}|(?<=abcdefgh)[A-Za-z0-9]{3}";
+		const regex = "api_key=[a-z]{8}[A-Za-z0-9]{3}|abcdefgh(?P<secret>[A-Za-z0-9]{3})";
 		const before = new SecretObfuscator(
 			[
 				{ type: "plain", content: "abcdefgh", friendlyName: "old" },
@@ -2143,9 +2132,9 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 	});
 
 	it("redacts a context-sensitive replace regex to a value stable in place", () => {
-		// A replace-mode regex with lookbehind matches a value only in context, so a
+		// A replace-mode regex with context matches a value only in context, so a
 		// candidate tested in isolation can be accepted yet re-match once substituted
-		// back. Regression: `(?<=api=)[AZ]` redacting `api=Z` to `api=A` (A does not
+		// back. Regression: `api=(?P<secret>[AZ])` redacting `api=Z` to `api=A` (A does not
 		// match a bare `A`) was then re-redacted to `api=Z` on the next pass, shipping
 		// the raw matched value on every other turn. The replacement must be a fixed
 		// point evaluated in its surrounding context. Both inputs exercise a distinct
@@ -2153,7 +2142,7 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		// differs from the value but still re-matches in context.
 		for (const input of ["api=Z", "api=A"]) {
 			const obf = new SecretObfuscator(
-				[{ type: "regex", mode: "replace", content: "(?<=api=)[AZ]" }],
+				[{ type: "regex", mode: "replace", content: "api=(?P<secret>[AZ])" }],
 				"Q".repeat(43),
 			);
 
@@ -2169,18 +2158,18 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		}
 	});
 
-	it("redacts a wide-lookbehind replace regex to a value stable in place", () => {
-		// A lookbehind wider than the re-match back-scan window (512) must still
-		// evaluate against the full surrounding text. Regression: truncating the
-		// fixed-point probe to a fixed window dropped the 600-char lookbehind, so the
-		// check falsely accepted a candidate the regex DOES re-match once the whole
-		// prefix is present — the redaction then oscillated back to the raw matched
-		// value on alternating obfuscate() passes, leaking it to the provider.
+	it("redacts a wide-context replace regex to a value stable in place", () => {
+		// Context wider than the re-match back-scan window (512) must still be
+		// seen. Regression: the fixed-point probe started its scan inside the
+		// 600-char context, so it falsely accepted a candidate the rule DOES
+		// re-match once the whole prefix is present — the redaction then
+		// oscillated back to the raw matched value on alternating obfuscate()
+		// passes, leaking it to the provider.
 		const prefix = "A".repeat(600);
 		const re = new RegExp(`(?<=${prefix})[AZ]`);
 		for (const input of [`${prefix}Z`, `${prefix}A`]) {
 			const obf = new SecretObfuscator(
-				[{ type: "regex", mode: "replace", content: `(?<=${prefix})[AZ]` }],
+				[{ type: "regex", mode: "replace", content: `${prefix}(?P<secret>[AZ])` }],
 				"Q".repeat(43),
 			);
 

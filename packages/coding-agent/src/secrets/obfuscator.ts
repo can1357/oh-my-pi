@@ -33,8 +33,7 @@ import {
 	trailingOutsidePreservedPlaceholderChunk,
 	transformOutsidePlaceholdersTracked,
 } from "./placeholder-scan";
-import { compileSecretRegex } from "./regex";
-import { rustPrefilterPattern } from "./regex-prefilter";
+import { compileSecretRegex, type SecretPattern } from "./regex";
 import { RegistryRevision, TrackedMap, TrackedSet } from "./registry-revision";
 import {
 	ensureDistinctReplacement,
@@ -51,28 +50,19 @@ import {
 
 export interface SecretEntry {
 	type: "plain" | "regex";
+	/** A literal secret, or for `regex` a Rust `regex` pattern (see `compileSecretRegex`). */
 	content: string;
 	mode?: "obfuscate" | "replace";
 	replacement?: string;
 	flags?: string;
 	friendlyName?: string;
-	/**
-	 * Regex entries only: literal substrings at least one of which every match
-	 * contains. Text containing none is skipped without running the regex.
-	 * Fail-safe: omitted means the regex always runs. Must be exhaustive for
-	 * the pattern; a wrong list here lets a secret through.
-	 */
-	literalPrefixes?: readonly string[];
 }
 
 interface CompiledRegexEntry {
-	regex: RegExp;
+	regex: SecretPattern;
 	mode: "obfuscate" | "replace";
 	replacement?: string;
 	friendlyName?: string;
-	/** Pre-folded probes (lower-cased when the regex is case-insensitive); null = always scan. */
-	probes: readonly string[] | null;
-	ignoreCase: boolean;
 }
 
 /** One regex-entry match: the entry's index and the match's range. */
@@ -87,33 +77,17 @@ interface NativeScan {
 	text: string;
 	/** A configured literal or `$$` occurs. */
 	literal: boolean;
-	/** Regex entries that may match the text: the scanner's hits plus every unfiltered entry. */
+	/** Regex entries that match the text. */
 	candidates: ReadonlySet<CompiledRegexEntry>;
 }
 
-/**
- * The native single-pass prefilter over `entries` (see `secret_scan.rs`), or
- * undefined when the loaded addon predates it: the JavaScript probes then gate
- * the regexes as before.
- */
-function createNativeScanner(entries: readonly CompiledRegexEntry[]): SecretScanner | undefined {
-	if (typeof SecretScanner !== "function") return undefined;
-	try {
-		return new SecretScanner(
-			entries.map(entry => ({ source: rustPrefilterPattern(entry.regex) ?? undefined })),
-			["$$"],
-		);
-	} catch {
-		return undefined;
-	}
-}
+const NO_CANDIDATES: ReadonlySet<CompiledRegexEntry> = new Set();
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
 export type JsonRecord = { [key: string]: JsonValue | undefined };
 
 const EMPTY_SECRET_VALUES: ReadonlySet<string> = new Set();
 const NO_VALUES: readonly string[] = [];
-const NON_ASCII_RE = /[^\x00-\x7F]/;
 
 /** Distinct placeholder prefixes whose regex verdict is memoized; forged prefixes beyond this are just re-tested. */
 const MAX_PREFIX_REGEX_MEMO = 4096;
@@ -223,25 +197,13 @@ export class SecretObfuscator {
 	#sortedReplaceEntries: [string, string][] | undefined;
 	#sortedPlainEntries: [string, number][] | undefined;
 	#literalDetector: RegExp | undefined;
-	/** Literals, `$$` and case-sensitive probes in one regex; see {@link #mayNeedRedaction}. */
-	#cleanDetector: RegExp | undefined;
 	/** Configured literals only (no `$$`); `null` when there are none. See {@link #isRedactionIdentity}. */
 	#configuredLiteralDetector: RegExp | null | undefined;
 	#literalCachePlainVersion = -1;
 	#literalCacheReplaceVersion = -1;
 
-	/** Probes of case-sensitive probed regex entries. */
-	readonly #rawProbes: readonly string[];
-	/** Matches any probe of a case-sensitive / case-insensitive (folded) probed regex entry; undefined when there are none. */
-	#rawProbeDetector: RegExp | undefined;
-	#foldedProbeDetector: RegExp | undefined;
-	/** `i`-flag form of the folded probes, set only when every folded probe is ASCII; see {@link #foldedProbeHit}. */
-	#asciiFoldedProbeDetector: RegExp | undefined;
-
-	/** Native single-pass prefilter; undefined on an addon without it. */
-	readonly #scanner: SecretScanner | undefined;
-	/** Regex entries the native scanner cannot filter: candidates for every text. */
-	readonly #unfilteredEntries: ReadonlySet<CompiledRegexEntry>;
+	/** Which regex entries match a text and whether a configured literal occurs, in one native pass. */
+	readonly #scanner: SecretScanner;
 	/** Native scan of the last text asked about; dropped when the literals change. */
 	#lastNativeScan: NativeScan | undefined;
 	/** Native scans of the {@link batch} in progress, from {@link prescan} and per-text scans; dropped when the literals change. */
@@ -303,53 +265,24 @@ export class SecretObfuscator {
 				this.#configuredSecretValues.add(entry.content);
 				continue;
 			}
-			try {
-				const regex = compileSecretRegex(entry.content, entry.flags);
-				const mode = entry.mode ?? "obfuscate";
-				// A default (no custom `replacement`) replace-mode regex that can
-				// never redact a 1-2 char match distinctly from itself (see
-				// `regexHasUnresolvableShortMatchFallback`) is dropped rather than
-				// risk a real secret round-tripping unredacted; `secrets/index.ts`
-				// warns loudly for the `secrets.yml`-loaded path — this is the
-				// silent backstop for direct construction.
-				if (
-					mode === "replace" &&
-					entry.replacement === undefined &&
-					regexHasUnresolvableShortMatchFallback(regex)
-				) {
-					continue;
-				}
-				const ignoreCase = regex.ignoreCase;
-				const prefixes = entry.literalPrefixes;
-				// An empty list would skip everything; treat it like "no metadata".
-				const probes =
-					prefixes !== undefined && prefixes.length > 0 && prefixes.every(prefix => prefix.length > 0)
-						? prefixes.map(prefix => (ignoreCase ? prefix.toLowerCase() : prefix))
-						: null;
-				regexEntries.push({
-					regex,
-					mode,
-					replacement: entry.replacement,
-					friendlyName: entry.friendlyName,
-					probes,
-					ignoreCase,
-				});
-			} catch {
-				// Invalid regex — skip silently (validation happens at load time)
+			const regex = compileSecretRegex(entry.content, entry.flags);
+			const mode = entry.mode ?? "obfuscate";
+			// A default (no custom `replacement`) replace-mode regex that can
+			// never redact a 1-2 char match distinctly from itself (see
+			// `regexHasUnresolvableShortMatchFallback`) is dropped rather than
+			// risk a real secret round-tripping unredacted; `secrets/index.ts`
+			// warns loudly for the `secrets.yml`-loaded path — this is the
+			// silent backstop for direct construction.
+			if (mode === "replace" && entry.replacement === undefined && regexHasUnresolvableShortMatchFallback(regex)) {
+				continue;
 			}
+			regexEntries.push({ regex, mode, replacement: entry.replacement, friendlyName: entry.friendlyName });
 		}
 		this.#regexEntries = regexEntries;
-		this.#scanner = createNativeScanner(regexEntries);
-		this.#unfilteredEntries = new Set(
-			this.#scanner ? this.#scanner.unfiltered().map(index => regexEntries[index]!) : [],
+		this.#scanner = new SecretScanner(
+			regexEntries.map(entry => ({ pattern: entry.regex.source, flags: entry.regex.flags })),
+			["$$"],
 		);
-		this.#rawProbes = regexEntries.flatMap(entry => (entry.ignoreCase ? [] : (entry.probes ?? [])));
-		this.#rawProbeDetector = buildLiteralDetector(this.#rawProbes);
-		const foldedProbes = regexEntries.flatMap(entry => (entry.ignoreCase ? (entry.probes ?? []) : []));
-		this.#foldedProbeDetector = buildLiteralDetector(foldedProbes);
-		if (!foldedProbes.some(probe => NON_ASCII_RE.test(probe))) {
-			this.#asciiFoldedProbeDetector = buildLiteralDetector(foldedProbes, "i");
-		}
 		let index = 0;
 		let hasRealSec = regexEntries.length > 0;
 		for (const entry of entries) {
@@ -418,41 +351,35 @@ export class SecretObfuscator {
 		this.#sortedReplaceEntries = undefined;
 		this.#sortedPlainEntries = undefined;
 		this.#literalDetector = undefined;
-		this.#cleanDetector = undefined;
 		this.#configuredLiteralDetector = undefined;
 		this.#literalCachePlainVersion = plainVersion;
 		this.#literalCacheReplaceVersion = replaceVersion;
-		this.#scanner?.setLiterals(["$$", ...this.#configuredLiterals]);
+		this.#scanner.setLiterals(["$$", ...this.#configuredLiterals]);
 		this.#lastNativeScan = undefined;
 		this.#batchNativeScans = undefined;
 		this.#previousBatchNativeScans = undefined;
 	}
 
 	#toNativeScan(text: string, hits: { literal: boolean; rules: number[] } | null): NativeScan {
-		let candidates = this.#unfilteredEntries;
-		if (hits !== null && hits.rules.length > 0) {
-			const set = new Set(this.#unfilteredEntries);
-			for (const index of hits.rules) set.add(this.#regexEntries[index]!);
-			candidates = set;
-		}
+		const candidates =
+			hits === null || hits.rules.length === 0
+				? NO_CANDIDATES
+				: new Set(hits.rules.map(index => this.#regexEntries[index]!));
 		return { text, literal: hits?.literal ?? false, candidates };
 	}
 
 	/**
-	 * The native scanner's literal hit and candidate entries for `text`, or
-	 * undefined without a scanner. Every entry that can match `text` is a
-	 * candidate. Texts scanned in this batch or the previous one, and the last
-	 * text asked about, are answered without another native call.
+	 * The native scanner's literal hit and matching entries for `text`. Texts
+	 * scanned in this batch or the previous one, and the last text asked
+	 * about, are answered without another native call.
 	 */
-	#nativeScan(text: string): NativeScan | undefined {
-		const scanner = this.#scanner;
-		if (scanner === undefined) return undefined;
+	#nativeScan(text: string): NativeScan {
 		this.#syncLiteralCaches();
 		const last = this.#lastNativeScan;
 		if (last !== undefined && last.text === text) return last;
 		let scan = this.#batchNativeScans?.get(text) ?? this.#previousBatchNativeScans?.get(text);
 		if (scan === undefined) {
-			scan = this.#toNativeScan(text, scanner.scan(text));
+			scan = this.#toNativeScan(text, this.#scanner.scan(text));
 			// Inside a batch the scan joins its results, so it carries to the next batch too.
 			if (this.#batchScans !== undefined) (this.#batchNativeScans ??= new Map()).set(text, scan);
 		}
@@ -464,11 +391,10 @@ export class SecretObfuscator {
 	 * Scan every text a {@link batch} is about to collect from and redact in one
 	 * native call, across cores; later per-text questions in the batch read the
 	 * results. Texts the previous prescanning batch scanned are not sent again.
-	 * Outside a batch, or without a scanner, this does nothing.
+	 * Outside a batch this does nothing.
 	 */
 	prescan(texts: readonly string[]): void {
-		const scanner = this.#scanner;
-		if (scanner === undefined || this.#batchScans === undefined) return;
+		if (this.#batchScans === undefined) return;
 		this.#syncLiteralCaches();
 		const scans = (this.#batchNativeScans ??= new Map());
 		const previous = this.#previousBatchNativeScans;
@@ -481,7 +407,7 @@ export class SecretObfuscator {
 		}
 		if (pending.size === 0) return;
 		const list = [...pending];
-		const results = scanner.scanMany(list);
+		const results = this.#scanner.scanMany(list);
 		for (let i = 0; i < list.length; i++) scans.set(list[i]!, this.#toNativeScan(list[i]!, results[i] ?? null));
 	}
 
@@ -511,32 +437,6 @@ export class SecretObfuscator {
 		this.#syncLiteralCaches();
 		this.#literalDetector ??= buildLiteralDetector(["$$", ...this.#configuredLiterals])!;
 		return !this.#literalDetector.test(text);
-	}
-
-	/**
-	 * One pass ruling out, at once, every configured literal, `$$`, and every
-	 * case-sensitive regex probe. `false` means the text is literal-free and no
-	 * case-sensitive probed entry can match; only on a hit do the separate
-	 * detectors say which.
-	 */
-	#mayNeedRedaction(text: string): boolean {
-		this.#syncLiteralCaches();
-		this.#cleanDetector ??= buildLiteralDetector(["$$", ...this.#configuredLiterals, ...this.#rawProbes])!;
-		return this.#cleanDetector.test(text);
-	}
-
-	/**
-	 * Whether any case-insensitive probe occurs in the lower-cased text. On
-	 * ASCII text with ASCII probes an `i`-flag regex gives the same answer
-	 * without copying the text; anything else (where `toLowerCase` and regex
-	 * case-insensitivity can disagree, e.g. `K` U+212A) folds as before.
-	 */
-	#foldedProbeHit(text: string, folded: () => string): boolean {
-		if (this.#foldedProbeDetector === undefined) return false;
-		if (this.#asciiFoldedProbeDetector !== undefined && !NON_ASCII_RE.test(text)) {
-			return this.#asciiFoldedProbeDetector.test(text);
-		}
-		return this.#foldedProbeDetector.test(folded());
 	}
 
 	/** Whether this pass will mint a keyed placeholder from a regex match. */
@@ -627,7 +527,7 @@ export class SecretObfuscator {
 		const matches: RegexMatchSpan[] = [];
 		const native = this.#nativeScan(text);
 		for (const [entry, compiled] of this.#regexEntries.entries()) {
-			if (native !== undefined && !native.candidates.has(compiled)) continue;
+			if (!native.candidates.has(compiled)) continue;
 			const regex = compiled.regex;
 			regex.lastIndex = 0;
 			for (;;) {
@@ -688,7 +588,7 @@ export class SecretObfuscator {
 	 *    and since that check is monotone in the known values, placeholder
 	 *    recognition is the same in every context the dirty path scans with —
 	 *    so the values it would collect are the ones already collected; and
-	 * 3. every regex entry that passes its probe gate finds no match to act
+	 * 3. every regex entry the native scan reports finds no match to act
 	 *    on (`#collectRegexMatches` is empty), so the regex phase and the
 	 *    replace-spillover stabilization rewrite nothing.
 	 */
@@ -714,10 +614,9 @@ export class SecretObfuscator {
 		}
 		PLACEHOLDER_RE.lastIndex = 0;
 
-		const folded = this.#foldedOnce(text);
 		let origin: string | undefined;
 		for (const entry of this.#regexEntries) {
-			if (!this.#entryMayMatch(entry, text, folded)) continue;
+			if (!this.#entryMayMatch(entry, text)) continue;
 			origin ??= "I".repeat(text.length);
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(text, entry.regex, entry.mode, origin, entry.replacement);
@@ -817,9 +716,8 @@ export class SecretObfuscator {
 		}
 
 		// 3. Process regex entries — discover new matches
-		const foldedResult = this.#foldedOnce(result);
 		for (const entry of this.#regexEntries) {
-			if (!this.#entryMayMatch(entry, result, foldedResult)) continue;
+			if (!this.#entryMayMatch(entry, result)) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(result, entry.regex, entry.mode, origin, entry.replacement);
 
@@ -1061,7 +959,7 @@ export class SecretObfuscator {
 	 * deterministic replacement already differs from most values, but it is
 	 * all-alphanumeric and a regex may still match it, either directly (a `Z`/`ZZ`
 	 * sentinel collision, or a class like `[A-Za-z0-9]+`) or only in context
-	 * (lookbehind/lookahead/`\b`, e.g. `(?<=api=)[AZ]`). When it would re-match,
+	 * (context around a `secret` group, or `\b`, e.g. `api=(?P<secret>[AZ])`). When it would re-match,
 	 * search same-length candidates IN CONTEXT for one the regex does not re-match:
 	 * that value is a stable fixed point and cannot re-leak. A single perturbation is
 	 * not enough — it may also match (e.g. `B`, not `A`, for `Z|A`) — so the search
@@ -1107,7 +1005,7 @@ export class SecretObfuscator {
 	 * construction-time check tests the regex in isolation, not every context
 	 * it could appear in).
 	 */
-	#generateRegexReplacement(value: string, regex: RegExp, context: RegexMatchContext): string {
+	#generateRegexReplacement(value: string, regex: SecretPattern, context: RegexMatchContext): string {
 		let replacement = generateDeterministicReplacement(value);
 		// Verify in context, not just against the sentinel collision: the
 		// deterministic replacement is all-alphanumeric and a context-sensitive regex
@@ -1130,7 +1028,7 @@ export class SecretObfuscator {
 		return replacement;
 	}
 
-	#generateRegexChunkReplacement(chunk: string, regex: RegExp, context: RegexMatchContext): string {
+	#generateRegexChunkReplacement(chunk: string, regex: SecretPattern, context: RegexMatchContext): string {
 		let replacement = this.#generateReplacement(chunk);
 		if (regexRematchesInContext(replacement, regex, context)) {
 			const stable = findNonMatchingReplacement(chunk, regex, context);
@@ -1146,7 +1044,7 @@ export class SecretObfuscator {
 	#redactRegexMatchOutsidePlaceholders(
 		text: string,
 		origin: string,
-		regex: RegExp,
+		regex: SecretPattern,
 		context: RegexMatchContext,
 	): { text: string; origin: string } {
 		let scanCursor = context.start;
@@ -1162,6 +1060,7 @@ export class SecretObfuscator {
 					text: context.text,
 					start,
 					end: scanCursor,
+					matchStart: Math.min(context.matchStart, start),
 				});
 			},
 			placeholder => {
@@ -1177,7 +1076,7 @@ export class SecretObfuscator {
 		let currentOrigin = origin;
 		for (const entry of this.#regexEntries) {
 			if (entry.mode !== "replace" || entry.replacement !== undefined) continue;
-			if (!this.#entryMayMatch(entry, result, this.#foldedOnce(result))) continue;
+			if (!this.#entryMayMatch(entry, result)) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(result, entry.regex, entry.mode, currentOrigin, entry.replacement);
 			entry.regex.lastIndex = 0;
@@ -1218,28 +1117,12 @@ export class SecretObfuscator {
 	}
 
 	/**
-	 * Cheap gate before `#collectRegexMatches(text, …)`. That scan runs the
-	 * regex over `text` with known placeholders expanded, so the native scanner
-	 * answers for the expanded view: an entry it does not report cannot match
-	 * there. Without the scanner, prefix metadata gates instead: a text
-	 * containing none of the prefixes cannot match, and without metadata the
-	 * regex always runs. `folded` is the caller's lower-cased copy for
-	 * case-insensitive entries, computed once per text.
+	 * Whether `entry` can match in `#collectRegexMatches(text, …)`. That scan
+	 * runs the regex over `text` with known placeholders expanded, so the
+	 * native scanner answers for the expanded view.
 	 */
-	#entryMayMatch(entry: CompiledRegexEntry, text: string, folded: () => string): boolean {
-		if (this.#scanner !== undefined)
-			return this.#nativeScan(this.#regexScanFor(text).scan.text)!.candidates.has(entry);
-		if (entry.probes === null) return true;
-		const haystack = entry.ignoreCase ? folded() : text;
-		for (const probe of entry.probes) {
-			if (haystack.includes(probe)) return true;
-		}
-		return false;
-	}
-
-	#foldedOnce(text: string): () => string {
-		let folded: string | undefined;
-		return () => (folded ??= text.toLowerCase());
+	#entryMayMatch(entry: CompiledRegexEntry, text: string): boolean {
+		return this.#nativeScan(this.#regexScanFor(text).scan.text).candidates.has(entry);
 	}
 
 	/** Find the obfuscate index for a known secret value. */
@@ -1364,20 +1247,11 @@ export class SecretObfuscator {
 	// `"TOKABC123"` could never match against that same case-sensitive
 	// pattern). Any of these means the text is meant to be redacted, not
 	// stamped unredacted onto every use of this secret.
-	/** `rawProbeHit`, when the caller already knows no case-sensitive probe occurs, skips that detector. */
-	#collectRegexSecretValues(text: string, rawProbeHit?: boolean): Set<string> {
+	#collectRegexSecretValues(text: string): Set<string> {
 		const values = new Set<string>();
-		const folded = this.#foldedOnce(text);
 		const native = this.#nativeScan(text);
-		// One combined scan per haystack rules out every probed entry at once;
-		// only when some probe occurs do entries check their own probes.
-		const rawHit = native === undefined && (rawProbeHit ?? this.#rawProbeDetector?.test(text) ?? false);
-		const foldedProbeHit = native === undefined && this.#foldedProbeHit(text, folded);
 		for (const entry of this.#regexEntries) {
-			if (native !== undefined) {
-				if (!native.candidates.has(entry)) continue;
-			} else if (entry.probes !== null && !(entry.ignoreCase ? foldedProbeHit : rawHit)) continue;
-			else if (!this.#entryMayMatch(entry, text, folded)) continue;
+			if (!native.candidates.has(entry)) continue;
 			entry.regex.lastIndex = 0;
 			for (;;) {
 				const match = entry.regex.exec(text);
@@ -1405,14 +1279,12 @@ export class SecretObfuscator {
 		const scans = this.#batchScans;
 		const cached = scans?.get(text);
 		if (cached !== undefined && cached.revision === this.#revision.value) return cached;
-		// Clean text (the common case) is ruled out in one combined pass.
 		const native = this.#nativeScan(text);
-		const mayNeedRedaction = native !== undefined ? native.literal : this.#mayNeedRedaction(text);
-		const rawValues = this.#collectRegexSecretValues(text, mayNeedRedaction ? undefined : false);
+		const rawValues = this.#collectRegexSecretValues(text);
 		const scan: TextScan = {
 			revision: this.#revision.value,
 			initialValues: rawValues.size === 0 ? NO_VALUES : [...rawValues],
-			literalFree: native !== undefined ? !native.literal : !mayNeedRedaction || this.#isLiteralFree(text),
+			literalFree: !native.literal,
 			collectedValues: undefined,
 		};
 		scans?.set(text, scan);
@@ -1467,7 +1339,7 @@ export class SecretObfuscator {
 		let simulatedOrigin = origin;
 		for (const entry of this.#regexEntries) {
 			if (entry.mode !== "replace") continue;
-			if (!this.#entryMayMatch(entry, simulated, this.#foldedOnce(simulated))) continue;
+			if (!this.#entryMayMatch(entry, simulated)) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(
 				simulated,
@@ -1726,7 +1598,7 @@ export class SecretObfuscator {
 
 	#collectRegexMatches(
 		text: string,
-		regex: RegExp,
+		regex: SecretPattern,
 		mode: "obfuscate" | "replace",
 		origin: string,
 		replacement: string | undefined,
@@ -1768,6 +1640,9 @@ export class SecretObfuscator {
 			scanContext: RegexMatchContext;
 		}> = [];
 		for (;;) {
+			// Where this search began: re-running from here finds this same match,
+			// context before its `secret` group included.
+			const searchFrom = regex.lastIndex;
 			const match = regex.exec(scanText);
 			if (match === null) break;
 			if (match[0].length === 0) {
@@ -1775,6 +1650,8 @@ export class SecretObfuscator {
 				continue;
 			}
 			let start = match.index;
+			// Where the whole match (context before its `secret` group included) began.
+			let wholeStart = match.matchIndex;
 			let end = match.index + match[0].length;
 			let scanMatchLength = match[0].length;
 			let scanMatchValue = match[0];
@@ -1811,7 +1688,7 @@ export class SecretObfuscator {
 				const prefixScanEnd = mapped.firstPlaceholderScanStart;
 				let handledOutside = false;
 				if (prefixScanEnd > match.index) {
-					regex.lastIndex = match.index;
+					regex.lastIndex = searchFrom;
 					const prefixMatch = regex.exec(scanText);
 					if (prefixMatch !== null && prefixMatch[0].length > 0 && prefixMatch.index < prefixScanEnd) {
 						const prefixStart = prefixMatch.index;
@@ -1819,6 +1696,7 @@ export class SecretObfuscator {
 						const prefixMapped = mapReplaceRegexMatch(regexScan.segments, prefixStart, prefixEnd);
 						if (!prefixMapped.partialPlaceholderCut && prefixEnd > prefixStart) {
 							start = prefixStart;
+							wholeStart = prefixMatch.matchIndex;
 							end = prefixEnd;
 							scanMatchValue = scanText.slice(prefixStart, prefixEnd);
 							// Keep the full match length in the expanded scan view (not the
@@ -1904,9 +1782,9 @@ export class SecretObfuscator {
 				// literal-token context (where the token's own non-word boundary can
 				// complete a boundary-sensitive pattern) and the EXPANDED scan context —
 				// the same view re-obfuscation's own regex scan runs against — so a
-				// lookbehind/lookahead that only resolves once the neighboring
-				// placeholder is expanded (e.g. `(?<=ABCDEFGH)SECRET` beside a
-				// placeholder for `ABCDEFGH`) also counts as an independent match.
+				// rule whose context only resolves once the neighboring placeholder is
+				// expanded (e.g. `ABCDEFGH(?P<secret>SECRET)` beside a placeholder for
+				// `ABCDEFGH`) also counts as an independent match.
 				inputPlaceholderOutsideIndependentlyMatches = outsidePlaceholderRangesAnyIndependentlyMatch(
 					text,
 					scanText,
@@ -1952,6 +1830,7 @@ export class SecretObfuscator {
 				text: scanText,
 				start: scanMatchStart,
 				end: scanMatchEnd,
+				matchStart: Math.min(wholeStart, scanMatchStart),
 			};
 			if (mode === "replace" && replacement === undefined && !preserveGeneratedPlaceholders) {
 				const savedLastIndex = regex.lastIndex;

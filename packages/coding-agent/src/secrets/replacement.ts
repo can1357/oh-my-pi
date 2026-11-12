@@ -1,3 +1,5 @@
+import type { SecretPattern } from "./regex";
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Deterministic replacement generation
 // ═══════════════════════════════════════════════════════════════════════════
@@ -47,15 +49,14 @@ export function ensureDistinctReplacement(replacement: string, secret: string): 
 }
 
 // How far left of the matched span the re-match scan begins looking for a match
-// that overlaps the candidate. This bounds ONLY the match-start search position,
-// never the lookbehind/lookahead context: the probe below substitutes the
-// candidate into the FULL text, so a regex's lookbehind/lookahead assertions
-// always evaluate against complete context regardless of width. The single
+// that overlaps the candidate. The probe below substitutes the candidate into
+// the FULL text, so context after the span always counts; a match, context
+// around its `secret` group included, must begin within this window. The single
 // re-match this misses is one that begins more than this many bytes before the
-// span and extends into it (a single match longer than the window) — that only
-// churns the chosen redaction marker between candidates, never back to the raw
-// matched value, so it cannot leak a secret.
-const REGEX_REMATCH_BACKSCAN = 512;
+// span and extends into it (a match longer than the window) — that only churns
+// the chosen redaction marker between candidates, never back to the raw matched
+// value, so it cannot leak a secret.
+export const REGEX_REMATCH_BACKSCAN = 512;
 
 export interface RegexMatchContext {
 	/** Full text the match was found in (positions are offsets into it). */
@@ -63,27 +64,29 @@ export interface RegexMatchContext {
 	/** Start/end of the matched span being replaced. */
 	start: number;
 	end: number;
+	/** Where the rule's whole match began, context before the span included. */
+	matchStart: number;
 }
 
 /**
  * Whether `candidate`, substituted for the matched span in its surrounding text,
  * is re-matched by `regex` at its own position. A replace-mode regex that depends
- * on context (lookbehind/lookahead/`\b`) can match a candidate that does NOT match
- * in isolation: e.g. `(?<=api=)[AZ]` never matches a bare `A`, but `api=A` does, so
- * a candidate `A` chosen by an isolation test is re-redacted on the next obfuscate()
- * pass and can oscillate back to the raw matched value. The probe substitutes the
- * candidate into the FULL text — not a truncated window — so a wide lookbehind or
- * lookahead (e.g. `(?<=A{600})`) still evaluates against the context that makes it
- * match. Truncating that context dropped the assertion's reach and falsely
- * accepted an oscillating, leaky candidate. The scan starts a bounded distance
- * left of the span and stops once a match begins at/after the span's end (matches
- * arrive in order), keeping per-candidate cost independent of total text length.
+ * on context (text around its `secret` group, `\b`) can match a candidate that
+ * does NOT match in isolation: e.g. `api=(?P<secret>[AZ])` never matches a bare
+ * `A`, but `api=A` does, so a candidate `A` chosen by an isolation test is
+ * re-redacted on the next obfuscate() pass and can oscillate back to the raw
+ * matched value. The probe substitutes the candidate into the FULL text — not a
+ * truncated window — so context after the span still makes it match. The scan
+ * starts a bounded distance left of the span, and never after where the
+ * replaced match itself began, so the rule's own leading context is always
+ * seen however wide it is; it stops once a match begins at/after the span's
+ * end (matches arrive in order).
  */
-export function regexRematchesInContext(candidate: string, regex: RegExp, ctx: RegexMatchContext): boolean {
+export function regexRematchesInContext(candidate: string, regex: SecretPattern, ctx: RegexMatchContext): boolean {
 	const probe = ctx.text.slice(0, ctx.start) + candidate + ctx.text.slice(ctx.end);
 	const spanStart = ctx.start;
 	const spanEnd = spanStart + candidate.length;
-	regex.lastIndex = Math.max(0, spanStart - REGEX_REMATCH_BACKSCAN);
+	regex.lastIndex = Math.min(Math.max(0, spanStart - REGEX_REMATCH_BACKSCAN), ctx.matchStart);
 	for (let m = regex.exec(probe); m !== null; m = regex.exec(probe)) {
 		const matchStart = m.index;
 		const matchEnd = m.index + m[0].length;
@@ -129,7 +132,7 @@ export function regexRematchesInContext(candidate: string, regex: RegExp, ctx: R
  */
 export function findNonMatchingReplacement(
 	value: string,
-	regex: RegExp,
+	regex: SecretPattern,
 	context: RegexMatchContext,
 ): string | undefined {
 	const len = value.length;
@@ -169,7 +172,7 @@ export function findNonMatchingReplacement(
  */
 function findWhitespaceFallbackReplacement(
 	value: string,
-	regex: RegExp,
+	regex: SecretPattern,
 	context: RegexMatchContext,
 ): string | undefined {
 	const len = value.length;
@@ -203,12 +206,15 @@ function findWhitespaceFallbackReplacement(
  * never treats as a real candidate, so the result depends only on the
  * regex's own matching behavior, not on this specific probe.
  */
-export function regexHasUnresolvableShortMatchFallback(regex: RegExp): boolean {
+export function regexHasUnresolvableShortMatchFallback(regex: SecretPattern): boolean {
 	return ([1, 2] as const).some(length => {
 		const probe = "\u0000".repeat(length);
 		const savedLastIndex = regex.lastIndex;
 		try {
-			return findNonMatchingReplacement(probe, regex, { text: probe, start: 0, end: length }) === undefined;
+			return (
+				findNonMatchingReplacement(probe, regex, { text: probe, start: 0, end: length, matchStart: 0 }) ===
+				undefined
+			);
 		} finally {
 			regex.lastIndex = savedLastIndex;
 		}

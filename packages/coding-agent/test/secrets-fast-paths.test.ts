@@ -28,14 +28,11 @@ describe("SecretObfuscator batch scans", () => {
 	});
 });
 
-describe("SecretObfuscator probe gating", () => {
-	it("redacts a case-insensitive unicode match whose probe only appears after lower-casing", () => {
-		// U+212A KELVIN SIGN lower-cases to "k", and a `u`-flag case-insensitive
-		// regex matches it, but a non-unicode `i` probe scan would not: the
-		// probe gate must not skip this non-ASCII text.
-		const obfuscator = new SecretObfuscator([
-			{ type: "regex", content: "kelvin[0-9]{8}", flags: "iu", literalPrefixes: ["kelvin"] },
-		]);
+describe("SecretObfuscator native gating", () => {
+	it("redacts a case-insensitive match spelled with the Kelvin sign", () => {
+		// U+212A KELVIN SIGN folds to "k": the native scan must not rule this
+		// non-ASCII text out of a case-insensitive rule's literal prefilter.
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "kelvin[0-9]{8}", flags: "i" }]);
 		const secret = "\u212Aelvin12345678";
 
 		const output = obfuscator.obfuscate(`token ${secret} here`);
