@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- `typeText` and `axType` resolve to `{ unconfirmed, focusReturn }` on every platform instead of the takeover focus report; only Windows takeover typing sets `unconfirmed`, saying why the target was not seen reading the typed text
+- `typeText` and `axType` resolve to `{ unconfirmed, focusReturn }` on every platform instead of the takeover focus report; only Windows takeover typing sets `unconfirmed`, saying why the target was not seen reading the typed text ([#19037](https://github.com/can1357/oh-my-pi/pull/19037) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -21,7 +21,7 @@
 - Fixed X11 takeover taking a typing user's keys: a window or element takeover now waits, without holding the input lock, until you have pressed no key or button for 5 s (failing `UserIntervened` if you are still at it near the run's timeout), and stops with `UserIntervened` at your first key or click once it has activated its target ([#18784](https://github.com/can1357/oh-my-pi/pull/18784) by [@will-bogusz](https://github.com/will-bogusz))
 - X11 takeover activation failures now ask the window manager to put your window back even when its active-window property has not caught up with core focus, and a press or Escape just after the activation request is sent no longer leaves the window manager switching to the target after the call returns; pointer hand-back no longer warps after your press or while a button is held ([#18784](https://github.com/can1357/oh-my-pi/pull/18784) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 window screenshots showing whatever was on screen over the window: under a compositing manager they come from the window's own pixels with its own menus and tooltips, cut to their shapes, and otherwise a covered window is reported covered instead of returning the window on top ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Windows takeover typing handing the foreground back before the target had read the typed keys, which sent the end of the text to the user's window while reporting success (a Chrome field kept 218 to 237 of 2,000 characters); typing now waits up to 5 s for the focused control's thread to read them, and `unconfirmed` says why when it could not see that
+- Fixed Windows takeover typing handing the foreground back before the target had read the typed keys, which sent the end of the text to the user's window while reporting success (a Chrome field kept 218 to 237 of 2,000 characters); typing now waits up to 5 s for the focused control's thread to read them, and `unconfirmed` says why when it could not see that ([#19037](https://github.com/can1357/oh-my-pi/pull/19037) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
