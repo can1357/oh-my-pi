@@ -6,7 +6,6 @@
 
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
 - Added the `login-replaces-credentials` authentication rule: a successful login replaces every stored credential for the provider instead of adding another account ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
-- Added the `native-transport-only "<api>"` provider rule: extensions can no longer replace the provider's built-in transport or login, only override its base URL and headers (Kiro uses it)
 - Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Added the Google/GitHub sign-in variant to the Kiro credential codec, carrying the login provider and profile ARN
 

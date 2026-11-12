@@ -30,29 +30,3 @@ export function seedModels<TApi extends Api = Api>(provider: string): readonly M
 	// arriving as resolved-key records rather than the spec interfaces.
 	return (rules.providers[provider]?.seed?.models ?? EMPTY) as unknown as readonly ModelSpec<TApi>[];
 }
-
-/** A provider declaring `native-transport-only`, and the built-in API that alone serves it. */
-export interface NativeTransportOwner {
-	provider: string;
-	api: Api;
-}
-
-let nativeTransportOwners: ReadonlyMap<string, NativeTransportOwner> | undefined;
-
-/**
- * The `native-transport-only` provider that owns `id`, when `id` is such a
- * provider or the built-in API it declares; `undefined` for every other id.
- */
-export function nativeTransportOwner(id: string): NativeTransportOwner | undefined {
-	if (!nativeTransportOwners) {
-		const owners = new Map<string, NativeTransportOwner>();
-		for (const entry of Object.values(rules.providers)) {
-			if (entry.nativeTransportOnly === undefined) continue;
-			const owner = { provider: entry.id, api: entry.nativeTransportOnly };
-			owners.set(entry.id, owner);
-			owners.set(entry.nativeTransportOnly, owner);
-		}
-		nativeTransportOwners = owners;
-	}
-	return nativeTransportOwners.get(id);
-}

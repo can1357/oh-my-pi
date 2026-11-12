@@ -3,7 +3,6 @@
 // ============================================================================
 
 import { authPolicyFor, providerDisabledReason, providerLoginWarning } from "@oh-my-pi/pi-catalog/compat/auth";
-import { assertNotNativeTransportRegistration } from "../../api-registry";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
@@ -37,7 +36,6 @@ const customOAuthProviders = new Map<string, OAuthProviderInterface>();
  * Register a custom OAuth provider.
  */
 export function registerOAuthProvider(provider: OAuthProviderInterface): void {
-	assertNotNativeTransportRegistration(provider.id);
 	customOAuthProviders.set(provider.id, provider);
 }
 

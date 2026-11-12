@@ -5,7 +5,6 @@
  * (e.g., "vertex-claude-api") that are not built into stream.ts.
  */
 
-import { nativeTransportOwner } from "@oh-my-pi/pi-catalog/compat/providers";
 import * as AIError from "./error";
 import type {
 	Api,
@@ -64,23 +63,7 @@ export interface RegisteredCustomApi {
 
 const customApiRegistry = new Map<string, RegisteredCustomApi>();
 
-/** Why an extension may not supply its own transport or login for a `native-transport-only` provider. */
-export function nativeTransportShadowMessage(provider: string): string {
-	return `The "${provider}" provider is built into this OMP version and serves only its native transport and login. Remove or disable the extension that registers it and restart OMP; then sign in with /login ${provider}.`;
-}
-
-/**
- * A provider declaring `native-transport-only` in its catalog rules must not be
- * shadowed at either registration seam (custom API or OAuth provider) —
- * extensions may register in any order, so both entry points assert this.
- */
-export function assertNotNativeTransportRegistration(id: string): void {
-	const owner = nativeTransportOwner(id);
-	if (owner !== undefined) throw new AIError.ConfigurationError(nativeTransportShadowMessage(owner.provider));
-}
-
 function assertCustomApiName(api: string): void {
-	assertNotNativeTransportRegistration(api);
 	if (BUILTIN_APIS.has(api as KnownApi)) {
 		throw new AIError.ConfigurationError(`Cannot register custom API "${api}": built-in API names are reserved.`);
 	}

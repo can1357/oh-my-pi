@@ -445,7 +445,6 @@ provider "sakana" {
     allow-unauthenticated #true                   // runtime manager without a key
     skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere
     keep-bundled-names #true                      // discovery never renames a bundled row
-    native-transport-only "kiro-api"              // only the built-in transport and login may serve this provider
     discovery label="Sakana AI" oauth-provider="sakana" allow-unauthenticated=#true {
         env "SAKANA_GEN_KEY"                      // generation-time keys; defaults to the provider env
     }
@@ -475,8 +474,6 @@ provider "muse-code" {
 Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
 
 `automatic-default #false` keeps a provider available for explicit selection but excludes it from startup fallback and automatic model presets. The default is `#true`; `apple` opts out because its on-device context cannot accommodate the standard coding-agent prompt in many projects.
-
-`native-transport-only "<api>"` names the built-in API that alone serves the provider (Kiro). An extension registering the provider may still override `baseUrl`/headers and add models of its own, but a registration that brings its own `api`, `streamSimple`, `oauth`, or a provider-level `transport` without models of its own is ignored with a configuration warning; neither the provider id nor the API can be registered as a custom OAuth provider or custom API; and a provider `transport` override never reroutes rows on that API. Absent, extensions may shadow the provider as before.
 
 `kind-apis { <kind> "<api>" }` maps each non-chat kind (`image`, `tts`, `stt`, `embedding`, `rerank`, `video`) to the API discovery assigns rows of that kind. A runner API must sit under the kind it serves (`RUNNER_API_KINDS` in `src/types.ts`); chat APIs, which serve hosted image generation, and multi-kind `local-inference` may back any kind.
 

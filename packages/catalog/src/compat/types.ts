@@ -684,14 +684,6 @@ export interface CompiledProvider {
 	skipCrossProviderReferenceFills?: boolean;
 	/** Runtime discovery keeps a bundled row's display name instead of the live one. */
 	keepBundledNames?: boolean;
-	/**
-	 * The built-in API that alone serves this provider. An extension registration
-	 * of the provider that brings its own `api`, `streamSimple`, `oauth`, or a
-	 * provider-level `transport` without models of its own is ignored with a
-	 * warning, the provider id cannot be registered as a custom OAuth provider,
-	 * and a provider `transport` override never reroutes rows on this API.
-	 */
-	nativeTransportOnly?: Api;
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */

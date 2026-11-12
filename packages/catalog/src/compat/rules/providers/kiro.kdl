@@ -8,7 +8,4 @@ provider "kiro" {
     default-model "auto"
     env "KIRO_API_KEY"
     dynamic-models-authoritative #true
-    // Kiro is built in; the legacy `omp-provider-kiro` extension must not
-    // shadow its transport or login (see `nativeTransportOnly`).
-    native-transport-only "kiro-api"
 }
