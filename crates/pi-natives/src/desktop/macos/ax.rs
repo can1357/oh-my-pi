@@ -1606,10 +1606,28 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 	TextSurface::Unknown
 }
 
+/// Whether `pid` takes an AX text write into one of its native fields as the
+/// field's input. A Chromium-family app does not: its own fields (Chrome's
+/// address bar, find bar) show an `AXSelectedText` or `AXValue` write while the
+/// browser keeps the text it had. The address bar then suggests for, and
+/// Return opens, the page's own URL, so Return reloaded the page instead of
+/// going to the written address. Keys reach those fields as typing.
+fn takes_ax_text_writes(pid: libc::pid_t) -> bool {
+	!process::is_chromium(pid)
+}
+
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
-	if process::is_terminal(element_pid(element)?) {
+	let pid = element_pid(element)?;
+	if process::is_terminal(pid) {
 		return Err(DesktopError::ax_failed(
 			"terminal AX text represents its rendered grid, not terminal input; use win.type instead",
+		));
+	}
+	if !takes_ax_text_writes(pid) {
+		return Err(DesktopError::ax_failed(
+			"a Chromium-based app shows an AX text write in its own fields, such as the address bar, \
+			 without taking it, so Return would still act on the old text; nothing was written; use \
+			 el.type(text) instead, which types into the field",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
@@ -1808,6 +1826,9 @@ fn insert_selected_text(
 	text: &str,
 	behind_user: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<bool> {
+	if !takes_ax_text_writes(pid) {
+		return Ok(false);
+	}
 	if !takes_inserted_text(
 		|| text_surface(element),
 		copy_string(element, "AXRole").as_deref(),

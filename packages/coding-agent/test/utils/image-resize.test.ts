@@ -495,6 +495,16 @@ describe("fitImage", () => {
 		expect(await size(image.data)).toEqual([400, 400]);
 	});
 
+	it("trims a size within the patch area to whole 32x32 patches", async () => {
+		// 321x319 is under 100 patches of area but covers 11x10 patches; trimming the width to 320 covers 10x10.
+		const { image } = await fitImage(
+			{ type: "image", data: await makeRedPng(321, 319), mimeType: "image/png" },
+			{ maxPatches: 100 },
+		);
+
+		expect(await size(image.data)).toEqual([320, 319]);
+	});
+
 	it("throws when no encoding fits the byte cap", async () => {
 		const noise = makeNoisePng(400, 400);
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Liquid AI (`liquid`) with the `d1.1` and `d1-ultra` judge models and `/login liquid` (`LIQUID_API_KEY`) ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
