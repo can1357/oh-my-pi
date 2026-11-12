@@ -3031,9 +3031,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			};
 			// Capture paths for downstream forwarding; filter inline-factory
 			// entries (`<inline-N>`) — those are per-session, not source paths.
-			extensionPaths = extensionsResult.extensions
-				.map(ext => ext.resolvedPath)
-				.filter(p => !p.startsWith("<inline"));
+			extensionPaths = extensionsResult.extensions.map(ext => ext.resolvedPath).filter(isFilesystemSourcePath);
 		} else if (restrictToolNames || options.preloadedPreparedExtensions) {
 			// Restricted children retain parent hooks, not ambient discovery, new
 			// extension inputs, or parent-bound instances. Tool admission stays clamped.

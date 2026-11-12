@@ -328,9 +328,8 @@ const { session } = await createAgentSession({
 - `extensions`: in-memory `ExtensionFactory[]` functions (`api => { ... }`),
   merged with discovery. Non-isolated in-process child sessions spawned through
   this session's `task` tool inherit `session.preparedExtensions` automatically
-  and rebind these functions. Worker-thread subagents (used in the CLI and
-  compiled binary when `task.workerThreads > 0` and 9 or more subagents run
-  concurrently; see [`task`](./tools/task.md#modes--variants)) cannot import an
+  and rebind these functions. Worker-thread subagents (see
+  [`task`](./tools/task.md#modes--variants)) cannot import an
   in-memory closure, so they run without those inline extensions and the parent
   session's thread logs one warning per inline extension to the omp log (default
   `~/.omp/logs/`) with its `<inline-N>` ID and `factory.name` (use a named
