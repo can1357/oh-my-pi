@@ -46,7 +46,11 @@ function type(component: HistorySearchComponent, text: string): void {
 describe("HistorySearchComponent", () => {
 	it("deletes the selected result only when Delete is at the end of the query", () => {
 		const storage = fakeStorage([makeEntry(1, "alpha one"), makeEntry(2, "alpha two")]);
-		const component = new HistorySearchComponent(storage, () => {}, () => {});
+		const component = new HistorySearchComponent(
+			storage,
+			() => {},
+			() => {},
+		);
 		type(component, "alpha");
 		component.handleInput("\x1b[D");
 		component.handleInput("\x1b[3~");

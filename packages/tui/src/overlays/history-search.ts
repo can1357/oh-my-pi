@@ -244,7 +244,12 @@ export class HistorySearchComponent extends OverlayPanel {
 
 		const dot = theme.fg("dim", theme.sep.dot);
 		const navigate = theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) + theme.fg("muted", " navigate");
-		const hint = [navigate, rawKeyHint("enter", "select"), rawKeyHint("delete", "delete at end"), keyHint("tui.select.cancel", "cancel")].join(dot);
+		const hint = [
+			navigate,
+			rawKeyHint("enter", "select"),
+			rawKeyHint("delete", "delete at end"),
+			keyHint("tui.select.cancel", "cancel"),
+		].join(dot);
 
 		this.addChild(new Spacer(1));
 		this.addChild(this.#searchInput);
