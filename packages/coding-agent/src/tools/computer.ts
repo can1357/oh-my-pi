@@ -9,7 +9,12 @@ import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
-import { type ComputerScreenshot, type ComputerSessionSnapshot, screenStateNotice } from "./computer/protocol";
+import {
+	type ComputerScreenshot,
+	type ComputerSessionSnapshot,
+	screenStateNotice,
+	secureInputNotice,
+} from "./computer/protocol";
 import {
 	type ComputerController,
 	ComputerSupervisor,
@@ -279,6 +284,8 @@ async function runComputer(
 	const content: AgentToolResult<ComputerPreludeDetails>["content"] = [];
 	const notice = screenStateNotice(run.capabilities);
 	if (notice) content.push({ type: "text", text: notice });
+	const secure = secureInputNotice(run.capabilities);
+	if (secure) content.push({ type: "text", text: secure });
 	if (cappedText) content.push({ type: "text", text: cappedText });
 	for (const image of run.displays) {
 		if (image.type === "image") content.push({ ...image, detail: "original" });

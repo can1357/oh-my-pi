@@ -88,8 +88,15 @@ pub struct DesktopCapabilities {
 	/// Native global Escape cancellation of takeover input (`takeover: true`,
 	/// held control, desktop/display-level input, raises, activating launches).
 	/// Without held control, background window input never watches the user's
-	/// keys; it and Wayland stop only through the host interrupt.
+	/// keys; it and Wayland stop only through the host interrupt. False on
+	/// macOS while `secureInput` holds: the Escape monitor then sees no keys.
 	pub global_escape: bool,
+	/// Secure Event Input is on (a focused password field, or a terminal's
+	/// secure keyboard entry): macOS hides every key from event monitors, so
+	/// the user's Escape and typing go unseen. Only macOS detects this.
+	pub secure_input: bool,
+	/// The app holding secure input, when macOS names its process.
+	pub secure_input_app: Option<String>,
 	pub capture_permission: String,
 	pub input_permission: String,
 	pub ax_permission: String,
@@ -117,6 +124,8 @@ impl DesktopCapabilities {
 			held_input: false,
 			spaces: false,
 			global_escape: false,
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: "unavailable".to_string(),
 			input_permission: "unavailable".to_string(),
 			ax_permission: "unavailable".to_string(),

@@ -5,6 +5,7 @@ import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-ca
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
+import secureInputTemplate from "../../prompts/tools/computer-secure-input.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
 
 export { COMPUTER_WORKER_ARG } from "../../cli/worker-selectors";
@@ -65,6 +66,16 @@ export type ComputerWorkerInbound =
 	| { type: "resume-display"; from: number; turn: number }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
+
+/**
+ * Tells the model a run ended with macOS secure input on, when the user's
+ * Escape and typing never reach omp. While locked, the lock note already says
+ * keys fail (the lock screen's own field may be the holder).
+ */
+export function secureInputNotice(capabilities: DesktopCapabilities | undefined): string | undefined {
+	if (!capabilities?.secureInput || capabilities.screenLocked) return undefined;
+	return prompt.render(secureInputTemplate, { secureInputApp: capabilities.secureInputApp });
+}
 
 /** Successful computer run output returned to the host supervisor. */
 export interface ComputerRunOk {

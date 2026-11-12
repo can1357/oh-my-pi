@@ -81,6 +81,7 @@ const capabilities: DesktopCapabilities = {
 	spaces: true,
 	screenLocked: false,
 	displayAsleep: false,
+	secureInput: false,
 };
 
 const display: DesktopDisplay = {
@@ -131,8 +132,15 @@ class FakeNativeSession implements NativeDesktopSession {
 	/** Lock and sleep state reported by captures, capabilities and screenState, as the native session reads it live. */
 	screenLocked = false;
 	displayAsleep = false;
+	/** The app holding macOS secure input, reported by capabilities; unset while it is off. */
+	secureInputApp: string | undefined;
 	get capabilities(): DesktopCapabilities {
-		return { ...capabilities, screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
+		return {
+			...capabilities,
+			...this.screenState,
+			secureInput: this.secureInputApp !== undefined,
+			secureInputApp: this.secureInputApp,
+		};
 	}
 	get screenState(): DesktopScreenState {
 		return { screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
@@ -1599,6 +1607,35 @@ describe("computer worker round trips", () => {
 		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\.\s/);
 		expect(text).toContain("Nothing on that display can be captured or clicked until it wakes.");
 		expect(text).toContain("`computer.display`");
+	});
+
+	it("names the app holding secure input in a run's note, and leaves the note out while locked", async () => {
+		const session = toolSession();
+		const native = new FakeNativeSession();
+		const prelude = workerPrelude(session, native);
+		const run = async () => {
+			const result = await prelude.invoke(
+				{ action: "run", code: "await desktop.click(1, 2)" },
+				{ session, toolCallId: "secure-run", signal: new AbortController().signal },
+			);
+			return result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		};
+
+		native.secureInputApp = "SecurityAgent";
+		const held = await run();
+		expect(held).toContain("secure input");
+		expect(held).toContain("SecurityAgent");
+
+		// The lock screen's own password field holds it: the lock note already says keys fail.
+		native.screenLocked = true;
+		native.secureInputApp = "loginwindow";
+		const locked = await run();
+		expect(locked).toContain("the screen is locked");
+		expect(locked).not.toContain("secure input");
+
+		native.screenLocked = false;
+		native.secureInputApp = undefined;
+		expect(await run()).not.toContain("secure input");
 	});
 
 	it("adds the lock state to a run timed out by a hung native call without reading capabilities", async () => {

@@ -280,6 +280,8 @@ impl Backend for WaylandBackend {
 			held_input: !input_unavailable,
 			spaces: false,
 			global_escape: false,
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {
 				"prompt-or-granted".to_string()
 			} else {
