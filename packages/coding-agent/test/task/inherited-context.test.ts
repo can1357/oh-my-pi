@@ -127,6 +127,20 @@ describe("buildInheritedContext", () => {
 			expect(new SecretObfuscator(entries).obfuscate(context?.text ?? "")).not.toContain(token);
 		}
 	});
+
+	it("never hands the child a secret fragment when secrets dominate the recent conversation", () => {
+		// Long plain secrets (PEM blocks, credential JSON) encode to short placeholders, so the encoded
+		// text is far shorter than the raw text it came from.
+		const entries = Array.from({ length: 10 }, (_, i) => ({
+			type: "plain" as const,
+			content: `secret${i}-${"q".repeat(6_000)}`,
+		}));
+		const parent = new SecretObfuscator(entries);
+		const text = `${"filler line\n".repeat(2_000)}${entries.map(entry => entry.content).join("\n")}\ndone`;
+		const context = buildInheritedContext([userMessage(text)], parent);
+		const sent = new SecretObfuscator(entries).obfuscate(context?.text ?? "");
+		expect(sent).not.toContain("q".repeat(64));
+	});
 });
 
 /** The child's provider context for an inherited tail, built the way the session builds it. */

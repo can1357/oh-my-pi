@@ -498,6 +498,7 @@ interface SyncSpawnRef {
 	index: number;
 	run?: SpawnRun;
 	preAllocatedId?: string;
+	inheritedContext?: InheritedContext;
 }
 
 /** Merged view of a sync spawn set's payloads: joined text plus flattened results/usage/paths. */
@@ -805,8 +806,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
-	/** The last call's inherited-context capture, shared by every item of that call. */
-	#inheritedCapture?: { toolCallId: string; context: InheritedContext | undefined };
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
 			const plan = planSpawns(
@@ -963,19 +962,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	/**
-	 * The parent's conversation tail for a flagged spawn, captured when the call dispatches (before
-	 * any concurrency wait, so a queued child sees the context its brief was written in). One
-	 * capture serves every item of a call.
+	 * The parent's conversation tail per item, captured once when the call dispatches (before any
+	 * concurrency wait or job start, so a queued child sees the context its brief was written in).
+	 * Only flagged items whose agent does not opt out (`inheritContext: false`) get it.
 	 */
-	#captureInheritedContext(toolCallId: string, params: TaskParams): InheritedContext | undefined {
-		if (!this.#wantsInheritedContext(params)) return undefined;
-		if (this.#inheritedCapture?.toolCallId !== toolCallId) {
-			this.#inheritedCapture = {
-				toolCallId,
-				context: buildInheritedContext(this.session.getContextMessages?.() ?? [], this.session.providerSecrets),
-			};
-		}
-		return this.#inheritedCapture.context;
+	#captureInheritedContexts(
+		spawns: readonly TaskParams[],
+		policies: readonly { agent: { inheritContext?: boolean } }[],
+	): (InheritedContext | undefined)[] {
+		const wants = spawns.map(
+			(spawn, index) => this.#wantsInheritedContext(spawn) && policies[index]!.agent.inheritContext !== false,
+		);
+		if (!wants.includes(true)) return spawns.map(() => undefined);
+		const context = buildInheritedContext(this.session.getContextMessages?.() ?? [], this.session.providerSecrets);
+		return wants.map(want => (want ? context : undefined));
 	}
 
 	#seanceSchemaFields() {
@@ -1022,8 +1022,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number;
 		agentId?: string;
 		detached: boolean;
+		inheritedContext?: InheritedContext;
 	}): SpawnRun {
-		const inheritedContext = this.#captureInheritedContext(spawn.toolCallId, spawn.params);
 		return new SpawnRun(
 			this.#permit,
 			run =>
@@ -1038,7 +1038,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
 					run.tools,
-					inheritedContext,
+					spawn.inheritedContext,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
@@ -1056,12 +1056,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal: AbortSignal,
 	): Promise<SpawnRun | undefined> {
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
-		// The parent's still-streaming turn (usually the reason for the spawn) is not in its context
-		// yet. Refusing halts speculation for the later items too, so ids and permits stay in order.
-		if (this.#wantsInheritedContext(spawn)) return undefined;
 		let blocking: boolean;
 		try {
-			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
+			const policy = await this.#resolveSpawnPreflight(spawn);
+			// The parent's still-streaming turn (usually the reason for the spawn) is not in its context
+			// yet. Refusing halts speculation for the later items too, so ids and permits stay in order.
+			if (this.#wantsInheritedContext(spawn) && policy.agent.inheritContext !== false) return undefined;
+			blocking = policy.effectiveAgent.blocking === true;
 		} catch {
 			return undefined;
 		}
@@ -1203,6 +1204,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
+		const inheritedContexts = this.#captureInheritedContexts(normalizedSpawnParams, policies);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -1250,7 +1252,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
-				spawnItems.map((item, index) => ({ item, index, run: adopted.get(index) })),
+				spawnItems.map((item, index) => ({
+					item,
+					index,
+					run: adopted.get(index),
+					inheritedContext: inheritedContexts[index],
+				})),
 				defaultAgent,
 				signal,
 				onUpdate,
@@ -1308,6 +1315,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			index: number;
 			blocking: boolean;
 			run: SpawnRun | undefined;
+			inheritedContext: InheritedContext | undefined;
 			progress: AgentProgress;
 		}> = [];
 		for (const [index, item] of spawnItems.entries()) {
@@ -1324,6 +1332,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index,
 				blocking: itemBlocking[index],
 				run,
+				inheritedContext: inheritedContexts[index],
 				progress: {
 					index,
 					id: agentId,
@@ -1385,6 +1394,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
 					run: spawn.run,
+					inheritedContext: spawn.inheritedContext,
 					progress: spawn.progress,
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
@@ -1501,6 +1511,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawn.index,
 				preAllocatedId: spawn.agentId,
 				run: spawn.run,
+				inheritedContext: spawn.inheritedContext,
 			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
@@ -1562,6 +1573,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId: string;
 		/** Run already started while the call streamed; the job adopts it instead of launching. */
 		run?: SpawnRun;
+		/** Parent tail captured at dispatch; the job hands it to the run it launches. */
+		inheritedContext?: InheritedContext;
 		progress: AgentProgress;
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
@@ -1574,6 +1587,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			spawnParams,
 			agentId,
 			run,
+			inheritedContext,
 			progress,
 			ircEnabled,
 			buildDetails,
@@ -1652,6 +1666,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: progress.index,
 					agentId,
 					detached: true,
+					inheritedContext,
 				}));
 				activeRun.attach({
 					signal: runSignal,
@@ -1799,6 +1814,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: spawn.index,
 					agentId: spawn.preAllocatedId,
 					detached: false,
+					inheritedContext: spawn.inheritedContext,
 				});
 			run.attach({ signal, onUpdate });
 			return await run.result;
@@ -1877,6 +1893,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						index: spawn.index,
 						agentId: spawn.preAllocatedId,
 						detached: false,
+						inheritedContext: spawn.inheritedContext,
 					});
 				run.attach({
 					signal: workerSignal,

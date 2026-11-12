@@ -31,12 +31,6 @@ export const INHERITED_CONTEXT_MAX_IDENTIFIERS = 120;
 const IDENTIFIER_MAX_CHARS = 240;
 /** A tail cut mid-line advances to the next line start when one is this close. */
 const LINE_SNAP_CHARS = 400;
-/**
- * Raw text kept around the tail before secrets are encoded. Encoding a slice can miss a secret
- * (or the context its rule needs) cut at the slice start; the slack puts that cut far before the
- * final tail, so the final cut drops it.
- */
-const ENCODE_WINDOW_CHARS = 2 * INHERITED_CONTEXT_CHARS;
 
 /** The session's secret encoder, as {@link buildInheritedContext} uses it. */
 export interface InheritedContextSecrets {
@@ -151,7 +145,10 @@ export function buildInheritedContext(
 	messages: readonly Message[],
 	secrets: InheritedContextSecrets | undefined,
 ): InheritedContext | undefined {
-	const raw = snapcompact.serializeConversation([...messages], { includeThinking: false }).slice(-ENCODE_WINDOW_CHARS);
+	// Encode the whole conversation, as the provider boundary does: a pre-encode slice would cut a
+	// secret (or the context its rule needs) at its start, and redaction can shrink the slice until
+	// that raw fragment lands inside the tail.
+	const raw = snapcompact.serializeConversation([...messages], { includeThinking: false });
 	const encoded = (secrets ? secrets.obfuscate(raw) : raw).trim();
 	if (!encoded) return undefined;
 	const tail = tailText(encoded, INHERITED_CONTEXT_CHARS);

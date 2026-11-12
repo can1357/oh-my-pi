@@ -4715,13 +4715,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// only when a provider fetches them, never held as pixels here.
 			blobBroker,
 		);
-		// A task child's inherited parent tail, drawn as frames for vision models (after obfuscation, before inline snapcompact).
-		const inheritedContextFrames = new InheritedContextFrames();
 		// One transform per conversation: the date/cwd reminder remembers what each
 		// conversation was sent, so the main loop and every advisor get their own.
 		// Only the main loop journals its reminders in the session.
 		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
 			const dateCwdReminder = new DateCwdReminderInjector(journal);
+			// A task child's inherited parent tail, drawn as frames for vision models (after obfuscation,
+			// before inline snapcompact). Per conversation: its render cache holds one model's frames.
+			const inheritedContextFrames = new InheritedContextFrames();
 			return async (context: Context, transformModel: Model): Promise<Context> => {
 				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
