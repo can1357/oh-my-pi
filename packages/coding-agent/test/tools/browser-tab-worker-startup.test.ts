@@ -12,6 +12,7 @@ import {
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { waitForDetached } from "@oh-my-pi/pi-coding-agent/tools/browser/selector-wait";
 import type { ReadyInfo, WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import {
 	acquireTab,
@@ -147,6 +148,260 @@ describe("browser tab worker startup", () => {
 });
 
 describe("OMP-owned browser evaluation", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps delayed-caught frame selector timeouts inside the run",
+		async () => {
+			const name = `frame-delayed-catch-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: 'data:text/html,<iframe name="child" srcdoc="<button>frame</button>"></iframe>',
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const frame = await tab.frame("child");
+					const pending = frame.waitForSelector("#missing", {timeout:50});
+					// This integration case requires the real Chromium timeout before attaching its catch.
+					await wait(150);
+					try { await pending; } catch (error) { return error.message.includes("timed out"); }
+					return false;
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toBe(true);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"completes public detached waits when navigation removes the element",
+		async () => {
+			const name = `selector-navigation-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: "data:text/html,<button id=present>old document</button>",
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const pending = tab.waitForSelector("#present", {state:"detached", timeout:2000});
+					await tab.evaluate("document.querySelector('#present').isConnected");
+					await page.goto("data:text/html,replacement-document");
+					return (await pending) === null;
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toBe(true);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"continues detached polling after a real document context replacement",
+		async () => {
+			const page = await headless().browser.newPage();
+			const queried = Promise.withResolvers<void>();
+			const replaced = Promise.withResolvers<void>();
+			let first = true;
+			try {
+				await page.setContent('<button id="present">old document</button>');
+				const frame = page.mainFrame();
+				const pending = waitForDetached(async () => {
+					if (!first) return frame.$("#present");
+					first = false;
+					const stale = await frame.$("#present");
+					if (!stale) throw new Error("Expected an old-document handle");
+					queried.resolve();
+					await replaced.promise;
+					try {
+						return (await stale.evaluateHandle(element => element)).asElement();
+					} finally {
+						await stale.dispose().catch(() => undefined);
+					}
+				}, new AbortController().signal).then(
+					value => ({ value }),
+					error => ({ error }),
+				);
+				await queried.promise;
+				await page.goto("data:text/html,new-document");
+				replaced.resolve();
+				expect(await pending).toEqual({ value: null });
+			} finally {
+				replaced.resolve();
+				await page.close().catch(() => undefined);
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"accepts selector wait states on tabs and frames",
+		async () => {
+			const name = `selector-states-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				const html =
+					'<button id="visible">shown</button><div id="hidden" style="display:none">hidden</div><iframe name="child" srcdoc="<div id=hidden style=display:none>hidden</div><div id=visible>shown</div>"></iframe>';
+				await acquireTab(name, headless(), {
+					url: `data:text/html,${encodeURIComponent(html)}`,
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const hidden = await tab.waitForSelector("#removed", {state:"hidden"});
+					const detached = await tab.waitForSelector("#removed", {state:"detached"});
+					const invisible = await tab.waitForSelector("#hidden", {state:"hidden"});
+					const attached = await tab.waitForSelector("#hidden", {state:"attached"});
+					const visible = await tab.waitForSelector("#visible", {state:"visible", timeout:Infinity});
+					const legacyHidden = await tab.waitForSelector("#removed", {hidden:true});
+					const legacyVisible = await tab.waitForSelector("#visible", {visible:true});
+					const frame = await tab.frame("child");
+					const frameHidden = await frame.waitForSelector("#removed", {state:"hidden"});
+					const frameDetached = await frame.waitForSelector("#removed", {state:"detached"});
+					const frameAttached = await frame.waitForSelector("#hidden", {state:"attached", timeout:Infinity});
+					const frameSnapshot = await frame.ariaSnapshot("#visible");
+					const frameRef = frameSnapshot.match(/ref=(e[0-9]+)/)?.[1];
+					if (!frameRef) throw new Error("Expected a frame element ref");
+					let frameRefAttached = "";
+					try { await frame.waitForSelector(frameRef, {state:"detached", timeout:50}); }
+					catch (e) { frameRefAttached = e.message; }
+					const frameRefVisible = await frame.waitForSelector(frameRef, {state:"visible"});
+					await frame.evaluate("document.querySelector('#visible').style.display = 'none'");
+					const frameRefHidden = await frame.waitForSelector(frameRef, {state:"hidden"});
+					let frameRefNotVisible = "";
+					try { await frame.waitForSelector(frameRef, {state:"visible", timeout:50}); }
+					catch (e) { frameRefNotVisible = e.message; }
+					await frame.evaluate("document.querySelector('#visible').remove()");
+					const frameRefDetached = await frame.waitForSelector(frameRef, {state:"detached"});
+					const frameRefRemovedHidden = await frame.waitForSelector(frameRef, {state:"hidden"});
+					let stillAttached = "";
+					try { await tab.waitForSelector("#hidden", {state:"detached", timeout:50}); }
+					catch (e) { stillAttached = e.message; }
+					const snapshot = await tab.ariaSnapshot("#visible");
+					const ref = snapshot.match(/ref=(e[0-9]+)/)?.[1];
+					if (!ref) throw new Error("Expected a visible element ref");
+					let attachedRef = "";
+					try { await tab.waitForSelector(ref, {state:"detached", timeout:50}); }
+					catch (e) { attachedRef = e.message; }
+					let visibleRefNotHidden = "";
+					try { await tab.waitForSelector(ref, {state:"hidden", timeout:50}); }
+					catch (e) { visibleRefNotHidden = e.message; }
+					await tab.evaluate("document.querySelector('#visible').style.display = 'none'");
+					let hiddenRefNotVisible = "";
+					try { await tab.waitForSelector(ref, {state:"visible", timeout:50}); }
+					catch (e) { hiddenRefNotVisible = e.message; }
+					const hiddenRef = await tab.waitForSelector(ref, {state:"hidden"});
+					const legacyHiddenRef = await tab.waitForSelector(ref, {hidden:true});
+					const pendingVisibleRef = tab.waitForSelector(ref, {state:"visible"});
+					await tab.evaluate("document.querySelector('#visible').style.display = ''");
+					const visibleRef = await pendingVisibleRef;
+					await Promise.all([hiddenRef.dispose(), legacyHiddenRef.dispose(), visibleRef.dispose()]);
+					await tab.evaluate("document.querySelector('#visible').remove()");
+					const detachedRef = await tab.waitForSelector(ref, {state:"detached"});
+					const removedHiddenRef = await tab.waitForSelector(ref, {state:"hidden"});
+					await Promise.all([attached.dispose(), invisible.dispose(), visible.dispose(), legacyVisible.dispose()]);
+					return { hidden, detached, invisible:!!invisible, attached:!!attached, visible:!!visible, legacyHidden,
+						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached, attachedRef, detachedRef,
+						visibleRefNotHidden, hiddenRefNotVisible, hiddenRef:!!hiddenRef, visibleRef:!!visibleRef, removedHiddenRef,
+						frameRefAttached, frameRefVisible, frameRefHidden, frameRefNotVisible, frameRefDetached, frameRefRemovedHidden };
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toMatchObject({
+					hidden: null,
+					detached: null,
+					invisible: true,
+					attached: true,
+					visible: true,
+					legacyHidden: null,
+					legacyVisible: true,
+					frameHidden: true,
+					frameDetached: true,
+					frameAttached: true,
+					stillAttached: expect.stringContaining("timed out"),
+					attachedRef: expect.stringContaining("timed out"),
+					detachedRef: null,
+					visibleRefNotHidden: expect.stringContaining("timed out"),
+					hiddenRefNotVisible: expect.stringContaining("timed out"),
+					hiddenRef: true,
+					visibleRef: true,
+					removedHiddenRef: null,
+					frameRefAttached: expect.stringContaining("timed out"),
+					frameRefVisible: true,
+					frameRefHidden: true,
+					frameRefNotVisible: expect.stringContaining("timed out"),
+					frameRefDetached: true,
+					frameRefRemovedHidden: true,
+				});
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"rejects unknown selector wait options instead of waiting",
+		async () => {
+			const name = `selector-options-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: "data:text/html,<div id=present>present</div>",
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const errors = [];
+					for (const opts of [{state:"gone"}, {visble:true}, {visible:"true"}, {hidden:1}, {timeout:"250"}, {visible:true, hidden:true}]) {
+						try { await tab.waitForSelector("#present", opts); errors.push("accepted"); }
+						catch (e) { errors.push(e.message); }
+					}
+					return errors;
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toEqual(
+					Array.from({ length: 6 }, () => expect.stringContaining("waitForSelector() accepts")),
+				);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"adopts isolated element arguments into the main world without consuming caller handles",
 		async () => {
