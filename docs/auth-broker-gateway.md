@@ -81,7 +81,7 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
 | `DELETE` | `/v1/credential/:id/block`   | bearer | Delete one block named by body `providerKey` and `blockScope`      |
 | `DELETE` | `/v1/credential/:id/blocks`  | bearer | Delete all rate-limit blocks for a credential                      |
-| `GET`    | `/v1/usage`                  | bearer | Current `UsageReport[]`; optional `provider` query filter          |
+| `GET`    | `/v1/usage`                  | bearer | Current `UsageReport[]`; optional `provider` query filter           |
 | `GET`    | `/v1/usage/history`          | bearer | Persisted usage history; optional `sinceMs` and `provider` filters |
 | `POST`   | `/v1/usage/observed`         | bearer | Record usage observed by a broker client                           |
 | `GET`    | `/v1/usage/clients`          | bearer | Summarize client-observed usage since optional `sinceMs`           |
@@ -288,7 +288,7 @@ Broker clients can restrict which broker credentials they see by setting `OMP_AU
 }
 ```
 
-An array lists exact `identityKey` values from the broker snapshot protocol. `identityKey` is the token-free identity field already carried by each authenticated `/v1/snapshot` credential entry. Operator tooling should project only `provider` and `identityKey`; it must not retain or print the accompanying credential payload. A dedicated account-listing CLI is intentionally outside this routing feature's scope. An OAuth account without an identity key is never in an `accounts` list. A Kiro login's identity key is `account:<login id>`; see [Kiro](./kiro.md#several-kiro-accounts).
+An array lists exact `identityKey` values from the broker snapshot protocol. `identityKey` is the token-free identity field already carried by each authenticated `/v1/snapshot` credential entry. Operator tooling should project only `provider` and `identityKey`; it must not retain or print the accompanying credential payload. A dedicated account-listing CLI is intentionally outside this routing feature's scope.
 
 | Value                                             | OAuth accounts visible                                                                   | API keys visible             |
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------- |
