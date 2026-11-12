@@ -1393,7 +1393,6 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 /// password). What a secure field reads, or a field that reads back as mask
 /// characters (Qt password fields on macOS report a plain text field), is
 /// described, never quoted.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn text_readback(
 	sent: &str,
 	expected: &str,
@@ -1442,16 +1441,10 @@ pub(crate) fn text_readback(
 }
 
 /// What a read-back shows in place of the written text.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 const WRITTEN: &str = "<the written text>";
 
 /// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
 /// toolkits fall back on.
-// Unused on Windows until it has a caller of `text_readback`.
-#[cfg_attr(
-	not(any(target_os = "macos", target_os = "linux", test)),
-	allow(dead_code, reason = "Windows has no caller of text_readback yet")
-)]
 pub(crate) fn masked(actual: &str) -> bool {
 	let mut chars = actual.chars();
 	chars.next().is_some_and(|first| {
