@@ -1624,7 +1624,7 @@ describe("computer worker round trips", () => {
 		native.secureInputApp = "SecurityAgent";
 		const held = await run();
 		expect(held).toContain("secure input");
-		expect(held).toContain("SecurityAgent");
+		expect(held).toContain("held by `SecurityAgent`");
 
 		// The lock screen's own password field holds it: the lock note already says keys fail.
 		native.screenLocked = true;
