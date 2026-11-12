@@ -9,6 +9,7 @@
 - Added Gemini 4 Hydrogen (`gemini-4-hydrogen`) on Google, Vertex, OpenCode Zen, OpenRouter, Vercel AI Gateway, and Kilo, with low, medium, high, and xhigh thinking levels on the native Google transports.
 
 ### Fixed
+- Fixed Codex discovery tests failing after a catalog refresh removed plain GPT-6 Astra and Sol entries ([#19087](https://github.com/can1357/oh-my-pi/issues/19087)).
 
 - Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
 - Fixed Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) misrouting to the first-party Gemini endpoint; they now ride the `publishers/mistralai` raw-predict endpoint with ADC auth and an OpenAI-shaped body ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
