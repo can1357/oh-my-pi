@@ -8484,8 +8484,10 @@ export function bifrostModelManagerOptions(config?: BifrostModelManagerConfig): 
 							toPositiveNumber(entry.max_input_tokens, reference?.contextWindow ?? defaults.contextWindow),
 						),
 					);
-					const pricing = perTokenPricingCost(entry.pricing);
-					const cost = pricing.input > 0 || pricing.output > 0 ? pricing : (reference?.cost ?? pricing);
+					// A row that prices itself (even at "0") is authoritative; only absent rates inherit the reference.
+					const rates = isRecord(entry.pricing) ? entry.pricing : undefined;
+					const priced = rates !== undefined && (rates.prompt != null || rates.completion != null);
+					const cost = priced ? perTokenPricingCost(rates) : (reference?.cost ?? perTokenPricingCost(undefined));
 					if (isBifrostDecisionModel(entry, defaults.id)) {
 						return {
 							...defaults,

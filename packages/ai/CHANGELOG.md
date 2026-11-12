@@ -6,6 +6,10 @@
 
 - Added the `nace-systemone` judgment API for Nace's Drex decision models, which sends images as Drex's top-level `images` data URLs and replaces the base64 image, audio, video and PDF data URLs that Drex rejects in judged text with a description ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
 
+### Fixed
+
+- Fixed OpenAI Decisions judge usage reading as zero from gateways such as Bifrost that report `prompt_tokens`/`completion_tokens` instead of `input_tokens`/`output_tokens` ([#19053](https://github.com/can1357/oh-my-pi/pull/19053) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

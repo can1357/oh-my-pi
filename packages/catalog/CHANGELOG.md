@@ -5,7 +5,7 @@
 ### Added
 
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
-- Added Bifrost (`bifrost`), a self-hosted OpenAI-compatible AI gateway: its `/models` roster is discovered live per virtual key from `BIFROST_BASE_URL` (default `http://localhost:8080/v1`), chat models run over Chat Completions, known decision models become `openai-decisions` judges on the gateway's `/decisions` route, and `/login bifrost` stores the virtual key (`BIFROST_API_KEY`)
+- Added Bifrost (`bifrost`), a self-hosted OpenAI-compatible AI gateway: its `/models` roster is discovered live per virtual key from `BIFROST_BASE_URL` (default `http://localhost:8080/v1`), chat models run over Chat Completions, known decision models become `openai-decisions` judges on the gateway's `/decisions` route, and `/login bifrost` stores the virtual key (`BIFROST_API_KEY`) ([#19053](https://github.com/can1357/oh-my-pi/pull/19053) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

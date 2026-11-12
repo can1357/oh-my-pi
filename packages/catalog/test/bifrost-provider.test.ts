@@ -32,7 +32,7 @@ describe("Bifrost discovery", () => {
 						pricing: { prompt: "0.000005", completion: "0.000025" },
 					},
 					{ id: "openai/gpt-6-luna-decisions" },
-					{ id: "Drex/drex-max-v1.1" },
+					{ id: "custom/drex-max-v1.1" },
 					{
 						id: "openrouter/google/gemini-decision-1",
 						architecture: { input_modalities: ["text"], output_modalities: ["decisions"] },
@@ -48,8 +48,8 @@ describe("Bifrost discovery", () => {
 
 		expect(calls).toEqual([{ url: `${BASE_URL}/models`, authorization: "Bearer sk-bf-test" }]);
 		expect([...byId.keys()].sort()).toEqual([
-			"Drex/drex-max-v1.1",
 			"anthropic/claude-opus-5-5",
+			"custom/drex-max-v1.1",
 			"openai/gpt-6-luna-decisions",
 			"openrouter/google/gemini-decision-1",
 		]);
@@ -64,8 +64,28 @@ describe("Bifrost discovery", () => {
 			cost: { input: 5, output: 25 },
 		});
 		expect(byId.get("anthropic/claude-opus-5-5")?.kind).toBeUndefined();
-		for (const id of ["openai/gpt-6-luna-decisions", "Drex/drex-max-v1.1", "openrouter/google/gemini-decision-1"]) {
+		for (const id of ["openai/gpt-6-luna-decisions", "custom/drex-max-v1.1", "openrouter/google/gemini-decision-1"]) {
 			expect(byId.get(id)).toMatchObject({ api: "openai-decisions", kind: "judge", baseUrl: BASE_URL });
 		}
+	});
+
+	test("keeps explicit zero pricing and inherits bundled rates only when pricing is absent", async () => {
+		const discover = async (row: Record<string, unknown>) => {
+			const options = bifrostModelManagerOptions({
+				apiKey: "sk-bf-test",
+				baseUrl: BASE_URL,
+				fetch: rosterFetch([row]),
+			});
+			const models = (await options.fetchDynamicModels?.()) ?? [];
+			return models[0]?.cost;
+		};
+
+		expect(await discover({ id: "anthropic/claude-opus-5-5", pricing: { prompt: "0", completion: "0" } })).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+		expect(await discover({ id: "anthropic/claude-opus-5-5" })).toMatchObject({ input: 4, output: 20 });
 	});
 });

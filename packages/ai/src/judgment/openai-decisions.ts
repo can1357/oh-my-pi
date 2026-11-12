@@ -142,12 +142,16 @@ export const openaiDecisionsWire: JudgmentWire = {
 			const answer = decodeAnswer(entry);
 			if (answer) answers[entry.name] = answer;
 		}
+		// Responses-style keys first; gateways such as Bifrost report chat-style `prompt_tokens`/`completion_tokens`.
 		const usage = isRecord(payload.usage) ? payload.usage : {};
 		return {
 			model: typeof payload.model === "string" ? payload.model : undefined,
 			answers,
 			refused,
-			usage: tokenUsage(finiteNumber(usage.input_tokens), finiteNumber(usage.output_tokens)),
+			usage: tokenUsage(
+				finiteNumber(usage.input_tokens) ?? finiteNumber(usage.prompt_tokens),
+				finiteNumber(usage.output_tokens) ?? finiteNumber(usage.completion_tokens),
+			),
 		};
 	},
 };
