@@ -216,6 +216,9 @@ pub struct GrepResult {
 	pub limit_reached:      Option<bool>,
 	/// Number of files skipped because they exceed the size limit.
 	pub skipped_oversized:  Option<u32>,
+	/// Number of files with all or part of their content skipped by binary
+	/// detection.
+	pub skipped_binary:     Option<u32>,
 }
 
 const fn to_mode(mode: Option<GrepOutputMode>) -> pi_walker::grep::Mode {
@@ -427,6 +430,7 @@ async fn grep_async(
 		limit_reached: result.limit_reached.then_some(true),
 		skipped_oversized: (result.skipped_oversized > 0)
 			.then(|| clamp_u32(result.skipped_oversized)),
+		skipped_binary: (result.skipped_binary > 0).then(|| clamp_u32(result.skipped_binary)),
 	})
 }
 

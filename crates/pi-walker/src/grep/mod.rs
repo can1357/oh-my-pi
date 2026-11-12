@@ -5,9 +5,10 @@
 //! oriented: a match is a line (in multiline mode, a block of lines)
 //! containing a match, reported with optional context lines, trailing
 //! whitespace trimmed, invalid UTF-8 replaced, and lines wider than
-//! `max_columns` cut to a window around their first match. A NUL byte in the
-//! first 64 KiB makes a file binary (searched, no matches); past that, a
-//! reported line holding a NUL ends the file's search.
+//! `max_columns` cut to a window around their first match. Explicit file roots
+//! are searched as text. For discovery and in-memory searches, a NUL byte in
+//! the first 64 KiB skips the input; past that, a reported line holding a NUL
+//! ends the search. Filesystem results count these binary skips.
 //!
 //! Directory searches read and scan files inside one parallel walk when
 //! results are unbounded; with a match budget a path-ordered walk streams
@@ -138,6 +139,7 @@ pub fn search(
 ) -> Result<SearchResult, String> {
 	let content_mode = opts.mode == Mode::Content;
 	let params = ScanParams {
+		text:        false,
 		content:     content_mode,
 		before:      if content_mode { opts.before } else { 0 },
 		after:       if content_mode { opts.after } else { 0 },
@@ -243,6 +245,8 @@ pub struct GrepResult {
 	pub limit_reached:      bool,
 	/// Files over [`MAX_FILE_BYTES`] that could not be read.
 	pub skipped_oversized:  u64,
+	/// Files with all or part of their content skipped by binary detection.
+	pub skipped_binary:     u64,
 }
 
 /// Why a [`grep`] failed.
