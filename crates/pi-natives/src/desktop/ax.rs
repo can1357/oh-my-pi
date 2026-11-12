@@ -1387,7 +1387,7 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 	backend.perform(handle, "press")
 }
 
-/// Exact equality is the verdict: a field that shows a rewritten value has
+/// Exact equality or a same-length mask is the verdict: a rewritten value has
 /// not been shown to hold what was sent (Contacts regroups a phone number in
 /// the field and stores none of it). The error never quotes the written text,
 /// which the caller already has and which may be a password the field's role
@@ -1405,6 +1405,9 @@ pub(crate) fn text_readback(
 ) -> CoreResult<()> {
 	const SHOWN: usize = 200;
 	if actual == Some(expected) {
+		return Ok(());
+	}
+	if actual.is_some_and(|actual| masks(actual, expected)) {
 		return Ok(());
 	}
 	let count = |text: &str| match text.chars().count() {
@@ -1454,6 +1457,14 @@ pub(crate) fn masked(actual: &str) -> bool {
 	chars.next().is_some_and(|first| {
 		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
 	})
+}
+
+/// Whether `actual` masks `value`: one mask character per character or UTF-16
+/// unit.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+pub(crate) fn masks(actual: &str, value: &str) -> bool {
+	let shown = actual.chars().count();
+	masked(actual) && (shown == value.chars().count() || shown == value.encode_utf16().count())
 }
 
 /// `value` cut to `max` characters, the last one an ellipsis when cut.
@@ -3077,29 +3088,37 @@ mod tests {
 	}
 
 	#[test]
-	fn a_field_that_reads_back_masked_never_quotes_the_text_whatever_its_role() {
-		// KeePassXC's Qt password field reports a plain text field and reads back
-		// bullets.
-		for (actual, mask) in
-			[("•••••••", "a mask of 7 characters."), ("*", "a mask of 1 character.")]
-		{
-			let error = text_readback("hunter2", "hunter2", Some(actual), false).unwrap_err();
-			assert_eq!(error.code, ErrorCode::AxFailed);
-			assert!(!error.message.contains("hunter2"), "{}", error.message);
-			assert!(!error.message.contains(actual), "{}", error.message);
-			assert!(error.message.contains(mask), "{}", error.message);
+	fn a_same_length_mask_succeeds_whatever_the_role() {
+		for (sent, actual) in [("hunter2", "•••••••"), ("Q", "*"), ("🔑", "••")] {
+			for secure in [false, true] {
+				assert!(text_readback(sent, sent, Some(actual), secure).is_ok());
+			}
+		}
+		// An insertion is checked against the whole value it should leave.
+		assert!(text_readback("abc", "•••abc", Some("••••••"), false).is_ok());
+		assert!(text_readback("abc", "•••abc", Some("•••"), false).is_err());
+	}
+
+	#[test]
+	fn a_different_length_mask_fails_without_quoting_the_text() {
+		for actual in ["••••••", "*"] {
+			for secure in [false, true] {
+				let error = text_readback("hunter2", "hunter2", Some(actual), secure).unwrap_err();
+				assert_eq!(error.code, ErrorCode::AxFailed);
+				assert!(!error.message.contains("hunter2"), "{}", error.message);
+				assert!(!error.message.contains(actual), "{}", error.message);
+			}
 		}
 	}
 
 	#[test]
-	fn a_plain_field_that_reads_back_empty_or_unreadable_never_quotes_the_text() {
-		// A password field whose role says plain text, read back as nothing.
-		for (actual, reads) in [(Some(""), "reads empty"), (None, "could not be read back")] {
-			let error = text_readback("hunter2", "hunter2", actual, false).unwrap_err();
-			assert_eq!(error.code, ErrorCode::AxFailed);
-			assert!(!error.message.contains("hunter2"), "{}", error.message);
-			assert!(error.message.contains("wrote 7 characters"), "{}", error.message);
-			assert!(error.message.contains(reads), "{}", error.message);
+	fn an_unreadable_value_still_fails_without_quoting_the_text() {
+		for actual in [None, Some("")] {
+			for secure in [false, true] {
+				let error = text_readback("hunter2", "hunter2", actual, secure).unwrap_err();
+				assert_eq!(error.code, ErrorCode::AxFailed);
+				assert!(!error.message.contains("hunter2"), "{}", error.message);
+			}
 		}
 	}
 
