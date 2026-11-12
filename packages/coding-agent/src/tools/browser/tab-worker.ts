@@ -988,8 +988,8 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 						}
 					} catch (error) {
 						if (waitSignal.aborted) throw waitSignal.reason;
-						if (!waitSignal.aborted && evalSignal.aborted) throw timedOut();
-						if (waitSignal.aborted || !isNavigatedContextError(error)) throw error;
+						if (evalSignal.aborted) throw timedOut();
+						if (!isNavigatedContextError(error)) throw error;
 						if (Date.now() >= deadline) throw timedOut();
 						continue;
 					}
