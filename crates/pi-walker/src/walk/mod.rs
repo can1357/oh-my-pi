@@ -17,7 +17,7 @@
 //!   entry as soon as every directory sorting before it is listed.
 //! - [`Tree`] is the serial, ordered traversal, driven one event at a time by
 //!   the caller, for tools whose output order and pruning decisions are
-//!   sequential (`find`, `fd`, workspace listing).
+//!   sequential (`find`, workspace listing).
 //!
 //! Directories open relative to their parent's handle, ignore files are read
 //! only when a listing contains them, unchanged directories are served from

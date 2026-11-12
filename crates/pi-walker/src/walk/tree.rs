@@ -2,7 +2,7 @@
 //!
 //! [`Tree`] is for tools whose output order and pruning are sequential:
 //! `find` (pre-order or `-depth` contents-first, `-prune`, `-quit`, `-xdev`,
-//! `-L`/`-H`), `fd`, and workspace listing. It shares the filesystem layer,
+//! `-L`/`-H`) and workspace listing. It shares the filesystem layer,
 //! ignore chain, and pruning rules of [`super::walk`], but the caller drives
 //! it one event at a time, deciding each entry (and, with
 //! [`Tree::skip_dir`], pruning each directory) before its subtree is read.
@@ -61,7 +61,7 @@ use crate::{
 pub enum Follow {
 	/// None, not even a root that is a symlink (it is reported as one).
 	Never,
-	/// Only the root (`find -H`, `grep -r`, `fd` without `-L`).
+	/// Only the root (`find -H`, `grep -r`).
 	#[default]
 	Roots,
 	/// Every link, with loop detection (`find -L`, `fd -L`).
@@ -73,7 +73,7 @@ pub enum Follow {
 pub enum Order {
 	/// As the directory listing returns them.
 	Listing,
-	/// Byte order of their names (`find`, `fd`).
+	/// Byte order of their names (`find`).
 	#[default]
 	Names,
 	/// Byte order of the paths of the files below: a listed directory sorts
