@@ -142,23 +142,22 @@ describe("tool path arrays", () => {
 		expect(details?.displayContent).not.toMatch(/[\0\x07\x1b]/);
 	});
 
-	it("search reports skipped binaries instead of claiming a directory has no matches", async () => {
+	it("search names skipped binaries that match instead of claiming a directory has no matches", async () => {
 		await Bun.write(path.join(tempDir, "nul-directory", "f.md"), "needle\n\0\n");
+		await Bun.write(path.join(tempDir, "nul-directory", "image.png"), "\x89PNG\0\0 no hit");
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "grep");
 		if (!tool) throw new Error("Missing grep tool");
 
-		for (const scope of ["nul-directory/", "nul-directory/*.md"]) {
-			const result = await tool.execute("search-nul-directory", { pattern: "needle", path: scope });
-			const details = result.details as { skippedBinary?: number } | undefined;
-			expect(details?.skippedBinary).toBe(1);
-			expect(getText(result)).toContain("No matches in searched content");
-			expect(getText(result)).toContain("Skipped binary content in 1 file(s)");
-			expect(getText(result)).not.toContain("No matches found");
-		}
+		const result = await tool.execute("search-nul-directory", { pattern: "needle", path: "nul-directory/" });
+		const details = result.details as { binaryMatches?: string[] } | undefined;
+		expect(details?.binaryMatches).toEqual(["nul-directory/f.md"]);
+		expect(getText(result)).toBe(
+			"No matches in text files\nBinary files also match (name one as `path` to search it as text): nul-directory/f.md",
+		);
 	});
 
-	it("search preserves named NUL matches and binary skip counts across mixed scopes", async () => {
+	it("search preserves named NUL matches and binary matches across mixed scopes", async () => {
 		await Bun.write(path.join(tempDir, "nul-mixed", "discovered", "f.md"), "needle\n\0\n");
 		await Bun.write(path.join(tempDir, "nul-mixed", "named.md"), "needle named\0\n");
 		const tools = await createTools(createTestSession(tempDir));
@@ -169,11 +168,10 @@ describe("tool path arrays", () => {
 			pattern: "needle",
 			path: "nul-mixed/discovered/;nul-mixed/named.md",
 		});
-		const details = result.details as { matchCount?: number; skippedBinary?: number } | undefined;
+		const details = result.details as { matchCount?: number; binaryMatches?: string[] } | undefined;
 		expect(details?.matchCount).toBe(1);
-		expect(details?.skippedBinary).toBe(1);
+		expect(details?.binaryMatches).toEqual(["nul-mixed/discovered/f.md"]);
 		expect(getText(result)).toContain("needle named");
-		expect(getText(result)).toContain("Skipped binary content in 1 file(s)");
 		expect(getText(result)).not.toContain("\0");
 	});
 

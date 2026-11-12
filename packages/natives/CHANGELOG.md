@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches return a `GrepResult.skippedBinary` file count ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.19.0] - 2026-11-12
 

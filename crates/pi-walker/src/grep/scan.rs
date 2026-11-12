@@ -33,7 +33,8 @@ pub const STREAM_LINE_LIMIT: usize = 64 * 1024 * 1024;
 /// What one scan reports.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScanParams {
-	/// Search NUL-containing input as text instead of stopping at binary data.
+	/// Search NUL-containing buffered input as text instead of skipping it as
+	/// binary.
 	pub text:        bool,
 	/// Render [`Match`] entries (line numbers, text, context).
 	pub content:     bool,
@@ -56,14 +57,15 @@ pub struct ScanParams {
 /// Outcome of one scan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScanOutcome {
-	/// Binary detection skipped all or part of the input.
-	pub skipped_binary: bool,
+	/// Binary detection skipped input holding a match (grep's "binary file
+	/// matches"); a NUL that only cuts context or match-free bytes is not one.
+	pub binary_match:  bool,
 	/// Matches found: skipped, collected, and the probe match.
-	pub count:          u64,
+	pub count:         u64,
 	/// Matches collected (after `offset`, up to the cap).
-	pub collected:      u64,
+	pub collected:     u64,
 	/// The cap was reached.
-	pub limit_reached:  bool,
+	pub limit_reached: bool,
 }
 
 /// Per-thread scanner scratch.
@@ -236,10 +238,7 @@ impl Scanner {
 		out: &mut Vec<Match>,
 	) -> Result<ScanOutcome, M::Error> {
 		let mut res = ScanOutcome::default();
-		if !p.text && memchr::memchr(0, &buf[..buf.len().min(BINARY_WINDOW)]).is_some() {
-			res.skipped_binary = true;
-			return Ok(res);
-		}
+		let binary = !p.text && memchr::memchr(0, &buf[..buf.len().min(BINARY_WINDOW)]).is_some();
 		let multi = multiline && spans_lines;
 		let strategy = if multi {
 			Strategy::Multi
@@ -252,6 +251,11 @@ impl Scanner {
 			Strategy::Confirm
 		};
 		let mut blocks = Blocks { matcher, buf, strategy, from: 0, pending: None, done: false };
+		if binary {
+			// A binary input is not searched, only probed for a first match.
+			res.binary_match = blocks.next()?.is_some();
+			return Ok(res);
+		}
 		let nul = |s: usize, e: usize| {
 			!p.text && e > BINARY_WINDOW && memchr::memchr(0, &buf[s..e]).is_some()
 		};
@@ -297,7 +301,7 @@ impl Scanner {
 			self.starts.clear();
 			if p.content {
 				if !flush_after(&mut pending, &mut floor, &mut *out, bs) {
-					res.skipped_binary = true;
+					res.binary_match = true;
 					return Ok(res);
 				}
 				let mut pos = bs;
@@ -310,7 +314,7 @@ impl Scanner {
 				// The probe: grep-searcher reports a match's context before
 				// the match, so a NUL in either keeps it from counting.
 				if self.starts.iter().any(|&s| nul(s, line_end(buf, s))) || nul(bs, be) {
-					res.skipped_binary = true;
+					res.binary_match = true;
 					return Ok(res);
 				}
 				res.count += 1;
@@ -318,7 +322,7 @@ impl Scanner {
 			}
 			if !p.content {
 				if nul(bs, be) {
-					res.skipped_binary = true;
+					res.binary_match = true;
 					return Ok(res);
 				}
 				res.count += 1;
@@ -343,7 +347,7 @@ impl Scanner {
 			for (i, &s) in self.starts.iter().rev().enumerate() {
 				let e = line_end(buf, s);
 				if nul(s, e) {
-					res.skipped_binary = true;
+					res.binary_match = true;
 					return Ok(res);
 				}
 				if skipped >= p.offset {
@@ -352,7 +356,7 @@ impl Scanner {
 				}
 			}
 			if nul(bs, be) {
-				res.skipped_binary = true;
+				res.binary_match = true;
 				return Ok(res);
 			}
 			res.count += 1;
@@ -390,7 +394,8 @@ impl Scanner {
 			}
 		}
 		if p.content {
-			res.skipped_binary = !flush_after(&mut pending, &mut floor, &mut *out, buf.len());
+			// No match follows: a NUL here only cuts trailing context.
+			flush_after(&mut pending, &mut floor, &mut *out, buf.len());
 		}
 		Ok(res)
 	}
@@ -409,11 +414,6 @@ struct StreamCollector<'a, M> {
 
 impl<M: Matcher> Sink for StreamCollector<'_, M> {
 	type Error = io::Error;
-
-	fn binary_data(&mut self, _: &Searcher, _: u64) -> Result<bool, io::Error> {
-		self.res.skipped_binary = true;
-		Ok(false)
-	}
 
 	fn matched(&mut self, _: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
 		self.res.count += 1;
@@ -478,7 +478,8 @@ impl<M: Matcher> Sink for StreamCollector<'_, M> {
 
 /// Searches `reader` line by line through grep-searcher's bounded buffer
 /// (lines up to [`STREAM_LINE_LIMIT`]), with the semantics of
-/// [`Scanner::scan`] in line mode.
+/// [`Scanner::scan`] in line mode. Only explicit file roots stream, so the
+/// input is always searched as text.
 pub fn scan_reader<M: Matcher>(
 	matcher: &M,
 	reader: impl io::Read,
@@ -491,11 +492,7 @@ pub fn scan_reader<M: Matcher>(
 		(0, 0)
 	};
 	let mut searcher = SearcherBuilder::new()
-		.binary_detection(if p.text {
-			BinaryDetection::none()
-		} else {
-			BinaryDetection::quit(0)
-		})
+		.binary_detection(BinaryDetection::none())
 		.line_number(p.content)
 		.before_context(before)
 		.after_context(after)

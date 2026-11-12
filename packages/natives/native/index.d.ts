@@ -2433,10 +2433,10 @@ export interface GrepResult {
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
   /**
-   * Number of files with all or part of their content skipped by binary
-   * detection.
+   * Paths, relative to the search root, of files skipped as binary although
+   * their content matches; search one as an explicit path to read it as text.
    */
-  skippedBinary?: number
+  binaryMatches?: Array<string>
 }
 
 /**

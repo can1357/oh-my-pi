@@ -71,8 +71,8 @@ export interface GrepToolDetails {
 	 * skipped these and continued with the surviving entries; surfaced as a
 	 * non-fatal warning in the renderer and in the model-facing text. */
 	missingPaths?: string[];
-	/** Files with all or part of their content skipped by binary detection. */
-	skippedBinary?: number;
+	/** Files skipped as binary although their content matches (cwd-relative display paths). */
+	binaryMatches?: string[];
 }
 
 // =============================================================================
@@ -226,8 +226,8 @@ export const grepToolRenderer = {
 			missingPathsList.length > 0
 				? uiTheme.fg("warning", `skipped missing: ${missingPathsList.join(", ")}`)
 				: undefined;
-		const binaryNote = details?.skippedBinary
-			? uiTheme.fg("warning", `skipped binary content: ${formatCount("file", details.skippedBinary)}`)
+		const binaryNote = details?.binaryMatches?.length
+			? uiTheme.fg("warning", `binary matches: ${formatCount("file", details.binaryMatches.length)}`)
 			: undefined;
 		const extraLines = compact([missingNote, binaryNote]);
 
@@ -321,8 +321,8 @@ export const grepToolRenderer = {
 		const textContent = details?.displayContent ?? resultText(result);
 		const missing = details?.missingPaths ?? [];
 		const missingNote = missing.length > 0 ? `skipped missing: ${missing.join(", ")}` : undefined;
-		const binaryNote = details?.skippedBinary
-			? `skipped binary content: ${formatCount("file", details.skippedBinary)}`
+		const binaryNote = details?.binaryMatches?.length
+			? `binary matches: ${formatCount("file", details.binaryMatches.length)}`
 			: undefined;
 		const scope = details?.scopePath ? `in ${details.scopePath}` : undefined;
 		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;

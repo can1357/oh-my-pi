@@ -8,7 +8,8 @@
 //! `max_columns` cut to a window around their first match. Explicit file roots
 //! are searched as text. For discovery and in-memory searches, a NUL byte in
 //! the first 64 KiB skips the input; past that, a reported line holding a NUL
-//! ends the search. Filesystem results count these binary skips.
+//! ends the search. Filesystem results list files whose skipped content
+//! holds a match.
 //!
 //! Directory searches read and scan files inside one parallel walk when
 //! results are unbounded; with a match budget a path-ordered walk streams
@@ -245,8 +246,9 @@ pub struct GrepResult {
 	pub limit_reached:      bool,
 	/// Files over [`MAX_FILE_BYTES`] that could not be read.
 	pub skipped_oversized:  u64,
-	/// Files with all or part of their content skipped by binary detection.
-	pub skipped_binary:     u64,
+	/// Walk-relative paths, sorted, of files whose content binary detection
+	/// skipped although it holds a match.
+	pub binary_matches:     Vec<String>,
 }
 
 /// Why a [`grep`] failed.

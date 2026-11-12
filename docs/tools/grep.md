@@ -48,8 +48,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - `truncated` — any file/match/native/line/output limit was reached; `truncation` and `meta.truncation` describe final byte truncation by `truncateHead()`.
    - `displayContent` — TUI-only rendering text with `│` gutters instead of model anchors.
    - `missingPaths` — multi-path entries skipped because their base path did not exist.
-   - `skippedBinary` — count of files whose content was wholly or partially skipped by binary detection during directory or glob scans.
-- No-match result text is `No matches found` (`No matches in searched content` when binary content was skipped or a multiline search limited large files to their first 4MB, or `No more results (<total> files total; skip=<N> is past the end)` when `skip` points past the last file page), optionally followed by skipped missing-path, unreadable-archive, oversized-file, or binary-content notes. Matching results append the same warning notes in the closing trailer, and `grepToolRenderer` (`packages/tui/src/tools/grep.ts`) shows a `skipped binary content` warning in both terminal (`renderResult`) and native Tern (`describeResult`) views.
+   - `binaryMatches` — cwd-relative paths of files skipped as binary during directory or glob scans although their content matches.
+- No-match result text is `No matches found` (`No matches in text files` when only skipped binary files match, `No matches in searched content` when a multiline search limited large files to their first 4MB, or `No more results (<total> files total; skip=<N> is past the end)` when `skip` points past the last file page), optionally followed by skipped missing-path, unreadable-archive, oversized-file, or binary-match notes. The binary-match note names up to five matching binary files. Matching results append the same notes in the closing trailer, and `grepToolRenderer` (`packages/tui/src/tools/grep.ts`) shows a `binary matches` count in both terminal (`renderResult`) and native Tern (`describeResult`) views.
 
 ## Flow
 
@@ -115,7 +115,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 2. **Single directory path or single glob-like path**
    - `parseSearchPath()` may split the input into `path` + `glob`.
    - One native `grep()` scans the directory tree with `gitignore` and `hidden:true`.
-   - Binary detection skips files with a NUL byte in the first 64 KiB and stops scanning a file when a later reported match or context line contains a NUL (keeping earlier matches); skipped files are counted in `details.skippedBinary`.
+   - Binary detection skips files with a NUL byte in the first 64 KiB and stops scanning a file when a later reported match or context line contains a NUL (keeping earlier matches); skipped files whose content matches are listed in `details.binaryMatches`.
    - Results are grouped into a 20-file page; use `skip` with the next file offset shown in the limit message.
    - JS round-robins the selected files' matches.
 3. **Multiple explicit paths/globs**
@@ -185,4 +185,4 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `gitignore:false` only affects native directory traversal. It does not disable the tool's own path normalization or explicit-file handling.
 - When `path` resolves to multiple exact files, each target gets its own native fetch cap before JS grouping (`2000` ordinarily; enlarged for line-range filters).
 - The section tag in hashline mode is a four-hex opaque snapshot tag from the session snapshot store; `grep` records whole-file snapshots when possible and prints bare line numbers beneath the header.
-- When the `ovnfs` binary is found (`ovnfs.path`, default `ovnfs` on `PATH`) and a host search root lies inside a checkout mount served by its daemon (`packages/coding-agent/src/ovnfs/search.ts`), the daemon answers `grep` instead of `@oh-my-pi/pi-natives` (falling back to native search on daemon failure). `DaemonGrepReply` carries no binary-skip field and `ovnfs` exposes no search-as-text request option, so daemon-answered searches filter out NUL-containing files (including explicitly targeted files) and leave `skippedBinary` unset.
+- When the `ovnfs` binary is found (`ovnfs.path`, default `ovnfs` on `PATH`) and a host directory or glob root lies inside a checkout mount served by its daemon (`packages/coding-agent/src/ovnfs/search.ts`), the daemon answers `grep` instead of `@oh-my-pi/pi-natives` (falling back to native search on daemon failure). Explicitly named files always use the native scanner, so they are searched as text. `DaemonGrepReply` has no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.

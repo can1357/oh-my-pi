@@ -283,28 +283,29 @@ fn binary_buffers_have_no_matches_and_late_nul_lines_end_the_scan() {
 	let Engine::Rust(matcher) = &engine else {
 		panic!("rust matcher")
 	};
-	for (input, expected) in [(b"match\x00\nmatch\n".as_slice(), 0), (doc.as_bytes(), 2)] {
-		let mut matches = Vec::new();
+	// Skipped content is reported only when it holds a match: not for a
+	// match-free binary buffer, nor for a NUL in context after the last match.
+	let params = scan::ScanParams { content: true, after: 1, ..Default::default() };
+	for (input, binary_match, count) in [
+		(b"match\x00\nmatch\n".to_vec(), true, 0),
+		(b"\x00\x01\x02 no hit\n".to_vec(), false, 0),
+		// Match 1's context NUL hides match 2.
+		(doc.clone().into_bytes(), true, 1),
+		(format!("{pad}match 1\nnul \x00 here\n").into_bytes(), false, 1),
+	] {
 		let outcome = scan::Scanner::default()
-			.scan(matcher, false, false, input, &scan::ScanParams::default(), &mut matches)
+			.scan(matcher, false, false, &input, &params, &mut Vec::new())
 			.expect("scan");
-		assert!(outcome.skipped_binary);
-		assert_eq!(outcome.count, expected);
+		assert_eq!((outcome.binary_match, outcome.count), (binary_match, count));
 	}
-	// Both buffered and streamed explicit text searches retain NUL lines and
-	// context.
-	for text in [false, true] {
-		let params =
-			scan::ScanParams { text, content: true, before: 1, after: 1, ..Default::default() };
-		for (outcome, matches) in scan_both(matcher, b"before\0\nmatch\0\nafter\0\n", &params) {
-			assert_eq!(outcome.skipped_binary, !text);
-			assert_eq!(outcome.count, u64::from(text));
-			if text {
-				assert_eq!(matches[0].text, "match\0");
-				assert_eq!(matches[0].before[0].text, "before\0");
-				assert_eq!(matches[0].after[0].text, "after\0");
-			}
-		}
+	// Buffered and streamed explicit text searches retain NUL lines and context.
+	let params =
+		scan::ScanParams { text: true, content: true, before: 1, after: 1, ..Default::default() };
+	for (outcome, matches) in scan_both(matcher, b"before\0\nmatch\0\nafter\0\n", &params) {
+		assert!(!outcome.binary_match);
+		assert_eq!(matches[0].text, "match\0");
+		assert_eq!(matches[0].before[0].text, "before\0");
+		assert_eq!(matches[0].after[0].text, "after\0");
 	}
 }
 
@@ -507,39 +508,22 @@ async fn named_nul_files_find_multiline_matches_in_the_search_window() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn directory_binary_skips_survive_budgets_globs_and_streamed_results() {
+async fn directory_results_list_only_binary_files_that_hide_matches() {
 	let dir = TempDir::new();
 	dir.write("early.md", b"needle\n\0\n");
 	dir.write("late.md", format!("{}needle\0\n", "padding\n".repeat(9000)));
+	dir.write("image.png", b"\x89PNG\0\0 no hit");
 	let engine = needle();
+	// Unbounded and budgeted walks.
 	for max_count in [None, Some(20)] {
-		let result =
-			run(dir.path(), &GrepOptions { glob: Some("*.md".into()), max_count, ..options(&engine) })
-				.await;
+		let result = run(dir.path(), &GrepOptions { max_count, ..options(&engine) }).await;
 		assert_eq!(result.total_matches, 0);
-		assert_eq!(result.skipped_binary, 2);
-		assert_eq!(result.files_searched, 2);
+		assert_eq!(result.binary_matches, ["early.md", "late.md"]);
 	}
 	dir.write("text.md", "needle text\n");
 	let (result, batches) = run_sunk(dir.path(), options(&engine)).await;
-	let result = result.expect("stream");
-	assert_eq!(result.skipped_binary, 2);
-	assert_eq!(result.total_matches, 1);
+	assert_eq!(result.expect("stream").binary_matches, ["early.md", "late.md"]);
 	assert_eq!(batches.into_iter().flatten().count(), 1);
-
-	let multi = Arc::new(Engine::compile("needle text\\n", false, true).expect("compile"));
-	let result = run(dir.path(), &GrepOptions { multiline: true, ..options(&multi) }).await;
-	assert_eq!(result.skipped_binary, 1);
-	assert_eq!(result.total_matches, 1);
-
-	// Late detection keeps matches found before the binary line, but still
-	// reports the unsearched remainder in both aggregation paths.
-	dir.write("late.md", format!("{}needle text\nneedle\0\n", "padding\n".repeat(9000)));
-	for max_count in [None, Some(20)] {
-		let result = run(dir.path(), &GrepOptions { max_count, ..options(&engine) }).await;
-		assert_eq!(result.skipped_binary, 2);
-		assert_eq!(result.total_matches, 2);
-	}
 }
 
 #[tokio::test(flavor = "multi_thread")]
