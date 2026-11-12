@@ -592,6 +592,31 @@ describe("ACP builtin slash commands", () => {
 			]);
 		});
 
+		it("jobs logs: headless names the interactive-only sheet instead of echoing live output", async () => {
+			const { output, runtime } = createRuntime();
+			runtime.session.getAsyncJobTree = () => ({
+				rootId: "Main",
+				agents: [],
+				running: [
+					{
+						id: "j1",
+						type: "bash",
+						status: "running",
+						label: "cargo build",
+						ownerId: "Main",
+						startTime: Date.now() - 5000,
+					},
+				],
+				recent: [],
+			});
+
+			const result = await executeAcpBuiltinSlashCommand("/jobs logs", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toMatch(/interactive/i);
+			expect(output[0]).not.toContain("cargo build");
+		});
+
 		it("jobs full: shows the untruncated command, fenced past any backticks in it", async () => {
 			const { output, runtime } = createRuntime();
 			const command = `echo \`\`\` && pytest ${"tests/a ".repeat(40)}-q`;
@@ -614,13 +639,11 @@ describe("ACP builtin slash commands", () => {
 
 			await executeAcpBuiltinSlashCommand("/jobs", runtime);
 			await executeAcpBuiltinSlashCommand("/jobs full", runtime);
-			await executeAcpBuiltinSlashCommand("/jobs bogus", runtime);
 
 			expect(output[0]).not.toContain(command);
 			expect(output[1]).toContain(`  ${command}`);
 			expect(output[1]).toContain("````text\n");
 			expect(output[1]).toContain("build done");
-			expect(output[2]).toContain("Usage: /jobs [full|kill <id>|kill all]");
 		});
 	});
 

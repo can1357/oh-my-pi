@@ -3,7 +3,10 @@
  * sheet the native jobs pill and `/jobs` open. A master–detail split lists
  * every job of the session's agent and its subagents as a tree (see
  * {@link buildJobTree}) beside the selected one's status, command, facts
- * (cwd, live pids, exit code, artifact) and live output.
+ * (cwd, live pids, exit code, artifact) and live output. A terminal without
+ * the native surface renders the same source as a bounded fallback: a
+ * selection-centered window of the tree, the selected job's newest output
+ * (pausable) and a one-row key guide, fit within the host's row budget.
  */
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -11,12 +14,15 @@ import type { Component } from "../tui";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
 import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../utils";
+import { ScrollView } from "../components/scroll-view";
+import { centeredViewportRange } from "../components/scroll-viewport";
 import { collapseCommand } from "../apps/ps-data";
-import { PREVIEW_LIMITS, shortenEmbeddedPaths } from "../render/render-utils";
+import { PREVIEW_LIMITS, shortenEmbeddedPaths, shortenPath } from "../render/render-utils";
 import { ansi, code, col, compact, item, node, row, span, stableKey, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton, selectList } from "../native/overlay";
-import { theme } from "../theme/theme";
+import { fgOrPlain, theme } from "../theme/theme";
+import { sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { buildJobTree, type JobTreeAgent, type JobTreeRow, jobTreeGuide } from "./job-tree";
 import { describeJobWidget, type JobWidgetView, renderJobWidgetLines } from "../tools/job-widget";
 
@@ -78,6 +84,15 @@ export interface JobsSheetSource {
 	cancel?(id: string): void;
 	/** Dismiss the sheet. */
 	close(): void;
+	/**
+	 * The overlay body budget in terminal rows, supplied by the host next to
+	 * its `maxHeight` option so both bound the sheet with the same number. The
+	 * terminal fallback (`render`) fits its whole output — header, windowed
+	 * tree, metadata and the newest output — within it, re-reading it every
+	 * frame so a resize applies on the next render; the native sheet ignores
+	 * it. When omitted the fallback assumes a conservative 24 rows.
+	 */
+	maxRows?(): number;
 }
 
 /** A job's status as the sheet names it. */
@@ -107,8 +122,18 @@ const STATUS_GLYPH: Record<JobsPanelJob["status"], TspSpan> = {
 /** The list row's icon per job type (Tern icon names); other types read as a generic job. */
 const TYPE_ICON: Record<string, string> = { bash: "bash", task: "agent" };
 
-/** Output tail rows the terminal fallback shows under the selected job. */
-const FALLBACK_TAIL_LINES = 8;
+/** Body rows the terminal fallback assumes when the host gives no {@link JobsSheetSource.maxRows}. */
+const FALLBACK_MAX_ROWS = 24;
+
+/**
+ * Output rows the terminal fallback reserves ahead of the optional metadata
+ * (command, facts, widget), so a short viewport clips metadata first and the
+ * newest capture stays visible.
+ */
+const OUTPUT_RESERVE_ROWS = 3;
+
+/** Shared empty capture: no rows until the job produces output. */
+const EMPTY_CAPTURE_ROWS: readonly string[] = [];
 
 /**
  * The jobs pill's sheet: a centred `lg` glass sheet titled Background jobs.
@@ -121,6 +146,13 @@ const FALLBACK_TAIL_LINES = 8;
  * Esc or Close dismisses; nothing enters the transcript. A source without
  * `cancel` renders read-only, and a subagent's job never offers Cancel: only
  * the root's own jobs can be stopped here.
+ *
+ * In a terminal without the native surface the same source renders as a
+ * bounded fallback within the host's `maxRows` budget: a selection-centered
+ * window of the tree, the selected job's metadata if room, its newest output
+ * and a one-row key guide. The output pane follows the capture tail; Space
+ * pauses on the exact rows shown (per job), PgUp/PgDn/Home scroll, End or
+ * Space resumes, and each job's pane starts at its own tail.
  */
 export class JobsSheet implements Component {
 	readonly nativeOverlay = {
@@ -132,8 +164,22 @@ export class JobsSheet implements Component {
 	readonly #source: JobsSheetSource;
 	#selectedId: string | undefined;
 	#native: { key: string; output: string | undefined; node: NativeNode } | undefined;
-	/** Fallback output tail, reused while the selected job's output is unchanged. */
-	#tail: { id: string; output: string; lines: readonly string[] } | undefined;
+	/** The fallback output pane: a viewport over the selected job's capture rows. */
+	readonly #log = new ScrollView([], {
+		height: 1,
+		followTail: true,
+		theme: { track: t => fgOrPlain("muted", t), thumb: t => fgOrPlain("accent", t) },
+	});
+	/**
+	 * The rows shown when Space paused the pane, keyed by job: a paused pane
+	 * displays these verbatim (even when empty); every other job follows its
+	 * tail. Toggled only where input is handled — never by render.
+	 */
+	#frozen: { id: string; lines: readonly string[] } | undefined;
+	/** What the pane currently holds, so an unchanged repaint re-feeds nothing. */
+	#outputView: { id: string; output: string; frozen: boolean; lines: readonly string[] } | undefined;
+	/** The selected job's capture as display rows, keyed by job + text: unchanged output is never split again. */
+	#capture: { id: string; output: string; lines: readonly string[] } | undefined;
 	/**
 	 * The selected job as last seen: its row, detail and the subagents placing
 	 * it. The session evicts settled jobs on its own clock; while the user keeps
@@ -188,64 +234,50 @@ export class JobsSheet implements Component {
 		return described;
 	}
 
-	/** Rows for a terminal without the native surface: the job tree, then the selected job's facts and output tail. */
+	/**
+	 * Rows for a terminal without the native surface, within the host's row
+	 * budget: the header, a selection-centered window of the tree, the selected
+	 * job's metadata if room is left after reserving the newest output, that
+	 * output, and the key guide. Never more rows than the budget.
+	 */
 	render(width: number): readonly string[] {
-		const { rows, jobs, selected } = this.#current();
-		const now = Date.now();
+		const safeWidth = Math.max(1, Math.trunc(Number.isFinite(width) ? width : 1));
+		const budget = this.#bodyBudget();
+		const { rows, jobs, selected, cancellable } = this.#current();
 		const running = jobs.filter(job => job.status === "running").length;
-		const lines = [truncateToWidth(` Background jobs · ${running} running`, width)];
-		if (jobs.length === 0) lines.push(" No background jobs");
-		for (const entry of rows) {
-			const guide = jobTreeGuide(entry, theme);
-			if (entry.kind === "agent") {
-				lines.push(truncateToWidth(`  ${guide}${entry.agent.id}`, width));
-				continue;
-			}
-			const { job } = entry;
-			const cursor = job === selected ? ">" : " ";
-			const age = formatDuration(jobAge(job, now));
-			const agent = entry.agent && entry.agent.id !== job.label ? `${entry.agent.id}: ` : "";
-			// The intent is model-written: strip terminal controls and flatten it to one row like the command.
-			const title = shortenEmbeddedPaths(collapseCommand(sanitizeText(job.intent ?? job.label)));
-			lines.push(truncateToWidth(`${cursor} ${guide}${job.status}  ${job.type} ${age}  ${agent}${title}`, width));
+		const lines = [truncateToWidth(` Background jobs · ${running} running`, safeWidth)];
+		if (!selected) {
+			if (budget >= 2) lines.push(truncateToWidth(" No background jobs", safeWidth));
+			if (budget >= 3) lines.push(this.#controlsLine(safeWidth, true, false));
+			return lines;
 		}
-		const detail = selected && this.#inspect(selected.id);
-		if (detail) {
-			if (selected.caption) {
-				for (const line of wrapTextWithAnsi(
-					shortenEmbeddedPaths(sanitizeText(selected.caption)),
-					Math.max(1, width - 3),
-				)) {
-					lines.push(`   ${theme.fg("muted", line)}`);
-				}
-			}
-			// Rows show the cut label; the selected job's command wraps here,
-			// bounded so a long script never pushes the facts and output off the sheet.
-			if (detail.command) {
-				const commandRows = wrapTextWithAnsi(
-					shortenEmbeddedPaths(replaceTabs(sanitizeText(detail.command))),
-					Math.max(1, width - 3),
-				);
-				for (const line of commandRows.slice(0, PREVIEW_LIMITS.EXPANDED_LINES)) lines.push(`   ${line}`);
-				const hidden = commandRows.length - PREVIEW_LIMITS.EXPANDED_LINES;
-				if (hidden > 0) lines.push(truncateToWidth(`   … ${hidden} more command lines`, width));
-			}
-			const facts = compact([
-				detail.cwd && `cwd ${detail.cwd}`,
-				detail.pids.length > 0 && `pid ${detail.pids.join(", ")}`,
-				detail.exitCode !== undefined && `exit ${detail.exitCode}`,
-				detail.artifactId && `artifact://${detail.artifactId}`,
-			]);
-			if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
-			if (detail.widget && widgetHasData(detail.widget)) {
-				for (const line of renderJobWidgetLines(detail.widget, Math.max(0, width - 3), theme)) {
-					lines.push(`   ${line}`);
-				}
-			}
-			for (const line of this.#tailLines(selected.id, detail.output ?? "")) {
-				if (line) lines.push(truncateToWidth(`   ${line}`, width));
-			}
+		const now = Date.now();
+		const selectedRow = rows.findIndex(entry => entry.kind === "job" && entry.job.id === selected.id);
+		if (budget === 1) return lines;
+		if (budget === 2) {
+			// Degrade: the header plus the selected row alone.
+			const entry = rows[Math.max(0, selectedRow)];
+			if (entry) lines.push(this.#treeLine(entry, selected, now, safeWidth));
+			return lines;
 		}
+		// Header and key guide are fixed; the newest output is reserved before the
+		// optional metadata and keeps the majority of what remains.
+		const body = budget - 2;
+		const treeRows = Math.max(1, body - OUTPUT_RESERVE_ROWS);
+		const window = centeredViewportRange(Math.max(0, selectedRow), rows.length, treeRows);
+		for (let index = window.start; index < window.end; index++) {
+			lines.push(this.#treeLine(rows[index]!, selected, now, safeWidth));
+		}
+		const left = Math.max(0, body - (window.end - window.start));
+		// The held job outlives its eviction from the snapshot, so read its detail through #inspect.
+		const detail = this.#inspect(selected.id);
+		const reserve = Math.min(left, OUTPUT_RESERVE_ROWS);
+		const metadata = this.#metadataLines(selected, detail, safeWidth, Math.max(0, Math.floor((left - reserve) / 2)));
+		lines.push(...metadata);
+		lines.push(...this.#outputSection(selected, detail, safeWidth, left - metadata.length));
+		lines.push(
+			this.#controlsLine(safeWidth, this.#frozen?.id !== selected.id, cancellable && selected.status === "running"),
+		);
 		return lines;
 	}
 
@@ -258,6 +290,18 @@ export class JobsSheet implements Component {
 		else if (matchesSelectUp(data)) this.#move(-1);
 		else if (matchesSelectDown(data)) this.#move(1);
 		else if (matchesKey(data, "x")) this.#cancelSelected();
+		// Terminal fallback log keys. The native sheet ignores them — they only
+		// move the fallback output pane, never the native actions above.
+		else if (matchesKey(data, "pageUp")) this.#scrollLog(-1);
+		else if (matchesKey(data, "pageDown")) this.#scrollLog(1);
+		else if (matchesKey(data, "home")) this.#scrollToLogTop();
+		else if (matchesKey(data, "end")) this.#resume();
+		else if (matchesKey(data, "space")) {
+			const { selected } = this.#current();
+			if (!selected) return;
+			if (this.#frozen?.id === selected.id) this.#resume();
+			else this.#pause(selected.id);
+		}
 	}
 
 	/** Clicks select a row; Close and Cancel job run what Esc and X run. */
@@ -306,6 +350,13 @@ export class JobsSheet implements Component {
 		return { rows, jobs, selected, cancellable: this.#source.cancel !== undefined && owned };
 	}
 
+	/** The host's overlay body budget, or a conservative default when it supplies none. */
+	#bodyBudget(): number {
+		const rows = this.#source.maxRows?.();
+		if (rows === undefined || !Number.isFinite(rows)) return FALLBACK_MAX_ROWS;
+		return Math.max(1, Math.trunc(rows));
+	}
+
 	/** The job's detail from the source, else the last one seen while it was held. */
 	#inspect(id: string): JobsPanelDetail | undefined {
 		const detail = this.#source.inspect(id);
@@ -315,12 +366,175 @@ export class JobsSheet implements Component {
 		return held.detail;
 	}
 
-	#tailLines(id: string, output: string): readonly string[] {
-		const cached = this.#tail;
-		if (cached?.id === id && cached.output === output) return cached.lines;
-		const lines = tailLines(output, FALLBACK_TAIL_LINES);
-		this.#tail = { id, output, lines };
+	/** One tree row: job id next to the cursor, then status, type, age, agent and what the job is for, single-line safe. */
+	#treeLine(entry: JobTreeRow<JobsPanelJob>, selected: JobsPanelJob, nowMs: number, width: number): string {
+		const guide = jobTreeGuide(entry, theme);
+		if (entry.kind === "agent") {
+			return truncateToWidth(`  ${guide}${sanitizeDisplaySingleLine(entry.agent.id)}`, width);
+		}
+		const { job } = entry;
+		const cursor = job.id === selected.id ? ">" : " ";
+		const age = formatDuration(jobAge(job, nowMs));
+		const agent = entry.agent && entry.agent.id !== job.label ? `${sanitizeDisplaySingleLine(entry.agent.id)}: ` : "";
+		const id = sanitizeDisplaySingleLine(job.id);
+		// The intent is model-written: strip terminal controls, flatten it to one
+		// row and shorten home paths like the command; the label stands in without one.
+		const title = sanitizeDisplaySingleLine(
+			shortenEmbeddedPaths(collapseCommand(sanitizeText(job.intent ?? job.label))),
+		);
+		return truncateToWidth(
+			`${cursor} ${guide}${id} ${job.status}  ${sanitizeDisplaySingleLine(job.type)} ${age}  ${agent}${title}`,
+			width,
+		);
+	}
+
+	/** Optional metadata shares the space left after reserving output rows: caption, command, facts and widget. */
+	#metadataLines(
+		job: JobsPanelJob,
+		detail: JobsPanelDetail | undefined,
+		width: number,
+		budget: number,
+	): readonly string[] {
+		if (budget <= 0) return [];
+		const lines: string[] = [];
+		// The caption is model-written: strip terminal controls and wrap it within
+		// the rows metadata has, so it never pushes the reserved newest output off.
+		if (job.caption) {
+			const captionRows = wrapTextWithAnsi(
+				shortenEmbeddedPaths(replaceTabs(sanitizeText(job.caption))),
+				Math.max(1, width - 3),
+			);
+			const shown = Math.min(captionRows.length, budget);
+			for (const line of captionRows.slice(0, shown)) {
+				lines.push(truncateToWidth(`   ${fgOrPlain("muted", line)}`, width));
+			}
+			const hidden = captionRows.length - shown;
+			if (hidden > 0 && lines.length < budget) {
+				lines.push(truncateToWidth(`   … ${hidden} more caption lines`, width));
+			}
+		}
+		if (lines.length >= budget) return lines;
+		// Rows show the cut label; the selected job's command wraps here,
+		// bounded so a long script never pushes the facts and output off the sheet.
+		const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+		if (command) {
+			const commandRows = wrapTextWithAnsi(
+				shortenEmbeddedPaths(replaceTabs(sanitizeText(command))),
+				Math.max(1, width - 3),
+			);
+			const shown = Math.min(commandRows.length, PREVIEW_LIMITS.EXPANDED_LINES, budget);
+			for (const line of commandRows.slice(0, shown)) lines.push(truncateToWidth(`   ${line}`, width));
+			const hidden = commandRows.length - shown;
+			if (hidden > 0 && lines.length < budget) {
+				lines.push(truncateToWidth(`   … ${hidden} more command lines`, width));
+			}
+		}
+		if (lines.length >= budget) return lines;
+		const pids = detail?.pids ?? [];
+		const facts = compact([
+			detail?.cwd && `cwd ${sanitizeDisplaySingleLine(shortenPath(detail.cwd))}`,
+			pids.length > 0 && `pid ${pids.join(", ")}`,
+			detail?.exitCode !== undefined && `exit ${detail.exitCode}`,
+			detail?.artifactId && `artifact://${sanitizeDisplaySingleLine(detail.artifactId)}`,
+		]);
+		if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
+		if (lines.length >= budget || !detail?.widget || !widgetHasData(detail.widget)) return lines;
+		for (const line of renderJobWidgetLines(detail.widget, Math.max(0, width - 3), theme)) {
+			if (lines.length >= budget) break;
+			lines.push(truncateToWidth(`   ${line}`, width));
+		}
 		return lines;
+	}
+
+	/**
+	 * The selected job's output under a viewport of `rows` rows. A pane paused
+	 * for this job shows the rows frozen when Space stopped it — held by
+	 * reference, so a capture that rolls or empties cannot shift the viewport;
+	 * any other job defaults to its live tail. The pane is re-fed only when the
+	 * job, the freeze, or (while live) the text changed.
+	 */
+	#outputSection(
+		job: JobsPanelJob,
+		detail: JobsPanelDetail | undefined,
+		width: number,
+		rows: number,
+	): readonly string[] {
+		if (rows <= 0) return [];
+		const output = detail?.output ?? "";
+		const frozen = this.#frozen;
+		const paused = frozen?.id === job.id;
+		const lines = paused ? frozen.lines : this.#captureLines(job.id, output);
+		const shown = this.#outputView;
+		if (lines.length === 0) {
+			// An empty capture clears the pane once per empty spell, so no previous
+			// job's rows or scroll offset survive into the next fill.
+			if (shown && (shown.lines.length > 0 || shown.id !== job.id)) this.#log.setLines([]);
+			this.#log.setHeight(Math.max(0, rows - 1));
+			this.#outputView = { id: job.id, output, frozen: paused, lines };
+			const message = job.status === "running" ? "No output yet" : "No output";
+			return [truncateToWidth(` ${fgOrPlain("muted", message)}`, width)];
+		}
+		const head = rows >= 2 ? [truncateToWidth(` ${fgOrPlain("muted", "Output")}`, width)] : [];
+		if (!shown || shown.id !== job.id || shown.frozen !== paused || (!paused && shown.output !== output)) {
+			this.#log.setFollowTail(!paused);
+			this.#log.setLines(lines);
+			this.#outputView = { id: job.id, output, frozen: paused, lines };
+			// A new job's pane starts at its own tail, never mid-history.
+			if (shown?.id !== job.id) this.#log.scrollToBottom();
+		}
+		this.#log.setHeight(rows - head.length);
+		return [...head, ...this.#log.render(width)];
+	}
+
+	/** The one-row key guide; the pause hint follows the pane's live state, X appears only when it can act. */
+	#controlsLine(width: number, follow: boolean, canCancel: boolean): string {
+		const hints = compact([
+			"esc close",
+			canCancel && "x cancel",
+			"↑/↓ select",
+			`space ${follow ? "pause" : "follow"}`,
+			"pgup/dn log",
+		]);
+		return truncateToWidth(` ${fgOrPlain("dim", hints.join(" · "))}`, width);
+	}
+
+	/** Sanitized capture rows for one job, memoized by job + text: unchanged output is never split again. */
+	#captureLines(id: string, output: string): readonly string[] {
+		const cached = this.#capture;
+		if (cached?.id === id && cached.output === output) return cached.lines;
+		const lines = captureRows(output);
+		this.#capture = { id, output, lines };
+		return lines;
+	}
+
+	/** Freeze the rows the pane currently shows for `id` — even an empty capture — keyed by job. */
+	#pause(id: string): void {
+		const shown = this.#outputView;
+		if (shown?.id === id) this.#frozen = { id, lines: shown.lines };
+	}
+
+	/** Drop the freeze and return to the live tail. */
+	#resume(): void {
+		this.#frozen = undefined;
+		this.#log.scrollToBottom();
+	}
+
+	/** One page of manual log scroll; landing back at the tail resumes following. */
+	#scrollLog(direction: -1 | 1): void {
+		const { selected } = this.#current();
+		if (!selected) return;
+		this.#log.page(direction);
+		if (this.#log.getScrollOffset() >= this.#log.getMaxScrollOffset()) this.#resume();
+		else this.#pause(selected.id);
+	}
+
+	/** Jump to the capture head; a capture taller than the pane stops following. */
+	#scrollToLogTop(): void {
+		const { selected } = this.#current();
+		if (!selected) return;
+		this.#log.scrollToTop();
+		if (this.#log.getScrollOffset() >= this.#log.getMaxScrollOffset()) this.#resume();
+		else this.#pause(selected.id);
 	}
 
 	#move(delta: number): void {
@@ -347,20 +561,14 @@ function widgetHasData(widget: JobWidgetView): boolean {
 }
 
 /**
- * The last `count` pieces of `text.trimEnd().split("\n")`, found by scanning
- * back from the end so a long running output is never split as a whole.
+ * A job's captured output as display rows: ANSI and control characters are
+ * stripped (the capture is untrusted), the trailing newline removed and each
+ * row indented under the detail block. Split only when the job's text changes.
  */
-function tailLines(text: string, count: number): string[] {
-	const trimmed = text.trimEnd();
-	const lines: string[] = [];
-	let end = trimmed.length;
-	while (lines.length < count) {
-		const newline = end > 0 ? trimmed.lastIndexOf("\n", end - 1) : -1;
-		lines.push(trimmed.slice(newline + 1, end));
-		if (newline < 0) break;
-		end = newline;
-	}
-	return lines.reverse();
+function captureRows(output: string): readonly string[] {
+	const clean = sanitizeText(output).trimEnd();
+	if (clean.length === 0) return EMPTY_CAPTURE_ROWS;
+	return clean.split("\n").map(line => `   ${line}`);
 }
 
 /**

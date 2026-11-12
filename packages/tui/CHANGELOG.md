@@ -12,6 +12,10 @@
 
 - GitHub Actions watch cards now show current-step progress and can be expanded with Ctrl+O to display ordered step states and durations in ANSI and native Tern views.
 
+### Changed
+
+- The terminal jobs sheet now fits its task tree and scrollable live output to the available height, with pause and tail-follow controls ([#14575](https://github.com/can1357/oh-my-pi/issues/14575), [#15595](https://github.com/can1357/oh-my-pi/pull/15595) by [@wyyyz1937365497](https://github.com/wyyyz1937365497))
+
 ### Fixed
 
 - Fixed comparison charts mislabeling gaps against a rival column as improvements or regressions.

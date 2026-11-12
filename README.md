@@ -335,6 +335,7 @@ Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
+- `/jobs` — show the background-job tree; `/jobs full` keeps full command lines. `/jobs logs` opens a nonfullscreen live-output sheet for the viewed session and its subagents, without a model turn. `↑/↓` select, `Space` pauses/resumes, `PgUp`/`PgDn`/`Home` scroll, `End` follows the tail, and `Esc` closes without stopping jobs. `x` cancels only the main session's own running jobs; a focused subagent view is read-only.
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 

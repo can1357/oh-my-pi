@@ -330,9 +330,10 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "jobs",
 		description: "Show async background jobs status",
 		acpDescription: "Show background jobs",
-		acpInputHint: "[full|kill <id>|kill all]",
+		acpInputHint: "[full|logs|kill <id>|kill all]",
 		subcommands: [
 			{ name: "full", description: "Show full, untruncated command lines" },
+			{ name: "logs", description: "Open the live jobs sheet (interactive TUI)" },
 			{ name: "kill", description: "Cancel a running background job", usage: "<id>|all" },
 		],
 		allowArgs: true,
@@ -347,7 +348,12 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleJobsKillCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			if (rest || (verb && verb !== "full")) return usage("Usage: /jobs [full|kill <id>|kill all]", runtime);
+			if (verb === "logs") {
+				if (rest) return usage("Usage: /jobs [full|logs|kill <id>|kill all]", runtime);
+				await runtime.output("The live jobs sheet requires an interactive TUI; use /jobs for a text report.");
+				return commandConsumed();
+			}
+			if (rest || (verb && verb !== "full")) return usage("Usage: /jobs [full|logs|kill <id>|kill all]", runtime);
 			const full = verb === "full";
 			if (full) runtime.session.requestJobCaptions();
 			const tree = runtime.session.getAsyncJobTree();
@@ -393,8 +399,11 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const { verb, rest } = parseSubcommand(command.args);
 			if (verb === "kill") {
 				await handleJobsKillCommand(rest, runtime.ctx.session, text => runtime.ctx.showStatus(text));
+			} else if (verb === "logs") {
+				if (rest) runtime.ctx.showStatus("Usage: /jobs [full|logs|kill <id>|kill all]");
+				else runtime.ctx.showJobsSheet();
 			} else if (rest || (verb && verb !== "full")) {
-				runtime.ctx.showStatus("Usage: /jobs [full|kill <id>|kill all]");
+				runtime.ctx.showStatus("Usage: /jobs [full|logs|kill <id>|kill all]");
 			} else {
 				await runtime.ctx.handleJobsCommand({ full: verb === "full" });
 			}

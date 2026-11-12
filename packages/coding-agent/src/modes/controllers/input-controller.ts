@@ -189,7 +189,7 @@ const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	export: () => true,
 	jobs: args => {
 		const { verb, rest } = parseSubcommand(args);
-		return !verb || (verb === "full" && !rest);
+		return !verb || ((verb === "full" || verb === "logs") && !rest);
 	},
 	model: () => true,
 	switch: () => true,

@@ -16,8 +16,10 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 import { Container } from "@oh-my-pi/pi-tui";
 import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
 
 const WIDTH = 60;
 
@@ -267,18 +269,196 @@ describe("/jobs in the native terminal", () => {
 			expect(at("deep probe")).toBeLessThan(at("worker build"));
 			expect(at("worker build")).toBeLessThan(at("main lint"));
 
-			// The sheet steps past Deep's header to its job, which main can inspect.
+			// The sheet steps past Deep's header to its job: main inspects it, but
+			// X cannot cancel it — only the root's own jobs are cancellable.
 			setNativeRendering(true);
 			await mode.handleJobsCommand();
 			const sheet = mode.ui.overlayStack.at(-1)?.component;
 			expect(sheet).toBeInstanceOf(JobsSheet);
 			sheet?.handleInput?.("\x1b[B");
-			expect(Bun.stripANSI(sheet?.render(120).join("\n") ?? "")).toMatch(/> .*running {2}bash .* deep probe/);
+			const selected = Bun.stripANSI(sheet?.render(120).join("\n") ?? "")
+				.split("\n")
+				.filter(line => line.startsWith(">"));
+			expect(selected).toEqual([expect.stringContaining("deep probe")]);
 			expect(session.inspectAsyncJob(deepId)).toMatchObject({ pids: [] });
+			sheet?.handleInput?.("x");
+			expect(manager.getJob(deepId)?.status).toBe("running");
 			sheet?.handleInput?.("\x1b");
 		} finally {
 			for (const gate of gates) gate.resolve("done");
 			for (const ref of refs) registry.unregister(ref.id, ref);
+		}
+	});
+});
+
+describe("/jobs logs on a real terminal", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let manager: AsyncJobManager;
+	let session: AgentSession;
+	let mode: InteractiveMode;
+	let term: VirtualTerminal;
+	let wasNative: boolean;
+
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-jobs-logs-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
+		manager = new AsyncJobManager({});
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+			asyncJobManager: manager,
+			agentId: "main",
+		});
+		term = new VirtualTerminal(120, 32);
+		mode = new InteractiveMode(
+			session,
+			"test",
+			() => {},
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: term }),
+		);
+		wasNative = isNativeRendering();
+		setNativeRendering(false);
+	});
+
+	afterEach(async () => {
+		setNativeRendering(wasNative);
+		mode?.stop();
+		HistoryStorage.close();
+		manager.cancelAll();
+		await manager.dispose({ timeoutMs: 1_000 });
+		await session?.dispose();
+		authStorage?.close();
+		tempDir?.removeSync();
+		resetSettingsForTest();
+	});
+
+	const screen = (): string[] => term.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+	const shows = (text: string): boolean => screen().some(row => row.includes(text));
+
+	async function submitLine(command: string): Promise<void> {
+		term.sendInput(command);
+		await term.waitForRender(() => shows(command));
+		term.sendInput("\r");
+	}
+
+	it("keeps the /jobs full report, shows the live capture tree under the task parent, and closes without consuming", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+
+		const worker = new AgentSession({
+			agent: new Agent({ initialState: { model: session.model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry: session.modelRegistry,
+			asyncJobManager: manager,
+			agentId: "Worker",
+		});
+		const gates = [Promise.withResolvers<string>(), Promise.withResolvers<string>(), Promise.withResolvers<string>()];
+		const advanced = Promise.withResolvers<void>();
+		let capture = "compiling\n";
+		const registry = AgentRegistry.global();
+		const workerRef = registry.register({
+			id: "Worker",
+			displayName: "task",
+			kind: "sub",
+			parentId: "main",
+			session: worker,
+		});
+		manager.register("task", "audit the worker", () => gates[0].promise, { ownerId: "main", agentId: "Worker" });
+		const workerJob = manager.register(
+			"bash",
+			"worker build",
+			async ({ reportProgress }) => {
+				await reportProgress(capture);
+				await advanced.promise;
+				await reportProgress(capture);
+				mode.ui.requestRender();
+				await gates[2].promise;
+				return "built";
+			},
+			{ ownerId: "Worker" },
+		);
+		const lintJob = manager.register(
+			"bash",
+			"main lint",
+			async ({ reportProgress }) => {
+				await reportProgress("lint clean\n");
+				await gates[1].promise;
+				return "linted";
+			},
+			{ ownerId: "main" },
+		);
+
+		try {
+			// The plain `/jobs full` report is untouched: the whole tree, boxed above the editor.
+			await submitLine("/jobs full");
+			await term.waitForRender(() => shows("Background Jobs"));
+			expect(shows("worker build")).toBe(true);
+			expect(shows("main lint")).toBe(true);
+			term.sendInput("\x1b");
+			await term.waitForRender(() => !shows("Background Jobs"));
+
+			// `/jobs logs` opens the same centred sheet: the whole tree under the task parent, live capture below.
+			await submitLine("/jobs logs");
+			await term.waitForRender(() => shows("Background jobs"));
+			expect(shows("audit the worker")).toBe(true);
+			expect(shows("worker build")).toBe(true);
+			expect(shows("main lint")).toBe(true);
+
+			// The selected job's capture follows progress updates without a model read.
+			term.sendInput("\x1b[B");
+			await term.waitForRender(() => shows("compiling"));
+			capture = "compiling\ntest 1/2 passed\n";
+			advanced.resolve();
+			await term.waitForRender(() => shows("test 1/2 passed"));
+			expect(manager.getJob(workerJob)?.status).toBe("running");
+
+			// Moving the selection swaps in that job's own output.
+			term.sendInput("\x1b[B");
+			await term.waitForRender(() => shows("lint clean"));
+			expect(shows("test 1/2 passed")).toBe(false);
+
+			// Closing keeps the jobs running and their capture unconsumed.
+			term.sendInput("\x1b");
+			await term.waitForRender(() => !shows("Background jobs"));
+			expect(manager.getJob(workerJob)?.status).toBe("running");
+			expect(manager.getJob(lintJob)?.status).toBe("running");
+			expect(manager.isJobResultConsumed(workerJob)).toBe(false);
+			expect(session.getAsyncJobTree()?.running.map(job => job.id)).toContain(workerJob);
+
+			// A focused subagent view's logs are the worker's tree alone, read-only.
+			Object.defineProperty(mode, "viewSession", { get: () => worker, configurable: true });
+			Object.defineProperty(mode, "focusedAgentId", { get: () => "Worker", configurable: true });
+			await submitLine("/jobs logs");
+			await term.waitForRender(() => shows("worker build"));
+			expect(shows("main lint")).toBe(false);
+			expect(shows("audit the worker")).toBe(false);
+			term.sendInput("x");
+			await term.waitForRender();
+			expect(manager.getJob(workerJob)?.status).toBe("running");
+			term.sendInput("\x1b");
+			await term.waitForRender(() => !shows("Background jobs"));
+		} finally {
+			for (const gate of gates) gate.resolve("done");
+			advanced.resolve();
+			registry.unregister("Worker", workerRef);
+			await worker.dispose();
 		}
 	});
 });

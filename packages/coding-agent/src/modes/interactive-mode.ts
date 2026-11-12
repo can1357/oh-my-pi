@@ -8642,6 +8642,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
+		// Keep the terminal body budget aligned with the overlay's height cap.
+		const maxHeightPct = 90;
 		const sheet = new JobsSheet({
 			load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
 			inspect: id => session.inspectAsyncJob(id),
@@ -8652,8 +8654,13 @@ export class InteractiveMode implements InteractiveModeContext {
 						this.ui.requestRender();
 					},
 			close: () => this.#hideJobsSheet(),
+			maxRows: () => Math.max(1, Math.floor((this.ui.terminal.rows * maxHeightPct) / 100)),
 		});
-		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
+		this.#jobsSheetHandle = this.ui.showOverlay(sheet, {
+			anchor: "center",
+			width: "90%",
+			maxHeight: `${maxHeightPct}%`,
+		});
 		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);
 		this.ui.requestRender();

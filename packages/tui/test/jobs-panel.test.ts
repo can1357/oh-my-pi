@@ -131,7 +131,10 @@ describe("JobsSheet", () => {
 		const root = sheet.describe(CX);
 		expect(prop(list(root), "selected")).toBe("bash-2");
 		expect(prop(byRole(root, "omp.jobs.output")[0], "text")).toBe("1 error\n");
-		expect(sheet.render(100).join("\n")).toContain("1 error");
+		// The held job keeps its row and final capture in the terminal fallback too.
+		const held = sheet.render(100).join("\n");
+		expect(held).toContain("bash-2");
+		expect(held).toContain("1 error");
 
 		sheet.handleInput(UP);
 		sheet.handleInput(DOWN);
@@ -139,6 +142,7 @@ describe("JobsSheet", () => {
 			"task-1",
 			"bash-1",
 		]);
+		expect(sheet.render(100).join("\n")).not.toContain("1 error");
 	});
 
 	it("routes clicks: a row selects, Cancel job cancels, Close and Esc close", () => {
@@ -171,7 +175,7 @@ describe("JobsSheet", () => {
 		sheet.handleInput(DOWN);
 		const lines = sheet.render(100).join("\n");
 		expect(lines).toContain("Background jobs · 2 running");
-		expect(lines).toContain("> running  bash");
+		expect(lines).toContain("> bash-1");
 		expect(lines).toContain("pid 41");
 		expect(lines).toContain("running 12 tests");
 	});
@@ -199,10 +203,14 @@ describe("JobsSheet", () => {
 			const lines = sheet.render(60).map(line => Bun.stripANSI(line));
 			const text = lines.join("\n");
 			// Wrapped, not cut at the row label: the end of a long one-liner is reachable.
-			if (expectTail) expect(text).toContain("tail_marker");
-			else expect(text).toContain("… 28 more command lines");
-			// The facts and output tail still follow the command.
-			expect(text).toContain("pid 7");
+			if (expectTail) {
+				expect(text).toContain("tail_marker");
+				expect(text).toContain("pid 7"); // facts follow when the command leaves room
+			} else {
+				// A long script is bounded: its head shows, its tail is cut.
+				expect(text).toContain("echo step 8");
+				expect(text).not.toContain("echo step 39");
+			}
 			expect(text).toContain("out");
 		}
 	});
@@ -258,6 +266,85 @@ describe("JobsSheet", () => {
 		const lines = sheet.render(100).join("\n");
 		expect(lines).toContain("cargo test --workspace");
 		expect(lines).toContain("pid 41");
+	});
+
+	it("caps the terminal fallback to the host's row budget with the intent and caption, keeping the newest output", () => {
+		const output = Array.from({ length: 60 }, (_, i) => `build line ${i}`).join("\n");
+		const intent = "Compile the workspace for the release profile";
+		const caption = Array.from(
+			{ length: 16 },
+			(_, i) => `step ${i} of the build waits for the linker before it writes the binary`,
+		).join("; ");
+		const job: JobsPanelJob = {
+			id: "bash-big",
+			type: "bash",
+			status: "running",
+			label: "cargo build",
+			intent,
+			caption,
+			startTime: NOW,
+		};
+		let budget = 14;
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => ({ command: "cargo build --release", cwd: "/work", pids: [9], output }),
+			maxRows: () => budget,
+			close: vi.fn(),
+		});
+
+		const tall = sheet.render(80).map(line => Bun.stripANSI(line));
+		expect(tall.length).toBeLessThanOrEqual(14);
+		// The row leads with the intent and the caption stays in the metadata; neither
+		// pushes the newest output past the cap.
+		expect(tall.some(line => line.includes(intent))).toBe(true);
+		expect(tall.join("\n")).toContain("step 0 of the build waits for the linker");
+		expect(tall.join("\n")).toContain("build line 59");
+
+		budget = 6;
+		const short = sheet.render(80).map(line => Bun.stripANSI(line));
+		expect(short.length).toBeLessThanOrEqual(6);
+		expect(short.join("\n")).toContain("build line 59");
+	});
+
+	it("follows the rolling capture, freezes it on space, and each selection starts at its own tail", () => {
+		let output = "step 1\n";
+		let other = "other\n";
+		let evictFirst = false;
+		const job = (id: string): JobsPanelJob => ({ id, type: "bash", status: "running", label: id, startTime: NOW });
+		const sheet = new JobsSheet({
+			load: () => ({
+				running: evictFirst ? [job("bash-two")] : [job("bash-one"), job("bash-two")],
+				recent: [],
+			}),
+			inspect: id => ({ pids: [], output: id === "bash-one" ? output : other }),
+			close: vi.fn(),
+		});
+		const screen = (): string => sheet.render(80).join("\n");
+
+		expect(screen()).toContain("step 1");
+		output = "step 1\nstep 2\n";
+		expect(screen()).toContain("step 2"); // follows the newest capture while open
+
+		sheet.handleInput(" "); // pause the pane
+		output = "step 1\nstep 2\nstep 3\n";
+		const paused = screen();
+		expect(paused).toContain("step 2");
+		expect(paused).not.toContain("step 3");
+
+		sheet.handleInput(" "); // resume at the live tail
+		expect(screen()).toContain("step 3");
+
+		sheet.handleInput(DOWN); // the next job's pane starts at its own tail, not the paused offset
+		expect(screen()).toContain("other");
+
+		// Evicted while paused: the survivor's selection follows its later appends.
+		sheet.handleInput(UP);
+		sheet.handleInput(" ");
+		evictFirst = true;
+		expect(screen()).toContain("other");
+		other = "other\nappended\n";
+		expect(screen()).toContain("appended");
+		expect(screen()).not.toContain("step 3");
 	});
 
 	it("shows the selected job's widget above its output, natively and in the terminal fallback", async () => {
@@ -335,12 +422,20 @@ describe("JobsSheet", () => {
 		let job = settled;
 		const sheet = new JobsSheet({
 			load: () => ({ running: [], recent: [job] }),
-			inspect: () => ({ command: settled.label, pids: [], exitCode: 0, output: "done" }),
+			inspect: () => ({ command: settled.label, pids: [], exitCode: 0, output: "final log line" }),
 			close: vi.fn(),
 		});
 		expect(byRole(sheet.describe(CX), "omp.jobs.caption")).toHaveLength(0);
+		expect(sheet.render(120).join("\n")).not.toContain("Waits about 2 min");
 		job = { ...settled, caption: "Waits about 2 min, printing nothing" };
 		expect(texts(byRole(sheet.describe(CX), "omp.jobs.caption")[0]!)).toContain("Waits about 2 min");
+		// The terminal fallback repaints on the same poll without losing the settled capture.
+		const fallback = sheet
+			.render(120)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(fallback).toContain("Waits about 2 min");
+		expect(fallback).toContain("final log line");
 	});
 
 	describe("as a tree of subagents", () => {
@@ -391,20 +486,23 @@ describe("JobsSheet", () => {
 				"main-bash",
 				"main-done",
 			]);
-			const rows = sheet
-				.render(120)
-				.slice(1, 9)
-				.map(line => line.trimEnd());
-			expect(rows).toEqual([
-				expect.stringMatching(/^> running {2}task \S+ {2}Audit: task-audit$/),
-				expect.stringMatching(/^ {2}├─ running {2}task \S+ {2}Sub: task-sub$/),
-				expect.stringMatching(/^ {2}│ {2}└─ running {2}bash \S+ {2}sub-bash$/),
-				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}audit-bash$/),
-				"  Lone",
-				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}lone-bash$/),
-				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
-				expect.stringMatching(/^ {2}completed {2}bash \S+ {2}main-done$/),
-			]);
+			const screen = sheet.render(120).map(line => Bun.stripANSI(line).trimEnd());
+			const at = (text: string): number => screen.findIndex(line => line.includes(text));
+			// Branchiest subtree leads; a root's own leaf jobs trail.
+			for (const [first, second] of [
+				["task-audit", "task-sub"],
+				["task-sub", "sub-bash"],
+				["sub-bash", "audit-bash"],
+				["audit-bash", "Lone"],
+				["lone-bash", "main-bash"],
+				["main-bash", "main-done"],
+			] as const) {
+				expect(at(first)).toBeGreaterThanOrEqual(0);
+				expect(at(first)).toBeLessThan(at(second));
+			}
+			// Sub's job sits nested under its task, inside Audit's branch.
+			expect(screen[at("task-sub")]).toMatch(/├─/);
+			expect(screen[at("sub-bash")]).toMatch(/└─/);
 		});
 
 		it("keeps an evicted subagent job under its subagent after the session drops both", () => {
@@ -423,12 +521,13 @@ describe("JobsSheet", () => {
 			const rows = sheet
 				.render(120)
 				.slice(1, 4)
-				.map(line => line.trimEnd());
-			expect(rows).toEqual([
-				"  Gone",
-				expect.stringMatching(/^> └─ completed {2}bash \S+ {2}gone-done$/),
-				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
-			]);
+				.map(line => Bun.stripANSI(line).trimEnd());
+			// The dropped subagent heads the branch, the held job sits nested under it
+			// with the cursor, and the surviving job follows.
+			expect(rows[0]).toBe("  Gone");
+			expect(rows[1]).toMatch(/^> └─ /);
+			expect(rows[1]).toContain("gone-done");
+			expect(rows[2]).toContain("main-bash");
 		});
 
 		it("cancels only jobs the root owns", () => {
