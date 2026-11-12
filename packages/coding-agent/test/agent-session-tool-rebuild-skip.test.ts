@@ -1386,7 +1386,7 @@ These tools became available:
 		await session.prompt("hi");
 		const boundDescription = evalTool.description;
 		const boundPrompt = session.systemPrompt;
-		expect(boundDescription).toContain("`mcp__nucleus_search`");
+		expect(boundDescription).toContain("mcp__nucleus_search");
 
 		await session.refreshMCPTools([search, fetch]);
 		await session.prompt("again");

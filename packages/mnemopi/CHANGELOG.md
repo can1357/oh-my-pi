@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed fact extraction storing decimals, prices, and IP-address fragments as `version` facts and leaving symbols such as `→` in `metric` fact keys ([#18886](https://github.com/can1357/oh-my-pi/issues/18886))
+
 ## [18.18.4] - 2026-11-09
 
 ### Fixed

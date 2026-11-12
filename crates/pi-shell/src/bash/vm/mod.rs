@@ -1354,7 +1354,10 @@ pub fn zsh_startup_values(
 	} else {
 		"unknown"
 	};
-	let ostype = if macos {
+	let ostype = if platform == crate::bash::ids::Platform::Windows {
+		// MSYS2's zsh, the zsh Windows users and plugins know.
+		BString::from("msys")
+	} else if macos {
 		let mut o = BString::from("darwin");
 		if let Some(major) = release
 			.split(|&c| c == b'.')
@@ -1365,9 +1368,6 @@ pub fn zsh_startup_values(
 			o.extend_from_slice(b".0");
 		}
 		o
-	} else if platform == crate::bash::ids::Platform::Windows {
-		// MSYS2's zsh, the zsh Windows users and plugins know.
-		BString::from("msys")
 	} else {
 		BString::from("linux-gnu")
 	};

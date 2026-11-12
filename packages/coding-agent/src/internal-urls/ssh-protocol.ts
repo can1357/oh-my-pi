@@ -33,6 +33,7 @@ import {
 	writeRemoteFile,
 } from "../ssh/file-transfer";
 import sshDoc from "../prompts/internal-urls/ssh.md" with { type: "text" };
+import sshReferenceDoc from "../prompts/internal-urls/ssh-reference.md" with { type: "text" };
 import { decodeUtf8Text } from "../tools/read-format";
 import { contentTypeForPath, formatDirectoryListing } from "./filesystem-resource";
 import type {
@@ -258,6 +259,10 @@ export class SshProtocolHandler implements ProtocolHandler {
 	/** Advertised only when an `ssh` client is on PATH. */
 	promptDoc(): string | undefined {
 		return $which("ssh") ? sshDoc.trim() : undefined;
+	}
+
+	promptReference(): string | undefined {
+		return $which("ssh") ? sshReferenceDoc.trim() : undefined;
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {

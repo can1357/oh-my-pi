@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 
 use crate::{
-	diff_string::{CompactDiffOptions, build_compact_diff_preview},
+	diff_string::{
+		BlockContextSource, CompactDiffOptions, build_compact_diff_preview, generate_diff_string,
+	},
 	engine::{
 		EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, Resolved, StagedFile,
 	},
@@ -372,9 +374,8 @@ impl Session {
 
 			let mut tag: Option<String> = None;
 			// Updated files register their response rows (plus still-valid prior
-			// provenance) against the minted tag: (store key, carried lines,
-			// drifted).
-			let mut provenance: Option<(PathBuf, Vec<u32>, bool)> = None;
+			// provenance) against the minted tag: (store key, carried lines).
+			let mut provenance: Option<(PathBuf, Vec<u32>)> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
 				FileOp::Noop => {
@@ -395,15 +396,29 @@ impl Session {
 					}
 					if file.record_snapshot {
 						let recorded = recorded_view(&file, &response.written);
-						let drifted = recorded != file.after;
-						if dest_canonical.is_none() && drifted {
-							file.warnings.push(write_drift_warning(&file.display));
+						if recorded != file.after {
+							// The host reformatted the write (LSP format-on-write,
+							// editor format-on-save): render the result from what
+							// landed so the rows match the tag minted below.
+							if dest_canonical.is_none() {
+								file.warnings.push(write_drift_warning(&file.display));
+							}
+							let diff =
+								generate_diff_string(&file.before, &recorded, None, &BlockContextSource {
+									path:      Some(&file.display),
+									lang:      None,
+									streaming: false,
+								});
+							file.diff = diff.diff;
+							file.preview_diff = None;
+							file.first_changed_line = diff.first_changed_line;
+							file.after = recorded;
 						}
 						let key = dest_canonical.unwrap_or_else(|| canonical.clone());
-						tag = Some(self.store.record(&key, &recorded, None));
+						tag = Some(self.store.record(&key, &file.after, None));
 						if track_provenance {
-							let carried = carried_seen_lines(&file.before, &recorded, prior.as_ref());
-							provenance = Some((key, carried, drifted));
+							let carried = carried_seen_lines(&file.before, &file.after, prior.as_ref());
+							provenance = Some((key, carried));
 						}
 					}
 					self.store.reset_noop(&canonical);
@@ -425,13 +440,8 @@ impl Session {
 				.as_ref()
 				.map_or_else(|| format!("[{header_path}]"), |tag| format!("[{header_path}#{tag}]"));
 			let text = format_file_text(&file, &header);
-			if let (Some((key, mut seen_lines, drifted)), Some(tag)) = (provenance, &response_tag) {
-				// A drifted write shows rows of the previewed text, not of the
-				// recorded version the tag names, so only carried lines
-				// stay anchorable.
-				if !drifted {
-					seen_lines.extend(seen_lines_from_body(&text));
-				}
+			if let (Some((key, mut seen_lines)), Some(tag)) = (provenance, &response_tag) {
+				seen_lines.extend(seen_lines_from_body(&text));
 				if !seen_lines.is_empty() {
 					self.store.record_seen_lines(&key, tag, &seen_lines);
 				}
@@ -600,14 +610,13 @@ pub fn source_parses(code: &str, path: &str) -> bool {
 		.is_ok_and(|language| language.is_some())
 }
 
-/// The persisted bytes differ from what was sent (an editor reformatted on
-/// save); the recorded snapshot reflects the real file.
+/// The persisted bytes differ from what was sent (LSP format-on-write or an
+/// editor's format-on-save); the result rows and tag reflect the real file.
 pub fn write_drift_warning(path: &str) -> String {
 	format!(
-		"{path}: the file on disk after this write differs from what was sent — the client \
-		 (editor/IDE) likely reformatted it on save (e.g. format-on-save, tab/space settings). The \
-		 returned snapshot reflects the actual file; re-read before further edits if the extra \
-		 changes were unexpected."
+		"{path}: the file on disk after this write differs from what was sent — it was reformatted \
+		 on write (LSP format-on-write, or the client editor's format-on-save). The lines and tag \
+		 above reflect the file as written; anchor further edits on them."
 	)
 }
 

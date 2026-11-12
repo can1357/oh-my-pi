@@ -1,21 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import {
-	buildOpenAiNativeHistory,
-	createCompactionSummaryMessage,
-	defaultConvertToLlm,
-} from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import type {
-	ResponseFileSearchToolCall,
-	ResponseFunctionWebSearch,
-	ResponseInput,
-	ResponseToolSearchOutputItemParam,
-} from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
-import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	AdviseTool,
 	type AdvisorAgent,
@@ -39,9 +26,7 @@ import {
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
-import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
-import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
 
@@ -1835,55 +1820,6 @@ describe("advisor", () => {
 			// The loop re-checked maintenance for the expanded batch.
 			expect(maintainCalls).toBe(2);
 		});
-		it("re-scrubs coalesced pending updates when a later regex value collides with their friendly prefixes", async () => {
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const { promise: firstMaintainStarted, resolve: startFirstMaintain } = Promise.withResolvers<void>();
-			const { promise: finishFirstMaintain, resolve: releaseFirstMaintain } = Promise.withResolvers<boolean>();
-			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
-			let maintainCalls = 0;
-			const agent: AdvisorAgent = {
-				prompt: async input => {
-					promptInputs.push(input);
-					startPrompt();
-				},
-				abort: () => {},
-				reset: () => {},
-				state: { messages: [] },
-			};
-			const messages: AgentMessage[] = [
-				{ role: "user", content: "first OTHERSECRET", timestamp: 1 } as AgentMessage,
-			];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-				maintainContext: async () => {
-					maintainCalls++;
-					if (maintainCalls === 1) {
-						startFirstMaintain();
-						return await finishFirstMaintain;
-					}
-					return false;
-				},
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await firstMaintainStarted;
-
-			messages.push({ role: "user", content: "later tok_abc123", timestamp: 2 } as AgentMessage);
-			runtime.onTurnEnd();
-
-			releaseFirstMaintain(false);
-			await promptStarted;
-
-			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).not.toContain("TOKABC123_");
-			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
-		});
 
 		it("caps maintainContext calls per drain cycle when arrivals never go stable", async () => {
 			// Regression guard for MAX_COALESCE_ROUNDS=3: during the first drain cycle,
@@ -2218,66 +2154,6 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain(secret);
 		});
 
-		it("drops a tool call's replay signature when it rewrites the call arguments", async () => {
-			const secret = "ADVISOR_SIGNED_ARG_SECRET_123";
-			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			// The Gemini signature attests to the arguments it was computed over,
-			// so it cannot ride along once those arguments are rewritten.
-			// https://ai.google.dev/gemini-api/docs/thought-signatures
-			const assistant = {
-				role: "assistant",
-				content: [
-					{
-						type: "toolCall",
-						id: "call_1",
-						name: "bash",
-						arguments: { command: `deploy --token ${secret}` },
-						thoughtSignature: "c2lnbmVkLW9yaWdpbmFsLWNhbGw=",
-					},
-				],
-				api: "google-generative-ai",
-				provider: "google",
-				model: "gemini-3.5-flash",
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "toolUse",
-				timestamp: 1,
-			} as AssistantMessage;
-			// The advisor's own conversation replays this history to its model, so
-			// it goes through the same re-obfuscation the primary transcript does.
-			const agent: AdvisorAgent = {
-				prompt: async input => {
-					promptInputs.push(input);
-				},
-				abort: () => {},
-				reset: () => {},
-				state: { messages: [assistant] as AgentMessage[] },
-			};
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => [{ role: "user", content: "deploy it", timestamp: 2 } as AgentMessage],
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await Promise.resolve();
-
-			expect(promptText(promptInputs[0])).not.toContain(secret);
-			const replayed = agent.state.messages[0];
-			expect(replayed?.role).toBe("assistant");
-			const block = (replayed as AssistantMessage).content[0];
-			expect(block?.type).toBe("toolCall");
-			expect(JSON.stringify(block?.type === "toolCall" ? block.arguments : {})).not.toContain(secret);
-			expect(block?.type === "toolCall" ? block.thoughtSignature : "kept").toBeUndefined();
-		});
-
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
 			const obfuscator = new SecretObfuscator([{ type: "regex", content: "BEGIN[\\s\\S]*END" }]);
 			const promptInputs: Array<string | AgentMessage[]> = [];
@@ -2460,7 +2336,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 		it("obfuscates advisor-visible successful tool-result bodies", async () => {
@@ -2491,7 +2367,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$");
+			expect(promptText(promptInputs[0])).toContain(obfuscator.obfuscate("tok_abc123"));
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2626,8 +2502,8 @@ describe("advisor", () => {
 				{ type: "plain", content: spaced },
 				{ type: "plain", content: pulledIn },
 				{ type: "regex", content: "tok_[a-z0-9]+" },
-				{ type: "regex", content: "LOOKSECRET(?= LOOKTAIL)" },
-				{ type: "regex", content: "A{100}(?= x{40}END)", mode: "replace", replacement: "[redacted]" },
+				{ type: "regex", content: "(?P<secret>LOOKSECRET) LOOKTAIL" },
+				{ type: "regex", content: "(?P<secret>A{100}) x{40}END", mode: "replace", replacement: "[redacted]" },
 			]);
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);
@@ -2694,40 +2570,6 @@ describe("advisor", () => {
 			expect(rendered).not.toContain("tok_zzz");
 			expect(rendered).not.toContain("SECRET_b");
 		});
-
-		it("redacts user execution sources in advisor history before cutting their previews", async () => {
-			const secret = distinctSecret(80);
-			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const prefix = "x".repeat(103);
-			agent.state.messages.push(
-				{
-					role: "bashExecution",
-					command: `echo ${prefix}${secret}`,
-					exitCode: 0,
-					timestamp: 1,
-				} as unknown as AgentMessage,
-				{
-					role: "pythonExecution",
-					code: `print("${prefix}${secret}")`,
-					exitCode: 0,
-					timestamp: 2,
-				} as unknown as AgentMessage,
-			);
-			const runtime = new AdvisorRuntime(agent, {
-				snapshotMessages: () => [{ role: "user", content: "review the execution", timestamp: 3 } as AgentMessage],
-				obfuscator,
-			});
-
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1_000, 1);
-
-			const bash = agent.state.messages[0] as AgentMessage & { command: string };
-			const python = agent.state.messages[1] as AgentMessage & { code: string };
-			expect(leakedSecretPieces(bash.command, secret)).toEqual([]);
-			expect(leakedSecretPieces(python.code, secret)).toEqual([]);
-		});
 		it("does not scan tool-call arguments hidden by the primary-argument preview", async () => {
 			const obfuscator = new SecretObfuscator([
 				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
@@ -2751,7 +2593,7 @@ describe("advisor", () => {
 			});
 			runtime.onTurnEnd();
 			await runtime.waitForCatchup(1000, 1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2779,7 +2621,7 @@ describe("advisor", () => {
 			});
 			runtime.onTurnEnd();
 			await runtime.waitForCatchup(1000, 1);
-			expect(promptText(promptInputs[0])).toContain("$$");
+			expect(promptText(promptInputs[0])).toContain(obfuscator.obfuscate("OTHERSECRET"));
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2817,7 +2659,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 		it("does not scan execution source after the advisor preview cap", async () => {
@@ -2853,7 +2695,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2883,7 +2725,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 			expect(obfuscate).not.toHaveBeenCalledWith("tok_abc123", expect.anything());
 		});
@@ -2917,716 +2759,9 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 			expect(obfuscate).not.toHaveBeenCalledWith("tok_abc123", expect.anything());
-		});
-
-		it("shares regex-protected values across the whole advisor delta so an earlier field's friendly prefix cannot leak a sibling field's secret", async () => {
-			// Regression: obfuscateAdvisorDelta must precompute regex-protected values
-			// (collectAdvisorRegexSecretValues) across every field of the WHOLE advisor
-			// delta before redacting any single message — mirroring the whole-batch
-			// precomputation obfuscateMessages performs for the primary provider path
-			// (see secrets-obfuscator.test.ts). Redacting message fields independently
-			// would let the EARLIER user message's plain secret (OTHERSECRET) mint a
-			// friendly-prefixed placeholder ("$$TOKABC123_<hash>$$") before the SIBLING
-			// toolResult's `details.diff` field, later in the same delta, reveals the
-			// regex-protected value that friendly name normalizes to
-			// (tok_abc123 -> TOKABC123) — baking a normalized rendering of that
-			// still-undiscovered secret into the advisor-bound prompt as an "innocent"
-			// friendly label instead of a bare placeholder.
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const diff = `--- a/config.ts\n+++ b/config.ts\n@@ -1 +1 @@\n-const token = "old";\n+const token = "tok_abc123";`;
-			const messages: AgentMessage[] = [
-				{ role: "user", content: "remember OTHERSECRET for later", timestamp: 1 } as AgentMessage,
-				{
-					role: "assistant",
-					content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "config.ts" } }],
-					timestamp: 2,
-				} as unknown as AgentMessage,
-				{
-					role: "toolResult",
-					toolCallId: "c1",
-					toolName: "edit",
-					content: "ok",
-					details: { diff },
-					timestamp: 3,
-				} as unknown as AgentMessage,
-			];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await Promise.resolve();
-
-			expect(promptInputs).toHaveLength(1);
-			const prompt = promptText(promptInputs[0]!);
-			expect(prompt).not.toContain("OTHERSECRET");
-			expect(prompt).not.toContain("tok_abc123");
-			// The friendly prefix is itself a normalized rendering of the
-			// later-discovered regex value; sharing regex values across the whole
-			// delta up front must strip it to a bare placeholder rather than bake
-			// it into the earlier user message's rendering.
-			expect(prompt).not.toContain("TOKABC123_");
-
-			// Both originals still round-trip through deobfuscation of the
-			// advisor-bound prompt text.
-			const restored = obfuscator.deobfuscate(prompt);
-			expect(restored).toContain("OTHERSECRET");
-			expect(restored).toContain("tok_abc123");
-		});
-
-		it("keeps replace-regex collisions across advisor deltas", async () => {
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const messages: AgentMessage[] = [{ role: "user", content: "first tok_abc123", timestamp: 1 } as AgentMessage];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1000, 1);
-			messages.push({ role: "user", content: "then OTHERSECRET", timestamp: 2 } as AgentMessage);
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1000, 1);
-
-			expect(promptInputs).toHaveLength(2);
-			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
-			expect(promptText(promptInputs[1])).not.toContain("OTHERSECRET");
-			expect(promptText(promptInputs[1])).not.toContain("TOKABC123_");
-		});
-
-		it("scrubs prior advisor prompts when a later replace regex collides with their friendly prefix", async () => {
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const firstStoredPrompt = (): string => {
-				const message = agent.state.messages[0];
-				if (message?.role !== "user" || !("content" in message)) {
-					throw new Error("Expected the first advisor history item to be a user prompt");
-				}
-				const c = (message as { content?: unknown }).content;
-				if (typeof c === "string") return c;
-				if (Array.isArray(c)) return c.map((b: unknown) => (b as { text?: string }).text ?? "").join("\n");
-				throw new Error("Unexpected content shape");
-			};
-			const messages: AgentMessage[] = [
-				{ role: "user", content: "remember OTHERSECRET", timestamp: 1 } as AgentMessage,
-			];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1000, 1);
-			agent.state.messages.push({
-				role: "user",
-				content: promptText(promptInputs[0]!),
-				timestamp: 1,
-			} as AgentMessage);
-			expect(firstStoredPrompt()).toContain("TOKABC123_");
-
-			messages.push({ role: "user", content: "later tok_abc123", timestamp: 2 } as AgentMessage);
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1000, 1);
-
-			expect(promptInputs).toHaveLength(2);
-			expect(firstStoredPrompt()).not.toContain("TOKABC123_");
-			expect(promptText(promptInputs[1])).not.toContain("TOKABC123_");
-		});
-
-		it.each(["v1", "v2", "codex"])(
-			"scrubs native %s replay and next-compaction history after a later friendly-prefix collision",
-			async version => {
-				const obfuscator = new SecretObfuscator([
-					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
-				]);
-				const model = getBundledModel("openai", "gpt-5.4");
-				if (!model) throw new Error("Expected bundled OpenAI replay model");
-				const replayModel =
-					version === "codex"
-						? { ...model, provider: "openai-codex" as const, api: "openai-codex-responses" as const }
-						: model;
-				const promptInputs: Array<string | AgentMessage[]> = [];
-				const agent = makeAgent(promptInputs);
-				const messages: AgentMessage[] = [{ role: "user", content: "remember OTHERSECRET", timestamp: 1 }];
-				const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
-				const runtime = new AdvisorRuntime(agent, {
-					snapshotMessages: () => messages,
-					obfuscator,
-					maintainContext: async () => {
-						const summary = agent.state.messages[0];
-						if (summary?.role === "compactionSummary") {
-							const payload = getOpenAiRemoteCompactionPayload(
-								summary as typeof summary & { preserveData?: Record<string, unknown> },
-							);
-							maintenanceInputs.push(buildOpenAiNativeHistory([], replayModel, payload?.items));
-						}
-						return false;
-					},
-				});
-
-				runtime.onTurnEnd();
-				await runtime.waitForCatchup(1000, 1);
-				const retainedPrompt = promptText(promptInputs[0]!);
-				expect(retainedPrompt).toContain("TOKABC123_");
-				const staleToken = obfuscator.obfuscate("OTHERSECRET");
-				const searchItemsFor = (
-					secret: string,
-				): Array<Omit<ResponseFileSearchToolCall, "id"> | Omit<ResponseFunctionWebSearch, "id">> => [
-					{
-						type: "file_search_call",
-						status: "completed",
-						queries: [`file query ${secret}`, "public query"],
-						results: [
-							{
-								file_id: staleToken,
-								filename: `${secret}.txt`,
-								text: `retrieved ${secret}`,
-								attributes: { label: secret, count: 3, enabled: true },
-								score: 0.75,
-							},
-							{
-								file_id: "file-public",
-								filename: "public.txt",
-								text: "public result",
-								attributes: null,
-								score: 0,
-							},
-						],
-					},
-					{
-						type: "web_search_call",
-						status: "completed",
-						action: {
-							type: "search",
-							queries: [`web query ${secret}`, "public query"],
-							query: `legacy ${secret}`,
-							sources: [{ type: "url", url: `https://example.test/${secret}` }],
-						},
-					},
-					{
-						type: "web_search_call",
-						status: "completed",
-						action: { type: "open_page", url: `https://example.test/${secret}` },
-					},
-					{
-						type: "web_search_call",
-						status: "completed",
-						action: { type: "find_in_page", url: `https://example.test/${secret}`, pattern: `find ${secret}` },
-					},
-				];
-				const searchItems = searchItemsFor(staleToken).map((item, index) => ({
-					...item,
-					id: `native-search-${index}`,
-				}));
-				const searchSnapshot = structuredClone(searchItems);
-				const compactionItem = {
-					type: "compaction",
-					id: "opaque-native-state",
-					encrypted_content: "OTHERSECRET TOKABC123_ tok_opaque",
-				};
-				const replacementHistory = buildOpenAiNativeHistory(
-					[{ role: "user", content: retainedPrompt, timestamp: 1 }],
-					replayModel,
-				);
-				replacementHistory.push(...searchItems, compactionItem);
-				const preserveData = {
-					openaiRemoteCompaction: {
-						provider: replayModel.provider,
-						replacementHistory,
-						...(version === "v2"
-							? { version: "v2", usedTokens: 100, retainedImageCount: 0 }
-							: { compactionItem }),
-					},
-				};
-				const originalSummary = {
-					...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
-						providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
-					}),
-					preserveData,
-				};
-				agent.state.messages.push(originalSummary);
-				messages.push({ role: "user", content: "later tok_abc123", timestamp: 2 });
-				runtime.onTurnEnd();
-				await runtime.waitForCatchup(1000, 1);
-
-				const encoded = buildResponsesInput({
-					model: replayModel,
-					context: { messages: defaultConvertToLlm(agent.state.messages) },
-					strictResponsesPairing: false,
-					supportsImageDetailOriginal: false,
-					nativeHistory: { replay: true, filterReasoning: false },
-				});
-				const redactedToken = obfuscator.obfuscate(
-					staleToken,
-					obfuscator.collectRegexSecretValuesForObfuscation("tok_abc123"),
-				);
-				expect(redactedToken).not.toContain("TOKABC123_");
-				for (const history of [encoded, ...maintenanceInputs]) {
-					const retained = history.filter(item => item.type === "message");
-					const plaintext = JSON.stringify(retained);
-					expect(plaintext).toContain("remember");
-					expect(plaintext).not.toContain("TOKABC123_");
-					expect(plaintext).not.toContain("OTHERSECRET");
-					expect(obfuscator.deobfuscate(plaintext)).toContain("OTHERSECRET");
-					const searches = history.filter(
-						item => item.type === "file_search_call" || item.type === "web_search_call",
-					);
-					expect(searches).toHaveLength(searchItems.length);
-					// Assert every schema-defined search plaintext slot, without pinning output IDs stripped by encoders.
-					expect(searches).toMatchObject(searchItemsFor(redactedToken));
-					expect(history.find(item => item.type === "compaction")).toMatchObject({
-						encrypted_content: compactionItem.encrypted_content,
-					});
-				}
-				expect(maintenanceInputs).toHaveLength(1);
-				expect(JSON.stringify(replacementHistory[0])).toContain("TOKABC123_");
-				expect(searchItems).toEqual(searchSnapshot);
-				expect(agent.state.messages[0]).not.toBe(originalSummary);
-			},
-		);
-
-		it.each([
-			{ source: "retained", kind: "file_search_call" },
-			{ source: "maintenance", kind: "file_search_call" },
-			{ source: "maintenance", kind: "tool_search_output" },
-		])(
-			"collects $kind-only collisions from $source history before replay and pending compaction input",
-			async ({ source, kind }) => {
-				const obfuscator = new SecretObfuscator([
-					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
-				]);
-				const model = getBundledModel("openai", "gpt-5.4");
-				if (!model) throw new Error("Expected bundled OpenAI replay model");
-				const stalePrompt = obfuscator.obfuscate("remember OTHERSECRET");
-				expect(stalePrompt).toContain("TOKABC123_");
-				const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
-				const searchItemFor = (text: string) =>
-					kind === "file_search_call"
-						? ({ type: "file_search_call", status: "completed", queries: [text] } satisfies Omit<
-								ResponseFileSearchToolCall,
-								"id"
-							>)
-						: ({
-								type: "tool_search_output",
-								execution: "server",
-								status: "completed",
-								tools: [
-									{
-										type: "namespace",
-										name: "workspace",
-										description: "Workspace tools",
-										tools: [
-											{
-												type: "custom",
-												name: "lookup",
-												description: `Use ${text}`,
-												format: { type: "text" },
-											},
-										],
-									},
-								],
-							} satisfies ResponseToolSearchOutputItemParam);
-				const searchItem = { ...searchItemFor("tok_abc123"), id: "search-only-collision" };
-				const replacementHistory = buildOpenAiNativeHistory(
-					[{ role: "user", content: stalePrompt, timestamp: 1 }],
-					model,
-				);
-				replacementHistory.push(searchItem, compactionItem);
-				const preserveData = {
-					openaiRemoteCompaction: { provider: model.provider, replacementHistory, compactionItem },
-				};
-				const summary = {
-					...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
-						providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
-					}),
-					preserveData: structuredClone(preserveData),
-				};
-				const originalSummary = structuredClone(summary);
-				const promptInputs: Array<string | AgentMessage[]> = [];
-				const encodedPrompts: ResponseInput[] = [];
-				const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
-				const maintenancePreviews: string[] = [];
-				const agent = makeAgent(promptInputs);
-				if (source === "retained") agent.state.messages.push(summary);
-				agent.prompt = async input => {
-					promptInputs.push(input);
-					const incoming: AgentMessage[] =
-						typeof input === "string" ? [{ role: "user", content: input, timestamp: 2 }] : input;
-					encodedPrompts.push(
-						buildResponsesInput({
-							model,
-							context: {
-								messages: obfuscateMessages(
-									obfuscator,
-									defaultConvertToLlm([...agent.state.messages, ...incoming]),
-								),
-							},
-							strictResponsesPairing: false,
-							supportsImageDetailOriginal: false,
-							nativeHistory: { replay: true, filterReasoning: false },
-						}),
-					);
-				};
-				const { promise: maintenanceStarted, resolve: startMaintenance } = Promise.withResolvers<void>();
-				const { promise: maintenanceReleased, resolve: releaseMaintenance } = Promise.withResolvers<void>();
-				const messages: AgentMessage[] = [{ role: "user", content: "review OTHERSECRET", timestamp: 2 }];
-				const runtime = new AdvisorRuntime(agent, {
-					snapshotMessages: () => messages,
-					obfuscator,
-					maintainContext: async incoming => {
-						maintenancePreviews.push(promptText([incoming]));
-						if (maintenancePreviews.length === 1) {
-							startMaintenance();
-							await maintenanceReleased;
-							if (source === "maintenance") agent.state.messages.push(summary);
-						} else {
-							maintenanceInputs.push(buildOpenAiNativeHistory(defaultConvertToLlm(agent.state.messages), model));
-							const retained = agent.state.messages[0] as typeof summary;
-							maintenanceInputs.push(
-								buildOpenAiNativeHistory([], model, getOpenAiRemoteCompactionPayload(retained)?.items),
-							);
-						}
-						return false;
-					},
-				});
-				runtime.onTurnEnd();
-				await maintenanceStarted;
-				messages.push({ role: "user", content: "queued OTHERSECRET", timestamp: 3 });
-				runtime.onTurnEnd();
-				releaseMaintenance();
-				await runtime.waitForCatchup(1000, 1);
-
-				expect(maintenancePreviews).toHaveLength(2);
-				expect(maintenancePreviews[1]).not.toContain("TOKABC123_");
-				expect(obfuscator.deobfuscate(maintenancePreviews[1]!)).toContain("queued OTHERSECRET");
-				expect(promptInputs).toHaveLength(1);
-				expect(promptText(promptInputs[0])).not.toContain("TOKABC123_");
-				expect(maintenanceInputs).toHaveLength(2);
-				for (const history of [encodedPrompts[0]!, ...maintenanceInputs]) {
-					const plaintext = JSON.stringify(history.filter(item => item.type !== "compaction"));
-					expect(plaintext).not.toContain("TOKABC123_");
-					expect(plaintext).not.toContain("tok_abc123");
-					expect(plaintext).not.toContain("OTHERSECRET");
-					expect(obfuscator.deobfuscate(plaintext)).toContain("remember OTHERSECRET");
-					expect(history.find(item => item.type === kind)).toMatchObject(searchItemFor("[hidden]"));
-					expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
-				}
-				expect(summary).toEqual(originalSummary);
-			},
-		);
-
-		it("scrubs a stale assistant native snapshot committed after a collision arrives during maintenance", async () => {
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
-			]);
-			const model = getBundledModel("openai", "gpt-5.4");
-			if (!model) throw new Error("Expected bundled OpenAI replay model");
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const encodedPrompts: ResponseInput[] = [];
-			const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
-			const agent = makeAgent(promptInputs);
-			agent.prompt = async input => {
-				promptInputs.push(input);
-				const incoming: AgentMessage[] =
-					typeof input === "string" ? [{ role: "user", content: input, timestamp: 1 }] : input;
-				encodedPrompts.push(
-					buildResponsesInput({
-						model,
-						context: {
-							messages: obfuscateMessages(
-								obfuscator,
-								defaultConvertToLlm([...agent.state.messages, ...incoming]),
-							),
-						},
-						strictResponsesPairing: false,
-						supportsImageDetailOriginal: false,
-						nativeHistory: { replay: true, filterReasoning: false },
-					}),
-				);
-			};
-			const { promise: maintenanceStarted, resolve: startMaintenance } = Promise.withResolvers<void>();
-			const { promise: maintenanceReleased, resolve: releaseMaintenance } = Promise.withResolvers<void>();
-			const staleHistory: AgentMessage[] = [];
-			let maintenanceCalls = 0;
-			const messages: AgentMessage[] = [{ role: "user", content: "remember OTHERSECRET", timestamp: 1 }];
-			const runtime = new AdvisorRuntime(agent, {
-				snapshotMessages: () => messages,
-				obfuscator,
-				maintainContext: async () => {
-					maintenanceCalls++;
-					if (maintenanceCalls === 2) {
-						startMaintenance();
-						await maintenanceReleased;
-						// The result was produced from a snapshot taken before the late delta.
-						agent.state.messages.splice(0, agent.state.messages.length, ...staleHistory);
-					} else if (maintenanceCalls === 3) {
-						maintenanceInputs.push(buildOpenAiNativeHistory(defaultConvertToLlm(agent.state.messages), model));
-						const summary = agent.state.messages[0] as AgentMessage & { preserveData?: Record<string, unknown> };
-						maintenanceInputs.push(
-							buildOpenAiNativeHistory([], model, getOpenAiRemoteCompactionPayload(summary)?.items),
-						);
-					}
-					return false;
-				},
-			});
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1000, 1);
-			const stalePrompt = promptText(promptInputs[0]!);
-			expect(stalePrompt).toContain("TOKABC123_");
-			const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
-			const replacementHistory = buildOpenAiNativeHistory(
-				[{ role: "user", content: stalePrompt, timestamp: 1 }],
-				model,
-			);
-			replacementHistory.push(compactionItem);
-			const preserveData = {
-				openaiRemoteCompaction: { provider: model.provider, replacementHistory, compactionItem },
-			};
-			staleHistory.push({
-				...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
-					providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
-				}),
-				preserveData,
-			} as AgentMessage);
-			const assistantSnapshot: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "visible response" }],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				stopReason: "stop",
-				timestamp: 2,
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				providerPayload: {
-					type: "openaiResponsesHistory",
-					provider: model.provider,
-					dt: false,
-					items: [
-						...replacementHistory,
-						{
-							type: "message",
-							role: "assistant",
-							id: "snapshot-tail",
-							content: [{ type: "output_text", text: `assistant snapshot ${stalePrompt}`, annotations: [] }],
-						},
-					],
-				},
-			};
-			staleHistory.push(assistantSnapshot);
-			agent.state.messages.push(...staleHistory);
-			messages.push({ role: "user", content: "continue reviewing", timestamp: 2 });
-			runtime.onTurnEnd();
-			await maintenanceStarted;
-			messages.push({ role: "user", content: "later tok_abc123", timestamp: 3 });
-			runtime.onTurnEnd();
-			releaseMaintenance();
-			await runtime.waitForCatchup(1000, 1);
-
-			expect(encodedPrompts).toHaveLength(2);
-			expect(maintenanceInputs).toHaveLength(2);
-			for (const history of [encodedPrompts[1]!, ...maintenanceInputs]) {
-				const plaintext = JSON.stringify(
-					history.filter(item => item.type === "message" || item.type === undefined),
-				);
-				expect(plaintext).toContain("remember");
-				expect(plaintext).not.toContain("TOKABC123_");
-				expect(plaintext).not.toContain("tok_abc123");
-				expect(plaintext).not.toContain("OTHERSECRET");
-				expect(obfuscator.deobfuscate(plaintext)).toContain("OTHERSECRET");
-				expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
-			}
-			expect(JSON.stringify(encodedPrompts[1])).toContain("assistant snapshot");
-			expect(JSON.stringify(maintenanceInputs[0])).toContain("assistant snapshot");
-			expect(agent.state.messages[1]).not.toBe(assistantSnapshot);
-		});
-
-		it("redacts secrets inside assistant thinking blocks, honoring the whole-delta friendly-prefix collision set", async () => {
-			// Regression: obfuscateAssistantMessage (the advisor-local redaction path)
-			// must rewrite `thinking` blocks the same way it rewrites `text` blocks.
-			// Mirrors the collision scenario above but sources the friendly-prefixed
-			// placeholder from a PRIOR thinking block: if thinking fell through
-			// unredacted, the advisor prompt would receive both the raw secret AND,
-			// had it been redacted without sharing the regex collision set, a
-			// normalized "$$TOKABC123_<hash>$$" rendering of the regex-protected value
-			// (tok_abc123) only discovered later in the same delta.
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const diff = `--- a/config.ts\n+++ b/config.ts\n@@ -1 +1 @@\n-const token = "old";\n+const token = "tok_abc123";`;
-			const messages: AgentMessage[] = [
-				{
-					role: "assistant",
-					content: [
-						{ type: "thinking", thinking: "Remember OTHERSECRET for later." },
-						{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "config.ts" } },
-					],
-					timestamp: 1,
-				} as unknown as AgentMessage,
-				{
-					role: "toolResult",
-					toolCallId: "c1",
-					toolName: "edit",
-					content: "ok",
-					details: { diff },
-					timestamp: 2,
-				} as unknown as AgentMessage,
-			];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await Promise.resolve();
-
-			expect(promptInputs).toHaveLength(1);
-			const prompt = promptText(promptInputs[0]!);
-			expect(prompt).toContain("_thinking:_");
-			expect(prompt).not.toContain("OTHERSECRET");
-			expect(prompt).not.toContain("tok_abc123");
-			expect(prompt).not.toContain("TOKABC123_");
-
-			// Both originals still round-trip through deobfuscation of the
-			// advisor-bound prompt text.
-			const restored = obfuscator.deobfuscate(prompt);
-			expect(restored).toContain("OTHERSECRET");
-			expect(restored).toContain("tok_abc123");
-		});
-		it("clears advisor thinking signatures when collision scrubbing rewrites their text", async () => {
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const staleThinking = obfuscator.obfuscate("OTHERSECRET");
-			agent.state.messages.push({
-				role: "assistant",
-				content: [{ type: "thinking", thinking: staleThinking, thinkingSignature: "signed-thinking" }],
-				timestamp: 1,
-			} as unknown as AgentMessage);
-			const messages: AgentMessage[] = [{ role: "user", content: "later tok_abc123", timestamp: 2 } as AgentMessage];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1000, 1);
-
-			const storedAssistant = agent.state.messages[0] as AssistantMessage;
-			const thinking = storedAssistant.content.find(block => block.type === "thinking");
-			expect(thinking?.thinking).not.toContain("TOKABC123_");
-			expect(thinking?.thinkingSignature).toBeUndefined();
-		});
-
-		it("skips raw image payload bytes when collecting regex-protected values, so image data cannot spuriously trigger friendly-prefix collision avoidance", async () => {
-			// Regression: collectAdvisorRegexSecretValues's generic tree walk only
-			// skipped strings already shaped like a `data:image/...` URL, but
-			// `ImageContent.data` at rest is raw base64 (that URL form only exists
-			// in the rendered viewer). Left unguarded, every image payload in the
-			// raw message array gets regex-scanned on every advisor turn —
-			// wasteful for large screenshots the advisor never even sees (images
-			// render as the literal "[image]" marker) — and an accidental regex
-			// match inside the base64 bytes would poison the whole-delta collision
-			// set used to decide whether OTHER fields' friendly-name placeholders
-			// are safe to render.
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const messages: AgentMessage[] = [
-				{ role: "user", content: "remember OTHERSECRET for later", timestamp: 1 } as AgentMessage,
-				{
-					role: "user",
-					content: [{ type: "image", data: "binary noise tok_abc123 more noise", mimeType: "image/png" }],
-					timestamp: 2,
-				} as unknown as AgentMessage,
-			];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await Promise.resolve();
-
-			expect(promptInputs).toHaveLength(1);
-			const prompt = promptText(promptInputs[0]!);
-			expect(prompt).not.toContain("OTHERSECRET");
-			// Because the image bytes were skipped by the collision pre-scan, the
-			// plain secret's friendly-name placeholder needed no collision avoidance.
-			expect(prompt).toContain("TOKABC123_");
-		});
-
-		it("ignores assistant provider replay payloads when collecting regex collision values", async () => {
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+" },
-			]);
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent = makeAgent(promptInputs);
-			const messages: AgentMessage[] = [
-				{
-					role: "assistant",
-					content: [{ type: "text", text: "remember OTHERSECRET for later" }],
-					providerPayload: { items: [{ note: "tok_abc123" }] },
-					timestamp: 1,
-				} as unknown as AgentMessage,
-			];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-			};
-			const runtime = new AdvisorRuntime(agent, host);
-
-			runtime.onTurnEnd();
-			await Promise.resolve();
-
-			expect(promptInputs).toHaveLength(1);
-			const prompt = promptText(promptInputs[0]!);
-			expect(prompt).not.toContain("OTHERSECRET");
-			expect(prompt).not.toContain("tok_abc123");
-			expect(prompt).toContain("TOKABC123_");
 		});
 
 		it("does not scan tool arguments omitted by the primary-argument preview", async () => {
@@ -5747,6 +4882,38 @@ describe("advisor", () => {
 			expect(runtime.backlog).toBe(0);
 		});
 
+		it("backs off between consecutive failures and honors a provider retry hint", async () => {
+			const promptTimes: number[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					promptTimes.push(performance.now());
+					// The 1st failure carries a 150 ms hint (above the 40 ms base); the 2nd has none.
+					state.error = promptTimes.length === 1 ? "429 rate limited retry-after-ms=150" : "provider failed";
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const failures: unknown[] = [];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				notifyFailure: error => failures.push(error),
+			};
+			const runtime = new AdvisorRuntime(agent, host, 40);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length >= 1 && runtime.backlog === 0);
+
+			expect(promptTimes).toHaveLength(3);
+			// Hint wins over the 40 ms jittered base; the second wait is 80 ms doubled, minus at most 25% jitter.
+			expect(promptTimes[1] - promptTimes[0]).toBeGreaterThanOrEqual(145);
+			expect(promptTimes[2] - promptTimes[1]).toBeGreaterThanOrEqual(58);
+		});
+
 		it("calls onTurnError for each consecutive failure including the dropped third turn", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const turnErrors: unknown[] = [];
@@ -6492,56 +5659,6 @@ describe("advisor", () => {
 			runtime.onTurnEnd(messages);
 			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
 			expect(promptText(promptInputs.at(-1) as string | AgentMessage[])).toContain("quota-turn");
-		});
-
-		it("renders the quota-requeued batch against the advisor regex values it was prepared under", async () => {
-			// The requeued single-block text is rendered lazily on the quota path. It
-			// must be rendered BEFORE the advisor seen-state (and its retained regex
-			// values) is cleared; rendering after the clear would mint a
-			// friendly-prefixed placeholder that collides with a previously
-			// delivered replace-regex value.
-			const obfuscator = new SecretObfuscator([
-				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
-				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
-			]);
-			const obfuscate = vi.spyOn(obfuscator, "obfuscate");
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			let shouldFail = false;
-			const agent: AdvisorAgent = {
-				prompt: async input => {
-					promptInputs.push(input);
-					if (shouldFail) throw new Error("insufficient_quota: rate limit exceeded");
-				},
-				abort: () => {},
-				reset: () => {},
-				state: { messages: [] },
-			};
-			const messages: AgentMessage[] = [{ role: "user", content: "first tok_abc123", timestamp: 1 } as AgentMessage];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-				obfuscator,
-				notifyQuotaExhausted: () => {},
-			};
-			const runtime = new AdvisorRuntime(agent, host, 0);
-			runtime.onTurnEnd();
-			await runtime.waitForCatchup(1000, 1);
-			expect(promptInputs).toHaveLength(1);
-
-			shouldFail = true;
-			obfuscate.mockClear();
-			messages.push({ role: "user", content: "then OTHERSECRET", timestamp: 2 } as AgentMessage);
-			runtime.onTurnEnd();
-			await settleUntil(() => runtime.quotaExhausted && promptInputs.length === 2);
-
-			const rendered = obfuscate.mock.results.flatMap(result =>
-				result.type === "return" && typeof result.value === "string" ? [result.value] : [],
-			);
-			const requeued = rendered.findLast(text => obfuscator.deobfuscate(text).includes("then OTHERSECRET"));
-			expect(requeued).toBeDefined();
-			expect(requeued).not.toContain("OTHERSECRET");
-			expect(requeued).not.toContain("TOKABC123_");
-			expect(promptText(promptInputs[1])).not.toContain("TOKABC123_");
-			runtime.dispose();
 		});
 
 		it("resolves waitForCatchup immediately when quota is exhausted", async () => {

@@ -63,9 +63,9 @@ pub struct DesktopCapture {
 	pub displays:          Vec<DesktopDisplay>,
 	pub backend:           String,
 	pub display_server:    Option<String>,
-	/// The user session was locked when this frame was taken: a display
-	/// capture shows the lock screen, and a window capture shows the window's
-	/// last frame behind it. Only macOS detects this; others report `false`.
+	/// The user session was unavailable when this frame was taken. On macOS,
+	/// a display capture shows the lock screen and a window capture its last
+	/// frame. Windows also detects disconnected sessions and secure desktops.
 	pub screen_locked:     bool,
 }
 
@@ -88,14 +88,21 @@ pub struct DesktopCapabilities {
 	/// Native global Escape cancellation of takeover input (`takeover: true`,
 	/// held control, desktop/display-level input, raises, activating launches).
 	/// Without held control, background window input never watches the user's
-	/// keys; it and Wayland stop only through the host interrupt.
+	/// keys; it and Wayland stop only through the host interrupt. False on
+	/// macOS while `secureInput` holds: the Escape monitor then sees no keys.
 	pub global_escape: bool,
+	/// Secure Event Input is on (a focused password field, or a terminal's
+	/// secure keyboard entry): macOS hides every key from event monitors, so
+	/// the user's Escape and typing go unseen. Only macOS detects this.
+	pub secure_input: bool,
+	/// The app holding secure input, when macOS names its process.
+	pub secure_input_app: Option<String>,
 	pub capture_permission: String,
 	pub input_permission: String,
 	pub ax_permission: String,
 	pub display_count: u32,
-	/// The user session is locked (lock screen up). Only macOS detects this;
-	/// other backends report `false`.
+	/// The session is locked, or on Windows disconnected or on a secure
+	/// desktop. Linux reports `false`.
 	pub screen_locked: bool,
 	/// The display is asleep, so nothing can be captured until it wakes. Only
 	/// macOS detects this; other backends report `false`.
@@ -117,6 +124,8 @@ impl DesktopCapabilities {
 			held_input: false,
 			spaces: false,
 			global_escape: false,
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: "unavailable".to_string(),
 			input_permission: "unavailable".to_string(),
 			ax_permission: "unavailable".to_string(),
@@ -128,7 +137,7 @@ impl DesktopCapabilities {
 }
 
 /// Lock and display-sleep state of the user session, read live per call.
-/// Only macOS detects either; other platforms report both as `false`.
+/// macOS detects both; Windows detects lock state; Linux reports both false.
 #[napi(object, js_name = "DesktopScreenState")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScreenState {

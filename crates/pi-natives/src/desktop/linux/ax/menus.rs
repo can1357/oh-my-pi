@@ -1,7 +1,7 @@
 use super::*;
 use crate::desktop::{
 	control,
-	menus::{DesktopMenuItem, match_index, require_command, require_enabled},
+	menus::{DesktopMenuItem, match_offered, require_command, require_enabled},
 };
 
 const NODE_LIMIT: usize = 2048;
@@ -55,10 +55,10 @@ impl AtSpiAx {
 	// belonging to another frame must never become a background command target.
 	async fn menu_children(&self, object: &ObjectRefOwned) -> CoreResult<Vec<ObjectRefOwned>> {
 		let proxy = object
-			.as_accessible_proxy(self.connection.connection())
+			.as_accessible_proxy(&self.connection)
 			.await
 			.map_err(failure)?;
-		let children = proxy.get_children().await.map_err(failure)?;
+		let children = self.reply(proxy.get_children()).await?.map_err(failure)?;
 		if children.len() > NODE_LIMIT {
 			return Err(failure("child limit exceeded"));
 		}
@@ -67,10 +67,10 @@ impl AtSpiAx {
 				return Err(failure("invalid or cross-application child ownership"));
 			}
 			let proxy = child
-				.as_accessible_proxy(self.connection.connection())
+				.as_accessible_proxy(&self.connection)
 				.await
 				.map_err(failure)?;
-			if proxy.parent().await.map_err(failure)? != *object {
+			if self.reply(proxy.parent()).await?.map_err(failure)? != *object {
 				return Err(failure("menu child has inconsistent parent ownership"));
 			}
 		}
@@ -87,10 +87,10 @@ impl AtSpiAx {
 			}
 			seen.push(object.clone());
 			let proxy = object
-				.as_accessible_proxy(self.connection.connection())
+				.as_accessible_proxy(&self.connection)
 				.await
 				.map_err(failure)?;
-			let role = proxy.get_role().await.map_err(failure)?;
+			let role = self.reply(proxy.get_role()).await?.map_err(failure)?;
 			if role == Role::MenuBar {
 				drop(proxy);
 				bars.push(object);
@@ -127,21 +127,21 @@ impl AtSpiAx {
 		let mut objects = Vec::new();
 		for container in containers {
 			let owner = container
-				.as_accessible_proxy(self.connection.connection())
+				.as_accessible_proxy(&self.connection)
 				.await
 				.map_err(failure)?;
-			let owner_role = owner.get_role().await.map_err(failure)?;
-			let owner_name = owner.name().await.map_err(failure)?;
+			let owner_role = self.reply(owner.get_role()).await?.map_err(failure)?;
+			let owner_name = self.reply(owner.name()).await?.map_err(failure)?;
 			let mut children = self.menu_children(container).await?;
 			// Some toolkits expose a submenu as an intermediate Menu object.
 			if owner_role != Role::MenuBar && children.len() == 1 {
 				let wrapped = {
 					let child = children[0]
-						.as_accessible_proxy(self.connection.connection())
+						.as_accessible_proxy(&self.connection)
 						.await
 						.map_err(failure)?;
-					let name = child.name().await.map_err(failure)?;
-					child.get_role().await.map_err(failure)? == Role::Menu
+					let name = self.reply(child.name()).await?.map_err(failure)?;
+					self.reply(child.get_role()).await?.map_err(failure)? == Role::Menu
 						&& (name.is_empty() || name == owner_name)
 				};
 				if wrapped {
@@ -153,33 +153,34 @@ impl AtSpiAx {
 					return Err(failure("menu item limit exceeded"));
 				}
 				let proxy = object
-					.as_accessible_proxy(self.connection.connection())
+					.as_accessible_proxy(&self.connection)
 					.await
 					.map_err(failure)?;
-				let role = proxy.get_role().await.map_err(failure)?;
+				let role = self.reply(proxy.get_role()).await?.map_err(failure)?;
 				if role == Role::Separator {
 					continue;
 				}
 				if !menu_role(role) {
 					return Err(failure("menu contains an unsupported non-menu child"));
 				}
-				let title = proxy.name().await.map_err(failure)?;
-				let state = proxy.get_state().await.map_err(failure)?;
+				let title = self.reply(proxy.name()).await?.map_err(failure)?;
+				let state = self.reply(proxy.get_state()).await?.map_err(failure)?;
 				if state.contains(State::Defunct) {
 					return Err(failure("menu item is defunct"));
 				}
 				let mut has_submenu = role == Role::Menu;
 				for child in self.menu_children(&object).await? {
 					let child_proxy = child
-						.as_accessible_proxy(self.connection.connection())
+						.as_accessible_proxy(&self.connection)
 						.await
 						.map_err(failure)?;
-					has_submenu |= menu_role(child_proxy.get_role().await.map_err(failure)?);
+					has_submenu |=
+						menu_role(self.reply(child_proxy.get_role()).await?.map_err(failure)?);
 				}
-				let shortcut = match Self::action(self.connection.connection(), &object).await {
-					Ok(action) => action
-						.get_key_binding(0)
-						.await
+				let shortcut = match Self::action(&self.connection, &object).await {
+					Ok(action) => self
+						.reply(action.get_key_binding(0))
+						.await?
 						.ok()
 						.filter(|binding| !binding.is_empty()),
 					Err(_) => None,
@@ -215,7 +216,7 @@ impl AtSpiAx {
 		let mut canonical = Vec::new();
 		for (depth, label) in path.iter().enumerate() {
 			let (mut items, mut objects) = self.menu_level(&containers, &canonical).await?;
-			let index = match_index(&items, label)?;
+			let index = match_offered(&items, label)?;
 			let item = items.remove(index);
 			require_enabled(&item)?;
 			let object = objects.remove(index);
@@ -238,7 +239,7 @@ impl AtSpiAx {
 	) -> CoreResult<Vec<DesktopMenuItem>> {
 		let root = self.window_root(window)?;
 		let root = Self::object(&root);
-		self.rt.block_on(async {
+		self.run(async {
 			let (containers, canonical) = if path.is_empty() {
 				(self.menu_bars(root).await?, Vec::new())
 			} else {
@@ -252,13 +253,13 @@ impl AtSpiAx {
 				.menu_level(&containers, &canonical)
 				.await
 				.map(|(items, _)| items)
-		})
+		})?
 	}
 
 	pub(crate) fn menu_select(&mut self, window: &DesktopWindow, path: &[String]) -> CoreResult<()> {
 		let root = self.window_root(window)?;
 		let root = Self::object(&root).clone();
-		let (item, object) = self.rt.block_on(self.resolve_menu(&root, path))?;
+		let (item, object) = self.run(self.resolve_menu(&root, path))??;
 		require_command(&item)?;
 		// Recheck the resolver and ancestor chain after discovery, before
 		// dispatch.
@@ -269,22 +270,27 @@ impl AtSpiAx {
 		if self.window_id(&handle, std::slice::from_ref(window))? != window.id {
 			return Err(failure("command no longer belongs to the target frame"));
 		}
-		self.rt.block_on(async {
+		self.run(async {
 			let (current, current_object) = self.resolve_menu(&root, path).await?;
 			require_command(&current)?;
 			if current_object != object {
 				return Err(failure("menu command changed during discovery"));
 			}
-			let action = Self::action(self.connection.connection(), &object)
+			let action = Self::action(&self.connection, &object)
 				.await
 				.map_err(failure)?;
-			let actions = action_names(&action).await.map_err(failure)?;
+			let actions = self.reply(action_names(&action)).await?.map_err(failure)?;
 			let index = command_index(actions.iter().map(String::as_str))?;
 			control::check()?;
-			if !action.do_action(index).await.map_err(failure)? {
+			if !self
+				.reply(action.do_action(index))
+				.await
+				.map_err(unconfirmed)?
+				.map_err(failure)?
+			{
 				return Err(failure("application refused the menu command"));
 			}
 			Ok(())
-		})
+		})?
 	}
 }
