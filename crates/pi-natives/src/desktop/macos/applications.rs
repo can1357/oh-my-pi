@@ -611,8 +611,8 @@ fn item_names(path: &Path) -> Vec<String> {
 /// frontmost window is returned when no title can be read. A browser shows
 /// a page in an existing window whose title changes, or a new document
 /// window (not an Open dialog when AX can classify it), so either is a
-/// candidate. once its title has held for [`SETTLE_POLLS`] polls, or at
-/// `timeout` whatever it changed to. For a URL (no `names`) the frontmost
+/// candidate, returned once its title has held for [`SETTLE_POLLS`] polls, or
+/// at `timeout` with whatever it changed to. For a URL (no `names`) the frontmost
 /// window is returned at `timeout` if none changed, as for a page that kept the
 /// old tab's title; for a file, none is.
 fn shown_window(
@@ -620,7 +620,7 @@ fn shown_window(
 	names: &[String],
 	before: &HashMap<String, String>,
 	mut windows: impl FnMut() -> Option<Vec<DesktopWindow>>,
-	mut is_document: impl FnMut(&DesktopWindow) -> Option<bool>,
+	mut classify: impl FnMut(&DesktopWindow) -> Option<bool>,
 	mut wait: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<Option<DesktopWindow>> {
 	let deadline = Instant::now() + timeout;
@@ -629,6 +629,13 @@ fn shown_window(
 	};
 	// The first title of each window that opened since, to see it change.
 	let mut first_titles = HashMap::new();
+	// A window's AX role does not change while it waits: ask once per window.
+	let mut kinds = HashMap::new();
+	let mut is_document = |window: &DesktopWindow| {
+		*kinds
+			.entry(window.id.clone())
+			.or_insert_with(|| classify(window))
+	};
 	// The window that changed, and for how many more polls it kept its title.
 	let mut changed: Option<(DesktopWindow, u32)> = None;
 	loop {
