@@ -3206,6 +3206,7 @@ mod tests {
 				};
 				server
 					.serve_at("/org/a11y/atspi/accessible/root", Element {
+						delay:    Duration::ZERO,
 						name:     "main",
 						role:     Role::DesktopFrame,
 						focused:  false,
@@ -3213,6 +3214,7 @@ mod tests {
 					})
 					.unwrap()
 					.serve_at("/qt", Element {
+						delay:    Duration::ZERO,
 						name:     "qtapp",
 						role:     Role::Application,
 						focused:  false,
@@ -3220,6 +3222,7 @@ mod tests {
 					})
 					.unwrap()
 					.serve_at("/qt/frame", Element {
+						delay:    Duration::ZERO,
 						name:     "Notes",
 						role:     Role::Frame,
 						focused:  true,
