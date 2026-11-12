@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
 ### Added
 
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
