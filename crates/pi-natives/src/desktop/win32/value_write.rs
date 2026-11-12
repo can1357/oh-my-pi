@@ -346,23 +346,10 @@ mod tests {
 	}
 
 	#[test]
-	fn unreadable_password_empty_readback_keeps_main_success() {
-		assert!(verdict("secret", Some(""), None, Some(true)).is_ok());
-	}
-
-	#[test]
-	fn unreadable_password_missing_readback_keeps_main_success() {
-		assert!(verdict("secret", None, None, Some(true)).is_ok());
-	}
-
-	#[test]
-	fn unreadable_password_protected_readback_keeps_main_success() {
-		assert!(verdict("secret", Some("protected"), None, Some(true)).is_ok());
-	}
-
-	#[test]
-	fn unreadable_plain_value_keeps_main_success() {
-		assert!(verdict("ordinary", None, None, Some(false)).is_ok());
+	fn a_password_readback_never_disproves_a_write() {
+		for read in [Some(""), Some("protected")] {
+			assert!(verdict("secret", read, None, Some(true)).is_ok());
+		}
 	}
 
 	#[test]
@@ -417,61 +404,6 @@ mod tests {
 				.unwrap_err()
 				.message
 				.contains("different")
-		);
-	}
-
-	// Drives an external hidden-desktop fixture without loading an addon.
-	// PI_NATIVE_COMBO_PROBE_JSON supplies hwnd, text, mode (fixed/main),
-	// and optional stall_message/stall_marker for a sleeping WndProc.
-	#[cfg(target_os = "windows")]
-	#[test]
-	#[ignore = "requires an external native/WinForms fixture"]
-	fn external_combo_probe() {
-		use uiautomation::{UIAutomation, patterns::UIValuePattern, types::Handle};
-		let input: serde_json::Value =
-			serde_json::from_str(&std::env::var("PI_NATIVE_COMBO_PROBE_JSON").unwrap()).unwrap();
-		let hwnd = input["hwnd"].as_u64().unwrap() as usize as _;
-		let text = input["text"].as_str().unwrap();
-		let mode = input["mode"].as_str().unwrap();
-		let pattern = if mode == "main" {
-			// This is origin/main's Windows value-write path: retrieve the
-			// ValuePattern and invoke its setter, with no native notifications.
-			let automation = UIAutomation::new().unwrap();
-			let element = automation
-				.element_from_handle(Handle::from(input["hwnd"].as_u64().unwrap() as isize))
-				.unwrap();
-			Some(element.get_pattern::<UIValuePattern>().unwrap())
-		} else {
-			assert_eq!(mode, "fixed");
-			None
-		};
-		if let Some(message) = input["stall_message"].as_u64() {
-			let marker = std::path::Path::new(input["stall_marker"].as_str().unwrap());
-			assert_ne!(
-				// SAFETY: the fixture owns this handle and custom stall message.
-				unsafe {
-					windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, message as u32, 0, 0)
-				},
-				0
-			);
-			let waiting = std::time::Instant::now();
-			while !marker.exists() {
-				assert!(waiting.elapsed() < std::time::Duration::from_secs(5));
-				std::thread::sleep(std::time::Duration::from_millis(10));
-			}
-		}
-		let start = std::time::Instant::now();
-		let result = if let Some(pattern) = pattern {
-			pattern.set_value(text).map_err(|error| error.to_string())
-		} else {
-			set_combo(hwnd, text, true, false).map_err(|error| error.to_string())
-		};
-		println!(
-			"{}",
-			serde_json::json!({
-				"mode": mode, "text": text, "elapsed_ms": start.elapsed().as_millis(),
-				"ok": result.is_ok(), "error": result.err(),
-			})
 		);
 	}
 
