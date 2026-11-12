@@ -794,9 +794,11 @@ export class ChainJudge implements Judge {
 		return list;
 	}
 
+	/** Every judge kind runs under `signal`, so a deadline or a lost hedge race cancels its request. */
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (model.api === "local-inference")
+			return withCandidateSignal(new TextJudge(new LocalTextBackend(model.id)), signal);
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
@@ -827,7 +829,7 @@ export class ChainJudge implements Judge {
 					startedAt: attempt.timestamp,
 				}),
 		});
-		return new TextJudge(backend);
+		return withCandidateSignal(new TextJudge(backend), signal);
 	}
 }
 
@@ -860,7 +862,7 @@ class LocalTextBackend implements TextBackend {
 	}
 }
 
-/** Bind native transport cancellation even when a withCandidate callback omits its call options. */
+/** Bind transport cancellation even when a withCandidate callback omits its call options. */
 function withCandidateSignal(judge: Judge, parent: AbortSignal | undefined): Judge {
 	return {
 		label: judge.label,

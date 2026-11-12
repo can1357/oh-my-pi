@@ -233,9 +233,12 @@ const HEDGE_ANSWER = {
 function hedgeLoopback({
 	hedgeAfterMs,
 	configuredFallback = true,
+	promptedPrimary = false,
 }: {
 	hedgeAfterMs: number;
 	configuredFallback?: boolean;
+	/** Lead with a prompted (chat-backed) judge instead of the native loopback primary. */
+	promptedPrimary?: boolean;
 }) {
 	const backupId = configuredFallback ? "loopback-backup" : "typesafe/jev-1.14";
 	const attempted: string[] = [];
@@ -273,12 +276,15 @@ function hedgeLoopback({
 			}) as Model,
 	);
 	const settings = Settings.isolated({
-		modelRoles: { judge: "openrouter/loopback-primary" },
+		modelRoles: { judge: promptedPrimary ? `${ONLINE.provider}/${ONLINE.id}` : "openrouter/loopback-primary" },
 		...(configuredFallback ? { "retry.fallbackChains": { judge: ["openrouter/loopback-backup"] } } : {}),
 	});
 	cfgJudgmentAttemptTimeoutMs.override(settings, 600_000);
 	cfgJudgmentHedgeAfterMs.override(settings, hedgeAfterMs);
-	const registry = makeRegistry(models, { openrouter: "loopback-key" });
+	const registry = makeRegistry(promptedPrimary ? [ONLINE, ...models] : models, {
+		openrouter: "loopback-key",
+		[ONLINE.provider]: "online-key",
+	});
 	// Credentials resolve synchronously once a hedge fires, before any network reply can arrive.
 	const getApiKey = registry.getApiKey.bind(registry);
 	vi.spyOn(registry, "getApiKey").mockImplementation((model, sessionId, options) => {
@@ -1700,6 +1706,26 @@ describe("ChainJudge hedging", () => {
 			{ model: "loopback-backup", stopReason: "stop" },
 			{ model: "loopback-primary", stopReason: "aborted" },
 		]);
+	});
+
+	it("races a pending prompted judge against the configured native fallback and aborts the prompted request", async () => {
+		using fixture = hedgeLoopback({ hedgeAfterMs: 500, promptedPrimary: true });
+		const promptedStarted = Promise.withResolvers<void>();
+		const promptedAborted = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
+			options?.signal?.addEventListener("abort", () => promptedAborted.resolve(), { once: true });
+			promptedStarted.resolve();
+			await promptedAborted.promise;
+			return reply(model, "", "aborted");
+		});
+		vi.useFakeTimers();
+		const pending = fixture.judge.judge(HEDGE_REQUEST);
+		await promptedStarted.promise;
+		vi.advanceTimersByTime(500);
+		const result = await pending;
+		expect(result.model).toBe("loopback-backup");
+		expect(fixture.attempted).toEqual(["loopback-backup"]);
+		await promptedAborted.promise;
 	});
 
 	it("does not hedge when the setting is off", async () => {
