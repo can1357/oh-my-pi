@@ -70,7 +70,8 @@
 		"command": "tsc",
 		"args": ["--lsp", "--stdio"],
 		"fileTypes": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
-		"rootMarkers": ["package.json", "tsconfig.json", "jsconfig.json"]
+		"rootMarkers": ["package.json", "tsconfig.json", "jsconfig.json"],
+		"watchFiles": true
 	},
 	"biome": {
 		"command": "biome",

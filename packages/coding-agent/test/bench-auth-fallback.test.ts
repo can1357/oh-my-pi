@@ -314,15 +314,18 @@ describe("bench OAuth account selection", () => {
 	it("uses the selected account for every request instead of rotating", async () => {
 		const auth = createInMemoryAuthStorage();
 		try {
-			await auth.credentials.set("anthropic", ["a", "b"].map(suffix => ({
-				type: "oauth" as const,
-				access: `access-${suffix}`,
-				refresh: `refresh-${suffix}`,
-				expires: Date.now() + 3_600_000,
-				accountId: suffix,
-				email: `${suffix}@example.com`,
-				orgId: suffix,
-			})));
+			await auth.credentials.set(
+				"anthropic",
+				["a", "b"].map(suffix => ({
+					type: "oauth" as const,
+					access: `access-${suffix}`,
+					refresh: `refresh-${suffix}`,
+					expires: Date.now() + 3_600_000,
+					accountId: suffix,
+					email: `${suffix}@example.com`,
+					orgId: suffix,
+				})),
+			);
 			const model = fakeModel("anthropic", "test-model");
 			const registry = fakeRegistry({ models: [model], authedProviders: ["anthropic"] });
 			const keys: unknown[] = [];

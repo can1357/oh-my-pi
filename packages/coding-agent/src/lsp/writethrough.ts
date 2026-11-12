@@ -5,7 +5,6 @@ import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-wr
 import {
 	beginPendingDiskWrite,
 	endPendingDiskWrite,
-	FileChangeType,
 	getActiveOrPendingClient,
 	getOrCreateClient,
 	notifyWorkspaceWatchedFiles,
@@ -27,7 +26,7 @@ import {
 } from "./diagnostics";
 import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
-import type { LspClient, ServerConfig } from "./types";
+import { FileChangeType, type LspClient, type ServerConfig } from "./types";
 import { summarizeDiagnosticMessages } from "./utils";
 
 const TSSERVER_REQUEST_COMMAND = "typescript.tsserverRequest";
