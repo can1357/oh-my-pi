@@ -30,7 +30,7 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
-		menus::{DesktopMenuItem, match_index, require_command, require_enabled, validate_path},
+		menus::{DesktopMenuItem, match_offered, require_command, require_enabled, validate_path},
 		types::DesktopWindow,
 	},
 	ax::Win32Ax,
@@ -261,7 +261,7 @@ fn native_resolve(root: HMENU, path: &[String]) -> CoreResult<NativeNode> {
 	let mut chain = Vec::with_capacity(path.len());
 	for (depth, label) in path.iter().enumerate() {
 		let mut level = native_level(menu, &canonical)?;
-		let index = match_index(&level.items, label)?;
+		let index = match_offered(&level.items, label)?;
 		let item = level.items.swap_remove(index);
 		require_enabled(&item)?;
 		let entry = level.entries[index];
@@ -636,7 +636,7 @@ impl<'a> UiaMenus<'a> {
 			if level.items.is_empty() {
 				return Err(unexposed_menu());
 			}
-			let index = match_index(&level.items, label)?;
+			let index = match_offered(&level.items, label)?;
 			let item = level.items.swap_remove(index);
 			require_enabled(&item)?;
 			if depth + 1 < path.len() && !item.has_submenu {

@@ -646,7 +646,7 @@ pub(super) fn push_quoted_label(line: &mut String, text: &str) {
 	}
 }
 
-fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
+pub(super) fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
 	line.push('"');
 	for ch in text.chars().take(shown) {
 		match ch {
@@ -1263,7 +1263,6 @@ pub(crate) fn masked(actual: &str) -> bool {
 }
 
 /// `value` cut to `max` characters, the last one an ellipsis when cut.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn truncate_chars(value: String, max: usize) -> String {
 	if value.chars().count() <= max {
 		return value;

@@ -41,6 +41,7 @@
 - Fixed Windows element typing and key presses that ran in takeover, such as `el.type()` into a Chrome, Electron or WPF field, leaving the target window in front instead of handing focus back to the user's window; a user window switch before element focus now stops delivery instead of taking focus back ([#18919](https://github.com/can1357/oh-my-pi/pull/18919) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS `press()` on a disabled control reporting success while the control ignored it; it now fails and says the control is disabled ([#18898](https://github.com/can1357/oh-my-pi/pull/18898) by [@will-bogusz](https://github.com/will-bogusz))
 - Windows menu selections that open a modal dialog no longer report a delivery timeout when the new dialog is responsive ([#18922](https://github.com/can1357/oh-my-pi/pull/18922) by [@will-bogusz](https://github.com/will-bogusz))
+- `menu.select()` and `menu.items()` on macOS, Linux and Windows now name the items a menu offers, escaping labels and marking disabled items and submenus, when a label in the path is not found; macOS waits for menu revalidation after activation before listing states ([#18923](https://github.com/can1357/oh-my-pi/pull/18923) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
