@@ -873,6 +873,25 @@ Baseten provides high-performance infrastructure for hosting open-weight LLMs (i
 - **Dynamic Model Discovery & Pricing**: `fetchDynamicModels` queries `https://inference.baseten.co/v1/models`. `mapModel` parses raw record metadata including `supported_features`, `input_modalities` (`image` for vision capability), context and completion token bounds (`context_length`, `max_completion_tokens`), and per-million token pricing (`prompt`, `completion`, `input_cache_read`).
 - **Native Reasoning Identification**: Flags `reasoning: true` for `openai/gpt-oss-120b`, `deepseek-ai/DeepSeek-V4-Pro`, and `zai-org/GLM-5.2` when dynamic features list `reasoning` or `reasoning_effort`.
 
+## Bifrost (`bifrost`)
+
+Bifrost is a self-hosted open-source AI gateway that serves every configured upstream provider behind one OpenAI-compatible API (default `http://localhost:8080/v1`). Chat models use the OpenAI Chat Completions transport (`openai-completions`); decision models use the gateway's OpenAI Decisions route (`openai-decisions`, `POST {baseUrl}/decisions`).
+
+### Special casings
+
+- **Gateway roster**: model ids are `<bifrost-provider>/<model>` (`anthropic/claude-opus-5-5`, `openrouter/google/gemini-decision-1`, or a custom provider name such as `Drex/drex-max-v1.1`). Nothing is bundled: `bifrost` is in `DISCOVERY_ONLY_PROVIDERS` (`packages/catalog/scripts/generate-models.ts`), and runtime discovery is authoritative (`dynamic-models-authoritative`).
+- **Row mapping (`bifrostModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`)**: Bifrost rows are OpenRouter-shaped where its model datasheet knows the model: `context_length` / `top_provider.context_length` / `max_input_tokens`, `max_output_tokens` / `top_provider.max_completion_tokens`, `architecture.input_modalities`, `supported_parameters` (`tools`, `reasoning`), a `reasoning` capability object, and per-token USD `pricing` (`prompt`, `completion`, `input_cache_read`, `input_cache_write`). Fields a row omits fall back to the bundled model of the upstream provider named by the id prefix, then to a bundled model with the same bare id; the reference's transport compat is not carried over.
+- **Decision models**: a row becomes an `openai-decisions` judge when its `architecture.output_modalities` contains `decisions` (OpenRouter's decision roster, which Bifrost merges into its listing) or when its `<model>` part is a bundled judge model id (`gpt-6-luna-decisions`, `typesafe/jev-1.14`, `drex-max-v1.1`). Bifrost translates the OpenAI Decisions body to each upstream's native decision API.
+- **Non-chat rows**: rows whose `architecture.output_modalities` contain neither `text` nor `decisions` are dropped in the mapper; metadata-less embedding, speech, transcription, image, and moderation ids are dropped by `exclude-models provider="bifrost"` in `runtime/behavior.kdl`.
+- **Proxy, not local server**: `bifrost` is in `PROXY_OPENAI_COMPAT_PROVIDERS` (`packages/catalog/src/compat/resolve.ts`), so a loopback base URL does not turn on the local-runtime request shaping (grammar tool schemas, reasoning-content replay, output clamping) meant for llama.cpp, vLLM, and similar servers.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/bifrost.kdl` and asks for a Bifrost virtual key (`sk-bf-...`). Environment key: `BIFROST_API_KEY`. A gateway without governance accepts any value.
+- `BIFROST_BASE_URL` sets the gateway's OpenAI-compatible root (`getDefaultModelDiscoveryBaseUrl` in `packages/catalog/src/provider-models/cache-provider-id.ts`); a `models.yml` provider `baseUrl` override wins. Discovery, chat, and judge requests all use it.
+- Discovery does not run without a credential: the default port `8080` is also llama.cpp's default, whose models must not appear as Bifrost models.
+- **Cache scope**: the model cache namespace hashes the API key and base URL (`bifrost` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), since virtual keys can restrict the roster.
+
 ## Cerebras (`cerebras`)
 
 Cerebras provides ultra-fast inference on wafer-scale engine hardware for open-weights models such as `zai-glm-4.7`, `gpt-oss-120b`, `qwen-3-235b-a22b-instruct-2507`, and `gemma-4-31b`. It communicates via the OpenAI Chat Completions (`openai-completions`) transport.

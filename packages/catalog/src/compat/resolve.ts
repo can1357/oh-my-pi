@@ -272,7 +272,7 @@ const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
 	vllm: true,
 	ollama: true,
 };
-const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true };
+const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true, bifrost: true };
 function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return false;
 	let hostname: string;

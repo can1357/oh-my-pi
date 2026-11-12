@@ -200,6 +200,12 @@ behavior {
 	exclude-models provider="otari" substring="embed" substring="rerank" substring="-tts" substring="transcribe" \
 		substring="realtime" substring="minilm" substring="mpnet" substring="/bge-" substring="/e5-" substring="/flux-" \
 		prefix="openai/gpt-image-" prefix="alibaba/qwen-image"
+	// Bifrost lists every model of every configured upstream, including
+	// embedding, speech, transcription, and image models. Rows with metadata are
+	// filtered on `architecture.output_modalities` in the mapper; these catch
+	// metadata-less non-chat rows behind the `<bifrost-provider>/` prefix.
+	exclude-models provider="bifrost" substring="embed" substring="rerank" substring="-tts" substring="transcribe" \
+		substring="whisper" substring="realtime" substring="/dall-e" substring="/gpt-image-" substring="moderation"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
