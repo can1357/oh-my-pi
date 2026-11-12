@@ -154,6 +154,10 @@
 
 - `omp update` runs mise, Homebrew, bun, and npm on the terminal's own output, so their progress bars redraw in place instead of printing every frame as a new line ([#18874](https://github.com/can1357/oh-my-pi/pull/18874) by [@a-glapinski](https://github.com/a-glapinski))
 
+### Added
+
+- Sessions now record approval prompts in their session file: a `tool_approval_requested` entry when a tool call starts waiting on you and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

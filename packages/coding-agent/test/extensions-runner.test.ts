@@ -3119,6 +3119,57 @@ describe("ExtensionRunner", () => {
 			]);
 			delete globalState.__deniedApprovalEvents;
 		});
+
+		it("records each approval wait in the session file, with no extension listening", async () => {
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
+			const answers = ["Approve", "Deny"];
+			initializeRunner(runner, async () => answers.shift());
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner) as ExtensionToolWrapper<any>;
+			const context = () => ({
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			});
+
+			await wrapper.execute("call-approved", {}, undefined, undefined, context());
+			await expect(wrapper.execute("call-denied", {}, undefined, undefined, context())).rejects.toThrow(
+				"Tool call denied by user: dangerous_tool",
+			);
+
+			const records = sessionManager
+				.getEntries()
+				.flatMap(entry =>
+					entry.type === "custom" && entry.customType.startsWith("tool_approval_")
+						? [{ customType: entry.customType, ...(entry.data as Record<string, unknown>) }]
+						: [],
+				);
+			expect(records).toEqual([
+				expect.objectContaining({
+					customType: "tool_approval_requested",
+					toolCallId: "call-approved",
+					toolName: "dangerous_tool",
+					approvalMode: "always-ask",
+					requestedAt: expect.any(String),
+				}),
+				expect.objectContaining({
+					customType: "tool_approval_resolved",
+					toolCallId: "call-approved",
+					approved: true,
+					resolvedAt: expect.any(String),
+				}),
+				expect.objectContaining({ customType: "tool_approval_requested", toolCallId: "call-denied" }),
+				expect.objectContaining({
+					customType: "tool_approval_resolved",
+					toolCallId: "call-denied",
+					approved: false,
+					reason: "denied by user",
+				}),
+			]);
+		});
 		it("emits resolved false when the approval prompt throws", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
 			const extCode = `
