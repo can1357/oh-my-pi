@@ -3635,7 +3635,7 @@ export class WorkerCore {
 			).catch(async () => {
 				// The context went away (a navigation commit) or the page refused the call: retry shortly.
 				await Bun.sleep(SETTLE_POLL_MS);
-				return false;
+				return false as const;
 			});
 			if (
 				quiet &&
