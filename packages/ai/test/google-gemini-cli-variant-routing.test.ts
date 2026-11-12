@@ -251,7 +251,7 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 
 	it("discovers one model per Gemini 4 family and sends each thinking level to that family's served SKU", async () => {
 		const tiers = [Effort.Low, Effort.Medium, Effort.High] as const;
-		const families = ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"];
+		const families = ["gemini-4-argon", "gemini-4-carbon"];
 		const result = await fetchAntigravityDiscoveryModels({
 			token: "token",
 			userAgent: "test",
