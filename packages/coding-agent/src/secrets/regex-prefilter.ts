@@ -11,7 +11,15 @@
  *   anchor and every word boundary is dropped;
  * - a backreference becomes any text;
  * - JavaScript's ASCII `\d`, `\w`, `\s` and their negations are spelled out as
- *   explicit classes, so Rust's Unicode classes cannot narrow them.
+ *   explicit classes, so Rust's Unicode classes cannot narrow them;
+ * - negated classes skip case folding, which in Rust drops characters a
+ *   case-insensitive JavaScript negated class matches; under `i` any other
+ *   non-ASCII character but whitespace becomes any character, since the two
+ *   engines' case tables disagree on them;
+ * - without `u`, atoms that can match half of a surrogate pair count UTF-16
+ *   units: one may match nothing and `{m,n}` becomes `{⌈(m-1)/2⌉,n}`, so an
+ *   astral character can account for two units, also across neighbours. Lone
+ *   surrogates reach the native side as U+FFFD.
  *
  * Returns `null` for anything it does not understand; the caller then always
  * runs that regex in JavaScript.
@@ -43,6 +51,35 @@ interface Cursor {
 	i: number;
 	unicode: boolean;
 	dotAll: boolean;
+	ignoreCase: boolean;
+}
+
+/** Any one character, line terminators included. */
+const ANY = "(?s:.)";
+
+/**
+ * Whether case-insensitive matching of `cp` may differ between JavaScript and
+ * Rust: their case tables disagree on non-ASCII letters (non-`u` JavaScript
+ * folds through `toUpperCase`, and either side may know newer Unicode case
+ * pairs), so only ASCII and whitespace are trusted.
+ */
+function caseUnsafe(cp: number): boolean {
+	return cp >= 0x80 && !/^\s$/u.test(String.fromCodePoint(cp));
+}
+
+function coversSurrogate(lo: number, hi: number): boolean {
+	return lo <= 0xdfff && hi >= 0xd800;
+}
+
+/** A translated atom. */
+interface Atom {
+	text: string;
+	/**
+	 * Whether it can match half of a surrogate pair. Without `u`, JavaScript
+	 * counts UTF-16 units, so one astral character can satisfy two such atoms
+	 * (or two repetitions of one); the native side counts code points.
+	 */
+	units: boolean;
 }
 
 /** Reads an escape after `\`; returns a code point, or a class body for shorthands, or a marker. */
@@ -133,8 +170,15 @@ function readEscape(
 	}
 }
 
-/** Translates one `[...]` class starting after `[`. */
-function readClass(c: Cursor): string {
+/**
+ * Translates one `[...]` class starting after `[`. Negated parts are emitted
+ * without case folding: Rust folds a class before negating it, which drops
+ * characters a case-insensitive JavaScript negated class still matches
+ * (`[^k]` and KELVIN SIGN). Lone surrogates in text reach the native side as
+ * U+FFFD, so a class covering surrogates also takes U+FFFD, and a negated one
+ * excluding U+FFFD is not translated.
+ */
+function readClass(c: Cursor): Atom {
 	let negated = false;
 	if (c.src[c.i] === "^") {
 		negated = true;
@@ -142,6 +186,9 @@ function readClass(c: Cursor): string {
 	}
 	const items: string[] = [];
 	const negatedShorthands: string[] = [];
+	let widen = false;
+	let surrogates = false;
+	let fffd = false;
 	let closed = false;
 	while (c.i < c.src.length) {
 		const ch = c.src[c.i];
@@ -166,10 +213,10 @@ function readClass(c: Cursor): string {
 			else items.push(atom.cls);
 			continue;
 		}
+		let hi = atom.cp;
 		// Range `a-b`?
 		if (c.src[c.i] === "-" && c.src[c.i + 1] !== "]" && c.i + 1 < c.src.length) {
 			c.i++;
-			let hi: number;
 			if (c.src[c.i] === "\\") {
 				c.i++;
 				const e = readEscape(c, true);
@@ -184,23 +231,42 @@ function readClass(c: Cursor): string {
 		} else {
 			items.push(hex(atom.cp));
 		}
+		// Without `u` an astral member stands for its two surrogate units.
+		const foldRisk = hi === atom.cp ? caseUnsafe(hi) : hi >= 0x80;
+		if ((!c.unicode && hi > 0xffff) || (c.ignoreCase && foldRisk)) widen = true;
+		if (coversSurrogate(atom.cp, hi)) surrogates = true;
+		if (atom.cp <= 0xfffd && hi >= 0xfffd) fffd = true;
 	}
 	if (!closed) throw new Unsupported();
-	if (items.length === 0 && negatedShorthands.length === 0) {
-		// `[]` never matches and `[^]` matches anything.
-		if (negated) return "(?s:.)";
-		throw new Unsupported();
+	if (negated) {
+		if (fffd) throw new Unsupported();
+		if (items.length === 0 && negatedShorthands.length === 0) return { text: ANY, units: !c.unicode };
+		// A negated shorthand inside (`[^\S]`) is a nested negated class.
+		const body = items.join("") + negatedShorthands.map(cls => `[^${cls}]`).join("");
+		return { text: `(?-i:[^${body}])`, units: !c.unicode };
 	}
-	// A negated shorthand inside a class (`[\S]`, `[\W-]`) unions a complement;
-	// Rust expresses it as a nested negated class.
-	const body = items.join("") + negatedShorthands.map(cls => `[^${cls}]`).join("");
-	return `[${negated ? "^" : ""}${body}]`;
+	if (items.length === 0 && negatedShorthands.length === 0) throw new Unsupported();
+	if (widen) return { text: ANY, units: !c.unicode };
+	if (surrogates) items.push(hex(0xfffd));
+	// A negated shorthand inside a positive class (`[\S]`, `[\W-]`) unions a complement.
+	const parts = [
+		...(items.length > 0 ? [`[${items.join("")}]`] : []),
+		...negatedShorthands.map(cls => `(?-i:[^${cls}])`),
+	];
+	return {
+		text: parts.length === 1 ? parts[0]! : `(?:${parts.join("|")})`,
+		units: !c.unicode && (surrogates || negatedShorthands.length > 0),
+	};
 }
 
 interface Piece {
 	text: string;
 	/** Positive lookaround kind when this piece is one, else undefined. */
 	look?: "behind" | "ahead";
+	/** See {@link Atom.units}. */
+	units?: boolean;
+	/** A literal astral character outside `u` mode: two units a quantifier would split. */
+	astral?: boolean;
 }
 
 /** Parses an alternation until `)` or end; returns its alternatives as piece lists. */
@@ -249,20 +315,21 @@ function readAlternation(c: Cursor, depth: number): Piece[][] {
 			else piece = { text: `(?:${innerText})`, look: kind };
 		} else if (ch === "[") {
 			c.i++;
-			piece = { text: readClass(c) };
+			piece = readClass(c);
 		} else if (ch === "\\") {
 			c.i++;
 			const e = readEscape(c, false);
 			if ("drop" in e) piece = { text: "" };
 			else if ("any" in e) piece = { text: "(?s:.*?)" };
-			else if ("cls" in e) piece = { text: `[${e.negated ? "^" : ""}${e.cls}]` };
-			else piece = { text: hex(e.cp) };
+			else if ("cls" in e) {
+				piece = e.negated ? { text: `(?-i:[^${e.cls}])`, units: !c.unicode } : { text: `[${e.cls}]` };
+			} else piece = literal(c, e.cp);
 		} else if (ch === "^" || ch === "$") {
 			c.i++;
 			piece = { text: "" };
 		} else if (ch === ".") {
 			c.i++;
-			piece = { text: c.dotAll ? "(?s:.)" : "." };
+			piece = { text: c.dotAll ? ANY : ".", units: !c.unicode };
 		} else if (ch === "*" || ch === "+" || ch === "?" || ch === "{") {
 			// A quantifier with nothing before it; JavaScript allows a literal `{` only outside `u` mode.
 			if (ch === "{" && !c.unicode && !isQuantifier(c.src, c.i)) {
@@ -272,14 +339,19 @@ function readAlternation(c: Cursor, depth: number): Piece[][] {
 		} else {
 			const cp = c.src.codePointAt(c.i)!;
 			c.i += cp > 0xffff ? 2 : 1;
-			piece = { text: /[A-Za-z0-9 ]/.test(String.fromCodePoint(cp)) ? String.fromCodePoint(cp) : hex(cp) };
+			piece = literal(c, cp);
 		}
 		const quantifier = readQuantifier(c);
-		if (quantifier) {
+		if (piece.look !== undefined || piece.text === "") {
 			// A quantified lookaround or an emptied construct stays harmless: drop
 			// the assertion, keep consuming pieces quantified.
-			if (piece.look !== undefined || piece.text === "") piece = { text: "" };
-			else piece = { text: `(?:${piece.text})${quantifier}` };
+			if (quantifier) piece = { text: "" };
+		} else if (piece.units) {
+			piece = { text: `(?:${piece.text})${unitQuantifier(quantifier)}` };
+		} else if (quantifier) {
+			// Without `u` a quantifier after an astral literal repeats only its low surrogate.
+			if (piece.astral) throw new Unsupported();
+			piece = { text: `(?:${piece.text})${quantifier}` };
 		}
 		pieces.push(piece);
 	}
@@ -308,6 +380,31 @@ function readQuantifier(c: Cursor): string | undefined {
 	return q;
 }
 
+/** A literal character: exact, or any character under `i` when the engines' case tables may disagree. */
+function literal(c: Cursor, cp: number): Piece {
+	const astral = !c.unicode && cp > 0xffff;
+	if (c.ignoreCase && caseUnsafe(cp)) return { text: ANY, astral };
+	return { text: /[A-Za-z0-9 ]/.test(String.fromCodePoint(cp)) ? String.fromCodePoint(cp) : hex(cp), astral };
+}
+
+/**
+ * The code-point quantifier for an atom that counts UTF-16 units (see
+ * {@link Atom.units}). Of `m` units, one may be the low half of a pair a
+ * preceding atom started, and pairs take two units per character, so at least
+ * `⌈(m-1)/2⌉` characters remain; a pair it starts and a following atom
+ * finishes counts here, within the `n` limit.
+ */
+function unitQuantifier(quantifier: string | undefined): string {
+	if (quantifier === undefined) return "?";
+	const lazy = quantifier.length > 1 && quantifier.endsWith("?") ? "?" : "";
+	const core = lazy ? quantifier.slice(0, -1) : quantifier;
+	if (core === "*" || core === "?") return quantifier;
+	if (core === "+") return `*${lazy}`;
+	const [, min, comma, max] = /^\{(\d+)(,)?(\d*)\}$/.exec(core)!;
+	const low = Math.max(0, Math.ceil((Number(min) - 1) / 2));
+	return `{${low},${comma ? max : min}}${lazy}`;
+}
+
 /**
  * Emits one alternative. At the top level a leading positive lookbehind and a
  * trailing positive lookahead consume their context; elsewhere a positive
@@ -330,7 +427,13 @@ function emit(pieces: Piece[], topLevel: boolean): string {
 
 /** The Rust prefilter pattern for a JavaScript regex, or null when it cannot be translated soundly. */
 export function rustPrefilterPattern(regex: RegExp): string | null {
-	const c: Cursor = { src: regex.source, i: 0, unicode: regex.unicode || regex.unicodeSets, dotAll: regex.dotAll };
+	const c: Cursor = {
+		src: regex.source,
+		i: 0,
+		unicode: regex.unicode || regex.unicodeSets,
+		dotAll: regex.dotAll,
+		ignoreCase: regex.ignoreCase,
+	};
 	try {
 		if (regex.unicodeSets) throw new Unsupported();
 		const alternatives = readAlternation(c, 0);

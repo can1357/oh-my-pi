@@ -156,4 +156,95 @@ describe.skipIf(typeof SecretScanner !== "function")("native secret-scan prefilt
 		const placeholder = ["$", "$AWSACCESSKEY_OGRR8VU7VWGX:U$", "$"].join("");
 		expect(scanner.scan(`already redacted ${placeholder}`)).toEqual({ literal: true, rules: [] });
 	});
+
+	it("reports matches where the engines' character semantics differ", () => {
+		const pairs: Array<[RegExp, string]> = [
+			// Rust folds a class before negating it; JavaScript without `u` still matches these.
+			[/key=[^s]{4}/i, "key=\u017Fabc"],
+			[/key=\W{2}/i, "key=\u212A\u212A"],
+			// A case pair one engine's Unicode tables know and the other's may not.
+			[/key=\uA7CF/iu, "key=\uA7CE"],
+			// Without `u`, JavaScript counts an astral character as two units, also across neighbours.
+			[/key=[^"]{8,}/, `key=${"\u{1F600}".repeat(4)}`],
+			[/key=.[^"]/, "key=\u{1F600}"],
+			// Lone surrogates reach the scanner as U+FFFD.
+			[/key=.{2}/, "key=\uD83Dx"],
+		];
+		for (const [regex, text] of pairs) {
+			expect(jsMatches(regex, text)).toBe(true);
+			expect(new SecretScanner([rule(regex)], []).scan(text)?.rules).toEqual([0]);
+		}
+	});
+
+	it("never rules out a text a random rule matches in JavaScript", () => {
+		let seed = 0x5eed;
+		const rand = (n: number) => {
+			seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+			return (seed >>> 8) % n;
+		};
+		const pick = <T>(xs: readonly T[]) => xs[rand(xs.length)]!;
+		const atoms = [
+			'[^"]',
+			".",
+			"\\S",
+			"\\W",
+			"\\D",
+			"[^]",
+			"a",
+			"[ab]",
+			"[^a]",
+			"k",
+			"s",
+			"[k-s]",
+			"\\w",
+			"[\\S]",
+			"[^\\w]",
+		];
+		const quantifiers = ["", "", "?", "*", "+", "{2}", "{3,}", "{1,3}", "{4,5}", "*?", "+?"];
+		const pool = [
+			"a",
+			"b",
+			"k",
+			"K",
+			"s",
+			'"',
+			"\u{1F600}",
+			"\u{1F601}",
+			"\uD83D",
+			"\uDE00",
+			"\u00E9",
+			"\u212A",
+			"\u017F",
+			"\n",
+			" ",
+			"_",
+		];
+		const misses: string[] = [];
+		for (const flags of ["", "i", "s", "u", "iu"]) {
+			const regexes: RegExp[] = [];
+			for (let p = 0; p < 120; p++) {
+				let body = "";
+				for (let a = 1 + rand(4); a > 0; a--) body += `(?:${pick(atoms)})${pick(quantifiers)}`;
+				regexes.push(new RegExp(`ZQ${body}QZ`, flags));
+			}
+			const texts: string[] = [];
+			for (let t = 0; t < 400; t++) {
+				let s = "";
+				for (let k = rand(9); k > 0; k--) s += pick(pool);
+				texts.push(`ZQ${s}QZ`);
+			}
+			const scanner = new SecretScanner(regexes.map(rule), []);
+			const unfiltered = new Set(scanner.unfiltered());
+			const hits = scanner.scanMany(texts);
+			texts.forEach((text, t) => {
+				const reported = new Set(hits[t]?.rules ?? []);
+				regexes.forEach((regex, r) => {
+					if (!reported.has(r) && !unfiltered.has(r) && regex.test(text)) {
+						misses.push(`${regex} on ${JSON.stringify(text)}`);
+					}
+				});
+			});
+		}
+		expect(misses.slice(0, 5)).toEqual([]);
+	});
 });
