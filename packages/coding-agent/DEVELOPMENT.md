@@ -53,6 +53,41 @@ must clear and restore `PI_CODING_AGENT_DIR` so inherited overrides cannot bypas
 the fixture. Reuse `restoreEnvValue()` from `test/helpers/settings-test-state.ts`
 to preserve unset values.
 
+### Session boundary proof without a native rebuild
+
+Use an isolated checkout on Linux with Bun >= 1.4.4. Do not run `bun setup`
+(it rebuilds Rust and globally links the CLI). From the repository root:
+
+```sh
+bun install --frozen-lockfile --ignore-scripts
+native_tmp=$(mktemp -d)
+npm pack @oh-my-pi/pi-natives-linux-x64@18.19.0 --pack-destination "$native_tmp"
+tar -xzf "$native_tmp"/*.tgz -C "$native_tmp"
+cp "$native_tmp"/package/*.node packages/natives/native/
+bun test packages/coding-agent/test/main-session-resolution-error.test.ts packages/coding-agent/test/main-cross-project-resume.test.ts packages/coding-agent/test/agent-session-switch-prev-context.test.ts packages/coding-agent/test/sdk-session-isolation.test.ts
+```
+
+Use `pi-natives-linux-arm64` instead on ARM64. Workspace loading intentionally
+does not resolve npm native leaf packages, so copy the published version-matched
+`.node` files into the checkout as above; no Rust build is needed.
+
+Prove the real source CLI too, using temporary storage and no installed binary:
+
+```sh
+proof=$(mktemp -d)
+mkdir -p "$proof/owned" "$proof/home"
+printf '{"type":"session","version":3,"id":"boundary-proof","cwd":"%s","timestamp":"2026-11-13T00:00:00.000Z"}\\n' "$proof" > "$proof/foreign.jsonl"
+HOME="$proof/home" bun packages/coding-agent/src/cli.ts --help
+HOME="$proof/home" PI_CODING_AGENT_DIR="$proof/agent" PI_CODING_AGENT_SESSION_DIR="$proof/owned" OMP_SESSION_BOUNDARY_ROOT="$proof/owned" bun packages/coding-agent/src/cli.ts --mode rpc --no-extensions --resume "$proof/foreign.jsonl"
+```
+
+The help must advertise `--session-boundary-root`. The RPC launch must exit
+nonzero with `outside session boundary` before emitting session data; repeat with
+`--fork` and with a symlink inside `owned` targeting the foreign file. To produce
+an isolated executable after proof, run
+`bun --cwd=packages/coding-agent run build` and use
+`packages/coding-agent/dist/omp`; do not globally link or install it as part of proof.
+
 ## Boot flow
 
 ```text

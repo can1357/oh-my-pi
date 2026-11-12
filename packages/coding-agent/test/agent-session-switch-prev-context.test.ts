@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { configureSessionBoundaryRoot } from "@oh-my-pi/pi-coding-agent/session/session-boundary";
 import type { BuildSessionContextOptions, SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildSessionContextView } from "@oh-my-pi/pi-coding-agent/session/context-view";
@@ -99,6 +100,34 @@ describe("AgentSession.switchSession previous-context build", () => {
 			},
 		};
 	}
+
+	it("rejects a foreign interactive switch before aborting or rebuilding context", async () => {
+		const owned = TempDir.createSync("@pi-switch-boundary-owned-");
+		const foreign = TempDir.createSync("@pi-switch-boundary-foreign-");
+		tempDirs.push(owned, foreign);
+		const { session, sessionManager } = buildSession(owned);
+		const target = SessionManager.create(foreign.path(), foreign.path());
+		target.appendMessage({ role: "user", content: "foreign secret", timestamp: 1 });
+		await target.rewriteEntries();
+		await target.close();
+		const previous = sessionManager.getSessionFile();
+		const release = configureSessionBoundaryRoot(owned.path());
+		const abort = vi.spyOn(session, "abort");
+		const open = vi.spyOn(sessionManager, "setSessionFile");
+		const context = instrumentBuildSessionContext(sessionManager);
+		try {
+			await expect(session.switchSession(target.getSessionFile()!)).rejects.toThrow("outside session boundary");
+			expect(abort).not.toHaveBeenCalled();
+			expect(open).not.toHaveBeenCalled();
+			expect(context.calls).toEqual([]);
+			expect(sessionManager.getSessionFile()).toBe(previous);
+		} finally {
+			context.restore();
+			abort.mockRestore();
+			open.mockRestore();
+			release();
+		}
+	});
 
 	it("skips building the previous display context when switching to a different session", async () => {
 		const tempDir = TempDir.createSync("@pi-switch-prev-ctx-different-");

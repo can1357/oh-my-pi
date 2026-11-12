@@ -9,15 +9,16 @@ import { describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
-import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type Args, parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, SessionResolutionError, writeStartupNotice } from "@oh-my-pi/pi-coding-agent/main";
 import {
 	collectPendingToolCalls,
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
+import { configureSessionBoundaryRoot } from "@oh-my-pi/pi-coding-agent/session/session-boundary";
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { loadEntriesFromFile, loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { loadEntriesFromFile, loadSessionFile, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { ForkSourceNotFoundError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
@@ -57,7 +58,7 @@ function buildForkArgs(fork: string, noSession = false, sessionDir?: string): Ar
 	};
 }
 
-const stubSettings = { get: () => undefined } as unknown as Settings;
+const stubSettings = Settings.isolated();
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
 const ORIGINAL_STDERR_WRITE = process.stderr.write.bind(process.stderr);
@@ -494,5 +495,177 @@ describe("createSessionManager — missing session (#2084)", () => {
 			name: "SessionResolutionError",
 			message: "--continue requires session persistence",
 		});
+	});
+});
+
+describe("session boundary before transcript loading", () => {
+	it.each(["cli", "environment", "config"] as const)(
+		"rejects foreign initial resume/fork before reads with %s policy and correct precedence",
+		async source => {
+			const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-"));
+			const root = path.join(cwd, "owned");
+			const foreign = path.join(cwd, "foreign.jsonl");
+			await fsp.mkdir(root);
+			await fsp.writeFile(foreign, `${JSON.stringify({ type: "session", id: "foreign", cwd })}\n`);
+			const release = configureSessionBoundaryRoot();
+			const previousEnv = process.env.OMP_SESSION_BOUNDARY_ROOT;
+			if (source === "config") delete process.env.OMP_SESSION_BOUNDARY_ROOT;
+			else process.env.OMP_SESSION_BOUNDARY_ROOT = source === "cli" ? cwd : root;
+			const configured = Settings.isolated({ sessionBoundaryRoot: source === "config" ? root : cwd });
+			const read = vi.spyOn(FileSessionStorage.prototype, "readText");
+			const slices = vi.spyOn(FileSessionStorage.prototype, "readTextSlices");
+			try {
+				for (const route of ["resume", "fork"]) {
+					const args = parseArgs([
+						"--session-dir", root,
+						...(source === "cli" ? ["--session-boundary-root", root] : []),
+						`--${route}`, foreign,
+					]);
+					await expect(createSessionManager(args, cwd, configured)).rejects.toThrow("outside session boundary");
+				}
+				expect(read).not.toHaveBeenCalled();
+				expect(slices).not.toHaveBeenCalled();
+			} finally {
+				vi.restoreAllMocks();
+				release();
+				if (previousEnv === undefined) delete process.env.OMP_SESSION_BOUNDARY_ROOT;
+				else process.env.OMP_SESSION_BOUNDARY_ROOT = previousEnv;
+				await fsp.rm(cwd, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("latches inherited environment for SDK opens before main or SDK bootstrap", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-env-"));
+		const foreign = path.join(cwd, "foreign.jsonl");
+		await fsp.writeFile(foreign, `${JSON.stringify({ type: "session", id: "foreign", cwd })}\n`);
+		const release = configureSessionBoundaryRoot();
+		const previousEnv = process.env.OMP_SESSION_BOUNDARY_ROOT;
+		process.env.OMP_SESSION_BOUNDARY_ROOT = path.join(cwd, "owned");
+		const read = vi.spyOn(FileSessionStorage.prototype, "readText");
+		try {
+			await expect(SessionManager.open(foreign)).rejects.toThrow("outside session boundary");
+			delete process.env.OMP_SESSION_BOUNDARY_ROOT;
+			await expect(SessionManager.open(foreign)).rejects.toThrow("outside session boundary");
+			expect(read).not.toHaveBeenCalled();
+		} finally {
+			vi.restoreAllMocks();
+			release();
+			if (previousEnv === undefined) delete process.env.OMP_SESSION_BOUNDARY_ROOT;
+			else process.env.OMP_SESSION_BOUNDARY_ROOT = previousEnv;
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects missing and blank CLI roots rather than disabling the boundary", () => {
+		for (const args of [[], [""], ["--resume", "secret.jsonl"]]) {
+			expect(() => parseArgs(["--session-boundary-root", ...args])).toThrow("requires a path");
+		}
+	});
+
+	it("rejects SDK opens, forks and switches through symlinked ancestors before reading", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-link-"));
+		const root = path.join(cwd, "owned");
+		const foreignDir = path.join(cwd, "foreign");
+		await fsp.mkdir(root);
+		await fsp.mkdir(foreignDir);
+		const foreign = path.join(foreignDir, "secret.jsonl");
+		await fsp.writeFile(foreign, `${JSON.stringify({ type: "session", id: "foreign", cwd })}\n`);
+		await fsp.symlink(foreignDir, path.join(root, "escape"), "dir");
+		await fsp.symlink(foreign, path.join(root, "file.jsonl"));
+		const release = configureSessionBoundaryRoot(root);
+		const manager = SessionManager.create(cwd, root);
+		const read = vi.spyOn(FileSessionStorage.prototype, "readText");
+		try {
+			for (const source of [
+				foreign,
+				path.join(root, "file.jsonl"),
+				path.join(root, "escape", "secret.jsonl"),
+				path.join(root, "escape", "missing", "secret.jsonl"),
+			]) {
+				await expect(SessionManager.open(source, root)).rejects.toThrow("outside session boundary");
+				await expect(SessionManager.forkFrom(source, cwd, root)).rejects.toThrow("outside session boundary");
+				await expect(manager.setSessionFile(source)).rejects.toThrow("outside session boundary");
+			}
+			expect(read).not.toHaveBeenCalled();
+		} finally {
+			vi.restoreAllMocks();
+			await manager.close();
+			release();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects symlink-parent traversal in initial opens, SDK APIs and header readers before reading", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-parent-"));
+		const root = path.join(cwd, "owned");
+		const foreign = path.join(cwd, "foreign");
+		await fsp.mkdir(root);
+		await fsp.mkdir(path.join(foreign, "subdir"), { recursive: true });
+		for (const [dir, id] of [[root, "owned"], [foreign, "foreign"]]) {
+			await fsp.writeFile(path.join(dir, "secret.jsonl"), `${JSON.stringify({ type: "session", id, cwd })}\n`);
+		}
+		const link = path.join(root, "link");
+		await fsp.symlink(path.join(foreign, "subdir"), link, "dir");
+		// Do not use path.join: that would erase the traversal this regression exercises.
+		const source = `${link}${path.sep}..${path.sep}secret.jsonl`;
+		const release = configureSessionBoundaryRoot(root);
+		const read = vi.spyOn(FileSessionStorage.prototype, "readText");
+		const open = vi.spyOn(fsp, "open");
+		try {
+			for (const args of [buildResumeArgs(source, root), buildForkArgs(source, false, root)]) {
+				await expect(createSessionManager(args, cwd, stubSettings)).rejects.toThrow("parent traversal");
+			}
+			await expect(SessionManager.open(source, root)).rejects.toThrow("parent traversal");
+			await expect(SessionManager.forkFrom(source, cwd, root)).rejects.toThrow("parent traversal");
+			await expect(readSessionHeaderId(source)).rejects.toThrow("parent traversal");
+			expect(read).not.toHaveBeenCalled();
+			expect(open).not.toHaveBeenCalled();
+		} finally {
+			vi.restoreAllMocks();
+			release();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps same-root resume, continue, fork and nested child journals working", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-boundary-owned-"));
+		const root = path.join(cwd, "owned");
+		const release = configureSessionBoundaryRoot(root);
+		const managers: SessionManager[] = [];
+		try {
+			const original = SessionManager.create(cwd, root);
+			managers.push(original);
+			original.appendMessage({ role: "user", content: "owned history", timestamp: Date.now() });
+			await original.setSessionName("owned history", "user");
+			await original.rewriteEntries();
+			const source = original.getSessionFile()!;
+			await original.close();
+			const alias = path.join(cwd, "owned-alias");
+			await fsp.symlink(root, alias, "dir");
+			const resumed = await createSessionManager(buildResumeArgs(path.join(alias, path.basename(source)), root), cwd, stubSettings);
+			managers.push(resumed!);
+			expect(resumed!.getSessionId()).toBe(original.getSessionId());
+			await resumed!.close();
+			const continued = await SessionManager.continueRecent(cwd, root);
+			managers.push(continued);
+			expect(continued.getSessionId()).toBe(original.getSessionId());
+			await continued.close();
+			const children = path.join(root, "parent", "children");
+			const forked = await SessionManager.forkFrom(source, cwd, children, undefined, {
+				sessionFile: path.join(children, "child.jsonl"),
+				suppressBreadcrumb: true,
+			});
+			managers.push(forked);
+			expect(forked.getEntries().some(entry => entry.type === "message" && entry.message.role === "user")).toBe(true);
+			await forked.close();
+			const child = await SessionManager.open(forked.getSessionFile()!);
+			managers.push(child);
+			expect(child.getSessionId()).toBe(forked.getSessionId());
+		} finally {
+			for (const manager of managers) await manager.close();
+			release();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
 	});
 });

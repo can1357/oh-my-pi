@@ -12,6 +12,7 @@ import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { visitEntriesFromFile } from "./session-loader";
+import { assertSessionBoundary } from "./session-boundary";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
@@ -434,6 +435,7 @@ async function scanSessionFile(
 ): Promise<SessionInfo | undefined> {
 	let stat: SessionStorageStat;
 	try {
+		assertSessionBoundary(file);
 		stat = knownStat ?? storage.statSync(file);
 	} catch {
 		// Missing/unstatable file: no stat identity to cache under.
@@ -595,6 +597,7 @@ function compareNewestFirst(a: SessionInfo, b: SessionInfo): number {
 export async function recoverOrphanedBackups(sessionDir: string, storage: SessionStorage): Promise<void> {
 	let backups: string[];
 	try {
+		assertSessionBoundary(sessionDir);
 		backups = storage.listFilesSync(sessionDir, "*.bak");
 	} catch {
 		return;

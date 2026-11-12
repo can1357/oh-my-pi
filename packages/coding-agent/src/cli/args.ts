@@ -72,6 +72,7 @@ export interface Args {
 	mode?: Mode;
 	noSession?: boolean;
 	sessionDir?: string;
+	sessionBoundaryRoot?: string;
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;
@@ -308,6 +309,14 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 				}
 			}
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
+			if (
+				arg === "--session-boundary-root" &&
+				(i + 1 >= args.length ||
+					args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG ||
+					(equalsValueIndex === -1 && args[i + 1].startsWith("-")))
+			) {
+				throw new CliUsageError("--session-boundary-root requires a path.");
+			}
 			if (arg === "--trusted-extension") trustedFlagCount++;
 			// Built-in string flags consume the next token even when it is flag-looking
 			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile").
