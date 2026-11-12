@@ -179,24 +179,31 @@ export function getSessionAccentHex(name: string, theme: SessionAccentTheme): st
 	const key = `${name}\0${theme.accentHex}\0${theme.surfaceLuminance}\0${theme.colorHexes.join(",")}`;
 	const cached = accentHexCache.get(key);
 	if (cached !== undefined) return cached;
-	const hex = computeSessionAccentHex(name, theme);
+	const intervals = theme.surfaceLuminance === undefined ? DARK_HUE_INTERVALS : LIGHT_HUE_INTERVALS;
+	const hex = computeSessionAccentHex(theme, intervals, nameToHash(name) % arcLength(intervals));
 	if (accentHexCache.size >= ACCENT_CACHE_LIMIT) accentHexCache.clear();
 	accentHexCache.set(key, hex);
 	return hex;
+}
+
+/**
+ * {@link getSessionAccentHex} with the hue chosen by position rather than by
+ * name, for callers that need several hues told apart: `fraction` in `[0, 1)`
+ * walks the wide arc (the one dark themes use) on every theme, since the cool
+ * band light themes keep for the session accent holds only a few distinct
+ * hues. Lightness, chroma, theme-hue avoidance and the light-theme contrast
+ * bisection are those of {@link getSessionAccentHex}.
+ */
+export function getSessionAccentHexAt(fraction: number, theme: SessionAccentTheme): string {
+	return computeSessionAccentHex(theme, DARK_HUE_INTERVALS, Math.floor(fraction * arcLength(DARK_HUE_INTERVALS)));
 }
 
 const ACCENT_CACHE_LIMIT = 256;
 const accentHexCache = new Map<string, string>();
 const accentAnsiCache = new Map<string, string | undefined>();
 
-function computeSessionAccentHex(name: string, theme: SessionAccentTheme): string {
-	// 1. Pick hue range based on theme mode
-	const isDark = theme.surfaceLuminance === undefined;
-	const intervals = isDark ? DARK_HUE_INTERVALS : LIGHT_HUE_INTERVALS;
-
-	// 2. Session name picks a position along the admissible arc
-	const pos = nameToHash(name) % arcLength(intervals);
-
+function computeSessionAccentHex(theme: SessionAccentTheme, intervals: readonly HueInterval[], pos: number): string {
+	// 1–2. The caller picks the arc for the theme mode and a position along it
 	// 3. Shift away if too close to any theme color — stays within the arc
 	const themeHues = theme.colorHexes.map(hexToHue).filter((h): h is number => h !== undefined);
 	const targetHue = findSafeHue(pos, themeHues, intervals);

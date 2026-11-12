@@ -2275,7 +2275,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			? treeBranch(ref, max, this.#treeDepthById, this.#treeParentById, this.#treeLastSiblingById)
 			: "";
 		const id = sanitizeDisplaySingleLine(ref.id);
-		const styledId = theme.bold(selected ? theme.fg("accent", id) : agentColored(ref.id, id));
+		const styledId = theme.bold(selected ? theme.fg("accent", id) : agentColored(theme, ref.id, id));
 		const fields: string[] = [`${cursor} ${branch}${statusGlyph(ref.status)} ${styledId}`];
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`));
