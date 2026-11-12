@@ -4,7 +4,7 @@
 
 ### Added
 
-- `Terminal.onProgramStatusSupport()` reports whether the terminal answered an OSC 7501 feature query, and `setPromptZonesEnabled()` (`chat/user-message`) turns user messages' OSC 133 prompt marks off and on ([#17307](https://github.com/can1357/oh-my-pi/issues/17307))
+- `Terminal.onProgramStatusSupport()` reports whether the terminal answered an OSC 7501 feature query, and `setPromptZonesEnabled()` (`chat/user-message`) turns user messages' OSC 133 prompt marks off and on ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#18969](https://github.com/can1357/oh-my-pi/pull/18969) by [@robfeldmann](https://github.com/robfeldmann))
 
 ## [18.19.0] - 2026-11-12
 
