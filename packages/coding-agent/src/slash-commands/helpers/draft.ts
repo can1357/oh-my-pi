@@ -79,10 +79,13 @@ export function restoreQueuedDraftOrdered(editor: CustomEditor, entries: readonl
 		const blocks = editorRestoreBlocks.get(editor) ?? [];
 		const prefix = blocks.map(block => block.text).join("\n\n");
 		const expanded = editor.getExpandedText();
-		if (blocks.length > 0 && prefix && expanded.startsWith(prefix)) {
+		const rest = expanded.slice(prefix.length);
+		// A tracked block that the user extended in place ("B suffix") is no longer
+		// a block: only a clean "\n\n" boundary (or nothing) may follow the prefix.
+		if (blocks.length > 0 && prefix && (rest === "" || rest.startsWith("\n\n"))) {
 			// Tracked blocks still head the draft: shift and merge only this batch,
 			// rebuild every restored block by rank, and keep the residual draft last.
-			const residual = expanded.slice(prefix.length).replace(/^\n+/, "");
+			const residual = rest.slice(2);
 			restoreQueuedDraft(editor, ordered, residual);
 			const union = [...blocks, batch].sort((left, right) => left.rank - right.rank);
 			const merged = [union.map(block => block.text).join("\n\n"), residual]
