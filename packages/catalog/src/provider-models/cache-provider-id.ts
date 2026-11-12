@@ -35,6 +35,9 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	otari: true,
 	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
 	litellm: true,
+	// OpenRouter's keyed roster is the set of models the key's workspace
+	// guardrails allow, and discovery is authoritative.
+	openrouter: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -230,8 +233,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "factory-droid":
 			return factoryDroidModelCacheProviderId(options);
-		case "openrouter":
-			return "openrouter:pseudo-api";
+		case "openrouter": {
+			// `pseudo-api` keeps pre-`api: "openrouter"` caches out. A keyed
+			// `/models` is filtered by the workspace guardrails and discovery is
+			// authoritative, so the namespace follows the key and endpoint: a
+			// keyless or wider-key roster never serves a guardrailed key.
+			const baseUrl = (options.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `openrouter:pseudo-api:${Bun.hash(scope).toString(36)}`;
+		}
 		case "vllm": {
 			// v2: qwen3.8 rows cached before the reasoning/template-effort upgrade
 			// carry `reasoning: false` and must be refetched.

@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -345,5 +348,43 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		);
 
 		expect(result.models.some(model => model.id === "openai/gpt-5.5" && model.api === "openrouter")).toBe(true);
+	});
+
+	it("never serves one key's cached roster to another key", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openrouter-key-scope-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		const chatIds = async (apiKey: string | undefined, roster: string[]) => {
+			const result = await resolveProviderModels(
+				{
+					...openrouterModelManagerOptions({
+						apiKey,
+						fetch: async input =>
+							String(input) === "https://openrouter.ai/api/v1/models"
+								? Response.json({
+										data: roster.map(id => ({ id, name: id, supported_parameters: ["tools"] })),
+									})
+								: new Response(null, { status: 404 }),
+					}),
+					staticModels: [],
+					cacheDbPath,
+				},
+				"online-if-uncached",
+			);
+			return result.models
+				.filter(model => modelKind(model) === "chat")
+				.map(model => model.id)
+				.sort();
+		};
+		try {
+			// Keyless (public roster), then a guardrailed key.
+			expect(await chatIds(undefined, ["a/one", "b/two", "c/three"])).toEqual(["a/one", "b/two", "c/three"]);
+			expect(await chatIds("sk-or-narrow", ["a/one"])).toEqual(["a/one"]);
+			// Narrow key, then a wider key.
+			expect(await chatIds("sk-or-wide", ["a/one", "b/two"])).toEqual(["a/one", "b/two"]);
+			// Each key still reads its own fresh cache row.
+			expect(await chatIds("sk-or-narrow", ["a/one", "b/two", "c/three"])).toEqual(["a/one"]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 });

@@ -3636,10 +3636,10 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
-		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`.
-		// Namespace the refreshed pseudo-API cache separately so those rows cannot
-		// override bundled `api: "openrouter"` models during online-if-uncached startup.
-		cacheProviderId: resolveModelCacheProviderId("openrouter"),
+		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`;
+		// the pseudo-API namespace keeps them from overriding bundled `api: "openrouter"`
+		// models. It is also scoped by key: the keyed roster is guardrail-filtered.
+		cacheProviderId: resolveModelCacheProviderId("openrouter", { apiKey, baseUrl }),
 		// With a key, `/models` lists only the models the key's workspace guardrails
 		// allow; bundled rows from the public roster must not widen that set.
 		dynamicModelsAuthoritative: true,
@@ -3841,12 +3841,12 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 				]);
 
 			if (imageModels === null) {
-				logger.warn("OpenRouter image model discovery unavailable; preserving chat model discovery", {
+				logger.warn("OpenRouter image model discovery unavailable; preserving other model discovery", {
 					endpoint: `${baseUrl}/images/models`,
 				});
 			}
 			if (decisionModels === null) {
-				logger.warn("OpenRouter decision model discovery unavailable; preserving chat model discovery", {
+				logger.warn("OpenRouter decision model discovery unavailable; preserving other model discovery", {
 					endpoint: `${baseUrl}/models?output_modalities=decisions`,
 				});
 			}
@@ -3877,7 +3877,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 			}
 
 			const models = new Map<string, ModelSpec<Api>>();
-			for (const model of chatModels ?? []) models.set(model.id, model);
+			for (const model of chatModels) models.set(model.id, model);
 			for (const model of imageModels ?? []) models.set(model.id, model);
 			for (const model of decisionModels ?? []) models.set(model.id, model);
 			for (const model of rerankModels ?? []) models.set(model.id, model);
