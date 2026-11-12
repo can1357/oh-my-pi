@@ -159,7 +159,8 @@ describe("failed child evidence", () => {
 		expect(result.isError).toBe(true);
 		expect(salvaged?.exitCode).toBe(0);
 		expect(salvaged?.outputPath).toBe(artifactPath);
-		expect(text?.type === "text" ? text.text : "").toContain(`exit 0. Its output is at \`agent://${salvaged?.id}\``);
+		expect(text?.type === "text" ? text.text : "").toContain("The child finished before this failure: exit 0.");
+		expect(text?.type === "text" ? text.text : "").toContain(`Its output is at \`agent://${salvaged?.id}\``);
 		// The child resolved a model before the merge threw, so the failure the
 		// parent reads carries the model and the fallback verdict: the parent
 		// verifies which model ran without parsing the child's session JSONL
