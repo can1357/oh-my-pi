@@ -2485,7 +2485,12 @@ export class WorkerCore {
 		}
 		// What the call raised on screen that no page call can reach, named on failures too: a native panel is often
 		// why the call failed.
-		const nativeNotices = (await this.#nativeWindows?.endCall(this.#dialogs?.state().open === true)) ?? [];
+		// Aborted runs must answer inside the supervisor's grace after interception cleanup; sampling can wait on
+		// both a previous tail and unresponsive pages, so it adds no work on this path.
+		const nativeNotices =
+			ac.signal.aborted || timeoutSignal.aborted
+				? []
+				: ((await this.#nativeWindows?.endCall(this.#dialogs?.state().open === true)) ?? []);
 		// A renderer crash or a debugger detach answers the run itself.
 		if (this.#unanswered !== active) return;
 		if (failure) {
