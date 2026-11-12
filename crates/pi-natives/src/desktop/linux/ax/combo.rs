@@ -11,6 +11,8 @@
 
 use std::fmt::Write as _;
 
+use futures::{StreamExt as _, TryStreamExt as _};
+
 use super::*;
 use crate::desktop::control;
 
@@ -19,6 +21,8 @@ use crate::desktop::control;
 const CHOOSE_ACTIONS: [&str; 2] = ["click", "select"];
 /// The most options read of one combo box: the count comes from the app.
 const OPTION_LIMIT: usize = 2048;
+/// Bound outstanding option reads without serializing each D-Bus round trip.
+const OPTION_READS: usize = 32;
 /// The most options an error lists.
 const LISTED_OPTIONS: usize = 50;
 /// How far below the combo box options sit: in its list, or in a group of
@@ -37,8 +41,8 @@ fn failure(message: impl std::fmt::Display) -> DesktopError {
 
 /// Whether a combo box's action `name` opens its list: GTK 3's `press`, Qt's
 /// `Press` and `ShowMenu`. Chromium's `open` takes no keyboard grab.
-pub(super) const fn opens_grabbing_list(name: &str) -> bool {
-	name.eq_ignore_ascii_case("press") || name.eq_ignore_ascii_case("showmenu")
+pub(super) fn opens_grabbing_list(name: &str) -> bool {
+	folds_to(name, "press") || folds_to(name, "showmenu")
 }
 
 /// One option of a combo box and its title.
@@ -103,11 +107,7 @@ fn option_list(options: &[ComboOption]) -> String {
 
 /// The index of the action among `names` that chooses an option.
 fn choose_action<'a>(mut names: impl Iterator<Item = &'a str>) -> Option<usize> {
-	names.position(|name| {
-		CHOOSE_ACTIONS
-			.iter()
-			.any(|choose| name.eq_ignore_ascii_case(choose))
-	})
+	names.position(|name| CHOOSE_ACTIONS.iter().any(|choose| folds_to(name, choose)))
 }
 
 const fn option_role(role: Role) -> bool {
@@ -158,33 +158,49 @@ impl AtSpiAx {
 			.then(|| combo.clone());
 		let mut pending = proxy.get_children().await.map_err(failure)?;
 		drop(proxy);
+		if pending.len() > OPTION_LIMIT {
+			return Err(failure("option limit exceeded"));
+		}
 		let mut options = Vec::new();
 		for _ in 0..OPTION_DEPTH {
 			let mut lists = Vec::new();
-			for object in pending {
-				if object.is_null() {
-					continue;
-				}
-				let proxy = object
-					.as_accessible_proxy(&self.connection)
-					.await
-					.map_err(failure)?;
-				let role = proxy.get_role().await.map_err(failure)?;
-				if !option_role(role) && !list_role(role) {
-					continue;
-				}
-				let children = proxy.get_children().await.map_err(failure)?;
-				if option_role(role) && children.is_empty() {
+			let find_selection = chosen.is_none();
+			let mut entries =
+				futures::stream::iter(pending.into_iter().filter(|object| !object.is_null()))
+					.map(|object| async move {
+						let proxy = object
+							.as_accessible_proxy(&self.connection)
+							.await
+							.map_err(failure)?;
+						let role = proxy.get_role().await.map_err(failure)?;
+						if !option_role(role) && !list_role(role) {
+							return Ok((None, None, Vec::new()));
+						}
+						let children = proxy.get_children().await.map_err(failure)?;
+						if option_role(role) && children.is_empty() {
+							let title = proxy.name().await.map_err(failure)?;
+							drop(proxy);
+							return Ok((Some(ComboOption { object, title }), None, children));
+						}
+						let selection = if find_selection
+							&& has_interface(&proxy, atspi::Interface::Selection).await?
+						{
+							Some(object.clone())
+						} else {
+							None
+						};
+						Ok::<_, DesktopError>((None, selection, children))
+					})
+					.buffered(OPTION_READS);
+			while let Some((option, selection, children)) = entries.try_next().await? {
+				if let Some(option) = option {
 					if options.len() >= OPTION_LIMIT {
 						return Err(failure("option limit exceeded"));
 					}
-					let title = proxy.name().await.map_err(failure)?;
-					drop(proxy);
-					options.push(ComboOption { object, title });
-					continue;
+					options.push(option);
 				}
-				if chosen.is_none() && has_interface(&proxy, atspi::Interface::Selection).await? {
-					chosen = Some(object.clone());
+				if chosen.is_none() {
+					chosen = selection;
 				}
 				if lists.len() + children.len() > OPTION_LIMIT {
 					return Err(failure("option limit exceeded"));
@@ -348,6 +364,14 @@ impl AtSpiAx {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn action_names_use_the_shared_folding_rules() {
+		assert!(opens_grabbing_list("Show-Menu"));
+		assert!(opens_grabbing_list("show menu"));
+		assert_eq!(choose_action(["showContextMenu", "s_e_l_e_c_t"].into_iter()), Some(1));
+		assert!(!opens_grabbing_list("open"));
+	}
 
 	#[test]
 	fn options_match_exactly_and_untitled_items_are_not_options() {
