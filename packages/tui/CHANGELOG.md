@@ -368,6 +368,7 @@
 ### Removed
 
 - Removed support for the TSP `t` (theme) verb, as surface theme synchronization is no longer required
+- The prompt history recalls a multi-row prompt with the caret at its end, so typing continues after the old prompt instead of at its first line; Up then walks the entry's own rows and only from its first line steps to older history ([#17233](https://github.com/can1357/oh-my-pi/pull/17233) by [@iacore](https://github.com/iacore))
 
 ## [18.13.2] - 2026-10-27
 
