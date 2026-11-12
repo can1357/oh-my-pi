@@ -17,6 +17,8 @@ function createHost() {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -74,7 +76,7 @@ button { margin: 80px; width: 180px; height: 60px; }
 				.map(block => block.text)
 				.join("\n");
 			expect(plainText).not.toContain("image decoder failed");
-			expect(plainText).toMatch(/Dimensions: [1-9]\d*x[1-9]\d*/);
+			expect(plainText.split("\n")[0]).toMatch(/^Screenshot [1-9]\d*x[1-9]\d*\./);
 			const plainShots =
 				plain.details && typeof plain.details === "object" && "screenshots" in plain.details
 					? plain.details.screenshots

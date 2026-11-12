@@ -20,6 +20,7 @@ mod win32;
 
 use std::{
 	collections::HashMap,
+	fmt::Write as _,
 	panic::AssertUnwindSafe,
 	sync::{
 		Arc,
@@ -35,7 +36,7 @@ use backend::{
 	Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
 	KeyboardFocus, MouseButton, PointerEvent, is_raise_action,
 };
-use control::{CancellationSource, InputLease, OperationToken};
+use control::{Admit, CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError, ErrorCode};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
 use keys::{parse_keys, parse_modifiers};
@@ -484,6 +485,20 @@ impl Request {
 			|| takeover.mode() != DeliveryMode::Background
 	}
 
+	/// A takeover of a window or an element, which activates it and hands it
+	/// the user's keyboard; the backend admits it before the input lease is
+	/// taken ([`Backend::admit_takeover`]).
+	fn takes_over_a_window(&self) -> bool {
+		self.takes_over()
+			&& !matches!(
+				self,
+				Self::RaiseWindow { .. } | Self::OpenApplication { .. } | Self::AxPerform { .. }
+			)
+			&& self
+				.target()
+				.is_none_or(|target| matches!(target, Target::Window(_)))
+	}
+
 	const fn frame_target(&self) -> Option<&Target> {
 		match self {
 			Self::Capture { target, .. } | Self::Observe { target, .. } => Some(target),
@@ -774,17 +789,24 @@ impl Worker {
 	}
 
 	fn window(&mut self, target: &Target) -> CoreResult<DesktopWindow> {
-		let windows = self.backend()?.windows()?;
-		match target {
-			Target::Window(id) => windows
-				.into_iter()
-				.find(|window| window.id == *id)
-				.ok_or_else(|| DesktopError::window_not_found(format!("window '{id}' was not found"))),
-			Target::Desktop | Target::Display(_) => windows
-				.into_iter()
-				.find(|window| window.focused)
-				.ok_or_else(|| DesktopError::window_not_found("no focused window was found")),
-		}
+		let backend = self.backend()?;
+		let windows = backend.windows()?;
+		let found = match target {
+			Target::Window(id) => windows.into_iter().find(|window| window.id == *id),
+			Target::Desktop | Target::Display(_) => windows.into_iter().find(|window| window.focused),
+		};
+		found.ok_or_else(|| {
+			backend
+				.missing_window(target)
+				.unwrap_or_else(|| match target {
+					Target::Window(id) => {
+						DesktopError::window_not_found(format!("window '{id}' was not found"))
+					},
+					Target::Desktop | Target::Display(_) => {
+						DesktopError::window_not_found("no focused window was found")
+					},
+				})
+		})
 	}
 
 	fn frame(&self, target: &Target) -> CoreResult<FrameGeometry> {
@@ -1060,16 +1082,27 @@ impl Worker {
 				// names its match like one from the request itself.
 				Err(error) => {
 					return Err(match request.reference() {
-						Some(reference) => self.name_match(reference, error, token),
+						Some(reference) => self.name_match(reference, error, false, token),
 						None => error,
 					});
 				},
 			}
 		};
-		let lease = request
-			.is_mutation()
-			.then(|| InputLease::acquire(token, request.takes_over()))
-			.transpose()?;
+		let lease = if !request.is_mutation() {
+			None
+		} else if request.takes_over_a_window() {
+			// The admission waits without the lease, so another session's input
+			// is not kept out while the user types.
+			Some(InputLease::acquire_admitted(token, |step| {
+				let backend = self.backend()?;
+				match step {
+					Admit::Wait => backend.admit_takeover().map(|()| true),
+					Admit::Recheck => backend.takeover_admitted(),
+				}
+			})?)
+		} else {
+			Some(InputLease::acquire(token, request.takes_over())?)
+		};
 		token.check()?;
 		// A full capture replaces coordinates only if it completes in its
 		// original generation. Keep the previous frame by move, not by
@@ -1078,6 +1111,13 @@ impl Worker {
 			.frame_target()
 			.and_then(|target| self.frames.remove(target.key()));
 		control::take_focus_return();
+		// An element action goes only to an element that still reads with the
+		// role and label its ref was read with ([`ax::require_read_as`]).
+		#[cfg(any(target_os = "macos", test))]
+		let read_as = request
+			.reference()
+			.filter(|_| request.is_mutation())
+			.and_then(|reference| self.registry.expect_read_as(reference));
 		// A read cancelled while it ran is discarded, a menu read included.
 		// Input's result stands, since it may have gone out: a cancel arriving
 		// after it stops the next call instead.
@@ -1107,9 +1147,13 @@ impl Worker {
 		// A `StaleRef` search reads the whole window, which can take long
 		// enough to keep other sessions from input: it runs once the call has
 		// released it.
+		#[cfg(any(target_os = "macos", test))]
+		let relabelled = read_as.is_some_and(|read_as| read_as.finish());
+		#[cfg(not(any(target_os = "macos", test)))]
+		let relabelled = false;
 		drop(lease);
 		match (result, request.reference()) {
-			(Err(error), Some(reference)) => Err(self.name_match(reference, error, token)),
+			(Err(error), Some(reference)) => Err(self.name_match(reference, error, relabelled, token)),
 			(result, _) => result,
 		}
 	}
@@ -1119,15 +1163,17 @@ impl Worker {
 	/// registered as a new ref. Nothing is sent to that element: equal fields
 	/// do not prove it is the same control, so the caller decides. Searches
 	/// only for a ref read with such fields, and only once its element is
-	/// provably destroyed.
+	/// provably destroyed or, `relabelled`, reads as another control; that
+	/// one gets a ref of its own in the error too.
 	fn name_match(
 		&mut self,
 		reference: &str,
 		error: DesktopError,
+		relabelled: bool,
 		token: &OperationToken,
 	) -> DesktopError {
 		if error.code != ErrorCode::StaleRef
-			|| !self.registry.has_proof(reference)
+			|| !(relabelled || self.registry.has_proof(reference))
 			|| token.check().is_err()
 		{
 			return error;
@@ -1138,24 +1184,72 @@ impl Worker {
 		let Ok(target) = self.registry.target(reference) else {
 			return error;
 		};
-		let Ok(window) = self.window(&Target::Window(target)) else {
-			return error;
+		let window = if target == "desktop" {
+			let found = self
+				.backend()
+				.and_then(|backend| backend.windows())
+				.and_then(|windows| {
+					let id = self.ax()?.window_id(&handle, &windows)?;
+					windows
+						.into_iter()
+						.find(|window| window.id == id)
+						.ok_or_else(|| {
+							DesktopError::window_not_found("the element's window is unavailable")
+						})
+				});
+			let Ok(window) = found else {
+				return error;
+			};
+			window
+		} else {
+			let Ok(window) = self.window(&Target::Window(target.clone())) else {
+				return error;
+			};
+			window
 		};
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let Some(ax) = backend.as_mut().ok().and_then(|backend| backend.ax()) else {
 			return error;
 		};
-		if !ax.destroyed(&handle) {
+		let mut message = if relabelled {
+			// The element still answers, as another control: give it a ref.
+			match ax::element_line(ax, registry, &target, handle) {
+				Ok(line) => format!(
+					"{reference} now reads as {}, not with the role and label it was read with; \
+					 nothing was sent.",
+					line.trim_start_matches("- ")
+				),
+				Err(_) => format!("{}.", error.message),
+			}
+		} else if ax.destroyed(&handle) {
+			format!("{reference} destroyed;")
+		} else {
 			return error;
-		}
-		match ax::refind(ax, registry, &window, reference) {
-			Ok(Some(found)) => DesktopError::stale_ref(format!(
-				"{reference} destroyed; {found} is the one element in the window with the role, \
-				 labels and value {reference} was read with. Equal fields do not prove it is the same \
-				 control: check {found} before acting on it, or re-run ax()/find()"
-			)),
-			_ => error,
-		}
+		};
+		// A relabelled element only needs the role-and-label candidate. Do
+		// not first walk for its old value-bearing proof and then walk again
+		// when that proof misses: neither candidate authorizes retargeting.
+		let candidate = if relabelled {
+			ax::find_read_as(ax, registry, &window, reference)
+				.map(|found| (found, "this read of the window found with the role and label"))
+		} else {
+			ax::refind(ax, registry, &window, reference)
+				.map(|found| (found, "in the window with the role, labels and value"))
+		};
+		let Ok((Some(found), fields)) = candidate else {
+			if !relabelled {
+				return error;
+			}
+			message.push_str(" Re-run ax()/find()");
+			return DesktopError::stale_ref(message);
+		};
+		let _ = write!(message, " {found} is the one element {fields} {reference} was read with.");
+		let _ = write!(
+			message,
+			" Equal fields do not prove it is the same control: check {found} before acting on it, \
+			 or re-run ax()/find()"
+		);
+		DesktopError::stale_ref(message)
 	}
 
 	/// Watches the user's own input into the app `request` reads or acts on,
@@ -1740,7 +1834,9 @@ fn create_backend(_: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
 /// thread rather than through the session worker.
 #[cfg(target_os = "macos")]
 use macos::screen_state as read_screen_state;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+use win32::screen_state as read_screen_state;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const fn read_screen_state(_: &DisplaySelector) -> ScreenState {
 	ScreenState { locked: false, display_asleep: false }
 }
@@ -2722,8 +2818,17 @@ mod capture_tests {
 	struct FakeTree {
 		titles:            HashMap<u64, &'static str>,
 		children:          Vec<u64>,
+		/// Values of elements below the window, which have none otherwise.
+		values:            HashMap<u64, &'static str>,
+		/// Elements the app is too busy to answer in full: they read without
+		/// a title or identity, marked partial.
+		partial:           HashSet<u64>,
 		destroyed:         HashSet<u64>,
 		pressed:           Vec<u64>,
+		/// Values written with `setValue`, by element.
+		written:           Vec<(u64, String)>,
+		/// Runs on the tree once a value is written to the element.
+		after_write:       Option<fn(&mut Self, u64)>,
 		/// A press is delivered, then the app replaces the pressed element with
 		/// an identical one under this id and the press answers as stale.
 		press_rebuilds_as: Option<u64>,
@@ -2812,6 +2917,55 @@ mod capture_tests {
 	}
 
 	impl FakeWaylandBackend {
+		/// An element's props as `props` reads them, without counting the
+		/// read: what a backend checks the element reads as before acting.
+		fn read_as(&self, h: &AxHandle) -> CoreResult<AxProps> {
+			let (role, title, value, partial) = match &self.tree {
+				Some(tree) => {
+					let tree = tree.lock();
+					let id = tree.element(h)?;
+					if id == 1 {
+						("window", tree.titles.get(&1).map(|title| (*title).to_string()), None, false)
+					} else {
+						let partial = tree.partial.contains(&id);
+						(
+							"button",
+							tree
+								.titles
+								.get(&id)
+								.filter(|_| !partial)
+								.map(|title| (*title).to_string()),
+							tree.values.get(&id).map(|value| (*value).to_string()),
+							partial,
+						)
+					}
+				},
+				None => ("button", None, None, false),
+			};
+			Ok(AxProps {
+				role: role.to_string(),
+				native_role: role.to_string(),
+				identity: (!partial).then(|| ax::test_identity((role, &title))),
+				partial,
+				label_complete: !partial,
+				title,
+				value,
+				description: None,
+				enabled: true,
+				focused: false,
+				bounds: (!self.no_bounds).then_some(AxBounds {
+					x:      10.0,
+					y:      10.0,
+					width:  20.0,
+					height: 20.0,
+				}),
+				actions: Vec::new(),
+				child_count: 0,
+				selected: false,
+				role_name: None,
+			})
+		}
+
 		fn new() -> Self {
 			Self {
 				window: DesktopWindow {
@@ -2892,40 +3046,10 @@ mod capture_tests {
 		}
 
 		fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
-			let (role, title) = match &self.tree {
-				Some(tree) => {
-					let mut tree = tree.lock();
-					tree.reads += 1;
-					let id = tree.element(h)?;
-					if id == 1 {
-						("window", None)
-					} else {
-						("button", tree.titles.get(&id).map(|title| (*title).to_string()))
-					}
-				},
-				None => ("button", None),
-			};
-			Ok(AxProps {
-				role: role.to_string(),
-				native_role: role.to_string(),
-				identity: Some(ax::test_identity((role, &title))),
-				partial: false,
-				title,
-				value: None,
-				description: None,
-				enabled: true,
-				focused: false,
-				bounds: (!self.no_bounds).then_some(AxBounds {
-					x:      10.0,
-					y:      10.0,
-					width:  20.0,
-					height: 20.0,
-				}),
-				actions: Vec::new(),
-				child_count: 0,
-				selected: false,
-				role_name: None,
-			})
+			if let Some(tree) = &self.tree {
+				tree.lock().reads += 1;
+			}
+			self.read_as(h)
 		}
 
 		fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
@@ -2952,6 +3076,7 @@ mod capture_tests {
 				self.clicks.lock().push(format!("perform {action}"));
 				return Ok(());
 			};
+			ax::require_read_as(|| self.read_as(h).map(Some))?;
 			let mut tree = tree.lock();
 			let id = tree.element(h)?;
 			if action != "press" {
@@ -3004,11 +3129,20 @@ mod capture_tests {
 			Ok(())
 		}
 
-		fn set_value(&mut self, h: &AxHandle, _: &str) -> CoreResult<()> {
-			if let Some(tree) = &self.tree {
-				tree.lock().element(h)?;
+		fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
+			let Some(tree) = &self.tree else {
+				unreachable!("text input not exercised")
+			};
+			ax::require_read_as(|| self.read_as(h).map(Some))?;
+			{
+				let mut tree = tree.lock();
+				let id = tree.element(h)?;
+				tree.written.push((id, value.to_owned()));
+				if let Some(after_write) = tree.after_write {
+					after_write(&mut tree, id);
+				}
 			}
-			unreachable!("text input not exercised")
+			ax::confirm_read_as(|| self.read_as(h).map(Some))
 		}
 
 		fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
@@ -3257,6 +3391,7 @@ mod capture_tests {
 				.queries_at_input
 				.lock()
 				.push(*self.window_queries.lock());
+			ax::require_read_as(|| self.read_as(h).map(Some))?;
 			if let Some(tree) = &self.tree {
 				tree.lock().element(h)?;
 			}
@@ -3276,6 +3411,7 @@ mod capture_tests {
 				.queries_at_input
 				.lock()
 				.push(*self.window_queries.lock());
+			ax::require_read_as(|| self.read_as(element).map(Some))?;
 			let (target, event) = backend::locate_element_click(self, element, click)?;
 			click.send(self, &target, event, &FrameGeometry::identity_global(), token)
 		}
@@ -3847,11 +3983,16 @@ mod capture_tests {
 	/// A worker whose window holds one button per `(id, title)`, read once by
 	/// `ax()`: the window is `e1` and the buttons `e2`, `e3`, … in order.
 	fn read_buttons(buttons: &[(u64, &'static str)]) -> (TestWorker, Arc<Mutex<FakeTree>>) {
-		let tree = Arc::new(Mutex::new(FakeTree {
+		read_tree(FakeTree {
 			titles: buttons.iter().copied().collect(),
 			children: buttons.iter().map(|(id, _)| *id).collect(),
 			..FakeTree::default()
-		}));
+		})
+	}
+
+	/// A worker whose window holds `tree`, read once by `ax()`.
+	fn read_tree(tree: FakeTree) -> (TestWorker, Arc<Mutex<FakeTree>>) {
+		let tree = Arc::new(Mutex::new(tree));
 		let mut backend = FakeWaylandBackend::new();
 		backend.tree = Some(Arc::clone(&tree));
 		let mut worker = worker_with(backend);
@@ -3912,6 +4053,212 @@ mod capture_tests {
 			.message
 			.strip_prefix(&format!("{reference} destroyed; "))?;
 		rest.split_whitespace().next().map(str::to_string)
+	}
+
+	/// Contacts answers the element read as an address's "City" field as its
+	/// "Street" field once typing the street adds a button at the head of the
+	/// row: each element now reads as the control before it.
+	fn shift_address_row(tree: &Mutex<FakeTree>) {
+		let mut tree = tree.lock();
+		tree
+			.titles
+			.extend([(2, "Remove Address"), (3, "Street"), (4, "City")]);
+		tree.children = vec![2, 3, 4];
+	}
+
+	#[test]
+	fn an_action_on_a_ref_whose_element_reads_as_another_control_is_refused_naming_both() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		shift_address_row(&tree);
+		let error = press(&mut worker, "e3").unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef, "{}", error.message);
+		assert!(
+			tree.lock().pressed.is_empty(),
+			"the press reached the element now reading \"Street\""
+		);
+		let now = error
+			.message
+			.strip_prefix("e3 now reads as button \"Street\" [ref=")
+			.and_then(|rest| rest.split(']').next())
+			.unwrap_or_else(|| panic!("{}", error.message));
+		let found = error
+			.message
+			.split(". ")
+			.find_map(|sentence| {
+				sentence.strip_suffix(
+					" is the one element this read of the window found with the role and label e3 was \
+					 read with",
+				)
+			})
+			.unwrap_or_else(|| panic!("{}", error.message));
+		// Each named ref acts on the element it names now.
+		press(&mut worker, found).unwrap();
+		press(&mut worker, now).unwrap();
+		assert_eq!(tree.lock().pressed, [4, 3]);
+	}
+
+	#[test]
+	fn a_relabelled_desktop_ref_names_its_current_control_and_window_candidate() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		let (backend, registry) = (&mut worker.worker.backend, &mut worker.worker.registry);
+		let node = register_node(
+			backend.as_mut().unwrap().ax().unwrap(),
+			registry,
+			"desktop",
+			AxHandle::Test(3),
+			&mut AppFocus::default(),
+		)
+		.unwrap();
+		shift_address_row(&tree);
+		let error = press(&mut worker, &node.ref_).unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef);
+		assert!(
+			error
+				.message
+				.contains("now reads as button \"Street\" [ref="),
+			"{}",
+			error.message
+		);
+		assert!(error.message.contains("this read of the window found"), "{}", error.message);
+		assert!(tree.lock().pressed.is_empty());
+	}
+
+	#[test]
+	fn a_relabelled_ref_searches_its_window_only_once_when_its_proof_misses() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		shift_address_row(&tree);
+		{
+			let mut tree = tree.lock();
+			tree.titles.insert(5, "City");
+			tree.children.push(5);
+			tree.reads = 0;
+		}
+		let error = press(&mut worker, "e3").unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef);
+		assert!(error.message.contains("Re-run ax()/find()"), "{}", error.message);
+		// One read for the element's new ref, then root + four children.
+		assert_eq!(tree.lock().reads, 6);
+		assert!(tree.lock().pressed.is_empty());
+	}
+
+	#[test]
+	fn a_write_whose_element_reads_as_another_control_afterwards_is_unconfirmed() {
+		let set = |worker: &mut TestWorker, reference: &str| {
+			let reference = reference.to_owned();
+			call(
+				worker,
+				move |reply| Request::AxSetValue { reference, value: "Cupertino".to_owned(), reply },
+				&granted(),
+			)
+			.map(drop)
+		};
+		{
+			// The app hands the field's element to the field before it as the
+			// text lands: the write may have gone there.
+			let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+			tree.lock().after_write = Some(|tree, id| {
+				tree.titles.insert(id, "Street");
+			});
+			let error = set(&mut worker, "e3").expect_err("a relabelled write");
+			assert_eq!(error.code, ErrorCode::AxUnconfirmed, "{}", error.message);
+			assert_eq!(tree.lock().written, [(3, "Cupertino".to_owned())]);
+		}
+		// The app rebuilds the element once the text lands: the read after the
+		// write cannot tell, so the write's own read-back stands.
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		tree.lock().after_write = Some(|tree, id| {
+			tree.destroyed.insert(id);
+		});
+		set(&mut worker, "e3").unwrap();
+		assert_eq!(tree.lock().written, [(3, "Cupertino".to_owned())]);
+	}
+
+	#[test]
+	fn a_retitled_window_keeps_taking_its_refs_actions() {
+		// A window's title names its document and changes as it is used.
+		let (mut worker, tree) = read_tree(FakeTree {
+			titles: [(1, "Untitled"), (2, "Go")].into(),
+			children: vec![2],
+			..FakeTree::default()
+		});
+		tree.lock().titles.insert(1, "Report.txt");
+		press(&mut worker, "e1").unwrap();
+		assert_eq!(tree.lock().pressed, [1]);
+	}
+
+	#[test]
+	fn a_relabelled_ref_without_a_proof_names_the_one_element_read_as_it_was() {
+		// Two "City" buttons when read: neither ref's fields tell it apart, so
+		// only the role and label lead to the field once the row shifts.
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City"), (5, "City")]);
+		{
+			let mut tree = tree.lock();
+			tree.titles.extend([(2, "Remove Address"), (3, "Street")]);
+		}
+		let error = press(&mut worker, "e3").unwrap_err();
+		let found = error
+			.message
+			.split(". ")
+			.find_map(|sentence| {
+				sentence.strip_suffix(
+					" is the one element this read of the window found with the role and label e3 was \
+					 read with",
+				)
+			})
+			.unwrap_or_else(|| panic!("{}", error.message));
+		assert!(tree.lock().pressed.is_empty());
+		press(&mut worker, found).unwrap();
+		assert_eq!(tree.lock().pressed, [5]);
+	}
+
+	#[test]
+	fn an_element_whose_value_changed_keeps_taking_its_refs_actions() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street")]);
+		tree.lock().values.insert(2, "10600 North Tantau Avenue");
+		press(&mut worker, "e2").unwrap();
+		assert_eq!(tree.lock().pressed, [2]);
+	}
+
+	#[test]
+	fn an_element_too_busy_to_answer_its_label_is_not_read_as_another_control() {
+		{
+			// Checked partial: the app leaves the title unanswered as the press
+			// checks the element, which cannot tell, so it acts as before.
+			let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+			tree.lock().partial.insert(3);
+			press(&mut worker, "e3").unwrap();
+			assert_eq!(tree.lock().pressed, [3]);
+		}
+		// Registered partial: the label the ref was read with may lack the
+		// title, so a full read later is not held to it.
+		let (mut worker, tree) = read_tree(FakeTree {
+			titles: [(2, "Street"), (3, "City")].into(),
+			children: vec![2, 3],
+			partial: [3].into(),
+			..FakeTree::default()
+		});
+		tree.lock().partial.clear();
+		press(&mut worker, "e3").unwrap();
+		assert_eq!(tree.lock().pressed, [3]);
+	}
+
+	#[test]
+	fn a_control_whose_title_flipped_takes_its_new_ref_from_the_refusal() {
+		// A Play button reads "Pause" once pressed: pressing its ref again
+		// sends nothing, and the error names the element's ref as it reads now.
+		let (mut worker, tree) = read_buttons(&[(2, "Play")]);
+		press(&mut worker, "e2").unwrap();
+		tree.lock().titles.insert(2, "Pause");
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef, "{}", error.message);
+		assert_eq!(tree.lock().pressed, [2]);
+		let now = error
+			.message
+			.strip_prefix("e2 now reads as button \"Pause\" [ref=")
+			.and_then(|rest| rest.split(']').next())
+			.unwrap_or_else(|| panic!("{}", error.message));
+		press(&mut worker, now).unwrap();
+		assert_eq!(tree.lock().pressed, [2, 2]);
 	}
 
 	#[test]
@@ -5254,6 +5601,36 @@ mod capture_tests {
 			let token = source.token();
 			assert_eq!(control::press_escape_for_test(), 1, "takeover input arms the Escape stop");
 			assert!(token.check().is_err(), "physical Escape stops takeover input");
+		}
+	}
+
+	/// Only these wait for the backend's admission without the input lease
+	/// ([`InputLease::acquire_admitted`]).
+	#[test]
+	fn window_and_element_takeovers_are_admitted_before_the_input_lease() {
+		let window = Target::Window("42".to_string());
+		let reply = || flume::unbounded().0;
+		let typing = |target: &Target, takeover| Request::TypeText {
+			target:   target.clone(),
+			text:     "abc".to_string(),
+			takeover: Takeover::new(takeover, None),
+			reply:    reply(),
+		};
+		let element = |takeover| Request::AxInput {
+			reference: "e1".to_string(),
+			input:     ElementInput::Text("hi".to_string()),
+			takeover:  Takeover::new(takeover, None),
+			reply:     reply(),
+		};
+		assert!(typing(&window, Some(true)).takes_over_a_window());
+		assert!(element(Some(true)).takes_over_a_window());
+		for other in [
+			typing(&window, None),
+			element(None),
+			typing(&Target::parse("display:screen-1"), None),
+			Request::RaiseWindow { id: "42".to_string(), reply: reply() },
+		] {
+			assert!(!other.takes_over_a_window());
 		}
 	}
 

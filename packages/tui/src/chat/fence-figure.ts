@@ -74,6 +74,11 @@ export class FenceFigure implements Component {
 		this.#diagram = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#svg?.releaseRenderCaches();
+		this.#diagram?.releaseRenderCaches();
+	}
+
 	dispose(): void {
 		this.#svg?.dispose();
 	}

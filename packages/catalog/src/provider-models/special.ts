@@ -414,6 +414,24 @@ export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"w
 	};
 }
 
+/** Liquid AI judges: the authored d1 rows. */
+export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemone"> {
+	return {
+		providerId: "liquid",
+		cacheProviderId: resolveModelCacheProviderId("liquid"),
+		staticModels: seedModels<"liquid-systemone">("liquid"),
+	};
+}
+
+/** Nace Drex judges: the authored Drex rows. */
+export function naceModelManagerOptions(): ModelManagerOptions<"nace-systemone"> {
+	return {
+		providerId: "nace",
+		cacheProviderId: resolveModelCacheProviderId("nace"),
+		staticModels: seedModels<"nace-systemone">("nace"),
+	};
+}
+
 /** Credentials and endpoint overrides for the TypeSafe catalog manager. */
 export interface TypeSafeModelManagerConfig {
 	apiKey?: string;

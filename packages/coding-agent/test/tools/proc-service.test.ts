@@ -274,7 +274,8 @@ describe("proc:// background jobs", () => {
 	});
 
 	it("advertises stdin and modes as service-only while kill remains available for jobs and agents", async () => {
-		const help = new InternalUrlRouter()
+		const router = new InternalUrlRouter();
+		const help = router
 			.describe({
 				skillUriAccess: false,
 				ruleCount: 0,
@@ -283,11 +284,14 @@ describe("proc:// background jobs", () => {
 				outReplies: false,
 				subagent: false,
 			})
-			.find(line => line.startsWith("`proc://`"));
-		expect(help).toMatch(/stdin[^;]*services.only/);
-		expect(help).toMatch(/\/mode[^;]*services.only/);
+			.find(line => line.startsWith("proc://"));
 		expect(help).toMatch(/\/kill[^;]*jobs, agents, and services/);
-		expect(help).toContain("named service");
+		// Service controls live in the on-demand reference (`xd://read/urls`), never unqualified in the always-on line.
+		expect(help).not.toContain("stdin");
+		const reference = router.reference().find(line => line.startsWith("proc://"));
+		expect(reference).toMatch(/stdin[^;]*services.only/);
+		expect(reference).toMatch(/\/mode[^;]*services.only/);
+		expect(reference).toContain("named service");
 
 		const protocol = new ProcProtocolHandler();
 		const session = toolSession(process.cwd(), undefined, { launch: false });
@@ -768,12 +772,14 @@ describe("bash services via proc://", () => {
 			await manager.getJob(collisionId)?.promise;
 			await manager.dispose({ timeoutMs: 1_000 });
 			session.asyncJobManager = undefined;
-			const sent = await proc.write(parseInternalUrl("proc://echo-service"), "hello", { session });
+			// Through the real write tool: stdin feeds a process and touches no files,
+			// so the result must not read as implementation work to the prewalk gate.
+			const write = new WriteTool(session);
+			const sent = await write.execute("stdin", { path: "proc://echo-service", content: "hello" });
 			expect(sent.content[0]?.type === "text" ? sent.content[0].text : "").toContain("Sent input");
-			expect(sent.details?.proc).toMatchObject({
-				action: "stdin",
-				daemon: { name: "echo-service" },
-				input: "hello",
+			expect(sent.details).toMatchObject({
+				proc: { action: "stdin", daemon: { name: "echo-service" }, input: "hello" },
+				touchesNoFiles: true,
 			});
 			const observed = await client.request({
 				op: "wait",
@@ -798,9 +804,12 @@ describe("bash services via proc://", () => {
 				timeoutMs: 2_000,
 			});
 			expect(blank.op === "wait" && blank.matched).toBe("ACK:[]");
-			const persisted = await proc.write(parseInternalUrl("proc://echo-service/mode"), "persist", { session });
+			const persisted = await write.execute("mode", { path: "proc://echo-service/mode", content: "persist" });
 			expect(persisted.content[0]?.type === "text" ? persisted.content[0].text : "").toContain("persistent");
-			expect(persisted.details?.proc).toMatchObject({ action: "mode", mode: "persist", daemon: { persist: true } });
+			expect(persisted.details).toMatchObject({
+				proc: { action: "mode", mode: "persist", daemon: { persist: true } },
+				touchesNoFiles: true,
+			});
 			const spec: { persist: boolean } = await Bun.file(
 				path.join(runtimeDir, "daemons", "echo-service", "spec.json"),
 			).json();
@@ -819,7 +828,6 @@ describe("bash services via proc://", () => {
 				async: false,
 			});
 			expect(restarted.content[0]?.type === "text" ? restarted.content[0].text : "").toContain("REPLACED");
-			const write = new WriteTool(session);
 			const stopped = await write.execute("kill", write.parameters.assert({ path: "proc://echo-service/kill" }));
 			expect(stopped.details?.proc).toMatchObject({ action: "stop", daemon: { name: "echo-service" } });
 			const background = await bash.execute("detach-candidate", {

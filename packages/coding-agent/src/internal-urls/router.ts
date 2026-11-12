@@ -437,6 +437,16 @@ export class InternalUrlRouter {
 		return lines;
 	}
 
+	/** Rendered promptReference entries, registration order: the body of `xd://read/urls`. */
+	reference(): string[] {
+		const lines: string[] = [];
+		for (const handler of this.#handlers.values()) {
+			const line = handler.promptReference?.();
+			if (line !== undefined) lines.push(line);
+		}
+		return lines;
+	}
+
 	#isResourceFallbackScheme(scheme: string): boolean {
 		return !["file", "http", "https"].includes(scheme) && this.#handlers.has(this.#resourceFallbackScheme);
 	}

@@ -112,7 +112,7 @@ describe("Skill URI reader capability", () => {
 			});
 			const text = systemPrompt.join("\n\n");
 			expect(text).toContain("bridge-skill");
-			expect(text).toContain("`skill://<name>`");
+			expect(text).toContain("skill://<name>");
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

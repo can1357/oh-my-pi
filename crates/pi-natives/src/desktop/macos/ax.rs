@@ -29,12 +29,12 @@ pub(super) use selection::select_dragged;
 use super::{
 	super::{
 		ax::{
-			AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos, text_readback,
-			truncate_chars,
+			AxBounds, AxHandle, AxProps, WalkBounds, confirm_read_as, normalize_role_macos,
+			require_read_as, text_readback, truncate_chars,
 		},
 		backend::{AxBackend, KeyboardFocus, is_raise_action, native_action_name},
 		control,
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
 		types::{AxTextSelection, DesktopWindow},
 	},
@@ -156,6 +156,13 @@ enum NodeBatch {
 
 impl NodeValues {
 	fn read(element: &AXUIElement, read: NodeRead) -> Self {
+		Self::from_batch(Self::batch(element, read), read.attributes(), |index| {
+			copy_attribute_result(element, NODE_ATTRIBUTES[index])
+		})
+	}
+
+	/// `read`'s attributes from `element` in one batched read.
+	fn batch(element: &AXUIElement, read: NodeRead) -> Result<CFRetained<CFArray<CFType>>, AXError> {
 		let mut output: *const CFArray = ptr::null();
 		let error = NODE_REQUESTS.with(|requests| {
 			// SAFETY: The request is a CFArray of CFString attribute names and
@@ -168,7 +175,7 @@ impl NodeValues {
 				)
 			}
 		});
-		let batch = if error == AXError::Success {
+		if error == AXError::Success {
 			NonNull::new(output.cast_mut())
 				.ok_or(AXError::Failure)
 				.map(|pointer| {
@@ -180,10 +187,7 @@ impl NodeValues {
 				})
 		} else {
 			Err(error)
-		};
-		Self::from_batch(batch, read.attributes(), |index| {
-			copy_attribute_result(element, NODE_ATTRIBUTES[index])
-		})
+		}
 	}
 
 	/// The batch's values, or `lone` reads of each attribute outside
@@ -313,6 +317,21 @@ pub(super) struct PointOwner {
 	pub(super) pid:    libc::pid_t,
 	/// `WindowServer` id of the surface's top-level window, when AX exposes it.
 	pub(super) window: Option<u32>,
+}
+
+/// Whether AX identifies this as a document window, rather than a dialog.
+/// `None` when AX cannot read the application, window, or subrole.
+pub(in crate::desktop) fn is_standard_window(window: &DesktopWindow) -> Option<bool> {
+	let app = window
+		.pid
+		.and_then(|pid| libc::pid_t::try_from(pid).ok())
+		.and_then(probe_application)?;
+	let element = find_window(&app, window).ok()?;
+	standard_window_subrole(&element)
+}
+
+fn standard_window_subrole(element: &AXUIElement) -> Option<bool> {
+	copy_string(element, "AXSubrole").map(|subrole| subrole == "AXStandardWindow")
 }
 
 /// `WindowServer` id of `pid`'s `AXFocusedWindow`.
@@ -804,17 +823,40 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 	None
 }
 
-/// The window id of `element` when it is itself one of `pid`'s `AXWindows`
-/// though not an `AXWindow`, as Finder's inline rename field is: such an
-/// element has no window above it and stands for its own.
+/// The window id of the nearest of `element` and its ancestors that is one of
+/// `pid`'s `AXWindows`, whatever its role. Finder's inline rename field
+/// is such an element itself and stands for its own window. A suggestion list
+/// that pops up under a text field is a window whose listed element is a
+/// scroll area with the application as its parent, so its rows reach no
+/// `AXWindow` and sit below that element. [`find_window`] resolves the same
+/// window id to the same listed element, so an element is owned by the window
+/// whose `ax()` shows it.
 fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
 	let app = probe_application(pid)?;
 	let windows = copy_elements(&app, "AXWindows").ok()?;
-	windows
-		.iter()
-		.any(|window| **window == *element)
-		.then(|| window_id(element))
-		.flatten()
+	let listed = nearest_matching(
+		element.retain(),
+		|current| windows.iter().any(|window| **window == **current),
+		|current| copy_element(current, "AXParent"),
+	)?;
+	window_id(&listed)
+}
+
+/// The first of `element` and its ancestors, read with `parent` for at most
+/// [`MAX_ANCESTRY_DEPTH`] levels, that `is_match` accepts.
+fn nearest_matching<E>(
+	element: E,
+	is_match: impl Fn(&E) -> bool,
+	parent: impl Fn(&E) -> Option<E>,
+) -> Option<E> {
+	let mut current = element;
+	for _ in 0..MAX_ANCESTRY_DEPTH {
+		if is_match(&current) {
+			return Some(current);
+		}
+		current = parent(&current)?;
+	}
+	None
 }
 
 /// An element that stands for its own `WindowServer` window but is absent
@@ -1064,7 +1106,9 @@ impl AxBackend for MacAx {
 		} else {
 			0
 		};
-		element_props(element, &values, child_count, WalkBounds::Read)
+		let mut props = element_props(&values, child_count, WalkBounds::Read)?;
+		props.actions = copy_strings_from_action_names(element).unwrap_or_default();
+		Ok(props)
 	}
 
 	fn walk_node(
@@ -1085,7 +1129,8 @@ impl AxBackend for MacAx {
 			.flatten()
 			.and_then(element_array)
 			.unwrap_or_default();
-		let mut props = element_props(element, &values, children.len(), read_bounds)?;
+		let mut props = element_props(&values, children.len(), read_bounds)?;
+		props.actions = copy_strings_from_action_names(element).unwrap_or_default();
 		props.partial |= !children_read;
 		Ok((props, children.into_iter().map(AxHandle::Mac).collect()))
 	}
@@ -1121,36 +1166,40 @@ impl AxBackend for MacAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
-		// A popup's value is chosen from its menu, not written. This runs before
-		// the text-target refusals: nothing is typed or written, and the verdict
-		// is the popup's own read-back after a real menu press.
-		let role = copy_held_attribute(element, "AXRole")?
-			.and_then(|value| value.downcast::<CFString>().ok());
-		if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
-			// Choosing opens the popup's menu, so the release helper starts
-			// up front.
-			return release_guard::scope(Presses::Process, || {
-				skylight::with_background_guard(element_pid(element)?, || popup::choose(element, value))
-			});
-		}
-		// Web AXValue can echo a write without the renderer accepting it. The
-		// API has no "unverified" outcome, so refuse before mutating that
-		// surface.
-		ensure_native_text_target(element)?;
-		if !attribute_settable(element, "AXValue") {
-			return Err(DesktopError::ax_failed(
-				"AXValue is not settable; no typing fallback was attempted",
-			));
-		}
-		if let Some(current) = copy_date(element, "AXValue") {
-			return set_date_value(element, value, current);
-		}
+		let entry_front = input::EntryFront::now();
 		let pid = element_pid(element)?;
-		// Focus is borrowed only from an app already in the background as the
-		// call starts: only then does the guard below watch for the user
-		// and restore the front app.
-		let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
+		// Arm the front-app guard before any synchronous AX probe, including
+		// the ref fingerprint: the user can pick this app while it blocks.
+		let started_in_background = entry_front.known_behind(pid);
 		skylight::with_background_guard(pid, || {
+			require_element_read_as(element)?;
+			let wid = element_window(element)
+				.as_deref()
+				.and_then(window_id)
+				.unwrap_or_default();
+			entry_front.require_behind(skylight::front_pid, pid, || wid)?;
+			// A popup's value is chosen from its menu, not written. This runs
+			// before the text-target refusals: nothing is typed or written, and
+			// the verdict is the popup's own read-back after a real menu press.
+			let role = copy_held_attribute(element, "AXRole")?
+				.and_then(|value| value.downcast::<CFString>().ok());
+			if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
+				// Choosing opens the popup's menu, so the release helper starts
+				// up front.
+				return release_guard::scope(Presses::Process, || popup::choose(element, value));
+			}
+			// Web AXValue can echo a write without the renderer accepting it. The
+			// API has no "unverified" outcome, so refuse before mutating that
+			// surface.
+			ensure_native_text_target(element)?;
+			if !attribute_settable(element, "AXValue") {
+				return Err(DesktopError::ax_failed(
+					"AXValue is not settable; no typing fallback was attempted",
+				));
+			}
+			if let Some(current) = copy_date(element, "AXValue") {
+				return set_date_value(element, value, current);
+			}
 			// Apps commit what reaches their field editor; several (Contacts,
 			// Font Book, System Settings search) echo an AXValue write without
 			// ever taking it, so replace the text the way `typeText` inserts it.
@@ -1163,13 +1212,16 @@ impl AxBackend for MacAx {
 			control::check()?;
 			control::intervention::check_press()?;
 			set_string_value(element, "AXValue", value)?;
-			verify_text_value(element, value, value)
+			verify_text_value(element, value, value)?;
+			confirm_read_as(|| read_as(element))
 		})
 	}
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
 		let element = mac_handle(h)?;
+		// The guard reads the user's front app before the element is read.
 		skylight::with_background_guard(element_pid(element)?, || {
+			require_element_read_as(element)?;
 			control::intervention::check_press()?;
 			set_focused(element)
 		})
@@ -1255,13 +1307,11 @@ impl AxBackend for MacAx {
 }
 
 fn element_props(
-	element: &AXUIElement,
 	values: &NodeValues,
 	child_count: usize,
 	read_bounds: WalkBounds,
 ) -> CoreResult<AxProps> {
 	let native_role = required_string(values.get(ROLE), "AXRole")?;
-	let actions = copy_strings_from_action_names(element).unwrap_or_default();
 	let read = |index| values.get(index).ok().flatten();
 	let string = |index| {
 		read(index)
@@ -1277,8 +1327,22 @@ fn element_props(
 	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
 	// A field with no label of its own is named by its placeholder ("Add
 	// Date"), as an accessible name falls back to it.
-	let description = nonempty(string(DESCRIPTION))
-		.or_else(|| nonempty(string(PLACEHOLDER)).filter(|_| title.is_none()));
+	let description = nonempty(string(DESCRIPTION));
+	let uses_placeholder = title.is_none() && description.is_none();
+	let description = description.or_else(|| {
+		if title.is_none() {
+			nonempty(string(PLACEHOLDER))
+		} else {
+			None
+		}
+	});
+	let label_complete = label_answered(values, TITLE)
+		&& (title.is_some()
+			|| (label_answered(values, DESCRIPTION)
+				&& (!uses_placeholder || label_answered(values, PLACEHOLDER))
+				&& (description.is_some()
+					|| native_role != "AXButton"
+					|| label_answered(values, SUBROLE))));
 	let identity = read_identity(values, &native_role, [&title, &value, &description]);
 	let role_name = window_control_name(&native_role, [&title, &description], string(SUBROLE));
 	let selected = selected(values, &native_role);
@@ -1296,13 +1360,24 @@ fn element_props(
 				.and_then(|(position, size)| frame(&position, &size)),
 			WalkBounds::Skip => None,
 		},
-		actions,
+		actions: Vec::new(),
 		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
 		partial: identity.is_none(),
+		label_complete,
 		identity,
 		selected,
 		role_name: role_name.map(str::to_owned),
 	})
+}
+
+/// An absent string is an answer; an error or a value of another type is
+/// not. Only fields that can choose the displayed label use this verdict.
+fn label_answered(values: &NodeValues, index: usize) -> bool {
+	match values.get(index) {
+		Ok(Some(value)) => value.downcast::<CFString>().is_ok(),
+		Ok(None) | Err(AXError::NoValue | AXError::AttributeUnsupported) => true,
+		Err(_) => false,
+	}
 }
 
 /// Whether the element reports itself selected. Only list and table rows and
@@ -1418,73 +1493,124 @@ fn perform_choosing(
 	// Read before any probe of the target, as for background input
 	// ([`input::EntryFront`]).
 	let entry_front = input::EntryFront::now();
-	let actions = copy_strings_from_action_names(element)?;
-	let Some(native) = supported_action(&actions, action).cloned() else {
-		return Err(unsupported_action(&native_action_name(action), &actions));
-	};
-	// AXRaise is an explicit request to change stacking, including the
-	// takeover preparation path. Other semantic actions must stay background.
-	if is_raise_action(action) {
-		if path.is_some() {
-			return Err(DesktopError::invalid_target("AXRaise opens no menu to choose an item from"));
-		}
-		return element_action_result(&native, send_action(element, &native));
+	let raise = is_raise_action(action);
+	if raise {
+		// Raising explicitly changes the front window; only its ref's
+		// identity, not the background-input boundary, constrains it.
+		require_read_as(|| read_as(element))?;
+	} else {
+		require_element_read_as(element)?;
 	}
-	let pid = element_pid(element)?;
-	let scroll = scroll_before_press(&native, &actions, || process::is_uikit(pid));
-	let perform = || press_into_view(&native, scroll, |action| send_action(element, action));
-	// A menu that a background application opens takes the keyboard from the
-	// user's app, so it is closed before the action returns; a frontmost
-	// application's menu stays open for the next call unless an item is asked
-	// for.
-	let background = entry_front.behind(pid);
-	let watch = path.is_some()
-		|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
-	skylight::with_background_watch(pid, |visit| {
-		// A popup in a system Open or Save panel opens its menu in the
-		// process that draws the panel.
-		let drawn = if watch {
-			innermost_window_id(element).map(|(id, _)| id)
-		} else {
-			None
-		};
-		let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
-		let before = if watch {
-			let before = capture::menu_windows(menu_pid).ok_or_else(|| {
-				DesktopError::ax_failed(format!(
-					"cannot list the open menus of process {menu_pid}, so a menu that {native} opens \
-					 could not be closed; nothing was performed"
-				))
-			})?;
-			if background {
-				activate_for_menu(element, pid, entry_front, visit)?;
+	let actions = copy_strings_from_action_names(element)?;
+	choose_action(
+		&actions,
+		action,
+		|| copy_bool(element, "AXEnabled"),
+		|native| {
+			// AXRaise is an explicit request to change stacking, including the
+			// takeover preparation path. Other semantic actions must stay
+			// background.
+			if raise {
+				if path.is_some() {
+					return Err(DesktopError::invalid_target(
+						"AXRaise opens no menu to choose an item from",
+					));
+				}
+				return element_action_result(native, send_action(element, native));
 			}
-			Some(before)
-		} else {
-			None
-		};
-		open_menu::guard(
-			open_menu::Press::Action(&native),
-			before.as_deref(),
-			path,
-			perform,
-			|before, path| {
-				// The user may have brought the target forward while its menu
-				// appeared.
-				let holds = || {
-					input::recheck_background(
-						background,
-						pid,
-						drawn.unwrap_or_default(),
-						skylight::front_pid,
-						|| visit.happened(),
-						|| Ok(()),
-					)
+			let pid = element_pid(element)?;
+			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
+			let perform = || {
+				entry_front.require_behind(skylight::front_pid, pid, || {
+					window_id(element).unwrap_or_default()
+				})?;
+				press_into_view(native, scroll, |action| send_action(element, action))
+			};
+			// A menu that a background application opens takes the keyboard from
+			// the user's app, so it is closed before the action returns; a
+			// frontmost application's menu stays open for the next call unless an
+			// item is asked for.
+			let background = entry_front.behind(pid);
+			let watch = path.is_some()
+				|| (background && open_menu::may_open(native, || copy_string(element, "AXRole")));
+			skylight::with_background_watch(pid, |visit| {
+				// A popup in a system Open or Save panel opens its menu in the
+				// process that draws the panel.
+				let drawn = if watch {
+					innermost_window_id(element).map(|(id, _)| id)
+				} else {
+					None
 				};
-				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT, holds)
-			},
-		)
-	})
+				let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
+				let before = if watch {
+					let before = capture::menu_windows(menu_pid).ok_or_else(|| {
+						DesktopError::ax_failed(format!(
+							"cannot list the open menus of process {menu_pid}, so a menu that {native} \
+							 opens could not be closed; nothing was performed"
+						))
+					})?;
+					if background {
+						activate_for_menu(element, pid, entry_front, visit)?;
+					}
+					Some(before)
+				} else {
+					None
+				};
+				open_menu::guard(
+					open_menu::Press::Action(native),
+					before.as_deref(),
+					path,
+					perform,
+					|before, path| {
+						// The user may have brought the target forward while its menu
+						// appeared.
+						let holds = || {
+							input::recheck_background(
+								background,
+								pid,
+								drawn.unwrap_or_default(),
+								skylight::front_pid,
+								|| visit.happened(),
+								|| Ok(()),
+							)
+						};
+						open_menu::settle(
+							menu_pid,
+							pid,
+							before,
+							path,
+							open_menu::CONTROL_MENU_TIMEOUT,
+							holds,
+						)
+					},
+				)
+			})
+		},
+	)
+}
+
+/// Chooses the element's spelling of `action` and dispatches it through
+/// `perform`. A press of an element that reports itself disabled (`enabled`
+/// reads its `AXEnabled`, `None` when it reports none) is refused before
+/// anything is sent: a disabled `AppKit` button still lists `AXPress` and
+/// answers it with success while its action never runs. Other actions, such as
+/// a scroll into view or a raise, still act on a disabled element.
+fn choose_action(
+	actions: &[String],
+	action: &str,
+	enabled: impl FnOnce() -> Option<bool>,
+	perform: impl FnOnce(&String) -> CoreResult<()>,
+) -> CoreResult<()> {
+	let Some(native) = supported_action(actions, action) else {
+		return Err(unsupported_action(&native_action_name(action), actions));
+	};
+	if native.eq_ignore_ascii_case("AXPress") && enabled() == Some(false) {
+		return Err(DesktopError::ax_failed(
+			"the element reports itself disabled, so nothing was sent: wait for it to become \
+			 enabled, or do what enables it first",
+		));
+	}
+	perform(native)
 }
 
 /// The refusal of `native`, an action the element does not list among
@@ -1606,10 +1732,28 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 	TextSurface::Unknown
 }
 
+/// Whether `pid` takes an AX text write into one of its native fields as the
+/// field's input. A Chromium-family app does not: its own fields (Chrome's
+/// address bar, find bar) show an `AXSelectedText` or `AXValue` write while the
+/// browser keeps the text it had. The address bar then suggests for, and
+/// Return opens, the page's own URL, so Return reloaded the page instead of
+/// going to the written address. Keys reach those fields as typing.
+fn takes_ax_text_writes(pid: libc::pid_t) -> bool {
+	!process::is_chromium(pid)
+}
+
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
-	if process::is_terminal(element_pid(element)?) {
+	let pid = element_pid(element)?;
+	if process::is_terminal(pid) {
 		return Err(DesktopError::ax_failed(
 			"terminal AX text represents its rendered grid, not terminal input; use win.type instead",
+		));
+	}
+	if !takes_ax_text_writes(pid) {
+		return Err(DesktopError::ax_failed(
+			"a Chromium-based app shows an AX text write in its own fields, such as the address bar, \
+			 without taking it, so Return would still act on the old text; nothing was written; use \
+			 el.type(text) instead, which types into the field",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
@@ -1648,6 +1792,50 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 
 fn verify_text_value(element: &AXUIElement, sent: &str, expected: &str) -> CoreResult<()> {
 	text_readback(sent, expected, copy_string(element, "AXValue").as_deref(), is_secure(element))
+}
+
+/// Every pre-action fingerprint probe must preserve the front-app boundary,
+/// even on paths whose longer-lived background guard starts after the probe.
+pub(super) fn require_element_read_as(element: &AXUIElement) -> CoreResult<()> {
+	require_read_as(|| {
+		checked_ref_read(skylight::front_pid, || Ok((element_pid(element)?, read_as(element)?)))
+	})
+}
+
+fn checked_ref_read(
+	front: impl Fn() -> Option<libc::pid_t>,
+	probe: impl FnOnce() -> CoreResult<(libc::pid_t, Option<AxProps>)>,
+) -> CoreResult<Option<AxProps>> {
+	let (entry, (pid, props)) = input::EntryFront::before(&front, probe)?;
+	if entry.behind(pid) && front() == Some(pid) {
+		return Err(DesktopError::user_intervened(
+			"the element's application came to the front while its reference was checked, so nothing \
+			 was sent",
+		));
+	}
+	Ok(props)
+}
+
+/// What `element` reads as now, for [`require_read_as`]: its role and labels
+/// from one batched read. `None` when the app does not answer the batch or
+/// the role, as when it is too busy: that cannot tell, and it costs none of
+/// the lone reads a walk falls back on, each with its own timeout. A
+/// destroyed element is `StaleRef`, as from the action itself.
+pub(super) fn read_as(element: &AXUIElement) -> CoreResult<Option<AxProps>> {
+	let read = NodeRead::Props;
+	let batch = NodeValues::batch(element, read);
+	if batch
+		.as_ref()
+		.is_err_and(|error| *error != AXError::InvalidUIElement)
+	{
+		return Ok(None);
+	}
+	let values = NodeValues::from_batch(batch, read.attributes(), |_| Err(AXError::CannotComplete));
+	match element_props(&values, 0, WalkBounds::Skip) {
+		Ok(props) => Ok(Some(props)),
+		Err(error) if error.code == ErrorCode::StaleRef => Err(error),
+		Err(_) => Ok(None),
+	}
 }
 
 fn is_secure(element: &AXUIElement) -> bool {
@@ -1808,6 +1996,9 @@ fn insert_selected_text(
 	text: &str,
 	behind_user: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<bool> {
+	if !takes_ax_text_writes(pid) {
+		return Ok(false);
+	}
 	if !takes_inserted_text(
 		|| text_surface(element),
 		copy_string(element, "AXRole").as_deref(),
@@ -1828,7 +2019,8 @@ fn insert_selected_text(
 	skylight::with_background_guard(pid, || {
 		control::intervention::check_press()?;
 		set_string_value(element, "AXSelectedText", text)?;
-		verify_text_value(element, text, &expected)
+		verify_text_value(element, text, &expected)?;
+		confirm_read_as(|| read_as(element))
 	})?;
 	Ok(true)
 }
@@ -2017,7 +2209,8 @@ impl TextField for LiveField<'_> {
 
 	fn insert(&self, text: &str) -> CoreResult<()> {
 		set_string_value(self.element, "AXSelectedText", text)?;
-		verify_text_value(self.element, text, text)
+		verify_text_value(self.element, text, text)?;
+		confirm_read_as(|| read_as(self.element))
 	}
 }
 
@@ -2512,9 +2705,17 @@ mod tests {
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
 		focused_window, is_outside_windows, may_borrow_focus, menu_window, perform_choosing,
 		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
-		select_attached, stringify_value, takes_inserted_text, target_window, window_records_of,
+		select_attached, standard_window_subrole, stringify_value, takes_inserted_text,
+		target_window, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
+
+	#[test]
+	fn an_unreadable_window_subrole_is_unknown_not_a_dialog() {
+		// The real system-wide AX element has no window subrole: an unsupported
+		// attribute, like a failed window read, cannot classify a dialog.
+		assert_eq!(standard_window_subrole(&create_system_wide()), None);
+	}
 
 	#[test]
 	fn batched_values_read_like_lone_reads() {
@@ -2580,7 +2781,10 @@ mod tests {
 
 	#[test]
 	fn only_an_element_whose_app_answered_every_identifying_attribute_has_an_identity() {
-		use super::{HELP, answered, read_identity};
+		use super::{
+			HELP, MacAx, WalkBounds, answered, element_props, read_identity, require_read_as,
+		};
+		use crate::desktop::ax::{AxHandle, AxRegistry, Uniqueness};
 
 		let error = |mut code: AXError| {
 			// SAFETY: An AXError-typed AXValue copies the one AXError it points
@@ -2596,11 +2800,11 @@ mod tests {
 		// SAFETY: kCFNull is a process-lifetime constant.
 		let null = unsafe { kCFNull }.unwrap();
 		// One walk read, in `NODE_ATTRIBUTES` order, with `help` as its `AXHelp`.
-		let walk = |help: &CFType| {
+		let walk_as = |title: &CFType, help: &CFType| {
 			let entries: [&CFType; 15] = [
 				null,
 				&role,
-				&title,
+				title,
 				&no_value,
 				null,
 				null,
@@ -2620,6 +2824,7 @@ mod tests {
 				|_| unreachable!("an answered batch needs no lone reads"),
 			)
 		};
+		let walk = |help: &CFType| walk_as(&title, help);
 		let go = Some("Go".to_string());
 		let identity = |values: &NodeValues| read_identity(values, "AXButton", [&go, &None, &None]);
 		// Missing and unsupported attributes are the same answer.
@@ -2633,6 +2838,37 @@ mod tests {
 		assert_eq!(identity(&walk(&failed)), Some(failing));
 		// One the app was too busy to answer leaves no identity.
 		assert!(identity(&walk(&busy)).is_none());
+
+		// HELP can be unanswered while the role and chosen title are known.
+		// Both the original ref and the action-time check use those labels,
+		// not the broader identity's completeness.
+		let stop = CFString::from_static_str("Stop");
+		for help in [&no_value, &busy] {
+			let registered = element_props(&walk(help), 0, WalkBounds::Skip).unwrap();
+			assert!(registered.label_complete);
+			let changed = element_props(&walk_as(&stop, &busy), 0, WalkBounds::Skip).unwrap();
+			assert!(changed.partial);
+			assert!(changed.label_complete);
+			let mut registry = AxRegistry::default();
+			let reference = registry.register(
+				&mut MacAx,
+				"fixture",
+				1,
+				AxHandle::Test(1),
+				&registered,
+				Uniqueness::Unknown,
+			);
+			let scope = registry.expect_read_as(&reference).unwrap();
+			let error = require_read_as(|| Ok(Some(changed))).unwrap_err();
+			assert_eq!(error.code, crate::desktop::error::ErrorCode::StaleRef);
+			assert!(scope.finish());
+		}
+		// An unanswered higher-priority title really can hide the label.
+		assert!(
+			!element_props(&walk_as(&busy, &no_value), 0, WalkBounds::Skip)
+				.unwrap()
+				.label_complete
+		);
 
 		// A batch that fails as a whole falls back to lone reads without the
 		// identity-only attributes, so the element has no identity.
@@ -2649,6 +2885,26 @@ mod tests {
 		);
 		assert!(identity(&lone).is_none());
 		assert!(!answered(&lone.get(CHILDREN)));
+	}
+
+	#[test]
+	fn a_ref_probe_refuses_when_the_user_picks_its_app_while_it_blocks() {
+		use super::checked_ref_read;
+		use crate::desktop::error::ErrorCode;
+
+		let front = std::cell::Cell::new(Some(9));
+		let result = checked_ref_read(
+			|| front.get(),
+			|| {
+				front.set(Some(7));
+				Ok((7, None))
+			},
+		);
+		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
+		// A target already in front, or one that stays behind, still passes
+		// the check even when its fingerprint was unanswered.
+		assert!(checked_ref_read(|| Some(7), || Ok((7, None))).is_ok());
+		assert!(checked_ref_read(|| Some(9), || Ok((7, None))).is_ok());
 	}
 
 	#[test]
@@ -2680,7 +2936,7 @@ mod tests {
 				NodeRead::Walk.attributes(),
 				|_| unreachable!("an answered batch needs no lone reads"),
 			);
-			element_props(&create_system_wide(), &values, 0, WalkBounds::Skip).unwrap()
+			element_props(&values, 0, WalkBounds::Skip).unwrap()
 		};
 		let unlabeled = field(null, null, add_date);
 		assert_eq!(unlabeled.description.as_deref(), Some("Add Date"));
@@ -2727,6 +2983,42 @@ mod tests {
 			element_action_result("AXPressAction", AXError::AttributeUnsupported).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
 		assert!(error.message.contains("observe the window"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_press_of_a_disabled_element_is_refused_before_anything_is_sent() {
+		let actions = ["AXPress", "AXScrollToVisible", "AXShowMenu"].map(String::from);
+		let mut sent = Vec::new();
+		let mut perform = |action, enabled| {
+			let result = super::choose_action(
+				&actions,
+				action,
+				|| enabled,
+				|native| {
+					sent.push(native.clone());
+					Ok(())
+				},
+			);
+			(result.map_err(|error| (error.code, error.message)), std::mem::take(&mut sent))
+		};
+		let (result, sent) = perform("press", Some(false));
+		let refused = result.unwrap_err();
+		assert_eq!(refused.0, ErrorCode::AxFailed);
+		assert!(refused.1.contains("disabled"), "{}", refused.1);
+		assert!(sent.is_empty(), "{sent:?}");
+		// Enabled, or silent about it: the press is dispatched.
+		assert_eq!(perform("press", Some(true)), (Ok(()), vec!["AXPress".to_owned()]));
+		assert_eq!(perform("press", None), (Ok(()), vec!["AXPress".to_owned()]));
+		// Other actions still dispatch on a disabled element.
+		assert_eq!(
+			perform("AXScrollToVisible", Some(false)),
+			(Ok(()), vec!["AXScrollToVisible".to_owned()])
+		);
+		assert_eq!(perform("showMenu", Some(false)), (Ok(()), vec!["AXShowMenu".to_owned()]));
+		// An action the element lacks is refused as unsupported, with no send.
+		let (result, sent) = perform("AXRaise", Some(false));
+		assert!(!result.unwrap_err().1.contains("disabled"));
+		assert!(sent.is_empty(), "{sent:?}");
 	}
 
 	#[test]
@@ -3151,6 +3443,22 @@ mod tests {
 			frame_matches: true,
 		}];
 		assert!(select_attached(&candidates, 57).is_err());
+	}
+
+	#[test]
+	fn an_element_belongs_to_the_nearest_listed_window_above_it() {
+		use super::nearest_matching;
+
+		// A suggestion list's text: statictext 5 > cell 4 > row 3 > table 2 >
+		// scroll area 1, listed in `AXWindows` > application 0.
+		let parent = |element: &u32| element.checked_sub(1);
+		let listed = |element: &u32| *element == 1;
+		assert_eq!(nearest_matching(5, listed, parent), Some(1));
+		// An element listed itself, as Finder's rename field is.
+		assert_eq!(nearest_matching(1, listed, parent), Some(1));
+		assert_eq!(nearest_matching(5, |element: &u32| *element == 9, parent), None);
+		// A parent that answers with the element itself ends at the bound.
+		assert_eq!(nearest_matching(5, |_: &u32| false, |element: &u32| Some(*element)), None);
 	}
 
 	#[test]

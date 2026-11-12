@@ -107,7 +107,7 @@ describe("browser targets in Tern", () => {
 		await startWindow(BLOCKS);
 		const tool = session();
 		opened.push("docs");
-		await invoke(tool, { action: "open", name: "docs", timeout: 5, app: { target: "Docs C" } });
+		await invoke(tool, { action: "open", name: "docs", timeout: 5, target: "Docs C" });
 		const { text, value } = await invoke(tool, { action: "targets", timeout: 5 });
 		expect(value).toEqual([
 			{ target: "5", title: "Docs A", url: "https://docs.example/a", shown: false, docked: true, driven: false },
@@ -122,7 +122,7 @@ describe("browser targets in Tern", () => {
 				tab: "docs",
 			},
 		]);
-		expect(text).toStartWith("Tern browser blocks (adopt one with app.target set to its id):\n");
+		expect(text).toStartWith("Tern browser blocks (adopt one with target set to its id):\n");
 		expect(text).toContain('- 5 "Docs A" https://docs.example/a (docked, not on screen)');
 		expect(text).toContain('- 7 "Docs C" https://docs.example/c (docked, on screen, driven by omp tab "docs")');
 	});
@@ -140,7 +140,7 @@ describe("browser targets elsewhere", () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		const failure = await invoke(session(), { action: "targets", timeout: 5 }).catch((error: unknown) => error);
 		expect(String(failure)).toContain("targets exist only inside a Tern pane");
-		expect(String(failure)).toContain("app.relay: true or the browser.relay setting");
+		expect(String(failure)).toContain('app: "relay" or the browser.relay setting');
 	});
 });
 
@@ -214,13 +214,13 @@ describe("browser targets with the relay", () => {
 			snapshot(3, { url: "https://old.example/", title: "Old", discarded: true }),
 		]);
 		const tool = session({ "browser.relayUrl": `http://127.0.0.1:${port}` });
-		const { text, value } = await invoke(tool, { action: "targets", timeout: 10, app: { relay: true } });
+		const { text, value } = await invoke(tool, { action: "targets", timeout: 10, app: "relay" });
 		expect(value).toEqual([
 			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
 			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/", shown: false },
 		]);
 		expect(text).toBe(
-			'Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n- "Mail" https://mail.example/ (active)\n- "Docs" https://docs.example/',
+			'Chrome pages via the relay (adopt one with target set to its URL or a title substring):\n- "Mail" https://mail.example/ (active)\n- "Docs" https://docs.example/',
 		);
 	}, 20_000);
 });

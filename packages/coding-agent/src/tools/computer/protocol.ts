@@ -5,6 +5,7 @@ import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-ca
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
+import secureInputTemplate from "../../prompts/tools/computer-secure-input.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
 
 export { COMPUTER_WORKER_ARG } from "../../cli/worker-selectors";
@@ -66,6 +67,16 @@ export type ComputerWorkerInbound =
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 
+/**
+ * Tells the model a run ended with macOS secure input on, when the user's
+ * Escape and typing never reach omp. While locked, the lock note already says
+ * keys fail (the lock screen's own field may be the holder).
+ */
+export function secureInputNotice(capabilities: DesktopCapabilities | undefined): string | undefined {
+	if (!capabilities?.secureInput || capabilities.screenLocked) return undefined;
+	return prompt.render(secureInputTemplate, { secureInputApp: capabilities.secureInputApp });
+}
+
 /** Successful computer run output returned to the host supervisor. */
 export interface ComputerRunOk {
 	displays: Array<TextContent | ImageContent>;
@@ -83,19 +94,25 @@ export const ESCAPE_AFTER_CALL_MESSAGE = prompt.render(escapeAfterCallMessage);
 /** Refusal of every later computer call until the user's next message acknowledges their Escape stop. */
 export const ESCAPE_REFUSED_MESSAGE = prompt.render(escapeRefusedMessage);
 
-/** Appended to a screenshot taken while the macOS lock screen is up. */
-export const SCREEN_LOCKED_CAPTURE_NOTE = prompt.render(screenLockedCaptureNote);
+/** Appended to a screenshot taken while the session's desktop is unavailable. */
+export function screenLockedCaptureNotice(platform: NodeJS.Platform = process.platform): string {
+	return prompt.render(screenLockedCaptureNote, { windows: platform === "win32" });
+}
 
 /**
- * Tells the model a run ended with the macOS screen locked or the session's
+ * Tells the model a run ended with the screen locked or the session's
  * display asleep, so lock-screen pixels and failed captures are not taken
  * for the app's state. Input is never refused because of it.
  */
-export function screenStateNotice(state: DesktopScreenState | undefined): string | undefined {
+export function screenStateNotice(
+	state: DesktopScreenState | undefined,
+	platform: NodeJS.Platform = process.platform,
+): string | undefined {
 	if (!state?.screenLocked && !state?.displayAsleep) return undefined;
 	return prompt.render(screenStateTemplate, {
 		screenLocked: state.screenLocked,
 		displayAsleep: state.displayAsleep,
+		windows: platform === "win32" && state.screenLocked,
 	});
 }
 
@@ -110,7 +127,7 @@ export interface ComputerScreenshot {
 	sourceWidth?: number;
 	sourceHeight?: number;
 	target: string;
-	/** The macOS lock screen was up: a display capture shows it, a window capture shows the window's last frame. */
+	/** The session was locked, disconnected or on a secure desktop when captured. */
 	screenLocked?: true;
 }
 

@@ -37,10 +37,14 @@ import {
 import type { BrowserHandle } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import * as sharedDaemon from "@oh-my-pi/pi-coding-agent/tools/browser/shared-daemon";
 import { stopSharedBrowserIfUnreachable } from "@oh-my-pi/pi-coding-agent/tools/browser/shared-daemon";
+import type { WorkerInbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { getTabsMapForTest, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import type { TabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import type { WorkerTabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { rejectionOf } from "../helpers/rejection";
 
 const DAEMON_NAME = "omp.browser.headless";
 /** The target id the incident log names for the tab whose close never landed. */
@@ -130,7 +134,7 @@ function makeWedgeHandle(scope: SharedTargetScope, options: WedgeOptions = {}): 
 }
 
 /** Tab whose page-close handshake never completes, so cleanup runs the forced path. */
-function makeWedgeTab(scope: SharedTargetScope, options: WedgeOptions = {}): TabSession {
+function makeWedgeTab(scope: SharedTargetScope, options: WedgeOptions = {}): WorkerTabSession {
 	return {
 		name: "logos-b2b",
 		browser: makeWedgeHandle(scope, options),
@@ -146,6 +150,7 @@ function makeWedgeTab(scope: SharedTargetScope, options: WedgeOptions = {}): Tab
 		lastActivityAt: Date.now(),
 		frozen: false,
 		worker: {
+			mode: "worker",
 			send: () => undefined,
 			onMessage: () => () => undefined,
 			onError: () => () => undefined,
@@ -153,7 +158,7 @@ function makeWedgeTab(scope: SharedTargetScope, options: WedgeOptions = {}): Tab
 				options.onTerminate?.();
 			},
 		},
-	} as unknown as TabSession;
+	} as unknown as WorkerTabSession;
 }
 
 /** Minimal tool session for the `runInTab` entry point. */
@@ -214,6 +219,7 @@ function makeBroker(
 const READY_MATCH = "DevTools listening on ws://127.0.0.1:63199/devtools/browser/wedged";
 
 afterEach(async () => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	resetOrphanRegistryForTest();
 	// oxlint-disable-next-line unicorn/no-useless-spread -- releasing tabs mutates the map
@@ -286,12 +292,136 @@ describe("browser cleanup — timed-out target close in a shared browser", () =>
 
 		await expect(
 			runInTab("logos-b2b", { code: "await wait(60_000);", timeoutMs: 20, session: makeSession() }),
-		).rejects.toThrow("hung past grace");
+		).rejects.toThrow('hung past its 20ms budget, so omp released tab "logos-b2b"');
 
 		expect(getTabsMapForTest().has("logos-b2b")).toBe(false);
+		// The next call names the kill once, without the advice the failed call already gave.
+		await expect(runInTab("logos-b2b", { code: "", timeoutMs: 20, session: makeSession() })).rejects.toThrow(
+			/Tab "logos-b2b" was killed:.*Reopen/i,
+		);
 		expect(await ownedTargets(scope)).toEqual([TARGET_ID]);
 		expect(healthCheck).toHaveBeenCalledTimes(1);
 		expect(healthCheck.mock.calls[0]?.[0]).toEqual(scope);
+	});
+
+	it("terminates an unresponsive cancelled run after the abort grace, not its inherited budget", async () => {
+		const scope = trackedScope();
+		spyOn(sharedDaemon, "stopSharedBrowserIfUnreachable").mockResolvedValue(false);
+		const terminated = Promise.withResolvers<void>();
+		const sent = Promise.withResolvers<void>();
+		const tab = makeWedgeTab(scope, { close: "fail", onTerminate: () => terminated.resolve() });
+		tab.worker.send = message => {
+			if (message.type === "run") sent.resolve();
+		};
+		getTabsMapForTest().set(tab.name, tab);
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		const failure = rejectionOf(
+			runInTab(tab.name, {
+				code: "while (true) {}",
+				timeoutMs: 300_000,
+				signal: controller.signal,
+				session: makeSession(),
+			}),
+		);
+		await sent.promise;
+		controller.abort();
+		vi.advanceTimersByTime(749);
+		expect(getTabsMapForTest().has(tab.name)).toBe(true);
+		vi.advanceTimersByTime(1);
+		await terminated.promise;
+		expect(await failure).toBeInstanceOf(ToolAbortError);
+		expect(getTabsMapForTest().has(tab.name)).toBe(false);
+	});
+
+	it.each([
+		{ expired: true, cancel: false, label: "caps startup after an expired run" },
+		{ expired: false, cancel: false, label: "preserves the startup budget of recovery before a run expires" },
+		{ expired: false, cancel: true, label: "cancels a stalled replacement and terminates its worker" },
+	])("$label", async ({ expired, cancel }) => {
+		const scope = trackedScope();
+		spyOn(sharedDaemon, "stopSharedBrowserIfUnreachable").mockResolvedValue(false);
+		const tab = makeWedgeTab(scope, { close: "fail" });
+		const runSent = Promise.withResolvers<string>();
+		tab.worker.send = message => {
+			if (message.type === "run") runSent.resolve(message.id);
+		};
+		getTabsMapForTest().set(tab.name, tab);
+		const RealWorker = globalThis.Worker;
+		const readyWait = Promise.withResolvers<void>();
+		const replacementTerminated = Promise.withResolvers<void>();
+		const controller = new AbortController();
+		let replacement: EventTarget | undefined;
+		vi.useFakeTimers();
+		let now = 0;
+		spyOn(performance, "now").mockImplementation(() => now);
+		const setTimer = globalThis.setTimeout;
+		let setupSent = false;
+		spyOn(globalThis, "setTimeout").mockImplementation(
+			Object.assign((...args: Parameters<typeof setTimeout>) => {
+				const timer = setTimer(...args);
+				if (setupSent && args[1] !== 2_000) readyWait.resolve();
+				return timer;
+			}, setTimer),
+		);
+		globalThis.Worker = class extends EventTarget {
+			constructor() {
+				super();
+				replacement = this;
+			}
+			postMessage(message: WorkerInbound): void {
+				if (message.type === "init") {
+					setupSent = true;
+					this.dispatchEvent(new MessageEvent("message", { data: { type: "setup" } }));
+				}
+				if (message.type === "close") {
+					this.dispatchEvent(new MessageEvent("message", { data: { type: "closed" } }));
+				}
+			}
+			terminate(): void {
+				replacementTerminated.resolve();
+			}
+		} as unknown as typeof Worker;
+		try {
+			const run = runInTab(tab.name, {
+				code: "",
+				timeoutMs: cancel ? 300_000 : expired ? 120_000 : 10_000,
+				signal: controller.signal,
+				session: makeSession(),
+			});
+			const result = run.catch(error => error);
+			const id = await runSent.promise;
+			const pending = tab.pending.get(id)!;
+			if (expired) pending.reject(new ToolError("Browser code execution timed out after 120000ms"));
+			else pending.resolve({ displays: [], screenshots: [], returnValue: true, recoverTab: true });
+			await readyWait.promise;
+			if (cancel) {
+				controller.abort();
+				vi.advanceTimersByTime(749);
+				expect(getTabsMapForTest().has(tab.name)).toBe(true);
+				vi.advanceTimersByTime(1);
+			} else {
+				now = 6_000;
+				vi.advanceTimersByTime(6_000);
+			}
+			if (!expired && !cancel) {
+				replacement!.dispatchEvent(new MessageEvent("message", { data: { type: "ready", info: {} } }));
+			}
+			const outcome = await result;
+			if (cancel) {
+				expect(outcome).toBeInstanceOf(ToolAbortError);
+				await replacementTerminated.promise;
+			} else if (expired) {
+				expect(outcome).toBeInstanceOf(ToolError);
+				expect(String(outcome)).toContain("released");
+				expect(String(outcome)).toContain("tools.maxTimeout");
+			} else {
+				expect(outcome).toMatchObject({ returnValue: true });
+			}
+			expect(getTabsMapForTest().has(tab.name)).toBe(!expired && !cancel);
+		} finally {
+			globalThis.Worker = RealWorker;
+		}
 	});
 
 	it("lets a release join an in-flight force-kill instead of tearing the tab down twice", async () => {

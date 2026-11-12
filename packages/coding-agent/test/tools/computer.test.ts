@@ -16,8 +16,10 @@ import {
 	type ComputerWorkerOutbound,
 	type ComputerWorkerTransport,
 	ESCAPE_AFTER_CALL_MESSAGE,
+	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
-	SCREEN_LOCKED_CAPTURE_NOTE,
+	screenLockedCaptureNotice,
+	screenStateNotice,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
 	beginComputerTurnForOwner,
@@ -80,6 +82,7 @@ const capabilities: DesktopCapabilities = {
 	spaces: true,
 	screenLocked: false,
 	displayAsleep: false,
+	secureInput: false,
 };
 
 const display: DesktopDisplay = {
@@ -130,8 +133,15 @@ class FakeNativeSession implements NativeDesktopSession {
 	/** Lock and sleep state reported by captures, capabilities and screenState, as the native session reads it live. */
 	screenLocked = false;
 	displayAsleep = false;
+	/** The app holding macOS secure input, reported by capabilities; unset while it is off. */
+	secureInputApp: string | undefined;
 	get capabilities(): DesktopCapabilities {
-		return { ...capabilities, screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
+		return {
+			...capabilities,
+			...this.screenState,
+			secureInput: this.secureInputApp !== undefined,
+			secureInputApp: this.secureInputApp,
+		};
 	}
 	get screenState(): DesktopScreenState {
 		return { screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
@@ -458,11 +468,13 @@ function workerPrelude(session: ToolSession, native: NativeDesktopSession): Eval
 		async capabilities() {
 			return native.capabilities;
 		},
-		async close() {
-			transport.inbound({ type: "close" });
-			await transport.waitFor(message => message.type === "closed");
-		},
+		reset: closeWorker,
+		close: closeWorker,
 	}));
+	async function closeWorker(): Promise<void> {
+		transport.inbound({ type: "close" });
+		await transport.waitFor(message => message.type === "closed");
+	}
 }
 
 afterAll(async () => {
@@ -478,6 +490,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const context = { session: toolSession(), toolCallId: "computer-validation" };
@@ -533,14 +546,45 @@ describe("computer prelude", () => {
 		await prelude.invoke({ action: "close" }, context);
 	});
 
-	it("routes run, capabilities, images, cancellation inputs, and close through one host controller", async () => {
+	it("keeps text it types, sets or copies out of status lines", () => {
+		const prelude = createComputerPrelude(toolSession(), () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async reset() {},
+			async close() {},
+		}));
+		const done = { content: [] };
+		const status = (chain: Array<{ method: string; args: unknown[] }>) =>
+			prelude.status?.({ action: "call", chain }, done);
+		const secret = "sentinel-password-4f9Q";
+		const lines = [
+			status([
+				{ method: "ref", args: ["e5"] },
+				{ method: "setValue", args: [secret] },
+			]),
+			status([
+				{ method: "window", args: [42] },
+				{ method: "type", args: [secret, { delayMs: 5 }] },
+			]),
+			status([{ method: "clipboard.write", args: [secret] }]),
+		];
+
+		expect(lines.join("\n")).not.toContain(secret);
+		expect(lines[0]).toBe('desktop.ref("e5").setValue(<hidden>)');
+		expect(status([{ method: "press", args: ["cmd+s"] }])).toBe('desktop.press("cmd+s")');
+	});
+
+	it("routes run, capabilities, images, and cancellation inputs through one host controller", async () => {
 		const calls: Array<{
 			code: string;
 			timeoutMs: number;
 			snapshot: ComputerSessionSnapshot;
 			signal?: AbortSignal;
 		}> = [];
-		let closeCount = 0;
 		const controller: ComputerController = {
 			async run(code: string, timeoutMs: number, runSnapshot: ComputerSessionSnapshot, signal?: AbortSignal) {
 				calls.push({ code, timeoutMs, snapshot: runSnapshot, signal });
@@ -557,9 +601,8 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return capabilities;
 			},
-			async close() {
-				closeCount += 1;
-			},
+			async reset() {},
+			async close() {},
 		};
 		const session = toolSession();
 		const prelude = createComputerPrelude(session, () => controller);
@@ -628,12 +671,6 @@ describe("computer prelude", () => {
 
 		const capabilityResult = await prelude.invoke({ action: "capabilities" }, context);
 		expect(capabilityResult.details).toEqual(capabilities);
-		await prelude.invoke({ action: "close" }, context);
-		await prelude.invoke({ action: "close" }, context);
-		expect(closeCount).toBe(1);
-		await expect(prelude.invoke({ action: "run", code: "await desktop.windows()" }, context)).rejects.toThrow(
-			"Computer session is closed",
-		);
 	});
 
 	it("installs a frozen JavaScript facade with handle proxies, runs, direct values, and display text", async () => {
@@ -645,6 +682,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const calls: unknown[] = [];
@@ -703,12 +741,7 @@ describe("computer prelude", () => {
 		expect(
 			await runInContext("computer.run(fn, { args: [7, /save/gi, argFn], read_only: true, timeout: 5 })", realm),
 		).toBe(42);
-		expect(
-			await runInContext(
-				'computer.run("41 + 1", { timeout: 2, action: "close", code: "old", fn: "old", unexpected: true })',
-				realm,
-			),
-		).toBe(42);
+		expect(await runInContext('computer.run("41 + 1", { timeout: 2 })', realm)).toBe(42);
 		expect(await runInContext("computer.capabilities()", realm)).toEqual(capabilities);
 
 		expect(
@@ -819,6 +852,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const calls: unknown[] = [];
@@ -831,6 +865,20 @@ describe("computer prelude", () => {
 		});
 		runInContext(prelude.javascript, realm);
 
+		await expect(
+			runInContext('computer.run("return 1;", { timeouts: 3, readOnly: true })', realm),
+		).rejects.toMatchObject({
+			name: "ToolError",
+			message: expect.stringContaining("readOnly: did you mean read_only"),
+		});
+		for (const key of ["a", "read", "out", ""]) {
+			await expect(
+				runInContext(`computer.run("return 1;", { ${JSON.stringify(key)}: true })`, realm),
+			).rejects.toMatchObject({
+				name: "ToolError",
+				message: expect.not.stringContaining("did you mean"),
+			});
+		}
 		await expect(
 			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
 		).rejects.toThrow("computer.run() args must be an array of the function's arguments after its scope");
@@ -906,6 +954,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const callValues: Record<string, unknown> = {
@@ -1310,7 +1359,7 @@ describe("computer prelude", () => {
 				`(async () => {
 					const win = await computer.window(42);
 					await win.ref("e1").doubleClick({ button: "right" });
-					await (await win.ref("e1")).doubleClick({ count: 3 });
+					await (await win.ref("e1")).doubleClick();
 					const found = await win.find({ role: "button" });
 					await found[0].doubleClick();
 					await computer.run(async ({ desktop }) => {
@@ -1418,6 +1467,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		definitions = [
@@ -1451,6 +1501,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 
@@ -1461,6 +1512,86 @@ describe("computer prelude", () => {
 });
 
 describe("computer worker round trips", () => {
+	it("rejects unknown computer options and forwards drag buttons", async () => {
+		class OptionsSession extends FakeNativeSession {
+			readonly draggedButtons: Array<string | undefined> = [];
+			override async axNode(ref: string): Promise<AxNode> {
+				if (ref === "e9") throw new Error("stale ref");
+				return super.axNode(ref);
+			}
+			override async drag(target: string, points: DesktopPoint[], options?: PointerOptions | null) {
+				this.draggedButtons.push(options?.button);
+				return super.drag(target, points, options);
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new OptionsSession();
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"strict-options",
+			`
+			const win = await desktop.window("42");
+			const el = await win.ref("e1");
+			const screen = await desktop.display("active");
+			const failures = [];
+			const check = async (name, call, invalid = { unexpected: true }) => {
+				let error;
+				try { await call(invalid); } catch (caught) { error = caught; }
+				if (!error) {
+					failures.push(name + " accepted " + Object.keys(invalid).join(", "));
+				} else if (error.name !== "ToolError" || !error.message.includes(name) || !error.message.includes("Valid names:")) {
+					failures.push(name + ": " + error.message);
+				} else {
+					for (const key of Object.keys(invalid)) assert(error.message.includes(key), error.message);
+					if (!invalid.max_depth) assert(!error.message.includes("did you mean"), error.message);
+					if (invalid.max_depth && !error.message.includes("max_depth: did you mean maxDepth")) failures.push("ax missing max_depth spelling hint");
+				}
+			};
+			await check("ax", o => win.ax(o), { depth: 3, max_depth: 3 });
+			await check("wait", o => wait(() => true, o), { timeoutMs: 10 });
+			await check("wait", o => wait(0, o), { timeout: 10, interval: 10 });
+			await check("observe", o => win.observe(o));
+			await check("find", o => win.find(o));
+			await check("windows", o => desktop.windows(o), { includeOffscreen: true });
+			await check("windows", o => desktop.windows(o), { wait: 5000 });
+			await check("windows", o => desktop.windows(o), { d: true });
+			await check("click", o => win.click(1, 2, o), { on: true });
+			await check("control.acquire", o => desktop.control.acquire(o), { "": true });
+			await check("window", o => desktop.window(o));
+			await check("apps.list", o => desktop.apps.list(o));
+			await check("apps.open", o => desktop.apps.open("test.editor", o));
+			await check("selectText", o => el.selectText("Save", o));
+			await check("perform", o => el.perform("press", o));
+			await check("press", o => el.press(o));
+			await check("press", o => el.press("enter", o));
+			await check("press", o => el.press(undefined, o), { takeover: true });
+			await check("press", o => el.press({ menu: ["Save"] }, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press(undefined, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press({ menu: ["Save"] }, o), { takeover: true });
+			await check("type", o => el.type("Save", o));
+			await check("click", o => el.click(o));
+			await check("doubleClick", o => el.doubleClick(o), { count: 3 });
+			await check("screenshot", o => win.screenshot(o));
+			await check("zoom", o => win.zoom({ x: 0, y: 0, width: 1, height: 1 }, o));
+			await check("doubleClick", o => win.doubleClick(1, 2, o));
+			await check("move", o => win.move(1, 2, o));
+			await check("drag", o => win.drag([[1, 2], [3, 4]], o));
+			await check("scroll", o => win.scroll(1, 2, o), { x: 1, y: 2, dx: 3 });
+			await check("type", o => win.type("Save", o));
+			await check("press", o => win.press("enter", o));
+			await check("holdKeys", o => win.holdKeys(["shift"], o));
+			await check("holdMouse", o => win.holdMouse(1, 2, o));
+			for (const target of [win, screen, desktop]) {
+				await target.drag([[1, 2], [3, 4]], { button: "middle" });
+			}
+			assert(failures.length === 0, failures.join("; "));
+		`,
+		);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(native.draggedButtons).toEqual(["middle", "middle", "middle"]);
+	});
+
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
@@ -1515,6 +1646,23 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	it("reports Windows unavailable desktops without claiming macOS lock-screen contents", () => {
+		const state = { screenLocked: true, displayAsleep: false };
+		for (const notice of [screenLockedCaptureNotice("win32"), screenStateNotice(state, "win32")]) {
+			expect(notice).toContain("Windows reports a locked or disconnected session");
+			expect(notice).not.toContain("macOS");
+			expect(notice).not.toContain("unlocks the Mac");
+		}
+		expect(screenStateNotice({ screenLocked: false, displayAsleep: false }, "win32")).toBeUndefined();
+	});
+
+	it("keeps the macOS capture and display-sleep explanations", () => {
+		expect(screenLockedCaptureNotice("darwin")).toContain("macOS is showing its lock screen");
+		expect(screenStateNotice({ screenLocked: false, displayAsleep: true }, "darwin")).toContain(
+			"Nothing on that display can be captured or clicked until it wakes.",
+		);
+	});
+
 	it("marks a screenshot taken behind the lock screen, and only then", async () => {
 		for (const locked of [true, false]) {
 			const transport = new MemoryTransport();
@@ -1529,7 +1677,7 @@ describe("computer worker round trips", () => {
 			const lines = caption?.type === "text" ? caption.text.split("\n") : [];
 			if (locked) {
 				expect(lines).toHaveLength(2);
-				expect(lines[1]).toBe(SCREEN_LOCKED_CAPTURE_NOTE);
+				expect(lines[1]).toBe(screenLockedCaptureNotice());
 				expect(result.payload.screenshots[0]?.screenLocked).toBe(true);
 				expect(result.payload.returnValue).toMatchObject({ screenLocked: true });
 			} else {
@@ -1555,7 +1703,7 @@ describe("computer worker round trips", () => {
 			if (locked) {
 				expect(result.content[0]).toMatchObject({
 					type: "text",
-					text: expect.stringMatching(/^Note: when this run ended the screen is locked\. /),
+					text: expect.stringMatching(/^Note: when this run ended the screen is locked\.\s/),
 				});
 			} else {
 				expect(notes).toEqual([]);
@@ -1579,7 +1727,7 @@ describe("computer worker round trips", () => {
 			if (result.ok) return;
 			const [first, ...rest] = result.error.message.split("\n");
 			expect(first).toBe("verification failed");
-			if (locked) expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+			if (locked) expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\.\s/);
 			else expect(rest).toEqual([]);
 		}
 	});
@@ -1595,9 +1743,38 @@ describe("computer worker round trips", () => {
 		);
 		const [note] = result.content;
 		const text = note?.type === "text" ? note.text : "";
-		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\. /);
+		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\.\s/);
 		expect(text).toContain("Nothing on that display can be captured or clicked until it wakes.");
 		expect(text).toContain("`computer.display`");
+	});
+
+	it("names the app holding secure input in a run's note, and leaves the note out while locked", async () => {
+		const session = toolSession();
+		const native = new FakeNativeSession();
+		const prelude = workerPrelude(session, native);
+		const run = async () => {
+			const result = await prelude.invoke(
+				{ action: "run", code: "await desktop.click(1, 2)" },
+				{ session, toolCallId: "secure-run", signal: new AbortController().signal },
+			);
+			return result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		};
+
+		native.secureInputApp = "SecurityAgent";
+		const held = await run();
+		expect(held).toContain("secure input");
+		expect(held).toContain("held by `SecurityAgent`");
+
+		// The lock screen's own password field holds it: the lock note already says keys fail.
+		native.screenLocked = true;
+		native.secureInputApp = "loginwindow";
+		const locked = await run();
+		expect(locked).toContain("the screen is locked");
+		expect(locked).not.toContain("secure input");
+
+		native.screenLocked = false;
+		native.secureInputApp = undefined;
+		expect(await run()).not.toContain("secure input");
 	});
 
 	it("adds the lock state to a run timed out by a hung native call without reading capabilities", async () => {
@@ -1629,7 +1806,7 @@ describe("computer worker round trips", () => {
 		if (result.ok) return;
 		const [first, ...rest] = result.error.message.split("\n");
 		expect(first).toBe("Computer code execution timed out after 50ms");
-		expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+		expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\.\s/);
 		expect(native.blockingReads).toBe(0);
 	});
 
@@ -2914,6 +3091,24 @@ describe("expanded computer APIs", () => {
 		});
 	});
 
+	it("reopens the desktop session after computer.close(), still refusing calls after the user's Escape", async () => {
+		const { native, prelude, context, close } = escapeHarness();
+		try {
+			await prelude.invoke(CLICK, context);
+			await prelude.invoke({ action: "close" }, context);
+			expect(native.closeCount).toBe(1);
+			await prelude.invoke(CLICK, context);
+			expect(native.clickCount).toBe(2);
+
+			native.escapeStops += 1;
+			await prelude.invoke({ action: "close" }, context);
+			await expect(prelude.invoke(CLICK, context)).rejects.toThrow(ESCAPE_REFUSED_MESSAGE);
+			expect(native.clickCount).toBe(2);
+		} finally {
+			await close();
+		}
+	});
+
 	it("reports what the stopped operation said, such as a failed restoration, ahead of the stop", async () => {
 		const { native, prelude, context, close } = escapeHarness();
 		try {
@@ -3951,6 +4146,7 @@ describe("display hold follows the agent turn", () => {
 			releaseDisplay(turn) {
 				releases.push(turn);
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const context = { session, toolCallId: "computer-turn", signal: new AbortController().signal };
@@ -4950,7 +5146,7 @@ describe("computer background fallback", () => {
 		});
 	});
 
-	it("never forwards a model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
+	it("rejects model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
 		const native = new RefusingSession();
 		const holds: NativeHoldOptions[] = [];
 		native.holdKeys = async (_target: string, _keys: string[], options: NativeHoldOptions) => {
@@ -4960,10 +5156,18 @@ describe("computer background fallback", () => {
 		native.holdMouse = async (_target: string, _x: number, _y: number, options: NativeHoldOptions) => {
 			holds.push(options);
 		};
+		const rejected = await run(
+			native,
+			'const win = await desktop.window("42"); await win.holdMouse(1, 2, { duration: 0, returnFocus: true });',
+			"takeover",
+		);
+		expect(rejected.ok).toBe(false);
+		if (!rejected.ok) expect(rejected.error.message).toContain("unknown option(s): returnFocus");
+		expect(holds).toEqual([]);
 		const code = [
 			'const win = await desktop.window("42");',
-			"await win.holdMouse(1, 2, { duration: 0, takeover: true, returnFocus: true });",
-			"await win.holdKeys(['a'], { duration: 0, returnFocus: true });",
+			"await win.holdMouse(1, 2, { duration: 0, takeover: true });",
+			"await win.holdKeys(['a'], { duration: 0 });",
 		].join("\n");
 		await run(native, code, "takeover");
 		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);
