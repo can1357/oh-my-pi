@@ -71,6 +71,21 @@ function emptyStream(): AssistantMessageEventStream {
 	return Object.assign(iterator, { result: async () => message }) as unknown as AssistantMessageEventStream;
 }
 
+/** A stream that records the key its request resolves before replaying {@link fakeStream}. */
+function keyRecordingStream(options: SimpleStreamOptions | undefined, keys: unknown[]): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
+			keys.push(await options.apiKey({ error: undefined, lastChance: false }));
+			for await (const event of fakeStream()) stream.push(event);
+		} catch (error) {
+			stream.fail(error);
+		}
+	})();
+	return stream;
+}
+
 interface FakeRegistryOptions {
 	models: Model<Api>[];
 	authedProviders: string[];
@@ -336,21 +351,7 @@ describe("bench OAuth account selection", () => {
 					writeStdout: () => {},
 					writeStderr: () => {},
 					setExitCode: () => {},
-					streamSimple: (_model, _context, options) => {
-						const stream = new AssistantMessageEventStream();
-						void (async () => {
-							try {
-								if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
-								keys.push(await options.apiKey({ error: undefined, lastChance: false }));
-								for await (const event of fakeStream()) {
-									stream.push(event);
-								}
-							} catch (error) {
-								stream.fail(error);
-							}
-						})();
-						return stream;
-					},
+					streamSimple: (_model, _context, options) => keyRecordingStream(options, keys),
 				},
 			);
 			expect(summary.failures).toBe(0);
@@ -384,15 +385,7 @@ describe("bench OAuth account selection", () => {
 					writeStdout: () => {},
 					writeStderr: () => {},
 					setExitCode: () => {},
-					streamSimple: (_model, _context, options) => {
-						const stream = fakeStream();
-						const iterator = (async function* () {
-							if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
-							keys.push(await options.apiKey({ error: undefined, lastChance: false }));
-							yield* stream;
-						})();
-						return Object.assign(iterator, { result: stream.result }) as unknown as AssistantMessageEventStream;
-					},
+					streamSimple: (_model, _context, options) => keyRecordingStream(options, keys),
 				},
 			);
 			expect(summary.failures).toBe(0);
