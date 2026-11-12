@@ -6,10 +6,10 @@ import type {
 	ApiKeyResolver,
 	AssistantMessage,
 	AssistantMessageEvent,
-	AssistantMessageEventStream,
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -337,13 +337,19 @@ describe("bench OAuth account selection", () => {
 					writeStderr: () => {},
 					setExitCode: () => {},
 					streamSimple: (_model, _context, options) => {
-						const stream = fakeStream();
-						const iterator = (async function* () {
-							if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
-							keys.push(await options.apiKey({ error: undefined, lastChance: false }));
-							yield* stream;
+						const stream = new AssistantMessageEventStream();
+						void (async () => {
+							try {
+								if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
+								keys.push(await options.apiKey({ error: undefined, lastChance: false }));
+								for await (const event of fakeStream()) {
+									stream.push(event);
+								}
+							} catch (error) {
+								stream.fail(error);
+							}
 						})();
-						return Object.assign(iterator, { result: stream.result });
+						return stream;
 					},
 				},
 			);
@@ -645,14 +651,18 @@ describe("bench service tier", () => {
 				writeStderr: () => {},
 				setExitCode: () => {},
 				streamSimple: () => {
-					const stream = fakeStream();
-					const iterator = (async function* () {
-						for await (const event of stream) {
-							if (event.type === "done") event.message.disabledFeatures = ["priority"];
-							yield event;
+					const stream = new AssistantMessageEventStream();
+					void (async () => {
+						try {
+							for await (const event of fakeStream()) {
+								if (event.type === "done") event.message.disabledFeatures = ["priority"];
+								stream.push(event);
+							}
+						} catch (error) {
+							stream.fail(error);
 						}
 					})();
-					return Object.assign(iterator, { result: stream.result });
+					return stream;
 				},
 			},
 		);
