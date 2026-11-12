@@ -243,7 +243,7 @@ impl MacInput {
 		require_phone_screen(window, remote)?;
 		// A takeover write goes to the window brought to the front for it.
 		let behind_user = || match mode {
-			DeliveryMode::Background => entry_front.require_behind(skylight::front_pid(), pid, wid),
+			DeliveryMode::Background => entry_front.require_behind(skylight::front_pid, pid, || wid),
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => Ok(()),
 		};
 		let inserted = inserts_first(mode, element.is_some(), text, || {
@@ -574,7 +574,7 @@ fn selection_behind<T>(
 ) -> CoreResult<Option<T>> {
 	let selection = select(entry_front.known_behind(pid))?;
 	if selection.is_none() {
-		entry_front.require_behind(front(), pid, wid)?;
+		entry_front.require_behind(front, pid, || wid)?;
 	}
 	Ok(selection)
 }
@@ -1626,14 +1626,16 @@ impl EntryFront {
 		front == Some(pid) && self.0 != Some(pid)
 	}
 
-	/// Refuses once [`Self::came_forward`] holds for window `wid`'s `pid`.
+	/// Resolves `window` before sampling `front`: a window's AX lookup can
+	/// block while the user brings the target forward.
 	pub(super) fn require_behind(
 		self,
-		front: Option<libc::pid_t>,
+		front: impl FnOnce() -> Option<libc::pid_t>,
 		pid: libc::pid_t,
-		wid: u32,
+		window: impl FnOnce() -> u32,
 	) -> CoreResult<()> {
-		if self.came_forward(front, pid) {
+		let wid = window();
+		if self.came_forward(front(), pid) {
 			return Err(came_forward_refusal(wid));
 		}
 		Ok(())
@@ -2311,7 +2313,7 @@ fn menu_press_verdict(
 	if let Some(refusal) = refusal {
 		return Err(refusal);
 	}
-	entry.require_behind(front(), pid, wid)
+	entry.require_behind(front, pid, || wid)
 }
 
 /// Posts background pointer `event` for window `wid` of `pid` to `to_wid` of
@@ -8073,15 +8075,27 @@ mod tests {
 	#[test]
 	fn a_native_text_write_refuses_once_its_app_came_forward() {
 		use crate::desktop::error::ErrorCode;
-		// The user (app 9) brought the target (7) forward while the write's
-		// probes blocked: the text would land in the field they took over.
+		// The window lookup blocks while the user picks the target. The
+		// front process must be sampled after that lookup, not before it.
+		let front = std::cell::Cell::new(Some(9));
 		let error = EntryFront(Some(9))
-			.require_behind(Some(7), 7, 42)
+			.require_behind(
+				|| front.get(),
+				7,
+				|| {
+					front.set(Some(7));
+					42
+				},
+			)
 			.unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		// Still behind the user, or already the user's own app: the write goes.
-		EntryFront(Some(9)).require_behind(Some(9), 7, 42).unwrap();
-		EntryFront(Some(7)).require_behind(Some(7), 7, 42).unwrap();
+		EntryFront(Some(9))
+			.require_behind(|| Some(9), 7, || 42)
+			.unwrap();
+		EntryFront(Some(7))
+			.require_behind(|| Some(7), 7, || 42)
+			.unwrap();
 	}
 
 	#[test]

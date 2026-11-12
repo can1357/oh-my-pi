@@ -470,7 +470,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bf601cccedfffec598ec2db1f9d6745885458bccc0e8916d7023f017c94b3d0"
 dependencies = [
  "atspi-common",
- "atspi-connection",
  "atspi-proxies",
  "zbus",
 ]
@@ -489,18 +488,6 @@ dependencies = [
  "zbus-lockstep-macros",
  "zbus_names",
  "zvariant",
-]
-
-[[package]]
-name = "atspi-connection"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fab8e4f574f5a7d3af280b38eff25fb6f47a537dac9ae39ce152f52b19fb10b"
-dependencies = [
- "atspi-common",
- "atspi-proxies",
- "futures-lite",
- "zbus",
 ]
 
 [[package]]

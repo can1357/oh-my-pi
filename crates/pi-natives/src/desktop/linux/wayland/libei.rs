@@ -18,7 +18,7 @@ use xutf::graphemes_str;
 use super::xkb::{KeyStroke, KeyboardLayout};
 use crate::desktop::{
 	backend::{Modifiers, MouseButton, PointerEvent},
-	control,
+	control::{self, cancellable},
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
 	linux::pace_clicks,
@@ -101,24 +101,6 @@ fn close_session(runtime: &tokio::runtime::Runtime, session: &RemoteDesktopSessi
 	let _ = runtime.block_on(async {
 		tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await
 	});
-}
-
-/// Waits for the original request or a generation-revocation wake. Cancellation
-/// drops that request, never polls on a timer or starts it again.
-pub(super) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResult<T> {
-	control::check()?;
-	let Some(token) = control::current_token() else {
-		return Ok(future.await);
-	};
-	let future = std::pin::pin!(future);
-	let cancelled = std::pin::pin!(token.cancelled());
-	match futures::future::select(cancelled, future).await {
-		futures::future::Either::Left((error, _)) => Err(error),
-		futures::future::Either::Right((result, _)) => {
-			token.check()?;
-			Ok(result)
-		},
-	}
 }
 
 /// Bounds a wait on the `RemoteDesktop` permission dialog by the current
