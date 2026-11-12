@@ -1077,8 +1077,11 @@ async fn write_value(
 			// The range only where it explains the value: an unbounded control
 			// reports ±f64::MAX, hundreds of digits each.
 			let range = match (proxy.minimum_value().await, proxy.maximum_value().await) {
-				(Ok(min), Ok(max)) if value < min || value > max => {
-					format!(" (its range is {min} to {max})")
+				(Ok(min), _) if value < min && min != -f64::MAX => {
+					format!(" (its minimum is {min})")
+				},
+				(_, Ok(max)) if value > max && max != f64::MAX => {
+					format!(" (its maximum is {max})")
 				},
 				_ => String::new(),
 			};
@@ -1996,8 +1999,6 @@ mod tests {
 		use atspi::zbus::{connection::Builder as ConnectionBuilder, interface};
 
 		/// What a control does with a write: takes it, clamps it to its range
-		/// (GTK, Qt), keeps its old value while answering (Qt), or takes it a
-		/// What a control does with a write: takes it, clamps it to its range
 		/// (GTK, Qt), keeps its old value while answering (Qt), takes it after
 		/// the first read back, or stores it as `float`.
 		#[derive(Clone, Copy)]
@@ -2009,13 +2010,12 @@ mod tests {
 			Single,
 		}
 
-		/// `org.a11y.atspi.Value` over the range 0 to 100, or one that cannot
-		/// say its range.
+		/// `org.a11y.atspi.Value` with optional bounds.
 		struct Value {
 			current: Arc<Mutex<f64>>,
 			pending: Mutex<Option<f64>>,
 			takes:   Takes,
-			ranged:  bool,
+			bounds:  Option<(f64, f64)>,
 		}
 
 		#[interface(name = "org.a11y.atspi.Value")]
@@ -2036,7 +2036,10 @@ mod tests {
 				let mut current = self.current.lock().unwrap();
 				match self.takes {
 					Takes::Exact => *current = value,
-					Takes::Clamped => *current = value.clamp(0.0, 100.0),
+					Takes::Clamped => {
+						let (min, max) = self.bounds.unwrap_or((0.0, 100.0));
+						*current = value.clamp(min, max);
+					},
 					Takes::Ignored => {},
 					Takes::Later => *self.pending.get_mut().unwrap() = Some(value),
 					#[expect(clippy::cast_possible_truncation, reason = "a float-storing toolkit")]
@@ -2046,41 +2049,56 @@ mod tests {
 
 			#[zbus(property)]
 			fn minimum_value(&self) -> atspi::zbus::fdo::Result<f64> {
-				self.range(0.0)
+				self.range(|(min, _)| min)
 			}
 
 			#[zbus(property)]
 			fn maximum_value(&self) -> atspi::zbus::fdo::Result<f64> {
-				self.range(100.0)
+				self.range(|(_, max)| max)
 			}
 		}
 
 		impl Value {
-			fn range(&self, bound: f64) -> atspi::zbus::fdo::Result<f64> {
-				if self.ranged {
-					Ok(bound)
-				} else {
-					Err(atspi::zbus::fdo::Error::Failed("no range".to_owned()))
-				}
+			fn range(&self, bound: impl FnOnce((f64, f64)) -> f64) -> atspi::zbus::fdo::Result<f64> {
+				self
+					.bounds
+					.map(bound)
+					.ok_or_else(|| atspi::zbus::fdo::Error::Failed("no range".to_owned()))
 			}
 		}
 
 		const PEER: &str = ":1.7";
-		// Path, what the control does, whether it says its range, the value
-		// written, and the error's text (`None`: the write succeeds).
-		let cases: [(&str, Takes, bool, f64, Option<&str>); 6] = [
-			("/exact", Takes::Exact, true, 37.25, None),
-			("/later", Takes::Later, true, 37.0, None),
-			("/single", Takes::Single, true, 0.3, None),
+		// Path, what the control does, its bounds, the value written,
+		// and the error's text (`None`: the write succeeds).
+		type Case = (&'static str, Takes, Option<(f64, f64)>, f64, Option<&'static str>);
+		let bounded = Some((0.0, 100.0));
+		let cases: [Case; 8] = [
+			("/exact", Takes::Exact, bounded, 37.25, None),
+			("/later", Takes::Later, bounded, 37.0, None),
+			("/single", Takes::Single, bounded, 0.3, None),
+			(
+				"/minimum_only",
+				Takes::Clamped,
+				Some((0.0, f64::MAX)),
+				-1.0,
+				Some("wrote -1; the control now reads 0 (its minimum is 0)."),
+			),
+			(
+				"/maximum_only",
+				Takes::Clamped,
+				Some((-f64::MAX, 100.0)),
+				150.0,
+				Some("wrote 150; the control now reads 100 (its maximum is 100)."),
+			),
 			(
 				"/clamped",
 				Takes::Clamped,
-				true,
+				bounded,
 				150.0,
-				Some("wrote 150; the control now reads 100 (its range is 0 to 100)"),
+				Some("wrote 150; the control now reads 100 (its maximum is 100)"),
 			),
-			("/ignored", Takes::Ignored, true, 37.0, Some("wrote 37; the control now reads 20.")),
-			("/unranged", Takes::Clamped, false, 150.0, Some("wrote 150; the control now reads 100.")),
+			("/ignored", Takes::Ignored, bounded, 37.0, Some("wrote 37; the control now reads 20.")),
+			("/unranged", Takes::Clamped, None, 150.0, Some("wrote 150; the control now reads 100.")),
 		];
 		let rt = Builder::new_current_thread().enable_all().build().unwrap();
 		let results = rt.block_on(async {
@@ -2089,9 +2107,9 @@ mod tests {
 				.server(atspi::zbus::Guid::generate())
 				.unwrap()
 				.p2p();
-			for &(path, takes, ranged, ..) in &cases {
+			for &(path, takes, bounds, ..) in &cases {
 				let current = Arc::new(Mutex::new(20.0));
-				let control = Value { current, pending: Mutex::new(None), takes, ranged };
+				let control = Value { current, pending: Mutex::new(None), takes, bounds };
 				builder = builder.serve_at(path, control).unwrap();
 			}
 			let client = ConnectionBuilder::unix_stream(client).p2p().build();
