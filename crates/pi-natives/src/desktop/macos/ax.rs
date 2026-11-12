@@ -3186,7 +3186,7 @@ mod tests {
 	fn linked_field(
 		title: Option<&'static str>,
 		label: Result<Option<&'static str>, AXError>,
-	) -> crate::desktop::ax::AxProps {
+	) -> (crate::desktop::ax::AxProps, super::AxReadAs) {
 		let role = CFString::from_static_str("AXTextField");
 		let title = title.map(CFString::from_static_str);
 		let link = create_system_wide();
@@ -3201,19 +3201,20 @@ mod tests {
 			NodeRead::Walk.attributes(),
 			|_| unreachable!("an answered batch needs no lone reads"),
 		);
-		super::labelled_props(&values, 0, super::WalkBounds::Skip, |_, attribute| {
+		let props = super::labelled_props(&values, 0, super::WalkBounds::Skip, |_, attribute| {
 			if attribute == "AXValue" {
 				label.map(|label| label.map(|label| CFString::from_static_str(label).into()))
 			} else {
 				Ok(None)
 			}
 		})
-		.unwrap()
+		.unwrap();
+		(props, super::read_as_values(&values).unwrap().unwrap())
 	}
 
 	fn check_linked_field(
 		before: &crate::desktop::ax::AxProps,
-		after: crate::desktop::ax::AxProps,
+		after: super::AxReadAs,
 	) -> crate::desktop::error::CoreResult<()> {
 		use crate::desktop::ax::{AxHandle, AxRegistry, Uniqueness};
 		let mut registry = AxRegistry::default();
@@ -3231,22 +3232,22 @@ mod tests {
 
 	#[test]
 	fn an_own_label_disappearing_is_refused_even_when_the_link_is_unread() {
-		let before = linked_field(Some("City"), Ok(None));
-		let after = linked_field(None, Err(AXError::CannotComplete));
+		let (before, _) = linked_field(Some("City"), Ok(None));
+		let (_, after) = linked_field(None, Err(AXError::CannotComplete));
 		assert_eq!(check_linked_field(&before, after).unwrap_err().code, ErrorCode::StaleRef);
 	}
 
 	#[test]
 	fn a_changed_linked_label_alone_is_not_an_action_guard() {
-		let before = linked_field(None, Ok(Some("City")));
-		let after = linked_field(None, Ok(Some("Street")));
+		let (before, _) = linked_field(None, Ok(Some("City")));
+		let (_, after) = linked_field(None, Ok(Some("Street")));
 		assert!(check_linked_field(&before, after).is_ok());
 	}
 
 	#[test]
 	fn an_unchanged_linked_label_does_not_refuse_its_control() {
-		let before = linked_field(None, Ok(Some("City")));
-		assert!(check_linked_field(&before, before.clone()).is_ok());
+		let (before, after) = linked_field(None, Ok(Some("City")));
+		assert!(check_linked_field(&before, after).is_ok());
 	}
 
 	#[test]
