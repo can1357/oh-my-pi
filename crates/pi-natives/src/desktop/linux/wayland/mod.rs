@@ -278,10 +278,10 @@ impl Backend for WaylandBackend {
 			applications: crate::desktop::applications::supported(),
 			menus: self.ax.is_some(),
 			held_input: !input_unavailable,
-			spaces: false,
-			global_escape: false,
 			secure_input: false,
 			secure_input_app: None,
+			spaces: false,
+			global_escape: false,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {
 				"prompt-or-granted".to_string()
 			} else {
