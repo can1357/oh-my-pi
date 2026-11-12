@@ -1209,17 +1209,18 @@ pub(crate) const QT_LINE_EDIT_SETS_TEXT: &str =
 
 /// Puts `text` into an element as focusing it and typing would, through the
 /// element's AT-SPI `Text` and `EditableText` interfaces: the text replaces
-/// the element's selection, or goes in at its caret, or replaces the whole
-/// text of a GTK entry that does not hold the keyboard focus (focusing one
-/// selects its text), and the caret ends after it.
+/// the element's selection, or goes in at its caret. An unfocused GTK entry
+/// takes it only for an empty or fully selected value: then either
+/// selection-on-focus setting leaves the same result.
 /// No keys are sent and no focus moves. `Absent` means the element took
 /// nothing, so keys may follow: its application's `toolkit` is neither GTK
 /// nor Qt (unnamed included), it lacks either interface, is or may be a
 /// password field, is read-only or disabled, its text or caret could not be
 /// read, or it left its text as it was after the write. `Declined` means the
 /// same for a single-line field of a Qt application
-/// ([`QT_LINE_EDIT_SETS_TEXT`]). Text the write changed to anything other
-/// than what typing would give is an error, after which nothing more is sent.
+/// ([`QT_LINE_EDIT_SETS_TEXT`]) or a GTK entry whose focus selection is
+/// unknown. Text changed to anything other than what typing would give is an
+/// error, after which nothing more is sent.
 ///
 /// GTK applies the insert through the field's own `insert-text` handlers, and
 /// Qt's multi-line edits through a `QTextCursor`, so the field validates and
@@ -1294,29 +1295,27 @@ async fn insert_typed_text(
 	if crate::desktop::ax::masked(&before) || length != before.encode_utf16().count() {
 		return ABSENT;
 	}
-	// Focusing a GTK single-line entry selects its whole text
-	// (`gtk-entry-select-on-focus`, on by default), so focusing one that does
-	// not hold the keyboard focus and typing replaces that text. A focused
-	// entry, a text view or a Qt edit keeps its caret and selection.
-	let selects_all = !qt && !states.contains(State::Focused) && !states.contains(State::MultiLine);
-	let (start, end) = if selects_all {
-		let Ok(all) = i32::try_from(length) else {
-			return ABSENT;
-		};
-		(0, all)
-	} else {
-		let Ok(caret) = reader.caret_offset().await else {
-			return ABSENT;
-		};
-		match reader.get_n_selections().await {
-			Ok(0) => (caret, caret),
-			Ok(_) => match reader.get_selection(0).await {
-				Ok((from, to)) => (from.min(to), from.max(to)),
-				Err(_) => return ABSENT,
-			},
-			Err(_) => return ABSENT,
-		}
+	let Ok(caret) = reader.caret_offset().await else {
+		return ABSENT;
 	};
+	let (start, end) = match reader.get_n_selections().await {
+		Ok(0) => (caret, caret),
+		Ok(_) => match reader.get_selection(0).await {
+			Ok((from, to)) => (from.min(to), from.max(to)),
+			Err(_) => return ABSENT,
+		},
+		Err(_) => return ABSENT,
+	};
+	// GTK's per-application select-on-focus setting is not exposed by AT-SPI.
+	// Only an empty or already fully selected value gives the same edit with
+	// either setting, so no inferred selection may delete existing text.
+	if !(qt
+		|| states.contains(State::Focused)
+		|| states.contains(State::MultiLine)
+		|| start == 0 && usize::try_from(end).ok() == Some(length))
+	{
+		return Ok(TextRoute::Declined("the field's selection after focusing is unknown"));
+	}
 	let (Ok(first), Ok(last)) = (usize::try_from(start), usize::try_from(end)) else {
 		return ABSENT;
 	};
@@ -2547,10 +2546,21 @@ mod tests {
 		};
 		let cases = [
 			field("/caret", "hello", 2, Outcome::Taken("heABllo", 4), 1),
-			// Focusing an entry selects its text, so typing replaces it.
+			// Select-on-focus can be off: do not delete an unfocused entry's
+			// text without evidence that its whole value is selected.
 			Case {
 				states: StateSet::new(State::Editable | State::Sensitive),
-				..field("/unfocused_entry", "hello", 0, Outcome::Taken("AB", 2), 2)
+				..field("/unfocused_entry", "hello", 2, Outcome::Declined, 0)
+			},
+			// Both setting values agree for a full selection or an empty value.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				selection: Some((5, 0)),
+				..field("/unfocused_selected", "hello", 0, Outcome::Taken("AB", 2), 2)
+			},
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				..field("/unfocused_empty", "", 0, Outcome::Taken("AB", 2), 1)
 			},
 			// A text view keeps its caret when focused.
 			Case {
@@ -2690,7 +2700,7 @@ mod tests {
 				},
 				(Outcome::Declined, Ok(TextRoute::Declined(reason))) => {
 					assert_eq!(field.text, case.old, "{}: text changed", case.path);
-					assert!(reason.contains("validator"), "{}: {reason}", case.path);
+					assert!(!reason.is_empty(), "{}: missing decline reason", case.path);
 				},
 				(Outcome::Reads(text), Err(err)) if err.message.contains(text) => {},
 				(outcome, result) => panic!("{}: expected {outcome:?}, got {result:?}", case.path),
