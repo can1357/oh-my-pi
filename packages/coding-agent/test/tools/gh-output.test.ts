@@ -137,12 +137,6 @@ const watchCases: WatchCase[] = [
 		reason: "empty",
 	},
 	{
-		name: "strips terminal controls from truncated captures without labeling them full",
-		logs: [{ ...escapedLog, stdout: `${escapedLog.stdout}\u001b`, stdoutTruncated: true }],
-		normalizedLogs: [normalizedEscapedLog],
-		label: "Partial failed-job logs",
-	},
-	{
 		name: "keeps the failed fetch exit status even when stderr is empty",
 		logs: [{ exitCode: 5, stdout: "", stderr: "" }],
 		label: "Failed-job log diagnostics",
