@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Mistral plan usage to `omp usage` and `/usage`: the monthly Vibe Code and API budgets with dollars used, reset time, and plan name ([#18748](https://github.com/can1357/oh-my-pi/issues/18748))
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
