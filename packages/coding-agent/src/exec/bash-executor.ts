@@ -4,6 +4,8 @@
  * Uses the embedded bash engine (pi-shell) through native bindings for shell
  * execution.
  */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
@@ -12,10 +14,11 @@ import {
 	RunTrace,
 	Shell,
 	type ShellFilesystem,
+	type ShellOptions,
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, isPidAlive, logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -56,6 +59,16 @@ export interface BashExecutorOptions {
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
 	sessionKey?: string;
+	/**
+	 * Directory of the agent session's saved shell states (`shellStateDir`), a file per
+	 * kind of session shell (the bash tool's and `!` commands' may differ). The persistent shell
+	 * writes there, after each command it completes, what it changed since its setup: variables,
+	 * functions, aliases and options. A new shell of the same kind (a resumed or returned-to
+	 * session) replays that on its own setup, so the current environment and shell configuration
+	 * reach it wherever the session left them alone. A state whose replay fails, hangs or crashes
+	 * the process is deleted; the commands that follow never put it in question.
+	 */
+	stateDir?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of the embedded shell parsing directly. */
@@ -268,6 +281,16 @@ export async function applyDirenvPreflight(
 }
 
 const shellSessions = new Map<string, Shell>();
+/** Each session shell's last saved state ({@link saveShellState}). */
+const shellStates = new WeakMap<Shell, Uint8Array>();
+/** The shell whose state each state file holds, by file: absent until a write succeeds. */
+const stateFileWriters = new Map<string, WeakRef<Shell>>();
+/** Session shells still being created (resumed from a saved state), by key. */
+const pendingShellSessions = new Map<string, Promise<Shell>>();
+/** Last pending write per state file, so writes land in command order. */
+const stateWrites = new Map<string, Promise<void>>();
+/** Markers of the replays running in this process ({@link resumeMarker}). */
+const resumeMarkers = new Set<string>();
 const brokenShellSessions = new Set<string>();
 const shellSessionQuarantines = new Map<string, Promise<unknown>>();
 /** Session keys with a command currently in flight on the persistent Shell. */
@@ -320,6 +343,17 @@ function trackAbortedShell(
 		pending.delete(cleanup);
 		if (pending.size === 0 && abortedShells.get(agentSessionKey) === pending) abortedShells.delete(agentSessionKey);
 	});
+}
+
+/**
+ * Wait for the shell-state writes still pending ({@link BashExecutorOptions.stateDir}) before exit,
+ * and clear the markers of replays still running: an orderly exit is no crash.
+ */
+export async function drainShellStateWrites(): Promise<void> {
+	await Promise.all([
+		...stateWrites.values(),
+		...Array.from(resumeMarkers, marker => fs.rm(marker, { force: true }).catch(() => undefined)),
+	]);
 }
 
 /** Wait for an agent session's cancelled commands to finish native TERM→KILL escalation before exit. */
@@ -429,6 +463,149 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 		shellSessions.delete(key);
 		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
 	}
+	// A shell still being created is not cached when it settles: its call drops it after running.
+	for (const key of pendingShellSessions.keys()) {
+		if (isShellSessionOwnedBy(key, agentSessionKey)) pendingShellSessions.delete(key);
+	}
+}
+
+/**
+ * The file in `stateDir` for one kind of session shell: what sets its commands apart (shell,
+ * prefix, git guard, minimizer), not what changes from one process to the next (the environment,
+ * the snapshot's path).
+ */
+function shellStateFile(stateDir: string, kind: readonly string[]): string {
+	return path.join(stateDir, `${Bun.hash(kind.join("\n")).toString(36)}.bin`);
+}
+
+/**
+ * Present, holding the pid, while a process replays the saved state in `stateFile` on a new shell:
+ * left by a process the replay crashed.
+ */
+function resumeMarker(stateFile: string): string {
+	return `${stateFile}.resuming`;
+}
+
+/** Upper bound on a resumed shell's setup and replay; past it the state is taken to hang the shell. */
+const STATE_RESUME_TIMEOUT_MS = 30_000;
+
+/**
+ * A new shell for the session, resumed from `stateFile` when it holds a saved state. The state is
+ * replayed here, by a no-op run before the caller's command: a state that breaks the shell (a
+ * replay that fails, hangs or crashes the process) is deleted and the shell starts fresh, while
+ * the caller's own command (a build that times out, a cancelled test run) never puts the state in
+ * question. A state this build cannot resume (another version saved it, or it is damaged) is
+ * logged and skipped. The caller's `signal` stops the replay (its setup may source a slow shell
+ * config) without putting the state in question: the shell, whose session the cancelled setup
+ * never finished, replays it again on its next run.
+ */
+async function createSessionShell(
+	shellOptions: ShellOptions,
+	stateFile: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<Shell> {
+	if (!stateFile) return new Shell(shellOptions);
+	await stateWrites.get(stateFile);
+	const marker = resumeMarker(stateFile);
+	let state: Uint8Array;
+	try {
+		// A live pid is a replay in flight (another process or call resuming the same state).
+		const pid = Number.parseInt(await Bun.file(marker).text(), 10);
+		if (!(pid > 0 && isPidAlive(pid))) {
+			logger.warn("Saved shell state dropped: replaying it crashed the process", { stateFile });
+			discardShellState(stateFile);
+			return new Shell(shellOptions);
+		}
+	} catch (err) {
+		if (!isEnoent(err)) logger.warn("Failed to read the shell state marker", { stateFile, error: String(err) });
+	}
+	try {
+		state = await Bun.file(stateFile).bytes();
+	} catch (err) {
+		if (!isEnoent(err)) logger.warn("Failed to read saved shell state", { stateFile, error: String(err) });
+		return new Shell(shellOptions);
+	}
+	let shell: Shell;
+	try {
+		shell = new Shell({ ...shellOptions, state });
+	} catch (err) {
+		// Another version's state, or a damaged one: the next save replaces it.
+		logger.warn("Saved shell state not resumed", { stateFile, error: String(err) });
+		return new Shell(shellOptions);
+	}
+	try {
+		await Bun.write(marker, String(process.pid));
+		resumeMarkers.add(marker);
+	} catch (err) {
+		logger.warn("Failed to mark the shell state resuming", { stateFile, error: String(err) });
+	}
+	let failure: string | undefined;
+	try {
+		const result = await shell.run({ command: ":", timeoutMs: STATE_RESUME_TIMEOUT_MS, signal });
+		if (result.timedOut) failure = "timed out";
+		else if (result.exitCode !== 0 && !signal?.aborted) failure = `exit status ${result.exitCode}`;
+	} catch (err) {
+		if (!signal?.aborted) failure = String(err);
+	}
+	resumeMarkers.delete(marker);
+	if (failure === undefined) {
+		try {
+			await fs.rm(marker, { force: true });
+		} catch (err) {
+			logger.warn("Failed to clear the shell state marker", { stateFile, error: String(err) });
+		}
+		return shell;
+	}
+	logger.warn("Saved shell state dropped: replaying it broke the shell", { stateFile, error: failure });
+	void shell.abort().catch(() => undefined);
+	discardShellState(stateFile);
+	return new Shell(shellOptions);
+}
+
+/**
+ * Write `shell`'s state to `stateFile` after the writes queued before it; nothing when the file
+ * already holds it. Of two live shells sharing the file (one kind, different environments), the
+ * last to complete a command wins. The file is replaced whole (written aside, then renamed), so a
+ * crash mid-write leaves the previous state.
+ */
+function saveShellState(shell: Shell, stateFile: string): void {
+	const fresh = shell.saveState();
+	if (fresh) shellStates.set(shell, fresh);
+	// `saveState()` returns nothing when the shell did not change since its last call: the file still
+	// needs its state when another shell, or a failed write, left something else there.
+	const state = fresh ?? (stateFileWriters.get(stateFile)?.deref() === shell ? undefined : shellStates.get(shell));
+	if (!state) return;
+	stateFileWriters.delete(stateFile);
+	queueStateWrite(stateFile, async () => {
+		const temp = `${stateFile}.${process.pid}.tmp`;
+		// Owner-only on POSIX: the state holds the shell's variables (tokens it fetched included).
+		await fs.mkdir(path.dirname(stateFile), { recursive: true, mode: 0o700 });
+		await fs.writeFile(temp, state, { mode: 0o600 });
+		await fs.rename(temp, stateFile);
+		stateFileWriters.set(stateFile, new WeakRef(shell));
+	});
+}
+
+/** Delete `stateFile` after the writes queued before it: the session's next shell starts fresh. */
+function discardShellState(stateFile: string): void {
+	queueStateWrite(stateFile, async () => {
+		// After the writes queued before it: none of them names a writer of the deleted file.
+		stateFileWriters.delete(stateFile);
+		await Promise.all([fs.rm(stateFile, { force: true }), fs.rm(resumeMarker(stateFile), { force: true })]);
+	});
+}
+
+/** Run `write` on `stateFile` after the ones queued before it, logging a failure. */
+function queueStateWrite(stateFile: string, write: () => Promise<unknown>): void {
+	const previous = stateWrites.get(stateFile) ?? Promise.resolve();
+	const done = previous.then(write).then(
+		() => undefined,
+		err => logger.warn("Failed to update saved shell state", { stateFile, error: String(err) }),
+	);
+	stateWrites.set(stateFile, done);
+	void done.finally(() => {
+		if (stateWrites.get(stateFile) === done) stateWrites.delete(stateFile);
+	});
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
@@ -802,6 +979,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		minimizer,
 	};
 	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options?.sessionKey, minimizer);
+	const stateFile = options?.stateDir
+		? shellStateFile(options.stateDir, [
+				shell,
+				prefix ?? "",
+				options.gitGuard ? `git-guard:${options.ovnfs ?? ""}` : "",
+				minimizer ? JSON.stringify(minimizer) : "",
+			])
+		: undefined;
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
 		shellSessions.delete(sessionKey);
@@ -814,17 +999,36 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// from the session's state before the owner's command. A quarantined
 	// session gets a fresh one-shot shell.
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
-	let shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
-	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
-		shellSession = new Shell(shellOptions);
-		shellSessions.set(sessionKey, shellSession);
-	}
-	const busyShell = sessionBusy ? shellSessions.get(sessionKey) : undefined;
-	const executionShell = shellSession ?? busyShell?.fork() ?? new Shell(shellOptions);
-	const ownsPersistentSession = shellSession !== undefined;
+	const ownsPersistentSession = !persistentSessionBroken && !sessionBusy;
+	let shellSession: Shell | undefined;
 	if (ownsPersistentSession) {
+		// Claimed before any await: an overlapping call sees the session busy.
 		shellSessionsInUse.add(sessionKey);
+		shellSession = shellSessions.get(sessionKey);
+		if (!shellSession) {
+			const created = createSessionShell(shellOptions, stateFile, options?.signal);
+			pendingShellSessions.set(sessionKey, created);
+			let current: boolean;
+			try {
+				shellSession = await created;
+			} catch (err) {
+				shellSessionsInUse.delete(sessionKey);
+				throw err;
+			} finally {
+				// Released while it was created (`releaseShellSessions`): run once, then drop it.
+				current = pendingShellSessions.get(sessionKey) === created;
+				if (current) pendingShellSessions.delete(sessionKey);
+			}
+			if (current) shellSessions.set(sessionKey, shellSession);
+		}
 	}
+	const busyShell = sessionBusy
+		? (shellSessions.get(sessionKey) ?? (await pendingShellSessions.get(sessionKey)?.catch(() => undefined)))
+		: undefined;
+	// A quarantined session's one-shot shell (or a busy one's whose creation failed) resumes the
+	// saved state too.
+	const executionShell =
+		shellSession ?? busyShell?.fork() ?? (await createSessionShell(shellOptions, stateFile, options?.signal));
 	if (sessionBusy) options?.onSessionShellBusy?.();
 	const userSignal = options?.signal;
 	const runAbortController = new AbortController();
@@ -846,6 +1050,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	};
 	if (userSignal) {
 		userSignal.addEventListener("abort", abortHandler, { once: true });
+		// Aborted while the shell was prepared (a resumed shell's replay, the snapshot).
+		if (userSignal.aborted) abortHandler();
 	}
 
 	let timeoutTimer: NodeJS.Timeout | undefined;
@@ -1031,6 +1237,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 		if (ownsPersistentSession) {
 			shellSessionsInUse.delete(sessionKey);
+			if (stateFile) {
+				// A timeout, cancel or failure keeps the state the last completed command left.
+				if (!resetSession && shellSession) saveShellState(shellSession, stateFile);
+			}
 			const releasedWhileInUse = shellSessions.get(sessionKey) !== shellSession;
 			if (
 				resetSession ||

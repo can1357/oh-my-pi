@@ -246,6 +246,12 @@ impl Image {
 		base
 	}
 
+	/// Whether `self` and `other` share every record: equal without looking
+	/// at one (`false` says nothing).
+	pub fn same_as(&self, other: &Self) -> bool {
+		self.vars.same_as(&other.vars) && self.records.same_as(&other.records)
+	}
+
 	/// A handle on the image's records other than variables (O(1)), to
 	/// recognise and reuse them ([`Self::shares_records`],
 	/// [`Self::set_records`]). It does not keep them shared: once no image
@@ -305,6 +311,16 @@ impl ImageDiff {
 	/// functions it holds).
 	pub fn records(&self) -> impl Iterator<Item = &Record> {
 		self.records.iter().filter_map(|(_, r)| r.as_ref())
+	}
+
+	/// Leave out the command hash table (`hash`): a cache of where `PATH`
+	/// found each command, which a later process (another `PATH`, tools
+	/// moved or upgraded) must not take over.
+	pub fn without_command_hash(mut self) -> Self {
+		self
+			.records
+			.retain(|(key, _)| !matches!(key, KeyBuf::CmdHash(_)));
+		self
 	}
 }
 

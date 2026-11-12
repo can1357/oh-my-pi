@@ -76,6 +76,7 @@
 ### Added
 
 - Added `find.verifyModel`, a model selector whose judge answers only `find`'s passage verification while filename and sketch ranking stay on the `judge` role ([#19006](https://github.com/can1357/oh-my-pi/pull/19006) by [@alphastorm](https://github.com/alphastorm))
+- Resuming a session restores its `bash` tool and `!` shells: what the session changed in variables, functions, aliases and shell options as of the last completed command, on top of the current environment and shell configuration. The state, the shell's own variables included (tokens it fetched too), is saved in the session's artifacts directory (owner-only on macOS and Linux) and is not copied by `/fork`; `bash.persistShellState: false` turns it off. After an omp update, resumed sessions start with a fresh shell ([#19073](https://github.com/can1357/oh-my-pi/pull/19073) by [@H4vC](https://github.com/H4vC))
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
 - Text a browser or computer call types into a page or app, such as a password, no longer appears in plain text in an eval cell's status lines or the session file ([#18981](https://github.com/can1357/oh-my-pi/pull/18981) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser page-script observations in Tern and WebKit now mask password values, including values used as accessible names or descriptions ([#18983](https://github.com/can1357/oh-my-pi/pull/18983) by [@will-bogusz](https://github.com/will-bogusz))

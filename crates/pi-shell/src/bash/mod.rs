@@ -64,6 +64,7 @@ pub mod zshopt;
 pub mod pattern;
 pub mod syntax;
 
+pub(crate) use crate::bash::mem_store::ProcessDiff;
 /// zsh/newuser's startup check: the `newuser` scripts an interactive zsh
 /// sources after `/etc/zshenv` when the user has no startup files.
 pub use crate::bash::vm::newuser_startup_scripts;

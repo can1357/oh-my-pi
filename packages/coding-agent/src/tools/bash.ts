@@ -21,6 +21,7 @@ import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { shellStateDir } from "../session/shell-state";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
@@ -718,6 +719,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	constructor(private readonly session: ToolSession) {}
 
+	/** Where session `sessionId`'s persistent shell saves its state, to resume with the session. */
+	#shellStateDir(sessionId: string | undefined): string | undefined {
+		return shellStateDir(this.session.settings, this.session.getArtifactsDir?.(), sessionId);
+	}
+
 	/**
 	 * URL filesystem for one embedded-shell run: this session's context, cancelled by the run's own
 	 * signal. `onReply` receives what the run writes to `out://`; without it such writes are refused.
@@ -1097,6 +1103,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						// backgrounded. A job that starts in the background gets its own
 						// shell, so it never holds the session's.
 						sessionKey: options.foreground ? options.sessionId : `${options.sessionId ?? ""}:async:${jobId}`,
+						stateDir: options.foreground ? this.#shellStateDir(options.sessionId) : undefined,
 						isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === options.sessionId,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
@@ -1883,6 +1890,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					cwd: commandCwd,
 					env: sessionEnv,
 					sessionKey: sessionId,
+					stateDir: this.#shellStateDir(sessionId),
 					minimize: !nativeShapingOff(this.session),
 					isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === sessionId,
 					timeout: timeoutMs ?? 0,

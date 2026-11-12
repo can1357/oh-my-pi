@@ -229,16 +229,30 @@ pub struct ShellOptions {
 	pub minimizer:     Option<MinimizerOptions>,
 	/// Filesystem backing every run of this session (native when absent).
 	pub filesystem:    Option<ShellFilesystem>,
+	/// State to resume, as `Shell.saveState()` returned it (an earlier
+	/// process's included): replayed after this session's own setup
+	/// (environment fallback, `snapshotPath`), so the variables, functions,
+	/// aliases, options, traps and working directory the earlier shell
+	/// changed come back over the current environment and configuration.
+	pub state:         Option<Uint8Array>,
 }
 
-impl From<ShellOptions> for CoreShellOptions {
-	fn from(value: ShellOptions) -> Self {
-		Self {
-			session_env:   value.session_env,
+impl TryFrom<ShellOptions> for CoreShellOptions {
+	type Error = Error;
+
+	fn try_from(value: ShellOptions) -> Result<Self> {
+		let state = value
+			.state
+			.map(|bytes| pi_shell::session::SavedState::from_bytes(&bytes))
+			.transpose()
+			.map_err(|err| Error::from_reason(format!("Failed to resume shell state: {err}")))?;
+		Ok(Self {
+			session_env: value.session_env,
 			snapshot_path: value.snapshot_path,
-			minimizer:     value.minimizer.map(Into::into),
-			filesystem:    value.filesystem.map_or_default(ShellFilesystem::into_fs),
-		}
+			minimizer: value.minimizer.map(Into::into),
+			filesystem: value.filesystem.map_or_default(ShellFilesystem::into_fs),
+			state,
+		})
 	}
 }
 
@@ -501,10 +515,26 @@ pub struct Shell {
 impl Shell {
 	/// Create a new shell session from optional configuration.
 	///
-	/// The options set session-scoped environment variables and a snapshot path.
+	/// The options set session-scoped environment variables and a snapshot
+	/// path, or a saved state to resume; throws when that state is not one
+	/// this build can resume (another build saved it, or it is corrupt).
 	#[napi(constructor)]
-	pub fn new(options: Option<ShellOptions>) -> Self {
-		Self { inner: Arc::new(CoreShell::new(options.map(Into::into))) }
+	pub fn new(options: Option<ShellOptions>) -> Result<Self> {
+		let options = options.map(TryInto::try_into).transpose()?;
+		Ok(Self { inner: Arc::new(CoreShell::new(options)) })
+	}
+
+	/// What this shell changed since its setup (environment fallback,
+	/// snapshot) as of its last command boundary, as bytes for
+	/// `ShellOptions.state` in a later process: while a command runs, the
+	/// state it started from. Environment variables it never changed are left
+	/// out (the resuming shell takes its own).
+	/// `null` before the shell has a session, and when nothing changed since
+	/// the last call returned bytes. Never waits for the running command;
+	/// live background jobs and processes are not part of it.
+	#[napi]
+	pub fn save_state(&self) -> Option<Uint8Array> {
+		self.inner.save_state().map(Uint8Array::from)
 	}
 
 	/// A new shell with this one's options whose session starts from this

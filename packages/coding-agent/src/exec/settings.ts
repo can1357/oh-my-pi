@@ -153,6 +153,19 @@ export const cfgBashGitGuard = register({
 	},
 });
 
+export const cfgBashPersistShellState = register({
+	id: "bash.persistShellState",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Resume Shell State",
+		description:
+			"Save the variables, functions, aliases and options the bash tool's and ! commands' shell set (in plain text, in the session's artifacts directory) and restore them when the session is resumed or returned to",
+	},
+});
+
 export const cfgBashPatterns = register({
 	id: "bash.patterns",
 	type: "array",

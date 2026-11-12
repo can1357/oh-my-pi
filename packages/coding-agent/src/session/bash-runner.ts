@@ -14,6 +14,7 @@ import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
 import type { BashExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
+import { shellStateDir } from "./shell-state";
 
 import { cfgToolsMaxTimeout } from "../tools/settings";
 
@@ -90,6 +91,13 @@ export class BashRunner {
 		options?: BashExecuteOptions,
 	): Promise<BashResult> {
 		const target = this.#captureSessionTarget();
+		// The session's own state file, fixed with its target: a command still pending when the
+		// session is left keeps saving to the session that ran it.
+		const stateDir = shellStateDir(
+			this.#host.settings,
+			this.#host.sessionManager.getArtifactsDir(),
+			target.sessionId,
+		);
 		let targetTransferred = false;
 		const excludeFromContext = options?.excludeFromContext === true;
 		const cwd = this.#host.sessionManager.getCwd();
@@ -133,6 +141,7 @@ export class BashRunner {
 					onChunk,
 					signal: abortController.signal,
 					sessionKey: target.sessionId,
+					stateDir,
 					// A command still pending when its session was left must not keep a
 					// shell under that session after the transition released its shells.
 					isSessionCurrent: () => this.#host.sessionManager.getSessionId() === target.sessionId,

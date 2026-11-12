@@ -9,6 +9,7 @@ import {
 	applyDirenvPreflight,
 	type BashResult,
 	buildMinimizerOptions,
+	drainShellStateWrites,
 	executeBash,
 	isPersistentShellCdCommand,
 	releaseShellSessions,
@@ -307,6 +308,124 @@ describe("executeBash", () => {
 
 		expect(result.output.trim()).toBe(linkDir);
 		expect(result.workingDir).toBe(linkDir);
+	});
+
+	it("resumes a session's saved shell state and starts fresh from a damaged one", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-${path.basename(tempDir)}`;
+		const run = (command: string) => executeBash(command, { sessionKey, cwd: tempDir, timeout: 5000, stateDir });
+		await run('PI_RESUMED=kept; pi_resumed_fn() { echo "fn:$1"; }');
+		await drainShellStateWrites();
+		const [stateName] = fs.readdirSync(stateDir);
+		const stateFile = path.join(stateDir, stateName);
+		// Owner-only: the state holds the shell's variables.
+		if (process.platform !== "win32") expect(fs.statSync(stateFile).mode & 0o777).toBe(0o600);
+		// The session's shell is gone, as in a later process.
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "$PI_RESUMED $(pi_resumed_fn x)"')).output.trim()).toBe("kept fn:x");
+
+		await drainShellStateWrites();
+		fs.writeFileSync(stateFile, "not a shell state");
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "[$PI_RESUMED]"')).output.trim()).toBe("[]");
+	});
+
+	it("drops a saved state whose replay crashed a process, not one another process is replaying", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-crash-${path.basename(tempDir)}`;
+		const run = (command: string) => executeBash(command, { sessionKey, cwd: tempDir, timeout: 5000, stateDir });
+		await run("PI_BEFORE_CRASH=kept");
+		await drainShellStateWrites();
+		const [stateName] = fs.readdirSync(stateDir);
+		const marker = path.join(stateDir, `${stateName}.resuming`);
+		// A live process replaying the same state (another terminal on this session).
+		fs.writeFileSync(marker, String(process.ppid));
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "[$PI_BEFORE_CRASH]"')).output.trim()).toBe("[kept]");
+		// What a process that died while replaying it leaves.
+		await drainShellStateWrites();
+		fs.writeFileSync(marker, "2147483646");
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "[$PI_BEFORE_CRASH]"')).output.trim()).toBe("[]");
+	});
+
+	it("drops a saved state whose replay breaks the shell", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-broken-${path.basename(tempDir)}`;
+		const run = (command: string) => executeBash(command, { sessionKey, cwd: tempDir, timeout: 5000, stateDir });
+		// The replay's probe (`:`) fails under this state.
+		await run("PI_BEFORE_BREAK=kept; :() { return 3; }");
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "[$PI_BEFORE_BREAK]"')).output.trim()).toBe("[]");
+	});
+
+	it("keeps a saved state per kind of session shell", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-kinds-${path.basename(tempDir)}`;
+		const run = (command: string, gitGuard: boolean) =>
+			executeBash(command, { sessionKey, cwd: tempDir, timeout: 5000, stateDir, gitGuard });
+		await run("PI_PLAIN=1", false);
+		await run("PI_GUARDED=2", true);
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "[$PI_PLAIN][$PI_GUARDED]"', false)).output.trim()).toBe("[1][]");
+		expect((await run('echo "[$PI_PLAIN][$PI_GUARDED]"', true)).output.trim()).toBe("[][2]");
+	});
+
+	it("lets one of two overlapping calls own a resuming session shell", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-race-${path.basename(tempDir)}`;
+		await executeBash("PI_SEEDED=1", { sessionKey, cwd: tempDir, timeout: 5000, stateDir });
+		releaseShellSessions(sessionKey);
+		let busy = 0;
+		const run = (command: string) =>
+			executeBash(command, {
+				sessionKey,
+				cwd: tempDir,
+				timeout: 5000,
+				stateDir,
+				onSessionShellBusy: () => busy++,
+			});
+		const [, overlapping] = await Promise.all([
+			run("A=first; sleep 0.3"),
+			run('B=second; test -n "$PATH" && echo "[$PI_SEEDED][path]"'),
+		]);
+		const after = await run('echo "[$A][$B]"');
+		expect(busy).toBe(1);
+		// The overlapping call runs in a fork of the resumed shell, environment included.
+		expect(overlapping.output.trim()).toBe("[1][path]");
+		expect(after.output.trim()).toBe("[first][]");
+	});
+
+	it("keeps the saved state through timeouts, the first command's after a resume included", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-timeout-${path.basename(tempDir)}`;
+		const run = (command: string, timeout = 5000) =>
+			executeBash(command, { sessionKey, cwd: tempDir, timeout, stateDir });
+		await run("PI_BEFORE_TIMEOUT=kept");
+		expect((await run("sleep 5", 200)).timedOut).toBe(true);
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "[$PI_BEFORE_TIMEOUT]"')).output.trim()).toBe("[kept]");
+
+		releaseShellSessions(sessionKey);
+		expect((await run("sleep 5", 200)).timedOut).toBe(true);
+		releaseShellSessions(sessionKey);
+		expect((await run('echo "[$PI_BEFORE_TIMEOUT]"')).output.trim()).toBe("[kept]");
+	});
+
+	it("cancels a call promptly while its shell replays a slow saved state", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-slow-${path.basename(tempDir)}`;
+		const run = (command: string, signal?: AbortSignal) =>
+			executeBash(command, { sessionKey, cwd: tempDir, timeout: 20_000, stateDir, signal });
+		// Every command after the replay, its probe included, waits on the trap.
+		await run("trap 'sleep 10' DEBUG");
+		releaseShellSessions(sessionKey);
+		const stop = new AbortController();
+		setTimeout(() => stop.abort(), 300);
+		const started = Date.now();
+		expect((await run("true", stop.signal)).cancelled).toBe(true);
+		expect(Date.now() - started).toBeLessThan(5000);
+		releaseShellSessions(sessionKey);
 	});
 
 	it("applies non-interactive environment defaults", async () => {

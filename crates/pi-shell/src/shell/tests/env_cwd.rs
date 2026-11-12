@@ -19,7 +19,8 @@ fn session_with(vars: HashMap<String, String>, cwd: &std::path::Path) -> ShellSe
 		output_decoding: None,
 	})
 	.expect("start session");
-	ShellSessionCore { session, slot, filesystem: Fs::native(), cwd }
+	let baseline = session.latest_image().get();
+	ShellSessionCore { session, slot, filesystem: Fs::native(), cwd, baseline }
 }
 
 /// The shell starts in, and a run's requested working directory moves it

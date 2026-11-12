@@ -637,9 +637,22 @@ export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
    *
-   * The options set session-scoped environment variables and a snapshot path.
+   * The options set session-scoped environment variables and a snapshot
+   * path, or a saved state to resume; throws when that state is not one
+   * this build can resume (another build saved it, or it is corrupt).
    */
   constructor(options?: ShellOptions | undefined | null)
+  /**
+   * What this shell changed since its setup (environment fallback,
+   * snapshot) as of its last command boundary, as bytes for
+   * `ShellOptions.state` in a later process: while a command runs, the
+   * state it started from. Environment variables it never changed are left
+   * out (the resuming shell takes its own).
+   * `null` before the shell has a session, and when nothing changed since
+   * the last call returned bytes. Never waits for the running command;
+   * live background jobs and processes are not part of it.
+   */
+  saveState(): Uint8Array | null
   /**
    * A new shell with this one's options whose session starts from this
    * session's state (variables, functions, aliases, options, working
@@ -3949,6 +3962,14 @@ export interface ShellOptions {
   minimizer?: MinimizerOptions
   /** Filesystem backing every run of this session (native when absent). */
   filesystem?: ShellFilesystem
+  /**
+   * State to resume, as `Shell.saveState()` returned it (an earlier
+   * process's included): replayed after this session's own setup
+   * (environment fallback, `snapshotPath`), so the variables, functions,
+   * aliases, options, traps and working directory the earlier shell
+   * changed come back over the current environment and configuration.
+   */
+  state?: Uint8Array
 }
 
 /** Options for running a shell command. */
