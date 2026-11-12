@@ -252,19 +252,14 @@ pub fn resolve_focus(
 	}
 }
 
-/// The most children OMP asks an element for in one `GetChildren`. Qt answers
-/// that call by building, and keeping, an accessible object for every child,
-/// and a reply for a long table can outgrow the bus's message limit, which
-/// cuts the app off the accessibility bus; at-spi2-atk refuses lists over
-/// 65,536.
+/// Bound standalone child reads and focus searches independently of tree walks.
 const MAX_CHILDREN: u32 = 5_000;
+// Bound in-flight replies to avoid flooding the application's bus.
+const CHILD_READ_CONCURRENCY: usize = 32;
 
-/// `proxy`'s children, given it reports `count` of them, and how many were
-/// left unread: one `GetChildren` for at most [`MAX_CHILDREN`], else the first
-/// `limit` asked for one at a time. An unreadable count leaves the children
-/// unread, without asking the application to construct an unbounded list.
-/// Failed indices count as unread; if none answers, the first error is
-/// returned.
+/// Read at most `limit` children by index; a stale count never authorizes an
+/// unbounded whole-list request. Failed indices count as unread; if none
+/// answers, the first error is returned.
 async fn children_of(
 	proxy: &atspi::proxy::accessible::AccessibleProxy<'_>,
 	count: Option<u32>,
@@ -273,28 +268,16 @@ async fn children_of(
 	use futures::StreamExt;
 
 	let Some(count) = count else {
-		return Ok((Vec::new(), 1));
+		return Ok((Vec::new(), crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN));
 	};
-	if count <= MAX_CHILDREN {
-		let children = proxy.get_children().await?;
-		return Ok((
-			children
-				.into_iter()
-				.filter(|child| !child.is_null())
-				.collect(),
-			0,
-		));
-	}
 	let read = limit.min(count);
-	let replies: Vec<_> = futures::stream::iter(0..read)
+	let mut replies = futures::stream::iter(0..read)
 		.map(|index| proxy.get_child_at_index(index as i32))
-		.buffered(256)
-		.collect()
-		.await;
-	let mut children = Vec::with_capacity(replies.len());
+		.buffered(CHILD_READ_CONCURRENCY);
+	let mut children = Vec::with_capacity(read as usize);
 	let mut first_error = None;
 	let mut unread = count - read;
-	for reply in replies {
+	while let Some(reply) = replies.next().await {
 		match reply {
 			Ok(child) if !child.is_null() => children.push(child),
 			Ok(_) => unread += 1,
@@ -727,14 +710,14 @@ impl AtSpiAx {
 		let proxy = answered("the application", reply_timeout, root.as_accessible_proxy(connection))
 			.await?
 			.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-		let (state, count) = futures::try_join!(
-			answered("the application", reply_timeout, proxy.get_state()),
-			answered("the application", reply_timeout, proxy.child_count()),
-		)?;
+		let state = answered("the application", reply_timeout, proxy.get_state()).await?;
 		if state.is_ok_and(|state| state.contains(State::Focused)) {
 			return Ok(Some(root));
 		}
-		let count = count.ok().map(|count| count.max(0) as u32);
+		let count = answered("the application", reply_timeout, proxy.child_count())
+			.await?
+			.ok()
+			.map(|count| count.max(0) as u32);
 		let (children, _) =
 			answered("the application", reply_timeout, children_of(&proxy, count, MAX_CHILDREN))
 				.await?
@@ -749,9 +732,8 @@ impl AtSpiAx {
 		Ok(None)
 	}
 
-	/// `h`'s children, at most `limit` of them once it has more than
-	/// [`MAX_CHILDREN`], with the number left unread. `count` is its
-	/// `ChildCount` when already read.
+	/// `h`'s children, at most `limit`, with the number left unread.
+	/// `count` is its `ChildCount` when already read.
 	fn read_children(
 		&self,
 		h: &AxHandle,
@@ -833,7 +815,11 @@ impl AtSpiAx {
 				label_complete: false,
 				selected: false,
 				role_name: None,
-				unread_children: u32::from(child_count.is_err()),
+				unread_children: if child_count.is_err() {
+					crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN
+				} else {
+					0
+				},
 			})
 		})))??
 	}
@@ -2453,8 +2439,8 @@ mod tests {
 				self.state.clone()
 			}
 
-			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
-				self.children.clone()
+			fn get_child_at_index(&self, index: i32) -> (String, OwnedObjectPath) {
+				self.children[index as usize].clone()
 			}
 		}
 
@@ -2559,7 +2545,8 @@ mod tests {
 		}
 
 		struct Cell {
-			state: Vec<u32>,
+			count_reads: Arc<AtomicU32>,
+			state:       Vec<u32>,
 		}
 
 		#[interface(name = "org.a11y.atspi.Accessible")]
@@ -2567,6 +2554,7 @@ mod tests {
 			#[allow(clippy::unused_self, reason = "fake cells have no children")]
 			#[zbus(property)]
 			fn child_count(&self) -> i32 {
+				self.count_reads.fetch_add(1, Ordering::SeqCst);
 				0
 			}
 
@@ -2617,11 +2605,17 @@ mod tests {
 					.unwrap()
 					.serve_at("/refusing", refusing)
 					.unwrap()
-					.serve_at("/cell", Cell { state: vec![0, 0] })
+					.serve_at("/cell", Cell {
+						count_reads: Arc::new(AtomicU32::new(0)),
+						state:       vec![0, 0],
+					})
 					.unwrap()
 					.serve_at("/partial", partial)
 					.unwrap()
-					.serve_at("/focus", Cell { state: vec![focused as u32, (focused >> 32) as u32] })
+					.serve_at("/focus", Cell {
+						count_reads: whole_reads.clone(),
+						state:       vec![focused as u32, (focused >> 32) as u32],
+					})
 					.unwrap()
 					.build();
 				let client = ConnectionBuilder::unix_stream(client).p2p().build();
@@ -2658,8 +2652,33 @@ mod tests {
 				children_of(&proxy, None, 800).await.unwrap()
 			});
 			assert!(children.is_empty());
-			assert!(unread > 0);
+			assert_eq!(unread, u32::MAX);
 			assert_eq!(whole_reads, 0);
+		}
+
+		#[test]
+		fn a_small_stale_count_never_requests_all_children_or_exceeds_the_budget() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, _) = table(client, "/table").await;
+				children_of(&proxy, Some(4), 2).await.unwrap()
+			});
+			assert_eq!((children.len(), unread, whole_reads), (2, 2, 0));
+		}
+
+		#[test]
+		fn a_focused_root_does_not_read_its_child_count() {
+			let (found, count_reads) = with_table(async |client| {
+				AtSpiAx::find_focused(
+					client,
+					ObjectRefOwned::from_static_str_unchecked(PEER, "/focus"),
+					0,
+					Duration::from_secs(1),
+				)
+				.await
+				.unwrap()
+			});
+			assert!(found.is_some());
+			assert_eq!(count_reads, 0);
 		}
 
 		#[test]
@@ -3359,6 +3378,10 @@ mod tests {
 
 			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
 				self.children.clone()
+			}
+
+			fn get_child_at_index(&self, index: i32) -> (String, OwnedObjectPath) {
+				self.children[index as usize].clone()
 			}
 		}
 

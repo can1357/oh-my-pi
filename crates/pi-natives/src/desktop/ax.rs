@@ -120,10 +120,14 @@ pub struct AxProps {
 	/// A name the platform derives when the element has neither title nor
 	/// description, such as a window's close button.
 	pub role_name:       Option<String>,
-	/// Children the backend left unread because the element has too many to
-	/// read whole, such as a table with a million rows.
+	/// Children left unread; [`UNKNOWN_UNREAD_CHILDREN`] when their count
+	/// could not be read.
 	pub unread_children: u32,
 }
+
+/// An unread child count that could not be determined; dominates saturating
+/// sums.
+pub(crate) const UNKNOWN_UNREAD_CHILDREN: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AxBounds {
@@ -1145,7 +1149,9 @@ pub fn snapshot(
 			text.push('\n');
 		}
 		let _ = write!(text, "… truncated ({} nodes)", state.visited);
-		if state.unread > 0 {
+		if state.unread == UNKNOWN_UNREAD_CHILDREN {
+			text.push_str("; children of long lists and tables not read");
+		} else if state.unread > 0 {
 			let _ = write!(text, "; {} children of long lists and tables not read", state.unread);
 		}
 	}
@@ -2992,6 +2998,26 @@ mod tests {
 		assert!(
 			s.text
 				.ends_with("… truncated (4 nodes); 999998 children of long lists and tables not read"),
+			"{}",
+			s.text
+		);
+	}
+	#[test]
+	fn an_unknown_unread_count_is_not_printed_as_a_number() {
+		let mut unknown = p("table", None);
+		unknown.unread_children = u32::MAX;
+		let mut known = p("table", None);
+		known.unread_children = 8;
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, unknown), (3, known)].into(),
+			children: [(1, vec![2, 3])].into(),
+			..Default::default()
+		};
+		let s = snapshot(&mut m, &mut AxRegistry::default(), &window(), &Default::default()).unwrap();
+		assert!(s.truncated);
+		assert!(
+			s.text
+				.ends_with("; children of long lists and tables not read"),
 			"{}",
 			s.text
 		);
