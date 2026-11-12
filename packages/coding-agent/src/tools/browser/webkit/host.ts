@@ -24,6 +24,8 @@ import { WebKitViewer } from "./viewer";
 const EXIT_GRACE_MS = 2_000;
 /** How long the host's last output may trail its exit (or its exit trail the end of its output). */
 const DRAIN_MS = 250;
+/** A newly downloaded macOS engine can spend over 20 seconds validating its dylibs before greeting. */
+const GREETING_TIMEOUT_MS = 30_000;
 
 /** omp's WebKit host cannot run here: it did not start, or could not open its first tab. An open falls back to Chromium. */
 export class WebKitUnavailableError extends ToolError {}
@@ -31,6 +33,7 @@ export class WebKitUnavailableError extends ToolError {}
 /** A host child process as the wire client's byte stream: frames to its stdin, frames from its stdout. */
 class HostProcessTransport implements TernTransport {
 	readonly product = "WebKit";
+	readonly greetingTimeoutMs = GREETING_TIMEOUT_MS;
 	readonly peer: string;
 	readonly #executable: string;
 	#child: Subprocess<"pipe", "pipe", "pipe"> | undefined;

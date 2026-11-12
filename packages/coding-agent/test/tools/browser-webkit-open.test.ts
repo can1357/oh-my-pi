@@ -136,6 +136,15 @@ describe("browser.open on omp's WebKit host", () => {
 		expect(isProcessAlive(pid)).toBe(false);
 	});
 
+	it("opens a WebKit tab when a cold host greets after the Tern socket deadline", async () => {
+		await useFakeHost("slow-greeting");
+		const text = await open(makeSession("session-cold-host"), "wk-cold-host", {
+			app: "webkit",
+			timeout: 25,
+		});
+		expect(text).toStartWith('Opened tab "wk-cold-host" on omp\'s headless WebKit browser');
+	}, 30_000);
+
 	it.each([
 		["the host cannot start", "exit-on-hello", "exited with code 3"],
 		["the host cannot open its first tab", "fail-open", "no display to create a view on"],

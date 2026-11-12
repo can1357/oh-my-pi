@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- WebKit browser tabs can open on macOS after a fresh engine download even when first-launch validation takes longer than ten seconds ([#18991](https://github.com/can1357/oh-my-pi/issues/18991)).
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes

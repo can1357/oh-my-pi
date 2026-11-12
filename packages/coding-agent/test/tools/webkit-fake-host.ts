@@ -18,10 +18,11 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
  * - `ok`: answers everything; exits when its input ends.
  * - `exit-on-hello`: exits with code 3 instead of welcoming.
  * - `fail-open`: answers `open` with a `failed` error.
+ * - `slow-greeting`: answers the hello after the Tern socket's 10-second deadline.
  * - `fail-navigation`: reports a `failed` load for every `goto`.
  * - `ignore-eof`: keeps running after its input ended.
  */
-export type FakeHostMode = "ok" | "exit-on-hello" | "fail-open" | "fail-navigation" | "ignore-eof";
+export type FakeHostMode = "ok" | "slow-greeting" | "exit-on-hello" | "fail-open" | "fail-navigation" | "ignore-eof";
 
 /** A fake engine directory. */
 export interface FakeHost {
@@ -110,7 +111,9 @@ process.stdin.on("data", chunk => {
 		buffered = buffered.subarray(4 + length);
 		if (message.hello) {
 			if (mode === "exit-on-hello") process.exit(3);
-			send({ welcome: { ops: ["browser", "dom", "console", "network"] } });
+			const welcome = { welcome: { ops: ["browser", "dom", "console", "network"] } };
+			if (mode === "slow-greeting") setTimeout(send, 11_000, welcome);
+			else send(welcome);
 		} else if (message.browser) {
 			fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(message.browser) + "\n");
 			const result = answer(message.browser);

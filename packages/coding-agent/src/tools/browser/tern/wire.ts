@@ -264,6 +264,8 @@ export interface TernTransport {
 	readonly peer: string;
 	/** Why a peer may hang up before greeting, appended to that error. */
 	readonly greetingHint?: string;
+	/** Greeting deadline, when a host needs longer to start than the Tern daemon. */
+	readonly greetingTimeoutMs?: number;
 	/** Open the stream. Called once; a throw is a failed connection. */
 	start(events: TernTransportEvents): void;
 	/** Send one frame. A throw is a dropped connection. */
@@ -464,7 +466,7 @@ export class TernSocketClient {
 		this.#greeting = greeting;
 		const timer = setTimeout(() => {
 			this.#fail(new TernError("connect", `The ${transport.peer} did not answer the greeting in time`));
-		}, CONNECT_TIMEOUT_MS);
+		}, transport.greetingTimeoutMs ?? CONNECT_TIMEOUT_MS);
 		timer.unref();
 		// A stream that drops before the welcome never connected (`connect`); after it, the connection dropped (`closed`).
 		const dropped = (reason: string | undefined): TernError => {
