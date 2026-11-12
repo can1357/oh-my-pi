@@ -45,6 +45,7 @@ import {
 } from "../tools/file-write-fallback";
 import { outputMeta, resolveOutputMaxColumns } from "../tools/output-meta";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { enforceWriteRoots, enforceWriteRootsAbsolute, writeRoots } from "../tools/write-roots-guard";
 import { DEFAULT_MAX_COLUMN } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveEditMode } from "../utils/edit-mode";
@@ -525,6 +526,10 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
+		// Opt-in write confinement runs before the native session stages anything, so a
+		// refused target fails before the first write — in every approval mode, headless
+		// included, without an approval prompt. Both sides of a rename pass through here.
+		await this.#enforceWriteRoots(params, signal);
 		let open = this.#sessions.get(toolCallId);
 		const argsJson = JSON.stringify(params);
 		if (open && this.#streamedArgs.get(toolCallId) !== argsJson) {
@@ -637,6 +642,24 @@ export class EditTool implements AgentTool<TInput> {
 		if (tagged) tagged[kInspection] = { mode: this.mode, inspection };
 		return inspection;
 	}
+	/**
+	 * Opt-in `tools.writeRoots` confinement: every authored target (section paths plus
+	 * rename sources and destinations, delete targets) must physically land inside a
+	 * configured root. The native session resolves the same spellings (hashline headers,
+	 * `~`, internal URLs through host answers); this pre-check mirrors it so the refusal
+	 * names the violation before anything is staged. Tag-recovery rebinding and the
+	 * resolved write requests are re-checked in {@link EditTool.#write}.
+	 */
+	async #enforceWriteRoots(params: EditParams, signal?: AbortSignal): Promise<void> {
+		const { paths, fileOps } = this.#inspect(params);
+		const targets = [...paths];
+		for (const op of fileOps) {
+			targets.push(op.path);
+			if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		}
+		if (targets.length === 0) return;
+		await enforceWriteRoots(this.session, targets, signal);
+	}
 
 	/**
 	 * Open a native session whose internal-URL targets resolve through the router
@@ -717,6 +740,14 @@ export class EditTool implements AgentTool<TInput> {
 				beforeMtimeMs: snapshot.mtimeMs,
 			});
 		};
+		// The native session hands back resolved absolutes (post tag-recovery); re-check
+		// confinement here so a rebound path cannot escape the execute() pre-check.
+		if (writeRoots(this.session) !== undefined) {
+			const targets = request.op === "move" && request.moveTo ? [request.path, request.moveTo] : [request.path];
+			for (const absolute of targets) {
+				await enforceWriteRootsAbsolute(this.session, absolute, { signal });
+			}
+		}
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			journal(request.path, null);

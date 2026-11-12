@@ -38,6 +38,7 @@ import {
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
+import { enforceWriteRootsAbsolute, writeRoots } from "./write-roots-guard";
 
 const astEditOpSchema = type({
 	pat: type("string").describe("ast pattern"),
@@ -287,6 +288,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				},
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
+			// Opt-in `tools.writeRoots` confinement, scope-level fail-fast: a scope rooted
+			// outside every root is refused before the dry run. Per-file enforcement below
+			// (and again at apply time) covers symlink escapes under an inside scope.
+			if (writeRoots(this.session) !== undefined) {
+				const scopePaths =
+					multiTargets !== undefined ? multiTargets.map(target => target.basePath) : [resolvedSearchPath];
+				for (const scopePathEntry of scopePaths) {
+					if (InternalUrlRouter.instance().canHandle(scopePathEntry)) continue;
+					await enforceWriteRootsAbsolute(this.session, scopePathEntry, { authored: scopePathEntry });
+				}
+			}
 
 			// Dry run, so a re-run after installing missing grammars cannot double-apply.
 			const result = await rerunWithGrammars(() =>
@@ -342,6 +354,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					: "";
 				const grammarMessage = grammarNote ? `\n${grammarNote}` : "";
 				return toolResult(baseDetails).text(`No replacements made${parseMessage}${grammarMessage}`).done();
+			}
+			// Per-file confinement: resolve every would-be-written file to its backing
+			// absolute (a `local://` result binds to its file) and refuse escapes —
+			// e.g. a symlinked directory under an inside scope pointing outside.
+			if (writeRoots(this.session) !== undefined) {
+				for (const relativePath of fileList) {
+					const backing = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
+					if (backing === undefined) continue;
+					await enforceWriteRootsAbsolute(this.session, backing, { authored: relativePath });
+				}
 			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
@@ -451,6 +473,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								const absolute = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
 								const before = absolute === undefined ? undefined : await readSnapshot(absolute);
 								if (absolute !== undefined && before) journaled.push({ path: absolute, before });
+							}
+						}
+						// Apply-time confinement, checked BEFORE the real write runs: the
+						// preview's file list is re-checked against the live setting, so a
+						// `tools.writeRoots` change between preview and apply cannot smuggle
+						// a write outside. A ToolError here keeps the preview pending.
+						if (writeRoots(this.session) !== undefined) {
+							for (const relativePath of fileList) {
+								const backing = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
+								if (backing === undefined) continue;
+								await enforceWriteRootsAbsolute(this.session, backing, { authored: relativePath });
 							}
 						}
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
