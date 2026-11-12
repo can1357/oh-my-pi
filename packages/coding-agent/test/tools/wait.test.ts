@@ -638,6 +638,16 @@ describe("wait", () => {
 			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 
+		test("a wake relay answers the question without asking for a reply back", async () => {
+			const { child } = registerParentAndChild();
+			await ask();
+			const waiting = childWait();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope", wakeRelay: true });
+			expect(await received(waiting, child)).toMatchObject([{ from: "Main", body: "heliotrope", wakeRelay: true }]);
+			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
+			expect(IrcBus.global().unansweredSends("Main", 0)).toEqual([]);
+		});
+
 		test("blocks for a second question asked in the same millisecond its first was answered", async () => {
 			const { child } = registerParentAndChild();
 			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
@@ -650,6 +660,24 @@ describe("wait", () => {
 				{ from: "Main", body: "heliotrope" },
 				{ from: "Main", body: "vermilion" },
 			]);
+		});
+
+		test("a delivered job answers the current question but not a later one in the same millisecond", async () => {
+			const { main } = registerParentAndChild();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const childRun = registerChildJob(manager);
+			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "which codeword?" });
+			childRun.resolve("heliotrope");
+			const result = await new WaitTool(session(manager)).execute("child-result", {});
+			expect(result.details?.jobs?.[0]).toMatchObject({ id: "Child", status: "completed" });
+			expect(IrcBus.global().unansweredSends("Main", 0)).toEqual([]);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "and the second word?" });
+			const waiting = new WaitTool(session(manager)).execute("second-answer", {});
+			const pending = await stillPending(waiting);
+			await IrcBus.global().send({ from: "Child", to: "Main", body: "vermilion" });
+			expect(pending).toBe(true);
+			expect(await received(waiting, main)).toMatchObject([{ from: "Child", body: "vermilion" }]);
 		});
 
 		test("ends once the agent asked starts waiting on the caller's result instead of answering", async () => {
@@ -803,12 +831,38 @@ describe("wait", () => {
 			]);
 		});
 
+		test("a broadcast delivered before wait leaves the direct question owed until its answer", async () => {
+			const { child } = registerParentAndChild();
+			await ask();
+			const broadcastAt = Date.now();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "editing auth.ts", broadcast: true });
+			expect(IrcBus.global().sentSince("Main", "Child", broadcastAt)).toBe(true);
+			const waiting = childWait();
+			const pending = await stillPending(waiting);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			expect(pending).toBe(true);
+			expect(await received(waiting, child)).toMatchObject([
+				{ from: "Main", body: "editing auth.ts", broadcast: true },
+				{ from: "Main", body: "heliotrope" },
+			]);
+			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
+		});
+
 		test("a broadcast from the agent asked answers the wait", async () => {
 			const { child } = registerParentAndChild();
 			await ask();
 			const waiting = childWait();
 			await IrcBus.global().send({ from: "Main", to: "Child", body: "codeword is heliotrope", broadcast: true });
 			expect(await received(waiting, child)).toMatchObject([{ from: "Main", broadcast: true }]);
+			// News still interrupts this wait, but only a direct answer settles the question.
+			const answerWait = childWait();
+			const pending = await stillPending(answerWait);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			expect(pending).toBe(true);
+			expect(await received(answerWait, child)).toMatchObject([
+				{ from: "Main", body: "codeword is heliotrope", broadcast: true },
+				{ from: "Main", body: "heliotrope" },
+			]);
 			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 
