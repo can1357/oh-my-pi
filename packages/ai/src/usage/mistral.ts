@@ -6,8 +6,10 @@
  *
  * Both are public `beta.billing` routes in Mistral's OpenAPI spec and accept the same key as
  * inference. `/budget` needs the `see_org_inference_usage` permission, so an organization member
- * without it gets 403; that reads as "no usage to show", not as a bad key.
+ * without it gets 403; that reads as "no usage to show", not as a bad key. Only a 401 (invalid or
+ * revoked key) throws, so the cached report is purged instead of re-served.
  */
+import { ProviderHttpError } from "../error";
 import type {
 	UsageAmount,
 	UsageFetchContext,
@@ -18,7 +20,7 @@ import type {
 	UsageStatus,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, parseIsoTimestamp, usageStatus } from "./shared";
+import { buildUsageAmount, DAY_MS, parseIsoTimestamp, usageStatus } from "./shared";
 
 const PROVIDER = "mistral";
 const DEFAULT_BASE_URL = "https://api.mistral.ai/v1";
@@ -75,27 +77,17 @@ function planTitle(subscription: Subscription | undefined): string | undefined {
 }
 
 function budgetAmount(usedFraction: number, budget: number, currency: string | undefined): UsageAmount {
-	const remainingFraction = Math.max(0, 1 - usedFraction);
-	if (currency === "USD") {
-		const used = usedFraction * budget;
-		return {
-			used,
-			limit: budget,
-			remaining: Math.max(0, budget - used),
-			usedFraction,
-			remainingFraction,
-			unit: "usd",
-		};
-	}
 	// No non-USD money unit exists; show the share and name the currency in a note.
-	return {
-		used: usedFraction * 100,
-		limit: 100,
-		remaining: remainingFraction * 100,
+	const usd = currency === "USD";
+	const limit = usd ? budget : 100;
+	const used = usedFraction * limit;
+	return buildUsageAmount({
+		used,
+		limit,
+		remaining: Math.max(0, limit - used),
 		usedFraction,
-		remainingFraction,
-		unit: "percent",
-	};
+		unit: usd ? "usd" : "percent",
+	});
 }
 
 /**
@@ -143,6 +135,9 @@ async function getJson(
 	try {
 		const response = await ctx.fetch(url, { headers, signal: params.signal });
 		if (!response.ok) {
+			if (response.status === 401) {
+				throw new ProviderHttpError(`Mistral billing read returned ${response.status}`, response.status);
+			}
 			// 403: a member without `see_org_inference_usage`; 404: a platform without billing.
 			const log = response.status === 403 || response.status === 404 ? ctx.logger?.debug : ctx.logger?.warn;
 			log?.call(ctx.logger, "Mistral billing read failed", { url, status: response.status });
@@ -150,6 +145,7 @@ async function getJson(
 		}
 		return await response.json();
 	} catch (error) {
+		if (error instanceof ProviderHttpError) throw error;
 		ctx.logger?.warn("Mistral billing read error", { url, error: String(error) });
 		return undefined;
 	}

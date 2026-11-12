@@ -109,6 +109,14 @@ describe("mistral usage provider", () => {
 		expect(report).toBeNull();
 	});
 
+	it("rejects a revoked key so the cached report is purged instead of re-served", async () => {
+		const ctx = makeCtx({
+			budget: { status: 401, body: { detail: "Invalid API Key" } },
+			subscription: { status: 401, body: { detail: "Invalid API Key" } },
+		});
+		await expect(fetchUsage(ctx)).rejects.toMatchObject({ status: 401 });
+	});
+
 	it("keeps the budget when the subscription read fails, and names a non-USD currency", async () => {
 		const report = await fetchUsage(
 			makeCtx({
