@@ -4023,6 +4023,19 @@ export class ModelRegistry {
 			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: config.apiKey, fallback });
 		}
 		this.#recordRuntimeCommandConfigs(providerName, config);
+		// Fixed-model registrations return before the general override path. Store
+		// routing now, but keep headers on the overlays so live header objects
+		// remain request-time values.
+		if (config.models?.length && config.transport !== undefined) {
+			const existingOverride = this.#runtimeProviderOverrides.get(providerName);
+			this.#runtimeProviderOverrides.set(
+				providerName,
+				this.#mergeProviderOverride(existingOverride, {
+					baseUrl: existingOverride?.baseUrl ?? config.baseUrl,
+					transport: config.transport,
+				}),
+			);
+		}
 
 		if (config.models && config.models.length > 0) {
 			// Build model overlays that persist across refresh() cycles
