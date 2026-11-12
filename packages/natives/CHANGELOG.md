@@ -19,7 +19,6 @@
 - Fixed X11 window screenshots showing whatever was on screen over the window: under a compositing manager they come from the window's own pixels with its own menus and tooltips, cut to their shapes, and otherwise a covered window is reported covered instead of returning the window on top ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
-- Added the secret-rule engine: `SecretRegex` runs a Rust `regex` secret rule over a `SecretText` and reports the span it redacts (its `secret` group, else the whole match) in UTF-16 offsets, and `SecretScanner` answers in one Aho-Corasick pass which rules match a text and whether a configured literal occurs, with `scanMany` scanning a batch across cores ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
 - `DirectoryWatcher` changes say whether their entry is a directory, and `close()` returns without waiting for the watcher thread to cancel its reads (a network round trip on shares)
 ### Fixed

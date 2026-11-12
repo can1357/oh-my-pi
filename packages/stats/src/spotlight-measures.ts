@@ -27,7 +27,7 @@ import {
 	jointSamples,
 	percentileInterval,
 } from "./spotlight-bootstrap";
-import { mergeRanges } from "./spotlight-ingest";
+import { mergeRanges, windowRanges } from "./spotlight-ingest";
 
 const CHARS_PER_TOKEN = 4;
 /** Holdouts per tool below which its baseline is too thin to trust. */
@@ -364,6 +364,36 @@ const POSITION_LABELS: readonly string[] = [
 	...Array.from({ length: 10 }, (_, d) => `${d * 10}–${(d + 1) * 10}%`),
 ];
 
+/** One ranked span of a result: its lines, heat, kept runs and needs, positions 1-based within it. */
+interface RankingUnit {
+	lines: number;
+	heat: string;
+	kept: [number, number][];
+	needs: Result["needs"];
+}
+
+/**
+ * The spans a result's ranking is judged over: the whole result, or of a `;`/`,` list read each window shaping cut
+ * (heat digits rank within their own window, and a window shown unchanged was never ranked).
+ */
+function rankingUnits(result: Result): RankingUnit[] {
+	if (result.windows.length <= 1) {
+		return [{ lines: result.lines, heat: result.heat, kept: result.kept, needs: result.needs }];
+	}
+	const { needs } = result;
+	return result.windows
+		.filter(window => window.hidden.length > 0)
+		.map(({ at, lines }) => ({
+			lines,
+			heat: result.heat.slice(at, at + lines),
+			kept: windowRanges(result.kept, at, lines),
+			needs: needs && {
+				reread: windowRanges(needs.reread, at, lines),
+				edit: windowRanges(needs.edit, at, lines),
+			},
+		}));
+}
+
 /**
  * Ranking quality per group over shaped reads with needed lines (see {@link SpotlightRankingCell}), mean heat by
  * line position over every scored cut or would-be cut, and how the needs were observed.
@@ -374,94 +404,96 @@ export function computeRanking(evaluated: readonly Evaluated[]): SpotlightRankin
 	const positionSum = new Float64Array(POSITION_LABELS.length);
 	const positionLines = new Float64Array(POSITION_LABELS.length);
 	for (const { result, analysis } of evaluated) {
-		const n = result.lines;
-		if ((result.shortened || result.holdout) && !result.scoreFree && n >= POSITION_MIN_LINES) {
-			const m = Math.min(n, HEAT_LINES);
-			for (let i = 0; i < Math.min(m, result.heat.length); i++) {
-				const c = result.heat.charCodeAt(i);
-				if (c < 48 || c > 57) continue;
-				const slot = i === 0 ? 0 : i <= 2 ? 1 : 2 + Math.min(9, Math.floor((10 * i) / m));
-				positionSum[slot] += c - 48;
-				positionLines[slot]++;
-			}
-		}
 		const group = rankingGroup(result);
-		if (result.tool !== "read" || n <= 0 || !result.needs || !group) continue;
-		const needed = lineMask(n, mergeRanges([...result.needs.reread, ...result.needs.edit]));
-		let neededCount = 0;
-		for (let p = 1; p <= n; p++) neededCount += needed[p];
-		if (neededCount === 0) continue;
-		if (result.needs.reread.some(([a, b]) => a <= n && b >= 1)) sources.reread++;
-		if (result.needs.edit.some(([a, b]) => a <= n && b >= 1)) sources.edit++;
-
-		let bySession = cells.get(group);
-		if (!bySession) {
-			bySession = new Map();
-			cells.set(group, bySession);
-		}
-		const file = analysis.session.session_file;
-		let sums = bySession.get(file);
-		if (!sums) {
-			sums = {
-				results: 0,
-				neededLines: 0,
-				aucSum: 0,
-				aucCount: 0,
-				topObserved: 0,
-				topExpected: 0,
-				keptObserved: 0,
-				keptExpected: 0,
-			};
-			bySession.set(file, sums);
-		}
-		sums.results++;
-		sums.neededLines += neededCount;
-
-		const kept = lineMask(n, result.kept);
-		let keptCount = 0;
-		let neededKept = 0;
-		for (let p = 1; p <= n; p++) {
-			keptCount += kept[p];
-			neededKept += kept[p] & needed[p];
-		}
-		sums.keptObserved += neededKept;
-		sums.keptExpected += (neededCount * keptCount) / n;
-
-		if (group === "scoreFree") continue;
-		const m = Math.min(n, HEAT_LINES);
-		const all = new Float64Array(10);
-		const need = new Float64Array(10);
-		for (let i = 0; i < m; i++) {
-			const d = heatDigit(result.heat, i);
-			all[d]++;
-			need[d] += needed[i + 1];
-		}
-		let neededIn = 0;
-		for (const count of need) neededIn += count;
-		const unneededIn = m - neededIn;
-		if (neededIn > 0 && unneededIn > 0) {
-			let below = 0;
-			let concordant = 0;
-			for (let d = 0; d < 10; d++) {
-				const unneeded = all[d] - need[d];
-				concordant += need[d] * below + 0.5 * need[d] * unneeded;
-				below += unneeded;
+		for (const unit of rankingUnits(result)) {
+			const n = unit.lines;
+			if ((result.shortened || result.holdout) && !result.scoreFree && n >= POSITION_MIN_LINES) {
+				const m = Math.min(n, HEAT_LINES);
+				for (let i = 0; i < Math.min(m, unit.heat.length); i++) {
+					const c = unit.heat.charCodeAt(i);
+					if (c < 48 || c > 57) continue;
+					const slot = i === 0 ? 0 : i <= 2 ? 1 : 2 + Math.min(9, Math.floor((10 * i) / m));
+					positionSum[slot] += c - 48;
+					positionLines[slot]++;
+				}
 			}
-			sums.aucSum += concordant / (neededIn * unneededIn);
-			sums.aucCount++;
-		}
-		if (neededIn > 0) {
-			// The hottest k lines; ties at the boundary digit share the remaining places evenly.
-			const k = Math.ceil(TOP_SHARE * m);
-			let remaining = k;
-			let observed = 0;
-			for (let d = 9; d >= 0 && remaining > 0; d--) {
-				const take = Math.min(remaining, all[d]);
-				if (take > 0) observed += (take * need[d]) / all[d];
-				remaining -= take;
+			if (result.tool !== "read" || n <= 0 || !unit.needs || !group) continue;
+			const needed = lineMask(n, mergeRanges([...unit.needs.reread, ...unit.needs.edit]));
+			let neededCount = 0;
+			for (let p = 1; p <= n; p++) neededCount += needed[p];
+			if (neededCount === 0) continue;
+			if (unit.needs.reread.some(([a, b]) => a <= n && b >= 1)) sources.reread++;
+			if (unit.needs.edit.some(([a, b]) => a <= n && b >= 1)) sources.edit++;
+
+			let bySession = cells.get(group);
+			if (!bySession) {
+				bySession = new Map();
+				cells.set(group, bySession);
 			}
-			sums.topObserved += observed;
-			sums.topExpected += (k * neededIn) / m;
+			const file = analysis.session.session_file;
+			let sums = bySession.get(file);
+			if (!sums) {
+				sums = {
+					results: 0,
+					neededLines: 0,
+					aucSum: 0,
+					aucCount: 0,
+					topObserved: 0,
+					topExpected: 0,
+					keptObserved: 0,
+					keptExpected: 0,
+				};
+				bySession.set(file, sums);
+			}
+			sums.results++;
+			sums.neededLines += neededCount;
+
+			const kept = lineMask(n, unit.kept);
+			let keptCount = 0;
+			let neededKept = 0;
+			for (let p = 1; p <= n; p++) {
+				keptCount += kept[p];
+				neededKept += kept[p] & needed[p];
+			}
+			sums.keptObserved += neededKept;
+			sums.keptExpected += (neededCount * keptCount) / n;
+
+			if (group === "scoreFree") continue;
+			const m = Math.min(n, HEAT_LINES);
+			const all = new Float64Array(10);
+			const need = new Float64Array(10);
+			for (let i = 0; i < m; i++) {
+				const d = heatDigit(unit.heat, i);
+				all[d]++;
+				need[d] += needed[i + 1];
+			}
+			let neededIn = 0;
+			for (const count of need) neededIn += count;
+			const unneededIn = m - neededIn;
+			if (neededIn > 0 && unneededIn > 0) {
+				let below = 0;
+				let concordant = 0;
+				for (let d = 0; d < 10; d++) {
+					const unneeded = all[d] - need[d];
+					concordant += need[d] * below + 0.5 * need[d] * unneeded;
+					below += unneeded;
+				}
+				sums.aucSum += concordant / (neededIn * unneededIn);
+				sums.aucCount++;
+			}
+			if (neededIn > 0) {
+				// The hottest k lines; ties at the boundary digit share the remaining places evenly.
+				const k = Math.ceil(TOP_SHARE * m);
+				let remaining = k;
+				let observed = 0;
+				for (let d = 9; d >= 0 && remaining > 0; d--) {
+					const take = Math.min(remaining, all[d]);
+					if (take > 0) observed += (take * need[d]) / all[d];
+					remaining -= take;
+				}
+				sums.topObserved += observed;
+				sums.topExpected += (k * neededIn) / m;
+			}
 		}
 	}
 

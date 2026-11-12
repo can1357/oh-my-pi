@@ -182,7 +182,14 @@ import {
 	type AgentRegistryApi,
 	MAIN_AGENT_ID,
 } from "./registry/agent-registry";
-import { buildSecretObfuscator, deobfuscateToolArguments, obfuscateMessages, type SecretObfuscator } from "./secrets";
+import {
+	buildSecretObfuscator,
+	deobfuscateSessionContext,
+	deobfuscateToolArguments,
+	obfuscateMessages,
+	obfuscateProviderContext,
+	type SecretObfuscator,
+} from "./secrets";
 import {
 	AgentSession,
 	type InitialRetryFallbackState,
@@ -2222,9 +2229,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		sessionManager.appendMessage(interruptedTurnAbort);
 		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getBranch());
 	}
-	// The agent replays the stored context as written: what the model wrote stays
-	// in placeholder form, and only display and tool execution restore values.
-	let existingSession = logger.time("loadSessionContext", () => sessionManager.buildSessionContext());
+	let existingSession = logger.time("loadSessionContext", () =>
+		deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
+	);
 	const hasExistingSession = existingBranch.length > 0;
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
@@ -3738,7 +3745,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				for (const result of createInterruptedToolResults(existingBranch)) sessionManager.appendMessage(result);
 				sessionManager.appendMessage(selectedModelAbort);
 				existingBranch = logger.time("getRecoveredUserTailBranch", () => sessionManager.getBranch());
-				existingSession = logger.time("loadRecoveredUserTailContext", () => sessionManager.buildSessionContext());
+				existingSession = logger.time("loadRecoveredUserTailContext", () =>
+					deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
+				);
 			}
 		}
 
@@ -4655,9 +4664,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		// Final convertToLlm: live provider replay drops API-level refusal errors,
-		// then encodes secrets. This is the one place outbound messages are encoded
-		// (main loop, live steering, side requests and handoffs all convert here);
-		// nothing downstream encodes again.
+		// then applies secret obfuscation to the remaining outbound context.
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
 			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
 			if (!obfuscator?.hasSecrets()) return converted;
@@ -4668,8 +4675,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const withContext = await extensionRunner.emitContext(messages, signal);
 			return wrapSteeringForModel(withContext);
 		};
-		// Per-request provider-context transforms. Messages arrive already encoded
-		// by convertToLlm, so snapcompact never rasterizes a secret into a frame. Clamp
+		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
+		// redacted from text before snapcompact rasterizes it into PNG frames. Clamp
 		// to the provider budget before normalizing decoder-incompatible images so
 		// dropped historical images never pay a transcode cost.
 		// URL-mirrored images: providers that fetch image URLs get a broker URL
@@ -4709,7 +4716,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
 			const dateCwdReminder = new DateCwdReminderInjector(journal);
 			return async (context: Context, transformModel: Model): Promise<Context> => {
-				let transformed = context;
+				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
 				transformed = capArchiveFrameBytes(transformed, transformModel);
 				transformed = await snapcompactInline.transform(transformed, transformModel);
@@ -5024,7 +5031,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				frameBudget === DEFAULT_FRAME_DATA_BYTES_BUDGET &&
 				getReadableCompactionEntry(branch, model) === getReadableCompactionEntry(branch, undefined)
 					? existingSession
-					: sessionManager.buildSessionContext({ maxFrameDataBytes: frameBudget, model });
+					: deobfuscateSessionContext(
+							sessionManager.buildSessionContext({ maxFrameDataBytes: frameBudget, model }),
+							obfuscator,
+						);
 			agent.replaceMessages(restored.messages);
 			// Only an explicit role alias re-owns a resumed branch; any other explicit model
 			// (subagent revival, SDK callers) keeps the role its history recorded.

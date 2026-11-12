@@ -1,108 +1,101 @@
-import { SecretRegex, SecretText } from "@oh-my-pi/pi-natives";
-
-/** A secret rule's match: the redacted span, shaped like the parts of `RegExpExecArray` the redactor reads. */
-export interface SecretMatch {
-	0: string;
-	index: number;
+/** Add global flag while preserving user-provided flags. */
+function enforceGlobalFlag(flags: string): string {
+	return flags.includes("g") ? flags : `${flags}g`;
 }
 
-/** The global-`RegExp` exec protocol shared by {@link SecretPattern} and `RegExp`. */
-export interface SpanPattern {
-	lastIndex: number;
-	exec(text: string): SecretMatch | null;
-}
-
-/** A {@link SecretPattern} match. */
-export interface SecretPatternMatch extends SecretMatch {
-	/** Where the whole match begins: before {@link SecretMatch.index} when context precedes the `secret` group. */
-	matchIndex: number;
-}
-
-/**
- * Texts converted for the native engine, most recent last. The redactor runs
- * every rule over the same few strings (a text, its placeholder-expanded scan
- * view, short probes), so a handful of slots convert each string once.
- */
-const textCache = new Map<string, SecretText>();
-const TEXT_CACHE_SIZE = 8;
-
-function secretText(text: string): SecretText {
-	let converted = textCache.get(text);
-	if (converted !== undefined) {
-		textCache.delete(text);
-	} else {
-		converted = new SecretText(text);
-		if (textCache.size >= TEXT_CACHE_SIZE) textCache.delete(textCache.keys().next().value!);
-	}
-	textCache.set(text, converted);
-	return converted;
-}
-
-/**
- * A secret regex rule: a Rust `regex` pattern run by the native engine, with
- * the global-`RegExp` `exec`/`test`/`lastIndex` protocol. A match is the
- * span the rule redacts: its `secret` named group when that participates,
- * else the whole match. The next search starts at the end of that span.
- */
-export class SecretPattern {
-	lastIndex = 0;
-	readonly #native: SecretRegex;
-
-	constructor(
-		readonly source: string,
-		readonly flags: string,
-	) {
-		this.#native = new SecretRegex(source, flags);
-	}
-
-	exec(text: string): SecretPatternMatch | null {
-		const span = this.lastIndex > text.length ? null : this.#native.exec(secretText(text), this.lastIndex);
-		if (span === null) {
-			this.lastIndex = 0;
-			return null;
-		}
-		const [start, end, matchIndex] = span as [number, number, number];
-		this.lastIndex = end;
-		return { 0: text.slice(start, end), index: start, matchIndex };
-	}
-
-	test(text: string): boolean {
-		return this.exec(text) !== null;
-	}
-}
-
-/**
- * Compile a secret regex rule. `pattern` is a Rust `regex` pattern, or
- * `/pattern/flags`; flags are `i`, `m` and `s` (`g` and `u` are accepted and
- * ignored). Throws when the pattern or a flag is invalid.
- */
-export function compileSecretRegex(pattern: string, flags?: string): SecretPattern {
+/** Compile a secret regex entry with global scanning enabled by default. */
+export function compileSecretRegex(pattern: string, flags?: string): RegExp {
 	let resolvedPattern = pattern;
 	let resolvedFlags = flags ?? "";
-	// Regex literal syntax: /pattern/flags
-	const literalMatch = /^\/((?:[^\\/]|\\.)*)\/([ a-z]*)$/.exec(pattern);
+
+	// Detect regex literal syntax: /pattern/flags
+	const literalMatch = /^\/((?:[^\\/]|\\.)*)\/([ gimsuy]*)$/.exec(pattern);
 	if (literalMatch) {
-		resolvedPattern = literalMatch[1]!;
-		resolvedFlags = [...new Set([...resolvedFlags, ...literalMatch[2]!.replaceAll(" ", "")])].join("");
+		resolvedPattern = literalMatch[1];
+		// Merge flags from literal with explicit flags param (deduplicate)
+		const combined = new Set([...resolvedFlags, ...literalMatch[2]]);
+		resolvedFlags = [...combined].join("");
 	}
-	return new SecretPattern(resolvedPattern, resolvedFlags);
+
+	return new RegExp(resolvedPattern, enforceGlobalFlag(resolvedFlags));
 }
 
-/** `text` with every non-empty span `regex` redacts replaced by `replacement`. */
-export function replaceSecretMatches(regex: SecretPattern, text: string, replacement: string): string {
-	regex.lastIndex = 0;
-	let out = "";
-	let cursor = 0;
-	let replaced = false;
-	for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
-		if (match[0].length === 0) {
-			regex.lastIndex++;
-			continue;
-		}
-		out += text.slice(cursor, match.index) + replacement;
-		cursor = match.index + match[0].length;
-		replaced = true;
+/** Shortest derived literal worth a gate; a shorter one occurs in too much text to skip anything. */
+const MIN_REQUIRED_LITERAL = 3;
+
+/** Characters an identity escape (`\.`) turns into a literal. */
+const ESCAPED_LITERALS = new Set("^$\\.*+?()[]{}|/-");
+
+/** Characters that end a literal run: syntax, or literal only in some contexts. */
+const SYNTAX = new Set("^$\\.*+?()[]{}|");
+
+/**
+ * A literal every match of `regex` contains, read from the pattern's leading
+ * literal run (after zero-width `^`, `\b`, `\B` and lookarounds), so the
+ * obfuscator can skip text without it. Conservative: undefined when the
+ * pattern has a top-level alternation, uses the `v` flag, or starts with
+ * anything but ASCII literals; a quantified last character is left out.
+ *
+ * Example: `api_?key=\w+` → `"api"`; `(?<=x)tok_[0-9]+` → `"tok_"`.
+ */
+export function requiredLiteral(regex: RegExp): string | undefined {
+	const source = regex.source;
+	if (regex.unicodeSets || hasTopLevelAlternation(source)) return undefined;
+	let at = 0;
+	for (;;) {
+		if (source[at] === "^") at++;
+		else if (source.startsWith("\\b", at) || source.startsWith("\\B", at)) at += 2;
+		else if (/^\(\?<?[=!]/.test(source.slice(at, at + 4))) at = groupEnd(source, at);
+		else break;
 	}
-	regex.lastIndex = 0;
-	return replaced ? out + text.slice(cursor) : text;
+	let literal = "";
+	while (at < source.length) {
+		let char = source[at]!;
+		let next = at + 1;
+		if (char === "\\") {
+			char = source[at + 1] ?? "";
+			if (!ESCAPED_LITERALS.has(char)) break;
+			next = at + 2;
+		} else if (SYNTAX.has(char) || char.charCodeAt(0) > 0x7f) {
+			break;
+		}
+		const quantifier = source[next];
+		// `?`, `*` and `{0,…}` let the character be absent; `+` keeps one copy.
+		if (quantifier === "?" || quantifier === "*" || quantifier === "{") break;
+		literal += char;
+		at = next;
+		if (quantifier === "+") break;
+	}
+	return literal.length >= MIN_REQUIRED_LITERAL ? literal : undefined;
+}
+
+/** Index just past the group opened at `start`, skipping escapes and classes. */
+function groupEnd(source: string, start: number): number {
+	let depth = 0;
+	let inClass = false;
+	for (let at = start; at < source.length; at++) {
+		const char = source[at];
+		if (char === "\\") at++;
+		else if (inClass) inClass = char !== "]";
+		else if (char === "[") inClass = true;
+		else if (char === "(") depth++;
+		else if (char === ")" && --depth === 0) return at + 1;
+	}
+	return source.length;
+}
+
+/** Whether `|` splits the whole pattern, outside every group and class. */
+function hasTopLevelAlternation(source: string): boolean {
+	let depth = 0;
+	let inClass = false;
+	for (let at = 0; at < source.length; at++) {
+		const char = source[at];
+		if (char === "\\") at++;
+		else if (inClass) inClass = char !== "]";
+		else if (char === "[") inClass = true;
+		else if (char === "(") depth++;
+		else if (char === ")") depth--;
+		else if (char === "|" && depth === 0) return true;
+	}
+	return false;
 }
