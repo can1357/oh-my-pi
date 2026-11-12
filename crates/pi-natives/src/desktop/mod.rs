@@ -1184,28 +1184,31 @@ impl Worker {
 		let Ok(target) = self.registry.target(reference) else {
 			return error;
 		};
-		let window = if target == "desktop" {
-			let found = self
-				.backend()
-				.and_then(|backend| backend.windows())
-				.and_then(|windows| {
-					let id = self.ax()?.window_id(&handle, &windows)?;
-					windows
-						.into_iter()
-						.find(|window| window.id == id)
-						.ok_or_else(|| {
-							DesktopError::window_not_found("the element's window is unavailable")
-						})
-				});
-			let Ok(window) = found else {
-				return error;
-			};
-			window
-		} else {
-			let Ok(window) = self.window(&Target::Window(target.clone())) else {
-				return error;
-			};
-			window
+		let window = match Target::parse(&target) {
+			target @ Target::Window(_) => {
+				let Ok(window) = self.window(&target) else {
+					return error;
+				};
+				window
+			},
+			Target::Desktop | Target::Display(_) => {
+				let found = self
+					.backend()
+					.and_then(|backend| backend.windows())
+					.and_then(|windows| {
+						let id = self.ax()?.window_id(&handle, &windows)?;
+						windows
+							.into_iter()
+							.find(|window| window.id == id)
+							.ok_or_else(|| {
+								DesktopError::window_not_found("the element's window is unavailable")
+							})
+					});
+				let Ok(window) = found else {
+					return error;
+				};
+				window
+			},
 		};
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let Some(ax) = backend.as_mut().ok().and_then(|backend| backend.ax()) else {
@@ -3076,7 +3079,7 @@ mod capture_tests {
 				self.clicks.lock().push(format!("perform {action}"));
 				return Ok(());
 			};
-			ax::require_read_as(|| self.read_as(h).map(Some))?;
+			ax::require_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))?;
 			let mut tree = tree.lock();
 			let id = tree.element(h)?;
 			if action != "press" {
@@ -3133,7 +3136,7 @@ mod capture_tests {
 			let Some(tree) = &self.tree else {
 				unreachable!("text input not exercised")
 			};
-			ax::require_read_as(|| self.read_as(h).map(Some))?;
+			ax::require_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))?;
 			{
 				let mut tree = tree.lock();
 				let id = tree.element(h)?;
@@ -3142,7 +3145,7 @@ mod capture_tests {
 					after_write(&mut tree, id);
 				}
 			}
-			ax::confirm_read_as(|| self.read_as(h).map(Some))
+			ax::confirm_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))
 		}
 
 		fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
@@ -3391,7 +3394,7 @@ mod capture_tests {
 				.queries_at_input
 				.lock()
 				.push(*self.window_queries.lock());
-			ax::require_read_as(|| self.read_as(h).map(Some))?;
+			ax::require_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))?;
 			if let Some(tree) = &self.tree {
 				tree.lock().element(h)?;
 			}
@@ -3411,7 +3414,7 @@ mod capture_tests {
 				.queries_at_input
 				.lock()
 				.push(*self.window_queries.lock());
-			ax::require_read_as(|| self.read_as(element).map(Some))?;
+			ax::require_read_as(|| self.read_as(element).map(ax::AxReadAs::from_props))?;
 			let (target, event) = backend::locate_element_click(self, element, click)?;
 			click.send(self, &target, event, &FrameGeometry::identity_global(), token)
 		}
@@ -4098,29 +4101,35 @@ mod capture_tests {
 	}
 
 	#[test]
-	fn a_relabelled_desktop_ref_names_its_current_control_and_window_candidate() {
-		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
-		let (backend, registry) = (&mut worker.worker.backend, &mut worker.worker.registry);
-		let node = register_node(
-			backend.as_mut().unwrap().ax().unwrap(),
-			registry,
-			"desktop",
-			AxHandle::Test(3),
-			&mut AppFocus::default(),
-		)
-		.unwrap();
-		shift_address_row(&tree);
-		let error = press(&mut worker, &node.ref_).unwrap_err();
-		assert_eq!(error.code, ErrorCode::StaleRef);
-		assert!(
-			error
-				.message
-				.contains("now reads as button \"Street\" [ref="),
-			"{}",
-			error.message
-		);
-		assert!(error.message.contains("this read of the window found"), "{}", error.message);
-		assert!(tree.lock().pressed.is_empty());
+	fn a_relabelled_non_window_ref_names_its_current_control_and_window_candidate() {
+		for target in ["desktop", "display:active"] {
+			let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+			let (backend, registry) = (&mut worker.worker.backend, &mut worker.worker.registry);
+			let node = register_node(
+				backend.as_mut().unwrap().ax().unwrap(),
+				registry,
+				target,
+				AxHandle::Test(3),
+				&mut AppFocus::default(),
+			)
+			.unwrap();
+			shift_address_row(&tree);
+			let error = press(&mut worker, &node.ref_).unwrap_err();
+			assert_eq!(error.code, ErrorCode::StaleRef);
+			assert!(
+				error
+					.message
+					.contains("now reads as button \"Street\" [ref="),
+				"{target}: {}",
+				error.message
+			);
+			assert!(
+				error.message.contains("this read of the window found"),
+				"{target}: {}",
+				error.message
+			);
+			assert!(tree.lock().pressed.is_empty());
+		}
 	}
 
 	#[test]

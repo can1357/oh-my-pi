@@ -384,10 +384,44 @@ fn ref_id(reference: &str) -> Option<u64> {
 /// The role and label a ref was read with, as [`AxRegistry::register`]
 /// compares them: an element read again with others gets a new ref.
 fn fingerprint(props: &AxProps) -> u64 {
+	label_fingerprint(&props.role, label(props))
+}
+
+fn label_fingerprint(role: &str, label: Option<&str>) -> u64 {
 	let mut hasher = DefaultHasher::new();
-	props.role.hash(&mut hasher);
-	label(props).hash(&mut hasher);
+	role.hash(&mut hasher);
+	label.hash(&mut hasher);
 	hasher.finish()
+}
+
+/// The answered role and chosen label, without decoding an unused value or
+/// the broader identity during an action's fingerprint probe.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug)]
+pub(crate) struct AxReadAs {
+	role:  String,
+	label: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl AxReadAs {
+	/// Callers pass only an answered role and fully answered chosen labels.
+	pub(crate) fn from_labels(role: String, labels: [Option<String>; 3]) -> Self {
+		Self {
+			role,
+			label: labels
+				.into_iter()
+				.flatten()
+				.find(|label| !label.trim().is_empty()),
+		}
+	}
+
+	#[cfg(test)]
+	pub(crate) fn from_props(props: AxProps) -> Option<Self> {
+		props
+			.label_complete
+			.then(|| Self::from_labels(props.role, [props.title, props.description, props.role_name]))
+	}
 }
 
 /// The ref the current request acts on, and what it was read as.
@@ -443,17 +477,18 @@ fn read_as_state() -> Option<bool> {
 /// not answer, or left the role or a field needed for its label unanswered,
 /// cannot tell, so it passes.
 #[cfg(any(target_os = "macos", test))]
-fn check_read_as(props: Option<&AxProps>) -> Option<String> {
+fn check_read_as(props: Option<&AxReadAs>) -> Option<String> {
 	READ_AS.with_borrow_mut(|read_as| {
 		let read_as = read_as.as_mut()?;
 		read_as.checked = true;
-		let props = props.filter(|props| props.label_complete)?;
-		if read_as.fingerprint == fingerprint(props) {
+		let props = props?;
+		let label = props.label.as_deref().map(str::trim);
+		if read_as.fingerprint == label_fingerprint(&props.role, label) {
 			return None;
 		}
 		read_as.tripped = true;
 		let mut message = format!("{} now reads as {}", read_as.reference, props.role);
-		if let Some(label) = label(props) {
+		if let Some(label) = label {
 			message.push(' ');
 			push_quoted_label(&mut message, label);
 		}
@@ -471,7 +506,7 @@ fn check_read_as(props: Option<&AxProps>) -> Option<String> {
 /// checked, nothing is read.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn require_read_as(
-	props: impl FnOnce() -> CoreResult<Option<AxProps>>,
+	props: impl FnOnce() -> CoreResult<Option<AxReadAs>>,
 ) -> CoreResult<()> {
 	if read_as_state() != Some(false) {
 		return Ok(());
@@ -491,7 +526,7 @@ pub(crate) fn require_read_as(
 /// read-back stands.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn confirm_read_as(
-	props: impl FnOnce() -> CoreResult<Option<AxProps>>,
+	props: impl FnOnce() -> CoreResult<Option<AxReadAs>>,
 ) -> CoreResult<()> {
 	if read_as_state() != Some(true) {
 		return Ok(());
