@@ -315,6 +315,21 @@ pub(super) struct PointOwner {
 	pub(super) window: Option<u32>,
 }
 
+/// Whether AX identifies this as a document window, rather than a dialog.
+/// `None` when AX cannot read the application, window, or subrole.
+pub(in crate::desktop) fn is_standard_window(window: &DesktopWindow) -> Option<bool> {
+	let app = window
+		.pid
+		.and_then(|pid| libc::pid_t::try_from(pid).ok())
+		.and_then(probe_application)?;
+	let element = find_window(&app, window).ok()?;
+	standard_window_subrole(&element)
+}
+
+fn standard_window_subrole(element: &AXUIElement) -> Option<bool> {
+	copy_string(element, "AXSubrole").map(|subrole| subrole == "AXStandardWindow")
+}
+
 /// `WindowServer` id of `pid`'s `AXFocusedWindow`.
 pub(super) fn focused_window_id(pid: libc::pid_t) -> Option<u32> {
 	let app = probe_application(pid)?;
@@ -2594,9 +2609,17 @@ mod tests {
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
 		focused_window, is_outside_windows, may_borrow_focus, menu_window, perform_choosing,
 		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
-		select_attached, stringify_value, takes_inserted_text, target_window, window_records_of,
+		select_attached, standard_window_subrole, stringify_value, takes_inserted_text,
+		target_window, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
+
+	#[test]
+	fn an_unreadable_window_subrole_is_unknown_not_a_dialog() {
+		// The real system-wide AX element has no window subrole: an unsupported
+		// attribute, like a failed window read, cannot classify a dialog.
+		assert_eq!(standard_window_subrole(&create_system_wide()), None);
+	}
 
 	#[test]
 	fn batched_values_read_like_lone_reads() {

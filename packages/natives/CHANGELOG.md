@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `computer.apps.open` on macOS returning `window: null` for an HTML file with its own `<title>`, or a page's window still titled with the previous tab: it now returns the browser window once it shows the page, with the page's title, including without Accessibility permission or when AX window/subrole reads fail; a hidden file-extension display name no longer selects an unchanged unrelated window, and root folders retain immediate display-name matching ([#18743](https://github.com/can1357/oh-my-pi/pull/18743) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
 - Added the secret-rule engine: `SecretRegex` runs a Rust `regex` secret rule over a `SecretText` and reports the span it redacts (its `secret` group, else the whole match) in UTF-16 offsets, and `SecretScanner` answers in one Aho-Corasick pass which rules match a text and whether a configured literal occurs, with `scanMany` scanning a batch across cores ([#18965](https://github.com/can1357/oh-my-pi/pull/18965) by [@H4vC](https://github.com/H4vC))
