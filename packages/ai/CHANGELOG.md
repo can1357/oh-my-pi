@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added MiniMax image generation: `MiniMax-H3-Image` served through the OpenAI-images-compatible endpoints, with H3 edits sending `images[].image_url` references (1–16 images). Seed hosts follow the credential origin: `minimax-code-cn` → api.minimaxi.com, `minimax`/`minimax-code` → api.minimax.io ([#12073](https://github.com/can1357/oh-my-pi/pull/12073) by [@abcfy2](https://github.com/abcfy2)).
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

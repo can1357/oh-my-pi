@@ -18,4 +18,25 @@ provider "minimax-code-cn" priority=1 {
 			high "high"
 		}
 	}
+
+	kind-apis {
+		image "openai-images"
+	}
+
+	// Token Plan keys are valid on the image endpoint; the China plan routes to
+	// the canonical domestic host (api.minimaxi.com). H3-Image serves the
+	// OpenAI-images-compatible /v1/images/generations and /v1/images/edits endpoints.
+	seed base-url="https://api.minimaxi.com/v1" bundle="always" {
+		model "MiniMax-H3-Image" name="MiniMax-H3-Image" api="openai-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=2.3 output=3.8 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "MiniMax-H3-Image" {
+		kind "image"
+	}
 }

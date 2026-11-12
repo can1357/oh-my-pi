@@ -30,6 +30,10 @@ export async function generateOpenAIImage(
 	// Hand-built image models (SDK callers, tests) may skip `buildModel` and carry no identity.
 	const isGptImage = model.identity?.family === "gpt-image";
 	const isXAI = model.provider === "xai" || model.provider === "xai-oauth";
+	// MiniMax H3-Image models serve the OpenAI-images-compatible endpoints with
+	// a provider-specific edits body (see buildEditBody).
+	const isMinimax =
+		model.provider === "minimax" || model.provider === "minimax-code" || model.provider === "minimax-code-cn";
 	const generationBody = isXAI
 		? {
 				model: wireModelId,
@@ -73,6 +77,15 @@ export async function generateOpenAIImage(
 		// them; OpenAI's multipart edit sends raw bytes and needs them only for
 		// the 404 fallback.
 		const buildEditBody = (): Record<string, unknown> => {
+			// MiniMax H3-Image edits take `images: [{ image_url }]` data URIs
+			// (platform.minimax.io H3 image edits reference) rather than the
+			// generic `input_references` JSON shape.
+			if (isMinimax) {
+				return {
+					...generationBody,
+					images: inputImages.map(image => ({ image_url: toDataUrl(image) })),
+				};
+			}
 			const references = inputImages.map(image => ({ type: "image_url", url: toDataUrl(image) }));
 			if (!isXAI) return { ...generationBody, input_references: references };
 			return references.length === 1

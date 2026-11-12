@@ -68,6 +68,44 @@ describe("OpenAI-compatible image response_format", () => {
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 
+	test("omitted size pins the 1K square instead of the provider default", async () => {
+		const model = imageModel("minimax-code-cn", "MiniMax-H3-Image");
+		let body: Record<string, unknown> | undefined;
+		const fetch: FetchImpl = async (_input, init) => {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return imageResponse();
+		};
+
+		await generateOpenAIImage(model, { prompt: "a cat" }, { apiKey: "test", fetch });
+
+		// A size-less request must not reach MiniMax H3's 16 MP 4K server default,
+		// which can outrun the image tool's 3-minute client timeout.
+		expect(body?.size).toBe("1024x1024");
+	});
+
+	test("MiniMax H3 edits send images[] image_url references", async () => {
+		const model = imageModel("minimax-code-cn", "MiniMax-H3-Image");
+		let body: Record<string, unknown> | undefined;
+		let url = "";
+		const fetch: FetchImpl = async (input, init) => {
+			url = String(input);
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return imageResponse();
+		};
+
+		const result = await generateOpenAIImage(
+			model,
+			{ prompt: "paint this", inputImages: [INPUT_IMAGE] },
+			{ apiKey: "test", fetch },
+		);
+
+		expect(url).toContain("/images/edits");
+		expect(body?.images).toEqual([{ image_url: `data:image/png;base64,${IMAGE_DATA}` }]);
+		expect(body).not.toHaveProperty("input_references");
+		expect(body?.response_format).toBe("b64_json");
+		expect(result.images[0]?.data).toBe(IMAGE_DATA);
+	});
+
 	test("OpenAI GPT Image multipart edits omit the unsupported form field", async () => {
 		const model = imageModel("openai", "gpt-image-1");
 		let form: FormData | undefined;

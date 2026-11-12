@@ -130,7 +130,7 @@ export async function postMultipart(options: {
 	);
 }
 
-async function imageFromUrl(url: string, fetch: FetchImpl, signal?: AbortSignal): Promise<GeneratedImage> {
+export async function imageFromUrl(url: string, fetch: FetchImpl, signal?: AbortSignal): Promise<GeneratedImage> {
 	const response = await fetch(url, { signal });
 	if (!response.ok) {
 		const text = await response.text();
@@ -275,6 +275,12 @@ export function resolveOpenAIImageSize(aspectRatio?: string, imageSize?: string)
 		case "16:9":
 			return "1536x1024";
 		default:
-			return undefined;
+			// An unrecognized explicit aspect stays with the provider default.
+			if (aspectRatio) return undefined;
+			// No size signal at all: pin the 1:1 1K square rather than letting a
+			// provider pick its own default — MiniMax H3 generates a 16 MP 4K
+			// image that can outrun the image tool's 3-minute client timeout
+			// (billed even when the client aborts).
+			return "1024x1024";
 	}
 }
