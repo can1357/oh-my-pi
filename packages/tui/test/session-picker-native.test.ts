@@ -1,9 +1,10 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { getKeybindings, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { OverlayPanel } from "../src/chrome/overlay-box";
 import { TextFormField } from "../src/components/form";
+import { formatKeyHint } from "../src/key-hint-format";
 import type { DescribeContext, NativeNode } from "../src/native/node";
 import { type HistorySearchEntry, HistorySearchComponent } from "../src/overlays/history-search";
 import { type SessionSelectorEntry, SessionSelectorComponent } from "../src/overlays/session-selector";
@@ -18,11 +19,15 @@ const withPicker: DescribeContext = {
 };
 const withoutPicker: DescribeContext = { ...withPicker, supports: kind => kind !== "picker" };
 
+const previousKeybindings = getKeybindings();
+
 beforeAll(async () => {
 	await initTheme(false);
 	// The app installs its keymap before any picker opens; `getKeybindings()` alone knows only `tui.*` actions.
 	setKeybindings(KeybindingsManager.inMemory());
 });
+
+afterAll(() => setKeybindings(previousKeybindings));
 
 const HOUR = 3_600_000;
 
@@ -192,9 +197,21 @@ describe("session selector picker", () => {
 				"ctrl",
 				"d",
 			]);
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain(`[${formatKeyHint("ctrl+d")} delete · `);
 			// Ctrl+D reaches the action before the search Input's forward delete, even mid-query.
 			type(selector, "ga");
 			selector.handleInput("\x04");
+			expect(props(selector.describe(withPicker)).confirm?.act).toBe("delete-confirm");
+		});
+
+		it("keeps a bound word-delete key editing a typed query, then deletes once the query is empty", () => {
+			setKeybindings(KeybindingsManager.inMemory({ "app.session.delete": "ctrl+w" }));
+			const selector = make();
+			type(selector, "ga");
+			selector.handleInput("\x17");
+			expect(props(selector.describe(withPicker)).query).toBe("");
+			expect(props(selector.describe(withPicker)).confirm).toBeNull();
+			selector.handleInput("\x17");
 			expect(props(selector.describe(withPicker)).confirm?.act).toBe("delete-confirm");
 		});
 
@@ -206,6 +223,7 @@ describe("session selector picker", () => {
 			const picker = props(selector.describe(withPicker));
 			expect(picker.confirm).toBeNull();
 			expect(picker.actions?.find(a => a.id === "delete")?.keys).toBeUndefined();
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).not.toContain("delete ·");
 		});
 	});
 });

@@ -142,6 +142,12 @@ const PREVIEW_EXCERPT_CHARS = 1200;
 const PREVIEW_SETTLE_MS = 60;
 const DAY_MS = 86_400_000;
 const PINNED_GROUP = { id: "pinned", label: "Pinned" };
+/** Search Input actions that delete backward: on a typed query they edit it even when bound to `app.session.delete`. */
+const SEARCH_BACKWARD_DELETE = [
+	"tui.editor.deleteCharBackward",
+	"tui.editor.deleteWordBackward",
+	"tui.editor.deleteToLineStart",
+] as const;
 
 /** Day group of a session's last modification, relative to local midnight today. */
 function sessionDayGroup(modified: Date, startOfToday: number): { id: string; label: string } {
@@ -932,7 +938,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		if (selected) this.onSelect?.(selected);
 	}
 
-	/** Delete / Backspace on an empty query: ask the parent to confirm deleting the selected session. */
+	/** `app.session.delete`: ask the parent to confirm deleting the selected session. */
 	requestDelete(): void {
 		const selected = this.#menu.selectedItem;
 		if (selected) this.onDeleteRequest?.(selected);
@@ -1386,17 +1392,19 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 
 	handleInput(keyData: string): void {
 		const keybindings = getKeybindings();
-		// `app.session.delete` (Delete or Backspace by default) requests delete
+		// `app.session.delete` (Backspace or Delete by default) requests delete
 		// confirmation from the parent. macOS laptops have no dedicated Forward
 		// Delete key: Fn+Backspace is the only way to send \e[3~, and many macOS
 		// terminals (Terminal.app, some iTerm2 profiles) deliver \x7f for that
 		// combo instead, hence Backspace. A bound key that also deletes backward
-		// in the search Input keeps editing a typed query; it deletes the session
-		// only once the query is empty. Checked before the Input so a binding
-		// such as Ctrl+D wins over its forward delete.
+		// in the search Input (Backspace, Ctrl+W, Ctrl+U by default) keeps editing
+		// a typed query; it deletes the session only once the query is empty.
+		// Checked before the Input so a binding such as Ctrl+D wins over its
+		// forward delete.
 		if (
 			keybindings.matches(keyData, "app.session.delete") &&
-			(this.#searchInput.getValue().length === 0 || !keybindings.matches(keyData, "tui.editor.deleteCharBackward"))
+			(this.#searchInput.getValue().length === 0 ||
+				!SEARCH_BACKWARD_DELETE.some(action => keybindings.matches(keyData, action)))
 		) {
 			this.requestDelete();
 			return;
@@ -2131,7 +2139,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/**
 	 * `lg` cards sheet (`screen` for the standalone app): sessions grouped by
 	 * day (ranked flat while searching), the selected session's preview, the
-	 * delete confirm strip, and the actions of the keys Enter, Delete/Backspace,
+	 * delete confirm strip, and the actions of the keys Enter, `app.session.delete`,
 	 * F2 (rename), the pin keys (Pin / Unpin, whichever applies to the selected
 	 * session), Tab (the scope toggle, labelled with the scope it switches
 	 * to) and Esc. Untitled unless the caller named it; the placeholder says the scope.
@@ -2249,7 +2257,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 
 	/**
 	 * Picker pointer events run the keys' paths: a row click selects (arrows),
-	 * a second click or `Resume` resumes (Enter), `Delete` asks (Delete),
+	 * a second click or `Resume` resumes (Enter), `Delete` asks (`app.session.delete`),
 	 * `Rename` renames (F2), `Pin` / `Unpin` flips the pin, the tab or `All projects` toggles scope (Tab),
 	 * `Close` cancels (Esc), and the confirm strip answers the delete dialog (Yes / Esc).
 	 */

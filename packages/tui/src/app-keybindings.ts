@@ -246,7 +246,7 @@ export const KEYBINDINGS = {
 		description: "Rename session",
 	},
 	"app.session.delete": {
-		defaultKeys: ["delete", "backspace"],
+		defaultKeys: ["backspace", "delete"],
 		description: "Delete session",
 	},
 	"app.session.deleteNoninvasive": {
