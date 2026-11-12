@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `^` model mention rows now list the `:level` thinking pins each reasoning model accepts (for example `Claude Sonnet 4.5 · :low/:medium/:high`), so the pin syntax is discoverable before typing `:` ([#18718](https://github.com/can1357/oh-my-pi/issues/18718))
+- `^` model mention rows now list the `:level` thinking pins each reasoning model accepts (for example `Claude Sonnet 4.5 · :low/:medium/:high`), so the pin syntax is discoverable before typing `:` ([#18718](https://github.com/can1357/oh-my-pi/issues/18718), [#18995](https://github.com/can1357/oh-my-pi/pull/18995) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.19.0] - 2026-11-12
 
