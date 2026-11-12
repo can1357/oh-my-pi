@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- The `/resume` picker deletes sessions through the `app.session.delete` action (default Delete or Backspace) and shows its keys in the hints, so `keybindings.yml` can replace the shortcut, for example with Ctrl+D, or disable it with `[]`; Backspace still edits a typed search query ([#17938](https://github.com/can1357/oh-my-pi/issues/17938))
+- The `/resume` picker deletes sessions through the `app.session.delete` action (default Delete or Backspace) and shows its keys in the hints, so `keybindings.yml` can replace the shortcut, for example with Ctrl+D, or disable it with `[]`; Backspace still edits a typed search query ([#17938](https://github.com/can1357/oh-my-pi/issues/17938), [#18961](https://github.com/can1357/oh-my-pi/pull/18961) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.18.9] - 2026-11-11
 
