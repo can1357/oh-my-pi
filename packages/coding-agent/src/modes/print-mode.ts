@@ -9,6 +9,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { DISABLED_MODELS_NOTICE_SOURCE } from "../config/disabled-models";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
@@ -390,11 +391,12 @@ async function runPrintModeCore(
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
 				event.source === COST_GATE_NOTICE_SOURCE ||
 				event.source === HINDSIGHT_NOTICE_SOURCE ||
-				event.source === SPOTLIGHT_NOTICE_SOURCE)
+				event.source === SPOTLIGHT_NOTICE_SOURCE ||
+				event.source === DISABLED_MODELS_NOTICE_SOURCE)
 		) {
-			// Text mode renders no session notices, but an automatic sign-out must not stay
-			// hidden behind a sibling account that quietly answers the prompt, a run must
-			// say when it crossed its cost thresholds, a memory failure must not pass
+			// Text mode renders no session notices, but an automatic sign-out or a skipped
+			// disabled fallback model must not stay hidden behind a quiet substitute, a run
+			// must say when it crossed its cost thresholds, a memory failure must not pass
 			// as an answer that used memories, and Spotlight must say when it lost its
 			// credential and fell back to unranked cuts.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
