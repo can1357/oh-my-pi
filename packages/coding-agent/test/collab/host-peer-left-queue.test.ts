@@ -25,10 +25,13 @@ import {
 	waitFor,
 } from "./helpers/throttled-host";
 
-const cleanups: (() => void)[] = [];
-afterEach(() => {
-	for (const cleanup of cleanups.splice(0).reverse()) cleanup();
-	uninstallInMemoryRelay();
+const cleanups: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+	try {
+		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	} finally {
+		uninstallInMemoryRelay();
+	}
 });
 
 it("discards a departed guest's queued snapshot instead of stalling the next guest's welcome", async () => {
@@ -37,7 +40,7 @@ it("discards a departed guest's queued snapshot instead of stalling the next gue
 	const snapshot = makeSnapshot();
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(snapshot, seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
@@ -112,7 +115,7 @@ it("settles an outstanding guest ask when the room is recreated", async () => {
 	const snapshot = makeSnapshot();
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(snapshot, seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
@@ -168,7 +171,7 @@ it("does not let a reissued peer id inherit write permission", async () => {
 			return Promise.resolve();
 		};
 	const host = new CollabHost(context);
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const full = parseCollabLink(host.link);
@@ -214,7 +217,7 @@ it("ignores a hello that finishes decrypting after its sender's peer-left", asyn
 	const snapshot = makeSnapshot();
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(snapshot, seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	// Hold the very first decryption — the host opening the guest's hello — so
 	// the departure control message overtakes it, exactly as a slow CPU would.

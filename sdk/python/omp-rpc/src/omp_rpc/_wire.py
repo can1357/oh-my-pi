@@ -93,8 +93,8 @@ _MESSAGE_UPDATES_VALUES: Final[frozenset[str]] = frozenset({"full", "delta"})
 _decode_message_updates = cast("Decoder[MessageUpdates]", literal(_MESSAGE_UPDATES_VALUES))
 
 
-TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned", "blocked"]
-_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned", "blocked"})
+TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
+_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned"})
 _decode_todo_status = cast("Decoder[TodoStatus]", literal(_TODO_STATUS_VALUES))
 
 
@@ -557,8 +557,6 @@ class ModelInfo:
 class TodoItem:
     content: str
     status: TodoStatus
-    blocker: str | None = None
-    """What a `blocked` task is waiting on."""
     details: str | None = None
     notes: tuple[str, ...] | None = None
 
@@ -1542,7 +1540,7 @@ class EditorUiRequest:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskUiRequest:
-    """Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it."""
+    """Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."""
     type: Literal["extension_ui_request"] = "extension_ui_request"
     id: str
     method: Literal["ask"] = "ask"
@@ -1646,7 +1644,7 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskAnswer:
-    """Answer to one `ask` question: exact option labels, plus optional free text."""
+    """Answer to one `ui.askDialog` question: exact option labels, plus optional free text."""
     id: str
     selected_options: tuple[str, ...]
     custom_input: str | None = None
@@ -1937,7 +1935,6 @@ def parse_todo_item(value: object, path: str = "TodoItem") -> TodoItem:
     return TodoItem(
         content=required(payload, "content", decode_str, path),
         status=required(payload, "status", _decode_todo_status, path),
-        blocker=optional(payload, "blocker", decode_str, path),
         details=optional(payload, "details", decode_str, path),
         notes=optional(payload, "notes", array(decode_str), path),
     )

@@ -315,6 +315,11 @@ describe("settings as a native prefs page", () => {
 			for (const ch of keys) selector.handleInput(ch);
 		};
 		const screen = (selector: SettingsSelectorComponent) => Bun.stripANSI(selector.render(160).join("\n"));
+		const openTarget = (selector: SettingsSelectorComponent, entries: Record<string, string>, key: string) => {
+			const index = Object.keys(entries).sort((a, b) => a.localeCompare(b)).indexOf(key);
+			for (let i = 0; i < index; i++) selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+		};
 
 		afterEach(() => applyLinkMapSetting({}));
 
@@ -418,9 +423,9 @@ describe("settings as a native prefs page", () => {
 			const { selector, values, entryWrites, changes } = harness({ "tui.linkMap": map });
 			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
 			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
-			// Alphabetical display puts /a//b first, but insertion order grants /a/b ownership.
+			// Display order must not affect insertion-order ownership.
 			expect(screen(selector)).toContain("ignored: same prefix as /a/b");
-			selector.handleInput(ENTER);
+			openTarget(selector, map, "/a//b");
 			selector.handleInput(ENTER);
 			expect(screen(selector)).toContain("/a/b is already the entry for that prefix");
 			type(selector, "next");
@@ -448,8 +453,7 @@ describe("settings as a native prefs page", () => {
 				send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
 				send(selector, { type: "activate", key: "", item: "tui.linkMap" });
 				expect(screen(selector)).not.toContain("ignored: same prefix");
-				if (invalidFirst) selector.handleInput(DOWN);
-				selector.handleInput(ENTER);
+				openTarget(selector, map, key);
 				selector.handleInput(ENTER);
 				expect(screen(selector)).toContain("Use a URI with a scheme");
 				selector.handleInput("\x01");
@@ -483,8 +487,7 @@ describe("settings as a native prefs page", () => {
 				send(selector, { type: "activate", key: "", item: "tui.linkMap" });
 				expect(screen(selector)).toContain("ignored: same prefix as /logical/home");
 				expect(screen(selector)).not.toContain("ignored: same prefix as ~");
-				selector.handleInput(DOWN);
-				selector.handleInput(ENTER);
+				openTarget(selector, map, "/physical/home");
 				selector.handleInput(ENTER);
 				expect(entryWrites).toEqual([["tui.linkMap", "/physical/home", "file:///Physical:/"]]);
 				expect(values.get("tui.linkMap")).toEqual(map);

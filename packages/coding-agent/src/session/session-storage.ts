@@ -1,9 +1,8 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
-import { getSessionOwnersDir } from "@oh-my-pi/pi-utils/dirs";
+import { getSessionOwnersDir, getTestTempDir } from "@oh-my-pi/pi-utils/dirs";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import {
 	type FileLockHandle,
@@ -297,6 +296,11 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	/** Identity of the file `#fd` is open on: fixed for the descriptor's lifetime, so read once per descriptor. */
 	#heldIdentity: { ino: bigint; dev: bigint } | undefined;
+	/**
+	 * By-name identity the session path reported when a descriptor-verified check
+	 * last found it naming `#fd`; reset whenever `#fd` changes.
+	 */
+	#pathIdentity: { ino: bigint; dev: bigint } | undefined;
 	#fpath: string;
 	#publishLock: ((append: () => void, landed: () => boolean) => void) | undefined;
 	#closed = false;
@@ -338,20 +342,43 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	}
 
 	/**
+	 * Whether the session path still names `#fd`: `undefined` when the path is
+	 * missing. By-name and handle identity disagree on Windows FSLogix disks, so
+	 * the first check per descriptor compares through a descriptor and records
+	 * the path's by-name identity; later checks compare by name to that record,
+	 * since re-opening a just-written file costs milliseconds on Windows
+	 * (on-access scanning). The by-name read precedes the descriptor check, so a
+	 * replacement between the two is never recorded as ours.
+	 */
+	#pathNamesHeld(): boolean | undefined {
+		let named: fs.BigIntStats;
+		try {
+			named = fs.statSync(this.#fpath, { bigint: true });
+		} catch (err) {
+			if (isEnoent(err)) return undefined;
+			throw err;
+		}
+		const recorded = this.#pathIdentity;
+		if (recorded) return named.ino === recorded.ino && named.dev === recorded.dev;
+		const live = statPathByHandle(this.#fpath);
+		if (!live) return undefined;
+		const held = this.#heldFile();
+		if (live.ino !== held.ino || live.dev !== held.dev) return false;
+		this.#pathIdentity = { ino: named.ino, dev: named.dev };
+		return true;
+	}
+
+	/**
 	 * A publish that renamed a fresh file over the session path leaves this
 	 * writer's descriptor on the orphaned previous inode, where the append would
 	 * be silently lost. Under the publish lock no cooperating replacement can
 	 * interleave, so re-open the live path when its identity changed.
 	 *
-	 * Returns the size of the descriptor the next write appends to: while the
-	 * path still names the held file, the one path identity read serves both the
-	 * identity check and the append rollback point.
+	 * Returns the size of the descriptor the next write appends to (the append
+	 * rollback point).
 	 */
 	#reopenIfReplaced(): number {
-		const held = this.#heldFile();
-		const live = statPathByHandle(this.#fpath);
-		if (!live) return fs.fstatSync(this.#fd).size;
-		if (live.ino === held.ino && live.dev === held.dev) return Number(live.size);
+		if (this.#pathNamesHeld() !== false) return fs.fstatSync(this.#fd).size;
 		const nextFd = fs.openSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
 		writerRegistry.unregister(this);
 		try {
@@ -361,6 +388,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		}
 		this.#fd = nextFd;
 		this.#heldIdentity = undefined;
+		this.#pathIdentity = undefined;
 		writerRegistry.register(this, nextFd, this);
 		const next = fs.fstatSync(nextFd, { bigint: true });
 		this.#heldIdentity = { ino: next.ino, dev: next.dev };
@@ -373,10 +401,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * and `#reopenIfReplaced` would append to the same descriptor again.
 	 */
 	#holdsLivePath(): boolean {
-		const held = this.#heldFile();
-		const live = statPathByHandle(this.#fpath);
-		if (!live) return true;
-		return live.ino === held.ino && live.dev === held.dev;
+		return this.#pathNamesHeld() !== false;
 	}
 
 	#recordError(err: unknown): Error {
@@ -553,8 +578,7 @@ const TEST_SESSION_OWNERS_DIR_ENV = "PI_TEST_SESSION_OWNERS_DIR";
 function testSessionOwnersDir(): string | undefined {
 	const exported = process.env[TEST_SESSION_OWNERS_DIR_ENV];
 	if (exported || !isBunTestRuntime()) return exported;
-	const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
-	const dir = path.join(os.tmpdir(), `omp-test-session-owners-${uid}`);
+	const dir = getTestTempDir("omp-test-session-owners");
 	process.env[TEST_SESSION_OWNERS_DIR_ENV] = dir;
 	return dir;
 }

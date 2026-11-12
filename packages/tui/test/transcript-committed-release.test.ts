@@ -1,4 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { Lexer, type Token } from "@oh-my-pi/pi-utils/marked";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -13,8 +15,11 @@ import { clearRenderCache, Markdown } from "@oh-my-pi/pi-tui/components/markdown
 import { Section } from "@oh-my-pi/pi-tui/components/section";
 import { TranscriptContainer, trimBlankEdges } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-tui/theme";
+import * as themeModule from "@oh-my-pi/pi-tui/theme/theme";
 import * as renderUtils from "@oh-my-pi/pi-tui/render/render-utils";
+import * as sixel from "@oh-my-pi/pi-tui/render/sixel";
 import { OutputPane } from "@oh-my-pi/pi-tui/render/output-pane";
+import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
 import { editToolRenderer } from "@oh-my-pi/pi-tui/tools/edit";
 import { renderMCPResult, setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
@@ -360,6 +365,234 @@ describe("committed transcript blocks release render caches", () => {
 
 	it("replays a streamed write tool card byte-identically after release", () => {
 		expectReplayContract(streamedWrite(), streamedWrite());
+	});
+
+	it("releases ToolExecutionComponent sanitized output and formatted caches on retirement and replays byte-identically", async () => {
+		const outputLines = Array.from(
+			{ length: 28 },
+			(_, index) => `line ${index}: build output with trailing detail that wraps on narrower terminals`,
+		).join("\n");
+
+		function settledBash(): ToolExecutionComponent {
+			const component = new ToolExecutionComponent(
+				"bash",
+				{ command: "bun run build --filter=@oh-my-pi/pi-tui" },
+				{},
+				undefined,
+				ui,
+			);
+			liveTools.push(component);
+			component.setArgsComplete();
+			component.setExecutionStarted();
+			component.updateResult({ content: [{ type: "text", text: `${outputLines}\n` }], isError: false }, false);
+			return component;
+		}
+
+		function settledEval(withCells: boolean): ToolExecutionComponent {
+			const component = new ToolExecutionComponent(
+				"eval",
+				{ code: "for i in range(5):\n    print('row', i, 'value' * 6)", language: "python" },
+				{},
+				undefined,
+				ui,
+			);
+			liveTools.push(component);
+			component.setArgsComplete();
+			component.setExecutionStarted();
+			component.updateResult(
+				{
+					content: [{ type: "text", text: `${outputLines}\n` }],
+					details: withCells
+						? {
+								language: "python",
+								cells: [
+									{
+										index: 0,
+										language: "python",
+										code: "for i in range(5):\n    print('row', i, 'value' * 6)",
+										status: "complete",
+										durationMs: 18,
+										output: outputLines,
+									},
+								],
+							}
+						: { language: "python" },
+					isError: false,
+				},
+				false,
+			);
+			return component;
+		}
+
+		function settledGeneric(): ToolExecutionComponent {
+			const component = new ToolExecutionComponent(
+				"custom_unregistered_tool",
+				{ target: "alpha", verbose: true },
+				{ useBuiltInRenderer: false },
+				undefined,
+				ui,
+			);
+			liveTools.push(component);
+			component.setArgsComplete();
+			component.setExecutionStarted();
+			component.updateResult({ content: [{ type: "text", text: `${outputLines}\n` }], isError: false }, false);
+			return component;
+		}
+
+		expectReplayContract(settledBash(), settledBash());
+		expectReplayContract(settledEval(false), settledEval(false));
+		expectReplayContract(settledEval(true), settledEval(true));
+		expectReplayContract(settledGeneric(), settledGeneric());
+
+		// Prove ToolExecutionComponent.#textOutput is genuinely dropped on releaseRenderCaches()
+		// (re-sanitized on a subsequent replay render, never while live caches hold) and custom
+		// tool renderCall/renderResult callbacks are never re-invoked on retirement or resize replay.
+		const origSanitize = sixel.sanitizeWithOptionalSixelPassthrough;
+		let sanitizeCalls = 0;
+		const sanitizeSpy = spyOn(sixel, "sanitizeWithOptionalSixelPassthrough").mockImplementation((text, sanitize) => {
+			sanitizeCalls++;
+			return origSanitize(text, sanitize);
+		});
+		try {
+			const bashCard = settledBash();
+			const initialRows = bashCard.render(80);
+			const afterInitialSanitize = sanitizeCalls;
+			expect(afterInitialSanitize).toBeGreaterThan(0);
+
+			// Live width change reuses memoized #textOutput without re-sanitizing result text.
+			bashCard.render(60);
+			expect(sanitizeCalls).toBe(afterInitialSanitize);
+
+			// Releasing caches drops #textOutput; re-rendering regenerates it on demand and matches byte-for-byte.
+			bashCard.releaseRenderCaches();
+			expect(bashCard.render(80)).toEqual(initialRows);
+			expect(sanitizeCalls).toBeGreaterThan(afterInitialSanitize);
+		} finally {
+			sanitizeSpy.mockRestore();
+		}
+
+		// Generic fallback WidthAwareText drops its width-formatted string so rendered rows become collectible.
+		const genericCard = settledGeneric();
+		const genericTranscript = new TranscriptContainer();
+		genericTranscript.addChild(genericCard);
+		const liveGenericRef = new WeakRef(genericCard.render(80));
+		const retiredGeneric = commitAll(genericTranscript, 80);
+		expect(await becomesCollectible(liveGenericRef)).toBe(true);
+		expect(replay(genericTranscript, 80)).toEqual(retiredGeneric);
+
+		// Custom tool renderers must NOT have renderCall/renderResult re-invoked on retirement or replay.
+		let renderCallCount = 0;
+		let renderResultCount = 0;
+		const customToolParameters = type({ q: "string" });
+		const makeCustomTool = () => {
+			const tool: AgentTool<typeof customToolParameters> = {
+				name: "ext_tool",
+				label: "ExtTool",
+				description: "test",
+				parameters: customToolParameters,
+				execute: async () => ({ content: [] }),
+				renderCall: () => {
+					renderCallCount++;
+					return new Text("ext call header that wraps cleanly when narrowed", 0, 0);
+				},
+				renderResult: () => {
+					renderResultCount++;
+					return new Text("ext result body that wraps cleanly when the terminal narrows", 0, 0);
+				},
+			};
+			const component = new ToolExecutionComponent("ext_tool", { q: "x" }, {}, tool, ui);
+			liveTools.push(component);
+			component.setArgsComplete();
+			component.updateResult({ content: [{ type: "text", text: "ok" }], isError: false }, false);
+			return component;
+		};
+
+		const committedCustom = makeCustomTool();
+		const callsAfterBuild = { call: renderCallCount, result: renderResultCount };
+		const customTranscript = new TranscriptContainer();
+		customTranscript.addChild(committedCustom);
+		const retiredCustom = commitAll(customTranscript, 80);
+		expect(replay(customTranscript, 80)).toEqual(retiredCustom);
+		replay(customTranscript, 48);
+		expect({ call: renderCallCount, result: renderResultCount }).toEqual(callsAfterBuild);
+	});
+
+	it("releases highlighted multi-line bash command caches on retirement and regenerates them on resize replay", async () => {
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("expected the dark theme");
+		const multiLineScript = [
+			"set -euo pipefail",
+			"for pkg in packages/tui packages/agent packages/ai; do",
+			'\tprintf "checking %s with extra flags that wrap on narrow terminals\\n" "$pkg"',
+			'\tbun test "$pkg/test" --bail',
+			"done",
+		].join("\n");
+		const outputLines = Array.from(
+			{ length: 16 },
+			(_, index) => `check ${index}: verified target output line that wraps across narrower widths`,
+		).join("\n");
+
+		function settledMultiLineBash(): ToolExecutionComponent {
+			const component = new ToolExecutionComponent("bash", { command: multiLineScript }, {}, undefined, ui);
+			liveTools.push(component);
+			component.setArgsComplete();
+			component.setExecutionStarted();
+			component.updateResult({ content: [{ type: "text", text: `${outputLines}\n` }], isError: false }, false);
+			return component;
+		}
+
+		const highlightSpy = spyOn(themeModule, "highlightCode");
+		try {
+			// 1. Settled bash ToolExecutionComponent through commit retirement + resize replay.
+			const committed = settledMultiLineBash();
+			const twin = settledMultiLineBash();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(committed);
+
+			committed.render(80);
+			const afterInitialHighlight = highlightSpy.mock.calls.length;
+			expect(afterInitialHighlight).toBe(1);
+
+			// Live width change reuses cached cmdLines without re-highlighting the script.
+			committed.render(60);
+			expect(highlightSpy.mock.calls.length).toBe(afterInitialHighlight);
+
+			// Commit retires the card and clears cmdLines; resize replay re-highlights on demand and matches twin.
+			const retired = commitAll(transcript, 80);
+			const afterCommitHighlight = highlightSpy.mock.calls.length;
+
+			expect(replay(transcript, 80)).toEqual(retired);
+			expect(highlightSpy.mock.calls.length).toBe(afterCommitHighlight + 1);
+
+			const twinNarrow = [...trimBlankEdges(twin.render(52)), ""];
+			const beforeNarrowReplay = highlightSpy.mock.calls.length;
+			expect(replay(transcript, 52)).toEqual(twinNarrow);
+			expect(highlightSpy.mock.calls.length).toBe(beforeNarrowReplay + 1);
+
+			// 2. Pending bashToolRenderer.renderCall card also releases cmdLines and regenerates on demand.
+			const pendingOptions = { expanded: false, isPartial: true };
+			const pendingCard = bashToolRenderer.renderCall({ command: multiLineScript }, pendingOptions, theme);
+			const freshPendingNarrow = bashToolRenderer
+				.renderCall({ command: multiLineScript }, pendingOptions, theme)
+				.render(52);
+
+			const beforePendingHighlight = highlightSpy.mock.calls.length;
+			const pendingWide = pendingCard.render(80);
+			expect(highlightSpy.mock.calls.length).toBe(beforePendingHighlight + 1);
+
+			pendingCard.render(60);
+			expect(highlightSpy.mock.calls.length).toBe(beforePendingHighlight + 1);
+
+			pendingCard.releaseRenderCaches?.();
+			expect(pendingCard.render(80)).toEqual(pendingWide);
+			expect(highlightSpy.mock.calls.length).toBe(beforePendingHighlight + 2);
+
+			pendingCard.releaseRenderCaches?.();
+			expect(pendingCard.render(52)).toEqual(freshPendingNarrow);
+			expect(highlightSpy.mock.calls.length).toBe(beforePendingHighlight + 3);
+		} finally {
+			highlightSpy.mockRestore();
+		}
 	});
 
 	it("releases MCP Markdown rows hidden behind capped output and replays the result", async () => {

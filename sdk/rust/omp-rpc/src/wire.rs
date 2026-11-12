@@ -2761,8 +2761,6 @@ pub enum TodoStatus {
 	Completed,
 	#[serde(rename = "abandoned")]
 	Abandoned,
-	#[serde(rename = "blocked")]
-	Blocked,
 }
 
 impl TodoStatus {
@@ -2773,7 +2771,6 @@ impl TodoStatus {
 			Self::InProgress => "in_progress",
 			Self::Completed => "completed",
 			Self::Abandoned => "abandoned",
-			Self::Blocked => "blocked",
 		}
 	}
 }
@@ -2936,9 +2933,6 @@ impl SubagentStatus {
 pub struct TodoItem {
 	pub content: String,
 	pub status: TodoStatus,
-	/// What a `blocked` task is waiting on.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub blocker: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub details: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4572,7 +4566,7 @@ pub struct EditorUiRequest {
 	pub prompt_style: Option<bool>,
 }
 
-/// Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.
+/// Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AskUiRequest {
 	pub id: String,
@@ -4647,7 +4641,7 @@ pub enum ExtensionUiRequest {
 	Confirm(ConfirmUiRequest),
 	Input(InputUiRequest),
 	Editor(EditorUiRequest),
-	/// Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.
+	/// Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.
 	Ask(AskUiRequest),
 	/// Close the dialog opened by request `targetId`; a later answer to it is ignored.
 	Cancel(CancelUiRequest),
@@ -4708,7 +4702,7 @@ impl<'de> Deserialize<'de> for ExtensionUiRequest {
 	}
 }
 
-/// Answer to one `ask` question: exact option labels, plus optional free text.
+/// Answer to one `ui.askDialog` question: exact option labels, plus optional free text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AskAnswer {
 	pub id: String,
@@ -4732,7 +4726,7 @@ pub struct ConfirmUiResponse {
 	pub confirmed: bool,
 }
 
-/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
+/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancelUiResponse {
 	pub id: String,
@@ -4755,7 +4749,7 @@ pub enum ExtensionUiResponse {
 	ValueUiResponse(ValueUiResponse),
 	/// Answers a `confirm` request.
 	ConfirmUiResponse(ConfirmUiResponse),
-	/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
+	/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers).
 	CancelUiResponse(CancelUiResponse),
 	/// Answers an `ask` request: one `AskAnswer` per question, in question order.
 	AnswersUiResponse(AnswersUiResponse),
