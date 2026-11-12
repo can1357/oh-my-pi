@@ -6,7 +6,7 @@
  * read, or is not a format the terminal draws, falls back to the line as
  * written so the reader still has the path.
  */
-import { readFile } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
 import type { Markdown } from "../components/markdown";
@@ -14,9 +14,32 @@ import { fencedCode } from "../components/markdown";
 import { getImageDimensions } from "../terminal-capabilities";
 import { ensureThemeSync, theme } from "../theme";
 import type { Component } from "../tui";
+import { MAX_PICTURE_BYTES } from "./image-source";
 
 /** Share of the viewport's rows one picture may fill, so it fits on screen whole. */
 const MAX_VIEWPORT_SHARE = 0.6;
+
+/**
+ * The file's bytes, or undefined when it is not a picture this figure draws.
+ *
+ * The path comes from a model-written line, so nothing about it is trusted: a
+ * device (`/dev/zero` fills memory before the read returns), a directory, or a
+ * file past {@link MAX_PICTURE_BYTES} is refused. `stat` runs before the open so
+ * a FIFO cannot block the load waiting for a writer, and the opened handle is
+ * re-checked because the name may be replaced between the two calls.
+ */
+async function readPicture(path: string): Promise<Uint8Array | undefined> {
+	const named = await stat(path);
+	if (!named.isFile() || named.size === 0 || named.size > MAX_PICTURE_BYTES) return undefined;
+	const handle = await open(path, "r");
+	try {
+		const opened = await handle.stat();
+		if (!opened.isFile() || opened.size > MAX_PICTURE_BYTES) return undefined;
+		return await handle.readFile();
+	} finally {
+		await handle.close();
+	}
+}
 
 let figuresEnabled = true;
 
@@ -59,7 +82,8 @@ export class RasterFigure implements Component {
 	#picture: Picture | undefined;
 	/** A path whose bytes could not be read or decoded: draw the line instead. */
 	#failedPath: string | undefined;
-	#loading = false;
+	/** The path a read is in flight for, if any. Cleared on completion, including for a path since replaced. */
+	#loadingPath: string | undefined;
 	#disposed = false;
 	#width: number | undefined;
 	#image: { picture: Picture; component: Image } | undefined;
@@ -83,9 +107,9 @@ export class RasterFigure implements Component {
 		if (this.#width !== undefined) this.#load();
 	}
 
-	/** Whether the current file's bytes are still being read. */
+	/** Whether a read is in flight for this figure, including one for a path `update` has since replaced. */
 	get pending(): boolean {
-		return this.#loading;
+		return this.#loadingPath !== undefined;
 	}
 
 	render(width: number): readonly string[] {
@@ -120,15 +144,27 @@ export class RasterFigure implements Component {
 		};
 	}
 
-	/** Read the file once, unless its bytes are already here, a read is in flight, or it already failed. */
+	/**
+	 * Read the file once, unless its bytes are already here, a read is in flight, or it already failed.
+	 *
+	 * A read that lands after `update` moved to another path releases the marker and
+	 * starts the new path's read: holding the marker for a path nobody is drawing
+	 * would leave the figure loading for the rest of the session.
+	 */
 	#load(): void {
-		if (this.#disposed || this.#loading || this.#picture?.path === this.#path || this.#failedPath === this.#path)
-			return;
 		const path = this.#path;
-		this.#loading = true;
-		void readFile(path)
+		if (
+			this.#disposed ||
+			this.#loadingPath !== undefined ||
+			this.#picture?.path === path ||
+			this.#failedPath === path
+		)
+			return;
+		this.#loadingPath = path;
+		void readPicture(path)
 			.then(
 				(bytes): Picture | undefined => {
+					if (bytes === undefined) return undefined;
 					const mime = sniffMime(bytes);
 					if (mime === undefined) return undefined;
 					const data = bytes.toBase64();
@@ -138,8 +174,15 @@ export class RasterFigure implements Component {
 				() => undefined,
 			)
 			.then(picture => {
-				if (this.#disposed || path !== this.#path) return;
-				this.#loading = false;
+				if (this.#disposed) return;
+				if (this.#loadingPath === path) this.#loadingPath = undefined;
+				if (path !== this.#path) {
+					// The rows are still the placeholder: schedule the repaint the new read
+					// needs, then start it.
+					this.#options.onChange();
+					this.#load();
+					return;
+				}
 				if (picture === undefined) {
 					this.#failedPath = path;
 					this.#options.onChange();

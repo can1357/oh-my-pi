@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { RasterFigure } from "@oh-my-pi/pi-tui/chat/raster-figure";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
@@ -109,5 +110,29 @@ describe("an assistant line naming a local picture", () => {
 			.findAll(node => node.k === "md")
 			.map(node => (node.p as { text?: string } | undefined)?.text ?? "");
 		expect(drawn.join("\n")).toContain(`![shot](${missing})`);
+	});
+
+	it("never hands a device or a folder to the terminal as a picture", async () => {
+		const component = new AssistantMessageComponent(answer(`Look:\n\n![zero](/dev/zero)\n\n![here](${dir})`));
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		await harness.render();
+		expect(harness.findAll(node => node.k === "media")).toHaveLength(0);
+	});
+
+	it("closes a read a new path superseded instead of staying pending", async () => {
+		const other = join(dir, "other.png");
+		writeFileSync(other, PNG);
+		const figure = new RasterFigure({ onChange: () => {} });
+		figure.update(picture, "one");
+		figure.render(40);
+		// The first read is still in flight: the second path must be followed once it lands.
+		figure.update(other, "two");
+		for (let try_ = 0; try_ < 40 && figure.pending; try_++) {
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
+		expect(figure.pending).toBe(false);
+		expect(figure.debugState()).toMatchObject({ path: other, mime: "image/png" });
+		figure.dispose();
 	});
 });

@@ -24,7 +24,6 @@ import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, get
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
-import { existsSync } from "node:fs";
 import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
 import { linkedImageText } from "../prompt/image-references";
@@ -42,7 +41,7 @@ import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReactio
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome/transcript-container";
 import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
 import { FigureMarkdown } from "./figure-markdown";
-import { hasImageFigure, type ImageFigureSegment, splitImageFigures } from "./image-source";
+import { drawablePictureFile, hasImageFigure, type ImageFigureSegment, splitImageFigures } from "./image-source";
 import { rasterFigureRendering } from "./raster-figure";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
@@ -1021,7 +1020,7 @@ export class AssistantMessageComponent extends Container {
 						: [{ kind: "markdown", text: source }];
 					segments.forEach((segment, part) => {
 						const slot = part === 0 ? `t${index}` : `t${index}.${part}`;
-						if (segment.kind === "image" && existsSync(segment.path)) {
+						if (segment.kind === "image" && drawablePictureFile(segment.path)) {
 							children.push(nativeMediaNode(segment.path, slot));
 							return;
 						}

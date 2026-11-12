@@ -1,6 +1,48 @@
 import { describe, expect, it } from "bun:test";
-import { homedir } from "node:os";
-import { hasImageFigure, imageTargetPath, splitImageFigures } from "../src/chat/image-source";
+import { closeSync, ftruncateSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	drawablePictureFile,
+	hasImageFigure,
+	imageTargetPath,
+	MAX_PICTURE_BYTES,
+	splitImageFigures,
+} from "../src/chat/image-source";
+
+/** A 1×1 PNG: enough for the header probe, small enough to inline. */
+const PNG = Buffer.from(
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+	"base64",
+);
+
+describe("drawablePictureFile", () => {
+	const dir = mkdtempSync(join(tmpdir(), "omp-drawable-"));
+
+	it("accepts a small picture file", () => {
+		const picture = join(dir, "shot.png");
+		writeFileSync(picture, PNG);
+		expect(drawablePictureFile(picture)).toBe(true);
+		expect(drawablePictureFile(join(dir, "shot.JPEG"))).toBe(false);
+	});
+
+	it("refuses a device, a directory, a missing file and a name that is not a picture", () => {
+		expect(drawablePictureFile("/dev/zero")).toBe(false);
+		expect(drawablePictureFile(dir)).toBe(false);
+		expect(drawablePictureFile(join(dir, "missing.png"))).toBe(false);
+		const text = join(dir, "note.png.txt");
+		writeFileSync(text, "not a picture");
+		expect(drawablePictureFile(text)).toBe(false);
+	});
+
+	it("refuses a picture past the size the transcript will read", () => {
+		const huge = join(dir, "huge.png");
+		const handle = openSync(huge, "w");
+		ftruncateSync(handle, MAX_PICTURE_BYTES + 1);
+		closeSync(handle);
+		expect(drawablePictureFile(huge)).toBe(false);
+	});
+});
 
 describe("splitImageFigures", () => {
 	it("lifts a line that is nothing but a local image, keeping the prose around it", () => {

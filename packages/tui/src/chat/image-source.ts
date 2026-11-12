@@ -6,10 +6,38 @@
  * would resolve it against its own cwd, and a URL stays prose because a
  * renderer MUST NOT fetch the network mid-transcript.
  */
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { extname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FigureSegment } from "./svg-source";
+
+/**
+ * A picture larger than this stays the line the model wrote. A transcript entry
+ * is read for a glance, and a multi-megabyte file read per repaint is a memory
+ * cost the reader never asked for; the reader can still open the path.
+ */
+export const MAX_PICTURE_BYTES = 32 * 1024 * 1024;
+
+/** The formats {@link getImageDimensions} reads and a terminal can be handed by path. */
+const PICTURE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+
+/**
+ * Whether `path` names a local picture a renderer may draw: a regular file of
+ * one of the four formats, non-empty and within {@link MAX_PICTURE_BYTES}. A
+ * terminal that loads the file itself renders without reading it here, so the
+ * check is two `stat` calls on the extension instead of a read: a device
+ * (`/dev/zero`), a directory or an oversized file stays prose.
+ */
+export function drawablePictureFile(path: string): boolean {
+	if (!PICTURE_EXTENSIONS.has(extname(path).toLowerCase())) return false;
+	try {
+		const stats = statSync(path);
+		return stats.isFile() && stats.size > 0 && stats.size <= MAX_PICTURE_BYTES;
+	} catch {
+		return false;
+	}
+}
 
 /** `![alt](target "title")` alone on a line, indented at most three spaces. */
 const IMAGE_LINE = /^ {0,3}!\[([^\]\n]*)\]\(\s*<?([^\s()<>]+)>?(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\s*\)\s*$/;
