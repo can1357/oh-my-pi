@@ -7,7 +7,7 @@ use atspi::{
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_atspi, text_readback},
+	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masked, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	error::{CoreResult, DesktopError},
 	types::DesktopWindow,
@@ -916,24 +916,14 @@ async fn write_text(
 		}
 		return text_readback(value, value, None, true).map_err(emptied);
 	}
-	// A role that cannot be read counts as a password field's, so no password
-	// enters an error.
-	let secure = actual.as_deref().is_some_and(masked)
-		|| accessible
-			.get_role()
-			.await
-			.ok()
-			.is_none_or(|role| role == Role::PasswordText);
+	// A role that cannot be read counts as a password field's, so what such a
+	// field reads never enters an error.
+	let secure = accessible
+		.get_role()
+		.await
+		.ok()
+		.is_none_or(|role| role == Role::PasswordText);
 	text_readback(value, value, actual.as_deref(), secure)
-}
-
-/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
-/// toolkits fall back on.
-fn masked(actual: &str) -> bool {
-	let mut chars = actual.chars();
-	chars.next().is_some_and(|first| {
-		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
-	})
 }
 
 /// Whether `actual` masks `value`: one mask character per character, or per
@@ -1600,7 +1590,7 @@ mod tests {
 			}
 		}
 
-		/// An error naming what the field reads, one that names no text, or one
+		/// An error naming what the field reads, one that quotes no text, or one
 		/// saying the field was emptied.
 		enum Verdict {
 			Ok,
@@ -1706,7 +1696,7 @@ mod tests {
 				(Verdict::Ok, Ok(())) => {},
 				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
 				(Verdict::Hidden, Err(err))
-					if err.message.contains("secure") && !err.message.contains("new") => {},
+					if !err.message.contains("new") && !err.message.contains(r#""old""#) => {},
 				(Verdict::Emptied, Err(err))
 					if err.message.contains("emptied") && !err.message.contains("new") => {},
 				(_, result) => panic!("{path}: {result:?}"),
