@@ -3,6 +3,7 @@ import {
 	disposeProgramStatus,
 	holdBlockedStatus,
 	initProgramStatus,
+	programStatusSettingsGate,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	setProgramStatusFilter,
@@ -116,7 +117,7 @@ describe("run status OSC 7501 reporting", () => {
 		setProgramStatusFilter(status => status.state !== "blocked");
 
 		setRunStatus({ state: "working" });
-		setRunStatus({ state: "blocked", kind: "question", msg: "Which branch?" });
+		const release = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Which branch?" });
 		expect(writes).toEqual([report("state=working:app=omp"), CLEAR]);
 
 		// An accepted gate reports the status the record was withdrawn for.
@@ -125,6 +126,7 @@ describe("run status OSC 7501 reporting", () => {
 		expect(writes).toEqual([
 			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from("Which branch?").toString("base64")}`),
 		]);
+		release();
 	});
 
 	it("keeps working, idle and error records whatever the gate rejects", () => {
@@ -139,6 +141,29 @@ describe("run status OSC 7501 reporting", () => {
 			report(`state=error:app=omp:msg=${Buffer.from("boom").toString("base64")}`),
 			report("state=idle:app=omp"),
 		]);
+	});
+
+	it("keeps an approval prompt's record when ask.notify is off and withdraws only the asked question", () => {
+		setProgramStatusFilter(programStatusSettingsGate(false, true));
+
+		const releasePermission = holdBlockedStatus({ state: "blocked", kind: "permission", msg: "Approve the command?" });
+		const releaseQuestion = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Which branch?" });
+		releaseQuestion();
+
+		const permission = report(
+			`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve the command?").toString("base64")}`,
+		);
+		expect(writes).toEqual([permission, CLEAR, permission]);
+		releasePermission();
+	});
+
+	it("withdraws a finished turn only when completion.notify is off, whatever ask.notify says", () => {
+		setProgramStatusFilter(programStatusSettingsGate(false, false));
+
+		holdBlockedStatus({ state: "blocked", kind: "permission" })();
+		setRunStatus({ state: "done" });
+
+		expect(writes).toEqual([report("state=blocked:kind=permission:app=omp"), report("state=idle:app=omp"), CLEAR]);
 	});
 
 	it("re-sends prompt-invalidated working and blocked records but never repeats a done result", () => {

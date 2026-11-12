@@ -878,7 +878,7 @@
 
 ### Fixed
 
-- Fixed terminals that read the OSC 7501 program status record (Tern) still raising their own banner and needs-attention entry for a waiting `ask` question or a finished turn after `ask.notify` or `completion.notify` was turned off: a silenced state is now withdrawn from the record instead of reported, while `working`, `idle` and `error` keep the pane's indicator ([#17227](https://github.com/can1357/oh-my-pi/pull/17227) by [@iacore](https://github.com/iacore))
+- Fixed terminals that read the OSC 7501 program status record (Tern) still raising their own banner and needs-attention entry for a waiting `ask` question or a finished turn after `ask.notify` or `completion.notify` was turned off: a silenced state is now withdrawn from the record instead of reported, while `working`, `idle` and `error` keep the pane's indicator and an approval prompt keeps its `blocked` record, since no setting governs it ([#17227](https://github.com/can1357/oh-my-pi/pull/17227) by [@iacore](https://github.com/iacore))
 
 ## [18.13.2] - 2026-10-27
 

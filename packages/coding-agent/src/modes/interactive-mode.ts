@@ -259,6 +259,7 @@ import {
 	disposeProgramStatus,
 	holdBlockedStatus,
 	initProgramStatus,
+	programStatusSettingsGate,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	setProgramStatusFilter,
@@ -4254,16 +4255,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * states the user silenced: a terminal that speaks the protocol raises its own
 	 * banner for a `blocked` run asking for input and for a `done` turn, so those
 	 * two records are the terminal's copy of the `ask.notify` and
-	 * `completion.notify` notifications and are withdrawn when those are off. The
-	 * filter goes in before the switch: `setProgramStatusEnabled(true)` re-publishes
-	 * the current status under whatever gate is installed.
+	 * `completion.notify` notifications and are withdrawn when those are off. An
+	 * approval prompt is not an `ask` question and keeps its record. The filter goes
+	 * in before the switch: `setProgramStatusEnabled(true)` re-publishes the current
+	 * status under whatever gate is installed.
 	 */
 	#applyProgramStatusSettings(): void {
-		setProgramStatusFilter(status => {
-			if (status.state === "blocked") return cfgAskNotify.get(this.settings) !== "off";
-			if (status.state === "done") return cfgCompletionNotify.get(this.settings) !== "off";
-			return true;
-		});
+		setProgramStatusFilter(
+			programStatusSettingsGate(
+				cfgAskNotify.get(this.settings) !== "off",
+				cfgCompletionNotify.get(this.settings) !== "off",
+			),
+		);
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 	}
 
