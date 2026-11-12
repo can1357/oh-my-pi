@@ -80,6 +80,35 @@ describe("WatchedFilesForwarder", () => {
 		await waitForEvent(sent, { uri: fileToUri(file), type: FileChangeType.Created });
 	});
 
+	it("reports each file once when a missing base appears below a recursively watched directory", async () => {
+		const { root, sent, forwarder } = setup();
+		const types = path.join(root, "node_modules", "@types");
+		await forwarder.register("ts", {
+			watchers: [
+				{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } },
+				{ globPattern: { baseUri: fileToUri(types), pattern: "**/*.ts" } },
+			],
+		});
+
+		const files: string[] = [];
+		for (let d = 0; d < 5; d++) {
+			const dir = path.join(types, `pkg${d}`);
+			fsSync.mkdirSync(dir, { recursive: true });
+			for (let f = 0; f < 20; f++) {
+				const file = path.join(dir, `f${f}.d.ts`);
+				fsSync.writeFileSync(file, "export {};\n");
+				files.push(file);
+			}
+		}
+		for (const file of files) await waitForEvent(sent, { uri: fileToUri(file), type: FileChangeType.Created });
+		// The duplicate came from a rescan after the base appeared; give it time to land.
+		await Bun.sleep(QUIET_MS);
+
+		const reports = new Map<string, number>();
+		for (const change of sent) reports.set(change.uri, (reports.get(change.uri) ?? 0) + 1);
+		expect([...reports].filter(([, count]) => count > 1)).toEqual([]);
+	});
+
 	it("does not report a directory as changed when only its entries changed", async () => {
 		const { root, sent, forwarder } = setup();
 		const dir = path.join(root, "src");

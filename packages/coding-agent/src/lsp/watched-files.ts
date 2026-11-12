@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { DirectoryChangeAction, type DirectoryChanges, DirectoryWatcher } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
+import { mapWithConcurrencyLimit } from "../task/parallel";
 import { FileChangeType, type FileEvent } from "./types";
 import { fileToUri, uriToFile } from "./utils";
 
@@ -31,6 +32,8 @@ const FLUSH_MAX_MS = 250;
 const RESYNC_MS = 100;
 /** After lost changes, files touched this long before the last delivered change are re-reported. */
 const RESCAN_SLACK_MS = 2_000;
+/** Stats in flight at once while a rescan checks which files changed (each is a round trip on network drives). */
+const RESCAN_STAT_CONCURRENCY = 32;
 
 /** Matches the servers' view: tsgo and friends treat Windows and macOS file names case-insensitively. */
 const caseInsensitive = process.platform === "win32" || process.platform === "darwin";
@@ -197,6 +200,11 @@ export class WatchedFilesForwarder {
 	#syncAgain = false;
 	/** Spec bases that did not exist at the last sync pass. */
 	#missing = new Set<string>();
+	/**
+	 * Case-folded spec bases and all their ancestors: the only paths whose
+	 * appearing or vanishing can change where bases are watched.
+	 */
+	#layoutPaths = new Set<string>();
 	/** Batches go out one after another, so a later batch's disk state never precedes an earlier one's. */
 	#delivery: Promise<void> = Promise.resolve();
 
@@ -223,6 +231,13 @@ export class WatchedFilesForwarder {
 		if (this.#closed) return Promise.resolve();
 		const roots = this.#roots();
 		this.#specs = [...this.#registrations.values()].flatMap(options => compileWatchers(options, roots));
+		this.#layoutPaths = new Set();
+		for (const { base } of this.#specs) {
+			for (let dir = foldCase(base); !this.#layoutPaths.has(dir); dir = path.dirname(dir)) {
+				this.#layoutPaths.add(dir);
+				if (path.dirname(dir) === dir) break;
+			}
+		}
 		return this.#sync();
 	}
 
@@ -237,6 +252,7 @@ export class WatchedFilesForwarder {
 		this.#pending.clear();
 		this.#registrations.clear();
 		this.#specs = [];
+		this.#layoutPaths.clear();
 	}
 
 	/**
@@ -298,6 +314,12 @@ export class WatchedFilesForwarder {
 			wanted.set(`r:${dir}`, { dir, recursive: true });
 		}
 		for (const dir of flat) if (!covered(dir)) wanted.set(`d:${dir}`, { dir, recursive: false });
+		// A base that was below an open recursive watch had its new files reported
+		// by that watch; only one waited on through a flat ancestor watch needs a rescan.
+		const recursivelyWatched = [...this.#watches.keys()].filter(key => key.startsWith("r:")).map(key => key.slice(2));
+		const rescanned = [...appeared].filter(
+			([base]) => !recursivelyWatched.some(dir => relativeWithin(dir, base) !== undefined),
+		);
 
 		for (const key of this.#failed) if (!wanted.has(key)) this.#failed.delete(key);
 		for (const [key, watcher] of this.#watches) {
@@ -310,7 +332,7 @@ export class WatchedFilesForwarder {
 		}
 		// A base that appeared since the last pass was watched only through an
 		// ancestor until now; report what was created in it meanwhile.
-		for (const [base, deep] of appeared) {
+		for (const [base, deep] of rescanned) {
 			void this.#rescan(base, deep, 0).catch(error => {
 				logger.debug("LSP watched-files rescan failed", { dir: base, error: String(error) });
 			});
@@ -367,7 +389,7 @@ export class WatchedFilesForwarder {
 					continue;
 				}
 				// Entries appearing or vanishing can move where bases are watched.
-				this.#scheduleResync();
+				this.#layoutChanged(target);
 				const added = action === DirectoryChangeAction.Added || action === DirectoryChangeAction.RenamedTo;
 				this.#record(target, !added, added);
 			}
@@ -383,7 +405,7 @@ export class WatchedFilesForwarder {
 			watch.seenAt = Date.now();
 			const target = path.join(dir, filename.toString());
 			if (eventType === "change") return this.#record(target, true, true);
-			this.#scheduleResync();
+			this.#layoutChanged(target);
 			this.#record(target, undefined, undefined);
 		});
 		const watch = newWatch(() => watcher.close());
@@ -423,13 +445,22 @@ export class WatchedFilesForwarder {
 			.filter(entry => !entry.isDirectory())
 			.map(entry => path.join(entry.parentPath, entry.name))
 			.filter(target => this.#wantedKinds(target) !== 0);
-		const stats = await Promise.all(targets.map(target => fs.promises.lstat(target).catch(() => undefined)));
+		const { results: stats } = await mapWithConcurrencyLimit(targets, RESCAN_STAT_CONCURRENCY, target =>
+			fs.promises.lstat(target).catch(() => undefined),
+		);
 		if (this.#closed) return;
 		for (const [index, target] of targets.entries()) {
 			const stat = stats[index];
 			if (!stat || stat.mtimeMs < since) continue;
-			this.#record(target, stat.birthtimeMs < since, true);
+			// Without a birth time (some Linux file systems) the file may be new: report it as created,
+			// which a server handles for a file it already knew, unlike a change to one it never saw.
+			this.#record(target, stat.birthtimeMs > 0 ? stat.birthtimeMs < since : undefined, true);
 		}
+	}
+
+	/** Re-resolve the watched directories when `target` is a spec base or one of its ancestors. */
+	#layoutChanged(target: string): void {
+		if (this.#layoutPaths.has(foldCase(target))) this.#scheduleResync();
 	}
 
 	#scheduleResync(): void {
