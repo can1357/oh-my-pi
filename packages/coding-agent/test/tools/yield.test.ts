@@ -1780,6 +1780,103 @@ describe("YieldTool", () => {
 		]);
 	});
 
+	it("reports the decoded summary limit without changing the schema retry budget", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string", maxLength: 1200 } },
+					required: ["summary"],
+				},
+			}),
+		);
+		const data = JSON.stringify({ summary: "x".repeat(1228) });
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			const submission = tool.execute(`call-decoded-summary-${attempt}`, { data });
+			await expect(submission).rejects.toThrow(
+				/Output does not match schema: summary: must be at most 1200 characters/,
+			);
+			await expect(submission).rejects.toThrow(/`data`.*decoded value.*not a JSON string/);
+			await expect(submission).rejects.toThrow(
+				attempt < 3 ? `${3 - attempt} retry attempt(s) remain` : "this is the final retry",
+			);
+		}
+		const overridden = await tool.execute("call-decoded-summary-override", { data });
+		expect(overridden.details).toMatchObject({ data, status: "success", schemaOverridden: true });
+		expect(overridden.content).toEqual([
+			{ type: "text", text: "Result submitted (schema validation overridden after 4 failed attempt(s))." },
+		]);
+		const corrected = { summary: "x".repeat(1200) };
+		const recovered = await tool.execute("call-decoded-summary-corrected", { data: JSON.stringify(corrected) });
+		expect(recovered.details?.data).toEqual(corrected);
+		expect(recovered.details?.schemaOverridden).toBeUndefined();
+	});
+
+	it("reports decoded nested constraints for incremental section payloads", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: {
+						findings: {
+							type: "array",
+							items: {
+								type: "object",
+								properties: {
+									review: {
+										type: "object",
+										properties: { summary: { type: "string", maxLength: 3 } },
+										required: ["summary"],
+									},
+								},
+								required: ["review"],
+							},
+						},
+					},
+				},
+			}),
+		);
+		const invalid = tool.execute("call-decoded-section-invalid", {
+			type: ["findings"],
+			data: JSON.stringify({ review: { summary: "four" } }),
+		});
+		await expect(invalid).rejects.toThrow(
+			/Section "findings" does not match schema: review\/summary: must be at most 3 characters/,
+		);
+		await expect(invalid).rejects.toThrow(/`data`.*decoded value.*not a JSON string/);
+		const recovered = await tool.execute("call-decoded-section-corrected", {
+			type: ["findings"],
+			data: JSON.stringify({ review: { summary: "ok" } }),
+		});
+		expect(recovered.details).toMatchObject({
+			data: { review: { summary: "ok" } },
+			status: "success",
+			type: ["findings"],
+		});
+		expect(recovered.details?.schemaOverridden).toBeUndefined();
+	});
+
+	it("keeps raw field, non-JSON string, and null diagnostics unchanged", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string", maxLength: 3 } },
+					required: ["summary"],
+				},
+			}),
+		);
+		const rawObject = tool.execute("call-raw-summary-invalid", { data: { summary: "four" } });
+		await expect(rawObject).rejects.toThrow(/Output does not match schema: summary: must be at most 3 characters/);
+		await expect(rawObject).rejects.not.toThrow(/decoded value/);
+		const nonJson = tool.execute("call-non-json-summary", { data: "not JSON" });
+		await expect(nonJson).rejects.toThrow(/Output does not match schema: expected object, received string/);
+		await expect(nonJson).rejects.not.toThrow(/decoded value/);
+		const decodedNull = tool.execute("call-null-summary", { data: "null" });
+		await expect(decodedNull).rejects.toThrow(/Output does not match schema: expected object, received string/);
+		await expect(decodedNull).rejects.not.toThrow(/decoded value/);
+	});
+
 	it("recovers double-encoded JSON primitives only when raw validation fails", async () => {
 		const tool = new YieldTool(
 			createSession({

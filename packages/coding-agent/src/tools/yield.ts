@@ -664,6 +664,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 							? this.#validate(value)
 							: undefined;
 			let sectionFailure = validateData(data);
+			let decodedFailureHint = "";
 			if (sectionFailure && !sectionFailure.success && typeof data === "string") {
 				// Lossless recovery: a JSON-encoded payload string parses to exactly
 				// the intended value (executor finalization already parses terminal
@@ -676,10 +677,12 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				const decoded = parseJsonEncodedValue(data);
 				if (decoded.parsed && decoded.value !== null) {
 					const normalized = normalizeData(decoded.value);
-					const revalidated = validateData(normalized);
-					if (revalidated === undefined || revalidated.success) {
+					// Report decoded constraints even when recovery cannot adopt the value.
+					sectionFailure = validateData(normalized);
+					if (sectionFailure === undefined || sectionFailure.success) {
 						data = normalized;
-						sectionFailure = revalidated;
+					} else {
+						decodedFailureHint = " Send `data` as the decoded value, not a JSON string.";
 					}
 				}
 			}
@@ -693,7 +696,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 							: " Call yield again with the corrected shape — this is the final retry before the schema constraint is dropped.";
 					const scope = isIncremental ? `Section ${formatYieldLabels(yieldType as string[])}` : "Output";
 					throw new Error(
-						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${retryHint}`,
+						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${decodedFailureHint}${retryHint}`,
 					);
 				}
 				// Budget exhausted: capture the count for the message, accept, and
