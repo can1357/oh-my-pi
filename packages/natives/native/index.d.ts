@@ -613,6 +613,31 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
+/** Native prefilter for outbound secret redaction; see the module docs. */
+export declare class SecretScanner {
+  /**
+   * # Errors
+   * Returns an error when the literal automaton cannot be built.
+   */
+  constructor(rules: Array<SecretScanRule>, literals: Array<string>)
+  /**
+   * Replaces the configured literals (plain secrets, the placeholder key, `$$`).
+   *
+   * # Errors
+   * Returns an error when the literal automaton cannot be built.
+   */
+  setLiterals(literals: Array<string>): void
+  /** Rule indices the scanner cannot filter; the caller runs them on every text. */
+  unfiltered(): Array<number>
+  /**
+   * Literal hit and possibly-matching rules of one text; `null` when the
+   * text needs no redaction work beyond the unfiltered rules.
+   */
+  scan(text: string): SecretScanHits | null
+  /** [`Self::scan`] over many texts in parallel, in input order. */
+  scanMany(texts: Array<string>): Array<SecretScanHits | undefined | null>
+}
+
 /** Persistent embedded bash engine (pi-shell) shell session. */
 export declare class Shell {
   /**
@@ -3506,6 +3531,25 @@ export interface SearchResult {
   limitReached: boolean
   /** Error message, if any. */
   error?: string
+}
+
+/** What [`SecretScanner::scan`] found in a text. */
+export interface SecretScanHits {
+  /** A configured literal (or `$$`) occurs. */
+  literal: boolean
+  /** Indices of the rules that may match. */
+  rules: Array<number>
+}
+
+/** One rule for [`SecretScanner`]. */
+export interface SecretScanRule {
+  /**
+   * Rust pattern matching a superset of the JavaScript rule; absent when the
+   * rule cannot be translated, which leaves it to JavaScript.
+   */
+  source?: string
+  /** Whether the JavaScript rule folds case with Unicode rules (`iu`). */
+  unicodeCase: boolean
 }
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void

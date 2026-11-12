@@ -23,6 +23,7 @@ default = []
 wayland-pipewire = ["dep:pipewire"]
 
 [dependencies]
+aho-corasick.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 arboard.workspace = true
@@ -64,6 +65,7 @@ portable-pty.workspace = true
 png.workspace = true
 rayon.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smallvec.workspace = true

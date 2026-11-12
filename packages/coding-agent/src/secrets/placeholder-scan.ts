@@ -452,26 +452,28 @@ function isPlainRecord(obj: object): obj is Record<string, unknown> {
 	return prototype === Object.prototype || prototype === null;
 }
 
+/** Visit every string value in JSON data, keys excluded. */
+export function forEachJsonString(value: JsonValue, visit: (text: string) => void): void {
+	if (typeof value === "string") {
+		visit(value);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const child of value) forEachJsonString(child, visit);
+		return;
+	}
+	if (value !== null && typeof value === "object") {
+		for (const child of Object.values(value)) {
+			if (child !== undefined) forEachJsonString(child, visit);
+		}
+	}
+}
+
 export function collectJsonRegexSecretValues(obfuscator: SecretObfuscator, value: JsonValue): SecretValueSet {
 	const values = new SecretValueSet();
-	const collect = (item: JsonValue): void => {
-		if (typeof item === "string") {
-			for (const secretValue of obfuscator.collectRegexSecretValuesForObfuscation(item)) {
-				values.add(secretValue);
-			}
-			return;
-		}
-		if (Array.isArray(item)) {
-			for (const child of item) collect(child);
-			return;
-		}
-		if (item !== null && typeof item === "object") {
-			for (const child of Object.values(item)) {
-				if (child !== undefined) collect(child);
-			}
-		}
-	};
-	collect(value);
+	forEachJsonString(value, text => {
+		for (const secretValue of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(secretValue);
+	});
 	return values;
 }
 

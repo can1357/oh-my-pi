@@ -11,7 +11,7 @@ import type {
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
-import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
+import { collectJsonRegexSecretValues, forEachJsonString, mapJsonStrings } from "./placeholder-scan";
 import { SecretValueSet } from "./placeholder";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -434,6 +434,28 @@ function mapNativeReplayItem(value: unknown, transform: (text: string) => string
 	}
 }
 
+/** Visit every native-replay plaintext field the redaction pass rewrites. */
+function forEachNativeReplayText(
+	message: { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
+	visit: (text: string) => void,
+): void {
+	const payload = message.providerPayload;
+	const remote = message.preserveData?.openaiRemoteCompaction;
+	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return;
+	const visitItem = (item: unknown): unknown =>
+		mapNativeReplayItem(item, text => {
+			visit(text);
+			return text;
+		});
+	if (payload?.type === "openaiResponsesHistory") mapNativeArray(payload.items, visitItem);
+	if (isRecord(remote)) {
+		if (payload?.type !== "openaiResponsesHistory" || remote.replacementHistory !== payload.items) {
+			mapNativeArray(remote.replacementHistory, visitItem);
+		}
+		visitItem(remote.compactionItem);
+	}
+}
+
 /** Collect native plaintext before any replay fields lose regex values through redaction. */
 export function collectNativeReplayRegexSecretValues(
 	obfuscator: SecretObfuscator,
@@ -441,21 +463,9 @@ export function collectNativeReplayRegexSecretValues(
 	values: Set<string>,
 ): void {
 	if (!obfuscator.hasSecrets()) return;
-	const payload = message.providerPayload;
-	const remote = message.preserveData?.openaiRemoteCompaction;
-	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return;
-	const collectItem = (item: unknown): unknown =>
-		mapNativeReplayItem(item, text => {
-			for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
-			return text;
-		});
-	if (payload?.type === "openaiResponsesHistory") mapNativeArray(payload.items, collectItem);
-	if (isRecord(remote)) {
-		if (payload?.type !== "openaiResponsesHistory" || remote.replacementHistory !== payload.items) {
-			mapNativeArray(remote.replacementHistory, collectItem);
-		}
-		collectItem(remote.compactionItem);
-	}
+	forEachNativeReplayText(message, text => {
+		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
+	});
 }
 
 /** Re-obfuscate native replay and its next-compaction source with one collision set. */
@@ -625,53 +635,58 @@ function obfuscateAnthropicCompactionFiles(
 	return { ...payload, filesText, retainedFiles };
 }
 
-function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): SecretValueSet {
-	const values = new SecretValueSet();
-	const addText = (text: string | undefined): void => {
-		if (text === undefined) return;
-		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) {
-			values.add(value);
-		}
-	};
-	for (const message of messages) {
-		// File metadata replayed beside a native compaction block carries the
-		// same harness paths as the summary text, so its regex-secret values
-		// join the shared set.
-		const compactionFiles = anthropicCompactionFilesText(message);
-		if (compactionFiles !== undefined) addText(compactionFiles);
-		for (const files of anthropicCompactionPayload(message)?.retainedFiles ?? []) addText(files.text);
-		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
-			collectNativeReplayRegexSecretValues(obfuscator, message, values);
-		}
-		if (message.role === "assistant") {
-			for (const block of message.content) {
-				if (block.type === "text") addText(block.text);
-				else if (block.type === "thinking") addText(block.thinking);
-				else if (block.type === "toolCall") {
-					for (const value of collectJsonRegexSecretValues(obfuscator, block.arguments as JsonValue)) {
-						values.add(value);
-					}
-					addText(block.intent);
-					addText(block.rawBlock);
-				}
+/** Visit every text of `message` the redaction pass scans, in the order it scans them. */
+function forEachOutboundText(message: Message, visit: (text: string) => void): void {
+	// File metadata replayed beside a native compaction block carries the
+	// same harness paths as the summary text, so its regex-secret values
+	// join the shared set.
+	const compactionFiles = anthropicCompactionFilesText(message);
+	if (compactionFiles !== undefined) visit(compactionFiles);
+	for (const files of anthropicCompactionPayload(message)?.retainedFiles ?? []) visit(files.text);
+	if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
+		forEachNativeReplayText(message, visit);
+	}
+	if (message.role === "assistant") {
+		for (const block of message.content) {
+			if (block.type === "text") visit(block.text);
+			else if (block.type === "thinking") visit(block.thinking);
+			else if (block.type === "toolCall") {
+				forEachJsonString(block.arguments as JsonValue, visit);
+				if (block.intent !== undefined) visit(block.intent);
+				if (block.rawBlock !== undefined) visit(block.rawBlock);
 			}
-			continue;
 		}
-		if (
-			message.role !== "user" &&
-			message.role !== "toolResult" &&
-			!(message.role === "developer" && message.attribution === "user")
-		) {
-			continue;
-		}
-		const target = message as UserFacingMessage;
-		if (typeof target.content === "string") {
-			addText(target.content);
-			continue;
-		}
-		for (const block of target.content) {
-			if (block.type === "text") addText(block.text);
-		}
+		return;
+	}
+	if (
+		message.role !== "user" &&
+		message.role !== "toolResult" &&
+		!(message.role === "developer" && message.attribution === "user")
+	) {
+		return;
+	}
+	const target = message as UserFacingMessage;
+	if (typeof target.content === "string") {
+		visit(target.content);
+		return;
+	}
+	for (const block of target.content) {
+		if (block.type === "text") visit(block.text);
+	}
+}
+
+/**
+ * The request-wide regex values of `messages`. Every text is first scanned in
+ * one native call (see `SecretObfuscator.prescan`), so the collection here and
+ * the redaction after it ask about each text without another one.
+ */
+function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): SecretValueSet {
+	const texts: string[] = [];
+	for (const message of messages) forEachOutboundText(message, text => texts.push(text));
+	obfuscator.prescan(texts);
+	const values = new SecretValueSet();
+	for (const text of texts) {
+		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
 	}
 	return values;
 }

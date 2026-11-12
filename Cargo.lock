@@ -6421,6 +6421,7 @@ dependencies = [
 name = "pi-natives"
 version = "18.18.9"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "arboard",
  "ashpd",
@@ -6482,6 +6483,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rayon",
  "regex",
+ "regex-syntax",
  "reis",
  "resvg",
  "serde",

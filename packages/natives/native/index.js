@@ -43,6 +43,7 @@ export const PowerAssertion = nativeBindings.PowerAssertion ?? missingNativeClas
 export const Process = nativeBindings.Process ?? missingNativeClass("Process");
 export const PtySession = nativeBindings.PtySession ?? missingNativeClass("PtySession");
 export const RunTrace = nativeBindings.RunTrace ?? missingNativeClass("RunTrace");
+export const SecretScanner = nativeBindings.SecretScanner ?? missingNativeClass("SecretScanner");
 export const Shell = nativeBindings.Shell ?? missingNativeClass("Shell");
 export const ShellVisualization = nativeBindings.ShellVisualization ?? missingNativeClass("ShellVisualization");
 export const TextPredictor = nativeBindings.TextPredictor ?? missingNativeClass("TextPredictor");
