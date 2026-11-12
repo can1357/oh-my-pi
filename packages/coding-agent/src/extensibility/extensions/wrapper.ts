@@ -10,8 +10,9 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
+import { logger, prompt, sanitizeText, toError, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { Settings } from "../../config/settings";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
 	approvalRestrictions,
@@ -232,6 +233,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		return target.restartForModeChange();
 	}
 
+	#refreshApprovalSettings(settings: Settings | undefined): Promise<void> | undefined {
+		return settings?.refreshForToolApproval()?.catch(error => {
+			logger.warn("Settings reload before tool approval failed", {
+				tool: this.tool.name,
+				error: String(error),
+			});
+		});
+	}
+
 	async execute(
 		toolCallId: string,
 		params: Static<TParameters>,
@@ -249,6 +259,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<TDetails, TParameters>> {
+		const settings: Settings | undefined = context?.settings ?? this.runner.sessionSettings;
+		let approvalRefresh = this.#refreshApprovalSettings(settings);
+		if (approvalRefresh) await approvalRefresh;
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
@@ -266,17 +279,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
-		const approvalSettings = context?.settings ?? this.runner.sessionSettings;
-		const { approvalMode, userPolicies } = resolveApprovalFromContext(
-			context ?? (approvalSettings ? { settings: approvalSettings } : undefined),
-		);
+		const approvalContext = context ?? (settings ? { settings } : undefined);
+		let { approvalMode, userPolicies } = resolveApprovalFromContext(approvalContext);
 		// `always-ask-cached` grants for this conversation, shared by the pre-check, the full gate,
 		// and the record after an approval.
-		const approvalGrants =
-			approvalMode === "always-ask-cached"
-				? getApprovalGrants(approvalSettings?.getAgentDir(), this.runner.sessionId)
-				: undefined;
-		const restrictions = approvalRestrictions(approvalSettings, this.runner.cwd);
+		const grantsFor = (mode: typeof approvalMode) =>
+			mode === "always-ask-cached" ? getApprovalGrants(settings?.getAgentDir(), this.runner.sessionId) : undefined;
+		let approvalGrants = grantsFor(approvalMode);
+		const restrictions = approvalRestrictions(settings, this.runner.cwd);
 		const preResolved = resolveApproval(
 			this.tool,
 			approvalArgs(params, context),
@@ -356,6 +366,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
+		approvalRefresh = this.#refreshApprovalSettings(settings);
+		if (approvalRefresh) await approvalRefresh;
+		({ approvalMode, userPolicies } = resolveApprovalFromContext(approvalContext));
+		approvalGrants = grantsFor(approvalMode);
 		const resolvedArgs = approvalArgs(effectiveParams, context);
 		this.tool.bindApprovalTargets?.(resolvedArgs);
 		const resolved = resolveApproval(
