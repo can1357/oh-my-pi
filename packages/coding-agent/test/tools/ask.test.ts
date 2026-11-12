@@ -206,6 +206,30 @@ describe("AskTool form dialog", () => {
 		expect(abort).toHaveBeenCalledTimes(1);
 	});
 
+	it("surfaces a failed form dialog as a tool error without aborting the turn", async () => {
+		const abort = vi.fn();
+		const outcome = new AskTool(createSession()).execute(
+			"call-failed",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			createContext({
+				formDialog: async () => {
+					throw new Error("ACP client failed the formDialog elicitation: Unsupported ACP elicitation form");
+				},
+				abort,
+			}),
+		);
+
+		const error = await outcome.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).not.toBeInstanceOf(ToolAbortError);
+		expect((error as Error).message).toContain("Unsupported ACP elicitation form");
+		expect(abort).not.toHaveBeenCalled();
+	});
+
 	it("tells the model a form without named controls needs one, without showing it", async () => {
 		const formDialog = vi.fn<FormDialog>();
 		const result = await new AskTool(createSession()).execute(
