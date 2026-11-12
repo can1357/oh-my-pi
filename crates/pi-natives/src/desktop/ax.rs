@@ -1496,7 +1496,6 @@ pub(crate) fn masked(actual: &str) -> bool {
 
 /// Whether `actual` masks `value`: one mask character per character or UTF-16
 /// unit.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn masks(actual: &str, value: &str) -> bool {
 	let shown = actual.chars().count();
 	masked(actual) && (shown == value.chars().count() || shown == value.encode_utf16().count())
