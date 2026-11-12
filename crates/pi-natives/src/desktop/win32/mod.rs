@@ -241,11 +241,13 @@ mod tests {
 
 	use windows_sys::Win32::{
 		Foundation::HWND,
-		UI::Input::KeyboardAndMouse::VK_RETURN,
-		UI::WindowsAndMessaging::{
-			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, ES_AUTOHSCROLL, GetForegroundWindow,
-			GetMessageW, MSG, PostMessageW, SendMessageW, SetForegroundWindow, TranslateMessage,
-			WM_APP, WM_GETTEXT, WM_KEYDOWN, WM_SETTEXT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+		UI::{
+			Input::KeyboardAndMouse::VK_RETURN,
+			WindowsAndMessaging::{
+				CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, ES_AUTOHSCROLL, GetForegroundWindow,
+				GetMessageW, MSG, PostMessageW, SendMessageW, SetForegroundWindow, TranslateMessage,
+				WM_APP, WM_GETTEXT, WM_KEYDOWN, WM_SETTEXT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+			},
 		},
 	};
 
