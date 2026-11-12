@@ -47,6 +47,40 @@ it("lists a plain TAR past the in-memory ceiling and reads only its selected sma
 	expect(await Bun.file(temp.join("identity.json")).exists()).toBe(false);
 });
 
+it("queries a selected TAR JSON member without materializing the whole archive", async () => {
+	await using temp = await TempDir.create("@read-tar-json-");
+	const archivePath = temp.join("receipt.tar");
+	await ar.writeArchive(archivePath, "tar", [
+		["fill.bin", new Uint8Array(6000)],
+		["receipt.json", '{"x":7}'],
+	]);
+	const openArchive = ar.openArchive;
+	vi.spyOn(ar, "openArchive").mockImplementation(source => openArchive(source, { limits: { maxInMemorySize: 512 } }));
+	const tool = new ReadTool(makeSession(temp.path()));
+	const plain = await tool.execute("receipt-bytes", { path: `${archivePath}:receipt.json:raw` });
+	expect(plain.content).toEqual([{ type: "text", text: '{"x":7}' }]);
+	const queried = await tool.execute("receipt-query", { path: `${archivePath}:receipt.json?q=.x` });
+	expect(queried.content).toEqual([{ type: "text", text: "7" }]);
+	expect(queried.details?.resolvedPath).toBe(`${archivePath}:receipt.json`);
+	expect(await Bun.file(temp.join("receipt.json")).exists()).toBe(false);
+});
+
+it("rejects a JSON query before extracting an over-limit archive member", async () => {
+	await using temp = await TempDir.create("@read-tar-json-limit-");
+	const archivePath = temp.join("bounded.tar");
+	const receipt = '{"x":7}';
+	await ar.writeArchive(archivePath, "tar", [["receipt.json", receipt]]);
+	const archive = await ar.openArchive(archivePath);
+	const bounded = new ar.ArchiveReader("tar", [...archive.indexEntries()], {
+		...archive.limits,
+		maxMemberSize: receipt.length - 1,
+	});
+	vi.spyOn(ar, "openArchive").mockResolvedValue(bounded);
+	await expect(
+		new ReadTool(makeSession(temp.path())).execute("bounded-json", { path: `${archivePath}:receipt.json?q=.x` }),
+	).rejects.toThrow("too large to extract");
+});
+
 it("reuses a plain TAR index across member reads while its file-backed source remains readable", async () => {
 	await using temp = await TempDir.create("@read-tar-cache-");
 	const archivePath = temp.join("members.tar");
