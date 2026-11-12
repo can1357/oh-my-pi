@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed clicking an element of a macOS suggestion list, such as a row of Safari's password autofill dropdown, failing with `AxFailed: AX element has no identifiable owning window`
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
