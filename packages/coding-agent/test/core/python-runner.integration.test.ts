@@ -1236,6 +1236,25 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("times both a statement and an expression with %time", async () => {
+		using tempDir = TempDir.createSync("@python-runner-time-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const statement = await executePythonWithKernel(kernel, "%time total = sum(range(10))\nprint(total)");
+			expect(statement.output).not.toContain("SyntaxError");
+			expect(statement.output).toContain("Wall time:");
+			expect(statement.output).toContain("45");
+			expect(statement.exitCode).toBe(0);
+
+			const expression = await executePythonWithKernel(kernel, "%time total * 2");
+			expect(expression.output).toContain("Wall time:");
+			expect(expression.output).toContain("90");
+			expect(expression.exitCode).toBe(0);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("translates %pwd magic to the user namespace", async () => {
 		using tempDir = TempDir.createSync("@python-runner-magic-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
