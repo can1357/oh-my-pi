@@ -28,6 +28,12 @@ const TREE_WALK_LIMIT: usize = 32;
 /// processes click-to-focus asynchronously).
 const FOCUS_SETTLE_WATCH: Duration = Duration::from_millis(150);
 const FOCUS_POLL: Duration = Duration::from_millis(25);
+/// How long a sent activation is given to move the focus after the user
+/// intervened, so the caller's hand-back can undo it: the shortest budget a
+/// takeover gives the WM to act on the same request.
+const QUEUED_ACTIVATION_WAIT: Duration = Duration::from_millis(800);
+/// Poll for that move; the user's keys reach the target until it is undone.
+const QUEUED_ACTIVATION_POLL: Duration = Duration::from_millis(2);
 
 pub(super) struct Atoms {
 	pub net_active_window:   Atom,
@@ -39,11 +45,13 @@ pub(super) struct Atoms {
 	pub time_probe:          Atom,
 	/// `_NET_WM_WINDOW_TYPE`s of override-redirect windows that hold no grab.
 	pub passive_popup_types: [Atom; 3],
+	/// `_OMP_MPX_HOLDER`, the master pointer property naming the pair's holder.
+	pub mpx_holder:          Atom,
 }
 
 impl Atoms {
 	pub(super) fn intern(conn: &RustConnection) -> CoreResult<Self> {
-		const NAMES: [&str; 10] = [
+		const NAMES: [&str; 11] = [
 			"_NET_ACTIVE_WINDOW",
 			"_NET_WM_PID",
 			"_NET_WM_NAME",
@@ -54,6 +62,7 @@ impl Atoms {
 			"_NET_WM_WINDOW_TYPE_TOOLTIP",
 			"_NET_WM_WINDOW_TYPE_NOTIFICATION",
 			"_NET_WM_WINDOW_TYPE_DND",
+			"_OMP_MPX_HOLDER",
 		];
 		let cookies = NAMES
 			.iter()
@@ -74,6 +83,7 @@ impl Atoms {
 			wm_state:            atoms[5],
 			time_probe:          atoms[6],
 			passive_popup_types: [atoms[7], atoms[8], atoms[9]],
+			mpx_holder:          atoms[10],
 		})
 	}
 }
@@ -336,21 +346,30 @@ impl Wm<'_> {
 		&self,
 		window: Window,
 		current: Option<Window>,
+		check_user: impl Fn() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		self.activate(window, current, false)
+		self.activate(window, current, false, check_user)
 	}
 
 	pub(super) fn restore_activation(&self, window: Window, current: Window) -> CoreResult<()> {
-		self.activate(window, Some(current), true)
+		self.activate(window, Some(current), true, || Ok(()))
 	}
 
-	fn activate(&self, window: Window, current: Option<Window>, restoring: bool) -> CoreResult<()> {
+	fn activate(
+		&self,
+		window: Window,
+		current: Option<Window>,
+		restoring: bool,
+		check_user: impl Fn() -> CoreResult<()>,
+	) -> CoreResult<()> {
 		control::check()?;
 		let time = self.server_time();
+		#[cfg(test)]
+		super::input::named_change_tests::after_server_time();
 		control::check()?;
 		// Timestamp acquisition can yield to physical input. Re-check the
 		// guard immediately before requesting a restore, not just before it.
-		if restoring && !current.is_some_and(|current| self.is_focused(current, true)) {
+		if restoring && !current.is_some_and(|current| self.is_focused(current, false)) {
 			return Ok(());
 		}
 		let event = ClientMessageEvent::new(32, window, self.atoms.net_active_window, [
@@ -360,6 +379,7 @@ impl Wm<'_> {
 			0,
 			0,
 		]);
+		check_user()?;
 		self
 			.conn
 			.send_event(
@@ -371,11 +391,19 @@ impl Wm<'_> {
 			.map_err(wm_failed)?
 			.check()
 			.map_err(wm_failed)?;
-		control::check()?;
+		#[cfg(test)]
+		super::input::named_change_tests::after_send();
+		// The WM holds the request and can move the focus once the caller has
+		// looked; let it, so the hand-back sees the move and undoes it. Escape
+		// both cancels and counts as a press, so neither may skip the wait.
+		if let Err(error) = control::check().and_then(|()| check_user()) {
+			self.await_activation(window);
+			return Err(error);
+		}
 		// Never override a newer focus switch while the WM handles the request.
 		if restoring
-			&& !self.is_focused(window, true)
-			&& !current.is_some_and(|current| self.is_focused(current, true))
+			&& !self.is_focused(window, false)
+			&& !current.is_some_and(|current| self.is_focused(current, false))
 		{
 			return Ok(());
 		}
@@ -384,6 +412,16 @@ impl Wm<'_> {
 			let _ = cookie.check();
 		}
 		self.conn.flush().map_err(wm_failed)
+	}
+
+	/// Waits, bounded, for core focus to reach `window` after its activation
+	/// was sent; a WM that declines the request leaves it at the bound. A
+	/// cancel does not end it: the caller's hand-back needs to see the move.
+	pub(super) fn await_activation(&self, window: Window) {
+		let deadline = Instant::now() + QUEUED_ACTIVATION_WAIT;
+		while Instant::now() < deadline && !self.is_focused(window, false) {
+			control::settle(QUEUED_ACTIVATION_POLL);
+		}
 	}
 
 	/// Whether `window` is the active window (when an EWMH WM tracks one) and

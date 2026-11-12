@@ -7,11 +7,15 @@ import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import {
+	ClickRefusedError,
 	clickElement,
 	clickQueryHandlerText,
+	ElementDetachedError,
 	fillViaHandle,
 	resolveActionableQueryHandlerClickTarget,
+	setElementChecked,
 	TypingInterruptedError,
+	withLiveElement,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
@@ -19,6 +23,7 @@ import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/pa
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
+import type { ElementHandle } from "puppeteer-core";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const TAB_NAME = `interactions-${crypto.randomUUID()}`;
@@ -71,6 +76,8 @@ function makeSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -543,7 +550,17 @@ return { during, after };`,
 		const selectHtml = `<!doctype html>
 <select id="country"><option value="">Choose…</option><option value="us">United States</option><option value="ca">Canada</option></select>
 <select id="size"><option value="m">Large</option><option value="Large">Extra large</option></select>
-<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option></select>`;
+<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option></select>
+<select id="jump"><option value="">Jump to…</option><option value="docs">Docs</option></select>
+<select id="swap"></select>
+<script>
+// A jump menu acts on the choice and resets itself, as "add filter" and "go to" menus do.
+document.querySelector("#jump").addEventListener("change", event => { event.target.value = ""; });
+// A cascading menu replaces its own options on a change.
+window.resetSwap = () => { document.querySelector("#swap").innerHTML = '<option value="a">A</option><option value="b">B</option>'; };
+resetSwap();
+document.querySelector("#swap").addEventListener("change", event => { event.target.innerHTML = '<option value="z" selected>Z</option>'; });
+</script>`;
 		await prelude.invoke(
 			{ action: "open", name: SELECT_TAB_NAME, url: `data:text/html,${encodeURIComponent(selectHtml)}` },
 			context,
@@ -560,6 +577,8 @@ const handle = await tab.waitFor("#country");
 const handleByLabel = await handle.select("United States");
 const afterHandle = await tab.value("#country");
 const valueWins = await tab.select("#size", "Large");
+const cleared = await tab.select("#size");
+const afterCleared = await tab.value("#size");
 const firstOnSingle = await tab.select("#country", "Canada", "us");
 const handleFirstOnSingle = await handle.select("us", "ca");
 const afterFirst = await tab.value("#country");
@@ -567,7 +586,15 @@ const noMatch = await tab.select("#country", "Mexico").catch(error => error.mess
 const handleNoMatch = await handle.select("ca", "Mexico").catch(error => error.message);
 const afterNoMatch = await tab.value("#country");
 const multiple = await tab.select("#extras", "Cheese", "olives");
-return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple };`,
+const reset = await tab.select("#jump", "Docs");
+const handleReset = await (await tab.waitFor("#jump")).select("docs");
+const afterReset = await tab.value("#jump");
+await tab.evaluate(() => resetSwap());
+const swapped = await tab.select("#swap", "b");
+await tab.evaluate(() => resetSwap());
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const ternSwapped = await tab.evaluate(() => globalThis.__ompTernKit.select({ engine: "css", query: "#swap" }, ["b"]));
+return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cleared, afterCleared, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple, reset, handleReset, afterReset, swapped, ternSwapped };`,
 					timeout: 20,
 				},
 				context,
@@ -579,6 +606,9 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, fi
 				handleByLabel: ["us"],
 				afterHandle: "us",
 				valueWins: ["Large"],
+				// A drop-down select with nothing selected selects its first option again.
+				cleared: ["m"],
+				afterCleared: "m",
 				firstOnSingle: ["ca"],
 				handleFirstOnSingle: ["us"],
 				afterFirst: "us",
@@ -586,6 +616,11 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, fi
 				handleNoMatch: expect.stringContaining('No <select> option matches "Mexico"'),
 				afterNoMatch: "us",
 				multiple: ["cheese", "olives"],
+				reset: [""],
+				handleReset: [""],
+				afterReset: "",
+				swapped: ["z"],
+				ternSwapped: ["z"],
 			});
 
 			// cmux tabs run the same rules in their injected page script; replay it in this page.
@@ -602,11 +637,16 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, fi
 				} as never,
 				surfaceId: "select",
 			});
+			await prelude.invoke(
+				{ action: "call", name: SELECT_TAB_NAME, chain: [{ method: "evaluate", args: ["resetSwap()"] }] },
+				context,
+			);
 			expect({
 				byLabel: await cmux.select("#country", "United States"),
 				firstOnSingle: await cmux.select("#country", "Canada", "us"),
 				multiple: await cmux.select("#extras", "Ham", "olives"),
-			}).toEqual({ byLabel: ["us"], firstOnSingle: ["ca"], multiple: ["ham", "olives"] });
+				swapped: await cmux.select("#swap", "b"),
+			}).toEqual({ byLabel: ["us"], firstOnSingle: ["ca"], multiple: ["ham", "olives"], swapped: ["z"] });
 			const noMatch = await cmux.select("#country", "Mexico").catch((error: Error) => error.message);
 			expect(noMatch).toContain('No <select> option matches "Mexico"');
 			expect(await cmux.value("#country")).toBe("ca");
@@ -1955,4 +1995,176 @@ return [await tab.evaluate(() => window.presses), await inner.evaluate(() => win
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 30_000);
+
+	// A trapped button takes no clicks, and the page rebuilds the list once a click scrolls the button to the middle
+	// of the view, as a page that rebuilds a list after a request does: the handle the click resolved is detached
+	// before it could take the click. `rebuild` is what the rebuild leaves: a clickable button, or nothing; `trapped`
+	// arms the trap at load. Clicks are counted in the DOM, which frame helpers read from their own world.
+	const replacingList = (rebuild: string, trapped = false) =>
+		`<!doctype html><style>body { margin: 0; height: 3000px; } #list { position: absolute; top: 500px; }</style><div id="list"></div>
+<script>window.render = trap => { scrollTo(0, 0); const list = document.querySelector("#list"); list.innerHTML = trap ? '<button id="vol" style="pointer-events: none">pgdata-2</button>' : '<button id="vol">pgdata-2</button>'; list.firstChild.addEventListener("click", () => { document.body.dataset.clicks = (document.body.dataset.clicks ?? "") + "vol "; }); };
+addEventListener("scroll", () => { const vol = document.querySelector("#vol"); if (scrollY > 0 && vol?.style.pointerEvents === "none") ${rebuild}; }); render(${trapped});</script>`;
+
+	test("looks a selector up again when the page replaces its element before the click, and fails a replaced handle at once", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-replaced-click" };
+		const tabName = `replaced-click-${crypto.randomUUID()}`;
+		const listHtml = replacingList("render(false)");
+		const frameHtml = replacingList("render(false)", true);
+		const frameScript = `const inner = document.createElement("iframe"); inner.name = "inner"; inner.style = "position: absolute; top: 0; left: 300px; width: 900px; height: 700px; border: 0"; inner.srcdoc = ${JSON.stringify(frameHtml).replaceAll("</", "<\\/")}; document.body.append(inner);`;
+		await prelude.invoke(
+			{
+				action: "open",
+				name: tabName,
+				url: `data:text/html,${encodeURIComponent(`${listHtml}<script>${frameScript}</script>`)}`,
+			},
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.evaluate(() => window.render(true));
+await tab.click("#vol");
+await tab.evaluate(() => window.render(true));
+await tab.click("text/pgdata-2");
+const inner = await tab.frame("inner");
+await inner.click("#vol");
+const { elements } = await tab.observe();
+const vol = await tab.id(elements.find(element => element.name === "pgdata-2").id);
+await tab.evaluate(() => window.render(false));
+let error = "";
+try { await vol.click(); } catch (caught) { error = String(caught?.message ?? caught); }
+const clicks = () => document.body.dataset.clicks;
+return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(clicks), error };`,
+					timeout: 20,
+				},
+				context,
+			);
+			const { clicks, frameClicks, error } = valueFrom<{ clicks: string; frameClicks: string; error: string }>(
+				result,
+			);
+			expect(clicks).toBe("vol vol ");
+			expect(frameClicks).toBe("vol ");
+			expect(error).toContain("is detached from the document");
+			expect(error).not.toContain("timed out");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
+	test("looks replaced checkboxes up before returning their state and replaced radios up before unchecking", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent(
+				'<input id="check" type="checkbox"><input id="uncheck" type="checkbox" checked><input id="radio" type="radio" checked>',
+			);
+			const signal = new AbortController().signal;
+			for (const [id, desired] of [
+				["check", true],
+				["uncheck", false],
+				["radio", false],
+			] as const) {
+				let first = true;
+				await withLiveElement(
+					async () => {
+						const handle = await page.locator(`#${id}`).waitHandle();
+						if (first) {
+							first = false;
+							await handle.evaluate((input, desired) => {
+								if (input.type === "radio") {
+									// Detach after the state read, before the separate radio mutation.
+									Object.defineProperty(input, "checked", {
+										get() {
+											queueMicrotask(() => input.replaceWith(input.cloneNode()));
+											return true;
+										},
+									});
+								} else {
+									const next = input.cloneNode() as typeof input;
+									input.checked = desired;
+									next.checked = !desired;
+									input.replaceWith(next);
+								}
+							}, desired);
+						}
+						return handle;
+					},
+					async handle => {
+						try {
+							await setElementChecked(handle, desired, `tab.${desired ? "check" : "uncheck"}`, signal);
+						} finally {
+							await handle.dispose();
+						}
+					},
+					signal,
+				);
+			}
+			expect(await page.$$eval("input", inputs => inputs.map(input => input.checked))).toEqual([true, false, false]);
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
+
+	test("a click whose element the page removed after replacing it reports the selector matching nothing", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-removed-click" };
+		const tabName = `removed-click-${crypto.randomUUID()}`;
+		const listHtml = replacingList('document.querySelector("#list").innerHTML = ""');
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(listHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.evaluate(() => window.render(true));
+try { await tab.click("#vol"); return "clicked"; } catch (caught) { return String(caught?.message ?? caught); }`,
+					timeout: 4,
+				},
+				context,
+			);
+			const error = valueFrom<string>(result);
+			expect(error).toContain("timed out");
+			expect(error).toContain("selector currently matches no elements");
+			expect(error).not.toContain("detached");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+});
+
+describe("looking a replaced element up again", () => {
+	// Stands in for the handles `resolve` returns; `act` decides what happens to each.
+	const handle = {} as ElementHandle;
+
+	test("looks the element up again after each replacement, and reports a wait that runs out clicking as replaced", async () => {
+		const controller = new AbortController();
+		let lookups = 0;
+		const error = await rejectionOf(
+			withLiveElement(
+				async () => {
+					lookups++;
+					return handle;
+				},
+				async () => {
+					if (lookups < 3) throw new ElementDetachedError("tab.click(#vol)");
+					controller.abort(new Error("deadline"));
+					throw new Error("aborted");
+				},
+				controller.signal,
+			),
+		);
+		expect(lookups).toBe(3);
+		expect(error).toBeInstanceOf(ClickRefusedError);
+		expect(error instanceof ClickRefusedError ? error.refusal : "").toContain("kept replacing");
+	});
 });

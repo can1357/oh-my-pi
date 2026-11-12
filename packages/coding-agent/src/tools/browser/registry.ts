@@ -24,21 +24,21 @@ import { UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
+import { WebKitHost } from "./webkit/host";
+import type { WebKitKind } from "./webkit/kind";
 
 export type PuppeteerBrowserKind =
 	| {
 			kind: "headless";
 			headless: boolean;
 			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
-			ignoreHttpsErrors?: boolean;
-			/** Process-local file access launch flag, unsupported by an already-running shared browser. */
-			allowFileAccess?: boolean;
+			insecure?: boolean;
 	  }
 	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
 
-export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind;
+export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind | WebKitKind;
 
 export type BrowserKindTag = BrowserKind["kind"];
 
@@ -76,7 +76,14 @@ export interface TernBrowserHandle extends BrowserHandleCommon {
 	tern: TernSocketClient;
 }
 
-export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle;
+/** omp's own WebKit host process, whose headless web views (one block each) are this handle's tabs. */
+export interface WebKitBrowserHandle extends BrowserHandleCommon {
+	kind: WebKitKind;
+	/** The host process omp started and stops with the handle. */
+	webkit: WebKitHost;
+}
+
+export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle | WebKitBrowserHandle;
 
 /** Controls bounded browser-handle teardown and identifies the owning resource in timeout diagnostics. */
 export interface ReleaseBrowserOptions {
@@ -95,7 +102,7 @@ const pendingOpens = new Map<string, { settled: Promise<void> }>();
 export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
-			return `headless:${kind.headless ? "1" : "0"}:${kind.ignoreHttpsErrors ? "tls" : ""}:${kind.allowFileAccess ? "file" : ""}`;
+			return `headless:${kind.headless ? "1" : "0"}:${kind.insecure ? "tls" : ""}`;
 		case "spawned":
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
@@ -106,6 +113,8 @@ export function browserKey(kind: BrowserKind): string {
 			return `cmux:${kind.socketPath}`;
 		case "tern":
 			return `tern:${kind.socketPath}:${kind.pane}`;
+		case "webkit":
+			return `webkit:${kind.path}`;
 	}
 }
 
@@ -124,7 +133,15 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 		const existing = browsers.get(key);
 		if (existing) {
 			if ("client" in existing) return existing;
-			if ("tern" in existing ? existing.tern.connected : existing.browser.connected) return existing;
+			if (
+				"tern" in existing
+					? existing.tern.connected
+					: "webkit" in existing
+						? existing.webkit.client.connected
+						: existing.browser.connected
+			) {
+				return existing;
+			}
 			browsers.delete(key);
 			await disposeBrowserHandle(existing, { kill: false });
 			continue;
@@ -194,7 +211,7 @@ export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
 	const cdpUrl = rawCdpUrl.replace(/\/+$/, "");
 	if (/^wss?:\/\//i.test(cdpUrl)) {
 		throw new ToolError(
-			"browser app.cdp_url must be the HTTP CDP discovery endpoint (for example http://127.0.0.1:9222), not a ws:// browser websocket URL.",
+			"browser app CDP URL must be the HTTP CDP discovery endpoint (for example http://127.0.0.1:9222), not a ws:// browser websocket URL.",
 		);
 	}
 	return cdpUrl;
@@ -217,6 +234,9 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		await tern.connect();
 		return { key: browserKey(kind), kind, tern, refCount: 0 };
 	}
+	if (kind.kind === "webkit") {
+		return { key: browserKey(kind), kind, webkit: await WebKitHost.launch(kind.path, kind.viewer), refCount: 0 };
+	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI
 		// worker host) MUST go through the project-shared broker-owned Chromium:
@@ -229,8 +249,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
-			ignoreHttpsErrors: kind.ignoreHttpsErrors,
-			allowFileAccess: kind.allowFileAccess,
+			insecure: kind.insecure,
 		});
 		return {
 			key: browserKey(kind),
@@ -329,7 +348,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 	const exe = kind.path;
 	if (!path.isAbsolute(exe)) {
 		throw new ToolError(
-			`app.path must be absolute (got ${JSON.stringify(exe)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
+			`app must be an absolute executable path (got ${JSON.stringify(exe)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
 		);
 	}
 	const appArgs = kind.args ?? [];
@@ -413,6 +432,11 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		handle.tern.close();
 		return;
 	}
+	if ("webkit" in handle) {
+		// The host is omp's own process whoever asked: it stops with its last tab, `kill` or not.
+		await handle.webkit.close();
+		return;
+	}
 	if (handle.kind.kind === "headless") {
 		if (handle.sharedDaemon) {
 			// The broker owns the Chromium; this process only drops its CDP
@@ -472,11 +496,6 @@ async function openSharedHeadlessHandle(
 	kind: Extract<PuppeteerBrowserKind, { kind: "headless" }>,
 	opts: AcquireBrowserOptions,
 ): Promise<PuppeteerBrowserHandle> {
-	if (kind.allowFileAccess) {
-		throw new ToolError(
-			"browser.open({ allow_file_access:true }) requires a process-local Chromium launch and cannot be applied to the project-shared browser. Use app.path to launch a dedicated browser.",
-		);
-	}
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	try {
 		const shared = await ensureSharedBrowser({

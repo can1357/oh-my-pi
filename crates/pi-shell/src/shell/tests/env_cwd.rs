@@ -197,6 +197,43 @@ async fn cmd_echo_chinese_decodes_from_system_acp() {
 	assert!(output.contains("中文"), "garbled command output: {output:?}");
 }
 
+/// On Windows an MSYS drive path (`/c/x`) names `C:\x` everywhere the shell
+/// resolves a name, not only in pi's utilities: `test`, an input and an
+/// output redirection, running a program, and `cd`, after which `$PWD` is
+/// the drive spelling. Each of these used to reach `\c\x` on the current
+/// drive and fail with "No such file or directory".
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn msys_drive_paths_reach_the_drive_for_every_consumer() {
+	let msys = |path: &std::path::Path| {
+		let text = path.to_str().expect("utf-8 path");
+		let (drive, rest) = text.split_at(2);
+		assert_eq!(drive.as_bytes()[1], b':', "a drive path: {text}");
+		format!("/{}{}", drive[..1].to_ascii_lowercase(), rest.replace('\\', "/"))
+	};
+	let dir = tempfile::tempdir().expect("scratch");
+	std::fs::write(dir.path().join("in.txt"), "line\n").expect("input file");
+	let system_root = std::env::var_os("SystemRoot").expect("SystemRoot");
+	// `where.exe`, not `cmd.exe`: cmd misreads its own command line when the
+	// program path is spelled with `/` (`C:/…/cmd.exe` fails the same way).
+	let program = std::path::Path::new(&system_root).join(r"System32\where.exe");
+	let (dir_alias, program_alias) = (msys(dir.path()), msys(&program));
+	let (result, output) = execute_captured(format!(
+		"d='{dir_alias}'; [ -f \"$d/in.txt\" ] && echo test; read -r l < \"$d/in.txt\" && echo \
+		 \"read $l\"; echo written > \"$d/out.txt\"; '{program_alias}' /q cmd.exe && echo exec; cd \
+		 \"$d\" && echo \"$PWD\""
+	))
+	.await;
+	assert_eq!(result.exit_code, Some(0), "{output}");
+	let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
+	let pwd = dir.path().display().to_string();
+	assert_eq!(lines, ["test", "read line", "exec", pwd.as_str()]);
+	assert_eq!(
+		std::fs::read_to_string(dir.path().join("out.txt")).expect("redirected output"),
+		"written\n"
+	);
+}
+
 /// Regression for issue #8925: a host env entry whose key or value is not
 /// valid Unicode must be skipped, not fatal. `std::env::vars()` panics on
 /// the first one (e.g. the corrupt `GHOSTTY_BIN_DIR` cmux/Ghostty stages,

@@ -129,7 +129,7 @@ export class CredentialHealth implements HealthApi {
 		const planGate = strategy?.planGate?.(rankingContext);
 		const planEligibilityByCredential = new Map<number, boolean | undefined>();
 		const blockScope = strategy?.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const reserveFraction = Number.isFinite(options.reserveFraction)
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: this.#deps.policies.defaultReservePct / 100;

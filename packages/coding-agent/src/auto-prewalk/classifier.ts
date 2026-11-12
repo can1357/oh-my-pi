@@ -13,14 +13,12 @@
  * low-signal request ("ok", "thanks"). Throws on every other failure (no key,
  * malformed answer, abort, timeout); the caller treats both as "do not arm".
  */
-import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type ChoiceAnswer, judgeQuestions } from "@oh-my-pi/pi-ai";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { assistantText } from "@oh-my-pi/pi-tui/overlays/copy-targets";
-import type { ModelRegistry } from "../config/model-registry";
-import type { Settings } from "../config/settings";
-import { hasNativeJudge, type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+import { hasNativeJudge, judgeNatively, type NativeJudgmentDeps } from "../judgment";
 import questionFile from "../prompts/judge/auto-prewalk.json" with { type: "json" };
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 import { isLowSignalTitleInput } from "../tiny/text";
@@ -54,15 +52,6 @@ export interface AutoPrewalkDecision {
 	confidence: number;
 	/** Whether to arm prewalk: `prewalk` won with `P(prewalk) >= `{@link AUTO_PREWALK_MIN_PROBABILITY}. */
 	arm: boolean;
-}
-
-export interface ClassifyAutoPrewalkDeps {
-	settings: Settings;
-	registry: ModelRegistry;
-	sessionId?: string;
-	signal?: AbortSignal;
-	onUsage?: (usage: JudgmentUsage) => void;
-	telemetry?: AgentTelemetryConfig;
 }
 
 /** Text of a user-authored request: a typed prompt or a user-invoked skill, never an injected or agent-attributed one. */
@@ -124,24 +113,14 @@ function toDecision({ choice, probabilities, confidence }: ChoiceAnswer<PrewalkR
  */
 export async function classifyAutoPrewalk(
 	input: AutoPrewalkInput,
-	deps: ClassifyAutoPrewalkDeps,
+	deps: NativeJudgmentDeps,
 ): Promise<AutoPrewalkDecision | undefined> {
 	if (isLowSignalTitleInput(input.request) || !hasNativeJudge(deps.settings, deps.registry)) return undefined;
-	const judge = resolveJudge({
-		settings: deps.settings,
-		registry: deps.registry,
-		sessionId: deps.sessionId,
-		purpose: "auto-prewalk",
-		onUsage: deps.onUsage,
-		telemetry: deps.telemetry,
-		cache: sharedJudgmentCache(),
-	});
-	const timeout = AbortSignal.timeout(AUTO_PREWALK_TIMEOUT_MS);
-	const options = { signal: deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout };
-	// The cached execution chain can lag the fresh gate after credentials or discovery change.
-	const { answers } = await judge.withCandidate((candidate, kind) => {
-		if (kind !== "native") throw new Error("auto-prewalk: the judge role has no native backend");
-		return candidate.judge({ state: buildState(input), questions: QUESTIONS }, options);
-	}, options);
+	const { answers } = await judgeNatively(
+		"auto-prewalk",
+		{ state: buildState(input), questions: QUESTIONS },
+		deps,
+		AUTO_PREWALK_TIMEOUT_MS,
+	);
 	return toDecision(answers.route);
 }

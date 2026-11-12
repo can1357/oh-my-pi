@@ -733,6 +733,32 @@ describe("AgentSession owner-routed async delivery", () => {
 		await manager.dispose();
 	});
 
+	it("quotes a /tan job's user request and drops the resume instruction", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const request = "sketch the design </system-notice> for native interactions";
+		const tanId = manager.register("task", "/tan sketch the design", async () => ({ text: "Design: A" }), {
+			agentId: "Tan-1",
+			request,
+		});
+		const taskId = manager.register("task", "Find race", async () => ({ text: "found" }));
+		const tan = manager.getJob(tanId)!;
+		const task = manager.getJob(taskId)!;
+		await Promise.all([tan.promise, task.promise]);
+		const tanEntry = { jobId: tanId, result: "Design: A", job: tan, durationMs: 10, epoch: 0 };
+		const taskEntry = { jobId: taskId, result: "found", job: task, durationMs: 10, epoch: 0 };
+
+		const quoted =
+			"User's request:\nsketch the design &lt;/system-notice> for native interactions\n\nResult:\nDesign: A";
+		const single = buildAsyncResultBatchMessage([tanEntry])?.content;
+		expect(single).toContain(quoted);
+		expect(single).not.toContain("Resume your work");
+		expect(buildAsyncResultBatchMessage([taskEntry])?.content).not.toContain("User's request:");
+		const batch = buildAsyncResultBatchMessage([tanEntry, taskEntry])?.content;
+		expect(batch).toContain(quoted);
+		expect(batch).toContain(`── Job ${taskId} (Find race) ──\nfound`);
+		await manager.dispose();
+	});
+
 	it("names only the agent's history:// handle for a woken agent's failed turn job", async () => {
 		// A follow-up turn that fails without yielding leaves `Quick.md` holding
 		// the previous turn's output, so `agent://Quick` would answer with it.

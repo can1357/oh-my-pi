@@ -1687,7 +1687,7 @@ export interface JudgmentTelemetryOptions {
 	readonly provider: string;
 	/** Requested model id. */
 	readonly model: string;
-	/** Model that answered, when the provider resolves an alias (`jev-latest` → `jev-1.13.0`). */
+	/** Model that answered, when the provider resolves an alias (`jev-latest` → `jev-1.14.0`). */
 	readonly responseModel?: string;
 	/** Caller-level reason the judgment ran; stamped as {@link OmpGenAIAttr.JudgmentPurpose}. */
 	readonly purpose: string;

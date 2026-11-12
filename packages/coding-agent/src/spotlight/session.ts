@@ -69,6 +69,13 @@ export interface SpotlightExperimentOptions extends Partial<SpotlightShares> {
 	tools?: readonly string[];
 }
 
+/** The `source` of the experiment's session notices. */
+export const SPOTLIGHT_NOTICE_SOURCE = "spotlight";
+
+/** The warning a session shows when Spotlight finds no Stencil credential. */
+export const NO_CREDENTIAL_NOTICE =
+	"No Stencil credential: Spotlight ranking is off, and tool output is cut by the unranked fallback rules. To restore it, run /login and choose Stencil, or set STENCIL_API_KEY.";
+
 /**
  * The experiment's state for one session: the Spotlight client, the coin shares, and the per-session shaping state
  * (lines already shown, cuts made) shaping reads and updates.

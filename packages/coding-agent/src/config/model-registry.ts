@@ -18,6 +18,7 @@ import type {
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
@@ -1339,6 +1340,24 @@ export class ModelRegistry {
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
+		this.#syncLiteLLMUsage();
+	}
+
+	/**
+	 * Register LiteLLM budget usage for `litellm` and every `discovery.type: litellm`
+	 * provider not in `disabledProviders`. A mirror's owner already did this.
+	 */
+	#syncLiteLLMUsage(): void {
+		if (this.#owner) return;
+		const disabled = getDisabledProviderIdsFromSettings(this.#settings);
+		const providers = new Map<string, UsageProvider>();
+		for (const provider of [
+			"litellm",
+			...this.#discoverableProviders.filter(c => c.discovery.type === "litellm").map(c => c.provider),
+		]) {
+			if (!disabled.has(provider)) providers.set(provider, litellmUsageProvider);
+		}
+		this.authStorage.usage.replaceConfiguredProviders(providers);
 	}
 
 	#resetStaticComposition(): void {
@@ -1386,6 +1405,14 @@ export class ModelRegistry {
 			}
 		}
 		this.#providerLookupSnapshots.delete(providerName);
+	}
+
+	/** A modifier runs only for a provider holding OAuth credentials; without one it cannot touch the catalog. */
+	#modelModifierCanApply(): boolean {
+		for (const providerName of this.#runtimeModelModifiers.keys()) {
+			if (this.authStorage.credentials.getOAuth(providerName)) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -1529,7 +1556,7 @@ export class ModelRegistry {
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		// A modifier is a whole-catalog transform. Build and project the full catalog
 		// before narrowing a lazy lookup, matching getAll() followed by filtering.
-		const projectFullCatalog = providerFilter !== undefined && this.#runtimeModelModifiers.size > 0;
+		const projectFullCatalog = providerFilter !== undefined && this.#modelModifierCanApply();
 		const compositionFilter = projectFullCatalog ? undefined : providerFilter;
 		const unprojected = this.#projectBaseModels(this.#composeBaseModels(compositionFilter), compositionFilter);
 		const projected = this.#finalizeModels(this.#applyRuntimeModelModifiers(unprojected));
@@ -2883,10 +2910,12 @@ export class ModelRegistry {
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
+			// An offline pass only reads the cache: a missing row means "not fetched
+			// yet" (a cold, credential-scoped namespace), not an unreachable provider.
 			const status =
 				result.source === "cache"
 					? "cached"
-					: result.source === "bundled" && result.stale
+					: result.source === "bundled" && result.stale && strategy !== "offline"
 						? "unavailable"
 						: result.source === "bundled"
 							? "idle"
@@ -3438,7 +3467,7 @@ export class ModelRegistry {
 		// owned by refresh, discovery and runtime provider registration. Whole-
 		// catalog modifiers can inspect live credentials, so keep reprojecting
 		// those rather than extending the lifetime of their output.
-		if (availableProviders.size === 1 && this.#runtimeModelModifiers.size === 0) {
+		if (availableProviders.size === 1 && !this.#modelModifierCanApply()) {
 			const models = this.#modelsForProviderLookup(availableProviders.values().next().value!);
 			return kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind);
 		}
@@ -4022,8 +4051,13 @@ export class ModelRegistry {
 
 			// A modifier is explicitly a whole-catalog transform and may throw
 			// based on another provider's models. Preserve registration-time
-			// execution/error reporting by materializing only for this case.
-			if (config.oauth?.modifyModels && !this.#hasFullSnapshot) {
+			// execution/error reporting by materializing only for this case, and
+			// only once a credential lets the hook run at all.
+			if (
+				config.oauth?.modifyModels &&
+				!this.#hasFullSnapshot &&
+				this.authStorage.credentials.getOAuth(providerName)
+			) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
 			if (config.oauth?.modifyModels) {

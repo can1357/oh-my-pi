@@ -156,6 +156,56 @@ describe("AgentSession bash session ownership", () => {
 		);
 	});
 
+	/** Aborts a TERM-ignoring command and verifies disposal killed its process. */
+	async function expectAbortedCommandKilledByDispose(beforeAbort?: () => Promise<void>): Promise<void> {
+		const pidFile = path.join(tempDir.path(), "child.pid");
+		const command = `trap '' TERM HUP INT; perl -e 'open my $f, ">", $ARGV[0] or die $!; print $f $$; close $f; sleep 60' '${pidFile}'`;
+		const running = session.executeBash(command);
+		let pid = 0;
+		try {
+			for (let i = 0; i < 500 && !pid; i++) {
+				if (fs.existsSync(pidFile)) pid = Number(fs.readFileSync(pidFile, "utf8"));
+				if (!pid) await Bun.sleep(10);
+			}
+			expect(pid).toBeGreaterThan(0);
+			await beforeAbort?.();
+			session.abortBash();
+			const result = await running;
+			expect(result.cancelled).toBe(true);
+			await session.dispose();
+			let alive = true;
+			try {
+				process.kill(pid, 0);
+			} catch (error) {
+				if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+				alive = false;
+			}
+			expect(alive).toBe(false);
+		} finally {
+			if (pid) {
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+			}
+		}
+	}
+
+	it("finishes killing an aborted foreground command before session disposal returns", async () => {
+		if (process.platform === "win32") return;
+		createSession();
+		await expectAbortedCommandKilledByDispose();
+	});
+
+	it("finishes killing a command aborted after its session was replaced before disposal returns", async () => {
+		if (process.platform === "win32") return;
+		createSession();
+		const startedIn = session.sessionId;
+		await expectAbortedCommandKilledByDispose(async () => {
+			await session.newSession();
+			expect(session.sessionId).not.toBe(startedIn);
+		});
+	});
+
 	it("forwards a hook-injected variable even when process.env already mirrors its value", async () => {
 		// Regression: an extension may both mirror a variable into process.env (so
 		// MCP servers and workers inherit it) and inject it via its spawnHook. The

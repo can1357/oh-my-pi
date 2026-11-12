@@ -24,9 +24,9 @@ export async function resolveInitScriptSources(entries: readonly string[] | unde
  *
  * Chromium drops the override when the session that set it detaches, so the
  * returned session must stay attached for as long as the tab honors
- * `ignore_https_errors`; the tab worker detaches it on close.
+ * `insecure`; the tab worker detaches it on close.
  */
-export async function applyIgnoreHttpsErrors(page: Page): Promise<CDPSession> {
+export async function applyInsecure(page: Page): Promise<CDPSession> {
 	const session = await page.createCDPSession();
 	try {
 		await session.send("Security.setIgnoreCertificateErrors", { ignore: true });
