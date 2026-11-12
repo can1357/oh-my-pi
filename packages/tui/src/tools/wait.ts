@@ -644,6 +644,10 @@ function jobsRenderResult(
 		invalidate() {
 			cached = undefined;
 		},
+		releaseRenderCaches() {
+			cached = undefined;
+			previewRows.clear();
+		},
 	};
 }
 

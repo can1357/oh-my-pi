@@ -195,7 +195,7 @@ export const frameDefs = {
 	},
 	AskUiRequest: doc(
 		{ type: UI, id: "string", method: "'ask'", questions: "AskQuestion[]", "timeout?": "number.integer" },
-		"Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.",
+		"Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.",
 	),
 	CancelUiRequest: doc(
 		{ type: UI, id: "string", method: "'cancel'", targetId: "string" },
@@ -239,7 +239,7 @@ export const frameDefs = {
 	),
 	AskAnswer: doc(
 		{ id: "string", selectedOptions: "string[]", "customInput?": "string" },
-		"Answer to one `ask` question: exact option labels, plus optional free text.",
+		"Answer to one `ui.askDialog` question: exact option labels, plus optional free text.",
 	),
 	ValueUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", value: "string" },
@@ -251,7 +251,7 @@ export const frameDefs = {
 	),
 	CancelUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", cancelled: "true", "timedOut?": "boolean" },
-		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).",
+		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers).",
 	),
 	AnswersUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", answers: "AskAnswer[]" },

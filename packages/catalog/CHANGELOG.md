@@ -2,20 +2,37 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
+
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added Liquid AI provider support with the d1.1 and d1-ultra judge models and Liquid authentication via `/login liquid` using `LIQUID_API_KEY`.
+
+### Fixed
+
+- Fixed Google Antigravity Gemini 4 Argon models sharing the general Gemini quota scope instead of their dedicated weekly bucket ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
+
+## [18.18.9] - 2026-11-11
+
 ### Added
 
 - Added the `web/sofya` search model ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
-
-### Removed
-
-- Removed Devin's retired SWE-1.6 Fast from the models omp lists before Devin's live model list loads (first start, or when Devin is unreachable) ([#18795](https://github.com/can1357/oh-my-pi/pull/18795) by [@will-bogusz](https://github.com/will-bogusz))
+- Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
 
 ### Fixed
 
 - Devin requests now identify as Devin CLI 3000.12.43, the current stable release, instead of 3000.11.205 ([#18766](https://github.com/can1357/oh-my-pi/pull/18766) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Gemini 4 Argon and Carbon on Command Code showing no reasoning levels; both now offer low, medium, and high
 - Fixed OpenCode Zen Gemini 4 Carbon requests going to the chat-completions endpoint instead of the native Gemini endpoint Zen serves it on
+
+### Removed
+
+- Removed Devin's retired SWE-1.6 Fast from the models omp lists before Devin's live model list loads (first start, or when Devin is unreachable) ([#18795](https://github.com/can1357/oh-my-pi/pull/18795) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
@@ -27,9 +44,6 @@
 ### Fixed
 
 - Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
-### Added
-
-- Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
 
 ## [18.18.7] - 2026-11-10
 
