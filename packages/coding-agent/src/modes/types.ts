@@ -216,6 +216,8 @@ export interface InteractiveModeContext {
 	// Session access
 	session: AgentSession;
 	sessionManager: SessionManager;
+	/** Explicit session storage override from --session-dir or PI_CODING_AGENT_SESSION_DIR. */
+	readonly sessionDirOverride?: string;
 	/** The current session display name / title. */
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */
