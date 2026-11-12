@@ -1856,8 +1856,8 @@ impl AtSpiAx {
 		let Some(name) = object.name().cloned() else {
 			return Ok(TextRoute::Absent);
 		};
-		self.rt.block_on(async {
-			let connection = self.connection.connection();
+		self.request(async {
+			let connection = &self.connection;
 			let Ok(accessible) = object.as_accessible_proxy(connection).await else {
 				return Ok(TextRoute::Absent);
 			};
