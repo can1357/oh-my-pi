@@ -5452,6 +5452,83 @@ func (v BtwRecordEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"btw_record"`, nil)
 }
 
+// How a prediction request settled, or `retired`: an offered prediction must no longer be shown or accepted.
+type NextMessagePredictionStatus string
+
+const (
+	NextMessagePredictionStatusOffered   NextMessagePredictionStatus = "offered"
+	NextMessagePredictionStatusSkipped   NextMessagePredictionStatus = "skipped"
+	NextMessagePredictionStatusStale     NextMessagePredictionStatus = "stale"
+	NextMessagePredictionStatusCancelled NextMessagePredictionStatus = "cancelled"
+	NextMessagePredictionStatusTimeout   NextMessagePredictionStatus = "timeout"
+	NextMessagePredictionStatusError     NextMessagePredictionStatus = "error"
+	NextMessagePredictionStatusRetired   NextMessagePredictionStatus = "retired"
+)
+
+func (v *NextMessagePredictionStatus) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "NextMessagePredictionStatus")
+	if err != nil {
+		return err
+	}
+	switch value := NextMessagePredictionStatus(s); value {
+	case NextMessagePredictionStatusOffered, NextMessagePredictionStatusSkipped, NextMessagePredictionStatusStale, NextMessagePredictionStatusCancelled, NextMessagePredictionStatusTimeout, NextMessagePredictionStatusError, NextMessagePredictionStatusRetired:
+		*v = value
+		return nil
+	}
+	return unknownValue("NextMessagePredictionStatus", s)
+}
+
+type NextMessagePredictionFeedbackEvent string
+
+const (
+	NextMessagePredictionFeedbackEventShown    NextMessagePredictionFeedbackEvent = "shown"
+	NextMessagePredictionFeedbackEventAccepted NextMessagePredictionFeedbackEvent = "accepted"
+)
+
+func (v *NextMessagePredictionFeedbackEvent) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "NextMessagePredictionFeedbackEvent")
+	if err != nil {
+		return err
+	}
+	switch value := NextMessagePredictionFeedbackEvent(s); value {
+	case NextMessagePredictionFeedbackEventShown, NextMessagePredictionFeedbackEventAccepted:
+		*v = value
+		return nil
+	}
+	return unknownValue("NextMessagePredictionFeedbackEvent", s)
+}
+
+// One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`.
+type NextMessagePredictionEvent struct {
+	PredictionID string                      `json:"predictionId"`
+	Status       NextMessagePredictionStatus `json:"status"`
+	// Alternatives, most likely first; present only with `offered`.
+	Choices []string `json:"choices,omitempty"`
+}
+
+func (v *NextMessagePredictionEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "NextMessagePredictionEvent", v.decodeFrom)
+}
+
+func (v *NextMessagePredictionEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out NextMessagePredictionEvent
+	d := fieldDecoder{raw: raw, owner: "NextMessagePredictionEvent"}
+	d.constant("type", "next_message_prediction")
+	d.required("predictionId", &out.PredictionID)
+	d.required("status", &out.Status)
+	d.optional("choices", &out.Choices)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v NextMessagePredictionEvent) MarshalJSON() ([]byte, error) {
+	type plain NextMessagePredictionEvent
+	return encodeObject(plain(v), `"type":"next_message_prediction"`, nil)
+}
+
 // Output of a builtin slash command.
 type CommandOutputEvent struct {
 	Text string `json:"text"`
@@ -6800,6 +6877,7 @@ func (DictationTranscriptEvent) isRpcNotification()     {}
 func (DictationEndEvent) isRpcNotification()            {}
 func (BtwDeltaEvent) isRpcNotification()                {}
 func (BtwRecordEvent) isRpcNotification()               {}
+func (NextMessagePredictionEvent) isRpcNotification()   {}
 func (CommandOutputEvent) isRpcNotification()           {}
 func (SessionInfoUpdateEvent) isRpcNotification()       {}
 func (ConfigUpdateEvent) isRpcNotification()            {}
@@ -6887,6 +6965,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[BtwDeltaEvent](raw)
 	case "btw_record":
 		value, err = decodeVariant[BtwRecordEvent](raw)
+	case "next_message_prediction":
+		value, err = decodeVariant[NextMessagePredictionEvent](raw)
 	case "command_output":
 		value, err = decodeVariant[CommandOutputEvent](raw)
 	case "session_info_update":
@@ -7005,6 +7085,7 @@ func (DictationTranscriptEvent) isRpcServerFrame()     {}
 func (DictationEndEvent) isRpcServerFrame()            {}
 func (BtwDeltaEvent) isRpcServerFrame()                {}
 func (BtwRecordEvent) isRpcServerFrame()               {}
+func (NextMessagePredictionEvent) isRpcServerFrame()   {}
 func (CommandOutputEvent) isRpcServerFrame()           {}
 func (SessionInfoUpdateEvent) isRpcServerFrame()       {}
 func (ConfigUpdateEvent) isRpcServerFrame()            {}
@@ -7102,6 +7183,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[BtwDeltaEvent](raw)
 	case "btw_record":
 		value, err = decodeVariant[BtwRecordEvent](raw)
+	case "next_message_prediction":
+		value, err = decodeVariant[NextMessagePredictionEvent](raw)
 	case "command_output":
 		value, err = decodeVariant[CommandOutputEvent](raw)
 	case "session_info_update":
@@ -7717,6 +7800,44 @@ func (v *PredictWordResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out PredictWordResult
 	d := fieldDecoder{raw: raw, owner: "PredictWordResult"}
 	d.nullable("suffix", &out.Suffix)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type PredictNextMessageResult struct {
+	PredictionID *string `json:"predictionId"`
+}
+
+func (v *PredictNextMessageResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "PredictNextMessageResult", v.decodeFrom)
+}
+
+func (v *PredictNextMessageResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out PredictNextMessageResult
+	d := fieldDecoder{raw: raw, owner: "PredictNextMessageResult"}
+	d.nullable("predictionId", &out.PredictionID)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type PredictNextMessageCancelResult struct {
+	Cancelled bool `json:"cancelled"`
+}
+
+func (v *PredictNextMessageCancelResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "PredictNextMessageCancelResult", v.decodeFrom)
+}
+
+func (v *PredictNextMessageCancelResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out PredictNextMessageCancelResult
+	d := fieldDecoder{raw: raw, owner: "PredictNextMessageCancelResult"}
+	d.required("cancelled", &out.Cancelled)
 	if d.err != nil {
 		return d.err
 	}
@@ -8530,6 +8651,38 @@ type PredictWordFeedbackCommand struct {
 // PredictWordFeedback sends "predict_word_feedback": Report a shown suggestion as accepted or typed past.
 func (c Commands) PredictWordFeedback(ctx context.Context, p PredictWordFeedbackCommand) error {
 	return c.call(ctx, "predict_word_feedback", p, 0, nil)
+}
+
+// PredictNextMessage sends "predict_next_message": Start a composer next-message prediction for the conversation as it stands, superseding any earlier one; null when none started. It settles as a `next_message_prediction` frame.
+func (c Commands) PredictNextMessage(ctx context.Context) (*string, error) {
+	var out PredictNextMessageResult
+	err := c.call(ctx, "predict_next_message", nil, 0, &out)
+	return out.PredictionID, err
+}
+
+// PredictNextMessageFeedbackCommand holds the parameters of "predict_next_message_feedback".
+type PredictNextMessageFeedbackCommand struct {
+	PredictionID string                             `json:"predictionId"`
+	Event        NextMessagePredictionFeedbackEvent `json:"event"`
+	// Index into the offered `choices`; required for `accepted`.
+	Rank *int64 `json:"rank,omitempty"`
+}
+
+// PredictNextMessageFeedback sends "predict_next_message_feedback": Report that an offered prediction was shown, or that its alternative at `rank` was accepted.
+func (c Commands) PredictNextMessageFeedback(ctx context.Context, p PredictNextMessageFeedbackCommand) error {
+	return c.call(ctx, "predict_next_message_feedback", p, 0, nil)
+}
+
+// PredictNextMessageCancelCommand holds the parameters of "predict_next_message_cancel".
+type PredictNextMessageCancelCommand struct {
+	PredictionID *string `json:"predictionId,omitempty"`
+}
+
+// PredictNextMessageCancel sends "predict_next_message_cancel": Cancel the pending or offered prediction (only `predictionId` when given); false when none matches.
+func (c Commands) PredictNextMessageCancel(ctx context.Context, p PredictNextMessageCancelCommand) (bool, error) {
+	var out PredictNextMessageCancelResult
+	err := c.call(ctx, "predict_next_message_cancel", p, 0, &out)
+	return out.Cancelled, err
 }
 
 // BtwCommand holds the parameters of "btw".

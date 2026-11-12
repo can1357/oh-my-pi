@@ -186,6 +186,17 @@ _LIVE_ROLE_VALUES: Final[frozenset[str]] = frozenset({"user", "assistant"})
 _decode_live_role = cast("Decoder[LiveRole]", literal(_LIVE_ROLE_VALUES))
 
 
+NextMessagePredictionStatus: TypeAlias = Literal["offered", "skipped", "stale", "cancelled", "timeout", "error", "retired"]
+"""How a prediction request settled, or `retired`: an offered prediction must no longer be shown or accepted."""
+_NEXT_MESSAGE_PREDICTION_STATUS_VALUES: Final[frozenset[str]] = frozenset({"offered", "skipped", "stale", "cancelled", "timeout", "error", "retired"})
+_decode_next_message_prediction_status = cast("Decoder[NextMessagePredictionStatus]", literal(_NEXT_MESSAGE_PREDICTION_STATUS_VALUES))
+
+
+NextMessagePredictionFeedbackEvent: TypeAlias = Literal["shown", "accepted"]
+_NEXT_MESSAGE_PREDICTION_FEEDBACK_EVENT_VALUES: Final[frozenset[str]] = frozenset({"shown", "accepted"})
+_decode_next_message_prediction_feedback_event = cast("Decoder[NextMessagePredictionFeedbackEvent]", literal(_NEXT_MESSAGE_PREDICTION_FEEDBACK_EVENT_VALUES))
+
+
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
 _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset({"aboveEditor", "belowEditor"})
 _decode_widget_placement = cast("Decoder[WidgetPlacement]", literal(_WIDGET_PLACEMENT_VALUES))
@@ -1447,6 +1458,16 @@ class BtwRecordEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class NextMessagePredictionEvent:
+    """One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`."""
+    type: Literal["next_message_prediction"] = "next_message_prediction"
+    prediction_id: str
+    status: NextMessagePredictionStatus
+    choices: tuple[str, ...] | None = None
+    """Alternatives, most likely first; present only with `offered`."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class CommandOutputEvent:
     """Output of a builtin slash command."""
     type: Literal["command_output"] = "command_output"
@@ -1729,7 +1750,7 @@ RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | Tu
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
-RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
+RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | NextMessagePredictionEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
 """Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`."""
 
 
@@ -2934,6 +2955,16 @@ def parse_btw_record_event(value: object, path: str = "BtwRecordEvent") -> BtwRe
     )
 
 
+def parse_next_message_prediction_event(value: object, path: str = "NextMessagePredictionEvent") -> NextMessagePredictionEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["next_message_prediction"]]', literal(frozenset({"next_message_prediction"}))), path)
+    return NextMessagePredictionEvent(
+        prediction_id=required(payload, "predictionId", decode_str, path),
+        status=required(payload, "status", _decode_next_message_prediction_status, path),
+        choices=optional(payload, "choices", array(decode_str), path),
+    )
+
+
 def parse_command_output_event(value: object, path: str = "CommandOutputEvent") -> CommandOutputEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["command_output"]]', literal(frozenset({"command_output"}))), path)
@@ -3306,6 +3337,7 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "dictation_end": parse_dictation_end_event,
         "btw_delta": parse_btw_delta_event,
         "btw_record": parse_btw_record_event,
+        "next_message_prediction": parse_next_message_prediction_event,
         "command_output": parse_command_output_event,
         "session_info_update": parse_session_info_update_event,
         "config_update": parse_config_update_event,
@@ -3779,6 +3811,27 @@ class WireClient:
         params["accepted"] = accepted
         self._command("predict_word_feedback", params)
 
+    def predict_next_message(self) -> str | None:
+        """Start a composer next-message prediction for the conversation as it stands, superseding any earlier one; null when none started. It settles as a `next_message_prediction` frame."""
+        params: dict[str, object] = {}
+        return required(expect_object(self._command("predict_next_message", params), "predict_next_message"), "predictionId", nullable(decode_str), "predict_next_message")
+
+    def predict_next_message_feedback(self, prediction_id: str, event: NextMessagePredictionFeedbackEvent, *, rank: int | None = None) -> None:
+        """Report that an offered prediction was shown, or that its alternative at `rank` was accepted."""
+        params: dict[str, object] = {}
+        params["predictionId"] = prediction_id
+        params["event"] = event
+        if rank is not None:
+            params["rank"] = rank
+        self._command("predict_next_message_feedback", params)
+
+    def predict_next_message_cancel(self, prediction_id: str | None = None) -> bool:
+        """Cancel the pending or offered prediction (only `predictionId` when given); false when none matches."""
+        params: dict[str, object] = {}
+        if prediction_id is not None:
+            params["predictionId"] = prediction_id
+        return required(expect_object(self._command("predict_next_message_cancel", params), "predict_next_message_cancel"), "cancelled", decode_bool, "predict_next_message_cancel")
+
     def btw(self, question: str, *, record_id: str | None = None) -> BtwHistoryRecord:
         """Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running."""
         params: dict[str, object] = {}
@@ -3870,6 +3923,10 @@ class WireClient:
     def on_btw_record(self, listener: Callable[[BtwRecordEvent], None]) -> Callable[[], None]:
         """Subscribe to `btw_record`: Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."""
         return self._listen("btw_record", listener)
+
+    def on_next_message_prediction(self, listener: Callable[[NextMessagePredictionEvent], None]) -> Callable[[], None]:
+        """Subscribe to `next_message_prediction`: One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`."""
+        return self._listen("next_message_prediction", listener)
 
     def on_command_output(self, listener: Callable[[CommandOutputEvent], None]) -> Callable[[], None]:
         """Subscribe to `command_output`: Output of a builtin slash command."""
@@ -4137,6 +4194,9 @@ __all__ = [
     "ModelInfo",
     "NavigateTreeResult",
     "NegotiateProtocolResult",
+    "NextMessagePredictionEvent",
+    "NextMessagePredictionFeedbackEvent",
+    "NextMessagePredictionStatus",
     "NoticeEvent",
     "NotifyType",
     "NotifyUiRequest",
@@ -4321,6 +4381,7 @@ __all__ = [
     "parse_model_info",
     "parse_navigate_tree_result",
     "parse_negotiate_protocol_result",
+    "parse_next_message_prediction_event",
     "parse_notice_event",
     "parse_notification",
     "parse_notify_ui_request",

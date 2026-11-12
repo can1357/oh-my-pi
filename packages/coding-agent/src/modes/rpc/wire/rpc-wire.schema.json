@@ -793,6 +793,39 @@
 				"clientOmit": []
 			},
 			{
+				"name": "predict_next_message",
+				"doc": "Start a composer next-message prediction for the conversation as it stands, superseding any earlier one; null when none started. It settles as a `next_message_prediction` frame.",
+				"params": null,
+				"result": "PredictNextMessageResult",
+				"nullable": false,
+				"unwrap": "predictionId",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "predict_next_message_feedback",
+				"doc": "Report that an offered prediction was shown, or that its alternative at `rank` was accepted.",
+				"params": "PredictNextMessageFeedbackParams",
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "predict_next_message_cancel",
+				"doc": "Cancel the pending or offered prediction (only `predictionId` when given); false when none matches.",
+				"params": "PredictNextMessageCancelParams",
+				"result": "PredictNextMessageCancelResult",
+				"nullable": false,
+				"unwrap": "cancelled",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "btw",
 				"doc": "Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.",
 				"params": "BtwParams",
@@ -5034,6 +5067,53 @@
 			],
 			"description": "Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."
 		},
+		"NextMessagePredictionStatus": {
+			"enum": [
+				"offered",
+				"skipped",
+				"stale",
+				"cancelled",
+				"timeout",
+				"error",
+				"retired"
+			],
+			"type": "string",
+			"description": "How a prediction request settled, or `retired`: an offered prediction must no longer be shown or accepted."
+		},
+		"NextMessagePredictionFeedbackEvent": {
+			"enum": [
+				"shown",
+				"accepted"
+			],
+			"type": "string"
+		},
+		"NextMessagePredictionEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "next_message_prediction"
+				},
+				"predictionId": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/NextMessagePredictionStatus"
+				},
+				"choices": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "Alternatives, most likely first; present only with `offered`."
+				}
+			},
+			"required": [
+				"type",
+				"predictionId",
+				"status"
+			],
+			"description": "One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`."
+		},
 		"CommandOutputEvent": {
 			"type": "object",
 			"properties": {
@@ -6105,6 +6185,9 @@
 				},
 				{
 					"$ref": "#/$defs/BtwRecordEvent"
+				},
+				{
+					"$ref": "#/$defs/NextMessagePredictionEvent"
 				},
 				{
 					"$ref": "#/$defs/CommandOutputEvent"
@@ -7184,6 +7267,62 @@
 				"cursor",
 				"suggestion",
 				"accepted"
+			]
+		},
+		"PredictNextMessageResult": {
+			"type": "object",
+			"properties": {
+				"predictionId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"required": [
+				"predictionId"
+			]
+		},
+		"PredictNextMessageFeedbackParams": {
+			"type": "object",
+			"properties": {
+				"predictionId": {
+					"type": "string"
+				},
+				"event": {
+					"$ref": "#/$defs/NextMessagePredictionFeedbackEvent"
+				},
+				"rank": {
+					"type": "integer",
+					"description": "Index into the offered `choices`; required for `accepted`."
+				}
+			},
+			"required": [
+				"predictionId",
+				"event"
+			]
+		},
+		"PredictNextMessageCancelParams": {
+			"type": "object",
+			"properties": {
+				"predictionId": {
+					"type": "string"
+				}
+			}
+		},
+		"PredictNextMessageCancelResult": {
+			"type": "object",
+			"properties": {
+				"cancelled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"cancelled"
 			]
 		},
 		"BtwParams": {

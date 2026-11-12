@@ -5,6 +5,7 @@
 ### Added
 
 - Added the Gemini Decision 1 judge (`google/gemini-decision-1`) for the `judge` role, and `models.yml` accepts the `google-decisions` API ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
+- RPC: hosts that render their own composer can request the composer's next-message predictions, including `composer.predictionAlternatives`, with `predict_next_message`, receive them as `next_message_prediction` frames that say when a prediction settles and when it stops applying, and report shown and accepted alternatives with `predict_next_message_feedback`. Nothing is requested until the host asks ([#18452](https://github.com/can1357/oh-my-pi/issues/18452), [#18659](https://github.com/can1357/oh-my-pi/pull/18659) by [@AustinM731](https://github.com/AustinM731))
 
 ### Fixed
 
@@ -177,6 +178,7 @@
 ### Added
 
 - Added Sofya as a web search engine (`web/sofya`), using `SOFYA_API_KEY` or a stored `sofya` credential ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
+- RPC: hosts that render their own composer can request the composer's next-message predictions, including `composer.predictionAlternatives`, with `predict_next_message`, receive them as `next_message_prediction` frames that say when a prediction settles and when it stops applying, and report shown and accepted alternatives with `predict_next_message_feedback`. Nothing is requested until the host asks ([#18452](https://github.com/can1357/oh-my-pi/issues/18452), [#18659](https://github.com/can1357/oh-my-pi/pull/18659) by [@AustinM731](https://github.com/AustinM731))
 - Documented autoresearch mode in [docs/autoresearch.md](https://github.com/can1357/oh-my-pi/blob/main/docs/autoresearch.md): activation and its git gates, the three stop conditions, the per-segment iteration cap that defaults to none, the harness `METRIC`/`ASI` contract, and the on-disk store that `OMP_AUTORESEARCH_DB_DIR` relocates ([#18655](https://github.com/can1357/oh-my-pi/pull/18655) by [@sjawhar](https://github.com/sjawhar))
 - Extensions can import the form theme, the native span helpers (`styledSpans`, `compactText`, `rowsText` and the rest of the ANSI/span conversions), the `xd://` URL helpers (`parseXdUrl` and friends) and the `cfgExtensionTranscriptPresenters` setting handle from `@oh-my-pi/pi-coding-agent` instead of internal module paths, which stop the extension from loading when a file moves ([#18849](https://github.com/can1357/oh-my-pi/pull/18849) by [@materemias](https://github.com/materemias))
 - `/context` shows loaded instruction files and skills in their own categories; System Prompt marks where each one sits without counting it twice, and notes when an extension or SDK callback changed the prompt after it was built ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))

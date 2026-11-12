@@ -94,10 +94,11 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 10.   Session quiescence (`{ type: "session_settled" }`); see [Yield vs settled](#yield-vs-settled)
 11.   Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 12.   Side-question frames (`btw_delta`, `btw_record`); see [Side questions](#side-questions-btw)
-13.   Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
-14.   Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
-15.   Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
-16.   Draft-only dictation frames (`dictation_state`, `dictation_transcript`, `dictation_end`); see [Dictation Sub-Protocol](#dictation-sub-protocol)
+13.   Next-message prediction frames (`next_message_prediction`); see [Next-message predictions](#next-message-predictions)
+14.   Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+15.   Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
+16.   Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
+17.   Draft-only dictation frames (`dictation_state`, `dictation_transcript`, `dictation_end`); see [Dictation Sub-Protocol](#dictation-sub-protocol)
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -318,6 +319,14 @@ fast for about 30 seconds while the daemon is backed off. Treat failures as
 Send `predict_word_feedback` with the `text` and `cursor` at which a
 suggestion was shown: `accepted: true` when the user took it, `false` when
 they typed past it. Feedback tunes the engine's learned state.
+
+### Next-message prediction
+
+- `{ id?, type: "predict_next_message" }` → `data: { predictionId: string | null }`
+- `{ id?, type: "predict_next_message_feedback", predictionId: string, event: "shown" | "accepted", rank?: number }`
+- `{ id?, type: "predict_next_message_cancel", predictionId?: string }` → `data: { cancelled: boolean }`
+
+See [Next-message predictions](#next-message-predictions).
 
 ### Side questions
 
@@ -930,7 +939,7 @@ Extension runner errors are emitted separately as:
 
 `message_start`, `message_update`, and `message_end` carry a `messageId` string assigned by RPC mode. One message keeps the same id from its start through every update to its end; ids are unique within the process. Records injected mid-stream (advisor cards, IRC messages) get their own id and do not disturb the id of the reply streaming around them.
 
-`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, side-question frames, builtin slash-command side channels, and session-persistence and `btw-history` `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, side-question frames, next-message prediction frames, builtin slash-command side channels, and session-persistence and `btw-history` `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
 
 The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved, and enough is added to rebuild the message client-side. `text_start`, `thinking_start`, and `toolcall_start` carry `block`: the shell of the content block at `contentIndex`, with its streamed content emptied (`text` and `thinking` are `""`, a tool call's `arguments` are `{}`; its `id`, `name`, and other metadata are kept), so the deltas that follow always apply from empty. The server snapshots a block when it handles the event, not when the model emitted it, so a start's snapshot can already hold text that a later delta delivers; hence the emptying. `text_end` and `thinking_end` keep `content` and add `block`: the same block without its text, so its signature and other metadata (`textSignature`, `thinkingSignature`, ...) are available; rebuild the block as `{ ...block, text: content }` or `{ ...block, thinking: content }`. `image_end` carries the whole image as `content` and `toolcall_end` the whole tool call as `toolCall`; each is the block at `contentIndex`. A `start` (a restart of the streaming message within a turn) carries `message`: the whole message to restart from; that snapshot can likewise be ahead of the deltas that follow, so treat each block's `*_end` as authoritative for its final content. `text_delta` and `thinking_delta` carry the text to append to the block at `contentIndex`; `toolcall_delta` carries a fragment of the tool call's arguments JSON, and the arguments are complete only in `toolcall_end`'s `toolCall`. Rebuilding covers the message's `content`: `usage`, `responseId`, `stopReason`, and the other message fields arrive only in `message_end`. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message and is authoritative: it can differ from the rebuilt content, for example when inline-edit recovery lifts edit payload text out of a text block and synthesizes an `edit` tool call just before it. Block kinds with no start event also arrive only in full there. Hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
 
@@ -1233,6 +1242,82 @@ shutdown the process exits anyway and reports the loss as another such notice.
 If the retry finds the topic deleted or rewritten on disk (for example by
 another process), it can never succeed: the answer is reported lost as another
 such notice and dropped, and the `btw` or session change proceeds.
+
+### Next-message predictions
+
+The TUI's composer predictions (`composer.predictions`, with up to four
+alternatives under `composer.predictionAlternatives`) for hosts that render
+their own composer. The server runs the same engine as the TUI: one ephemeral
+side turn on the session's model that reuses its prompt cache, the same prompt,
+parser, 15-second deadline, `composer-prediction` usage entries, and
+`omp.composer.prediction.*` metrics.
+
+Nothing is requested until the host asks. Send `predict_next_message` when a
+prediction is wanted, typically after a `prompt_result` with
+`status: "completed"` while the host's own draft is empty (the server cannot
+see it). It answers `predictionId: null` without a request when
+`composer.predictions` is off, no model is set, or the session is streaming,
+compacting, generating a handoff, or changing sessions (including an
+extension's `newSession`, `switchSession` or `branch`), or while a `prompt`,
+`steer`, `follow_up`, `abort_and_prompt`, `bash` or `handoff` the server has
+read is still unfinished (queued behind another command, admitting, or queued
+in the session):
+the conversation would move under the prediction without a session event to
+retire it. A new request supersedes the previous one.
+
+```json
+{ "id": "req_1", "type": "predict_next_message" }
+{ "id": "req_1", "type": "response", "command": "predict_next_message", "success": true, "data": { "predictionId": "3" } }
+{ "type": "next_message_prediction", "predictionId": "3", "status": "offered", "choices": ["run the tests", "open a PR"] }
+{ "id": "req_2", "type": "predict_next_message_feedback", "predictionId": "3", "event": "shown" }
+{ "id": "req_3", "type": "predict_next_message_feedback", "predictionId": "3", "event": "accepted", "rank": 1 }
+{ "id": "req_4", "type": "predict_next_message_cancel", "predictionId": "3" }
+{ "type": "next_message_prediction", "predictionId": "3", "status": "retired" }
+```
+
+Every started prediction produces exactly one settling frame:
+
+- `offered`: `choices` holds the alternatives, most likely first (one unless
+  `composer.predictionAlternatives` is on)
+- `skipped`: the model declined or replied with nothing usable
+- `stale`: the conversation moved on before the reply arrived
+- `cancelled`: superseded or cancelled before it settled
+- `timeout`: no reply before the deadline
+- `error`: the side turn failed
+
+An `offered` prediction is later followed by exactly one `retired` frame, after
+which the host must stop showing it and must not accept it. It retires when
+the host cancels it or requests another, when the host sends `prompt` (builtins
+such as `/handoff` included), `steer`, `follow_up`, `abort_and_prompt`, `bash` (excluded or not) or
+`handoff`, as soon as the server reads that command (even while it waits behind
+an earlier one), when a new message lands (including one no session event
+announces, such as an extension's hidden `display: false` message), when user input
+is queued (an extension's `steer` or `followUp` included), when a run or
+a compaction (manual or automatic) starts, and on `new_session`, `switch_session`, `branch`,
+`fork`, `navigate_tree`, `open_session`, extension-initiated session changes,
+and shutdown. A pending prediction is cancelled at the same points except one:
+when a new message lands without a run starting (an extension's custom
+message, say), its side turn runs on and settles `stale`. Turning `composer.predictions` off while the process runs (a
+settings write or reload) cancels a pending prediction and retires an offered
+one; turning `composer.predictionAlternatives` off does the same for a pending
+prediction and for an offered one with more than one choice. These frames
+bypass `set_event_filter`.
+
+Feedback drives the prediction metrics. Send `event: "shown"` once the host
+first displays the prediction, and `event: "accepted"` with the alternative's
+0-based `rank` when the user inserts it; the last accepted rank before
+retirement counts. Cancel with `predict_next_message_cancel` when the user
+dismisses it or starts typing their own message. A shown prediction that
+retires without an accepted rank counts as ignored. Feedback for a prediction
+that is no longer offered is ignored. An `accepted` event without a rank, or
+with a rank outside `choices`, fails.
+
+`predict_next_message_feedback` and `predict_next_message_cancel` bypass the
+command queue, so they land while a long command such as `compact` or `login`
+still runs, and in the order sent: feedback pipelined before a cancel counts.
+`predict_next_message_cancel` answers `cancelled: false` when nothing is pending
+or offered, when `predictionId` names another prediction, or when the
+`predict_next_message` it targets is still queued behind other commands.
 
 ## Prompt/Queue Concurrency and Ordering
 

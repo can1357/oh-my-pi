@@ -52,6 +52,8 @@ function predictionAnchor(session: AgentViewSession): AgentMessage | undefined {
 
 /** The conversation point a prediction was made for: a new message or session invalidates it. */
 interface PredictionSource {
+	/** Identifies the request in {@link ComposerPredictionUpdate}s. */
+	id: string;
 	session: AgentViewSession;
 	lastMessage: AgentMessage | undefined;
 	/** Session file and entry the request branched from; its usage is recorded there. */
@@ -73,7 +75,33 @@ interface Prediction {
 	rank: number | undefined;
 }
 
-type PredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession" | "focusedAgentId" | "editor" | "ui">;
+/** What predictions read and drive: any composer draft skips a request; `requestRender` repaints the composer. */
+export type ComposerPredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession" | "focusedAgentId"> & {
+	readonly editor: Pick<InteractiveModeContext["editor"], "getText">;
+	readonly ui: Pick<InteractiveModeContext["ui"], "requestRender">;
+};
+
+/** How a started request settled, or `retired`: its offered prediction left the composer. */
+export type ComposerPredictionStatus = PredictionOutcome | "retired";
+
+/**
+ * A prediction's lifecycle step. Every started request settles exactly once; an `offered` one,
+ * which alone carries `choices`, is later `retired` exactly once (cancelled, superseded, or stale).
+ */
+export interface ComposerPredictionUpdate {
+	id: string;
+	status: ComposerPredictionStatus;
+	/** Alternatives, most likely first; present only when `status` is `offered`. */
+	choices?: readonly string[];
+}
+
+export interface ComposerPredictionOptions {
+	deadlineMs?: number;
+	/** Metrics sink; the global provider when unset. */
+	meterProvider?: MeterProvider;
+	/** Called on every lifecycle step, for hosts that render the prediction themselves. */
+	onUpdate?: (update: ComposerPredictionUpdate) => void;
+}
 
 /**
  * Normalize a prediction reply to the single line the composer shows, or
@@ -132,17 +160,21 @@ function parseReply(reply: string, alternatives: boolean): string[] | undefined 
  * empty composer. Tab or Right inserts one; nothing is sent.
  */
 export class ComposerPredictionController {
-	readonly #ctx: PredictionContext;
+	readonly #ctx: ComposerPredictionContext;
 	readonly #deadlineMs: number;
 	/** Metrics sink; the global provider when unset. */
 	readonly #meterProvider: MeterProvider | undefined;
-	#abort: AbortController | undefined;
+	readonly #onUpdate: ((update: ComposerPredictionUpdate) => void) | undefined;
+	/** The request in flight, if any. */
+	#pending: { id: string; abort: AbortController } | undefined;
 	#prediction: Prediction | undefined;
+	#lastId = 0;
 
-	constructor(ctx: PredictionContext, options: { deadlineMs?: number; meterProvider?: MeterProvider } = {}) {
+	constructor(ctx: ComposerPredictionContext, options: ComposerPredictionOptions = {}) {
 		this.#ctx = ctx;
 		this.#deadlineMs = options.deadlineMs ?? PREDICTION_DEADLINE_MS;
 		this.#meterProvider = options.meterProvider;
+		this.#onUpdate = options.onUpdate;
 	}
 
 	/** The prediction's alternatives for the conversation as it stands now, most likely first, if one is ready. */
@@ -152,21 +184,46 @@ export class ComposerPredictionController {
 		return prediction.choices;
 	}
 
-	/** Predict the next message for the turn that just completed, superseding any earlier prediction. */
-	request(): void {
+	/** Id of the prediction offered for the conversation as it stands now, if one is ready. */
+	get offeredId(): string | undefined {
+		const prediction = this.#prediction;
+		if (!prediction || !this.#isCurrent(prediction.source)) return undefined;
+		return prediction.source.id;
+	}
+
+	/** Id of the request in flight, else of the offered prediction not yet retired (even if stale). */
+	get activeId(): string | undefined {
+		return this.#pending?.id ?? this.#prediction?.source.id;
+	}
+
+	/**
+	 * Predict the next message for the turn that just completed, superseding any earlier prediction.
+	 * Returns the request's id, or `undefined` when no request started.
+	 */
+	request(): string | undefined {
 		this.cancel();
-		if (!cfgComposerPredictions.get(this.#ctx.settings)) return;
+		if (!cfgComposerPredictions.get(this.#ctx.settings)) return undefined;
 		// A focused subagent's "user" is the parent agent, not the person at the composer.
-		if (this.#ctx.focusedAgentId !== undefined) return;
+		if (this.#ctx.focusedAgentId !== undefined) return undefined;
 		const session = this.#ctx.viewSession;
 		// Any draft, even whitespace, keeps the ghost hidden (it shows only over a prefix of the
-		// prediction), and a compaction would rewrite the history the prediction reads: skip the
-		// billed request either way.
+		// prediction), and a compaction or handoff would rewrite the history the prediction reads:
+		// skip the billed request either way.
 		const model = session.model;
-		if (!model || session.isStreaming || session.isCompacting || this.#ctx.editor.getText()) return;
+		if (
+			!model ||
+			session.isStreaming ||
+			session.isCompacting ||
+			session.isGeneratingHandoff ||
+			this.#ctx.editor.getText()
+		) {
+			return undefined;
+		}
 		const abort = new AbortController();
-		this.#abort = abort;
+		const id = String(++this.#lastId);
+		this.#pending = { id, abort };
 		const source: PredictionSource = {
+			id,
 			session,
 			lastMessage: predictionAnchor(session),
 			// The journal id: after `/fresh` or with an SDK provider id, `session.sessionId` is the
@@ -176,6 +233,7 @@ export class ComposerPredictionController {
 			model: `${model.provider}/${model.id}`,
 		};
 		void this.#run(source, abort, cfgComposerPredictionAlternatives.get(this.#ctx.settings));
+		return id;
 	}
 
 	/** The composer painted the current prediction; its first painted frame counts it as shown. */
@@ -197,12 +255,13 @@ export class ComposerPredictionController {
 		prediction.rank = rank;
 	}
 
-	/** Abort an in-flight prediction and retire the shown one. */
-	cancel(): void {
-		this.#abort?.abort();
-		this.#abort = undefined;
+	/** Abort an in-flight prediction and retire the offered one; returns whether there was either. */
+	cancel(): boolean {
+		const pending = this.#pending;
+		pending?.abort.abort();
+		this.#pending = undefined;
 		const prediction = this.#prediction;
-		if (!prediction) return;
+		if (!prediction) return pending !== undefined;
 		// Resolved on retirement, so an accepted prediction counts the alternative the user kept.
 		const { source, choices, shownAt, rank, acceptDelayMs } = prediction;
 		if (rank === undefined) {
@@ -227,13 +286,15 @@ export class ComposerPredictionController {
 		}
 		this.#prediction = undefined;
 		this.#ctx.ui.requestRender();
+		this.#onUpdate?.({ id: source.id, status: "retired" });
+		return true;
 	}
 
 	async #run(source: PredictionSource, abort: AbortController, alternatives: boolean): Promise<void> {
 		const startedAt = performance.now();
 		const deadline = AbortSignal.timeout(this.#deadlineMs);
 		let outcome: PredictionOutcome;
-		let offered: number | undefined;
+		let choices: string[] | undefined;
 		try {
 			const { replyText } = await source.session.runEphemeralTurn({
 				promptText: prompt.render(composerPredictionPrompt, {
@@ -245,21 +306,30 @@ export class ComposerPredictionController {
 				signal: AbortSignal.any([abort.signal, deadline]),
 				onUsage: message => this.#recordUsage(source, message),
 			});
-			const choices = parseReply(replyText, alternatives);
+			choices = parseReply(replyText, alternatives);
 			outcome = this.#offer(source, abort, choices);
-			if (outcome === "offered") offered = choices?.length;
 		} catch (error) {
 			outcome = abort.signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : "error";
 			if (outcome === "error") logger.debug("Composer prediction failed", { error: String(error) });
 		} finally {
-			if (this.#abort === abort) this.#abort = undefined;
+			if (this.#pending?.abort === abort) this.#pending = undefined;
 		}
-		recordPredictionRequest(outcome, source.model, performance.now() - startedAt, offered, this.#meterProvider);
+		const offered = outcome === "offered" ? choices : undefined;
+		recordPredictionRequest(
+			outcome,
+			source.model,
+			performance.now() - startedAt,
+			offered?.length,
+			this.#meterProvider,
+		);
+		this.#onUpdate?.(
+			offered ? { id: source.id, status: outcome, choices: offered } : { id: source.id, status: outcome },
+		);
 	}
 
 	/** Offer settled alternatives as the composer prediction when it is still wanted; returns how it settled. */
 	#offer(source: PredictionSource, abort: AbortController, choices: string[] | undefined): PredictionOutcome {
-		if (this.#abort !== abort) return "cancelled";
+		if (this.#pending?.abort !== abort) return "cancelled";
 		if (!this.#isCurrent(source)) return "stale";
 		if (!choices) return "skipped";
 		// Counted as shown by the composer's first frame that paints it (`shown()`), not here.

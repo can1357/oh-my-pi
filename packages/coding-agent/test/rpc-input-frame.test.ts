@@ -384,6 +384,53 @@ describe("RpcInputDispatcher", () => {
 		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["after", "predict"]);
 	});
 
+	test("prediction feedback and cancel overtake a long serial command in the order sent", async () => {
+		const releaseCompact = Promise.withResolvers<void>();
+		const handled: string[] = [];
+		const { deps, outputs } = makeDeps(async command => {
+			handled.push(command.type);
+			if (command.type === "compact") {
+				await releaseCompact.promise;
+				return { id: command.id, type: "response", command: "compact", success: false, error: "done" };
+			}
+			if (command.type === "predict_next_message_feedback") {
+				return { id: command.id, type: "response", command: "predict_next_message_feedback", success: true };
+			}
+			if (command.type === "predict_next_message_cancel") {
+				return {
+					id: command.id,
+					type: "response",
+					command: "predict_next_message_cancel",
+					success: true,
+					data: { cancelled: true },
+				};
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "compact", type: "compact" });
+		// Pipelined without awaiting: the accept must land before the cancel retires the prediction.
+		dispatcher.dispatch({
+			id: "feedback",
+			type: "predict_next_message_feedback",
+			predictionId: "1",
+			event: "accepted",
+			rank: 0,
+		});
+		dispatcher.dispatch({ id: "cancel", type: "predict_next_message_cancel", predictionId: "1" });
+		await flushMicrotasks();
+		expect(handled.filter(type => type !== "compact")).toEqual([
+			"predict_next_message_feedback",
+			"predict_next_message_cancel",
+		]);
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["feedback", "cancel"]);
+
+		releaseCompact.resolve();
+		await dispatcher.drain();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["feedback", "cancel", "compact"]);
+	});
+
 	test("a prompt waits for an earlier session change without blocking a later abort", async () => {
 		const reset = Promise.withResolvers<void>();
 		const admission = Promise.withResolvers<void>();

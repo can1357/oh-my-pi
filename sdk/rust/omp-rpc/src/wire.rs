@@ -4412,6 +4412,69 @@ pub struct BtwRecordEvent {
 	pub record: BtwHistoryRecord,
 }
 
+/// How a prediction request settled, or `retired`: an offered prediction must no longer be shown or accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NextMessagePredictionStatus {
+	#[serde(rename = "offered")]
+	Offered,
+	#[serde(rename = "skipped")]
+	Skipped,
+	#[serde(rename = "stale")]
+	Stale,
+	#[serde(rename = "cancelled")]
+	Cancelled,
+	#[serde(rename = "timeout")]
+	Timeout,
+	#[serde(rename = "error")]
+	Error,
+	#[serde(rename = "retired")]
+	Retired,
+}
+
+impl NextMessagePredictionStatus {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Offered => "offered",
+			Self::Skipped => "skipped",
+			Self::Stale => "stale",
+			Self::Cancelled => "cancelled",
+			Self::Timeout => "timeout",
+			Self::Error => "error",
+			Self::Retired => "retired",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NextMessagePredictionFeedbackEvent {
+	#[serde(rename = "shown")]
+	Shown,
+	#[serde(rename = "accepted")]
+	Accepted,
+}
+
+impl NextMessagePredictionFeedbackEvent {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Shown => "shown",
+			Self::Accepted => "accepted",
+		}
+	}
+}
+
+/// One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NextMessagePredictionEvent {
+	#[serde(rename = "predictionId")]
+	pub prediction_id: String,
+	pub status: NextMessagePredictionStatus,
+	/// Alternatives, most likely first; present only with `offered`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub choices: Option<Vec<String>>,
+}
+
 /// Output of a builtin slash command.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandOutputEvent {
@@ -5093,6 +5156,8 @@ pub enum RpcNotification {
 	BtwDelta(BtwDeltaEvent),
 	/// Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins.
 	BtwRecord(BtwRecordEvent),
+	/// One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`.
+	NextMessagePrediction(NextMessagePredictionEvent),
 	/// Output of a builtin slash command.
 	CommandOutput(CommandOutputEvent),
 	/// A builtin slash command changed the session title.
@@ -5129,6 +5194,7 @@ impl RpcNotification {
 			Some("dictation_end") => |value| serde_json::from_value(value).map(Self::DictationEnd),
 			Some("btw_delta") => |value| serde_json::from_value(value).map(Self::BtwDelta),
 			Some("btw_record") => |value| serde_json::from_value(value).map(Self::BtwRecord),
+			Some("next_message_prediction") => |value| serde_json::from_value(value).map(Self::NextMessagePrediction),
 			Some("command_output") => |value| serde_json::from_value(value).map(Self::CommandOutput),
 			Some("session_info_update") => |value| serde_json::from_value(value).map(Self::SessionInfoUpdate),
 			Some("config_update") => |value| serde_json::from_value(value).map(Self::ConfigUpdate),
@@ -5161,6 +5227,7 @@ impl Serialize for RpcNotification {
 			Self::DictationEnd(member) => serialize_tagged(member, &[("type", "dictation_end")], serializer),
 			Self::BtwDelta(member) => serialize_tagged(member, &[("type", "btw_delta")], serializer),
 			Self::BtwRecord(member) => serialize_tagged(member, &[("type", "btw_record")], serializer),
+			Self::NextMessagePrediction(member) => serialize_tagged(member, &[("type", "next_message_prediction")], serializer),
 			Self::CommandOutput(member) => serialize_tagged(member, &[("type", "command_output")], serializer),
 			Self::SessionInfoUpdate(member) => serialize_tagged(member, &[("type", "session_info_update")], serializer),
 			Self::ConfigUpdate(member) => serialize_tagged(member, &[("type", "config_update")], serializer),
@@ -5196,7 +5263,7 @@ impl RpcServerFrame {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("response") => |value| serde_json::from_value(value).map(Self::Response),
 			Some("host_tool_call" | "host_tool_cancel" | "host_uri_request" | "host_uri_cancel") => |value| serde_json::from_value(value).map(Self::RpcHostRequest),
-			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
+			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "next_message_prediction" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -5711,6 +5778,33 @@ pub struct PredictWordFeedbackParams {
 	pub cursor: i64,
 	pub suggestion: String,
 	pub accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PredictNextMessageResult {
+	#[serde(rename = "predictionId", deserialize_with = "Deserialize::deserialize")]
+	pub prediction_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PredictNextMessageFeedbackParams {
+	#[serde(rename = "predictionId")]
+	pub prediction_id: String,
+	pub event: NextMessagePredictionFeedbackEvent,
+	/// Index into the offered `choices`; required for `accepted`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub rank: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PredictNextMessageCancelParams {
+	#[serde(rename = "predictionId", default, skip_serializing_if = "Option::is_none")]
+	pub prediction_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PredictNextMessageCancelResult {
+	pub cancelled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7396,6 +7490,59 @@ impl Command for PredictWordFeedbackCommand {
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		let _ = data;
 		Ok(())
+	}
+}
+
+/// Start a composer next-message prediction for the conversation as it stands, superseding any earlier one; null when none started. It settles as a `next_message_prediction` frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PredictNextMessageCommand {}
+
+impl Command for PredictNextMessageCommand {
+	const NAME: &'static str = "predict_next_message";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = Option<String>;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<PredictNextMessageResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.prediction_id)
+	}
+}
+
+/// Report that an offered prediction was shown, or that its alternative at `rank` was accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PredictNextMessageFeedbackCommand {
+	#[serde(rename = "predictionId")]
+	pub prediction_id: String,
+	pub event: NextMessagePredictionFeedbackEvent,
+	/// Index into the offered `choices`; required for `accepted`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub rank: Option<i64>,
+}
+
+impl Command for PredictNextMessageFeedbackCommand {
+	const NAME: &'static str = "predict_next_message_feedback";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ();
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		let _ = data;
+		Ok(())
+	}
+}
+
+/// Cancel the pending or offered prediction (only `predictionId` when given); false when none matches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PredictNextMessageCancelCommand {
+	#[serde(rename = "predictionId", default, skip_serializing_if = "Option::is_none")]
+	pub prediction_id: Option<String>,
+}
+
+impl Command for PredictNextMessageCancelCommand {
+	const NAME: &'static str = "predict_next_message_cancel";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = bool;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<PredictNextMessageCancelResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.cancelled)
 	}
 }
 

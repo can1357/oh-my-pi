@@ -995,6 +995,8 @@ export class SessionManager {
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
+	/** Observers of every appended entry; see {@link subscribeEntryAppended}. */
+	readonly #entryAppendedListeners = new Set<(entry: SessionEntry) => void>();
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -2054,6 +2056,15 @@ export class SessionManager {
 		);
 	}
 
+	/**
+	 * Call `listener` after each entry is appended, including the ones no session event announces
+	 * (hidden custom messages, bash results). Returns the unsubscribe.
+	 */
+	subscribeEntryAppended(listener: (entry: SessionEntry) => void): () => void {
+		this.#entryAppendedListeners.add(listener);
+		return () => this.#entryAppendedListeners.delete(listener);
+	}
+
 	#notifyEntryAppended(entry: SessionEntry): void {
 		const callback = this.onEntryAppended;
 		if (callback) {
@@ -2061,6 +2072,13 @@ export class SessionManager {
 				callback(entry);
 			} catch (err) {
 				logger.warn("collab entry hook failed", { error: String(err) });
+			}
+		}
+		for (const listener of this.#entryAppendedListeners) {
+			try {
+				listener(entry);
+			} catch (err) {
+				logger.warn("entry-appended listener failed", { error: String(err) });
 			}
 		}
 	}

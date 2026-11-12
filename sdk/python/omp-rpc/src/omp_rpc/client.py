@@ -299,7 +299,8 @@ class RpcProcessExitError(RpcError):
 
 
 class RpcConcurrencyError(RpcError):
-    """Raised when overlapping prompt lifecycle collectors would be ambiguous."""
+    """Raised when overlapping prompt lifecycle collectors would be ambiguous, or a listener sends a
+    command from the stdout reader thread, which would wait on a response only that thread delivers."""
 
 
 class RpcCommandError(RpcError):
@@ -1446,6 +1447,13 @@ class RpcClient(WireClient):
         `timeout` overrides the client's `request_timeout` for this command.
         """
         process = self._require_process()
+        # Listeners run on the stdout reader thread, the only thread that delivers responses: waiting
+        # there would stall every frame until the request timed out.
+        if threading.current_thread() is self._stdout_thread:
+            raise RpcConcurrencyError(
+                f"{command_type} was sent from a listener on the stdout reader thread; "
+                "hand it to another thread"
+            )
         envelope: JsonObject = {"id": request_id, "type": command_type}
         for key, value in payload.items():
             if value is not None or not drop_none:

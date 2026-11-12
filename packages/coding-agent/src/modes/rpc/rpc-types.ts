@@ -34,6 +34,7 @@ import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import type { BtwHistoryRecord } from "../../session/btw-history";
+import type { ComposerPredictionStatus } from "../controllers/composer-prediction-controller";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -160,6 +161,17 @@ export type RpcCommand =
 			suggestion: string;
 			accepted: boolean;
 	  }
+
+	// Composer next-message predictions; results arrive as `next_message_prediction` frames
+	| { id?: string; type: "predict_next_message" }
+	| {
+			id?: string;
+			type: "predict_next_message_feedback";
+			predictionId: string;
+			event: RpcNextMessagePredictionFeedbackEvent;
+			rank?: number;
+	  }
+	| { id?: string; type: "predict_next_message_cancel"; predictionId?: string }
 
 	// Side questions (/btw); answers stream as `btw_delta` / `btw_record` frames
 	| { id?: string; type: "btw"; question: string; recordId?: string }
@@ -661,6 +673,23 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "predict_word"; success: true; data: { suffix: string | null } }
 	| { id?: string; type: "response"; command: "predict_word_feedback"; success: true }
 
+	// Composer next-message predictions
+	| {
+			id?: string;
+			type: "response";
+			command: "predict_next_message";
+			success: true;
+			data: { predictionId: string | null };
+	  }
+	| { id?: string; type: "response"; command: "predict_next_message_feedback"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "predict_next_message_cancel";
+			success: true;
+			data: { cancelled: boolean };
+	  }
+
 	// Side questions (/btw)
 	| { id?: string; type: "response"; command: "btw"; success: true; data: { record: RpcBtwHistoryRecord } }
 	| { id?: string; type: "response"; command: "btw_cancel"; success: true; data: { cancelled: boolean } }
@@ -696,6 +725,25 @@ export interface RpcBtwDeltaFrame {
 export interface RpcBtwRecordFrame {
 	type: "btw_record";
 	record: RpcBtwHistoryRecord;
+}
+
+// ============================================================================
+// Composer next-message prediction frames (stdout)
+// ============================================================================
+
+/** What the host reports about an offered prediction. */
+export type RpcNextMessagePredictionFeedbackEvent = "shown" | "accepted";
+
+/**
+ * One lifecycle step of a `predict_next_message` request: exactly one settling status, then,
+ * for `offered`, exactly one `retired` once it is cancelled, superseded, or stale.
+ */
+export interface RpcNextMessagePredictionFrame {
+	type: "next_message_prediction";
+	predictionId: string;
+	status: ComposerPredictionStatus;
+	/** Alternatives, most likely first; only with `offered`. */
+	choices?: string[];
 }
 
 // ============================================================================

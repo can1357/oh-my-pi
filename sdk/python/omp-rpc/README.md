@@ -300,7 +300,7 @@ At `"events"`, `on_subagent_event()` delivers each subagent's own session
 events as `SubagentEvent.payload.event` (an `UnknownNotification` when it cannot
 be parsed).
 
-## Live Voice, Login, Handoff, and Word Prediction
+## Live Voice, Login, Handoff, and Prediction
 
 - `live_start(voice=None, instructions=None)` starts a GPT live voice session
   bound to this session and returns the voice in use; `live_mute(muted=None)`
@@ -321,6 +321,13 @@ be parsed).
   `predict_word_feedback(text, cursor, suggestion, accepted=...)`. It waits up to
   155 seconds regardless of `request_timeout`, since a cold prediction daemon can
   take that long; treat `RpcCommandError` as "no suggestion".
+- `predict_next_message()` starts a composer next-message prediction and returns
+  its id, or `None` when none started; `on_next_message_prediction()` receives
+  its settled `choices` and later `retired` frame. Report display and acceptance
+  with `predict_next_message_feedback(prediction_id, "shown")` or
+  `predict_next_message_feedback(prediction_id, "accepted", rank=i)`, and
+  withdraw it with `predict_next_message_cancel(prediction_id=None)`. Send these
+  from your UI thread, not from the listener (see Error Handling).
 
 ## Host-Owned Custom Tools
 
@@ -490,6 +497,10 @@ allows:
   `client.protocol_errors` and `client.on_protocol_error(...)`
 - listener exceptions no longer kill the stdout reader thread; they are exposed
   through `client.listener_errors` and `client.on_listener_error(...)`
+- listeners run on the stdout reader thread, which also delivers command
+  responses, so a command sent from a listener raises `RpcConcurrencyError`
+  instead of stalling every frame until it times out; hand it to another thread
+  (a queue your UI loop drains, or a `threading.Thread`)
 
 For long-lived hosts, retained event and stderr history is bounded by default:
 

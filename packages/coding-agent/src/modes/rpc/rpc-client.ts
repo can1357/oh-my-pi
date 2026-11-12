@@ -31,6 +31,8 @@ import type {
 	RpcBtwDeltaFrame,
 	RpcBtwHistoryRecord,
 	RpcBtwRecordFrame,
+	RpcNextMessagePredictionFeedbackEvent,
+	RpcNextMessagePredictionFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
 	RpcDictationFrame,
@@ -283,6 +285,15 @@ function isRpcBtwRecordFrame(value: unknown): value is RpcBtwRecordFrame {
 	return isRecord(value) && value.type === "btw_record" && isRecord(value.record);
 }
 
+function isRpcNextMessagePredictionFrame(value: unknown): value is RpcNextMessagePredictionFrame {
+	return (
+		isRecord(value) &&
+		value.type === "next_message_prediction" &&
+		typeof value.predictionId === "string" &&
+		typeof value.status === "string"
+	);
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -348,6 +359,7 @@ export class RpcClient {
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#btwDeltaListeners = new Set<(frame: RpcBtwDeltaFrame) => void>();
 	#btwRecordListeners = new Set<(record: RpcBtwHistoryRecord) => void>();
+	#nextMessagePredictionListeners = new Set<(frame: RpcNextMessagePredictionFrame) => void>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	#liveListeners = new Set<RpcLiveListener>();
@@ -676,6 +688,12 @@ export class RpcClient {
 	onBtwRecord(listener: (record: RpcBtwHistoryRecord) => void): () => void {
 		this.#btwRecordListeners.add(listener);
 		return () => this.#btwRecordListeners.delete(listener);
+	}
+
+	/** Subscribe to `next_message_prediction` frames: each step of a {@link predictNextMessage} request. */
+	onNextMessagePrediction(listener: (frame: RpcNextMessagePredictionFrame) => void): () => void {
+		this.#nextMessagePredictionListeners.add(listener);
+		return () => this.#nextMessagePredictionListeners.delete(listener);
 	}
 
 	/** Subscribe to `prompt_result` frames: the terminal outcome of each prompt, correlated by request id. */
@@ -1296,6 +1314,39 @@ export class RpcClient {
 	}
 
 	/**
+	 * Start a composer next-message prediction, superseding any earlier one. Resolves with its id,
+	 * or `null` when none started; the choices arrive via {@link onNextMessagePrediction}.
+	 */
+	async predictNextMessage(): Promise<string | null> {
+		const response = await this.#send({ type: "predict_next_message" });
+		return this.#getData<{ predictionId: string | null }>(response).predictionId;
+	}
+
+	/** Report an offered prediction as shown, or its alternative at `rank` as accepted. */
+	async predictNextMessageFeedback(
+		predictionId: string,
+		event: RpcNextMessagePredictionFeedbackEvent,
+		rank?: number,
+	): Promise<void> {
+		const response = await this.#send({
+			type: "predict_next_message_feedback",
+			predictionId,
+			event,
+			...(rank === undefined ? {} : { rank }),
+		});
+		this.#getData(response);
+	}
+
+	/** Cancel the pending or offered prediction (only if it is `predictionId`, when given). */
+	async cancelNextMessagePrediction(predictionId?: string): Promise<boolean> {
+		const response = await this.#send({
+			type: "predict_next_message_cancel",
+			...(predictionId === undefined ? {} : { predictionId }),
+		});
+		return this.#getData<{ cancelled: boolean }>(response).cancelled;
+	}
+
+	/**
 	 * Get one stable, byte-bounded message page.
 	 */
 	async getMessagesPage(options: RpcMessagesPageOptions = {}): Promise<RpcMessagesPage> {
@@ -1656,6 +1707,11 @@ export class RpcClient {
 
 		if (isRpcBtwRecordFrame(data)) {
 			for (const listener of this.#btwRecordListeners) listener(data.record);
+			return;
+		}
+
+		if (isRpcNextMessagePredictionFrame(data)) {
+			for (const listener of this.#nextMessagePredictionListeners) listener(data);
 			return;
 		}
 

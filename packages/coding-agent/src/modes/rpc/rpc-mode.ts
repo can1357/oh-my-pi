@@ -79,6 +79,7 @@ import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from 
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcBtwController } from "./rpc-btw";
+import { RpcNextMessagePredictor } from "./rpc-next-message-prediction";
 import { RpcGoalController } from "./rpc-goal";
 import { RpcDictationBridge, type RpcDictationControllerFactory } from "./rpc-dictation";
 import { RpcLiveBridge, type RpcLiveSessionFactory } from "./rpc-live";
@@ -425,9 +426,11 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
 /**
  * Commands that skip the serial queue entirely; see {@link dispatchRpcInputFrame}.
  * (`prompt` and `steer_subagent` are also backgrounded there, but start through
- * the serial tail.) `btw_cancel` is synchronous and must overtake a `btw` still
- * starting or a long serial command; `abort_branch_summary` likewise overtakes
- * the `navigate_tree` whose summary it stops.
+ * the serial tail.) `btw_cancel` and `predict_next_message_cancel` are synchronous
+ * and must overtake a `btw` still starting or a long serial command (a paid side
+ * turn keeps running until they land); `predict_next_message_feedback` takes the
+ * same path, so feedback pipelined before a cancel still lands first.
+ * `abort_branch_summary` likewise overtakes the `navigate_tree` whose summary it stops.
  * A Set, not a Record: `type` is untrusted input and must not hit prototype keys.
  */
 const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
@@ -436,8 +439,20 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 	"live_start",
 	"live_connect",
 	"btw_cancel",
+	"predict_next_message_feedback",
+	"predict_next_message_cancel",
 	"abort_branch_summary",
 ]);
+
+/** Host input that ends any next-message prediction before it runs; see `handleCommandImpl`. */
+const PREDICTION_RETIRING_COMMANDS: Partial<Record<RpcCommand["type"], true>> = {
+	prompt: true,
+	steer: true,
+	follow_up: true,
+	abort_and_prompt: true,
+	bash: true,
+	handoff: true,
+};
 
 /**
  * Dispatch a single parsed frame from the RPC input stream.
@@ -1454,6 +1469,16 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 	const wordPredictor = new RpcWordPredictor();
 	const btw = new RpcBtwController(session, output);
+	// Frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
+	const nextMessagePredictor = new RpcNextMessagePredictor(session, output, {
+		// Retiring host input counts from the moment it is read from stdin, so a long serial command it
+		// waits behind (a `login`) cannot reopen the gap; admission outlives an `abort_and_prompt` answer.
+		isHostBusy: () => retiringInputsInFlight.size > 0 || orderedInputsInFlight > 0 || sessionChangesInProgress > 0,
+	});
+	// Host input that retires predictions (see `PREDICTION_RETIRING_COMMANDS`), from the moment it is read
+	// until its handler settles. That spans a host `bash` result too: an extension `user_bash` hook runs
+	// before the session reports the shell as running, and the result lands without a session event.
+	const retiringInputsInFlight = new Set<RpcCommand>();
 	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement.
 	const goalController = new RpcGoalController(session, () => void settleWatcher.check());
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
@@ -1765,6 +1790,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			withSessionChange(async () => {
 				await stopDictationForSessionChange();
 				await btw.close();
+				nextMessagePredictor.close();
 				await goalController.beginSessionChange();
 				let result: T | undefined;
 				try {
@@ -1808,6 +1834,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		goalController.observe(event);
 		promptResults.observe(event);
 		settleWatcher.observe(event);
+		nextMessagePredictor.observe(event);
 	});
 	await goalController.reconcile();
 	await goalController.settled();
@@ -1838,6 +1865,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				logger.error(message);
 				output({ type: "notice", level: "error", message, source: "btw-history" });
 			});
+			nextMessagePredictor.close();
 			// Close the realtime call (microphone, socket) before the session it delegates into.
 			dictationBridge.dispose();
 			await liveBridge.stop();
@@ -1893,7 +1921,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const inputGate = new RpcUserInputGate();
 	type OrderedUserInput = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
 	type OrderedInputOutcome = "local" | "cancelled" | "admitted" | "builtin-agent";
-	const dispatchOrderedUserInput = (
+	const admitOrderedUserInput = (
 		command: OrderedUserInput,
 		ticket: RpcPromptTicket | undefined,
 	): Promise<OrderedInputOutcome> =>
@@ -2008,6 +2036,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			});
 			return "admitted";
 		});
+	// Counted from the call (before the gate's queue) until admission settles: the input hook and image
+	// normalization run before the session reports anything, so next-message predictions stay off.
+	let orderedInputsInFlight = 0;
+	const dispatchOrderedUserInput = (
+		command: OrderedUserInput,
+		ticket: RpcPromptTicket | undefined,
+	): Promise<OrderedInputOutcome> => {
+		orderedInputsInFlight++;
+		return admitOrderedUserInput(command, ticket).finally(() => {
+			orderedInputsInFlight--;
+		});
+	};
 	// Abort controllers for builtin commands whose work outlives the prompt
 	// response (e.g. the `/mcp reauth` browser wait, dispatched through
 	// `runCommandInBackground`). Host abort and disconnect must tear those
@@ -2022,7 +2062,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// Handle a single command
 	const handleCommandImpl = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
-
 		switch (command.type) {
 			case "negotiate_protocol": {
 				if (command.protocolVersion !== 2)
@@ -2137,6 +2176,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// Validation first: a refused change must not cancel the running side question.
 				await stopDictationForSessionChange();
 				await btw.close();
+				nextMessagePredictor.close();
 				await goalController.beginSessionChange();
 				let result: RpcSessionChangeResult | undefined;
 				try {
@@ -2176,6 +2216,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					return error(id, "navigate_tree", busy.message, "session_busy");
 				}
 				await btw.close();
+				nextMessagePredictor.close();
 				// A goal continuation waiting to start is held until the navigation ends, then resumes (same session).
 				await goalController.beginSessionChange();
 				let result: NavigateTreeResult;
@@ -2231,6 +2272,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				await stopDictationForSessionChange();
 				const fileBeforeOpen = session.sessionFile;
 				await btw.close();
+				nextMessagePredictor.close();
 				await goalController.beginSessionChange();
 				let result: RpcOpenSessionResult | undefined;
 				try {
@@ -2902,6 +2944,34 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return success(id, "predict_word_feedback");
 			}
 
+			// =================================================================
+			// Composer next-message prediction
+			// =================================================================
+
+			case "predict_next_message":
+				return success(id, "predict_next_message", { predictionId: nextMessagePredictor.request() });
+
+			case "predict_next_message_feedback": {
+				if (typeof command.predictionId !== "string") {
+					return error(id, "predict_next_message_feedback", "predictionId must be a string");
+				}
+				try {
+					nextMessagePredictor.feedback(command.predictionId, command.event, command.rank);
+				} catch (err) {
+					return error(id, "predict_next_message_feedback", toError(err).message);
+				}
+				return success(id, "predict_next_message_feedback");
+			}
+
+			case "predict_next_message_cancel": {
+				if (command.predictionId !== undefined && typeof command.predictionId !== "string") {
+					return error(id, "predict_next_message_cancel", "predictionId must be a string");
+				}
+				return success(id, "predict_next_message_cancel", {
+					cancelled: nextMessagePredictor.cancel(command.predictionId),
+				});
+			}
+
 			default: {
 				const unknownCommand = command as { type: string };
 				return error(id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
@@ -2910,8 +2980,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	};
 
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
-		if (!Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return handleCommandImpl(command);
-		return withSessionChange(() => handleCommandImpl(command));
+		try {
+			if (!Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return await handleCommandImpl(command);
+			return await withSessionChange(() => handleCommandImpl(command));
+		} finally {
+			retiringInputsInFlight.delete(command);
+		}
 	};
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
@@ -2944,7 +3018,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const inputDispatcher = new RpcInputDispatcher({
 		deps: dispatchFrameDeps,
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
-		acceptInput: command => inputGate.accept(command),
+		acceptInput: command => {
+			inputGate.accept(command);
+			// The user acted from the composer, and these can rewrite the conversation without a session event
+			// (a contextual bash result, a handoff, a builtin): retire the prediction as soon as the input is
+			// read, not when the serial queue reaches it, and refuse new ones until its handler settles.
+			if (!Object.hasOwn(PREDICTION_RETIRING_COMMANDS, command.type)) return;
+			retiringInputsInFlight.add(command);
+			nextMessagePredictor.close();
+		},
 	});
 
 	// Startup is over: run the frames held back meanwhile, then every later frame, through the dispatcher.

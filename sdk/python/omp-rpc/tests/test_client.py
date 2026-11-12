@@ -2109,6 +2109,28 @@ class RpcClientTests(unittest.TestCase):
         self.assertEqual(len(client.listener_errors), 1)
         self.assertEqual(client.listener_errors[0].listener_kind, "notification")
 
+    def test_command_from_a_listener_fails_fast_and_frames_keep_flowing(self) -> None:
+        errors: list[BaseException] = []
+
+        def on_turn_start(_event: object) -> None:
+            try:
+                client.get_state()
+            except RpcConcurrencyError as exc:
+                errors.append(exc)
+
+        with self.make_client(request_timeout=5.0) as client:
+            client.on_turn_start(on_turn_start)
+            started = time.monotonic()
+            turn = client.prompt_and_wait("say hello", timeout=2.0)
+            elapsed = time.monotonic() - started
+            # The same command still works from the caller's own thread.
+            self.assertEqual(client.get_state().session_id, "fake-session")
+
+        self.assertEqual(turn.require_assistant_text(), "pong")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("get_state", str(errors[0]))
+        self.assertLess(elapsed, 2.0)
+
     def test_stderr_history_is_bounded(self) -> None:
         client = self.make_client(server=STDERR_SERVER, max_stderr_chunks=1)
 
