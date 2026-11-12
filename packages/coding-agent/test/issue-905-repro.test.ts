@@ -298,7 +298,8 @@ test("omp models prints invalid models.yml schema errors before listing output",
 		}
 
 		const output = captured.join("");
-		expect(output).toContain("Warning: models.yml validation failed — custom providers disabled");
+		expect(output).toContain("Warning: models.yml validation failed");
+		expect(output).toContain("providers.myprovider.compat.thinkingFormat");
 		expect(output).toContain("providers.myprovider.compat.thinkingFormat");
 		expect(output).toContain("deepseek");
 	} finally {
