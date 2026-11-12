@@ -867,9 +867,8 @@ impl X11Input {
 	/// [`KEYBOARD_GRAB_WAIT`] for a short grab to end. Probes with a grab of
 	/// its own on the focus window, released in the same flush: a grab where
 	/// the focus already is sends no focus events. X does not name a grab's
-	/// owner, so a viewable popup of `target`'s process stands for its own
-	/// grab (an open menu of the target), which the keys are meant for; that
-	/// heuristic only withholds this refusal, it authorises nothing.
+	/// owner, so only the topmost viewable, non-passive override-redirect
+	/// root child belonging to `target`'s process stands for its own grab.
 	fn check_keyboard_grab(&self, target: Window) -> CoreResult<()> {
 		let deadline = Instant::now() + KEYBOARD_GRAB_WAIT;
 		loop {
@@ -895,7 +894,7 @@ impl X11Input {
 				Ok(GrabStatus::ALREADY_GRABBED | GrabStatus::FROZEN) => {
 					if wm
 						.owning_pid(target)
-						.and_then(|pid| wm.grab_popup_of(pid))
+						.and_then(|pid| wm.topmost_grab_popup_of(pid))
 						.is_some()
 					{
 						return Ok(());
@@ -1518,7 +1517,36 @@ const fn event_kind(event: &PointerEvent) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		io::{BufRead, BufReader},
+		process::{Child, Command, Stdio},
+	};
+
 	use super::*;
+
+	struct Server(Child);
+	impl Drop for Server {
+		fn drop(&mut self) {
+			let _ = self.0.kill();
+			let _ = self.0.wait();
+		}
+	}
+
+	fn start_server() -> (Server, String) {
+		let mut server = Server(
+			Command::new("Xvfb")
+				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("Xvfb starts"),
+		);
+		let mut number = String::new();
+		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
+			.read_line(&mut number)
+			.expect("Xvfb reports its display");
+		(server, format!(":{}", number.trim()))
+	}
 
 	#[test]
 	#[ignore = "needs an isolated Xorg display with uinput hotplug"]
@@ -1555,11 +1583,6 @@ mod tests {
 	#[test]
 	#[ignore = "starts Xvfb"]
 	fn a_takeover_refuses_a_typing_user_but_not_its_own_keys() {
-		use std::{
-			io::{BufRead, BufReader},
-			process::{Child, Command, Stdio},
-		};
-
 		use x11rb::{
 			protocol::xproto::{CreateWindowAux, WindowClass},
 			wrapper::ConnectionExt as _,
@@ -1567,26 +1590,7 @@ mod tests {
 
 		use crate::desktop::{control::CancellationSource, keys::parse_key};
 
-		struct Server(Child);
-		impl Drop for Server {
-			fn drop(&mut self) {
-				let _ = self.0.kill();
-				let _ = self.0.wait();
-			}
-		}
-		let mut server = Server(
-			Command::new("Xvfb")
-				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
-				.stdout(Stdio::piped())
-				.stderr(Stdio::null())
-				.spawn()
-				.expect("Xvfb starts"),
-		);
-		let mut number = String::new();
-		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
-			.read_line(&mut number)
-			.expect("Xvfb reports its display");
-		let display = format!(":{}", number.trim());
+		let (_server, display) = start_server();
 		let connect = || x11rb::connect(Some(&display)).expect("connect").0;
 		// The target app, which counts the key presses it gets.
 		let app = connect();
@@ -1959,11 +1963,6 @@ mod tests {
 	#[test]
 	#[ignore = "starts Xvfb"]
 	fn xtest_keys_refuse_another_clients_keyboard_grab() {
-		use std::{
-			io::{BufRead, BufReader},
-			process::{Child, Command, Stdio},
-		};
-
 		use x11rb::{
 			protocol::{
 				Event,
@@ -1972,26 +1971,7 @@ mod tests {
 			wrapper::ConnectionExt as _,
 		};
 
-		struct Reaped(Child);
-		impl Drop for Reaped {
-			fn drop(&mut self) {
-				let _ = self.0.kill();
-				let _ = self.0.wait();
-			}
-		}
-		let mut server = Reaped(
-			Command::new("Xvfb")
-				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
-				.stdout(Stdio::piped())
-				.stderr(Stdio::null())
-				.spawn()
-				.expect("Xvfb starts"),
-		);
-		let mut number = String::new();
-		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
-			.read_line(&mut number)
-			.expect("Xvfb reports its display");
-		let display = format!(":{}", number.trim());
+		let (_server, display) = start_server();
 		// The target and, from its own connection, a menu that grabs the
 		// keyboard.
 		let window = |conn: &RustConnection, root: Window, menu: bool| {
@@ -2049,6 +2029,8 @@ mod tests {
 			.unwrap()
 			.check()
 			.unwrap();
+		let target_popup = window(&target, root, true);
+		set_pid(target_popup, std::process::id());
 		let (menu, _) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
 		let menu_window = window(&menu, root, true);
 		set_pid(menu_window, std::process::id().wrapping_add(1));
@@ -2067,6 +2049,7 @@ mod tests {
 			.expect_err("takeover keys under another application's grab");
 		assert!(error.message.contains("keyboard grab is active"), "{}", error.message);
 		assert_eq!(presses(&menu), 0, "the other application's menu got keys");
+		assert_eq!(presses(&target), 0, "neither the target nor its lower popup got keys");
 
 		input
 			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground)
