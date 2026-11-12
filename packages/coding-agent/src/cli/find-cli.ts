@@ -9,11 +9,10 @@ import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesyste
 import { openStandaloneJudge } from "../judgment/standalone";
 import { standaloneFindSpotlight } from "../spotlight/session";
 import { formatPathRelativeToCwd, resolveSearchResultPath } from "../tools/path-utils";
-import { cfgFindVerifyModel } from "../tools/settings";
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
 import { rankedHeat } from "../tools/jfind/passages";
 import { resolveSearchRoot, type SearchRoot } from "../tools/jfind/tree";
-import { cfgFindHitThreshold } from "../tools/settings";
+import { cfgFindHitThreshold, cfgFindVerifyModel } from "../tools/settings";
 
 export interface FindCommandArgs {
 	query: string;

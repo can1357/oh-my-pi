@@ -655,11 +655,11 @@ tools:
 
 Mounting still follows the session's explicit tool allow-list. A session that permits `read` but omits `write` can receive a device-only write transport; this does not grant filesystem writes.
 
-`find.verifyModel` (an unset-by-default model selector, e.g. `openrouter/liquid/d1-ultra`) tries that model first for passage verification; filename and sketch ranking stay on the `judge` role. It resolves against the judge role's candidates, then falls back to the role chain without duplicates under the same fallback rules; a selector matching nothing logs a warning and leaves verification on the plain `judge` chain (see [find](./tools/find.md)). Empty or whitespace-only values are unset.
-
 Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `archive.enabled` (default `true`; the read-only `archive` eval prelude over prompt history, recent projects, past sessions, and recaps), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
 
 `find.hitThreshold` (a number above 0, up to 1; unset is `0.2`) is the verified-passage probability `find` needs before it reports a file as a hit, and the lowest probability of the line ranges it lists. The default suits TypeSafe Jev. Other decision models calibrate differently, and a judge that gives unrelated passages higher probabilities needs a higher value to keep its weak hits out (see [find](./tools/find.md)).
+
+`find.verifyModel` (an unset-by-default model selector, e.g. `openrouter/liquid/d1-ultra`) tries that model first for passage verification; filename and sketch ranking stay on the `judge` role. It resolves against the judge role's candidates, then falls back to the role chain without duplicates under the same fallback rules; a selector matching nothing logs a warning and leaves verification on the plain `judge` chain (see [find](./tools/find.md)). Empty or whitespace-only values are unset.
 
 ### Window-scoped computer use
 

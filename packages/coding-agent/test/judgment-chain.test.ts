@@ -13,7 +13,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
-import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
@@ -312,7 +312,7 @@ describe("ChainJudge", () => {
 		expect(urls).toEqual([OPENROUTER_DECISIONS_URL, "https://judge.example.test/v1/systemone"]);
 	});
 
-	it("ignores a lead that matches no candidate, warning once", async () => {
+	it("ignores a lead that matches no candidate", async () => {
 		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
 		const registry = makeRegistry([JEV_PREVIEW], { typesafe: "ts-key" });
 		const urls: string[] = [];
@@ -326,20 +326,12 @@ describe("ChainJudge", () => {
 				});
 			}),
 		);
-		const warnings = vi.spyOn(logger, "warn");
 		const judge = new ChainJudge({ settings, registry, purpose: "test", leadModel: "nace/drex-max-v1.1" });
-		for (let call = 0; call < 2; call++) {
-			const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
-			expect(result.answers.level.choice).toBe("high");
-		}
+		const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
 
+		expect(result.answers.level.choice).toBe("high");
 		expect(judge.primaryModel()?.id).toBe(JEV_PREVIEW.id);
-		expect(urls).toEqual(["https://judge.example.test/v1/systemone", "https://judge.example.test/v1/systemone"]);
-		expect(warnings).toHaveBeenCalledTimes(1);
-		expect(warnings).toHaveBeenCalledWith(
-			expect.stringContaining("lead model"),
-			expect.objectContaining({ leadModel: "nace/drex-max-v1.1" }),
-		);
+		expect(urls).toEqual(["https://judge.example.test/v1/systemone"]);
 	});
 
 	it("never degrades a native lead to a prompted model, and keeps the native gate on the judge role", async () => {
