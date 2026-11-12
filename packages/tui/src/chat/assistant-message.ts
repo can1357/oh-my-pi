@@ -1943,8 +1943,12 @@ export class AssistantMessageComponent extends Container {
 			const currentTokens = message.usage.reasoningTokens ?? message.usage.output;
 			this.#thinkingTokens = currentTokens;
 			const now = performance.now();
-			if (this.#lastTokenCount !== undefined) {
-				const tokenDelta = currentTokens - this.#lastTokenCount;
+			// A render whose usage has not moved carries no sample: the span since the
+			// previous render is a few milliseconds over zero tokens, and advancing the
+			// anchor on it makes the next real delta read as that much faster. The
+			// anchor therefore moves only when the provider's count does.
+			if (this.#lastTokenCount !== currentTokens) {
+				const tokenDelta = this.#lastTokenCount === undefined ? 0 : currentTokens - this.#lastTokenCount;
 				const elapsedMs = now - this.#lastTokenTime;
 				if (tokenDelta > 0 && elapsedMs > 0) {
 					// First live sample of this block: drop the session gauge's prior-turn
@@ -1953,9 +1957,9 @@ export class AssistantMessageComponent extends Container {
 					sharedSpeedTracker.observe(tokenDelta, elapsedMs, now);
 					this.#thinkingRateLive = true;
 				}
+				this.#lastTokenCount = currentTokens;
+				this.#lastTokenTime = now;
 			}
-			this.#lastTokenCount = currentTokens;
-			this.#lastTokenTime = now;
 		} else {
 			this.#lastTokenCount = undefined;
 			this.#thinkingTokens = 0;
