@@ -39,3 +39,22 @@ export const cfgDecisionSkillsDeadlineMs = register({
 		}
 	},
 });
+
+export const cfgDecisionToolsMode = register({
+	id: "decision.tools.mode",
+	type: "enum",
+	values: DECISION_MODES,
+	default: "off",
+});
+
+export const cfgDecisionToolsDeadlineMs = register({
+	id: "decision.tools.deadlineMs",
+	type: "number",
+	default: 4_000,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0 || raw > 30_000) {
+			throw new Error("decision.tools.deadlineMs must be an integer from 1 to 30000");
+		}
+	},
+});

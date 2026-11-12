@@ -83,3 +83,19 @@ Shows the backend, whether a native judge is available, each feature's mode and 
 | `decision.skills.mode`       | `off`    | `off`, `shadow`, `suggest`, or `automatic`.             |
 | `decision.skills.variant`    | `roster` | `roster` or `progressive` system-prompt skill listing.  |
 | `decision.skills.deadlineMs` | `4000`   | Total judge budget per selection (1–30000 ms).          |
+| `decision.tools.mode`        | `off`    | `off`, `shadow`, `suggest`, or `automatic`.             |
+| `decision.tools.deadlineMs`  | `4000`   | Total judge budget per tool preflight (1–30000 ms).     |
+
+## Tools
+
+`decision.tools.mode` picks which tools a user task needs before the main model's first request and delivers their documentation with it. It never changes the native tool array, hides tools, generates arguments, or runs a tool.
+
+```sh
+omp config set decision.backend judge
+omp config set decision.tools.mode automatic
+```
+
+- **Candidates.** Every enabled `xd://` device: omp's own discoverable tools and the tools of connected MCP servers that omp mounts there (each judged with its server name). Top-level tools are not candidates; their schemas are already in every request. Preflight needs `read` and `write`, the device transport, and runs after pending MCP discovery so newly connected servers count.
+- **Selection.** Local BM25 picks at most 64 candidates by name, description, and required parameter names. One judgment asks an independent relevance Noul per candidate (0.7) and whether the shortlist covers the task (0.7); at most eight are selected. Tools the request names explicitly, as `xd://<name>` or a backticked exact name, are always selected (a bare word such as `debug` is not); the `deterministic` backend selects only those.
+- **Delivery.** `suggest` sends a hidden `tool_relevance` hint naming the selection. `automatic` sends each selected device's full docs as a `decision-tool-contract` message (at most 16 KiB each; larger ones are omitted, never truncated, and named in the hint instead). A contract already in context with the same schema revision is not sent again. Skill bodies and tool contracts share one 64 KiB budget per task. `shadow` ranks after the turn starts and only records the outcome.
+- **Budget.** `decision.tools.deadlineMs` (default 4,000 ms) bounds the judgment, which runs concurrently with skill selection.

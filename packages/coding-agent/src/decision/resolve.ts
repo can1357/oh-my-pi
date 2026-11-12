@@ -7,12 +7,14 @@ import {
 	cfgDecisionBackend,
 	cfgDecisionSkillsDeadlineMs,
 	cfgDecisionSkillsMode,
+	cfgDecisionToolsDeadlineMs,
+	cfgDecisionToolsMode,
 	type DECISION_MODES,
 } from "./settings";
 
 export type DecisionMode = (typeof DECISION_MODES)[number];
 export type DecisionBackend = "off" | "deterministic" | "judge";
-export const DECISION_FEATURES = ["skills"] as const;
+export const DECISION_FEATURES = ["skills", "tools"] as const;
 export type DecisionFeature = (typeof DECISION_FEATURES)[number];
 
 export interface DecisionFeatureConfig {
@@ -26,6 +28,10 @@ const FEATURES: Record<DecisionFeature, (settings: Settings) => { mode: Decision
 	skills: settings => ({
 		mode: cfgDecisionSkillsMode.get(settings),
 		deadlineMs: cfgDecisionSkillsDeadlineMs.get(settings),
+	}),
+	tools: settings => ({
+		mode: cfgDecisionToolsMode.get(settings),
+		deadlineMs: cfgDecisionToolsDeadlineMs.get(settings),
 	}),
 };
 

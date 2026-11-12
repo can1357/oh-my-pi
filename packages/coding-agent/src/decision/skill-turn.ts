@@ -16,8 +16,11 @@ import { buildTaskContext } from "./task-context";
 
 export const SKILL_HINT_MESSAGE_TYPE = "decision-skill-hint";
 
+/** Optional skill bodies and tool contracts delivered with one user task share this many bytes. */
+export const DECISION_CONTEXT_BYTES = 64 * 1024;
+
 /** Bounds on optional bodies loaded per turn; an over-budget batch loads nothing rather than part of it. */
-export const SKILL_AUTOLOAD_LIMITS = { bytes: 64 * 1024, skills: 32, deadlineMs: 1_000 } as const;
+export const SKILL_AUTOLOAD_LIMITS = { bytes: DECISION_CONTEXT_BYTES, skills: 32, deadlineMs: 1_000 } as const;
 
 export interface SkillTurnInput {
 	settings: Settings;
