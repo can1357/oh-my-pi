@@ -520,6 +520,8 @@ describe("pickElectronTarget", () => {
 				"--no-default-browser-check",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				// `open` always adds this to a spawned app; without it the open keys a second browser.
+				"--allow-file-access-from-files",
 				...RENDERER_PRIORITY_ARGS,
 			];
 			const child = Bun.spawn(
@@ -595,6 +597,8 @@ describe("pickElectronTarget", () => {
 				"--no-first-run",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				// `open` always adds this to a spawned app; without it the open keys a second browser.
+				"--allow-file-access-from-files",
 				...RENDERER_PRIORITY_ARGS,
 				`--user-data-dir=${profile}`,
 			];

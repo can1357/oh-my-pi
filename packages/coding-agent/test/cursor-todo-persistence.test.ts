@@ -68,7 +68,7 @@ describe("todo snapshots saved with the retired blocked status", () => {
 			type: "message",
 			message: { role: "toolResult", toolName: "todo", details: { op: "append", phases: saved } },
 		};
-		const expected = [{ name: "Work", tasks: [{ content: "wait", status: "pending" }] }];
+		const expected: TodoPhase[] = [{ name: "Work", tasks: [{ content: "wait", status: "pending" }] }];
 		expect(getLatestTodoPhasesFromEntries([userEdit as SessionEntry])).toEqual(expected);
 		expect(getLatestTodoPhasesFromEntries([toolResult as SessionEntry])).toEqual(expected);
 	});

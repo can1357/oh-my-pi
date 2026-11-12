@@ -1,0 +1,40 @@
+// Nace Drex decision models. Drex answers typed questions over JSON state with
+// the TypeSafe System One body (`{model, state, questions}`, plus top-level
+// `images` data URLs) at `POST /v1/systemone`.
+
+provider "nace" {
+	default-model "drex-max-v1.1"
+	env "NACE_API_KEY"
+
+	// console.nace.ai/docs/drex/reference/models: every model bills input tokens
+	// only. The Drex Max models take text and images within 262,144 tokens for
+	// the whole request; Drex 2.0 is text-only, with 131,072 state tokens and
+	// 262,144 for the state plus its longest question.
+	seed api="nace-systemone" base-url="https://console.nace.ai" bundle="always" {
+		model "drex-max-v1.1" name="Drex Max v1.1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.03 output=0 cache-read=0 cache-write=0
+			limits context=262144
+			supports-tools #false
+		}
+		model "drex-max-finance" name="Drex Max Finance" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.03 output=0 cache-read=0 cache-write=0
+			limits context=262144
+			supports-tools #false
+		}
+		model "drex-v2.0" name="Drex 2.0" {
+			reasoning #false
+			input "text"
+			cost input=0.03 output=0 cache-read=0 cache-write=0
+			limits context=262144
+			supports-tools #false
+		}
+	}
+
+	models "*" {
+		kind "judge"
+	}
+}

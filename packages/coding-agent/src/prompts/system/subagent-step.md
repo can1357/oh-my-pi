@@ -1,7 +1,6 @@
 {{#each steps}}
 # Step {{number}} of {{total}}
 {{text}}
-
 {{/each}}
 {{#if last}}
 Last {{#if multiple}}steps{{else}}step{{/if}}: your {{#if structured}}terminal `yield`{{else}}final message{{/if}} is the result of the whole assignment and MUST cover every step.

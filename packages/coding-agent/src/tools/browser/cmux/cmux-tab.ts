@@ -1133,8 +1133,6 @@ export class CmuxTab implements InProcessRunTab {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: "viewport", scale: cssWidth && resized.originalWidth / cssWidth },
