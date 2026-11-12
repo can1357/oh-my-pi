@@ -56,6 +56,9 @@ Run one agent synchronously.
 {{#if effortEnabled}}
 - `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
 {{/if}}
+{{#if inheritContextEnabled}}
+- `inheritContext`: `true` starts the child with your recent conversation (images plus exact identifiers). Only when the brief cannot carry the state the child needs; still write a self-contained brief. Agents declaring `inheritContext: false` (reviewers, independent judges) ignore it.
+{{/if}}
 {{#if perCallModelEnabled}}
 - `model`: one exact `provider/model-id[@upstream][:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}.
   - `@upstream` pins an aggregator route and is part of the model identity.

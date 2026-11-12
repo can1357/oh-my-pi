@@ -308,6 +308,8 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
+	/** `false` = ignore a task item's `inheritContext` request. */
+	inheritContext?: boolean;
 }
 
 /**
@@ -377,6 +379,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const blocking = parseBoolean(frontmatter.blocking);
 	const structured = parseBoolean(frontmatter.structured);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
+	const inheritContext = parseBoolean(frontmatter.inheritContext);
 	// prewalk: true → hand off to the default prewalk target; "<pattern>" → custom target.
 	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
 	if (prewalk === undefined && typeof frontmatter.prewalk === "string") {
@@ -404,6 +407,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		structured,
 		autoloadSkills,
 		readSummarize,
+		inheritContext,
 		prewalk,
 		advisor,
 	};

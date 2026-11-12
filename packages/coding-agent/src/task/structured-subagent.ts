@@ -89,6 +89,7 @@ import {
 	ovnfsCommand,
 	perCallModelEnabled,
 } from "./settings";
+import { buildInheritedContext } from "./inherited-context";
 import {
 	assertPerCallModelApproved,
 	parentModelGrantPattern,
@@ -169,6 +170,8 @@ export interface StructuredSubagentRequest {
 	structured?: boolean;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
+	/** Start the child with the parent's conversation tail; agents declaring `inheritContext: false` ignore it. */
+	inheritContext?: boolean;
 	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
 	solutionSpace?: string;
 	identity?: StructuredSubagentIdentity;
@@ -863,6 +866,15 @@ function buildExecutorOptions(
 		// Autoload runs after session start, outside the seance isolation options.
 		autoloadSkills: preparedSession ? undefined : autoloadSkills,
 		workspaceTree: session.workspaceTree,
+		// Per-item opt-in. Seance children read their own source session, and agents declaring
+		// `inheritContext: false` (reviewers, independent judges) stay blind to the parent's tail.
+		inheritedContext:
+			request.inheritContext === true &&
+			preparedSession === undefined &&
+			request.invocationKind === "task" &&
+			policy.agent.inheritContext !== false
+				? buildInheritedContext(session.getContextMessages?.() ?? [], session.obfuscateForProvider)
+				: undefined,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
 		// Root policy and module paths have separate jobs: the live policy drives

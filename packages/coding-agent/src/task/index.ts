@@ -78,6 +78,7 @@ import {
 	cfgTaskBatch,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
+	cfgTaskInheritContext,
 	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
@@ -153,6 +154,7 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	inheritContextEnabled: boolean;
 	perCallModelEnabled: boolean;
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	evalToolsEnabled: boolean;
@@ -206,6 +208,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		inheritContextEnabled: options.inheritContextEnabled,
 		perCallModelEnabled: options.perCallModelEnabled,
 		perCallModelAdvertisement: options.perCallModelAdvertisement,
 		evalToolsEnabled: options.evalToolsEnabled,
@@ -386,6 +389,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
+	if ("inheritContext" in params) item.inheritContext = params.inheritContext;
 	if ("isolated" in params) item.isolated = params.isolated;
 	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
 	if ("model" in params) item.model = params.model;
@@ -412,6 +416,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("inheritContext" in item) spawn.inheritContext = item.inheritContext;
 	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
 	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
@@ -845,6 +850,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			inheritContextEnabled: cfgTaskInheritContext.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			steps: cfgTaskSteps.get(this.session.settings),
@@ -894,6 +900,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			inheritContextEnabled: cfgTaskInheritContext.get(this.session.settings),
 			perCallModelEnabled: perCallModel,
 			perCallModelAdvertisement,
 			evalToolsEnabled: evalToolsEnabled(this.session),
@@ -945,6 +952,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#effortParams(params: TaskParams): Pick<StructuredSubagentRequest, "effort"> {
 		if (params.effort === undefined || !cfgTaskEnableEffort.get(this.session.settings)) return {};
 		return { effort: params.effort };
+	}
+
+	/**
+	 * Inherited parent context for a spawn. Like `effort`, `task.inheritContext` gates the item flag at
+	 * runtime too, so a stale transcript cannot opt a child in while the setting is off.
+	 */
+	#inheritContextParams(params: TaskParams): Pick<StructuredSubagentRequest, "inheritContext"> {
+		if (params.inheritContext !== true || !cfgTaskInheritContext.get(this.session.settings)) return {};
+		return { inheritContext: true };
 	}
 
 	#seanceSchemaFields() {
@@ -1911,6 +1927,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...this.#effortParams(params),
+				...this.#inheritContextParams(params),
 				solutionSpace: params.solutionSpace,
 				...(params.tools?.length
 					? {

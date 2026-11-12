@@ -520,6 +520,11 @@ export interface ToolSession {
 	 * the lines still in it (whatever a compaction, prune, clear or branch move took out does not count).
 	 */
 	getContextMessages?: () => readonly Message[];
+	/**
+	 * Encode secrets in `text` exactly as outbound provider text is encoded (identity while redaction is off).
+	 * For content that leaves as something the provider-boundary encoder cannot rewrite, such as rendered frames.
+	 */
+	obfuscateForProvider?: (text: string) => string;
 	/** The Spotlight experiment's handle on this session; present only while `spotlight.experiment.enabled`. */
 	spotlight?: SpotlightSession;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */

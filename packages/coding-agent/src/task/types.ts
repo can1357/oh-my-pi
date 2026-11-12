@@ -174,6 +174,7 @@ function createTaskSchema(options: {
 	batchEnabled: boolean;
 	defaultAgent: string;
 	effortEnabled: boolean;
+	inheritContextEnabled: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	steps: boolean;
@@ -183,6 +184,7 @@ function createTaskSchema(options: {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const taskFields = options.steps ? { steps: "string[]" } : { task: "string" };
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
+	const inheritField = options.inheritContextEnabled ? { "inheritContext?": "boolean" } : {};
 	const schemaFields = options.structured
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
@@ -200,6 +202,7 @@ function createTaskSchema(options: {
 				...taskFields,
 				solutionSpace: "string",
 				...effortField,
+				...inheritField,
 				...schemaFields,
 				...toolsField,
 				...gatedFields,
@@ -220,6 +223,7 @@ function createTaskSchema(options: {
 			...taskFields,
 			solutionSpace: "string",
 			...effortField,
+			...inheritField,
 			...schemaFields,
 			...toolsField,
 			...gatedFields,
@@ -240,6 +244,7 @@ function createTaskSchema(options: {
 			...taskFields,
 			solutionSpace: "string",
 			...effortField,
+			...inheritField,
 			...schemaFields,
 			...toolsField,
 			...gatedFields,
@@ -253,6 +258,7 @@ function createTaskSchema(options: {
 		...taskFields,
 		solutionSpace: "string",
 		...effortField,
+		...inheritField,
 		...schemaFields,
 		...toolsField,
 		...gatedFields,
@@ -265,6 +271,8 @@ export function getTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	effortEnabled?: boolean;
+	/** Advertise the per-item `inheritContext` opt-in (`task.inheritContext`); default off. */
+	inheritContextEnabled?: boolean;
 	/** Advertise the `tools` field for eval-defined tools (`eval.tools.enabled`, default on). */
 	evalToolsEnabled?: boolean;
 	/** Advertise `outputSchema`/`schemaMode` (`task.structured`); default on. */
@@ -279,6 +287,7 @@ export function getTaskSchema(options: {
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
+	const inheritContextEnabled = options.inheritContextEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
 	const structured = options.structured ?? true;
 	const steps = options.steps ?? false;
@@ -287,6 +296,7 @@ export function getTaskSchema(options: {
 	if (
 		defaultAgent === "task" &&
 		!effortEnabled &&
+		!inheritContextEnabled &&
 		evalToolsEnabled &&
 		structured &&
 		!steps &&
@@ -296,13 +306,14 @@ export function getTaskSchema(options: {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${steps ? "steps" : "task"}:${perCallModel ? "model" : "nomodel"}:${options.seanceFields ? "seance" : "plain"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${inheritContextEnabled ? "inherit" : "fresh"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${steps ? "steps" : "task"}:${perCallModel ? "model" : "nomodel"}:${options.seanceFields ? "seance" : "plain"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({
 		...options,
 		steps,
 		effortEnabled,
+		inheritContextEnabled,
 		evalToolsEnabled,
 		structured,
 		defaultAgent,
@@ -342,6 +353,8 @@ export interface AgentDefinition {
 	prewalk?: boolean | string;
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
+	/** `false` = never start with the parent's conversation tail, even when a task item asks (reviewers and other independent judges). */
+	inheritContext?: boolean;
 	source: AgentSource;
 	filePath?: string;
 }

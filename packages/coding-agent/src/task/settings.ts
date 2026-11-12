@@ -337,6 +337,19 @@ export const cfgTaskStructured = register({
 	},
 });
 
+export const cfgTaskInheritContext = register({
+	id: "task.inheritContext",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Inherit Parent Context",
+		description:
+			"Offer an inheritContext flag on each task item. A flagged subagent starts with the most recent ~28k characters of this conversation as up to two snapcompact image frames, plus a text list of the exact hashes, paths, flags, and numbers in that excerpt; secrets are redacted before rendering. Children on models without image input get the excerpt as text. Agents declaring inheritContext: false (the bundled reviewers) ignore the flag; seance and eval agent() spawns never inherit.",
+	},
+});
+
 export const cfgTaskSpeculativeLaunch = register({
 	id: "task.speculativeLaunch",
 	type: "boolean",

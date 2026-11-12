@@ -132,6 +132,7 @@ import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
+import { type InheritedContext, INHERITED_CONTEXT_MESSAGE_TYPE, inheritedContextMessage } from "./inherited-context";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -631,6 +632,8 @@ export interface ExecutorOptions {
 	parentTelemetry?: AgentTelemetryConfig;
 	/** Skills to autoload via sendCustomMessage before the first prompt */
 	autoloadSkills?: Skill[];
+	/** Parent conversation tail sent as a hidden frames+sidecar message before the first prompt (`task.inheritContext`). */
+	inheritedContext?: InheritedContext;
 	/**
 	 * Registry id of the spawning agent, recorded as this subagent's parent.
 	 * Forwarded verbatim to the SDK; the executor never derives it (the spawner
@@ -5360,6 +5363,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						{ triggerTurn: false },
 					);
 				}
+			}
+			if (options.inheritedContext) {
+				const { content, details } = await awaitAbortable(
+					inheritedContextMessage(options.inheritedContext, session.model),
+				);
+				await session.sendCustomMessage(
+					{ customType: INHERITED_CONTEXT_MESSAGE_TYPE, content, display: false, details },
+					{ triggerTurn: false },
+				);
 			}
 
 			readyAt = performance.now();
