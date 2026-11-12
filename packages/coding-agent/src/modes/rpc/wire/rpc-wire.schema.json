@@ -186,17 +186,6 @@
 				"clientOmit": []
 			},
 			{
-				"name": "set_form_dialog",
-				"doc": "Opt in to `form` UI requests for the `ask` tool; returns the applied setting.",
-				"params": "SetFormDialogParams",
-				"result": "SetFormDialogResult",
-				"nullable": false,
-				"unwrap": "enabled",
-				"timeoutMs": null,
-				"completion": null,
-				"clientOmit": []
-			},
-			{
 				"name": "get_available_commands",
 				"doc": "List the slash-command catalog.",
 				"params": null,
@@ -5393,7 +5382,7 @@
 				"method",
 				"html"
 			],
-			"description": "The HTML `<form>` of one `ask` tool call; sent only after `set_form_dialog` enables it."
+			"description": "The HTML `<form>` of one `ask` tool call; no opt-in is required."
 		},
 		"CancelUiRequest": {
 			"type": "object",
@@ -6415,28 +6404,6 @@
 			]
 		},
 		"SetAskDialogResult": {
-			"type": "object",
-			"properties": {
-				"enabled": {
-					"type": "boolean"
-				}
-			},
-			"required": [
-				"enabled"
-			]
-		},
-		"SetFormDialogParams": {
-			"type": "object",
-			"properties": {
-				"enabled": {
-					"type": "boolean"
-				}
-			},
-			"required": [
-				"enabled"
-			]
-		},
-		"SetFormDialogResult": {
 			"type": "object",
 			"properties": {
 				"enabled": {

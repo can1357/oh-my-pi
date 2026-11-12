@@ -1337,7 +1337,7 @@ export interface AskUiRequest {
 	timeout?: number;
 }
 
-/** The HTML `<form>` of one `ask` tool call; sent only after `set_form_dialog` enables it. */
+/** The HTML `<form>` of one `ask` tool call; no opt-in is required. */
 export interface FormUiRequest {
 	type: "extension_ui_request";
 	id: string;
@@ -1642,14 +1642,6 @@ export interface SetAskDialogParams {
 }
 
 export interface SetAskDialogResult {
-	enabled: boolean;
-}
-
-export interface SetFormDialogParams {
-	enabled: boolean;
-}
-
-export interface SetFormDialogResult {
 	enabled: boolean;
 }
 
@@ -1969,7 +1961,6 @@ export interface RpcWireCommands {
 	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };
 	set_ask_dialog: { params: SetAskDialogParams; result: SetAskDialogResult };
-	set_form_dialog: { params: SetFormDialogParams; result: SetFormDialogResult };
 	get_available_commands: { params: undefined; result: GetAvailableCommandsResult };
 	get_entries: { params: GetEntriesParams; result: SessionEntries };
 	get_tree: { params: undefined; result: SessionTree };

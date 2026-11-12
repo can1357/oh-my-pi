@@ -1558,7 +1558,7 @@ class AskUiRequest:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class FormUiRequest:
-    """The HTML `<form>` of one `ask` tool call; sent only after `set_form_dialog` enables it."""
+    """The HTML `<form>` of one `ask` tool call; no opt-in is required."""
     type: Literal["extension_ui_request"] = "extension_ui_request"
     id: str
     method: Literal["form"] = "form"
@@ -3468,12 +3468,6 @@ class WireClient:
         params: dict[str, object] = {}
         params["enabled"] = enabled
         return required(expect_object(self._command("set_ask_dialog", params), "set_ask_dialog"), "enabled", decode_bool, "set_ask_dialog")
-
-    def set_form_dialog(self, enabled: bool) -> bool:
-        """Opt in to `form` UI requests for the `ask` tool; returns the applied setting."""
-        params: dict[str, object] = {}
-        params["enabled"] = enabled
-        return required(expect_object(self._command("set_form_dialog", params), "set_form_dialog"), "enabled", decode_bool, "set_form_dialog")
 
     def get_available_commands(self) -> tuple[AvailableSlashCommand, ...]:
         """List the slash-command catalog."""

@@ -4587,7 +4587,7 @@ pub struct AskUiRequest {
 	pub timeout: Option<i64>,
 }
 
-/// The HTML `<form>` of one `ask` tool call; sent only after `set_form_dialog` enables it.
+/// The HTML `<form>` of one `ask` tool call; no opt-in is required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormUiRequest {
 	pub id: String,
@@ -4664,7 +4664,7 @@ pub enum ExtensionUiRequest {
 	Editor(EditorUiRequest),
 	/// Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.
 	Ask(AskUiRequest),
-	/// The HTML `<form>` of one `ask` tool call; sent only after `set_form_dialog` enables it.
+	/// The HTML `<form>` of one `ask` tool call; no opt-in is required.
 	Form(FormUiRequest),
 	/// Close the dialog opened by request `targetId`; a later answer to it is ignored.
 	Cancel(CancelUiRequest),
@@ -5351,16 +5351,6 @@ pub struct SetAskDialogParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetAskDialogResult {
-	pub enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SetFormDialogParams {
-	pub enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SetFormDialogResult {
 	pub enabled: bool,
 }
 
@@ -6506,22 +6496,6 @@ impl Command for SetAskDialogCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<SetAskDialogResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.enabled)
-	}
-}
-
-/// Opt in to `form` UI requests for the `ask` tool; returns the applied setting.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SetFormDialogCommand {
-	pub enabled: bool,
-}
-
-impl Command for SetFormDialogCommand {
-	const NAME: &'static str = "set_form_dialog";
-	const TIMEOUT_MS: Option<u64> = None;
-	type Output = bool;
-
-	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
-		serde_json::from_value::<SetFormDialogResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.enabled)
 	}
 }
 

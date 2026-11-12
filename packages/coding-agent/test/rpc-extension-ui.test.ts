@@ -178,7 +178,7 @@ await runRpcMode(session, {
 		expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
 	}, 30_000);
 
-	/** Spawns an RPC runtime whose extension awaits a `confirm` in `session_start` and has a `/probe` command. */
+	/** Spawns an RPC runtime whose extension awaits a form in `session_start` and has a `/probe` command. */
 	async function spawnStartupDialogRuntime(temp: TempDir) {
 		const fixturePath = temp.join("runtime.ts");
 		const sourceDir = path.resolve(import.meta.dir, "../src");
@@ -201,7 +201,7 @@ const { session } = await createAgentSession({
       handler: async (_args, ctx) => ctx.ui.notify("askDialog:" + typeof ctx.ui.askDialog),
     });
     pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.notify(String(await ctx.ui.confirm("Trust?", "startup")));
+      ctx.ui.notify(JSON.stringify((await ctx.ui.formDialog("<form><input name='trust'></form>"))?.data));
     });
   }],
 });
@@ -232,13 +232,13 @@ await runRpcMode(session);
 		const child = await spawnStartupDialogRuntime(temp);
 		const stderr = new Response(child.stderr).text();
 		const seen: string[] = [];
-		let confirmId: unknown;
+		let formId: unknown;
 		for await (const frame of readJsonl<unknown>(child.stdout)) {
 			if (!isRecord(frame)) continue;
-			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
-				confirmId = frame.id;
-				// Held until startup finishes (had one run at once, its response would precede the confirm's
-				// notify) and then run in arrival order. set_ask_dialog is served during startup and takes effect.
+			if (frame.type === "extension_ui_request" && frame.method === "form") {
+				formId = frame.id;
+				// Held until startup finishes; a premature response would precede the form's notify.
+				// set_ask_dialog is served during startup and takes effect independently of forms.
 				for (const id of ["s1", "s2"]) child.stdin.write(`${JSON.stringify({ id, type: "get_state" })}\n`);
 				child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: "/probe" })}\n`);
 				child.stdin.write(`${JSON.stringify({ id: "s3", type: "get_state" })}\n`);
@@ -246,7 +246,9 @@ await runRpcMode(session);
 				await child.stdin.flush();
 			} else if (frame.type === "response" && frame.id === "ask") {
 				seen.push("ask");
-				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: confirmId, confirmed: true })}\n`);
+				child.stdin.write(
+					`${JSON.stringify({ type: "extension_ui_response", id: formId, data: { trust: "yes" } })}\n`,
+				);
 				await child.stdin.flush();
 			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
 				seen.push(String(frame.message));
@@ -261,7 +263,7 @@ await runRpcMode(session);
 		expect(
 			seen.filter(entry => entry !== "p:true" && entry !== "askDialog:function"),
 			await stderr,
-		).toEqual(["ask", "true", "s1:true", "s2:true", "s3:true"]);
+		).toEqual(["ask", '{"trust":"yes"}', "s1:true", "s2:true", "s3:true"]);
 		expect(seen).toContain("askDialog:function");
 	}, 30_000);
 
@@ -271,7 +273,7 @@ await runRpcMode(session);
 		const stderr = new Response(child.stderr).text();
 		// Read to the end of stdout: closing it early would fail the child's output, not exercise the EOF.
 		for await (const frame of readJsonl<unknown>(child.stdout)) {
-			if (isRecord(frame) && frame.type === "extension_ui_request" && frame.method === "confirm") child.stdin.end();
+			if (isRecord(frame) && frame.type === "extension_ui_request" && frame.method === "form") child.stdin.end();
 		}
 		const exitCode = await child.exited;
 		expect({ exitCode, signal: child.signalCode }, await stderr).toEqual({ exitCode: 0, signal: null });
@@ -910,7 +912,7 @@ describe("RPC ask dialog", () => {
 		expect(onTimeout).not.toHaveBeenCalled();
 	});
 
-	it("walks the ask tool's form through select prompts until the host opts into form dialogs", async () => {
+	it("submits the ask tool's whole form without opt-in, independently of extension ask dialogs", async () => {
 		await using temp = await TempDir.create("@rpc-ask-dialog-");
 		const extensionPath = temp.join("scripted-ask.ts");
 		await Bun.write(extensionPath, scriptedAskProvider);
@@ -954,7 +956,6 @@ describe("RPC ask dialog", () => {
 		const formRequests: Record<string, unknown>[] = [];
 		const toolResults: unknown[] = [];
 		let optInResponse: unknown;
-		let formOptInResponse: unknown;
 		let finished = false;
 		const html =
 			'<form><p>Which database?</p><label><input type="radio" name="db" value="pg"> Postgres</label><label><input type="radio" name="db" value="sqlite" checked> SQLite</label></form>';
@@ -967,7 +968,7 @@ describe("RPC ask dialog", () => {
 				if (!isRecord(frame)) continue;
 				if (frame.type === "response" && frame.id === "model") {
 					if (frame.success !== true) throw new Error(`Scripted model unavailable: ${JSON.stringify(frame)}`);
-					await send({ type: "prompt", id: "fallback", message: form });
+					await send({ type: "prompt", id: "default-form", message: form });
 				} else if (frame.type === "extension_ui_request" && frame.method === "select") {
 					selectRequests.push(frame);
 					await send({ type: "extension_ui_response", id: frame.id, value: "Postgres" });
@@ -979,17 +980,12 @@ describe("RPC ask dialog", () => {
 					await send({ type: "extension_ui_response", id: frame.id, data: { db: "pg" } });
 				} else if (frame.type === "tool_execution_end" && frame.toolName === "ask") {
 					toolResults.push(frame.result);
-				} else if (frame.type === "prompt_result" && frame.id === "fallback") {
+				} else if (frame.type === "prompt_result" && frame.id === "default-form") {
 					await send({ type: "set_ask_dialog", id: "opt-in", enabled: true });
 				} else if (frame.type === "response" && frame.id === "opt-in") {
 					optInResponse = frame;
 					await send({ type: "prompt", id: "dialog", message: form });
 				} else if (frame.type === "prompt_result" && frame.id === "dialog") {
-					await send({ type: "set_form_dialog", id: "form-opt-in", enabled: true });
-				} else if (frame.type === "response" && frame.id === "form-opt-in") {
-					formOptInResponse = frame;
-					await send({ type: "prompt", id: "form", message: form });
-				} else if (frame.type === "prompt_result" && frame.id === "form") {
 					finished = true;
 					break;
 				}
@@ -1002,8 +998,7 @@ describe("RPC ask dialog", () => {
 
 		if (!finished) throw new Error(`RPC ask fixture did not finish: ${await stderr}`);
 		await stderr;
-		expect(selectRequests).toHaveLength(2);
-		expect(selectRequests[0]).toMatchObject({ method: "select", title: "Which database?" });
+		expect(selectRequests).toEqual([]);
 		expect(optInResponse).toEqual({
 			id: "opt-in",
 			type: "response",
@@ -1012,11 +1007,13 @@ describe("RPC ask dialog", () => {
 			data: { enabled: true },
 		});
 		expect(askRequests).toEqual([]);
-		expect(formOptInResponse).toMatchObject({ command: "set_form_dialog", success: true, data: { enabled: true } });
-		expect(formRequests).toEqual([expect.objectContaining({ method: "form", html })]);
+		expect(formRequests).toEqual([
+			expect.objectContaining({ method: "form", html }),
+			expect.objectContaining({ method: "form", html }),
+		]);
 		const answered = expect.objectContaining({
 			details: { answers: [{ name: "db", question: "Which database?", answer: "Postgres" }] },
 		});
-		expect(toolResults).toEqual([answered, answered, answered]);
+		expect(toolResults).toEqual([answered, answered]);
 	}, 60_000);
 });

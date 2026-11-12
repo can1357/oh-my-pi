@@ -5860,7 +5860,7 @@ func (v AskUiRequest) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"ask"`, nil)
 }
 
-// The HTML `<form>` of one `ask` tool call; sent only after `set_form_dialog` enables it.
+// The HTML `<form>` of one `ask` tool call; no opt-in is required.
 type FormUiRequest struct {
 	ID      string `json:"id"`
 	HTML    string `json:"html"`
@@ -7308,25 +7308,6 @@ func (v *SetAskDialogResult) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
-type SetFormDialogResult struct {
-	Enabled bool `json:"enabled"`
-}
-
-func (v *SetFormDialogResult) UnmarshalJSON(data []byte) error {
-	return decodeWith(data, "SetFormDialogResult", v.decodeFrom)
-}
-
-func (v *SetFormDialogResult) decodeFrom(raw map[string]json.RawMessage) error {
-	var out SetFormDialogResult
-	d := fieldDecoder{raw: raw, owner: "SetFormDialogResult"}
-	d.required("enabled", &out.Enabled)
-	if d.err != nil {
-		return d.err
-	}
-	*v = out
-	return nil
-}
-
 type GetAvailableCommandsResult struct {
 	Commands []AvailableSlashCommand `json:"commands"`
 }
@@ -8047,18 +8028,6 @@ type SetAskDialogCommand struct {
 func (c Commands) SetAskDialog(ctx context.Context, p SetAskDialogCommand) (bool, error) {
 	var out SetAskDialogResult
 	err := c.call(ctx, "set_ask_dialog", p, 0, &out)
-	return out.Enabled, err
-}
-
-// SetFormDialogCommand holds the parameters of "set_form_dialog".
-type SetFormDialogCommand struct {
-	Enabled bool `json:"enabled"`
-}
-
-// SetFormDialog sends "set_form_dialog": Opt in to `form` UI requests for the `ask` tool; returns the applied setting.
-func (c Commands) SetFormDialog(ctx context.Context, p SetFormDialogCommand) (bool, error) {
-	var out SetFormDialogResult
-	err := c.call(ctx, "set_form_dialog", p, 0, &out)
 	return out.Enabled, err
 }
 

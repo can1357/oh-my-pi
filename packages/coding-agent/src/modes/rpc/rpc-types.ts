@@ -73,7 +73,6 @@ export type RpcCommand =
 			token_budget?: number;
 	  }
 	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
-	| { id?: string; type: "set_form_dialog"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
 	| { id?: string; type: "get_tree" }
@@ -474,7 +473,6 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_slow_mode"; success: true; data: { enabled: boolean } }
 	| { id?: string; type: "response"; command: "goal"; success: true; data: RpcGoalResult }
 	| { id?: string; type: "response"; command: "set_ask_dialog"; success: true; data: { enabled: boolean } }
-	| { id?: string; type: "response"; command: "set_form_dialog"; success: true; data: { enabled: boolean } }
 	| {
 			id?: string;
 			type: "response";
@@ -835,7 +833,7 @@ export type RpcExtensionUIRequest =
 			questions: RpcAskDialogQuestion[];
 			timeout?: number;
 	  }
-	/** Emitted only after the host opts in with `set_form_dialog`. */
+	/** The whole HTML form of an `ask` tool call; no opt-in is required. */
 	| { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {

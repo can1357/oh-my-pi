@@ -1644,10 +1644,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	 */
 	class RpcExtensionUIContext implements ExtensionUIContext {
 		readonly supportsEditor = true;
-		/** Set by `set_ask_dialog`; hosts that never opt in keep the select/editor ask fallback. */
+		/** Set by `set_ask_dialog`; extension ask dialogs use select/editor until the host opts in. */
 		askDialogEnabled = false;
-		/** Set by `set_form_dialog`; hosts that never opt in answer the `ask` tool field by field. */
-		formDialogEnabled = false;
 
 		constructor(
 			private pendingRequests: Map<string, PendingExtensionRequest>,
@@ -1661,7 +1659,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		}
 
 		get formDialog(): ExtensionUIContext["formDialog"] {
-			if (!this.formDialogEnabled) return undefined;
 			return (html, dialogOptions) =>
 				requestRpcFormDialog(this.pendingRequests, this.output, frameEncoder.maxResponseBytes, html, dialogOptions);
 		}
@@ -1860,15 +1857,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		rpcUiContext.askDialogEnabled = command.enabled === true;
 		return success(command.id, "set_ask_dialog", { enabled: rpcUiContext.askDialogEnabled });
 	};
-	const setFormDialog = (command: RpcCommand & { type: "set_form_dialog" }): RpcResponse => {
-		rpcUiContext.formDialogEnabled = command.enabled === true;
-		return success(command.id, "set_form_dialog", { enabled: rpcUiContext.formDialogEnabled });
-	};
 	const onPromptError = (id: string | undefined, command: string) => (promptError: Error) =>
 		output(error(id, command, promptError.message));
 
 	// Read stdin from now on: `session_start` may be waiting on a dialog only the client can answer. Until the
-	// command loop below exists, a dialog answer and the ask- and form-dialog opt-ins are handled at once and every
+	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every
 	// other frame is held, in arrival order, for that loop.
 	let heldFrames: unknown[] | undefined = [];
 	const receiveFrame = (parsed: unknown): void => {
@@ -1878,8 +1871,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			pendingExtensionRequests.get(parsed.id)?.resolve(parsed);
 		} else if (isRecord(parsed) && parsed.type === "set_ask_dialog") {
 			output(setAskDialog(parsed as RpcCommand & { type: "set_ask_dialog" }));
-		} else if (isRecord(parsed) && parsed.type === "set_form_dialog") {
-			output(setFormDialog(parsed as RpcCommand & { type: "set_form_dialog" }));
 		} else {
 			heldFrames.push(parsed);
 		}
@@ -2475,9 +2466,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "set_ask_dialog":
 				return setAskDialog(command);
-
-			case "set_form_dialog":
-				return setFormDialog(command);
 
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });

@@ -456,21 +456,14 @@ if request.method == "ask":
     )
 ```
 
-Servers without the command raise `RpcCommandError` from `set_ask_dialog`, so
-keep handling `select` as the fallback.
+Servers without the command raise `RpcCommandError` from `set_ask_dialog`, so keep handling `select` as the fallback for extension `ui.askDialog` calls. This setting does not affect the `ask` tool.
 
-After `client.set_form_dialog(True)`, the `ask` tool sends one `form` request
-carrying the model's HTML form (`request.html`) instead of walking its fields.
-Answer with the submitted values by control `name`, as an HTML form would
-submit them (a checkbox group gives a list); omp checks them against the form:
+The `ask` tool sends one `form` request carrying the model's HTML form (`request.html`), without an enable command. RPC clients must handle this request; the tool no longer walks its fields through separate prompts. Answer with the submitted values by control `name`, as an HTML form would submit them (a checkbox group gives a list); omp checks them against the form:
 
 ```python
 if request.method == "form":
     client.send_ui_data(request.id, {"store": "sqlite", "ttl_days": 30})
 ```
-
-Servers without the command raise `RpcCommandError` from `set_form_dialog`;
-keep the field-by-field fallback for them.
 
 For non-interactive scripts, you can install a default headless policy instead of
 handling every request manually:

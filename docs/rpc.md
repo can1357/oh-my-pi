@@ -30,7 +30,7 @@ Behavior notes:
 - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog), `set_ask_dialog` and `set_form_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
+- Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
@@ -150,7 +150,6 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_slow_mode", enabled: boolean }`
 - `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
-- `{ id?, type: "set_form_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
 - `{ id?, type: "get_tree" }`
@@ -737,12 +736,7 @@ The corresponding `get_state` result reports the same computed state:
 
 ### `set_ask_dialog` payload
 
-`set_ask_dialog` opts the host in to the `ask` extension UI request (see
-[Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default
-for every process; until a host enables it, the `ask` tool keeps prompting with
-one `select` (plus `editor` for free text) per choice. Builds without the
-command answer with a failed `response`, so hosts should keep the `select`
-fallback when enabling fails.
+`set_ask_dialog` opts the host in to the `ask` extension UI request for extension `ui.askDialog` calls (see [Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default; until enabled, those calls use `select` and `editor`. This setting does not affect the `ask` tool, which always sends a whole `form`. Builds without the command answer with a failed `response`, so hosts should keep handling extension dialogs through `select` and `editor` when enabling fails.
 
 ```json
 { "id": "req_ask", "type": "set_ask_dialog", "enabled": true }
@@ -753,29 +747,6 @@ fallback when enabling fails.
 	"id": "req_ask",
 	"type": "response",
 	"command": "set_ask_dialog",
-	"success": true,
-	"data": { "enabled": true }
-}
-```
-
-### `set_form_dialog` payload
-
-`set_form_dialog` opts the host in to the `form` extension UI request (see
-[Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default
-for every process; until a host enables it, the `ask` tool walks its HTML form
-field by field through `select`, `input` and `editor`. Builds without the
-command answer with a failed `response`, so hosts should keep that fallback
-when enabling fails.
-
-```json
-{ "id": "req_form", "type": "set_form_dialog", "enabled": true }
-```
-
-```json
-{
-	"id": "req_form",
-	"type": "response",
-	"command": "set_form_dialog",
 	"success": true,
 	"data": { "enabled": true }
 }
@@ -1327,7 +1298,7 @@ Extensions in RPC mode use request/response UI frames. `--no-ui` disables the ex
 
 `--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
 
-- Without `set_form_dialog`, `ask` sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`. Each `ask` prompt's `title` can span several lines: the form's context text for that field (paragraphs, lists, `<pre>` blocks, tables) separated by blank lines, then the field's question on the last line.
+- The `ask` tool sends one `form` request carrying the complete HTML form, without an enable command. Hosts must render the form and reply with submitted `data` or cancellation; the tool no longer walks fields through `select`, `input` or `editor` over RPC.
 - Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
 - Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
 - MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
@@ -1348,28 +1319,18 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      (option to focus first), `selectionMarker?: "radio" | "checkbox"`,
      `checkedIndices?: number[]` (options currently checked in a checkbox
      list) and `markableCount?: number` (leading options that get a marker;
-     trailing ones are actions, such as the `ask` tool's "Done selecting";
-     absent means every option when `selectionMarker` is set). The `ask`
-     tool's "Other" row is marked and appears in `checkedIndices` once a custom
-     answer is entered.
-     The `ask` tool's checkbox fallback re-sends `select` after
-     every toggle, so `checkedIndices` is the authoritative checked state; a
-     host that ignores it cannot show which options are already checked.
+     trailing ones are actions; absent means every option when
+     `selectionMarker` is set). `checkedIndices` is the authoritative checked state.
    - `input` carries `title: string` and optional `placeholder?: string`,
      `timeout?: number`, and `secret?: boolean`. `secret` is an unnegotiated
      host hint from `ExtensionUIDialogOptions.secret`; hosts that support
      masked input should hide typed characters when `secret: true`.
    - `ask` is emitted only after `set_ask_dialog` enables it. It carries every
-     question of one extension `ui.askDialog` call (the `ask` tool instead sends
-     a `form` request, or walks its HTML form field by field through `select`,
-     `input` and `editor`):
+     question of one extension `ui.askDialog` call (the `ask` tool instead sends a `form` request):
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.
-   - `form` is emitted only after `set_form_dialog` enables it. It carries the
-     HTML `<form>` of one `ask` tool call as `html: string`, plus
-     `timeout?: number`. Hosts render the form whole; radio and checkbox groups
-     of two or more options offer a free-text "Other" answer.
+   - `form` requires no opt-in. It carries the HTML `<form>` of one `ask` tool call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
