@@ -213,16 +213,15 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(renderTodos(mode)).not.toContain("done task");
 	});
 
-	it("marks reconciled todos complete and auto-dismisses the durable plan", async () => {
+	it("keeps a matching todo open and the plan visible when its subagent completes", async () => {
 		await replaceMode();
 		setTodoClearDelay(0);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		session.sessionManager.appendCustomEntry("user_todo_edit", {
-			phases: [{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] }],
-		});
-		session.setTodoPhases([
+		const phases: TodoPhase[] = [
 			{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] },
-		]);
+		];
+		const planEntryId = session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
 		mode.setTodos(session.getTodoPhases());
 		await mode.init();
 		vi.useFakeTimers();
@@ -238,11 +237,19 @@ describe("InteractiveMode todo HUD persistence", () => {
 		vi.advanceTimersByTime(0);
 		await session.settleInFlightMessagePersistence();
 		await session.sessionManager.flush();
-		expect(session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
-		expect(renderTodos(mode)).toBe("");
+		// A finished subagent is not a `todo done`: the plan stays open, so even
+		// instant auto-clear has nothing to dismiss and nothing is persisted.
+		expect(session.getTodoPhases()).toEqual(phases);
+		expect(
+			session.sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "custom")
+				.map(entry => entry.id),
+		).toEqual([planEntryId]);
+		expect(renderTodos(mode)).toContain("Fix review comments");
 	});
 
-	it("reconciles focused worker todos without overwriting the main session", async () => {
+	it("leaves focused worker todos open without overwriting the main session when a nested subagent completes", async () => {
 		await replaceMode();
 		setTodoClearDelay(-1);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -301,9 +308,14 @@ describe("InteractiveMode todo HUD persistence", () => {
 			});
 			vi.advanceTimersByTime(100);
 
-			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("pending");
 			expect(session.getTodoPhases()).toEqual(mainPhases);
-			expect(renderTodos(mode)).toContain("1/2");
+			expect(
+				[...focusedSession.sessionManager.getBranch(), ...session.sessionManager.getBranch()].some(
+					entry => entry.type === "custom" && entry.customType === "user_todo_edit",
+				),
+			).toBe(false);
+			expect(renderTodos(mode)).toContain("0/2");
 
 			await mode.unfocusSession();
 			expect(renderTodos(mode)).toContain("orchestrate the main work");
@@ -317,11 +329,11 @@ describe("InteractiveMode todo HUD persistence", () => {
 		}
 	});
 
-	it("reconciles into the snapshot's owning session even when viewSession has moved on", async () => {
+	it("writes neither the snapshot's owning session nor viewSession when a subagent completes mid focus-attach", async () => {
 		// Reproduces the focus-attach window deterministically: the HUD snapshot is
 		// reloaded from the worker (making it the owner) while viewSession is still
-		// the main session. A subagent completing here must land in the worker, not
-		// be written over the main session's canonical plan (#9575 review).
+		// the main session. A subagent completing here must not land in the worker
+		// or be written over the main session's canonical plan (#9575 review).
 		await replaceMode();
 		setTodoClearDelay(-1);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -362,9 +374,14 @@ describe("InteractiveMode todo HUD persistence", () => {
 			});
 			vi.advanceTimersByTime(100);
 
-			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("in_progress");
 			expect(session.getTodoPhases()).toEqual(mainPhases);
-			expect(renderTodos(mode)).toContain("1/1");
+			expect(
+				[...workerSession.sessionManager.getBranch(), ...session.sessionManager.getBranch()].some(
+					entry => entry.type === "custom" && entry.customType === "user_todo_edit",
+				),
+			).toBe(false);
+			expect(renderTodos(mode)).toContain("0/1");
 		} finally {
 			vi.useRealTimers();
 			await workerSession.dispose();
