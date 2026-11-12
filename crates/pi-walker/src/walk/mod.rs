@@ -13,6 +13,8 @@
 //! - [`collect`] gathers the entries a filter keeps, optionally in byte order
 //!   of their paths (each worker sorts its directory's share of the order;
 //!   collection only concatenates). Dropping its future cancels the walk.
+//! - [`ordered`] streams that path-ordered collection while the walk runs: each
+//!   entry as soon as every directory sorting before it is listed.
 //! - [`Tree`] is the serial, ordered traversal, driven one event at a time by
 //!   the caller, for tools whose output order and pruning decisions are
 //!   sequential (`find`, `fd`, workspace listing).
@@ -451,6 +453,64 @@ where
 	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Send + Sync + 'static,
 {
 	collect_in(fs, root, opts, sorted, filter, default_cache(fs, opts)).await
+}
+
+/// [`collect`] in path order, streamed while the walk runs.
+///
+/// [`Ordered::next`] delivers each kept entry as soon as every directory
+/// sorting before it has been listed, so output starts while the walk runs on
+/// its workers and a slow subtree holds back only what sorts after it.
+/// `filter` is as for [`collect`];
+/// `Action::Stop` ends the walk, delivering what was kept before. Dropping
+/// the [`Ordered`] cancels the walk.
+///
+/// # Errors
+/// As for [`walk`].
+pub async fn ordered<F>(
+	fs: &Fs,
+	root: &Path,
+	opts: &Options,
+	filter: F,
+) -> Result<Ordered, WalkError>
+where
+	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Send + Sync + 'static,
+{
+	let sink = parallel::CollectSink::new(parallel::BoxedKeep(Box::new(filter)));
+	let started = parallel::start(fs, root, opts, sink, true, default_cache(fs, opts), None).await?;
+	Ok(Ordered(parallel::InOrder::new(started)))
+}
+
+/// A running [`ordered`] walk.
+pub struct Ordered(parallel::InOrder<parallel::CollectSink<parallel::BoxedKeep>>);
+
+impl Ordered {
+	/// The next kept entry in path order; `None` once the walk is done.
+	/// Cancel-safe: dropping the future loses no entry.
+	pub async fn next(&mut self) -> Option<Entry<'_>> {
+		let stored = self.0.next().await?;
+		Some(Entry {
+			// SAFETY: the path lives in a scratch arena of the walk, which
+			// `self` keeps until it is dropped.
+			path:      unsafe { stored.path.get() },
+			file_type: stored.file_type,
+			depth:     stored.depth,
+			size:      stored.size,
+			mtime:     stored.mtime,
+		})
+	}
+
+	/// Waits until [`Self::next`] can deliver without waiting, so a consumer
+	/// can bound how long its output sits unflushed while the walk works.
+	/// Cancel-safe.
+	pub async fn wait(&mut self) {
+		self.0.wait().await;
+	}
+
+	/// Directories below the root that could not be read, once the walk has
+	/// ended.
+	pub async fn into_errors(self) -> Vec<DirError> {
+		self.0.into_errors().await
+	}
 }
 
 /// [`collect`] against an explicit listing cache.

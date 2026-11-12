@@ -34,7 +34,10 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use tokio::{sync::mpsc, task::AbortHandle};
+use tokio::{
+	sync::{Notify, mpsc},
+	task::AbortHandle,
+};
 
 use super::{
 	Action, Batch, DirError, Entry, Options, Stop, WalkError, Worker, absolute_root,
@@ -140,6 +143,30 @@ where
 	}
 }
 
+/// The filter of a collecting walk ([`super::collect`], [`super::ordered`]).
+pub(super) trait Keep: Send + Sync + 'static {
+	fn keep(&self, worker: &mut Worker<'_>, entry: &mut Entry<'_>) -> Action;
+}
+
+impl<F> Keep for F
+where
+	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Send + Sync + 'static,
+{
+	fn keep(&self, worker: &mut Worker<'_>, entry: &mut Entry<'_>) -> Action {
+		self(worker, entry)
+	}
+}
+
+/// A boxed [`Keep`]: a filter type that names no closure, so futures holding
+/// a walk stay `'static` and `Send` for the compiler.
+pub(super) struct BoxedKeep(pub(super) Box<dyn Keep>);
+
+impl Keep for BoxedKeep {
+	fn keep(&self, worker: &mut Worker<'_>, entry: &mut Entry<'_>) -> Action {
+		self.0.keep(worker, entry)
+	}
+}
+
 /// [`Sink`] of [`super::collect`].
 pub(super) struct CollectSink<F> {
 	filter: F,
@@ -151,10 +178,7 @@ impl<F> CollectSink<F> {
 	}
 }
 
-impl<F> Sink for CollectSink<F>
-where
-	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Send + Sync + 'static,
-{
+impl<F: Keep> Sink for CollectSink<F> {
 	type Item = Infallible;
 	type Out = Infallible;
 	type State = ();
@@ -170,7 +194,7 @@ where
 		entry: &mut Entry<'_>,
 		_out: &mut Vec<Infallible>,
 	) -> Action {
-		(self.filter)(worker, entry)
+		self.filter.keep(worker, entry)
 	}
 
 	fn settle(
@@ -258,9 +282,39 @@ pub(super) struct Stored {
 	pub(super) mtime:     Option<i64>,
 }
 
-/// One directory's share of a sorted collection, set once by the worker that
-/// lists it.
-type Slot = OnceLock<Vec<Item>>;
+/// One directory's share of a sorted collection, filled once by the worker
+/// that lists it, which wakes an [`InOrder`] consumer waiting for it.
+#[derive(Default)]
+struct Slot {
+	items:  OnceLock<Vec<Item>>,
+	filled: Notify,
+}
+
+impl Slot {
+	fn get(&self) -> Option<&Vec<Item>> {
+		self.items.get()
+	}
+}
+
+/// A [`Slot`] a job owes. Dropped unfilled (the directory could not be
+/// listed, or was pruned before its listing) it fills the slot empty, so an
+/// ordered consumer never waits for a listing that will not come.
+struct Out(Arc<Slot>);
+
+impl Out {
+	fn fill(self, items: Vec<Item>) {
+		let _ = self.0.items.set(items);
+		self.0.filled.notify_waiters();
+	}
+}
+
+impl Drop for Out {
+	fn drop(&mut self) {
+		if self.0.items.set(Vec::new()).is_ok() {
+			self.0.filled.notify_waiters();
+		}
+	}
+}
 
 /// An entry (key `name`) or a subtree (key `name/`) of one directory.
 /// Sorting these keys orders the directory's part of the output exactly as
@@ -347,7 +401,7 @@ struct Job {
 	count:    u32,
 	frame:    Option<Arc<Frame>>,
 	/// Sorted-collection slot.
-	out:      Option<Arc<Slot>>,
+	out:      Option<Out>,
 }
 
 /// One worker's scratch.
@@ -559,7 +613,7 @@ pub(super) async fn start<K: Sink>(
 			tx,
 			total: AtomicUsize::new(0),
 		});
-		let root_slot = sorted.then(|| Arc::new(Slot::new()));
+		let root_slot = sorted.then(|| Arc::new(Slot::default()));
 		let root_job = Job {
 			parent:   None,
 			rel:      Bytes::EMPTY,
@@ -567,7 +621,7 @@ pub(super) async fn start<K: Sink>(
 			depth:    0,
 			count:    0,
 			frame:    root_frame,
-			out:      root_slot.clone(),
+			out:      root_slot.clone().map(Out),
 		};
 		let rooted = ctx.list_dir(&mut st, root_job, Some(root_dir)).await;
 		let mut first = st.carry.take().filter(|_| !ctx.shared.halted());
@@ -617,6 +671,21 @@ impl<K: Sink> Started<K> {
 	/// Resolves once every worker has ended.
 	pub(super) async fn finished(&self) {
 		let _ = self.done.recv_async().await;
+	}
+
+	/// Waits until `slot` is filled or the walk has ended; `true` when it
+	/// ended (a slot still empty then stays empty).
+	async fn until_filled(&self, slot: &Slot) -> bool {
+		let filled = slot.filled.notified();
+		let mut filled = std::pin::pin!(filled);
+		filled.as_mut().enable();
+		if slot.get().is_some() {
+			return false;
+		}
+		tokio::select! {
+			() = filled => false,
+			() = self.finished() => true,
+		}
 	}
 
 	/// The kept entries of a finished collecting walk.
@@ -978,10 +1047,10 @@ impl<K: Sink> Ctx<K> {
 				_ => None,
 			};
 			let slot = job.out.as_ref().map(|_| {
-				let slot = Arc::new(Slot::new());
+				let slot = Arc::new(Slot::default());
 				items
 					.push(Item { name: bytes.tail(name.len()), kind: ItemKind::Dir(Arc::clone(&slot)) });
-				slot
+				Out(slot)
 			});
 			let child = Job {
 				parent,
@@ -1003,9 +1072,98 @@ impl<K: Sink> Ctx<K> {
 		}
 		if let Some(out) = job.out {
 			items.sort_unstable_by(compare_items);
-			let _ = out.set(items);
+			out.fill(items);
 		}
 		batch
+	}
+}
+
+/// The entries of a sorted collection in path order while its walk runs:
+/// each is delivered once every directory sorting before it is listed.
+pub(super) struct InOrder<K: Sink> {
+	started: Started<K>,
+	/// Directories being delivered, outermost first, with the index of each
+	/// one's next item.
+	stack:   Vec<(Arc<Slot>, usize)>,
+	/// The walk has ended: a slot still empty stays empty.
+	ended:   bool,
+}
+
+impl<K: Sink> InOrder<K> {
+	/// Delivers the entries of `started`, a sorted collection.
+	pub(super) fn new(started: Started<K>) -> Self {
+		let stack = started
+			.root_slot
+			.clone()
+			.map(|root| (root, 0))
+			.into_iter()
+			.collect();
+		Self { started, stack, ended: false }
+	}
+
+	/// Moves to the next entry as far as listed directories allow, without
+	/// waiting: `true` when it (or the end) is reached, `false` when it waits
+	/// for a directory still being listed.
+	fn ready(&mut self) -> bool {
+		loop {
+			let Some((slot, index)) = self.stack.last_mut() else {
+				return true;
+			};
+			let Some(items) = slot.get() else {
+				if !self.ended {
+					return false;
+				}
+				self.stack.pop();
+				continue;
+			};
+			match items.get(*index).map(|item| &item.kind) {
+				None => {
+					self.stack.pop();
+				},
+				Some(ItemKind::Entry(_)) => return true,
+				Some(ItemKind::Dir(child)) => {
+					*index += 1;
+					let child = Arc::clone(child);
+					self.stack.push((child, 0));
+				},
+			}
+		}
+	}
+
+	/// Waits until the next entry (or the end) can be delivered.
+	/// Cancel-safe.
+	pub(super) async fn wait(&mut self) {
+		while !self.ready() {
+			let Some((slot, _)) = self.stack.last() else {
+				return;
+			};
+			let slot = Arc::clone(slot);
+			self.ended = self.started.until_filled(&slot).await;
+			if self.ended {
+				self.started.ctx.shared.check_panic();
+			}
+		}
+	}
+
+	/// The next entry, its path in an arena the walk keeps; `None` once
+	/// every entry is delivered. Cancel-safe.
+	pub(super) async fn next(&mut self) -> Option<Stored> {
+		self.wait().await;
+		let (slot, index) = self.stack.last_mut()?;
+		let item = &slot.get()?[*index];
+		*index += 1;
+		match item.kind {
+			ItemKind::Entry(stored) => Some(stored),
+			ItemKind::Dir(_) => unreachable!("ready() stops at an entry"),
+		}
+	}
+
+	/// Directories below the root that could not be read, once the walk has
+	/// ended.
+	pub(super) async fn into_errors(self) -> Vec<DirError> {
+		self.started.finished().await;
+		self.started.ctx.shared.check_panic();
+		self.started.ctx.shared.take_errors()
 	}
 }
 
@@ -1013,7 +1171,7 @@ impl<K: Sink> Ctx<K> {
 struct DirJob {
 	rel:   Bytes,
 	depth: usize,
-	out:   Option<Arc<Slot>>,
+	out:   Option<Out>,
 }
 
 /// Resolves the symlink `name` in the walk-relative directory `dir` for

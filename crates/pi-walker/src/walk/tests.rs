@@ -925,6 +925,49 @@ async fn tree_skip_descends_and_skip_dir_prunes() {
 	assert_eq!(seen, ["keep/file.txt", "keep", "skip/file.txt", "skip"]);
 }
 
+/// An ordered walk streams exactly what a sorted collect returns, in the same
+/// order, honouring the filter's pruning; dropping it mid-walk is clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn ordered_walk_streams_the_sorted_collection() {
+	let specs: Vec<String> = (0..40)
+		.flat_map(|i| [format!("d{i:02}/a-b"), format!("d{i:02}/a/x/y"), format!("d{i:02}/a.txt")])
+		.chain(["skip/inner/file".to_owned(), "top".to_owned()])
+		.collect();
+	let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
+	let tmp = make_tree("ordered", &specs);
+	let filter = |_: &mut Worker<'_>, entry: &mut Entry<'_>| match entry.path {
+		b"skip" => Action::SkipDir,
+		path if path.ends_with(b"/x") => Action::Skip,
+		_ => Action::Continue,
+	};
+	let opts = Options { workers: Some(4), ..Options::default() };
+	let collected = collect(&Fs::native(), tmp.path(), &opts, true, filter)
+		.await
+		.expect("collect");
+	let want: Vec<String> = collected.iter().map(|entry| lossy(&entry)).collect();
+	let mut walk = ordered(&Fs::native(), tmp.path(), &opts, filter)
+		.await
+		.expect("ordered");
+	let mut seen = Vec::new();
+	while let Some(entry) = walk.next().await {
+		seen.push(lossy(&entry));
+	}
+	assert!(walk.into_errors().await.is_empty());
+	assert_eq!(seen, want);
+	assert!(
+		!seen
+			.iter()
+			.any(|path| path.starts_with("skip") || path.ends_with("/x"))
+	);
+	assert!(seen.iter().any(|path| path.ends_with("/x/y")));
+
+	let mut walk = ordered(&Fs::native(), tmp.path(), &opts, filter)
+		.await
+		.expect("ordered");
+	assert_eq!(walk.next().await.map(|entry| lossy(&entry)), want.first().cloned());
+	drop(walk);
+}
+
 /// Reading ahead changes how listings are obtained, never what the walk
 /// reports: every option set and `skip_dir` pruning yield the serial walk's
 /// events, in the serial walk's order.
