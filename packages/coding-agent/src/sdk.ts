@@ -380,6 +380,7 @@ import { cfgAutolearnEnabled } from "./autolearn/settings";
 import { cfgBrowserEnabled } from "./tools/browser/settings";
 import {
 	cfgDefaultThinkingLevel,
+	cfgEncourageEdits,
 	cfgExternalThinking,
 	cfgIncludeModelInPrompt,
 	cfgIncludeWorkspaceTree,
@@ -4462,6 +4463,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				renderSvg: tuiTranscript && cfgTuiRenderSvg.get(settings),
 				autoGraph: tuiTranscript && cfgTuiAutoGraph.get(settings) !== "off",
 				reactions: agentKind === "main" && options.hasUI === true && cfgTuiReactions.get(settings),
+				encourageEdits: cfgEncourageEdits.get(settings),
 				activeRepoContext,
 			});
 

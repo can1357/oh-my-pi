@@ -488,6 +488,19 @@ export const cfgIncludeWorkspaceTree = register({
 	},
 });
 
+/** Whether the system prompt carries a critical rule making `edit` mandatory for file edits; off omits edit guidance. */
+export const cfgEncourageEdits = register({
+	id: "encourageEdits",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "model",
+		group: "Prompt",
+		label: "Encourage Edits",
+		description: "Require the edit tool for file edits and forbid sed/perl/python edits",
+	},
+});
+
 export const cfgSkillful = register({
 	id: "skillful",
 	type: "boolean",
