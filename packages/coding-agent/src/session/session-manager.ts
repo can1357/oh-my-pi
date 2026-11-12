@@ -790,7 +790,12 @@ export type ReadonlySessionManager = Pick<
 	| "putBlobSync"
 >;
 
-interface SessionManagerStateSnapshot {
+/**
+ * A {@link SessionManager.captureState} snapshot: the move-relevant state
+ * {@link SessionManager.rollbackMove} restores. Exported because the relocation
+ * passes it across the session boundary.
+ */
+export interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
 	sessionId: string;

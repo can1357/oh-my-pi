@@ -81,6 +81,7 @@ async function relocateHeadlessSession(
 	const result = await relocateSessionCwd(
 		{
 			session: runtime.session,
+			sessionManager: runtime.sessionManager,
 			settings: runtime.settings,
 			afterRescope: async () => {
 				await runtime.refreshCommands?.();

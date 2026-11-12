@@ -20,12 +20,16 @@ import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import type { AgentSession } from "./agent-session";
-import type { SessionManager } from "./session-manager";
-
-type SessionStateSnapshot = ReturnType<SessionManager["captureState"]>;
+import type { SessionManager, SessionManagerStateSnapshot } from "./session-manager";
 
 export interface CwdRelocationHost {
 	readonly session: AgentSession;
+	/**
+	 * The manager the move drives. Passed beside the session rather than read off
+	 * it, so a host that keeps its own manager (an ACP host, a test double) says
+	 * which instance the cwd belongs to instead of the call reaching into one.
+	 */
+	readonly sessionManager: SessionManager;
 	/** The instance whose project scope follows the session. */
 	readonly settings: Settings;
 	/**
@@ -68,15 +72,19 @@ export async function rescopeCwdTo(host: Pick<CwdRelocationHost, "session" | "se
 
 async function rollback(
 	host: CwdRelocationHost,
-	snapshot: SessionStateSnapshot,
+	snapshot: SessionManagerStateSnapshot,
 	attempted: string,
 	cause: unknown,
 ): Promise<CwdRelocationResult> {
 	const reason = describeError(cause);
-	const manager = host.session.sessionManager;
+	const manager = host.sessionManager;
 	try {
 		await manager.rollbackMove(snapshot);
 		await rescopeCwdTo(host, snapshot.cwd);
+		// The host state rebuilt for the attempted directory (command list, plugin
+		// roots) has to follow the session back, or it describes a workspace the
+		// session is no longer in.
+		await host.afterRescope?.();
 	} catch (rollbackError) {
 		const actual = manager.getCwd();
 		// Re-align the caches with wherever the session actually ended up, so the
@@ -87,7 +95,7 @@ async function rollback(
 		return {
 			ok: false,
 			fatal: true,
-			error: `Cannot change working directory to ${attempted}: ${reason} (rollback failed: ${describeError(rollbackError)}; workspace remains at ${actual})`,
+			error: `Cannot change working directory to ${attempted}: ${reason} (rollback failed: ${describeError(rollbackError)}; failed to re-align workspace to ${actual})`,
 		};
 	}
 	return { ok: false, fatal: false, error: `Cannot change working directory to ${attempted}: ${reason}` };
@@ -100,7 +108,7 @@ async function rollback(
  * of several candidate paths was meant) is better than a bare `ENOENT`.
  */
 export async function relocateSessionCwd(host: CwdRelocationHost, newCwd: string): Promise<CwdRelocationResult> {
-	const manager = host.session.sessionManager;
+	const manager = host.sessionManager;
 	const resolved = path.resolve(newCwd);
 	const previousCwd = manager.getCwd();
 	if (resolved === path.resolve(previousCwd)) {

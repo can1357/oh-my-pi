@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type CwdRelocationHost, relocateSessionCwd } from "@oh-my-pi/pi-coding-agent/session/cwd-relocation";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -10,9 +11,14 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const cleanup: string[] = [];
 const originalCwd = process.cwd();
+// The relocation re-scopes the process, and `projectDir` is process-global: left
+// where the last move put it, every later test file in this process reads a
+// workspace that no longer exists.
+const originalProjectDir = getProjectDir();
 
 afterEach(async () => {
 	process.chdir(originalCwd);
+	setProjectDir(originalProjectDir);
 	for (const dir of cleanup.splice(0)) await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -113,14 +119,14 @@ function makeRelocationHost(state: FakeState, calls: string[]): CwdRelocationHos
 		},
 		setTitleSystemPrompt() {},
 		async refreshSkillsAndCommands() {},
-		sessionManager: {
-			getCwd: () => state.cwd,
-			captureState: () => ({ cwd: state.cwd, sessionDir: state.cwd, sessionId: "s" }),
-			async rollbackMove(snapshot: { cwd: string }) {
-				calls.push(`rollback:${snapshot.cwd}`);
-				if (state.rollbackFails) throw new Error("rollback denied");
-				state.cwd = snapshot.cwd;
-			},
+	};
+	const sessionManager = {
+		getCwd: () => state.cwd,
+		captureState: () => ({ cwd: state.cwd, sessionDir: state.cwd, sessionId: "s" }),
+		async rollbackMove(snapshot: { cwd: string }) {
+			calls.push(`rollback:${snapshot.cwd}`);
+			if (state.rollbackFails) throw new Error("rollback denied");
+			state.cwd = snapshot.cwd;
 		},
 	};
 	const settings = {
@@ -130,7 +136,11 @@ function makeRelocationHost(state: FakeState, calls: string[]): CwdRelocationHos
 			if (state.rescopeFails === "reload" && next === state.failReloadAt) throw new Error("reload failed");
 		},
 	};
-	return { session: session as unknown as AgentSession, settings: settings as unknown as Settings };
+	return {
+		session: session as unknown as AgentSession,
+		sessionManager: sessionManager as unknown as CwdRelocationHost["sessionManager"],
+		settings: settings as unknown as Settings,
+	};
 }
 
 describe("relocateSessionCwd", () => {
@@ -174,6 +184,26 @@ describe("relocateSessionCwd", () => {
 		expect(state.cwd).toBe(from);
 		expect(process.cwd()).toBe(from);
 		expect(calls).toEqual([`move:${to}`, `reload:${to}`, `rollback:${from}`, `reload:${from}`]);
+	});
+
+	it("re-scopes the host after a rollback too", async () => {
+		const from = await tempDir("omp-cwd-");
+		const to = await tempDir("omp-cwd-");
+		const state: FakeState = { cwd: from, rescopeFails: "reload", failReloadAt: to };
+		const calls: string[] = [];
+		const host: CwdRelocationHost = {
+			...makeRelocationHost(state, calls),
+			afterRescope: () => {
+				calls.push("after");
+			},
+		};
+
+		const result = await relocateSessionCwd(host, to);
+
+		expect(result.ok).toBe(false);
+		// The host rebuilt its command list and plugin roots for the attempted
+		// directory; those have to follow the session back.
+		expect(calls).toEqual([`move:${to}`, `reload:${to}`, `rollback:${from}`, `reload:${from}`, "after"]);
 	});
 
 	it("reports a failed rollback as fatal", async () => {

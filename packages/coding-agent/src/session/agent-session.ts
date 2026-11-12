@@ -12605,7 +12605,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * were and the thrown message says what went wrong.
 	 */
 	async changeWorkingDirectory(newCwd: string): Promise<string> {
-		const result = await relocateSessionCwd({ session: this, settings: this.settings }, newCwd);
+		const result = await relocateSessionCwd(
+			{ session: this, sessionManager: this.sessionManager, settings: this.settings },
+			newCwd,
+		);
 		if (!result.ok) throw new Error(result.error);
 		if (result.changed) await this.onCwdChanged?.(result.cwd, result.previousCwd);
 		return result.cwd;
