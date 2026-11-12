@@ -312,7 +312,8 @@ describe("LspMuxServer", () => {
 		});
 	}
 
-	it("watches the files a shared server registers when the client asked it to hand watching over", async () => {
+	/** Link a client that hands watching to the mux, register `**\/*.ts`, and return once the watch reports a write. */
+	async function watchingClient(): Promise<MuxTestClient> {
 		const { client } = await link();
 		await client.request("initialize", {
 			...initializeParams(),
@@ -331,10 +332,37 @@ describe("LspMuxServer", () => {
 			await Bun.sleep(200);
 			const { watchedFileChanges } = await state(client);
 			if (watchedFileChanges.some(change => change.type === FileChangeType.Created && written.has(change.uri)))
-				break;
+				return client;
 			if (Date.now() > deadline) throw new Error(`no Created among ${JSON.stringify(watchedFileChanges)}`);
 		}
+	}
+
+	it("watches the files a shared server registers when the client asked it to hand watching over", async () => {
+		await watchingClient();
 	}, 10_000);
+
+	it("forwards a client's own watched-file report once, without the watcher's echo", async () => {
+		const client = await watchingClient();
+		const own = path.join(tmpDir, "own.ts");
+		await Bun.write(own, "export {};\n");
+		client.notify("workspace/didChangeWatchedFiles", { changes: [{ uri: fileToUri(own), type: FileChangeType.Created }] });
+		// A later outside write proves the watcher has flushed past the client's own write.
+		const marker = path.join(tmpDir, "marker.ts");
+		await Bun.write(marker, "export {};\n");
+		const deadline = Date.now() + 5_000;
+		let changes: FileEvent[] = [];
+		while (!changes.some(change => change.uri === fileToUri(marker))) {
+			if (Date.now() > deadline) throw new Error(`marker never reported: ${JSON.stringify(changes)}`);
+			await Bun.sleep(100);
+			changes = (await state(client)).watchedFileChanges;
+		}
+		// Past the batch window: an echo would have landed by now.
+		await Bun.sleep(600);
+		changes = (await state(client)).watchedFileChanges;
+		expect(changes.filter(change => change.uri === fileToUri(own))).toEqual([
+			{ uri: fileToUri(own), type: FileChangeType.Created },
+		]);
+	}, 15_000);
 
 	it("leaves watching to a shared server whose client did not ask it to hand watching over", async () => {
 		const { client } = await link();
