@@ -506,16 +506,16 @@ impl Mpx {
 		let result =
 			result.and_then(|confirmed| released_button.map(|()| confirmed && released_keys));
 		self.uncertain = !matches!(result, Ok(true));
+		// Parking warps the virtual master itself, so it stays off the user's
+		// devices even when the route check below finds a slave moved.
+		if park_after && matches!(result, Ok(true)) {
+			self.park();
+		}
 		if self.sent {
 			self.route_held(true)?;
 		}
 		match result {
-			Ok(true) => {
-				if park_after {
-					self.park();
-				}
-				Ok(())
-			},
+			Ok(true) => Ok(()),
 			Ok(false) => Err(DesktopError::input_failed(
 				"the X server did not confirm virtual input or key release; delivery is uncertain, so \
 				 do not retry blindly; inspect the desktop first",
