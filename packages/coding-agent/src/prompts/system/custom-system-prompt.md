@@ -8,6 +8,7 @@ If a skill applies, you MUST read `skill://<name>` before proceeding.
 <skills>
 {{#each skills}}
 {{#unless @first}}
+
 {{/unless}}
 <skill name="{{name}}">
 {{description}}
