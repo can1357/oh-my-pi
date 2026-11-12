@@ -311,7 +311,7 @@ fn fresh_shell(
 	origin: &str,
 ) -> Result<Vproc, StoreError> {
 	let vpid = k.vpid(cx.store);
-	let mut ov = Overlay::default();
+	let mut ov = Overlay::fork(&mut k.root, cx.store, vp)?;
 	// Nothing of the parent shell shows through.
 	for (key, _) in state::scan(&k.root, cx.store, vp, Table::Var)? {
 		if let KeyBuf::Var(name) = key {

@@ -346,10 +346,20 @@ impl Overlay {
 		parent: &Vproc,
 	) -> Result<Self, StoreError> {
 		let mut overlay = parent.overlay.clone().unwrap_or_default();
-		if overlay.snapshot.is_none() {
-			overlay.snapshot = Some(root.fork_snapshot(store)?);
-		}
+		overlay.ensure_snapshot(root, store)?;
 		Ok(overlay)
+	}
+
+	/// Pin a store-less host submission before any queued script runs.
+	pub(super) fn ensure_snapshot(
+		&mut self,
+		root: &mut Root,
+		store: &mut dyn StateStore,
+	) -> Result<(), StoreError> {
+		if self.snapshot.is_none() {
+			self.snapshot = Some(root.fork_snapshot(store)?);
+		}
+		Ok(())
 	}
 
 	fn global<'a>(

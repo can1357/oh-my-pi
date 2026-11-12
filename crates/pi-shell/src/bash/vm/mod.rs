@@ -1736,7 +1736,8 @@ impl Shell {
 	/// Queue a script; see [`VprocSel`] for where it runs. A new subshell
 	/// starts from the shell's global state: it does not see the locals of
 	/// a function the shell is in the middle of (a host submits between
-	/// steps, at no particular point of the root's execution).
+	/// steps, at no particular point of the root's execution). Its root
+	/// bindings are pinned at adoption, before any queued script runs.
 	pub fn submit(&mut self, script: Script) -> RunId {
 		self.submit_from(0, script, None, None)
 	}
@@ -1783,7 +1784,13 @@ impl Shell {
 			VprocSel::NewSubshellWithStdio(stdio) => Some(stdio),
 		};
 		let p = &self.procs[parent];
-		let mut overlay = p.overlay.clone().unwrap_or_default();
+		let mut overlay = match store.as_deref_mut() {
+			Some(store) => Overlay::fork(&mut self.k.root, store, p).unwrap_or_else(|err| {
+				self.k.root.fail(err);
+				Overlay::default()
+			}),
+			None => p.overlay.clone().unwrap_or_default(),
+		};
 		if !script.foreign_env.is_empty() {
 			let mut foreign = match store.as_deref_mut() {
 				Some(store) => match state::record(store, p, Key::Misc(MiscKey::ForeignEnv)) {
@@ -1983,7 +1990,12 @@ impl Shell {
 	/// Move children created during the turn into the scheduler and reap
 	/// subshell vprocs that finished.
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
-		for p in &self.k.spawned {
+		for p in &mut self.k.spawned {
+			if let Some(overlay) = &mut p.overlay
+				&& let Err(err) = overlay.ensure_snapshot(&mut self.k.root, cx.store)
+			{
+				self.k.root.fail(err);
+			}
 			let rec = Record::Proc { parent: p.parent, status: None };
 			self
 				.k
