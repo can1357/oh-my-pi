@@ -1,5 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { span } from "../native/describe";
 import { isNativeRendering } from "../native/state";
@@ -131,29 +131,33 @@ export function imageLinksEnabled(): boolean {
 	return isNativeRendering() ? isNativeLinkEnabled() : isHyperlinkEnabled();
 }
 
-/**
- * The file a transcript image opens: `sourcePath` when it was read from one, else a
- * blob copy of its bytes written through the host. Undefined when links are disabled
- * or no file exists, so a disabled policy never writes blobs.
- */
-export function transcriptImageLink(
+/** The local file a transcript image can open or display, regardless of hyperlink settings. */
+export function transcriptImagePath(
 	image: Pick<ImageContent, "data" | "mimeType">,
 	sourcePath?: string,
 ): string | undefined {
-	if (!imageLinksEnabled()) return undefined;
 	if (sourcePath) return sourcePath;
 	if (!hostBlobWriter || !image.data) return undefined;
 	const key = `${image.mimeType}:${Bun.hash(image.data)}`;
 	const cached = blobLinks.get(key);
 	if (cached) return cached;
-	const link = materializeImageReferenceLink({ type: "image", ...image }, 1, hostBlobWriter);
-	if (!link) return undefined;
+	const filePath = materializeImageReferenceLink({ type: "image", ...image }, 1, hostBlobWriter);
+	if (!filePath) return undefined;
 	if (blobLinks.size >= BLOB_LINK_CACHE_LIMIT) {
 		const oldest = blobLinks.keys().next();
 		if (!oldest.done) blobLinks.delete(oldest.value);
 	}
-	blobLinks.set(key, link);
-	return link;
+	blobLinks.set(key, filePath);
+	return filePath;
+}
+
+/** The file a transcript image opens when links are enabled; no blob is written when disabled. */
+export function transcriptImageLink(
+	image: Pick<ImageContent, "data" | "mimeType">,
+	sourcePath?: string,
+): string | undefined {
+	if (!imageLinksEnabled()) return undefined;
+	return transcriptImagePath(image, sourcePath);
 }
 
 /** `text` (an image's placeholder) as an OSC 8 link to the image's file; plain when hyperlinks are off or no file exists. */
@@ -165,6 +169,12 @@ export function linkedImageText(
 	if (!isHyperlinkEnabled()) return text;
 	const target = transcriptImageLink(image, sourcePath);
 	return target ? fileHyperlink(target, text) : text;
+}
+
+/** Link a visible transcript image path while keeping terminal controls out of its label. */
+export function linkedImagePathText(imagePath: string, image: Pick<ImageContent, "data" | "mimeType">): string {
+	const label = sanitizeText(imagePath).replaceAll("\n", "\\n").replaceAll("\t", "\\t");
+	return linkedImageText(`Image file: ${label}`, image, imagePath);
 }
 
 /** Native counterpart of {@link linkedImageText}: a span linking to the image's file when one exists. */

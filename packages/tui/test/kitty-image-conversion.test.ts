@@ -1,11 +1,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
-import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { ImageProtocol, setTerminalImageProtocol, TERMINAL, type TUI } from "@oh-my-pi/pi-tui";
+import { setImageBlobWriter } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 
 const IMAGE: ImageContent = {
 	type: "image",
@@ -165,6 +168,45 @@ describe("Kitty PNG conversion cache", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		setTerminalImageProtocol(originalProtocol);
+	});
+	it("prints local image paths for assistant, live tool, and shell results with hyperlinks disabled", () => {
+		applyHyperlinkSetting("off");
+		const filePath = "/tmp/omp-generated-image.png";
+		const disposeWriter = setImageBlobWriter(() => ({ displayPath: filePath }));
+		const image = { ...IMAGE, mimeType: "image/png" };
+		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn(), resetDisplay: vi.fn() };
+		try {
+			for (const protocol of [ImageProtocol.Kitty, null]) {
+				setTerminalImageProtocol(protocol);
+				const assistant = new AssistantMessageComponent(finishedMessage());
+				assistant.setToolResultImages("call-1", [image]);
+				const tool = new ToolExecutionComponent("generate_image", {}, {}, undefined, ui);
+				tool.updateResult({ content: [image] }, false);
+				const shell = new BashExecutionComponent("generate image", ui as unknown as TUI, false);
+				shell.setComplete(0, false, { images: [image] });
+				for (const component of [assistant, tool, shell]) {
+					expect(Bun.stripANSI(component.render(80).join("\n"))).toContain(`Image file: ${filePath}`);
+				}
+			}
+		} finally {
+			disposeWriter();
+			applyHyperlinkSetting("auto");
+		}
+	});
+
+	it("cleans control-byte image path labels without changing their link target", () => {
+		applyHyperlinkSetting("always");
+		const sourcePath = "/tmp/image\x1b[?1049h\nname.png";
+		try {
+			const component = new AssistantMessageComponent(finishedMessage());
+			component.setToolResultImages("call-1", [{ ...IMAGE, mimeType: "image/png" }], sourcePath);
+			const output = component.render(120).join("\n");
+			expect(output).not.toContain("\x1b[?1049h");
+			expect(output).toContain("image%1B%5B%3F1049h%0Aname.png");
+			expect(Bun.stripANSI(output)).toContain("Image file: /tmp/image\\nname.png");
+		} finally {
+			applyHyperlinkSetting("auto");
+		}
 	});
 
 	it("converts each tool-result image once across re-delivery and rebuilt components", async () => {

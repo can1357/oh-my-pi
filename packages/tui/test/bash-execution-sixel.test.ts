@@ -3,6 +3,8 @@ import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeWithOptionalSixelPassthrough } from "@oh-my-pi/pi-tui/render/sixel";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { setImageBlobWriter } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 const SIXEL = "\x1bPqabc\x1b\\";
@@ -29,6 +31,28 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		else Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = originalAllowPassthrough;
 	});
 
+	it("does not materialize or list file paths for hidden result images", () => {
+		applyHyperlinkSetting("off");
+		let writes = 0;
+		const disposeWriter = setImageBlobWriter(() => {
+			writes++;
+			return { displayPath: "/tmp/hidden-image.png" };
+		});
+		try {
+			const component = new BashExecutionComponent("generate image", ui, false);
+			component.setComplete(0, false, {
+				images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+				showImages: false,
+			});
+			const output = Bun.stripANSI(component.render(100).join("\n"));
+			expect(output).not.toContain("Image file:");
+			expect(output).toContain("[image/png]");
+			expect(writes).toBe(0);
+		} finally {
+			disposeWriter();
+			applyHyperlinkSetting("auto");
+		}
+	});
 	it("preserves SIXEL output when passthrough gates are enabled", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";

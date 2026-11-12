@@ -3,7 +3,12 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { linkedImageText, setImageBlobWriter, transcriptImageLink } from "@oh-my-pi/pi-tui/prompt/image-references";
+import {
+	linkedImageText,
+	setImageBlobWriter,
+	transcriptImageLink,
+	transcriptImagePath,
+} from "@oh-my-pi/pi-tui/prompt/image-references";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -52,6 +57,17 @@ describe("transcript image links", () => {
 		expect(first).toContain(url.pathToFileURL(path.resolve("blobs", "copy.png")).href);
 		expect(second).toBe(first);
 		expect(writes).toBe(1);
+	});
+	it("keeps a copyable local path when hyperlinks are disabled and reuses it when enabled", () => {
+		applyHyperlinkSetting("off");
+		installWriter();
+		const filePath = transcriptImagePath(IMAGE);
+		expect(filePath).toBe(path.resolve("blobs", "copy.png"));
+		expect(transcriptImageLink(IMAGE)).toBeUndefined();
+		expect(transcriptImagePath(IMAGE)).toBe(filePath);
+		expect(writes).toBe(1);
+		applyHyperlinkSetting("always");
+		expect(transcriptImageLink(IMAGE)).toBe(filePath);
 	});
 
 	it("leaves the placeholder plain when no file can back it", () => {

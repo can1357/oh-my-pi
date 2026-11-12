@@ -45,7 +45,12 @@ import { plainLine, plainText } from "../native/spans";
 import { diagnosticsSection, displayPath, resultText, toolHead } from "../tools/native-view";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
-import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
+import {
+	imageLinksEnabled,
+	linkedImagePathText,
+	linkedImageText,
+	transcriptImagePath,
+} from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from "../tools/edit";
 import { taskCardAgentIds } from "../tools/task";
@@ -416,7 +421,7 @@ export class ToolExecutionComponent extends Container {
 	#usesContentBox = false;
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
 	#imageComponents: Image[] = [];
-	#imageSpacers: Spacer[] = [];
+	#imageExtras: (Spacer | Text)[] = [];
 	/** The renderer's {@link ToolRenderer.figure} drawing; kept across rebuilds while its language is unchanged, so it redraws in place and its raster survives them. */
 	#figure: FenceFigure | undefined;
 	readonly #instanceId = ++toolExecutionInstanceSeq;
@@ -2084,10 +2089,10 @@ export class ToolExecutionComponent extends Container {
 			this.removeChild(img);
 		}
 		this.#imageComponents = [];
-		for (const spacer of this.#imageSpacers) {
-			this.removeChild(spacer);
+		for (const extra of this.#imageExtras) {
+			this.removeChild(extra);
 		}
-		this.#imageSpacers = [];
+		this.#imageExtras = [];
 		this.#syncFigure();
 
 		if (this.#result) {
@@ -2096,9 +2101,11 @@ export class ToolExecutionComponent extends Container {
 
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
-				if (TERMINAL.imageProtocol && this.#showImages && img.data && img.mimeType) {
+				if (!this.#showImages || !img.data || !img.mimeType) continue;
+				const source: ImageContent = { type: "image", data: img.data, mimeType: img.mimeType };
+				const imagePath = transcriptImagePath(source, sourcePath);
+				if (TERMINAL.imageProtocol) {
 					// Use converted PNG for Kitty protocol if available
-					const source: ImageContent = { type: "image", data: img.data, mimeType: img.mimeType };
 					const converted =
 						TERMINAL.imageProtocol === ImageProtocol.Kitty && img.mimeType !== "image/png"
 							? (this.#kittyConverted.get(imagePayloadKey(source)) ?? cachedPngConversion(source))
@@ -2106,28 +2113,30 @@ export class ToolExecutionComponent extends Container {
 					const imageData = converted?.data ?? img.data;
 					const imageMimeType = converted?.mimeType ?? img.mimeType;
 
-					// For Kitty, skip non-PNG images that haven't been converted yet
-					if (TERMINAL.imageProtocol === ImageProtocol.Kitty && imageMimeType !== "image/png") {
-						continue;
+					if (TERMINAL.imageProtocol !== ImageProtocol.Kitty || imageMimeType === "image/png") {
+						const spacer = new Spacer(1);
+						this.addChild(spacer);
+						this.#imageExtras.push(spacer);
+						const imageComponent = new Image(
+							imageData,
+							imageMimeType,
+							{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
+							{
+								...resolveImageOptions(),
+								sourcePath: imagePath,
+								budget: this.#ui.imageBudget,
+								imageKey: `te${this.#instanceId}:${i}`,
+								requestRender: () => this.#ui.requestRender(),
+							},
+						);
+						this.#imageComponents.push(imageComponent);
+						this.addChild(imageComponent);
 					}
-
-					const spacer = new Spacer(1);
-					this.addChild(spacer);
-					this.#imageSpacers.push(spacer);
-					const imageComponent = new Image(
-						imageData,
-						imageMimeType,
-						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{
-							...resolveImageOptions(),
-							sourcePath,
-							budget: this.#ui.imageBudget,
-							imageKey: `te${this.#instanceId}:${i}`,
-							requestRender: () => this.#ui.requestRender(),
-						},
-					);
-					this.#imageComponents.push(imageComponent);
-					this.addChild(imageComponent);
+				}
+				if (imagePath) {
+					const caption = new Text(theme.fg("toolOutput", linkedImagePathText(imagePath, source)), 1, 0);
+					this.addChild(caption);
+					this.#imageExtras.push(caption);
 				}
 			}
 		}
