@@ -13,11 +13,11 @@ describe("omp agents unpack", () => {
 		if (dir) await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("keeps the reviewers' inheritContext: false opt-out, since an unpacked agent overrides the bundled one", async () => {
+	it("keeps the inheritContext: false opt-out, since an unpacked agent overrides the bundled one", async () => {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agents-unpack-"));
 		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		await runAgentsCommand({ action: "unpack", flags: { dir, json: true } });
-		for (const name of ["reviewer", "security-reviewer"]) {
+		for (const name of ["reviewer", "security-reviewer", "seance"]) {
 			const { frontmatter } = parseFrontmatter(await Bun.file(path.join(dir, `${name}.md`)).text());
 			expect(parseAgentFields(frontmatter)?.inheritContext).toBe(false);
 		}

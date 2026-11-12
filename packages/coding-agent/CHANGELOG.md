@@ -17,7 +17,7 @@
 
 - Added the Gemini Decision 1 judge (`google/gemini-decision-1`) for the `judge` role, and `models.yml` accepts the `google-decisions` API ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - `ssh://` host listing, `ssh://` autocomplete and `/ssh list` now include the `Host` aliases from `~/.ssh/config` and `/etc/ssh/ssh_config` (following `Include`); `ssh.json` entries win on a name clash
-- `task.inheritContext` (default off) offers an `inheritContext` flag on each task item; a flagged subagent starts with the parent's most recent ~28k characters of conversation as background from another agent, with a text list of the exact hashes, paths, flags, and numbers in that excerpt, and secrets redacted. Vision models receive the excerpt as up to two snapcompact image frames rendered per request; text-only models, or sessions with `images.blockImages`, get it as text. Agents whose frontmatter sets `inheritContext: false`, including the bundled `reviewer` and `security-reviewer`, ignore the flag ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
+- Added `task.inheritContext` (default off): a task item can set `inheritContext: true` to start its subagent with a redacted tail of the parent conversation; agents with `inheritContext: false`, including the bundled reviewers and `seance`, ignore it ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 

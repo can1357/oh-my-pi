@@ -9,6 +9,7 @@ import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as imageBudget from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import * as settingsStream from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
 import type { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -144,4 +145,22 @@ describe("inherited context through a real child session", () => {
 		},
 		60_000,
 	);
+
+	it("falls back to the text tail when the inline-image byte clamp drops its frames", async () => {
+		using directory = TempDir.createSync("@omp-task-inherit-");
+		// What a host whose byte budget holds no frame does: the oldest-first clamp leaves the turn's text only.
+		vi.spyOn(imageBudget, "clampProviderContextImageBytes").mockImplementation(context => ({
+			...context,
+			messages: context.messages.map(message =>
+				message.role === "user" && message.inheritedContext === true && Array.isArray(message.content)
+					? { ...message, content: message.content.filter(block => block.type !== "image") }
+					: message,
+			),
+		}));
+		const context = await firstChildRequest(directory, "none");
+		const turn = context.messages.find(message => message.role === "user" && message.inheritedContext === true);
+		const content = blocks(turn!);
+		expect(content.every(block => block.type === "text")).toBe(true);
+		expect(content.some(block => block.text?.includes(CODEWORD))).toBe(true);
+	}, 60_000);
 });
