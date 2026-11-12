@@ -131,7 +131,7 @@ describe("builtinCredentialSecretEntries", () => {
 		expect(providerView).not.toContain("BEGIN RSA PRIVATE KEY");
 		expect(providerView).not.toContain("END RSA PRIVATE KEY");
 		expect(providerView).not.toContain(bodyLine);
-		expect(providerView.match(/\$\$[^$]+\$\$/g)).toHaveLength(1);
+		expect(providerView.split("\n")).toHaveLength(3);
 		expect(providerView.startsWith("before line\n")).toBe(true);
 		expect(providerView.endsWith("\nafter line")).toBe(true);
 		const args = deobfuscateToolArguments(obfuscator, { old_string: providerView });

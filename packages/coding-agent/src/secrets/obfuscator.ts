@@ -3,10 +3,11 @@ import { deepWalkStrings } from "./json-strings";
 import {
 	buildPlaceholder,
 	defaultPlaceholderKey,
+	isPlaceholderWords,
 	labelShowsSecret,
 	MIN_OBFUSCATE_SECRET_LEN,
-	PLACEHOLDER_RE,
 	PLACEHOLDER_WORDS,
+	PLACEHOLDER_WORDS_RE,
 	placeholderWords,
 	sanitizeSecretFriendlyName,
 } from "./placeholder";
@@ -33,7 +34,7 @@ interface CompiledRegexEntry {
 /** The native scanner's answer for one text (`SecretObfuscator#nativeScan`). */
 interface NativeScan {
 	text: string;
-	/** A configured literal or `$$` occurs. */
+	/** A configured literal occurs. */
 	literal: boolean;
 	/** Regex entries that match the text. */
 	candidates: ReadonlySet<CompiledRegexEntry>;
@@ -49,15 +50,27 @@ interface Span {
 
 const NO_CANDIDATES: ReadonlySet<CompiledRegexEntry> = new Set();
 
+const ALNUM = /[A-Za-z0-9]/;
+/** A run that could still grow into placeholder words: lowercase first word, camelCased after. */
+const WORDS_PREFIX = /^[a-z]+(?:[A-Z][a-z]*)*$/;
+
 /**
- * Ranges of placeholder-shaped tokens in `text`. Every one is opaque, minted
- * here or not, so encoding is idempotent: placeholder-form text, including a
- * placeholder whose plaintext has left the session, encodes to itself.
+ * Ranges of placeholders in `text`: runs of list words, minted here or not,
+ * with the `Name_` before them. Rules never match inside them, so encoding is
+ * idempotent, including for a placeholder whose plaintext left the session.
  */
 function placeholderRanges(text: string): Array<readonly [number, number]> {
-	if (!text.includes("$$")) return [];
 	const ranges: Array<readonly [number, number]> = [];
-	for (const match of text.matchAll(PLACEHOLDER_RE)) ranges.push([match.index, match.index + match[0].length]);
+	for (const match of text.matchAll(PLACEHOLDER_WORDS_RE)) {
+		if (!isPlaceholderWords(match[0])) continue;
+		let start = match.index;
+		if (text[start - 1] === "_") {
+			let nameStart = start - 1;
+			while (nameStart > 0 && ALNUM.test(text[nameStart - 1]!)) nameStart--;
+			if (nameStart < start - 1) start = nameStart;
+		}
+		ranges.push([start, match.index + match[0].length]);
+	}
 	return ranges;
 }
 
@@ -65,13 +78,14 @@ function placeholderRanges(text: string): Array<readonly [number, number]> {
  * Encodes local plaintext for a provider and decodes provider text back.
  *
  * `obfuscate` turns configured literals and regex-rule matches into
- * placeholders (`$$Name_correctHorseStapleBattery$$`, reversible) or one-way
- * replacements. It is idempotent: placeholder-shaped tokens are opaque, so
- * text the model wrote from placeholders encodes to itself. `deobfuscate`
- * turns placeholders back into secrets where a value is used locally (tool
- * execution, display). The only state is the placeholder map, which every
- * encode (or {@link learn}) of the plaintext rebuilds; placeholders are a
- * keyed digest of the secret, so they are the same in every session.
+ * placeholders (`GitHubToken_correctHorseStapleBattery`, reversible) or
+ * one-way replacements. It is idempotent: rules never match inside
+ * placeholders, so text the model wrote from placeholders encodes to itself.
+ * `deobfuscate` turns placeholders back into secrets where a value is used
+ * locally (tool execution, display). The only state is the placeholder map,
+ * which every encode (or {@link learn}) of the plaintext rebuilds;
+ * placeholders are a keyed digest of the secret, so they are the same in
+ * every session.
  */
 export class SecretObfuscator {
 	readonly #regexEntries: readonly CompiledRegexEntry[];
@@ -79,8 +93,10 @@ export class SecretObfuscator {
 	readonly #scanner: SecretScanner;
 	/** Literal secret → replacement (a placeholder in obfuscate mode), longest first. */
 	#literals: Array<[string, string]> = [];
-	/** Words of every placeholder this instance minted → the secret. */
-	readonly #secretByWords = new Map<string, string>();
+	/** Words of every placeholder this instance minted → the secret, and the `Name_` written before the words. */
+	readonly #secretByWords = new Map<string, { secret: string; prefix: string }>();
+	/** Every friendly name a placeholder can carry, sanitized. */
+	readonly #friendlyNames = new Set<string>();
 	/** Secret → its placeholder. */
 	readonly #placeholderBySecret = new Map<string, string>();
 	#key: string | undefined;
@@ -103,6 +119,10 @@ export class SecretObfuscator {
 	constructor(entries: SecretEntry[], key: string | (() => string) = defaultPlaceholderKey()) {
 		const regexEntries: CompiledRegexEntry[] = [];
 		for (const entry of entries) {
+			const name = entry.friendlyName === undefined ? undefined : sanitizeSecretFriendlyName(entry.friendlyName);
+			if (name) this.#friendlyNames.add(name);
+		}
+		for (const entry of entries) {
 			if (entry.type !== "regex") continue;
 			regexEntries.push({
 				regex: compileSecretRegex(entry.content, entry.flags),
@@ -114,7 +134,7 @@ export class SecretObfuscator {
 		this.#regexEntries = regexEntries;
 		this.#scanner = new SecretScanner(
 			regexEntries.map(entry => ({ pattern: entry.regex.source, flags: entry.regex.flags })),
-			["$$"],
+			[],
 		);
 		if (typeof key === "function") this.#keyProvider = key;
 		else this.#setKey(key);
@@ -167,10 +187,49 @@ export class SecretObfuscator {
 
 	/** Restore every placeholder this instance knows; unknown ones stay as written. */
 	deobfuscate(text: string): string {
-		if (!this.#hasAny || !text.includes("$$")) return text;
-		return text.replace(PLACEHOLDER_RE, (token, _name: string | undefined, words: string) => {
-			return this.#secretByWords.get(words) ?? token;
-		});
+		if (this.#secretByWords.size === 0) return text;
+		let out = "";
+		let cursor = 0;
+		for (const match of text.matchAll(PLACEHOLDER_WORDS_RE)) {
+			const known = this.#secretByWords.get(match[0]);
+			if (known === undefined) continue;
+			let start = match.index;
+			const before = start - known.prefix.length;
+			if (
+				known.prefix &&
+				before >= cursor &&
+				text.startsWith(known.prefix, before) &&
+				(before === 0 || !ALNUM.test(text[before - 1]!))
+			) {
+				start = before;
+			}
+			out += text.slice(cursor, start) + known.secret;
+			cursor = match.index + match[0].length;
+		}
+		return cursor === 0 ? text : out + text.slice(cursor);
+	}
+
+	/**
+	 * Where the trailing run of a streaming `text` that could still become a
+	 * placeholder starts (`text.length` when none could): a lowercase
+	 * camel-word prefix, or a known friendly name's `Name_` (or a prefix of
+	 * it) with one. Text before it is safe to decode and show.
+	 */
+	pendingPlaceholderStart(text: string): number {
+		const run = /[A-Za-z0-9_]*$/.exec(text)![0];
+		const runStart = text.length - run.length;
+		for (let at = 0; at < run.length; at = run.indexOf("_", at) + 1 || run.length) {
+			const tail = run.slice(at);
+			if (WORDS_PREFIX.test(tail)) return runStart + at;
+			for (const name of this.#friendlyNames) {
+				const head = `${name}_`;
+				if (head.startsWith(tail)) return runStart + at;
+				if (tail.startsWith(head) && (tail.length === head.length || WORDS_PREFIX.test(tail.slice(head.length)))) {
+					return runStart + at;
+				}
+			}
+		}
+		return text.length;
 	}
 
 	/** Deep-walk an object, deobfuscating string values. */
@@ -366,8 +425,9 @@ export class SecretObfuscator {
 			words = placeholderWords(key, secret, count);
 		}
 		const label = friendlyName === undefined || labelShowsSecret(friendlyName, secret) ? undefined : friendlyName;
-		const placeholder = buildPlaceholder(words, label && sanitizeSecretFriendlyName(label));
-		this.#secretByWords.set(words, secret);
+		const name = label && sanitizeSecretFriendlyName(label);
+		const placeholder = buildPlaceholder(words, name);
+		this.#secretByWords.set(words, { secret, prefix: name ? `${name}_` : "" });
 		this.#placeholderBySecret.set(secret, placeholder);
 		return placeholder;
 	}
@@ -399,7 +459,7 @@ export class SecretObfuscator {
 		if (this.#literals.some(([known]) => known === secret)) return;
 		this.#literals.push([secret, replacement]);
 		this.#literals.sort((a, b) => b[0].length - a[0].length);
-		this.#scanner.setLiterals(["$$", ...this.#literals.map(([literal]) => literal)]);
+		this.#scanner.setLiterals(this.#literals.map(([literal]) => literal));
 		this.#lastNativeScan = undefined;
 		this.#batchNativeScans = undefined;
 		this.#previousBatchNativeScans = undefined;

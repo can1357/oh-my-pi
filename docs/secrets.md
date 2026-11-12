@@ -19,7 +19,7 @@ secrets:
    - Built-in reversible regexes for common credential shapes that appear only in session content or tool results: GitHub, GitLab, OpenAI, and Anthropic tokens, AWS access keys, Google API keys, Slack tokens, npm tokens, Stripe secret and restricted keys and webhook secrets, Hugging Face tokens, SendGrid keys, JWTs, Bearer header tokens, and PEM private key blocks
    - Passwords embedded in connection-URL environment values — any variable holding a `scheme://user:password@host`-style value (for example `DATABASE_URL`) has its password registered regardless of the variable name when it is at least 8 characters long. Both raw and percent-decoded forms are collected when they meet that limit.
 
-2. Everything sent to the provider (messages of every role, native replay plaintext, compaction file lists) is encoded on its way out: matching values become deterministic placeholders such as `$$correctHorseStapleBattery$$` or `$$GitHubToken_correctHorseStapleBattery$$`. Encoding is idempotent, since placeholder-shaped tokens are never re-encoded.
+2. Everything sent to the provider (messages of every role, native replay plaintext, compaction file lists) is encoded on its way out: matching values become deterministic placeholders such as `correctHorseStapleBattery` or `GitHubToken_correctHorseStapleBattery`, four or more camelCased words from a fixed list with an optional friendly-name prefix. Encoding is idempotent: regex rules never match inside a placeholder (configured literals are still found anywhere).
 
 3. What the model writes from placeholders (assistant text, thinking, tool calls, and branch/compaction summaries) is stored as written and encodes to itself, so it replays byte-identical and thinking/tool-call signatures and prompt caches stay valid. Model output that still holds a value (written while redaction was off, or before the secret was configured) is encoded on replay, and the signature bound to the changed block is dropped. Placeholders are restored only where values are used or shown: before a tool executes, in the transcript display, and in exports. Replace-mode substitutions are one-way and are not restored.
 
@@ -27,7 +27,7 @@ Two modes control what happens to each secret:
 
 | Mode                  | Behavior                                                                                      | Reversible |
 | --------------------- | --------------------------------------------------------------------------------------------- | ---------- |
-| `obfuscate` (default) | Replaced with a deterministic `$$words$$` or `$$FriendlyName_words$$` placeholder              | Yes        |
+| `obfuscate` (default) | Replaced with a deterministic `words` or `FriendlyName_words` placeholder                     | Yes        |
 | `replace`             | Replaced with the configured `replacement`, or a deterministic same-length value when omitted | No         |
 
 Obfuscate-mode plain values and regex matches shorter than 8 characters are ignored to avoid redacting ordinary short words. Replace mode can handle short values; a replace-mode regex with no custom replacement is rejected only when every possible 1–2 character match would be impossible to redact to a distinct stable value.
@@ -82,7 +82,7 @@ Each entry in the array has these fields:
   friendlyName: GitHub Token
 ```
 
-This produces placeholders shaped like `$$GitHubToken_correctHorseStapleBattery$$`. The friendly name keeps its letters and digits (case preserved), is capped at 32 characters, and is omitted if nothing remains. Invalid optional `friendlyName` metadata does not disable the secret entry; the secret still obfuscates with an unlabeled placeholder. The label is cosmetic: a placeholder is identified by its words. The label is shown to the model as written, so never put a secret in it; a label that spells out its own secret is dropped.
+This produces placeholders shaped like `GitHubToken_correctHorseStapleBattery`. The friendly name keeps its letters and digits (case preserved), is capped at 32 characters, and is omitted if nothing remains. Invalid optional `friendlyName` metadata does not disable the secret entry; the secret still obfuscates with an unlabeled placeholder. The label is cosmetic: a placeholder is identified by its words. The label is shown to the model as written, so never put a secret in it; a label that spells out its own secret is dropped.
 
 Native Responses replay plaintext is obfuscated too, including message text, tool arguments/results, and file/web-search text. Dynamic definitions in `mcp_list_tools`, `tool_search_output`, and `additional_tools` also redact tool/namespace descriptions, shell skill descriptions, MCP annotations, and schema descriptive annotations and examples. Schema constraints (including `enum`/`const`), execution defaults, unknown schema extensions, identifiers, authentication/routing settings, and grammars remain unchanged and outside text redaction. Static `context.tools`, system prompts, and image/file bytes are unchanged.
 

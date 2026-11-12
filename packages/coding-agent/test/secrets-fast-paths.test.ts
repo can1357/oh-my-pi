@@ -46,7 +46,7 @@ describe("SecretObfuscator text that is only placeholders", () => {
 	it("leaves already-redacted text unchanged", () => {
 		const obfuscator = new SecretObfuscator(entries);
 		const redacted = obfuscator.obfuscate("use OTHERSECRET now");
-		expect(redacted).toMatch(/^use \$\$TOKABC123_[a-z]+(?:[A-Z][a-z]+){3}\$\$ now$/);
+		expect(redacted).toMatch(/^use TOKABC123_[a-z]+(?:[A-Z][a-z]+){3} now$/);
 		expect(obfuscator.obfuscate(redacted)).toBe(redacted);
 	});
 

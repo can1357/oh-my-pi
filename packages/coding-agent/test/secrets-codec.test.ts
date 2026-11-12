@@ -43,7 +43,7 @@ describe("secret placeholders", () => {
 		const second = new SecretObfuscator(entries, KEY).obfuscate("pw=hunter2-database-pass");
 		const otherKey = new SecretObfuscator(entries, `${KEY}-other`).obfuscate("pw=hunter2-database-pass");
 
-		expect(first).toMatch(new RegExp(`^pw=\\$\\$DbPass_${WORDS}\\$\\$$`));
+		expect(first).toMatch(new RegExp(`^pw=DbPass_${WORDS}$`));
 		expect(second).toBe(first);
 		expect(otherKey).not.toBe(first);
 	});
@@ -54,7 +54,7 @@ describe("secret placeholders", () => {
 			KEY,
 		);
 
-		expect(obfuscator.obfuscate("shown-label-123")).toMatch(new RegExp(`^\\$\\$${WORDS}\\$\\$$`));
+		expect(obfuscator.obfuscate("shown-label-123")).toMatch(new RegExp(`^${WORDS}$`));
 	});
 
 	it("does not restore tokens in the retired hash format", () => {
@@ -67,11 +67,33 @@ describe("secret placeholders", () => {
 
 	it("redacts a configured secret written inside a placeholder-shaped token", () => {
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: "ghp1234567890abcdefXYZ" }], KEY);
+		const input = "a ghp1234567890abcdefXYZ_abandonAbilityAbleAbout b";
 
-		const output = obfuscator.obfuscate("a $$ghp1234567890abcdefXYZ_fooBarBazQux$$ b");
+		const output = obfuscator.obfuscate(input);
 
 		expect(output).not.toContain("ghp1234567890abcdefXYZ");
-		expect(obfuscator.deobfuscate(output)).toBe("a $$ghp1234567890abcdefXYZ_fooBarBazQux$$ b");
+		expect(obfuscator.deobfuscate(output)).toBe(input);
+	});
+
+	it("still lets rules match camelCase that is not made of placeholder words", () => {
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "[A-Za-z]{20,}" }], KEY);
+
+		expect(obfuscator.obfuscate("id getUserAccountSettingsQuickly")).not.toContain("getUserAccountSettingsQuickly");
+	});
+
+	it("holds back only a streamed tail that could still become a placeholder", () => {
+		const obfuscator = new SecretObfuscator(
+			[{ type: "plain", content: "hunter2-database-pass", friendlyName: "GitHubToken" }],
+			KEY,
+		);
+		const pending = (text: string) => text.slice(obfuscator.pendingPlaceholderStart(text));
+
+		expect(pending("see GitHu")).toBe("GitHu");
+		expect(pending("see GitHubToken_correctHo")).toBe("GitHubToken_correctHo");
+		expect(pending("see correctHo")).toBe("correctHo");
+		expect(pending("see Hello")).toBe("");
+		expect(pending("see 42")).toBe("");
+		expect(pending("done. ")).toBe("");
 	});
 });
 

@@ -12,6 +12,7 @@ import wordList from "./words.txt" with { type: "text" };
  * each word carries 11 bits.
  */
 const WORDS = wordList.trim().split("\n");
+const WORD_SET = new Set(WORDS);
 const BITS_PER_WORD = 11;
 /** Words in a placeholder: 44 bits of a keyed digest, so unrelated secrets practically never share one. */
 export const PLACEHOLDER_WORDS = 4;
@@ -52,13 +53,26 @@ export function placeholderWords(key: string, secret: string, count = PLACEHOLDE
 	return words;
 }
 
-/** `$$Name_words$$`, or `$$words$$` without a friendly name. */
+/** `Name_words`, or bare `words` without a friendly name. */
 export function buildPlaceholder(words: string, friendlyName?: string): string {
-	return friendlyName ? `$$${friendlyName}_${words}$$` : `$$${words}$$`;
+	return friendlyName ? `${friendlyName}_${words}` : words;
 }
 
-/** Placeholder tokens; group 1 is the friendly name, group 2 the words that identify the secret. */
-export const PLACEHOLDER_RE = /\$\$(?:([A-Za-z0-9]+)_)?([a-z]+(?:[A-Z][a-z]+){3,})\$\$/g;
+/**
+ * Runs of four or more camelCased words bounded by non-alphanumerics (`_`
+ * included, so `Name_words` yields the words). A placeholder's words; its
+ * friendly name, if any, is the `Name_` right before them. Decoding only
+ * replaces words this codec minted, so ordinary camelCase never restores.
+ */
+export const PLACEHOLDER_WORDS_RE = /(?<![A-Za-z0-9])[a-z]+(?:[A-Z][a-z]+){3,}(?![A-Za-z0-9])/g;
+
+/** Whether a {@link PLACEHOLDER_WORDS_RE} run is made only of list words, as every placeholder's is. */
+export function isPlaceholderWords(words: string): boolean {
+	for (const word of words.split(/(?=[A-Z])/)) {
+		if (!WORD_SET.has(word.toLowerCase())) return false;
+	}
+	return true;
+}
 
 /** Normalize a friendly name into the model-visible placeholder prefix: letters and digits, case kept. */
 export function sanitizeSecretFriendlyName(name: string): string | undefined {
@@ -97,16 +111,4 @@ export function secretEntryNeedsPlaceholderKey(entry: SecretEntry): boolean {
 /** Whether any of `entries` needs the persisted placeholder key (see {@link secretEntryNeedsPlaceholderKey}). */
 export function secretEntriesNeedPlaceholderKey(entries: SecretEntry[]): boolean {
 	return entries.some(secretEntryNeedsPlaceholderKey);
-}
-
-const PENDING_PLACEHOLDER_SUFFIX_RE = /\$\$[A-Za-z0-9_]*$|\$$/;
-
-// Withhold a trailing run that could be the start of a placeholder from streamed
-// deltas, so a partial token is never emitted before deobfuscation can replace
-// it. A lone trailing delimiter character is always buffered because it can open
-// a placeholder; the final non-streamed flush re-emits it when no token follows.
-export function stripPendingSecretPlaceholderSuffix(text: string): string {
-	const pendingPlaceholderStart = text.match(PENDING_PLACEHOLDER_SUFFIX_RE);
-	if (pendingPlaceholderStart?.index === undefined) return text;
-	return text.slice(0, pendingPlaceholderStart.index);
 }

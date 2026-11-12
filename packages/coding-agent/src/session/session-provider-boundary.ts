@@ -11,7 +11,6 @@ import type { Settings } from "../config/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
@@ -202,11 +201,14 @@ export class SessionProviderBoundary {
 		return obfuscator.deobfuscate(text);
 	}
 
-	/** Deobfuscates a streamed delta and removes an incomplete secret placeholder suffix. */
+	/**
+	 * Deobfuscates streamed provider text up to a trailing run that could still
+	 * become a placeholder; that run waits for more text (or the final flush).
+	 */
 	deobfuscateDelta(text: string): string {
-		const deobfuscated = this.deobfuscateText(text);
-		if (!this.#host.obfuscator()?.hasSecrets()) return deobfuscated;
-		return stripPendingSecretPlaceholderSuffix(deobfuscated);
+		const obfuscator = this.#host.obfuscator();
+		if (!obfuscator?.hasSecrets()) return text;
+		return obfuscator.deobfuscate(text.slice(0, obfuscator.pendingPlaceholderStart(text)));
 	}
 
 	/** Converts side-request messages through the session's secret boundary. */

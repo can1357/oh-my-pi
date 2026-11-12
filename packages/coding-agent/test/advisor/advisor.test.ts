@@ -2336,7 +2336,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 		it("obfuscates advisor-visible successful tool-result bodies", async () => {
@@ -2367,7 +2367,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$");
+			expect(promptText(promptInputs[0])).toContain(obfuscator.obfuscate("tok_abc123"));
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2593,7 +2593,7 @@ describe("advisor", () => {
 			});
 			runtime.onTurnEnd();
 			await runtime.waitForCatchup(1000, 1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2621,7 +2621,7 @@ describe("advisor", () => {
 			});
 			runtime.onTurnEnd();
 			await runtime.waitForCatchup(1000, 1);
-			expect(promptText(promptInputs[0])).toContain("$$");
+			expect(promptText(promptInputs[0])).toContain(obfuscator.obfuscate("OTHERSECRET"));
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2659,7 +2659,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 		it("does not scan execution source after the advisor preview cap", async () => {
@@ -2695,7 +2695,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -2725,7 +2725,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 			expect(obfuscate).not.toHaveBeenCalledWith("tok_abc123", expect.anything());
 		});
@@ -2759,7 +2759,7 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 			expect(obfuscate).not.toHaveBeenCalledWith("tok_abc123", expect.anything());
 		});

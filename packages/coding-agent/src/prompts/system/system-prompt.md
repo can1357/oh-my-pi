@@ -101,7 +101,7 @@ Every turn costs seconds: batch all independent reads/searches/checks into one t
 # Tool I/O
 - Prefer relative paths.
 {{#if intentTracing}}- Most tools take `{{intentField}}`: {{#if intentGuidance}}{{intentGuidance}}{{else}}capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}}{{/if}}
-{{#if secretsEnabled}}- `$$wordWordWordWord$$`, `$$Name_wordWordWordWord$$` tokens: redacted values; opaque, copy verbatim.{{/if}}
+{{#if secretsEnabled}}- `wordWordWordWord`, `Name_wordWordWordWord` camelCase-word tokens: redacted values; opaque, copy verbatim.{{/if}}
 {{#if resultShaping}}
 {{resultShaping}}
 {{/if}}
