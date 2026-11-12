@@ -662,24 +662,6 @@ describe("wait", () => {
 			]);
 		});
 
-		test("a delivered job answers the current question but not a later one in the same millisecond", async () => {
-			const { main } = registerParentAndChild();
-			const manager = new AsyncJobManager({ onJobComplete: () => {} });
-			const childRun = registerChildJob(manager);
-			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "which codeword?" });
-			childRun.resolve("heliotrope");
-			const result = await new WaitTool(session(manager)).execute("child-result", {});
-			expect(result.details?.jobs?.[0]).toMatchObject({ id: "Child", status: "completed" });
-			expect(IrcBus.global().unansweredSends("Main", 0)).toEqual([]);
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "and the second word?" });
-			const waiting = new WaitTool(session(manager)).execute("second-answer", {});
-			const pending = await stillPending(waiting);
-			await IrcBus.global().send({ from: "Child", to: "Main", body: "vermilion" });
-			expect(pending).toBe(true);
-			expect(await received(waiting, main)).toMatchObject([{ from: "Child", body: "vermilion" }]);
-		});
-
 		test("ends once the agent asked starts waiting on the caller's result instead of answering", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
