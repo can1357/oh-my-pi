@@ -55,7 +55,7 @@ export interface KiroOAuthRow {
 	access: string;
 	apiEndpoint?: string;
 	/** Profile ARN: chosen for IAM Identity Center, resolved for social sign-in, absent for Builder ID. */
-	orgId?: string;
+	kiroProfileArn?: string;
 	kiroLoginId?: string;
 	/** Present only for a Google/GitHub sign-in. */
 	kiroLoginProvider?: KiroSocialLoginProvider;
@@ -127,13 +127,15 @@ export function encodeKiroOAuthRow(row: KiroOAuthRow): string {
 		throw new KiroCredentialError("Kiro login is incomplete; run /login kiro again");
 	}
 	if (row.kiroLoginProvider) {
-		if (!row.orgId) throw new KiroCredentialError("Kiro social login has no profile ARN; run /login kiro again");
+		if (!row.kiroProfileArn) {
+			throw new KiroCredentialError("Kiro social login has no profile ARN; run /login kiro again");
+		}
 		return encodeKiroCredential({
 			kind: "oauth",
 			token: row.access,
 			apiEndpoint: row.apiEndpoint,
 			loginId: row.kiroLoginId,
-			profileArn: row.orgId,
+			profileArn: row.kiroProfileArn,
 			loginProvider: row.kiroLoginProvider,
 		});
 	}
@@ -142,7 +144,7 @@ export function encodeKiroOAuthRow(row: KiroOAuthRow): string {
 		token: row.access,
 		apiEndpoint: row.apiEndpoint,
 		loginId: row.kiroLoginId,
-		...(row.orgId ? { profileArn: row.orgId } : {}),
+		...(row.kiroProfileArn ? { profileArn: row.kiroProfileArn } : {}),
 	});
 }
 

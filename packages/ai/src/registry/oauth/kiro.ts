@@ -759,7 +759,7 @@ export async function loginKiroDevice(ctrl: OAuthController, config: KiroDeviceC
 		...completed,
 		...registration,
 		apiEndpoint: kiroRuntimeBaseUrl(parsedProfile.apiRegion),
-		orgId: selected.profileArn,
+		kiroProfileArn: selected.profileArn,
 		// `orgName` is the account label every login surface renders. The raw ARN
 		// embeds the AWS account id, so fall back to its trailing segment instead
 		// of exposing it when a profile carries no display name.
@@ -933,7 +933,7 @@ export async function loginKiroSocial(
 	return {
 		...completed.tokens,
 		apiEndpoint: kiroRuntimeBaseUrl(parsedProfile.apiRegion),
-		orgId: parsedProfile.profileArn,
+		kiroProfileArn: parsedProfile.profileArn,
 		orgName: profileName ?? label,
 		kiroLoginProvider: loginProvider,
 		...kiroLoginIdentity(),
@@ -980,7 +980,7 @@ async function refreshKiroSocialToken(
 	// unparseable ARN is not routing information, so the stored one stays.
 	const profileArn =
 		(typeof data.profileArn === "string" ? parseKiroProfileArn(data.profileArn)?.profileArn : undefined) ??
-		current.orgId;
+		current.kiroProfileArn;
 	const parsedProfile = parseKiroProfileArn(profileArn);
 	if (!parsedProfile) {
 		throw new AIError.OAuthError("Kiro refresh state is incomplete; run /login kiro again", {
@@ -993,7 +993,7 @@ async function refreshKiroSocialToken(
 		...current,
 		...socialTokens(data, current.refresh),
 		apiEndpoint: kiroRuntimeBaseUrl(parsedProfile.apiRegion),
-		orgId: parsedProfile.profileArn,
+		kiroProfileArn: parsedProfile.profileArn,
 		kiroLoginProvider: loginProvider,
 		kiroLoginId: current.kiroLoginId,
 		accountId: current.kiroLoginId,

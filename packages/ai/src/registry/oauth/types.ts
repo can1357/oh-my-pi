@@ -51,6 +51,8 @@ export type OAuthCredentials = {
 	 * Kiro auth service's `/refreshToken` grant instead of the OIDC client binding.
 	 */
 	kiroLoginProvider?: KiroSocialLoginProvider;
+	/** Kiro profile ARN the login routes by; absent for Builder ID. Embeds the AWS account id, so never displayed. */
+	kiroProfileArn?: string;
 	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an

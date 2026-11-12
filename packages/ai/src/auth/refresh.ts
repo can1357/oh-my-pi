@@ -127,6 +127,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 		projectId: refreshed.projectId ?? current.projectId,
 		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
+		kiroProfileArn: refreshed.kiroProfileArn ?? current.kiroProfileArn,
 		...mergeRefreshedOrganizationScope(current, refreshed),
 		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
 	};
@@ -1229,14 +1230,7 @@ export class OAuthRefresher {
 	}
 }
 
-/**
- * Broker-facing snapshot entry for a refreshed row; the real refresh token never leaves the store.
- *
- * Redaction goes through {@link redactCredentialForWire} rather than overriding
- * `refresh` here, so this path also drops the Kiro OIDC client secret — a
- * refresh-capable secret that would otherwise reach broker clients on
- * `POST /v1/credential/:id/refresh`.
- */
+/** Broker-facing snapshot entry for a refreshed row; refresh secrets never leave the store. */
 function snapshotEntry(id: number, provider: string, credential: OAuthCredential): AuthCredentialSnapshotEntry {
 	return {
 		id,

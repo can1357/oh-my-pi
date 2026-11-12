@@ -46,7 +46,7 @@ interface KiroUsageRoute {
 
 /**
  * Resolve the management route. API keys decode through the Kiro credential
- * codec; OAuth rows route by their profile ARN (`orgId`), or by the runtime
+ * codec; OAuth rows route by their profile ARN (`kiroProfileArn`), or by the runtime
  * endpoint for Builder ID logins, which have no profile.
  */
 function resolveUsageRoute(credential: UsageCredential): KiroUsageRoute | undefined {
@@ -65,8 +65,8 @@ function resolveUsageRoute(credential: UsageCredential): KiroUsageRoute | undefi
 	}
 	const token = credential.accessToken?.trim();
 	if (!token) return undefined;
-	if (credential.orgId !== undefined) {
-		const profile = parseKiroProfileArn(credential.orgId);
+	if (credential.kiroProfileArn !== undefined) {
+		const profile = parseKiroProfileArn(credential.kiroProfileArn);
 		return profile
 			? { apiRegion: profile.apiRegion, token, profileArn: profile.profileArn, apiKey: false }
 			: undefined;

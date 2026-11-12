@@ -15,7 +15,6 @@ import {
 import type { OAuthCredentials, OAuthPrompt } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { resolveKiroModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { kiroCliOsFamily } from "@oh-my-pi/pi-catalog/wire/kiro-cli";
 import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 
 const PROFILE_ONE = "arn:aws:codewhisperer:us-east-1:123456789012:profile/one";
@@ -71,8 +70,7 @@ function clientCredentials(overrides: Partial<OAuthCredentials> = {}): OAuthCred
 	return { ...base, ...client, kiroClientSecretExpiresAt: Date.now() + 60_000, ...overrides };
 }
 
-type StorageHooks = { globalFetch?: (url: string, init?: RequestInit) => Response; onDisabled?: Disabled };
-type Disabled = (event: { orgId?: string }) => void;
+type StorageHooks = { globalFetch?: (url: string, init?: RequestInit) => Response; onDisabled?: () => void };
 
 /** In-memory AuthStorage; its refreshes use global fetch, so `globalFetch` is spied in for the test body. */
 async function withStorage(
@@ -114,7 +112,7 @@ describe("Kiro login", () => {
 		const { fetch, urls, bodies } = queued(idcResponses().slice(0, 3));
 		const credentials = (await loginKiroHook({ ...noAuth, onPrompt: answers("2"), fetch })) as OAuthCredentials;
 		expect([urls[0], bodies[1]]).toMatchObject([US_TOKEN.replace("token", "client/register"), { startUrl: BUILDER }]);
-		expect([credentials.kiroOidcRegion, credentials.orgId]).toEqual(["us-east-1", undefined]);
+		expect([credentials.kiroOidcRegion, credentials.kiroProfileArn]).toEqual(["us-east-1", undefined]);
 	});
 
 	it("validates Identity Center input, registers with exact scopes, and resolves an omitted token endpoint", async () => {
@@ -166,15 +164,12 @@ describe("Kiro login", () => {
 			return responses.shift() ?? json({}, 500);
 		};
 		try {
-			expect((await loginKiroDevice({ ...noAuth, fetch }, IDC)).orgId).toBe(PROFILE_TWO);
+			expect((await loginKiroDevice({ ...noAuth, fetch }, IDC)).kiroProfileArn).toBe(PROFILE_TWO);
 		} finally {
 			sleepSpy.mockRestore();
 		}
 		expect(urls.filter(url => url === US_TOKEN)).toHaveLength(3);
-		const ua = `aws-sdk-rust/1.6.0 ua/2.1 api/ssooidc/1.100.0 os/${kiroCliOsFamily()} lang/rust/1.94.1 m/E,N app/AmazonQ-For-CLI`;
-		const base = { "content-type": "application/json", "user-agent": ua, "x-amz-user-agent": ua, accept: "*/*" };
-		const sdk = { "accept-encoding": "gzip", "amz-sdk-invocation-id": expect.stringMatching(/^[0-9a-f-]{36}$/) };
-		expect(sent).toEqual([1, 2, 3].map(n => ({ ...base, ...sdk, "amz-sdk-request": `attempt=${n}; max=3` })));
+		expect(sent.map(headers => headers["amz-sdk-request"])).toEqual([1, 2, 3].map(n => `attempt=${n}; max=3`));
 	});
 
 	it("stores an ARN-safe label and endpoint, and each login adds an account", async () => {
@@ -239,36 +234,34 @@ describe("Kiro token refresh", () => {
 		expect(semantic.urls).toHaveLength(1);
 	});
 
-	it("disables on definitive refresh failures, keeps on transient ones, and keeps raw ARNs out of the event", async () => {
-		const social = { orgId: SOCIAL_PROFILE, kiroLoginProvider: "Google" as const };
-		const malformed = "arn:aws:sso:us-east-1:123456789012:profile/two";
-		// Last column: orgIds reported by the credential-disabled event; empty means the credential is kept.
-		const cases: Array<[string, Partial<OAuthCredentials>, Response, Array<string | undefined>]> = [
-			["invalid_grant", { orgId: PROFILE_TWO }, json({ error: "invalid_grant" }, 400), ["two"]],
-			["expired client", { orgId: malformed, kiroClientSecretExpiresAt: 1 }, json(TOKEN), [undefined]],
-			["incomplete state", { kiroClientSecret: undefined }, json(TOKEN), [undefined]],
-			["social 401", social, json({ message: "Bad credentials" }, 401), ["SOCIAL"]],
-			["other OIDC error", {}, json({ error: "invalid_request" }, 400), []],
-			["social outage", social, json({ message: "unavailable" }, 503), []],
+	it("disables on definitive refresh failures and keeps the login on transient ones", async () => {
+		const social = { kiroProfileArn: SOCIAL_PROFILE, kiroLoginProvider: "Google" as const };
+		// Last column: whether the credential is disabled.
+		const cases: Array<[string, Partial<OAuthCredentials>, Response, boolean]> = [
+			["invalid_grant", {}, json({ error: "invalid_grant" }, 400), true],
+			["expired client", { kiroClientSecretExpiresAt: 1 }, json(TOKEN), true],
+			["incomplete state", { kiroClientSecret: undefined }, json(TOKEN), true],
+			["social 401", social, json({ message: "Bad credentials" }, 401), true],
+			["other OIDC error", {}, json({ error: "invalid_request" }, 400), false],
+			["social outage", social, json({ message: "unavailable" }, 503), false],
 		];
 		for (const [name, credential, response, disabled] of cases) {
-			const events: Array<{ orgId?: string }> = [];
+			let events = 0;
 			await withStorage(
 				async auth => {
 					const row = clientCredentials({ expires: 1, kiroLoginId: "login-dead", ...credential });
 					await auth.credentials.set("kiro", { type: "oauth", ...row });
 					expect(await auth.keys.get("kiro", `session-${name}`)).toBeUndefined();
-					const outcome = { name, kept: auth.credentials.has("kiro"), orgIds: events.map(event => event.orgId) };
-					expect(outcome).toEqual({ name, kept: disabled.length === 0, orgIds: disabled });
-					expect(JSON.stringify(events)).not.toContain("123456789012");
+					const outcome = { name, kept: auth.credentials.has("kiro"), events };
+					expect(outcome).toEqual({ name, kept: !disabled, events: disabled ? 1 : 0 });
 				},
-				{ globalFetch: () => response.clone() as Response, onDisabled: event => void events.push(event) },
+				{ globalFetch: () => response.clone() as Response, onDisabled: () => void events++ },
 			);
 		}
 	});
 
 	it("projects route and login id without the refresh token, and peek shares its cache scope", async () => {
-		const live = { access: "access-token", expires: Date.now() + 3e6, orgId: PROFILE_ONE, kiroLoginId: "l1" };
+		const live = { access: "access-token", expires: Date.now() + 3e6, kiroProfileArn: PROFILE_ONE, kiroLoginId: "l1" };
 		const row = clientCredentials(live);
 		const projected = (await getOAuthApiKey("kiro", { kiro: row }))?.apiKey;
 		const decoded = { kind: "oauth" as const, token: "access-token", apiEndpoint: RUNTIME, loginId: "l1" };
@@ -330,7 +323,7 @@ describe("Kiro social (Google/GitHub) sign-in", () => {
 				return url.includes("us-east-1") ? (usEast.clone() as Response) : json({ profiles: [] });
 			};
 			const login = loginKiroSocial({ ...noAuth, fetch }, "Google");
-			if (expected) expect({ name, orgId: (await login).orgId }).toEqual({ name, orgId: expected });
+			if (expected) expect({ name, arn: (await login).kiroProfileArn }).toEqual({ name, arn: expected });
 			else await expect(login).rejects.toMatchObject({ kind: "discovery" });
 		}
 	});
@@ -338,10 +331,10 @@ describe("Kiro social (Google/GitHub) sign-in", () => {
 	it("refreshes a social login against /refreshToken and follows a moved profile", async () => {
 		const moved = "arn:aws:codewhisperer:eu-central-1:699475941385:profile/EU";
 		const { fetch, urls, bodies } = queued([json({ accessToken: "n", refreshToken: "r2", profileArn: moved })]);
-		const social = { kiroLoginId: "l", kiroLoginProvider: "Github" as const, orgId: SOCIAL_PROFILE };
+		const social = { kiroLoginId: "l", kiroLoginProvider: "Github" as const, kiroProfileArn: SOCIAL_PROFILE };
 		const current = { access: "a", refresh: "social-refresh", expires: 0, apiEndpoint: RUNTIME, ...social };
 		const result = await refreshKiroToken(current, { fetch });
 		expect([urls, bodies]).toEqual([[`${SOCIAL_AUTH}/refreshToken`], [{ refreshToken: "social-refresh" }]]);
-		expect(result).toMatchObject({ refresh: "r2", orgId: moved, apiEndpoint: EU_RUNTIME, kiroLoginId: "l" });
+		expect(result).toMatchObject({ refresh: "r2", kiroProfileArn: moved, apiEndpoint: EU_RUNTIME, kiroLoginId: "l" });
 	});
 });

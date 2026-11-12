@@ -50,7 +50,6 @@ export class OAuthError extends Error {
 	readonly kind: OAuthErrorKind;
 	readonly provider: string | undefined;
 	readonly status: number | undefined;
-	readonly definitive: boolean;
 
 	constructor(message: string, options: OAuthErrorOptions = {}) {
 		super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -58,10 +57,9 @@ export class OAuthError extends Error {
 		this.kind = options.kind ?? "http";
 		this.provider = options.provider;
 		this.status = options.status;
-		this.definitive = options.definitive === true;
 		attach(
 			this,
-			this.definitive
+			options.definitive
 				? create(Flag.AuthFailed, Flag.OAuthExpiry)
 				: this.kind === "timeout" || this.kind === "polling"
 					? create(Flag.Transient)

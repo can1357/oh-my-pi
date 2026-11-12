@@ -65,6 +65,7 @@ export function buildRefreshableOauthCredential(credential: UsageCredential): OA
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		kiroProfileArn: credential.kiroProfileArn,
 		region: credential.region,
 		inferenceRegion: credential.inferenceRegion,
 		activeOrganizationId: credential.activeOrganizationId,
@@ -86,6 +87,7 @@ export function mergeRefreshedUsageCredential(
 		email: refreshed.email ?? credential.email,
 		enterpriseUrl: refreshed.enterpriseUrl ?? credential.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? credential.apiEndpoint,
+		kiroProfileArn: refreshed.kiroProfileArn ?? credential.kiroProfileArn,
 		...mergeRefreshedOrganizationScope(credential, refreshed),
 	};
 }
@@ -223,6 +225,7 @@ export class UsageService implements UsageApi {
 			email: next.email ?? entry.credential.email,
 			enterpriseUrl: next.enterpriseUrl ?? entry.credential.enterpriseUrl,
 			apiEndpoint: next.apiEndpoint ?? entry.credential.apiEndpoint,
+			kiroProfileArn: next.kiroProfileArn ?? entry.credential.kiroProfileArn,
 			orgId: next.orgId,
 			orgName: next.orgName,
 			region: next.region,

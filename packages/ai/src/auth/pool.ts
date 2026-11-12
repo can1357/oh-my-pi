@@ -1,5 +1,4 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
-import { extractKiroProfileSegment } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { providerPauseReason } from "../registry/oauth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
@@ -31,14 +30,9 @@ function fingerprintOAuthBearer(bearer: string): string {
 	return Bun.SHA256.hash(bearer, "base64url");
 }
 /**
- * Strip broker-invisible secrets from a credential before it crosses the wire.
- * OAuth refresh tokens become the sentinel; the Kiro OIDC client secret is a
- * refresh-capable secret too, so it is dropped while the non-secret client
- * binding (client id, token endpoint, region) survives for routing.
- *
- * Every path that hands a credential to the auth-broker (snapshot, upsert, and
- * the forced-refresh response) must route through this helper; a site that
- * spreads the credential and overrides only `refresh` still ships the secret.
+ * Strip broker-invisible secrets before a credential crosses the wire: the
+ * refresh token becomes the sentinel and the Kiro OIDC client secret is
+ * dropped. Every broker-bound path (snapshot, upsert, refresh reply) uses this.
  */
 export function redactCredentialForWire(credential: AuthCredential): SnapshotCredential {
 	if (credential.type === "api_key") return credential;
@@ -49,17 +43,7 @@ export function redactCredentialForWire(credential: AuthCredential): SnapshotCre
 /** One stored credential row as cached in memory. */
 export type StoredCredential = { id: number; credential: AuthCredential };
 
-/**
- * {@link CredentialDisabledEvent} for a torn-down row, carrying the account identity it was signed in as.
- *
- * Kiro stores its profile ARN in `orgId`, and that ARN embeds the AWS account
- * id. Events are logged to disk and replayed to hosts, so the ARN is reduced
- * to its trailing segment. A row whose `orgId` is not a parseable Kiro profile
- * ARN yields no `orgId` at all rather than the raw value: `orgName` still
- * names the row, and a malformed ARN is exactly the case that must not be
- * echoed. Only the interactive device flow validates the ARN, so unvalidated
- * rows (API-key logins, `credentials.set`, older writes) reach here too.
- */
+/** {@link CredentialDisabledEvent} for a torn-down row, carrying the account identity it was signed in as. */
 export function credentialDisabledEvent(
 	provider: string,
 	row: StoredCredential,
@@ -70,13 +54,7 @@ export function credentialDisabledEvent(
 	if (credential.type === "oauth") {
 		if (credential.email) event.email = credential.email;
 		if (credential.accountId) event.accountId = credential.accountId;
-		if (credential.orgId) {
-			if (provider !== "kiro") event.orgId = credential.orgId;
-			else {
-				const segment = extractKiroProfileSegment(credential.orgId);
-				if (segment) event.orgId = segment;
-			}
-		}
+		if (credential.orgId) event.orgId = credential.orgId;
 		if (credential.orgName) event.orgName = credential.orgName;
 	}
 	return event;

@@ -67,7 +67,7 @@ const socialParams = (): UsageFetchParams => ({
 		type: "oauth",
 		accessToken: "social-access",
 		expiresAt: Date.now() + 3_600_000,
-		orgId: PROFILE_ARN,
+		kiroProfileArn: PROFILE_ARN,
 		apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
 	},
 });

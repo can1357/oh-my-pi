@@ -164,7 +164,7 @@ describe("Kiro provider discovery", () => {
 		const bearer = { kind: "oauth", token: "b", apiEndpoint: API_ENDPOINT } as const;
 		const social = { access: "b", apiEndpoint: API_ENDPOINT, kiroLoginId: "s", kiroLoginProvider: "Github" as const };
 		expect(decodeKiroCredential("ksk_raw", {})).toEqual({ kind: "api_key", token: "ksk_raw" });
-		const decoded = decodeKiroCredential(encodeKiroOAuthRow({ ...social, orgId: PROFILE_ARN }), {});
+		const decoded = decodeKiroCredential(encodeKiroOAuthRow({ ...social, kiroProfileArn: PROFILE_ARN }), {});
 		expect(decoded).toEqual({ ...bearer, loginId: "s", profileArn: PROFILE_ARN, loginProvider: "Github" });
 		expect(() => encodeKiroOAuthRow(social)).toThrow("profile ARN");
 		const rejected: Array<[unknown, string]> = [

@@ -16,6 +16,10 @@
 - Kiro requests now identify as the official Kiro CLI 3.2.0, with the same headers and service targets; OMP still opts out of sharing content with AWS
 - Kiro no longer cuts every tool result to 25 KB: results are sent as OMP's tool output limit produced them, up to Kiro's 800 KB service limit; only when a request is over budget are older tool results shrunk to 25 KB, before falling back to compaction
 
+### Fixed
+
+- OAuth accounts refreshed through an auth broker keep their stored routing metadata (such as an API endpoint) in the key built for the request, instead of losing it after the first refresh
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
