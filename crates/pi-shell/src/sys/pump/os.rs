@@ -27,6 +27,8 @@ use std::{
 	time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+pub use self::imp::PIPE_PREFIX;
 #[cfg(unix)]
 pub use self::imp::socket_pair;
 pub use self::imp::{OsPipe, Timer, reclaim};
@@ -413,7 +415,7 @@ mod imp {
 		os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
 		ptr,
 		sync::{
-			Arc,
+			Arc, LazyLock,
 			atomic::{AtomicU32, Ordering},
 		},
 		task::{Context, Poll, Waker},
@@ -478,12 +480,52 @@ mod imp {
 		is_os(e, ERROR_BROKEN_PIPE) || is_os(e, ERROR_PIPE_NOT_CONNECTED)
 	}
 
-	/// A fresh pipe name `\\.\pipe\obash-pump-<pid>-<n>` (NUL-terminated
+	/// Where this process may create named pipes: `\\.\pipe\LOCAL\` inside an
+	/// `AppContainer`, which may create them nowhere else (any other name fails
+	/// with access denied, so every spawn would), else `\\.\pipe\`. Not
+	/// `LOCAL\` everywhere: outside an `AppContainer` it is a plain name with a
+	/// backslash, and programs that probe the path first, like `cmd`'s
+	/// `type`, report it not found.
+	pub static PIPE_PREFIX: LazyLock<&'static str> = LazyLock::new(|| {
+		use windows_sys::Win32::{
+			Foundation::CloseHandle,
+			Security::{GetTokenInformation, TOKEN_QUERY, TokenIsAppContainer},
+			System::Threading::{GetCurrentProcess, OpenProcessToken},
+		};
+		let mut token: HANDLE = ptr::null_mut();
+		// SAFETY: the pseudo handle needs no closing; `token` is written on
+		// success.
+		if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+			return r"\\.\pipe\";
+		}
+		let mut is_app_container = 0u32;
+		let mut len = 0u32;
+		// SAFETY: a valid token and a u32 buffer of the size we pass.
+		let ok = unsafe {
+			GetTokenInformation(
+				token,
+				TokenIsAppContainer,
+				(&raw mut is_app_container).cast(),
+				size_of::<u32>() as u32,
+				&mut len,
+			)
+		};
+		// SAFETY: `token` is ours and still open.
+		unsafe { CloseHandle(token) };
+		if ok != 0 && is_app_container != 0 {
+			r"\\.\pipe\LOCAL\"
+		} else {
+			r"\\.\pipe\"
+		}
+	});
+
+	/// A fresh pipe name `<PIPE_PREFIX>obash-pump-<pid>-<n>` (NUL-terminated
 	/// UTF-16 beside it).
 	fn pipe_name() -> (String, Vec<u16>) {
 		static SEQ: AtomicU32 = AtomicU32::new(0);
 		let name = format!(
-			r"\\.\pipe\obash-pump-{}-{}",
+			"{}obash-pump-{}-{}",
+			*PIPE_PREFIX,
 			std::process::id(),
 			SEQ.fetch_add(1, Ordering::Relaxed)
 		);

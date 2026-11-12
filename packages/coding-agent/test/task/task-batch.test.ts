@@ -283,7 +283,7 @@ describe("task.batch schema gating", () => {
 		]);
 		const session = createSession({ settings: { "task.batch": true, "async.enabled": true } });
 		const tool = await TaskTool.create(session);
-		const navigation = "nested `/reports/0/data`";
+		const navigation = "nested /reports/0/data";
 
 		const optedIn = tool.description;
 		expect(optedIn).toContain(navigation);
@@ -1121,15 +1121,15 @@ describe("bundled seance model call boundaries", () => {
 				["eval", "batch"],
 				["off", "flat"],
 			] as const
-		).flatMap(([mode, shape]) => [false, true].map(file => [mode, shape, file] as const)),
+		).flatMap(([mode, shape]) => [false, true].map(steps => [mode, shape, steps] as const)),
 	)(
-		"rejects an approved explicit seance model while task.perCallModel is %s (%s call, file=%s)",
-		async (mode, shape, file) => {
+		"rejects an approved explicit seance model while task.perCallModel is %s (%s call, steps=%s)",
+		async (mode, shape, steps) => {
 			using tempDir = TempDir.createSync("@omp-seance-model-off-");
 			const batch = shape === "batch";
 			const fixture = await seanceSession(tempDir.path(), {
 				"task.batch": batch,
-				"task.file": file,
+				"task.steps": steps,
 				"task.perCallModel": mode,
 				modelRoles: { review: "mock/requested-seance-model" },
 			});
@@ -1138,9 +1138,7 @@ describe("bundled seance model call boundaries", () => {
 				const tool = await TaskTool.create(fixture.session);
 				const work = {
 					agent: "seance",
-					...(file
-						? { taskFile: path.join(tempDir.path(), "missing.md") }
-						: { task: "Read the historical request." }),
+					...(steps ? { steps: ["Read the historical request."] } : { task: "Read the historical request." }),
 					solutionSpace: "Read-only consultation.",
 					sourceSession: fixture.sourceFile,
 					model: fixture.modelSelector,
@@ -1193,76 +1191,6 @@ describe("bundled seance model call boundaries", () => {
 			expect(run.mock.calls[0]?.[0].modelRole).toBe(role);
 			expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeDefined();
 		} finally {
-			fixture.authStorage.close();
-		}
-	});
-
-	it.each([false, true])("preserves file-backed seance model boundaries (host=%s)", async host => {
-		using tempDir = TempDir.createSync("@omp-seance-file-model-");
-		const fixture = await seanceSession(tempDir.path(), {
-			"task.batch": true,
-			"task.file": true,
-			"task.perCallModel": host ? "off" : "on",
-			"async.enabled": host,
-			modelRoles: host ? {} : { review: "mock/requested-seance-model" },
-		});
-		const manager = host ? new AsyncJobManager({ onJobComplete: () => {} }) : undefined;
-		fixture.session.asyncJobManager = manager;
-		const taskFile = path.join(tempDir.path(), "assignment.md");
-		const assignment = "Consult the transcript using the file-backed instructions.";
-		await Bun.write(taskFile, assignment);
-		const run = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
-			makeResult(options.id, {
-				agent: "seance",
-				assignment: options.assignment,
-				resolvedModel: fixture.modelSelector,
-			}),
-		);
-		try {
-			const tool = await TaskTool.create(fixture.session);
-			const work = {
-				agent: "seance",
-				name: "FileSeance",
-				taskFile,
-				solutionSpace: "Read-only consultation.",
-				sourceSession: fixture.sourceFile,
-				model: host ? fixture.modelSelector : "@review",
-			};
-			const result = host
-				? await taskModule.executeTaskFromHost(
-						tool as unknown as AgentTool,
-						"seance-file-host",
-						work,
-						fixture.context,
-					)
-				: await tool.execute(
-						"seance-file-model",
-						validateAgentToolArguments(tool as unknown as AgentTool, {
-							type: "toolCall",
-							id: "seance-file-model",
-							name: "task",
-							arguments: { context: "Historical context", tasks: [work] },
-						}),
-					);
-			expect(result.isError, getFirstText(result)).not.toBe(true);
-			if (manager) {
-				const job = manager.getJob("FileSeance");
-				if (!job) throw new Error("Expected a file-backed host seance job");
-				await job.promise;
-				expect(job.status).toBe("completed");
-			}
-			expect(run).toHaveBeenCalledTimes(1);
-			expect(run.mock.calls[0]?.[0]).toMatchObject({
-				assignment,
-				modelOverride: [fixture.modelSelector],
-			});
-			if (host) expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
-			else expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeDefined();
-			const provenance = host ? result.details?.progress?.[0] : result.details?.results[0];
-			expect(provenance?.taskFile).toBe(taskFile);
-			expect(provenance?.taskFileSha256).toMatch(/^[0-9a-f]{64}$/);
-		} finally {
-			await manager?.dispose({ timeoutMs: 1000 });
 			fixture.authStorage.close();
 		}
 	});

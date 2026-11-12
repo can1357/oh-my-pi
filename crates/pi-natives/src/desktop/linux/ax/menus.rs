@@ -1,7 +1,7 @@
 use super::*;
 use crate::desktop::{
 	control,
-	menus::{DesktopMenuItem, match_index, require_command, require_enabled},
+	menus::{DesktopMenuItem, match_offered, require_command, require_enabled},
 };
 
 const NODE_LIMIT: usize = 2048;
@@ -215,7 +215,7 @@ impl AtSpiAx {
 		let mut canonical = Vec::new();
 		for (depth, label) in path.iter().enumerate() {
 			let (mut items, mut objects) = self.menu_level(&containers, &canonical).await?;
-			let index = match_index(&items, label)?;
+			let index = match_offered(&items, label)?;
 			let item = items.remove(index);
 			require_enabled(&item)?;
 			let object = objects.remove(index);

@@ -117,8 +117,6 @@ export function createSessionStub(
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 		modelRegistry: {},
 		getToolByName: () => undefined,
-		hasSessionApproval: () => false,
-		getApprovalGrants: () => ({ present: () => new Set<string>() }),
 		buildToolContext: (): AgentToolContext => ({
 			sessionManager,
 			settings: sessionSettings,

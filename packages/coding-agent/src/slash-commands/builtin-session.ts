@@ -274,18 +274,23 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				if (runtime.session.isStreaming) return usage("Cannot delete the session while streaming.", runtime);
 				const sessionFile = runtime.sessionManager.getSessionFile();
 				if (!sessionFile) return usage("No session file to delete (in-memory session).", runtime);
-				// Route through the active SessionManager so the persist writer is
-				// closed before the file is deleted. Constructing a fresh
-				// FileSessionStorage and calling deleteSessionWithArtifacts leaves
-				// the active writer attached to the now-deleted path, so the next
-				// prompt would silently resurrect or corrupt the "deleted" file.
+				// Detach the live agent before deleting its file; the next prompt must
+				// belong to a fresh session with a valid header and no old history.
+				try {
+					if (!(await runtime.session.newSession())) return usage("Session deletion cancelled.", runtime);
+				} catch (err) {
+					return usage(`Failed to start a new session: ${errorMessage(err)}`, runtime);
+				}
 				try {
 					await runtime.sessionManager.dropSession(sessionFile);
 				} catch (err) {
-					return usage(`Failed to delete session: ${errorMessage(err)}`, runtime);
+					return usage(
+						`Started new session ${runtime.session.sessionId}, but failed to delete ${sessionFile}: ${errorMessage(err)}`,
+						runtime,
+					);
 				}
 				await runtime.output(
-					`Session deleted: ${sessionFile}. Use ACP \`session/load\` to switch to another session.`,
+					`Session deleted: ${sessionFile}. New session: ${runtime.session.sessionId} (${runtime.session.sessionFile}).`,
 				);
 				return commandConsumed();
 			}
@@ -772,13 +777,6 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "unauth", description: "Remove OAuth auth from a server", usage: "<name>" },
 			{ name: "enable", description: "Enable an MCP server", usage: "<name>" },
 			{ name: "disable", description: "Disable an MCP server", usage: "<name>" },
-			{
-				name: "smithery-search",
-				description: "Search Smithery registry and deploy an MCP server",
-				usage: "<keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			},
-			{ name: "smithery-login", description: "Login to Smithery and cache API key" },
-			{ name: "smithery-logout", description: "Remove cached Smithery API key" },
 			{ name: "reconnect", description: "Reconnect to a specific MCP server", usage: "<name>" },
 			{ name: "reload", description: "Force reload MCP runtime tools" },
 			{ name: "resources", description: "List available resources from connected servers" },

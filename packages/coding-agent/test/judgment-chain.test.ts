@@ -240,6 +240,135 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
+	it.each([false, true])("tries the lead first and falls back on failure (%s)", async leadFails => {
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (leadFails && String(url) === OPENROUTER_DECISIONS_URL) {
+					return new Response("rejected", { status: 400 });
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const onUsage = vi.fn();
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			leadModel: "openrouter/~typesafe/jev-latest",
+			onUsage,
+		});
+
+		expect(judge.primaryModel()?.id).toBe(OPENROUTER_JEV.id);
+		const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(urls).toEqual(
+			leadFails ? [OPENROUTER_DECISIONS_URL, "https://judge.example.test/v1/systemone"] : [OPENROUTER_DECISIONS_URL],
+		);
+		expect(onUsage).toHaveBeenCalledTimes(leadFails ? 2 : 1);
+		expect(onUsage).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({ model: OPENROUTER_JEV.id, stopReason: leadFails ? "error" : "stop" }),
+		);
+		if (leadFails) {
+			expect(onUsage).toHaveBeenNthCalledWith(
+				2,
+				expect.objectContaining({ model: JEV_PREVIEW.id, stopReason: "stop" }),
+			);
+		}
+	});
+
+	it("does not retry a lead that also appears in the role chain", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: ["openrouter/~typesafe/jev-latest"] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				return new Response("rejected", { status: 400 });
+			}),
+		);
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			leadModel: "openrouter/~typesafe/jev-latest",
+		});
+
+		await expect(
+			judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } }),
+		).rejects.toThrow("every judge candidate failed");
+		expect(urls).toEqual([OPENROUTER_DECISIONS_URL, "https://judge.example.test/v1/systemone"]);
+	});
+
+	it("ignores a lead that matches no candidate", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([JEV_PREVIEW], { typesafe: "ts-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const judge = new ChainJudge({ settings, registry, purpose: "test", leadModel: "nace/drex-max-v1.1" });
+		const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(judge.primaryModel()?.id).toBe(JEV_PREVIEW.id);
+		expect(urls).toEqual(["https://judge.example.test/v1/systemone"]);
+	});
+
+	it("never degrades a native lead to a prompted model, and keeps the native gate on the judge role", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
+		});
+		const registry = makeRegistry([LOCAL, ONLINE, OPENROUTER_JEV], {
+			openrouter: "or-key",
+			[ONLINE.provider]: "online-key",
+		});
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				return new Response("rejected", { status: 400 });
+			}),
+		);
+		const local = vi.spyOn(tinyModelClient, "complete").mockRejectedValue(new Error("prompted judge must not run"));
+		const online = vi.spyOn(ai, "completeSimple").mockRejectedValue(new Error("prompted judge must not run"));
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			leadModel: "openrouter/~typesafe/jev-latest",
+			sessionModel: ONLINE_BACKUP,
+		});
+
+		await expect(
+			judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } }),
+		).rejects.toThrow("400");
+		expect(urls).toEqual([OPENROUTER_DECISIONS_URL]);
+		expect(local).not.toHaveBeenCalled();
+		expect(online).not.toHaveBeenCalled();
+		expect(hasNativeJudge(settings, registry)).toBe(false);
+	});
+
 	it("falls from a coarse local question to a tiered online question", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
@@ -426,6 +555,40 @@ describe("ChainJudge", () => {
 		);
 	});
 
+	it("skips a candidate whose model was not found on later calls and goes straight to the fallback", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (String(url).endsWith("/v1/systemone")) {
+					return Response.json({ error: { message: "This model is unavailable", code: 404 } }, { status: 404 });
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
+
+		for (let call = 0; call < 2; call++) {
+			const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge(request);
+			expect(result.answers.level.choice).toBe("high");
+		}
+
+		expect(urls).toEqual([
+			"https://judge.example.test/v1/systemone",
+			OPENROUTER_DECISIONS_URL,
+			OPENROUTER_DECISIONS_URL,
+		]);
+	});
+
 	it("skips text-only chat and local candidates for image judgments", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${TEXT_ONLY.provider}/${TEXT_ONLY.id}` },
@@ -538,6 +701,52 @@ describe("ChainJudge", () => {
 		const [, part] = state as [string, { image_url: { url: string } }];
 		const sent = await new Bun.Image(Buffer.from(part.image_url.url.split(",")[1], "base64")).metadata();
 		expect([sent.width, sent.height]).toEqual([280, 280]);
+	});
+
+	it("splits a request-wide patch cap across images that each fit it alone", async () => {
+		const liquid = {
+			...JEV_PREVIEW,
+			id: "d1.1",
+			api: "liquid-systemone",
+			provider: "liquid",
+			baseUrl: "https://api.liquid.ai",
+			input: ["text", "image"],
+		} as Model<Api>;
+		const settings = Settings.isolated({ modelRoles: { judge: `${liquid.provider}/${liquid.id}` } });
+		const registry = makeRegistry([liquid], { liquid: "liquid_key" });
+		let images: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				images = JSON.parse(String(init?.body)).images;
+				return Response.json({
+					model: liquid.id,
+					answers: { visible: { type: "noul", noul: 0.75 } },
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		// 2304x2304 covers 72x72 = 5184 patches: within Liquid's 10,000 alone, over it as a pair.
+		const side = 2304;
+		const large: ImageContent = {
+			type: "image",
+			data: encodeRawPng(new Uint8Array(side * side * 3), side, side, 3).toBase64(),
+			mimeType: "image/png",
+		};
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "compare these",
+			questions: { visible: { type: "noul", instructions: "Is an object visible?" } },
+			images: [large, large],
+		});
+
+		expect(result.answers.visible.noul).toBe(0.75);
+		let patches = 0;
+		for (const url of images) {
+			const { width, height } = await new Bun.Image(Buffer.from(url.split(",")[1], "base64")).metadata();
+			patches += Math.ceil(width / 32) * Math.ceil(height / 32);
+		}
+		expect(images).toHaveLength(2);
+		expect(patches).toBeLessThanOrEqual(10_000);
 	});
 
 	it("measures box answers on the source image its question names, not the padded fit sent", async () => {
@@ -973,7 +1182,7 @@ describe("ChainJudge", () => {
 	it("does not charge local image preparation to a native candidate's deadline", async () => {
 		using fixture = nativeLoopback();
 		fixture.recover();
-		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(ai, "judgmentImagesWithin").mockReturnValue(false);
 		vi.spyOn(imageResize, "fitImage").mockImplementation(async image => {
 			// AbortSignal.timeout uses the platform clock; image work must outlast that real deadline.
 			await Bun.sleep(400);
@@ -992,7 +1201,7 @@ describe("ChainJudge", () => {
 		using fixture = nativeLoopback();
 		const started = Promise.withResolvers<void>();
 		const fitted = Promise.withResolvers<imageResize.FittedImage>();
-		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(ai, "judgmentImagesWithin").mockReturnValue(false);
 		vi.spyOn(imageResize, "fitImage").mockImplementation(() => {
 			started.resolve();
 			return fitted.promise;

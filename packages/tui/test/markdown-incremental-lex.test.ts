@@ -1161,6 +1161,35 @@ describe("Locked streaming tables", () => {
 		expect(locked.render(60)).toEqual(plain);
 	});
 
+	it("waits for a finished body row before locking, so the header alone never sizes the columns", () => {
+		const locks: TableLocks = new Map();
+		const live = new Markdown("", 0, 0, THEME);
+		live.tableLocks = locks;
+		live.transientRenderCache = true;
+		for (const partial of [header, `${header}| a much longer key cell | a`]) {
+			live.setText(partial);
+			live.render(60);
+			expect(live.lockOpenTable()).toBe(false);
+		}
+		const firstRow = `${header}| a much longer key cell | a much longer value cell |\n`;
+		live.setText(`${firstRow}| x`);
+		live.render(60);
+		expect(live.lockOpenTable()).toBe(true);
+		// The lock is filled by the next render, with the first row's widths.
+		live.render(60);
+		clearRenderCache();
+		const firstRowBorder = new Markdown(firstRow, 0, 0, THEME).render(60)[0];
+		// A longer later row would widen the key column of an unlocked render;
+		// the final locked render keeps the widths pinned while streaming.
+		const full = `${firstRow}| a key cell that is longer still | v |\n`;
+		clearRenderCache();
+		expect(new Markdown(full, 0, 0, THEME).render(60)[0]).not.toEqual(firstRowBorder);
+		clearRenderCache();
+		const locked = new Markdown(full, 0, 0, THEME);
+		locked.tableLocks = locks;
+		expect(locked.render(60)[0]).toEqual(firstRowBorder);
+	});
+
 	it("keeps a row with an unresolved reference label out of the stable text", () => {
 		const live = lockedStream(`${header}| a | b |\n| [doc] | d |\n| e`, new Map());
 		// A later `[doc]: url` definition could still turn that cell into a link.
