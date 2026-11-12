@@ -65,6 +65,15 @@ Session env behavior:
 - Windows-only path enrichment (`crates/pi-shell/src/windows.rs`) appends discovered Git-for-Windows paths when present and not already included.
 - `snapshotPath`, when present, is sourced during session creation with stdout/stderr/stdin wired to null files.
 
+### Forked child state
+
+In-engine child execution (`crates/pi-shell/src/bash/vm/mod.rs`, `crates/pi-shell/src/bash/vm/proc.rs`, `crates/pi-shell/src/bash/vm/state.rs`):
+
+- Root shell bindings are stored in `StateStore` (`crates/pi-shell/src/bash/store.rs`), while subshells, pipeline stages, background jobs, command and process substitutions, and coprocs run as forked green-thread virtual processes (`Vproc`).
+- Lookups in a forked `Vproc` resolve its copied function-local scopes first, then its writable `Overlay`, and then an `Arc`-shared `ForkSnapshot` of the root shell's fork-time bindings (global variables and export attributes, positional parameters, functions, aliases, shell options, traps, the directory stack, command hashes, `umask`, and `enable -n` disabled builtins; working directory is copied onto `Vproc.cwd` separately, and nested subshells clone their parent's `Overlay` and `Arc` snapshot).
+- Root writes mark dirty keys on `Root::write` and refresh `Root::fork_snapshot` lazily at the next fork (a non-engine store write that advances `StateStore::epoch` drops `Root::fork_snapshot` instead). Existing children retain their `Arc` view, including the absence of bindings created later in the parent, while child writes stay in `Overlay` and per-`Vproc` status and dynamic special parameters (`$?`, `PIPESTATUS`, `$BASH_SUBSHELL`, `$LINENO`, `$BASHPID` in `crates/pi-shell/src/bash/vm/expand.rs` and `crates/pi-shell/src/bash/vm/zsh/specials.rs`) evaluate against the running `Vproc`.
+- When `Shell::externalize` (`crates/pi-shell/src/bash/vm/frames.rs`) serializes transient VM state into `BlobSlot::Frames` (versioned by `FRAMES_VERSION`), it includes each child overlay's `ForkSnapshot` and retains compiled function IR units (`BlobSlot::Unit`) referenced only by those snapshots; mismatched `FRAMES_VERSION` headers are rejected on restore.
+
 ### Host-injected filesystem
 
 `filesystem` is `{ handler: (error: Error | null, request: ShellFsRequest) => Promise<ShellFsResponse>, nativeLocalPaths?: boolean }`. The bridge covers shell redirections, globs, cwd changes, and in-process utility file operations; paths travel verbatim, including absolute `scheme://` URLs. With `nativeLocalPaths: true`, all host paths bypass the handler and only URL paths are routed to it; otherwise the handler receives host paths too. Ordinary external programs still use the OS filesystem rather than this callback interface.
