@@ -1188,9 +1188,12 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 
 /// Exact equality is the verdict: a field that shows a rewritten value has
 /// not been shown to hold what was sent (Contacts regroups a phone number in
-/// the field and stores none of it). The error names what the field reads so
-/// the next step needs no extra read, except in a secure field, whose text
-/// never enters an error.
+/// the field and stores none of it). The error never quotes the written text,
+/// which the caller already has and which may be a password the field's role
+/// does not reveal; it counts its characters and names what the field reads so
+/// the next step needs no extra read. What a secure field reads, or a field
+/// that reads back as mask characters (Qt password fields on macOS report a
+/// plain text field), is described, never quoted.
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn text_readback(
 	sent: &str,
@@ -1202,31 +1205,46 @@ pub(crate) fn text_readback(
 	if actual == Some(expected) {
 		return Ok(());
 	}
-	if secure {
-		return Err(DesktopError::ax_failed(
-			"the secure text field's value could not be confirmed after the write; inspect the \
-			 target before writing again",
-		));
-	}
-	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
-	let Some(actual) = actual else {
-		return Err(DesktopError::ax_failed(format!(
-			"wrote {}, but the field's value could not be read back; inspect the target before \
-			 writing again",
-			quote(sent),
-		)));
+	let count = |text: &str| match text.chars().count() {
+		1 => "1 character".to_owned(),
+		count => format!("{count} characters"),
 	};
 	let whole = if sent == expected {
 		String::new()
 	} else {
-		format!(" instead of {}", quote(expected))
+		format!(" into a value that should now be {}", count(expected))
+	};
+	let reads = match actual {
+		None if secure => "the secure text field's value could not be confirmed".to_owned(),
+		None => "the field's value could not be read back".to_owned(),
+		Some(actual) => {
+			let reads = match actual {
+				"" => "the field now reads empty".to_owned(),
+				actual if masked(actual) => {
+					format!("the field now reads as a mask of {}", count(actual))
+				},
+				_ if secure => "the secure text field's value is not shown".to_owned(),
+				actual => {
+					format!("the field now reads {:?}", truncate_chars(actual.to_owned(), SHOWN))
+				},
+			};
+			format!("{reads}. The app may have reformatted it or not taken it")
+		},
 	};
 	Err(DesktopError::ax_failed(format!(
-		"wrote {}; the field now reads {}{whole}. The app may have reformatted it or not taken it: \
-		 inspect the target before writing again",
-		quote(sent),
-		quote(actual),
+		"wrote {}{whole}, but {reads}; inspect the target before writing again",
+		count(sent),
 	)))
+}
+
+/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
+/// toolkits fall back on.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+pub(crate) fn masked(actual: &str) -> bool {
+	let mut chars = actual.chars();
+	chars.next().is_some_and(|first| {
+		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
+	})
 }
 
 /// `value` cut to `max` characters, the last one an ellipsis when cut.
@@ -2779,21 +2797,27 @@ mod tests {
 		let error =
 			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxFailed);
-		assert!(error.message.contains(r#""555-789-0123""#), "{}", error.message);
+		assert!(error.message.contains("wrote 12 characters"), "{}", error.message);
+		assert!(!error.message.contains("555-789-0123"), "{}", error.message);
 		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
 		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
 	}
 
 	#[test]
-	fn inserted_readback_names_the_whole_value_it_expected() {
+	fn inserted_readback_counts_the_whole_value_it_expected() {
 		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxFailed);
-		for quoted in [r#""b""#, r#""ac""#, r#""abc""#] {
-			assert!(error.message.contains(quoted), "{quoted}: {}", error.message);
+		assert!(error.message.contains(r#""ac""#), "{}", error.message);
+		for counted in ["wrote 1 character ", "should now be 3 characters"] {
+			assert!(error.message.contains(counted), "{counted}: {}", error.message);
+		}
+		for quoted in [r#""b""#, r#""abc""#] {
+			assert!(!error.message.contains(quoted), "{quoted}: {}", error.message);
 		}
 		let unread = text_readback("b", "abc", None, false).unwrap_err();
 		assert_eq!(unread.code, ErrorCode::AxFailed);
-		assert!(unread.message.contains(r#""b""#), "{}", unread.message);
+		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
+		assert!(!unread.message.contains(r#""b""#), "{}", unread.message);
 	}
 
 	#[test]
@@ -2806,12 +2830,38 @@ mod tests {
 
 	#[test]
 	fn secure_readbacks_never_quote_the_text() {
-		for actual in [None, Some("••••"), Some("")] {
+		for actual in [None, Some("••••"), Some(""), Some("sk-hunter")] {
 			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
 			assert_eq!(error.code, ErrorCode::AxFailed);
-			assert!(!error.message.contains("hunter2"), "{}", error.message);
-			assert!(error.message.contains("secure"), "{}", error.message);
+			assert!(!error.message.contains("hunter"), "{}", error.message);
 		}
 		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
+	}
+
+	#[test]
+	fn a_field_that_reads_back_masked_never_quotes_the_text_whatever_its_role() {
+		// KeePassXC's Qt password field reports a plain text field and reads back
+		// bullets.
+		for (actual, mask) in
+			[("•••••••", "a mask of 7 characters."), ("*", "a mask of 1 character.")]
+		{
+			let error = text_readback("hunter2", "hunter2", Some(actual), false).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter2"), "{}", error.message);
+			assert!(!error.message.contains(actual), "{}", error.message);
+			assert!(error.message.contains(mask), "{}", error.message);
+		}
+	}
+
+	#[test]
+	fn a_plain_field_that_reads_back_empty_or_unreadable_never_quotes_the_text() {
+		// A password field whose role says plain text, read back as nothing.
+		for (actual, reads) in [(Some(""), "reads empty"), (None, "could not be read back")] {
+			let error = text_readback("hunter2", "hunter2", actual, false).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter2"), "{}", error.message);
+			assert!(error.message.contains("wrote 7 characters"), "{}", error.message);
+			assert!(error.message.contains(reads), "{}", error.message);
+		}
 	}
 }

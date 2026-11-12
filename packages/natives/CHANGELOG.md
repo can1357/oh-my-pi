@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `setValue` and typed accessibility insertion on macOS and Linux quoting the written text in `AxFailed` when the field read back something else, which put passwords into the error for password fields that report a plain text role (KeePassXC's Qt field); the error now gives how many characters were written and what the field reads, described as masked when it reads back as mask characters
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
