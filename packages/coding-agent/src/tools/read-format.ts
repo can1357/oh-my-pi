@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { countNewlines } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
+import { readFileText, recordFileSnapshot } from "../sandbox/file-access";
 import {
 	formatHashlineHeader,
 	formatNumberedLines,
@@ -82,25 +83,40 @@ export function formatReadHashlineHeader(displayPath: string, tag: string): stri
 	return formatHashlineHeader(anchor, tag);
 }
 
-function recordFullHashlineContext(
+/** Records `fullText` (the whole file) as the snapshot of `absolutePath`; `undefined` for a relative path. */
+function recordTextHashlineContext(
 	session: ToolSession,
 	absolutePath: string | undefined,
 	displayPath: string,
 	fullText: string,
-	sourceStartLine?: number,
 ): HashlineHeaderContext | undefined {
 	if (!absolutePath || !path.isAbsolute(absolutePath)) return undefined;
-	// An excerpt must never replace the backing file's full edit snapshot.
-	const normalized = sourceStartLine === undefined ? normalizeToLF(fullText) : undefined;
-	const tag =
-		normalized === undefined
-			? getEditStore(session).recordSnapshotFile(absolutePath)
-			: getEditStore(session).recordSnapshot(absolutePath, normalized);
+	const normalized = normalizeToLF(fullText);
+	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized);
 	if (!tag) return undefined;
 	return {
 		header: formatReadHashlineHeader(displayPath, tag),
 		tag,
 		fullText: normalized,
+	};
+}
+
+async function recordFullHashlineContext(
+	session: ToolSession,
+	absolutePath: string | undefined,
+	displayPath: string,
+	fullText: string,
+	sourceStartLine?: number,
+): Promise<HashlineHeaderContext | undefined> {
+	if (sourceStartLine === undefined) return recordTextHashlineContext(session, absolutePath, displayPath, fullText);
+	if (!absolutePath || !path.isAbsolute(absolutePath)) return undefined;
+	// An excerpt must never replace the backing file's full edit snapshot.
+	const tag = await recordFileSnapshot(getEditStore(session), absolutePath);
+	if (!tag) return undefined;
+	return {
+		header: formatReadHashlineHeader(displayPath, tag),
+		tag,
+		fullText: undefined,
 	};
 }
 
@@ -110,7 +126,7 @@ export async function readHashlineHeaderContext(
 	cwd: string,
 	displayPath?: string,
 ): Promise<HashlineHeaderContext> {
-	return hashlineHeaderContextForText(session, absolutePath, cwd, await Bun.file(absolutePath).text(), displayPath);
+	return hashlineHeaderContextForText(session, absolutePath, cwd, await readFileText(absolutePath), displayPath);
 }
 
 /**
@@ -125,7 +141,7 @@ export function hashlineHeaderContextForText(
 	fullText: string,
 	displayPath: string = formatPathRelativeToCwd(absolutePath, cwd),
 ): HashlineHeaderContext {
-	const context = recordFullHashlineContext(session, absolutePath, displayPath, fullText);
+	const context = recordTextHashlineContext(session, absolutePath, displayPath, fullText);
 	if (!context) throw new ToolError(`Cannot record hashline snapshot for non-absolute path: ${absolutePath}`);
 	return context;
 }
@@ -218,16 +234,17 @@ export function lineNumbersFromSpans(spans: readonly { startLine: number; endLin
 	return lines;
 }
 
-function recordInMemorySeenLines(
+async function recordInMemorySeenLines(
 	session: ToolSession,
 	absolutePath: string | undefined,
 	fullText: string,
 	seenLines: readonly number[] | undefined,
 	sourceStartLine?: number,
-): void {
+): Promise<void> {
 	if (!absolutePath || !path.isAbsolute(absolutePath) || !seenLines || seenLines.length === 0) return;
 	if (sourceStartLine !== undefined) {
-		getEditStore(session).recordSnapshotFile(
+		await recordFileSnapshot(
+			getEditStore(session),
 			absolutePath,
 			seenLines.map(line => line + sourceStartLine - 1),
 		);
@@ -443,7 +460,7 @@ export async function buildInMemoryTextResult(
 	details.rowPrefixes = shouldAddHashLines || shouldAddLineNumbers;
 	const hashContext =
 		shouldAddHashLines && options.sourcePath
-			? recordFullHashlineContext(
+			? await recordFullHashlineContext(
 					session,
 					options.sourcePath,
 					formatPathRelativeToCwd(options.sourcePath, session.cwd),
@@ -565,7 +582,7 @@ export async function buildInMemoryTextResult(
 		getEditStore(session).recordSeenLines(options.sourcePath, hashContext.tag, seenLines);
 	}
 	if (options.raw === true && options.sourcePath && options.immutable !== true && rawSeenLines) {
-		recordInMemorySeenLines(session, options.sourcePath, text, rawSeenLines, options.sourceStartLine);
+		await recordInMemorySeenLines(session, options.sourcePath, text, rawSeenLines, options.sourceStartLine);
 	}
 	resultBuilder.text(outputText);
 	if (truncationInfo) {
@@ -599,7 +616,7 @@ export async function buildInMemoryMultiRangeResult(
 	details.rowPrefixes = shouldAddHashLines || shouldAddLineNumbers;
 	const hashContext =
 		shouldAddHashLines && options.sourcePath
-			? recordFullHashlineContext(
+			? await recordFullHashlineContext(
 					session,
 					options.sourcePath,
 					formatPathRelativeToCwd(options.sourcePath, session.cwd),
@@ -684,7 +701,7 @@ export async function buildInMemoryMultiRangeResult(
 		getEditStore(session).recordSeenLines(options.sourcePath, hashContext.tag, seenLines);
 	}
 	if (options.raw === true && options.sourcePath && options.immutable !== true && visibleSpans.length > 0) {
-		recordInMemorySeenLines(
+		await recordInMemorySeenLines(
 			session,
 			options.sourcePath,
 			text,

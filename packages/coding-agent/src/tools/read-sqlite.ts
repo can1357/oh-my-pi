@@ -34,7 +34,7 @@ import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-interface ResolvedSqliteReadPath {
+export interface ResolvedSqliteReadPath {
 	absolutePath: string;
 	sqliteSubPath: string;
 	queryString: string;

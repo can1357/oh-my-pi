@@ -21,7 +21,6 @@ import {
 	type ImageMetadata,
 	IMAGE_METADATA_HEADER_BYTES,
 	hasFsCode,
-	isProbablyBinary,
 	isProbablyBinaryHeader,
 	isEnoent,
 	logger,
@@ -31,14 +30,17 @@ import {
 	readImageMetadata,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
-import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import {
-	cfgIdaAvailable,
-	EXECUTABLE_SNIFF_BYTES,
-	isExecutableFile,
-	isExecutableHeader,
-	isIdaDatabasePath,
-} from "../ida";
+	containedFileAccess,
+	openReadableFile,
+	outsideContainedFileAccess,
+	peekReadableFile,
+	readFileBytes,
+	readFileText,
+	recordFileSnapshot,
+	withContainedFileAccess,
+} from "../sandbox/file-access";
+import { cfgIdaAvailable, EXECUTABLE_SNIFF_BYTES, isExecutableHeader, isIdaDatabasePath } from "../ida";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
@@ -258,7 +260,7 @@ interface BufferedFileText {
  */
 async function readWholeFile(absolutePath: string): Promise<Buffer | undefined> {
 	try {
-		return await fs.readFile(absolutePath);
+		return await readFileBytes(absolutePath);
 	} catch {
 		return undefined;
 	}
@@ -660,7 +662,7 @@ async function streamLinesFromFile(
 	setupLineState();
 
 	try {
-		fileHandle = await fs.open(filePath, "r");
+		fileHandle = await openReadableFile(filePath);
 		// Offsets from an earlier scan only hold for the same, unchanged file.
 		if (seek && !sameSeekFileIdentity(seek.identity, await fileHandle.stat())) {
 			lineIndex = 0;
@@ -793,7 +795,7 @@ async function resolveFileTailSelector(
 	let newlines = 0;
 	let position = 0;
 	let lastByte = -1;
-	const handle = await fs.open(filePath, "r");
+	const handle = await openReadableFile(filePath);
 	let identity: SeekFileIdentity;
 	try {
 		const stat = await handle.stat();
@@ -1346,19 +1348,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// lexical path instead, so the committed result matches an ordinary
 			// read exactly (hashline headers, source metadata).
 			const requestedPath = (context.args as ReadParams).path;
-			const result = await speculativeTool.#executeInner(
-				context.toolCall.id,
-				{ ...(context.args as ReadParams), path: absolutePath },
-				signal,
-				undefined,
-				undefined,
-				bytes => {
-					snapshotDigest = digestLocalReadBytes(bytes);
-				},
-				() => {
-					throw new Error("Conflict-aware reads require authoritative execution");
-				},
-				path.resolve(this.session.cwd, requestedPath),
+			const result = await withContainedFileAccess(this.session, () =>
+				speculativeTool.#executeInner(
+					context.toolCall.id,
+					{ ...(context.args as ReadParams), path: absolutePath },
+					signal,
+					undefined,
+					undefined,
+					bytes => {
+						snapshotDigest = digestLocalReadBytes(bytes);
+					},
+					() => {
+						throw new Error("Conflict-aware reads require authoritative execution");
+					},
+					path.resolve(this.session.cwd, requestedPath),
+				),
 			);
 			const snapshotHash = store.headHash(absolutePath);
 			if (!signal.aborted && !execution.discarded && snapshotHash) {
@@ -1641,18 +1645,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	async #readPdfPageScreenshot(options: PdfPageReadOptions): Promise<AgentToolResult<ReadToolDetails>> {
 		const { readPath, absolutePdfPath, page, pdfFileSize, question, suffixResolution, signal } = options;
 		const screenshot = await renderPdfPageScreenshot(this.session, absolutePdfPath, page, signal);
-		const screenshotFile = Bun.file(screenshot.dest);
-		const screenshotMetadata = await readImageMetadata(screenshot.dest);
-		const loaded = await this.#loadImageContent({
-			readPath,
-			absolutePath: screenshot.dest,
-			mimeType: screenshot.mimeType,
-			imageMetadata: screenshotMetadata,
-			fileSize: screenshotFile.size,
-			question,
-			questionPath: readPath,
-			signal,
-		});
+		// The screenshot is omp's own render of a verified copy, written where the container need not
+		// grant reads, so it loads outside the contained call.
+		const loaded = await outsideContainedFileAccess(async () =>
+			this.#loadImageContent({
+				readPath,
+				absolutePath: screenshot.dest,
+				mimeType: screenshot.mimeType,
+				imageMetadata: await readImageMetadata(screenshot.dest),
+				fileSize: Bun.file(screenshot.dest).size,
+				question,
+				questionPath: readPath,
+				signal,
+			}),
+		);
 		if (suffixResolution) {
 			const firstText = loaded.content.find((entry): entry is TextContent => entry.type === "text");
 			if (firstText) firstText.text = prependSuffixResolutionNotice(firstText.text, suffixResolution);
@@ -1960,7 +1966,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (shouldAddHashLines && outputText) {
 			const tag = buffered
 				? getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText)
-				: getEditStore(this.session).recordSnapshotFile(absolutePath);
+				: await recordFileSnapshot(getEditStore(this.session), absolutePath);
 			if (tag) {
 				recordFullySeenRows(getEditStore(this.session), absolutePath, tag, outputText, cutLines);
 				outputText = `${formatReadHashlineHeader(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag)}\n${outputText}`;
@@ -1971,7 +1977,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (buffered) {
 					getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText, rawSeenLines);
 				} else {
-					getEditStore(this.session).recordSnapshotFile(absolutePath, rawSeenLines);
+					await recordFileSnapshot(getEditStore(this.session), absolutePath, rawSeenLines);
 				}
 			}
 		}
@@ -1984,7 +1990,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return { outputText, columnCut, details };
 	}
 
-	async execute(
+	execute(
+		toolCallId: string,
+		params: ReadParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
+		toolContext?: AgentToolContext,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		// Under the OS sandbox, every file read and directory listing of this call runs contained.
+		return withContainedFileAccess(this.session, () =>
+			this.#execute(toolCallId, params, signal, onUpdate, toolContext),
+		);
+	}
+
+	async #execute(
 		toolCallId: string,
 		params: ReadParams,
 		signal?: AbortSignal,
@@ -2308,7 +2327,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 			const sqlitePath = await resolveSqliteReadPath(this.session, readPath, suffixCache, signal);
 			if (sqlitePath) {
-				return readSqlite(sqlitePath, signal);
+				// SQLite opens its -wal/-shm sidecars itself, so a contained read runs whole in the host.
+				return containedFileAccess()?.sqliteRead(sqlitePath) ?? readSqlite(sqlitePath, signal);
 			}
 			// local:// and artifact:// locate backing files without their URL query;
 			// restore it only for JSON reads, leaving other schemes' query semantics alone.
@@ -2516,7 +2536,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			isRawSelector(parsed) && !rawImages
 				? undefined
 				: (wholeFileBytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES) ??
-					(await peekFile(absolutePath, IMAGE_METADATA_HEADER_BYTES, header => header)));
+					(await peekReadableFile(absolutePath, IMAGE_METADATA_HEADER_BYTES, header => header)));
 		const imageMetadata = imageHeader ? parseImageMetadata(imageHeader) : null;
 		const mimeType = imageMetadata?.mimeType;
 		// HEIC, AVIF and other HEIF stills reach the model decoded by ffmpeg instead of as binary.
@@ -2530,10 +2550,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// that merely wears the extension falls through to the plain-text path.
 		if (!mimeType && parsed.kind === "none" && fileSize <= MAX_PROFILE_SUMMARY_BYTES) {
 			let rendered: string | null = null;
-			if (isSampleProfilePath(renderAbsolutePath))
-				rendered = renderSampleProfile(await Bun.file(absolutePath).text());
-			else if (isCpuProfilePath(renderAbsolutePath))
-				rendered = renderCpuProfile(await Bun.file(absolutePath).text());
+			if (isSampleProfilePath(renderAbsolutePath)) rendered = renderSampleProfile(await readFileText(absolutePath));
+			else if (isCpuProfilePath(renderAbsolutePath)) rendered = renderCpuProfile(await readFileText(absolutePath));
 			if (rendered) {
 				// One unnumbered document: `:N` addresses the file, so the summary carries no row
 				// numbers, snapshot tag or `:N` continuation, and no line count that would mark it a
@@ -2606,7 +2624,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		} else if (renderAbsolutePath.toLowerCase().endsWith(".ipynb") && !isRawSelector(parsed)) {
 			let notebookJson: string;
 			try {
-				notebookJson = await Bun.file(absolutePath).text();
+				notebookJson = await readFileText(absolutePath);
 			} catch (error) {
 				if (isEnoent(error)) throw new Error(`File not found: ${resolvedDisplayPath}`);
 				throw error;
@@ -2654,7 +2672,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				!isRawSelector(parsed) &&
 				(wholeFileBytes
 					? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
-					: await isProbablyBinary(absolutePath));
+					: await peekReadableFile(absolutePath, BINARY_SNIFF_BYTES, isProbablyBinaryHeader));
 			// Executables and IDBs open in IDA instead of being refused. Speculative
 			// reads (lexicalAbsolutePath set) never launch IDA; they fall back to an
 			// ordinary execution that does.
@@ -2665,7 +2683,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				(isIdaDatabasePath(absolutePath) ||
 					(wholeFileBytes
 						? isExecutableHeader(wholeFileBytes.subarray(0, EXECUTABLE_SNIFF_BYTES))
-						: await isExecutableFile(absolutePath)))
+						: await peekReadableFile(absolutePath, EXECUTABLE_SNIFF_BYTES, isExecutableHeader).catch(
+								() => false,
+							)))
 			) {
 				return readBinary(this.session, { absolutePath, view: "" }, parsed, signal);
 			}
@@ -2686,7 +2706,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 			// Unbounded schemes (instruction documents) read whole: no summary, no result limits.
 			if (located?.spec.unbounded) {
-				const text = buffered?.strippedText ?? (await Bun.file(absolutePath).text());
+				const text = buffered?.strippedText ?? (await readFileText(absolutePath));
 				return buildInMemorySelectorResult(this.session, text, parsed, {
 					details: { resolvedPath: renderAbsolutePath },
 					sourcePath: renderAbsolutePath,
@@ -3059,7 +3079,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 										absolutePath,
 										normalizeToLF(`${collectedLines.join("\n")}${hasTrailingNewline ? "\n" : ""}`),
 									)
-								: getEditStore(this.session).recordSnapshotFile(absolutePath);
+								: await recordFileSnapshot(getEditStore(this.session), absolutePath);
 						if (tag) {
 							hashContext = hashlineHeaderContext(
 								formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd),
@@ -3235,7 +3255,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						if (buffered) {
 							getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText, seenLines);
 						} else {
-							getEditStore(this.session).recordSnapshotFile(absolutePath, seenLines);
+							await recordFileSnapshot(getEditStore(this.session), absolutePath, seenLines);
 						}
 					}
 

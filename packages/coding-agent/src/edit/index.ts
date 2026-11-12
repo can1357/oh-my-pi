@@ -32,7 +32,7 @@ import { notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { FileChangeType } from "../lsp/types";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
-import { mutateFile, withContainedFileMutations } from "../sandbox/file-mutations";
+import { mutateFile, withContainedFileAccess } from "../sandbox/file-access";
 import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { approvalTargetKey } from "../tools/approval-targets";
@@ -526,9 +526,7 @@ export class EditTool implements AgentTool<TInput> {
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		// Under the OS sandbox, every write, delete and move of this call runs in the contained host.
-		return withContainedFileMutations(this.session, () =>
-			this.#execute(toolCallId, params, signal, onUpdate, context),
-		);
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
 	}
 
 	async #execute(

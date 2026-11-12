@@ -23,6 +23,7 @@ import {
 	splitSliceRef,
 } from "../ida";
 import idaDescription from "../prompts/tools/ida.md" with { type: "text" };
+import { withContainedFileAccess } from "../sandbox/file-access";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { saveArtifactText } from "./gh-common";
@@ -128,6 +129,18 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 	}
 
 	async execute(
+		toolCallId: string,
+		params: IdaParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<IdaToolDetails>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<IdaToolDetails>> {
+		// Under the OS sandbox, the binary this call reads goes through the contained host, and the
+		// database opens in a worker that runs contained.
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
 		_toolCallId: string,
 		params: IdaParams,
 		signal?: AbortSignal,

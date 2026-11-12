@@ -32,6 +32,7 @@ import {
 	type ShellFsResponse,
 } from "@oh-my-pi/pi-natives";
 import { isFsError } from "@oh-my-pi/pi-utils";
+import { containedFileAccess, readFileRange } from "../sandbox/file-access";
 import { TIER_RANK } from "../tools/approval";
 import { UrlContainmentError } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -339,7 +340,12 @@ export class InternalUrlFilesystem {
 	async readPrefix(input: string, maxBytes: number): Promise<Uint8Array> {
 		try {
 			const node = await this.#node(input, true, false);
-			if (node.kind !== "virtual") return await Bun.file(node.path).slice(0, maxBytes).bytes();
+			if (node.kind !== "virtual") {
+				// Contained, the bytes come through the container-verified handle, not a by-path read in omp.
+				return containedFileAccess()
+					? await readFileRange(node.path, 0, maxBytes)
+					: await Bun.file(node.path).slice(0, maxBytes).bytes();
+			}
 			if (node.directory) throw new UrlFsError("EISDIR", `Is a directory: ${node.url}`);
 			return node.bytes.subarray(0, maxBytes);
 		} catch (error) {

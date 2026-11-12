@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { mutateFile } from "../sandbox/file-access";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
@@ -163,7 +164,7 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
 	const content = await readTextFromDisk(filePath);
 	const result = applyTextEditsToString(content, edits);
-	await Bun.write(filePath, result);
+	await mutateFile({ kind: "write", path: filePath, data: result });
 }
 
 /** A reference file and the text edits a rename computed for it. */
@@ -195,10 +196,12 @@ export async function applyEditsThenRename(
 		await applyTextEdits(filePath, edits);
 	}
 	try {
-		await fs.mkdir(path.dirname(dest), { recursive: true });
-		await fs.rename(source, dest);
+		await mutateFile({ kind: "mkdir", path: path.dirname(dest) });
+		await mutateFile({ kind: "rename", from: source, to: dest });
 	} catch (err) {
-		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
+		await Promise.all(
+			backups.map(({ filePath, original }) => mutateFile({ kind: "write", path: filePath, data: original })),
+		);
 		throw err;
 	}
 }
@@ -352,13 +355,12 @@ export async function applyWorkspaceEdit(
 				record({ kind: "edit", uri: op.uri });
 			} else if (op.kind === "create") {
 				const filePath = uriToFile(op.uri);
-				await fs.mkdir(path.dirname(filePath), { recursive: true });
+				await mutateFile({ kind: "mkdir", path: path.dirname(filePath) });
 				try {
 					if (op.options?.overwrite) {
-						await Bun.write(filePath, "");
+						await mutateFile({ kind: "write", path: filePath, data: "" });
 					} else {
-						const handle = await fs.open(filePath, "wx");
-						await handle.close();
+						await mutateFile({ kind: "create", path: filePath });
 					}
 				} catch (error) {
 					if (!(op.options?.ignoreIfExists && !op.options.overwrite && isEexist(error))) {
@@ -371,7 +373,7 @@ export async function applyWorkspaceEdit(
 			} else if (op.kind === "rename") {
 				const oldPath = uriToFile(op.oldUri);
 				const newPath = uriToFile(op.newUri);
-				await fs.mkdir(path.dirname(newPath), { recursive: true });
+				await mutateFile({ kind: "mkdir", path: path.dirname(newPath) });
 				if (oldPath !== newPath) {
 					// Displace an overwritten destination into a kernel-reserved sibling
 					// temp dir (same filesystem, so the moves stay atomic) instead of
@@ -390,12 +392,13 @@ export async function applyWorkspaceEdit(
 						// source, so let fs.rename change the case in place instead.
 						const sourceStat = await fs.lstat(oldPath);
 						if (sourceStat.dev !== targetStat.dev || sourceStat.ino !== targetStat.ino) {
-							const holdDir = await fs.mkdtemp(path.join(path.dirname(newPath), ".omp-displaced-"));
+							const holdDir = path.join(path.dirname(newPath), `.omp-displaced-${crypto.randomUUID()}`);
+							await mutateFile({ kind: "mkdir", path: holdDir });
 							const holdFile = path.join(holdDir, path.basename(newPath));
 							try {
-								await fs.rename(newPath, holdFile);
+								await mutateFile({ kind: "rename", from: newPath, to: holdFile });
 							} catch (error) {
-								await fs.rm(holdDir, { recursive: true, force: true }).catch(() => {});
+								await mutateFile({ kind: "rm", path: holdDir, recursive: true, force: true }).catch(() => {});
 								throw error;
 							}
 							displaced = { dir: holdDir, file: holdFile };
@@ -404,27 +407,31 @@ export async function applyWorkspaceEdit(
 						if (!isEnoent(error)) throw error;
 					}
 					try {
-						await fs.rename(oldPath, newPath);
+						await mutateFile({ kind: "rename", from: oldPath, to: newPath });
 					} catch (error) {
 						if (displaced) {
 							try {
-								await fs.rename(displaced.file, newPath);
+								await mutateFile({ kind: "rename", from: displaced.file, to: newPath });
 							} catch {
 								// Restoration failed: the destination really is gone, so
 								// report it to reconciliation as an executed delete.
 								record({ kind: "delete", uri: op.newUri });
 							}
-							await fs.rm(displaced.dir, { recursive: true, force: true }).catch(() => {});
+							await mutateFile({ kind: "rm", path: displaced.dir, recursive: true, force: true }).catch(
+								() => {},
+							);
 						}
 						throw error;
 					}
 					if (displaced) {
-						await fs.rm(displaced.dir, { recursive: true, force: true }).catch((error: unknown) => {
-							logger.debug("LSP rename: failed to remove displaced overwrite target", {
-								displaced: displaced?.dir,
-								error: error instanceof Error ? error.message : String(error),
-							});
-						});
+						await mutateFile({ kind: "rm", path: displaced.dir, recursive: true, force: true }).catch(
+							(error: unknown) => {
+								logger.debug("LSP rename: failed to remove displaced overwrite target", {
+									displaced: displaced?.dir,
+									error: error instanceof Error ? error.message : String(error),
+								});
+							},
+						);
 					}
 				}
 				applied.push(`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} → ${formatPathRelativeToCwd(newPath, cwd)}`);
@@ -434,9 +441,14 @@ export async function applyWorkspaceEdit(
 				try {
 					const stat = await fs.lstat(filePath);
 					if (stat.isDirectory() && !stat.isSymbolicLink() && !op.options?.recursive) {
-						await fs.rmdir(filePath);
+						await mutateFile({ kind: "rmdir", path: filePath });
 					} else {
-						await fs.rm(filePath, { recursive: op.options?.recursive ?? false });
+						await mutateFile({
+							kind: "rm",
+							path: filePath,
+							recursive: op.options?.recursive ?? false,
+							force: false,
+						});
 					}
 				} catch (error) {
 					if (!(op.options?.ignoreIfNotExists && isEnoent(error))) throw error;

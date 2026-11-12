@@ -50,7 +50,7 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import writeDeviceOnlyRefusal from "../prompts/tools/write-device-only-refusal.md" with { type: "text" };
-import { containedFileMutations, mutateFile, withContainedFileMutations } from "../sandbox/file-mutations";
+import { containedFileAccess, mutateFile, withContainedFileAccess } from "../sandbox/file-access";
 import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
@@ -727,7 +727,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// `withFileLock` flocks `<archive>.lock` on Unix other than Linux, creating it in this
 		// process. Under the sandbox the contained host creates it first (an empty append never
 		// truncates a held lock file), so the OS decides that create like the archive's own.
-		if (containedFileMutations() && process.platform !== "linux" && process.platform !== "win32") {
+		if (containedFileAccess() && process.platform !== "linux" && process.platform !== "win32") {
 			await mutateFile({ kind: "append", path: `${finalPath}.lock`, data: new Uint8Array() });
 		}
 
@@ -778,7 +778,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// path also avoids collisions with stale files left by prior runs.
 				const tmpPath = `${finalPath}.tmp-${process.pid}-${Bun.randomUUIDv7()}`;
 				try {
-					if (containedFileMutations()) {
+					if (containedFileAccess()) {
 						// Built in omp's own temp directory, then published by the contained host.
 						using staging = TempDir.createSync("@omp-archive-write-");
 						const staged = path.join(staging.path(), path.basename(finalPath));
@@ -873,7 +873,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
 			}
 			const { absolutePath: dbPath, table, key } = resolvedSqlitePath;
-			const contained = containedFileMutations();
+			const contained = containedFileAccess();
 			const resultText = contained
 				? await contained.sqliteWrite({ dbPath, table, key, content })
 				: writeSqliteRow(dbPath, table, key, content);
@@ -897,9 +897,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		// Under the OS sandbox, the file writes of this call run in the contained host.
-		return withContainedFileMutations(this.session, () =>
-			this.#execute(toolCallId, params, signal, onUpdate, context),
-		);
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
 	}
 
 	async #execute(

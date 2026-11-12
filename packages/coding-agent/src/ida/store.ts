@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDir, peekFile } from "@oh-my-pi/pi-utils";
+import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { containedFileAccess, copyReadableFile, peekReadableFile, withReadableFile } from "../sandbox/file-access";
 
 /** Number of leading bytes needed by {@link isExecutableHeader} (a full 64-byte DOS header for PE). */
 export const EXECUTABLE_SNIFF_BYTES = 64;
@@ -126,10 +127,7 @@ export function parseFatSlices(header: Uint8Array): MachOSlice[] | null {
 
 /** Slice table of a fat Mach-O on disk; null when the file is not one. */
 export async function readFatSlices(absPath: string): Promise<MachOSlice[] | null> {
-	const header = await Bun.file(absPath)
-		.slice(0, FAT_HEADER_SIZE + MAX_FAT_ARCHS * FAT_ARCH_64_SIZE)
-		.bytes();
-	return parseFatSlices(header);
+	return peekReadableFile(absPath, FAT_HEADER_SIZE + MAX_FAT_ARCHS * FAT_ARCH_64_SIZE, parseFatSlices);
 }
 
 /**
@@ -167,7 +165,7 @@ export function isIdaDatabasePath(p: string): boolean {
 /** Sniff the file header; false on any I/O error. */
 export async function isExecutableFile(absPath: string): Promise<boolean> {
 	try {
-		return await peekFile(absPath, EXECUTABLE_SNIFF_BYTES, isExecutableHeader);
+		return await peekReadableFile(absPath, EXECUTABLE_SNIFF_BYTES, isExecutableHeader);
 	} catch {
 		return false;
 	}
@@ -217,7 +215,30 @@ interface ContentHash {
 
 const contentHashes = new Map<string, ContentHash>();
 
+/** Largest chunk read at a time when hashing or staging through a verified handle. */
+const HANDLE_CHUNK_BYTES = 1024 * 1024;
+
 async function hashFileContent(absPath: string): Promise<string> {
+	// Contained, the file is read through a handle the sandbox host verified; a refusal still applies
+	// when the digest is memoized, so the handle is opened first.
+	if (containedFileAccess()) {
+		return withReadableFile(absPath, async handle => {
+			const stat = await handle.stat();
+			const cached = contentHashes.get(absPath);
+			if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.sha;
+			const hasher = new Bun.CryptoHasher("sha256");
+			const chunk = Buffer.allocUnsafe(HANDLE_CHUNK_BYTES);
+			for (let position = 0; ;) {
+				const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+				if (bytesRead === 0) break;
+				hasher.update(chunk.subarray(0, bytesRead));
+				position += bytesRead;
+			}
+			const sha = hasher.digest("hex");
+			contentHashes.set(absPath, { size: stat.size, mtimeMs: stat.mtimeMs, sha });
+			return sha;
+		});
+	}
 	const stat = await fs.promises.stat(absPath);
 	const cached = contentHashes.get(absPath);
 	if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.sha;
@@ -291,7 +312,11 @@ export async function prepareStoreDir(loc: IdbLocation): Promise<void> {
 	const stagedName = sanitizeIdbName(path.basename(loc.sourcePath));
 	const staged = path.join(loc.dir, stagedName);
 	if (!(await Bun.file(staged).exists())) {
-		if (loc.fat) {
+		if (containedFileAccess()) {
+			// Read through the handle the sandbox host verified; the fat case stages the chosen slice.
+			const range = loc.fat ? { offset: loc.fat.slice.offset, size: loc.fat.slice.size } : undefined;
+			await copyReadableFile(loc.sourcePath, staged, range);
+		} else if (loc.fat) {
 			// IDA's loader would silently take the first slice of a fat file; stage the chosen thin Mach-O instead.
 			const { arch, offset, size } = loc.fat.slice;
 			const source = Bun.file(loc.sourcePath);

@@ -13,8 +13,14 @@ export async function applyFileMutation(mutation: HostFileMutation): Promise<voi
 		case "append":
 			await fs.appendFile(mutation.path, mutation.data);
 			return;
+		case "create":
+			await (await fs.open(mutation.path, "wx")).close();
+			return;
 		case "unlink":
 			await fs.unlink(mutation.path);
+			return;
+		case "rmdir":
+			await fs.rmdir(mutation.path);
 			return;
 		case "mkdir":
 			await fs.mkdir(mutation.path, { recursive: true });

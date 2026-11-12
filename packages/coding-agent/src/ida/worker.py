@@ -662,7 +662,7 @@ def _error(e):
 
 def _send(frame):
     data = json.dumps(frame, ensure_ascii=False, default=str) + "\n"
-    if _WINDOWS:
+    if _FRAME_INTERRUPTS:
         _proto.write(data)
         _proto.flush()
         return
@@ -676,12 +676,14 @@ def _send(frame):
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
 
 
-# Windows cannot deliver SIGINT to one child process (the supervisor's kill terminates it), so
-# the supervisor writes `{"interrupt": <id>}` to stdin instead. A reader thread consumes stdin
-# and schedules KeyboardInterrupt in the main thread (at most once) while that request runs.
+# Windows cannot deliver SIGINT to one child process (the supervisor's kill terminates it), and a
+# contained worker (OMP_IDA_FRAME_INTERRUPTS=1) sits behind a sandbox wrapper that cannot be
+# signalled either, so the supervisor writes `{"interrupt": <id>}` to stdin instead. A reader
+# thread consumes stdin and schedules KeyboardInterrupt in the main thread (at most once) while
+# that request runs.
 # Scheduling is asynchronous, so `_run` absorbs a pending interrupt before the response is
 # written: it can never truncate a frame or hit the next request.
-_WINDOWS = sys.platform == "win32"
+_FRAME_INTERRUPTS = sys.platform == "win32" or os.environ.get("OMP_IDA_FRAME_INTERRUPTS") == "1"
 # How long `_run` spins for a scheduled interrupt the request's own code already swallowed.
 _INTERRUPT_ABSORB_S = 0.5
 _requests = queue.Queue()
@@ -795,11 +797,11 @@ def _handle(line):
 
 
 def main():
-    if _WINDOWS:
+    if _FRAME_INTERRUPTS:
         threading.Thread(target=_read_requests, name="omp-ida-stdin", daemon=True).start()
     while True:
         try:
-            line = _requests.get() if _WINDOWS else sys.stdin.readline()
+            line = _requests.get() if _FRAME_INTERRUPTS else sys.stdin.readline()
             if not line:
                 break
             if line.strip():

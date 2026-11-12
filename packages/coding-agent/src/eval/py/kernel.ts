@@ -9,7 +9,6 @@
  * timeout. When the sandbox applies to `eval`, the runner is launched contained
  * through `SandboxRuntime` (see `spawnContainedKernel` for signal mapping).
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
@@ -39,6 +38,7 @@ import {
 	enumeratePythonRuntimes,
 	filterEnv,
 	type PythonRuntime,
+	pythonReadRoots,
 	resolveExplicitPythonRuntime,
 	resolvePythonRuntime,
 } from "./runtime";
@@ -516,22 +516,6 @@ function buildInitScript(cwd: string, env?: Record<string, string | undefined>):
 		"for __omp_key, __omp_val in __omp_env.items():\n    os.environ[__omp_key] = __omp_val",
 		"if __omp_cwd not in sys.path:\n    sys.path.insert(0, __omp_cwd)",
 	].join("\n");
-}
-
-/**
- * Directories the contained runner must read beyond the configured read roots: the staged runner
- * script (when there is one), the virtual environment, and the real interpreter installation
- * behind its symlinks (never the symlink's own parent, which can be `~/.local` or `/opt/homebrew`).
- */
-async function pythonReadRoots(runtime: PythonRuntime, scriptPath?: string): Promise<string[]> {
-	const roots = scriptPath ? [path.dirname(scriptPath)] : [];
-	if (runtime.venvPath) roots.push(runtime.venvPath);
-	try {
-		roots.push(path.dirname(path.dirname(await fs.realpath(runtime.pythonPath))));
-	} catch {
-		// Unresolvable interpreter: the spawn reports it.
-	}
-	return roots;
 }
 
 /**

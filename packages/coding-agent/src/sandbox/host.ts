@@ -1,17 +1,24 @@
 /**
  * The in-sandbox host (`omp __omp_sandbox_host`): owns the embedded `Shell` and `PtySession`
  * instances of one agent session inside an MXC container and serves them to the trusted parent
- * over the JSONL protocol of {@link ./host-protocol}. It also performs the file mutations of the
- * parent's in-process file tools (`file.mutate`, `ast.edit`, `sqlite.write`), so the container
- * decides those at the syscall too. Exits when stdin closes.
+ * over the JSONL protocol of {@link ./host-protocol}. It also performs the filesystem work of the
+ * parent's in-process file tools — mutations (`file.mutate`, `ast.edit`, `sqlite.write`), searches
+ * and listings (`search.grep`, `search.glob`, `ast.grep`, `dir.list`), SQLite reads, and the open
+ * that decides a single-file read (`file.identify`) — so the container decides those at the
+ * syscall too. Exits when stdin closes.
  *
  * stdout carries protocol lines only. `cli.ts` rebinds `process.stdout` and the console to stderr
  * before this module loads; protocol lines go through a dedicated `Bun.stdout` writer, and the
  * logger forwards its records to the parent instead of opening a log file (the agent directory is
  * not writable in here).
  */
+import * as fs from "node:fs/promises";
 import {
 	astEdit,
+	astGrep,
+	glob,
+	grep,
+	listWorkspace,
 	Process,
 	PtySession,
 	RunTrace,
@@ -21,14 +28,17 @@ import {
 	type ShellFsResponse,
 } from "@oh-my-pi/pi-natives";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { readSqlite } from "../tools/read-sqlite";
 import { writeSqliteRow } from "../tools/sqlite-reader";
 import { applyFileMutation } from "./file-mutation-ops";
 import {
 	decodeHostMessage,
 	encodeHostMessage,
 	type HostEvent,
+	type HostFileIdentity,
 	type HostRequest,
 	type HostResults,
+	type HostRunFs,
 	MAX_HOST_LINE_BYTES,
 	readHostLines,
 	SANDBOX_HOST_PROTOCOL_VERSION,
@@ -39,6 +49,21 @@ const RUN_POLL_MS = 80;
 
 type RunRequest = Extract<HostRequest, { op: "shell.run" }>;
 type PtyStartRequest = Extract<HostRequest, { op: "pty.start" }>;
+type DispatchRequest = Exclude<
+	HostRequest,
+	{ op: "pty.write" | "pty.resize" | "fs.reply" | "pty.start" | "call.abort" }
+>;
+
+/** Opens `filePath` for reading, as the parent's read will, and reports which file that was. */
+async function identifyFile(filePath: string): Promise<HostFileIdentity> {
+	const handle = await fs.open(filePath, "r");
+	try {
+		const stats = await handle.stat({ bigint: true });
+		return { dev: stats.dev, ino: stats.ino };
+	} finally {
+		await handle.close();
+	}
+}
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -49,6 +74,8 @@ class SandboxHost {
 	readonly #shells = new Map<number, Shell>();
 	readonly #ptys = new Map<number, PtySession>();
 	readonly #fsReplies = new Map<number, (response: ShellFsResponse) => void>();
+	/** Abort handles of the in-flight requests whose native call takes a signal. */
+	readonly #aborts = new Map<number, AbortController>();
 	#nextFsReq = 0;
 
 	send(event: HostEvent): void {
@@ -75,6 +102,9 @@ class SandboxHost {
 				resolve?.(message.response);
 				return;
 			}
+			case "call.abort":
+				this.#aborts.get(message.target)?.abort();
+				return;
 			case "pty.start":
 				this.#startPty(message);
 				return;
@@ -129,9 +159,23 @@ class SandboxHost {
 		return shell;
 	}
 
-	async #dispatch(
-		message: Exclude<HostRequest, { op: "pty.write" | "pty.resize" | "fs.reply" | "pty.start" }>,
-	): Promise<HostResults[keyof HostResults]> {
+	/** The abort signal of request `id`, fired by a `call.abort`; released when the request settles. */
+	async #abortable<T>(id: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+		const controller = new AbortController();
+		this.#aborts.set(id, controller);
+		try {
+			return await run(controller.signal);
+		} finally {
+			this.#aborts.delete(id);
+		}
+	}
+
+	/** The URL-path filesystem of request `id`, when the parent bridges one. */
+	#requestFilesystem(id: number, fs: HostRunFs | null): ShellFilesystem | undefined {
+		return fs ? this.#bridgeFilesystem(id, fs.nativeLocalPaths) : undefined;
+	}
+
+	async #dispatch(message: DispatchRequest): Promise<HostResults[keyof HostResults]> {
 		switch (message.op) {
 			case "shell.create":
 				this.#shells.set(message.shell, new Shell(message.options));
@@ -156,15 +200,39 @@ class SandboxHost {
 			case "file.mutate":
 				await applyFileMutation(message.mutation);
 				return null;
-			case "ast.edit": {
-				const result = await astEdit({
-					...message.options,
-					filesystem: message.fs ? this.#bridgeFilesystem(message.id, message.fs.nativeLocalPaths) : undefined,
-				});
-				// An applied rewrite is reported by its per-file counts; the before/after text of every
-				// change could outgrow a protocol line.
-				return { ...result, changes: [] };
+			case "file.identify":
+				return identifyFile(message.path);
+			case "dir.list":
+				return listWorkspace(message.options);
+			case "search.grep": {
+				const { id } = message;
+				return this.#abortable(id, signal =>
+					grep({
+						...message.options,
+						signal,
+						filesystem: this.#requestFilesystem(id, message.fs),
+						onMatches: message.stream ? matches => this.send({ ev: "search.matches", id, matches }) : undefined,
+					}),
+				);
 			}
+			case "search.glob":
+				return this.#abortable(message.id, signal =>
+					glob({ ...message.options, signal, filesystem: this.#requestFilesystem(message.id, message.fs) }),
+				);
+			case "ast.grep":
+				return this.#abortable(message.id, signal =>
+					astGrep({ ...message.options, signal, filesystem: this.#requestFilesystem(message.id, message.fs) }),
+				);
+			case "ast.edit": {
+				const result = await this.#abortable(message.id, signal =>
+					astEdit({ ...message.options, signal, filesystem: this.#requestFilesystem(message.id, message.fs) }),
+				);
+				// An applied rewrite is reported by its per-file counts; the before/after text of every
+				// change could outgrow a protocol line. A preview needs them.
+				return message.options.dryRun ? result : { ...result, changes: [] };
+			}
+			case "sqlite.read":
+				return readSqlite(message.target);
 			case "sqlite.write": {
 				const { dbPath, table, key, content } = message.write;
 				return writeSqliteRow(dbPath, table, key, content);

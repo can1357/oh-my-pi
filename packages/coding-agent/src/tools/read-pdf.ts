@@ -1,5 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { untilAborted } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { containedFileAccess, copyReadableFile } from "../sandbox/file-access";
 import type { ToolSession } from "../sdk";
 import type { BrowserHandle } from "./browser/registry";
 import type { ScreenshotResult } from "./browser/tab-protocol";
@@ -92,8 +94,29 @@ export function splitPdfImageReadPath(readPath: string): PdfImageReadTarget | nu
 	return { pdfPath, member, page };
 }
 
-/** Render one PDF page through the browser capability's shared headless Chromium. */
+/**
+ * Render one PDF page through the browser capability's shared headless Chromium. Chromium opens
+ * the PDF itself, outside any container, so a contained call hands it a private copy of the bytes
+ * read through the verified handle instead of the path.
+ */
 export async function renderPdfPageScreenshot(
+	session: ToolSession,
+	absolutePdfPath: string,
+	page: number,
+	signal?: AbortSignal,
+): Promise<ScreenshotResult> {
+	if (!containedFileAccess()) return renderPdfFilePage(session, absolutePdfPath, page, signal);
+	const copyDir = await TempDir.create("@omp-pdf-page-");
+	try {
+		const copy = copyDir.join("input.pdf");
+		await copyReadableFile(absolutePdfPath, copy);
+		return await renderPdfFilePage(session, copy, page, signal);
+	} finally {
+		await copyDir.remove().catch(() => {});
+	}
+}
+
+async function renderPdfFilePage(
 	session: ToolSession,
 	absolutePdfPath: string,
 	page: number,

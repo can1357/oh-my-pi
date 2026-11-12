@@ -20,7 +20,7 @@ import {
 	sanitizeText,
 	TempDir,
 } from "@oh-my-pi/pi-utils";
-import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
+import { containedFileAccess, copyReadableFile, peekReadableFile } from "../sandbox/file-access";
 import type { ToolSession } from "../sdk";
 import { quotePosixArgument } from "../utils/shell-quote";
 import { resolveReadPath } from "./path-utils";
@@ -423,7 +423,7 @@ export async function resolveJsonReadPath(
 		const stat = await Bun.file(filePath).stat();
 		if (!stat.isFile()) return false;
 		const jsonName = JSON_FILE_PATTERN.test(filePath);
-		return peekFile(filePath, IMAGE_METADATA_HEADER_BYTES, header => {
+		return peekReadableFile(filePath, IMAGE_METADATA_HEADER_BYTES, header => {
 			if (parseImageMetadata(header) || parseHeifImageMimeType(header)) return false;
 			return jsonName || opensLikeJson(header);
 		});
@@ -470,6 +470,13 @@ export async function readJson(
 		await using scratch = await TempDir.create("@omp-read-json-");
 		const inputPath = scratch.join("input.json");
 		await Bun.write(inputPath, resolvedJsonPath.content);
+		queryOutput = await executeJsonQuery(inputPath, resolvedJsonPath.selector, signal);
+	} else if (containedFileAccess()) {
+		// jq opens its file itself, so the container never decided that path: it queries a private
+		// copy of the bytes read through the verified handle.
+		await using scratch = await TempDir.create("@omp-read-json-");
+		const inputPath = scratch.join("input.json");
+		await copyReadableFile(resolvedJsonPath.absolutePath, inputPath);
 		queryOutput = await executeJsonQuery(inputPath, resolvedJsonPath.selector, signal);
 	} else {
 		queryOutput = await executeJsonQuery(resolvedJsonPath.absolutePath, resolvedJsonPath.selector, signal);

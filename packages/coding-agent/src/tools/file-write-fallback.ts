@@ -41,7 +41,7 @@
  * `LspFileSystem.delete` and `defaultFileSystem.delete` for `apply_patch`.
  *
  * Inside a tool call whose mutations are contained (the OS sandbox is active; see
- * `sandbox/file-mutations.ts`), the write, unlink and recovery `mkdir` below run in
+ * `sandbox/file-access.ts`), the write, unlink and recovery `mkdir` below run in
  * the session's sandbox host instead of this process, so the container decides them.
  * A denial there reaches the handlers like an in-process one.
  *
@@ -137,7 +137,7 @@ import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import type { BunFile } from "bun";
 import type { ExtensionContext } from "../extensibility/extensions/types";
-import { containedFileMutations, mutateFile } from "../sandbox/file-mutations";
+import { containedFileAccess, mutateFile } from "../sandbox/file-access";
 import { resolveSyscallTarget } from "./path-utils";
 
 /** A denied write, captured for a registered fallback to retry through a privileged channel. */
@@ -310,7 +310,7 @@ export function withFileMutationSession<T>(sessionId: string | undefined, fn: ()
  * must propagate — `edit`'s `REM` turns it into a `NotFoundError`.
  */
 export async function deleteFileWithFallback(dst: string, file?: BunFile): Promise<void> {
-	const contained = containedFileMutations();
+	const contained = containedFileAccess();
 	try {
 		if (contained) {
 			await contained.mutate({ kind: "unlink", path: dst });
@@ -415,7 +415,7 @@ export async function writeFileWithFallback(dst: string, content: string, file?:
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,
 	// which bounds the loop at two writes.
-	const contained = containedFileMutations();
+	const contained = containedFileAccess();
 	for (let attempt = 0; ; attempt++) {
 		try {
 			if (contained) {

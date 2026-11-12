@@ -5,7 +5,7 @@
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
-import { mutateFile } from "../../sandbox/file-mutations";
+import { mutateFile } from "../../sandbox/file-access";
 
 // =============================================================================
 // Biome JSON Output Types

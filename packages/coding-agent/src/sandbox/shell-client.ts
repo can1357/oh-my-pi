@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	type GrepMatch,
 	type PipeStreams,
 	Process,
 	type PtyRunResult,
@@ -110,6 +111,9 @@ interface RunRoutes {
 	trace?: SandboxRunTrace;
 	filesystem?: ShellFilesystem;
 	onPids?: (pids: number[]) => void;
+	onMatches?: (matches: GrepMatch[]) => void;
+	/** Aborts the request in the host (`call.abort`); its reply then settles it. */
+	signal?: AbortSignal;
 }
 
 /** Numeric fields each host event must carry; a reply carries `id`. */
@@ -119,6 +123,7 @@ const HOST_EVENT_FIELDS: Record<Exclude<HostEvent, { ok: boolean }>["ev"], reado
 	"shell.trace": ["id"],
 	"shell.pids": ["id"],
 	"fs.request": ["id", "req"],
+	"search.matches": ["id"],
 	"pty.data": ["pty"],
 	"pty.exit": ["pty"],
 	log: [],
@@ -146,7 +151,7 @@ interface PtyRoutes {
 	onFail(error: Error): void;
 }
 
-type Notification = Extract<HostRequest, { op: "pty.write" | "pty.resize" | "fs.reply" }>;
+type Notification = Extract<HostRequest, { op: "pty.write" | "pty.resize" | "fs.reply" | "call.abort" }>;
 /** A request awaiting a reply, before the connection numbers it. */
 type HostCall =
 	Exclude<HostRequest, Notification> extends infer R ? (R extends unknown ? Omit<R, "id"> : never) : never;
@@ -205,6 +210,8 @@ export class SandboxHostConnection {
 
 	request<M extends HostCall>(message: M, run?: RunRoutes): Promise<HostResults[M["op"]]> {
 		if (this.#failure) return Promise.reject(this.#failure);
+		const signal = run?.signal;
+		if (signal?.aborted) return Promise.reject(signal.reason);
 		const id = ++this.#nextId;
 		const call: HostCall = message;
 		const line = encodeHostMessage({ ...call, id });
@@ -216,6 +223,14 @@ export class SandboxHostConnection {
 		const { promise, resolve, reject } = Promise.withResolvers<HostResults[M["op"]]>();
 		this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, run });
 		this.#write(line);
+		if (signal) {
+			const onAbort = (): void => this.notify({ op: "call.abort", target: id });
+			signal.addEventListener("abort", onAbort, { once: true });
+			void promise.then(
+				() => signal.removeEventListener("abort", onAbort),
+				() => signal.removeEventListener("abort", onAbort),
+			);
+		}
 		return promise;
 	}
 
@@ -370,6 +385,9 @@ export class SandboxHostConnection {
 			case "shell.pids":
 				this.#pending.get(event.id)?.run?.onPids?.(event.pids);
 				return;
+			case "search.matches":
+				this.#pending.get(event.id)?.run?.onMatches?.(event.matches);
+				return;
 			case "fs.request": {
 				const filesystem = this.#pending.get(event.id)?.run?.filesystem;
 				const reply = (response: ShellFsResponse): void =>
@@ -414,6 +432,8 @@ export interface SandboxHostScope {
 	extraRead?: readonly string[];
 	/** omp-owned roots the contained shell may write in every sandbox mode (the session's `local://` root). */
 	extraWrite?: readonly string[];
+	/** Network mode overriding the configured one (the file-access host needs none). */
+	network?: SandboxNetworkMode;
 }
 
 const hostPool = new Map<string, Promise<SandboxHostConnection>>();
@@ -455,7 +475,7 @@ export async function startSandboxHost(
 export function acquireSandboxHost(runtime: SandboxRuntime, scope: SandboxHostScope): Promise<SandboxHostConnection> {
 	const prefix = poolPrefix(scope.agentSessionKey);
 	const extra = [...(scope.extraRead ?? []), "\0", ...(scope.extraWrite ?? [])].join("\0");
-	const key = `${prefix}${runtime.fingerprint()}\n${extra}`;
+	const key = `${prefix}${runtime.fingerprint()}\n${scope.network ?? ""}\n${extra}`;
 	const existing = hostPool.get(key);
 	if (existing) return existing;
 	releaseSandboxHosts(scope.agentSessionKey);

@@ -8,21 +8,14 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import {
-	type AstReplaceChange,
-	type AstReplaceFileChange,
-	type AstReplaceOptions,
-	type AstReplaceResult,
-	astEdit,
-	type ShellFilesystem,
-} from "@oh-my-pi/pi-natives";
+import type { AstReplaceChange, AstReplaceFileChange, ShellFilesystem } from "@oh-my-pi/pi-natives";
 
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
-import { containedFileMutations, withContainedFileMutations } from "../sandbox/file-mutations";
+import { containedAstEdit, readFileText, withContainedFileAccess } from "../sandbox/file-access";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
@@ -88,12 +81,6 @@ interface AstEditAggregatedResult {
 	missingGrammars?: string[];
 }
 
-/** `astEdit`, run in the contained host when it writes and the running call's mutations are contained. */
-function nativeAstEdit(options: AstReplaceOptions): Promise<AstReplaceResult> {
-	const contained = options.dryRun ? undefined : containedFileMutations();
-	return contained ? contained.astEdit(options) : astEdit(options);
-}
-
 async function runAstEditTargets(
 	targets: Array<{ basePath: string; glob?: string }>,
 	commonBasePath: string,
@@ -108,7 +95,7 @@ async function runAstEditTargets(
 	let limitReached = false;
 	let applied = !options.dryRun;
 	for (const target of targets) {
-		const targetResult = await nativeAstEdit({
+		const targetResult = await containedAstEdit({
 			rewrites: options.rewrites,
 			path: target.basePath,
 			glob: target.glob,
@@ -160,7 +147,7 @@ function runAstEditOnce(
 	if (targets) {
 		return runAstEditTargets(targets, resolvedSearchPath, options);
 	}
-	return nativeAstEdit({
+	return containedAstEdit({
 		rewrites: options.rewrites,
 		path: resolvedSearchPath,
 		glob: globFilter,
@@ -285,6 +272,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	}
 
 	async execute(
+		toolCallId: string,
+		params: AstEditSchemaInfer,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<AstEditToolDetails>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<AstEditToolDetails>> {
+		// Under the OS sandbox, the preview's tree walk and parses run in the contained host.
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
 		_toolCallId: string,
 		params: AstEditSchemaInfer,
 		signal?: AbortSignal,
@@ -395,7 +393,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					const snapshotPath = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
 					if (snapshotPath === undefined) continue;
 					try {
-						const fullText = normalizeToLF(await Bun.file(snapshotPath).text());
+						const fullText = normalizeToLF(await readFileText(snapshotPath));
 						const tag = snapshotStore.recordSnapshot(snapshotPath, fullText);
 						hashContexts.set(relativePath, { tag });
 					} catch {
@@ -487,7 +485,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						// The apply outlives the preview call: its filesystem carries no signal.
 						const applyContext = sessionResolveContext(this.session);
 						// Under the OS sandbox the rewrite runs in the contained host, which writes the files.
-						const applyResult = await withContainedFileMutations(this.session, () =>
+						const applyResult = await withContainedFileAccess(this.session, () =>
 							runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 								rewrites: normalizedRewrites,
 								dryRun: false,
@@ -518,17 +516,20 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						const freshTagLines: string[] = [];
 						if (useHashLines) {
 							const snapshotStore = getEditStore(this.session);
-							for (const relativePath of appliedFileList) {
-								const appliedPath = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
-								if (appliedPath === undefined) continue;
-								try {
-									const fullText = normalizeToLF(await Bun.file(appliedPath).text());
-									const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
-									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
-								} catch {
-									// File disappeared between apply and re-read; skip its tag.
+							// The re-read of the rewritten files goes through the container's verified handle too.
+							await withContainedFileAccess(this.session, async () => {
+								for (const relativePath of appliedFileList) {
+									const appliedPath = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
+									if (appliedPath === undefined) continue;
+									try {
+										const fullText = normalizeToLF(await readFileText(appliedPath));
+										const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
+										freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
+									} catch {
+										// File disappeared between apply and re-read; skip its tag.
+									}
 								}
-							}
+							});
 						}
 						const appliedFileReplacements = appliedFileList.map(filePath => ({
 							path: filePath,

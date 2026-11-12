@@ -9,8 +9,17 @@
  * {@link readHostLines} frames incoming streams, capping a line at {@link MAX_HOST_LINE_BYTES}.
  */
 import type {
+	AstFindOptions,
+	AstFindResult,
 	AstReplaceOptions,
 	AstReplaceResult,
+	GlobOptions,
+	GlobResult,
+	GrepMatch,
+	GrepOptions,
+	GrepResult,
+	ListWorkspaceOptions,
+	ListWorkspaceResult,
 	MinimizerOptions,
 	PtyRunResult,
 	PtyStartOptions,
@@ -18,11 +27,14 @@ import type {
 	ShellFsResponse,
 	ShellRunResult,
 } from "@oh-my-pi/pi-natives";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { LogEvent } from "@oh-my-pi/pi-utils/logger";
 import { readLines } from "@oh-my-pi/pi-utils/stream";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ResolvedSqliteReadPath } from "../tools/read-sqlite";
 
 /** Bumped on every incompatible message change; the client refuses a host announcing another. */
-export const SANDBOX_HOST_PROTOCOL_VERSION = 2;
+export const SANDBOX_HOST_PROTOCOL_VERSION = 3;
 
 /** `ShellOptions` minus `filesystem` (a parent-side callback; runs bridge it per call instead). */
 export interface HostShellOptions {
@@ -48,22 +60,37 @@ export interface HostRunFs {
 }
 
 /**
- * A file mutation an in-process file tool (`write`, `edit`, `ast_edit`) delegates to the host, so
- * the OS sandbox decides it at the syscall. `write` creates missing parent directories, like
- * `Bun.write`; `mkdir` is recursive.
+ * A file mutation an in-process file tool (`write`, `edit`, `ast_edit`, `lsp`) delegates to the
+ * host, so the OS sandbox decides it at the syscall. `write` creates missing parent directories,
+ * like `Bun.write`; `mkdir` is recursive; `create` makes an empty file and fails with `EEXIST` when
+ * the path exists; `rmdir` removes an empty directory.
  */
 export type HostFileMutation =
 	| { kind: "write"; path: string; data: string | Uint8Array }
 	/** Appends `data` to an existing file: the later chunks of a write too large for one line. */
 	| { kind: "append"; path: string; data: Uint8Array }
+	| { kind: "create"; path: string }
 	| { kind: "unlink"; path: string }
 	| { kind: "mkdir"; path: string }
+	| { kind: "rmdir"; path: string }
 	| { kind: "rename"; from: string; to: string }
 	| { kind: "rm"; path: string; recursive: boolean; force: boolean }
 	| { kind: "chmod"; path: string; mode: number };
 
+/** Identity of the file the host opened: what the parent compares its own handle against. */
+export interface HostFileIdentity {
+	dev: bigint;
+	ino: bigint;
+}
+
 /** `astEdit` options minus the parent-side callbacks (the filesystem is bridged per request). */
 export type HostAstEditOptions = Omit<AstReplaceOptions, "filesystem" | "signal">;
+/** `astGrep` options minus the parent-side callbacks. */
+export type HostAstGrepOptions = Omit<AstFindOptions, "filesystem" | "signal">;
+/** `grep` options minus the parent-side callbacks (`onMatches` streams as `search.matches`). */
+export type HostGrepOptions = Omit<GrepOptions, "filesystem" | "signal" | "onMatches">;
+/** `glob` options minus the parent-side callbacks. */
+export type HostGlobOptions = Omit<GlobOptions, "filesystem" | "signal">;
 
 /** One `write`-tool row write into an existing SQLite database (empty `content`: delete the row). */
 export interface HostSqliteWrite {
@@ -86,8 +113,18 @@ export type HostRequest =
 	| { id: number; op: "pty.kill"; pty: number }
 	| { op: "fs.reply"; req: number; response: ShellFsResponse }
 	| { id: number; op: "file.mutate"; mutation: HostFileMutation }
+	/** Opens `path` for reading in the container and answers with what it opened. */
+	| { id: number; op: "file.identify"; path: string }
+	| { id: number; op: "dir.list"; options: ListWorkspaceOptions }
+	/** `stream`: the parent passed `onMatches`; batches arrive as `search.matches` events. */
+	| { id: number; op: "search.grep"; options: HostGrepOptions; fs: HostRunFs | null; stream: boolean }
+	| { id: number; op: "search.glob"; options: HostGlobOptions; fs: HostRunFs | null }
+	| { id: number; op: "ast.grep"; options: HostAstGrepOptions; fs: HostRunFs | null }
 	| { id: number; op: "ast.edit"; options: HostAstEditOptions; fs: HostRunFs | null }
-	| { id: number; op: "sqlite.write"; write: HostSqliteWrite };
+	| { id: number; op: "sqlite.read"; target: ResolvedSqliteReadPath }
+	| { id: number; op: "sqlite.write"; write: HostSqliteWrite }
+	/** Aborts the in-flight request `target` (its native call gets an aborted signal). */
+	| { op: "call.abort"; target: number };
 
 /** Result payload of each request op. */
 export interface HostResults {
@@ -100,8 +137,14 @@ export interface HostResults {
 	"pty.start": { pid: number };
 	"pty.kill": null;
 	"file.mutate": null;
-	/** `changes` is empty: an applied rewrite is reported by `fileChanges`. */
+	"file.identify": HostFileIdentity;
+	"dir.list": ListWorkspaceResult;
+	"search.grep": GrepResult;
+	"search.glob": GlobResult;
+	"ast.grep": AstFindResult;
+	/** An applied rewrite's `changes` is empty (reported by `fileChanges`); a dry run keeps them. */
 	"ast.edit": AstReplaceResult;
+	"sqlite.read": AgentToolResult<ReadToolDetails>;
 	/** The write tool's result line. */
 	"sqlite.write": string;
 }
@@ -120,8 +163,10 @@ export type HostEvent =
 	| { ev: "shell.trace"; id: number; snapshot: string }
 	/** Changed live pids of the run started by request `id`. */
 	| { ev: "shell.pids"; id: number; pids: number[] }
-	/** URL-path filesystem operation of the run or `ast.edit` started by request `id`; answered by `fs.reply`. */
+	/** URL-path filesystem operation of the run, search or `ast.edit` started by request `id`; answered by `fs.reply`. */
 	| { ev: "fs.request"; id: number; req: number; request: ShellFsRequest }
+	/** A batch of matches the streaming `search.grep` request `id` found. */
+	| { ev: "search.matches"; id: number; matches: GrepMatch[] }
 	| { ev: "pty.data"; pty: number; data: string }
 	| { ev: "pty.exit"; pty: number; result: PtyRunResult; error?: string }
 	| { ev: "log"; record: HostLogRecord };

@@ -1,7 +1,8 @@
 /**
- * Destructive file tools under the OS sandbox: their writes, deletes, AST rewrites and SQLite row
- * writes run in a contained host, so the container refuses one that omp's path check never saw (a
- * symlink, or a call that skipped the check). The contained cases skip where no backend exists.
+ * File tools under the OS sandbox: their writes, deletes, AST rewrites and SQLite row writes run in
+ * a contained host, and a single-file read is opened there first, so the container refuses one that
+ * omp's path check never saw (a symlink, or a call that skipped the check). The contained cases
+ * skip where no backend exists.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -12,12 +13,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { releaseShellSessions } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import {
-	containedFileMutations,
+	containedFileAccess,
 	mutateFile,
-	withContainedFileMutations,
-} from "@oh-my-pi/pi-coding-agent/sandbox/file-mutations";
+	readFileText,
+	withContainedFileAccess,
+} from "@oh-my-pi/pi-coding-agent/sandbox/file-access";
 import { SandboxRuntime, SandboxUnavailableError } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
 import {
+	cfgSandboxDenyRead,
 	cfgSandboxEnabled,
 	cfgSandboxFallback,
 	cfgSandboxMode,
@@ -70,8 +73,8 @@ function toolSession(sessionId: string | null = sessionKey): ToolSession {
 
 /** Runs `fn` as a contained tool call of `session` would, failing if nothing is contained. */
 function contained<T>(fn: () => Promise<T>, session = toolSession()): Promise<T> {
-	return withContainedFileMutations(session, () => {
-		if (!containedFileMutations()) throw new Error("expected the call's mutations to be contained");
+	return withContainedFileAccess(session, () => {
+		if (!containedFileAccess()) throw new Error("expected the call's mutations to be contained");
 		return fn();
 	});
 }
@@ -127,16 +130,16 @@ describe("destructive file tools without a sandbox backend", () => {
 		SandboxRuntime.resetForTest(SANDBOX_UNAVAILABLE);
 		SandboxRuntime.setWarningSink(() => {});
 		cfgSandboxFallback.set(settings, "block");
-		const run = vi.fn(async () => containedFileMutations());
-		expect(await failure(withContainedFileMutations(toolSession(), run))).toBeInstanceOf(SandboxUnavailableError);
+		const run = vi.fn(async () => containedFileAccess());
+		expect(await failure(withContainedFileAccess(toolSession(), run))).toBeInstanceOf(SandboxUnavailableError);
 		expect(run).not.toHaveBeenCalled();
 		cfgSandboxFallback.set(settings, "warn");
-		expect(await withContainedFileMutations(toolSession(), run)).toBeUndefined();
+		expect(await withContainedFileAccess(toolSession(), run)).toBeUndefined();
 		SandboxRuntime.setWarningSink(undefined);
 	});
 });
 
-describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("destructive file tools in the sandbox", () => {
+describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("contained file access", () => {
 	it("writes a workspace file through the session's contained host", async () => {
 		const result = await new WriteTool(toolSession()).execute("call-inside", {
 			path: "inside.txt",
@@ -217,10 +220,10 @@ describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("destructive file tools in
 		fs.writeFileSync(inside, "const value = oldName();\n");
 		fs.writeFileSync(beyond, "const value = oldName();\n");
 		const rewrite = { rewrites: { "oldName()": "newName()" }, lang: "typescript", dryRun: false };
-		const applied = await contained(() => containedFileMutations()!.astEdit({ ...rewrite, path: inside }));
+		const applied = await contained(() => containedFileAccess()!.astEdit({ ...rewrite, path: inside }));
 		expect(applied.totalReplacements).toBe(1);
 		expect(fs.readFileSync(inside, "utf8")).toBe("const value = newName();\n");
-		await failure(contained(() => containedFileMutations()!.astEdit({ ...rewrite, path: beyond })));
+		await failure(contained(() => containedFileAccess()!.astEdit({ ...rewrite, path: beyond })));
 		expect(fs.readFileSync(beyond, "utf8")).toBe("const value = oldName();\n");
 	});
 
@@ -235,11 +238,11 @@ describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("destructive file tools in
 		create(insideDb);
 		create(outsideDb);
 		const row = { table: "notes", key: undefined, content: '{ body: "hi" }' };
-		expect(await contained(() => containedFileMutations()!.sqliteWrite({ ...row, dbPath: insideDb }))).toBe(
+		expect(await contained(() => containedFileAccess()!.sqliteWrite({ ...row, dbPath: insideDb }))).toBe(
 			"Inserted row into notes",
 		);
 		expect(
-			await failure(contained(() => containedFileMutations()!.sqliteWrite({ ...row, dbPath: outsideDb }))),
+			await failure(contained(() => containedFileAccess()!.sqliteWrite({ ...row, dbPath: outsideDb }))),
 		).toBeInstanceOf(Error);
 		const count = (dbPath: string) => {
 			const db = new Database(dbPath, { readonly: true });
@@ -248,5 +251,19 @@ describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("destructive file tools in
 			return rows;
 		};
 		expect([count(insideDb), count(outsideDb)]).toEqual([1, 0]);
+	});
+
+	it("reads a workspace file through the verified handle and refuses one the container cannot open", async () => {
+		fs.writeFileSync(path.join(workspace, "plain.txt"), "plain\n");
+		const secret = path.join(outside, "secret.txt");
+		fs.writeFileSync(secret, "secret\n");
+		cfgSandboxDenyRead.set(settings, [outside]);
+		// The link is named inside the workspace; only the container sees where it leads.
+		fs.symlinkSync(secret, path.join(workspace, "innocent.txt"));
+		expect(await contained(() => readFileText(path.join(workspace, "plain.txt")))).toBe("plain\n");
+		const error = await failure(contained(() => readFileText(path.join(workspace, "innocent.txt"))));
+		expect(isPermissionDeniedError(error) || (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT").toBe(
+			true,
+		);
 	});
 });
