@@ -49,7 +49,7 @@ import {
 } from "./browser/tab-supervisor";
 import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
-import { renderCallChain, renderFunctionRun } from "./run-code";
+import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -341,7 +341,7 @@ function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknow
 		case "run":
 			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
 		case "call":
-			return `${name}.${renderCallChain(parsed.chain ?? [])}`;
+			return `${name}.${renderStatusCallChain(parsed.chain ?? [])}`;
 		case "tabs":
 			return "tabs";
 		case "targets":

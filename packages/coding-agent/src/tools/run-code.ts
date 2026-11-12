@@ -60,6 +60,33 @@ export function renderCallChain(chain: readonly { method: string; args: readonly
 	return chain.map(step => `${step.method}(${step.args.map(renderRunArg).join(", ")})`).join(".");
 }
 
+/** Helpers whose last string argument is text entered into a page or an app, often a credential. */
+const ENTERED_TEXT_METHODS: Record<string, true> = {
+	fill: true,
+	type: true,
+	setValue: true,
+	clipboardWrite: true,
+	"clipboard.write": true,
+};
+
+/**
+ * Renders a call chain for a status line, which the session file keeps and the terminal shows:
+ * {@link renderCallChain}, except that entered text appears only as its length.
+ */
+export function renderStatusCallChain(chain: readonly { method: string; args: readonly unknown[] }[]): string {
+	return chain
+		.map(step => {
+			const entered = ENTERED_TEXT_METHODS[step.method] === true
+				? step.args.findLastIndex(arg => typeof arg === "string")
+				: -1;
+			const args = step.args.map((arg, index) =>
+				index === entered && typeof arg === "string" ? `<${arg.length} chars>` : renderRunArg(arg),
+			);
+			return `${step.method}(${args.join(", ")})`;
+		})
+		.join(".");
+}
+
 /** Renders a function invocation with the requested run scope and positional arguments. */
 export function renderFunctionRun(fnSource: string, scopeNames: readonly string[], args: readonly unknown[]): string {
 	const scope = scopeNames.join(", ");

@@ -293,6 +293,42 @@ describe("browser facade in real Eval runtimes", () => {
 		});
 	});
 
+	it("records text a cell fills or types only by its length in the status events the session keeps", async () => {
+		const calls: unknown[] = [];
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(() => definitions);
+		definitions = [recorderDefinition(session, calls)];
+		const secret = "sentinel-password-4f9Q";
+		const result = await executeJs(
+			[
+				'const tab = await browser.open({ name: "status-js" });',
+				`const secret = ${JSON.stringify(secret)};`,
+				'await tab.fill("#password", secret);',
+				'await tab.type("#otp", secret, { delay: 5 });',
+				"await tab.id(5).fill(secret);",
+				"await tab.clipboardWrite(secret);",
+				'await tab.click("#submit");',
+			].join("\n"),
+			{
+				cwd: process.cwd(),
+				sessionId: `browser-status-js-${crypto.randomUUID()}`,
+				session,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		const events = (result.displayOutputs ?? []).flatMap(output => (output.type === "status" ? [output.event] : []));
+		expect(JSON.stringify(events)).not.toContain(secret);
+		expect(events.map(event => field(event, "detail"))).toEqual([
+			"open status-js",
+			'status-js.fill("#password", <22 chars>)',
+			'status-js.type("#otp", <22 chars>, {"delay":5})',
+			"status-js.id(5).fill(<22 chars>)",
+			"status-js.clipboardWrite(<22 chars>)",
+			'status-js.click("#submit")',
+		]);
+	});
+
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
