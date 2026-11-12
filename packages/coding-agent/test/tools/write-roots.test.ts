@@ -245,10 +245,7 @@ describe("tools.writeRoots confinement", () => {
 
 	it("conflict:// writes to files outside the roots are refused", async () => {
 		const victim = path.join(outside, "victim.md");
-		fs.writeFileSync(
-			victim,
-			["<<<<<<< ours", "inside", "=======", "outside", ">>>>>>> theirs", ""].join("\n"),
-		);
+		fs.writeFileSync(victim, ["<<<<<<< ours", "inside", "=======", "outside", ">>>>>>> theirs", ""].join("\n"));
 		const session = createSession(candidate, [candidate]);
 		const read = new ReadTool(session);
 		const seen = await read.execute("read-victim", { path: victim } as never);

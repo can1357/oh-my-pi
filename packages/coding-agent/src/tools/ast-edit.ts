@@ -494,13 +494,18 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 									};
 								})
 							: multiTargets;
-						const applyResult = await runAstEditOnce(applyTargets, resolvedSearchPath, confined ? undefined : globFilter, {
-							rewrites: normalizedRewrites,
-							dryRun: false,
-							maxFiles,
-							failOnParseError: false,
-							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
-						});
+						const applyResult = await runAstEditOnce(
+							applyTargets,
+							resolvedSearchPath,
+							confined ? undefined : globFilter,
+							{
+								rewrites: normalizedRewrites,
+								dryRun: false,
+								maxFiles,
+								failOnParseError: false,
+								filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
+							},
+						);
 						for (const { path: file, before } of journaled) {
 							const after = await readSnapshot(file);
 							if (!after || after.text === before.text) continue;
