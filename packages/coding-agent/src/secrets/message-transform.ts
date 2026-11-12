@@ -38,10 +38,10 @@ export function deobfuscateSessionContext(
 	return messages === sessionContext.messages ? sessionContext : { ...sessionContext, messages };
 }
 
-/** Mint the placeholders for every secret in `messages` (see `SecretObfuscator.learn`). */
-export function learnFromPlaintext(obfuscator: SecretObfuscator, messages: readonly AgentMessage[]): void {
+/** Mint the placeholders for every secret in the strings of `values`: messages or whole session entries (see `SecretObfuscator.learn`). */
+export function learnFromPlaintext(obfuscator: SecretObfuscator, values: readonly unknown[]): void {
 	const texts: string[] = [];
-	for (const message of messages) collectTexts(message, texts);
+	for (const value of values) collectTexts(value, texts);
 	if (texts.length === 0) return;
 	obfuscator.batch(() => {
 		obfuscator.prescan(texts);

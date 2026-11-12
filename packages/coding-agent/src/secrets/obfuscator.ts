@@ -266,42 +266,59 @@ export class SecretObfuscator {
 			this.#getKey();
 			native = this.#nativeScan(text);
 		}
-		let out = "";
-		let cursor = 0;
-		for (const [start, end] of native.literal ? placeholderRanges(text) : []) {
-			out += this.#encodeSegment(text.slice(cursor, start), native, emit) + text.slice(start, end);
-			cursor = end;
-		}
-		return out + this.#encodeSegment(cursor === 0 ? text : text.slice(cursor), native, emit);
-	}
-
-	/** Encode a stretch holding no known placeholder; a rule can match only within it. */
-	#encodeSegment(segment: string, native: NativeScan, emit: boolean): string {
-		const spans = this.#spans(segment, native, true);
-		if (!emit || spans.length === 0) return segment;
+		const spans = this.#spans(text, native, true);
+		if (!emit || spans.length === 0) return text;
 		let out = "";
 		let cursor = 0;
 		for (const span of spans) {
-			out += segment.slice(cursor, span.start) + span.replacement;
+			out += text.slice(cursor, span.start) + span.replacement;
 			cursor = span.end;
 		}
-		return out + segment.slice(cursor);
+		return out + text.slice(cursor);
 	}
 
 	/**
-	 * Non-overlapping secret occurrences in `segment`, by position. Literals
+	 * Non-overlapping secret occurrences in `text`, by position. Literals
 	 * (longest first) win over regex matches, and earlier regex entries over
 	 * later ones. `mint` decides whether placeholders are minted for them.
+	 *
+	 * Literals are found everywhere: a placeholder never contains a configured
+	 * secret, so a literal inside a placeholder-shaped token is plaintext. Rules
+	 * run only between placeholder-shaped tokens, which keeps encoding
+	 * idempotent under rules broad enough to match placeholder words.
 	 */
-	#spans(segment: string, native: NativeScan, mint: boolean): Span[] {
+	#spans(text: string, native: NativeScan, mint: boolean): Span[] {
 		const candidates: Span[] = [];
 		if (native.literal) {
 			for (const [index, [secret, replacement]] of this.#literals.entries()) {
-				for (let at = segment.indexOf(secret); at !== -1; at = segment.indexOf(secret, at + secret.length)) {
+				for (let at = text.indexOf(secret); at !== -1; at = text.indexOf(secret, at + secret.length)) {
 					candidates.push({ start: at, end: at + secret.length, replacement, rank: index });
 				}
 			}
 		}
+		if (native.candidates.size > 0) {
+			let cursor = 0;
+			for (const [start, end] of [...placeholderRanges(text), [text.length, text.length] as const]) {
+				if (start > cursor) this.#ruleSpans(text.slice(cursor, start), cursor, native, mint, candidates);
+				cursor = end;
+			}
+		}
+		if (candidates.length === 0) return candidates;
+		candidates.sort((a, b) => a.rank - b.rank || a.start - b.start);
+		const taken = new Uint8Array(text.length);
+		const accepted: Span[] = [];
+		for (const span of candidates) {
+			let free = true;
+			for (let at = span.start; at < span.end && free; at++) free = taken[at] === 0;
+			if (!free) continue;
+			taken.fill(1, span.start, span.end);
+			accepted.push(span);
+		}
+		return accepted.sort((a, b) => a.start - b.start);
+	}
+
+	/** Push the regex-rule matches in `segment` (at `offset` in its text) onto `out`. */
+	#ruleSpans(segment: string, offset: number, native: NativeScan, mint: boolean, out: Span[]): void {
 		for (const [index, entry] of this.#regexEntries.entries()) {
 			if (!native.candidates.has(entry)) continue;
 			const regex = entry.regex;
@@ -318,46 +335,22 @@ export class SecretObfuscator {
 					: entry.mode === "obfuscate"
 						? this.#placeholderFor(value, entry.friendlyName)
 						: (entry.replacement ?? this.#replacementFor(value));
-				candidates.push({
-					start: match.index,
-					end: match.index + value.length,
+				out.push({
+					start: offset + match.index,
+					end: offset + match.index + value.length,
 					replacement,
 					rank: this.#literals.length + index,
 				});
 			}
 			regex.lastIndex = 0;
 		}
-		if (candidates.length === 0) return candidates;
-		candidates.sort((a, b) => a.rank - b.rank || a.start - b.start);
-		const taken = new Uint8Array(segment.length);
-		const accepted: Span[] = [];
-		for (const span of candidates) {
-			let free = true;
-			for (let at = span.start; at < span.end && free; at++) free = taken[at] === 0;
-			if (!free) continue;
-			taken.fill(1, span.start, span.end);
-			accepted.push(span);
-		}
-		return accepted.sort((a, b) => a.start - b.start);
 	}
 
 	/** Ranges of every secret occurrence in `text`, as {@link obfuscate} would redact them. */
 	#secretRanges(text: string): Array<readonly [number, number]> {
 		const native = this.#nativeScan(text);
 		if (!native.literal && native.candidates.size === 0) return [];
-		const ranges: Array<readonly [number, number]> = [];
-		let cursor = 0;
-		const add = (segment: string, offset: number): void => {
-			for (const span of this.#spans(segment, native, false)) {
-				ranges.push([offset + span.start, offset + span.end]);
-			}
-		};
-		for (const [start, end] of native.literal ? placeholderRanges(text) : []) {
-			add(text.slice(cursor, start), cursor);
-			cursor = end;
-		}
-		add(text.slice(cursor), cursor);
-		return ranges;
+		return this.#spans(text, native, false).map(span => [span.start, span.end] as const);
 	}
 
 	/** The placeholder for `secret`, minted on first use. */
@@ -367,6 +360,8 @@ export class SecretObfuscator {
 		const key = this.#getKey();
 		let words = placeholderWords(key, secret);
 		// Four words leave 44 bits; on the rare clash with another secret, draw more.
+		// Which secret keeps the four-word form depends on mint order, which can
+		// differ across processes; at 44 bits that is accepted, not handled.
 		for (let count = PLACEHOLDER_WORDS + 1; this.#secretByWords.has(words); count++) {
 			words = placeholderWords(key, secret, count);
 		}

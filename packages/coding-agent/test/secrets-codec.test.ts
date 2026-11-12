@@ -64,6 +64,15 @@ describe("secret placeholders", () => {
 
 		expect(obfuscator.deobfuscate(`see ${retired}`)).toBe(`see ${retired}`);
 	});
+
+	it("redacts a configured secret written inside a placeholder-shaped token", () => {
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: "ghp1234567890abcdefXYZ" }], KEY);
+
+		const output = obfuscator.obfuscate("a $$ghp1234567890abcdefXYZ_fooBarBazQux$$ b");
+
+		expect(output).not.toContain("ghp1234567890abcdefXYZ");
+		expect(obfuscator.deobfuscate(output)).toBe("a $$ghp1234567890abcdefXYZ_fooBarBazQux$$ b");
+	});
 });
 
 describe("session codec", () => {

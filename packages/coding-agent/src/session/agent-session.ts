@@ -221,6 +221,7 @@ import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
+	learnFromPlaintext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
@@ -2729,6 +2730,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#recordModelCallSystemPrompt(prompt);
 		});
 		this.#obfuscator = config.obfuscator;
+		this.#learnSessionSecrets();
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -3528,6 +3530,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Install the obfuscator built after a live `secrets.enabled` switch-on. */
 	setObfuscator(obfuscator: SecretObfuscator | undefined): void {
 		this.#obfuscator = obfuscator;
+		this.#learnSessionSecrets();
+	}
+
+	/**
+	 * Mint the placeholders of every secret in the session file, every entry
+	 * and branch, so placeholders whose plaintext was compacted out of the
+	 * context still restore at tool execution and in the display. Runs when an
+	 * obfuscator meets a session file; live content is minted as it is sent.
+	 */
+	#learnSessionSecrets(): void {
+		if (this.#obfuscator) learnFromPlaintext(this.#obfuscator, this.sessionManager.getEntries());
 	}
 
 	/** Whether a TTSR abort is pending (stream was aborted to inject rules) */
@@ -14155,6 +14168,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
 			await this.sessionManager.setSessionFile(sessionPath);
+			this.#learnSessionSecrets();
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
