@@ -17,6 +17,7 @@
 
 - Added the Gemini Decision 1 judge (`google/gemini-decision-1`) for the `judge` role, and `models.yml` accepts the `google-decisions` API ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - `ssh://` host listing, `ssh://` autocomplete and `/ssh list` now include the `Host` aliases from `~/.ssh/config` and `/etc/ssh/ssh_config` (following `Include`); `ssh.json` entries win on a name clash
+- `task.inheritContext` (default off) offers an `inheritContext` flag on each task item; a flagged subagent starts with the parent's most recent ~28k characters of conversation as up to two snapcompact image frames, with a text list of the exact hashes, paths, flags, and numbers in that excerpt, and secrets redacted before rendering. Subagents on text-only models get the excerpt as text. Agents whose frontmatter sets `inheritContext: false`, including the bundled `reviewer` and `security-reviewer`, ignore the flag ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 
@@ -30,10 +31,6 @@
 - Computer instructions now describe macOS `StaleRef` refusals for relabelled controls, including the new ref and the weaker role-and-label recovery candidate from a partial window read ([#18892](https://github.com/can1357/oh-my-pi/pull/18892) by [@will-bogusz](https://github.com/will-bogusz))
 - Computer-use guidance tells the agent to reread the window after `UserIntervened` on X11 as well as macOS, without undoing or replaying over the user's input ([#18784](https://github.com/can1357/oh-my-pi/pull/18784) by [@will-bogusz](https://github.com/will-bogusz))
 - Computer raise refusals say that on X11 a covered window's screenshot needs a compositing manager, instead of promising one plain X11 cannot supply ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Added
-
-- `task.inheritContext` (default off) offers an `inheritContext` flag on each task item; a flagged subagent starts with the parent's most recent ~28k characters of conversation as up to two snapcompact image frames, with a text list of the exact hashes, paths, flags, and numbers in that excerpt, and secrets redacted before rendering. Subagents on text-only models get the excerpt as text. Agents whose frontmatter sets `inheritContext: false`, including the bundled `reviewer` and `security-reviewer`, ignore the flag
 
 ### Changed
 
