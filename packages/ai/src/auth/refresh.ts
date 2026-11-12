@@ -760,14 +760,13 @@ export class OAuthRefresher {
 				);
 				if (disabled) {
 					// Re-read: siblings may have been removed while the exchange ran.
-					this.#deps.pool.replace(
+					this.#deps.pool.replaceAndReset(
 						provider,
 						this.#deps.store
 							.listAuthCredentials(provider)
 							.filter(entry => entry.id !== row.id)
 							.map(entry => ({ id: entry.id, credential: entry.credential })),
 					);
-					this.#deps.pool.reset(provider);
 					this.#deps.pool.emitDisabled(credentialDisabledEvent(provider, row, disabledCause));
 					return { result: { credential: undefined, refreshed: false, removed: true } };
 				}

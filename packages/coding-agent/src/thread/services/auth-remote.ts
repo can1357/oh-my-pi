@@ -228,6 +228,15 @@ class RemoteCredentials implements CredentialsApi {
 	onGeneration(listener: (generation: number) => void): () => void {
 		return remoteUnsubscribe(this.#remote.callSync("credentials.onGeneration", listener));
 	}
+	get refreshAttempts(): number {
+		return this.#remote.callSync("credentials.refreshAttempts");
+	}
+	onRefreshAttempted(listener: (refreshAttempts: number) => void): () => void {
+		return remoteUnsubscribe(this.#remote.callSync("credentials.onRefreshAttempted", listener));
+	}
+	notifyExternalRefresh(): void {
+		this.#remote.callSync("credentials.notifyExternalRefresh");
+	}
 	onDisabled(listener: (event: CredentialDisabledEvent) => void | Promise<void>): () => void {
 		return remoteUnsubscribe(this.#remote.callSync("credentials.onDisabled", listener));
 	}
@@ -665,6 +674,10 @@ export class RemoteAuthStorageBackend implements AuthStorageBackend {
 		this.limits = new RemoteLimits(remote);
 		this.resets = new RemoteResets(remote, availability);
 		this.blocks = new RemoteBlocks(remote);
+	}
+
+	get sourceLabel(): string | undefined {
+		return this.#remote.callSync("sourceLabel");
 	}
 
 	setAccountPolicies(config: AuthAccountPolicyConfig): void {

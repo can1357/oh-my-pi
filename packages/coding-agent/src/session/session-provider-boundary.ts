@@ -48,6 +48,7 @@ export interface SessionProviderBoundaryHost {
 	/** The session tree's current cost gate. */
 	costGate?(): CostGateApi | undefined;
 	localProtocolOptions(): LocalProtocolOptions;
+	applyStartupOAuthAccountPin(provider: string, sessionId: string): void;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
 	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -328,6 +329,8 @@ export class SessionProviderBoundary {
 					telemetryConfig: this.#host.agent.telemetry,
 					sessionId: this.#host.sessionId(),
 					costGate: this.#host.costGate?.(),
+					applyStartupOAuthAccountPin: (provider, sessionId) =>
+						this.#host.applyStartupOAuthAccountPin(provider, sessionId),
 				},
 				signal,
 			);

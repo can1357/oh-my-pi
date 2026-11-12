@@ -308,6 +308,19 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
 	readonly #accountPool?: ReadonlyMap<string, ResolvedProviderPool>;
 	#snapshot: SnapshotResponse = emptySnapshot();
+	/**
+	 * Unfiltered mirror of `#snapshot.credentials`, updated in parallel by
+	 * every path that mutates `#snapshot` (full snapshot delivery, `entry`/
+	 * `removed` deltas). `discover.ts` persists every `onSnapshot` payload
+	 * verbatim as the on-disk startup cache; `#applySnapshot` can pass its own
+	 * raw wire parameter straight through for that (see its own comment), but
+	 * a delta event only ever carries ONE credential, not a full raw
+	 * snapshot — this field is what a delta notification reconstructs one
+	 * from, so an account-pool filter never causes a pool-excluded
+	 * credential to silently vanish from the persisted cache the moment any
+	 * OTHER credential changes while the filter is active.
+	 */
+	#rawCredentials: SnapshotEntry[] = [];
 	#snapshotReceivedAt = Date.now();
 	#generation = 0;
 	/**
@@ -407,9 +420,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		if (snapshotBlocksChanged(previousCredentials, credentials)) this.#invalidateUsageCache();
 		if (protectNewBlocks) this.#protectNewSnapshotBlocks(previousCredentials, credentials, nowMs);
 		this.#snapshot = { ...snapshot, credentials };
+		this.#rawCredentials = snapshot.credentials;
 		this.#generation = generation;
 		this.#snapshotReceivedAt = nowMs;
 		this.#rebuildCredentialHashes();
+		// Notify with the RAW wire snapshot (not `this.#snapshot`, which is
+		// account-pool-filtered and block-normalized) -- `discover.ts`'s
+		// `persist` callback writes this verbatim to the on-disk cache read
+		// back as `initialSnapshot` on the next process start.
 		const onSnapshot = this.#onSnapshot;
 		if (!onSnapshot) return;
 		try {
@@ -659,8 +677,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		serverNowMs: number,
 	): void {
 		this.#upsertBrokerUsageAccount(entry);
+		this.#upsertRawCredential(entry);
 		if (!isCredentialInAccountPool(entry, this.#accountPool)) {
-			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs, { retainBrokerUsageAccount: true });
+			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs, {
+				retainBrokerUsageAccount: true,
+				retainRawCredential: true,
+			});
 			return;
 		}
 		const nowMs = Date.now();
@@ -683,6 +705,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshotReceivedAt = nowMs;
 		this.#dirtyCredentialIds.add(incoming.id);
 		this.#refreshCredentialRevision();
+		this.#notifySnapshot();
 	}
 
 	#removeStreamCredential(
@@ -690,10 +713,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		refresher: RefresherSchedule,
 		generation: number,
 		serverNowMs: number,
-		options?: { retainBrokerUsageAccount?: boolean },
+		options?: { retainBrokerUsageAccount?: boolean; retainRawCredential?: boolean },
 	): void {
 		if (!options?.retainBrokerUsageAccount) this.#removeBrokerUsageAccount(id);
 		const nowMs = Date.now();
+		if (!options?.retainRawCredential) this.#rawCredentials = this.#rawCredentials.filter(entry => entry.id !== id);
 		const removed = this.#snapshot.credentials.find(entry => entry.id === id);
 		if (removed?.blocks?.some(block => block.blockedUntilMs > nowMs)) this.#invalidateUsageCache();
 		const credentials = this.#snapshot.credentials.filter(entry => entry.id !== id);
@@ -702,6 +726,39 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshotReceivedAt = nowMs;
 		this.#dirtyCredentialIds.add(id);
 		this.#refreshCredentialRevision();
+		this.#notifySnapshot();
+	}
+
+	/** Upsert into `#rawCredentials` by id, mirroring the pool-filtered upsert in `#applyStreamEntry`. */
+	#upsertRawCredential(entry: SnapshotEntry): void {
+		const index = this.#rawCredentials.findIndex(candidate => candidate.id === entry.id);
+		this.#rawCredentials =
+			index === -1
+				? [...this.#rawCredentials, entry]
+				: this.#rawCredentials.map((candidate, i) => (i === index ? entry : candidate));
+	}
+
+	/**
+	 * Fires `onSnapshot` for an incremental delta (`entry`/`removed` stream
+	 * frames), which mutate `#snapshot`/`#generation` directly instead of
+	 * going through `#applySnapshot`. Without this, a caller wired to
+	 * `onSnapshot` to refresh a downstream cache (e.g. `AuthStorage.reload()`
+	 * in `discover.ts`) only ever sees the FIRST full snapshot after the SSE
+	 * connection opens — every subsequent single-credential update on that
+	 * same long-lived connection would be invisible to it. Notifies with
+	 * `#rawCredentials` (unfiltered), not `#snapshot.credentials`
+	 * (account-pool-filtered) — `discover.ts`'s `persist` callback writes
+	 * this verbatim to the on-disk cache, and a pool-excluded credential must
+	 * not silently vanish from it the moment any OTHER credential changes.
+	 */
+	#notifySnapshot(): void {
+		const onSnapshot = this.#onSnapshot;
+		if (!onSnapshot) return;
+		try {
+			onSnapshot({ ...this.#snapshot, credentials: this.#rawCredentials }, this.#generation);
+		} catch (error) {
+			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
+		}
 	}
 
 	/** Re-hydrate the in-memory snapshot from the broker. */

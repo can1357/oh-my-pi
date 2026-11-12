@@ -796,6 +796,7 @@ function buildExecutorOptions(
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+		applyStartupOAuthAccountPin: session.applyStartupOAuthAccountPin,
 		agent: policy.effectiveAgent,
 		// A stepped spawn starts on its first step prompt; the executor sends the rest.
 		task: renderSubagentUserPrompt(steps ? steps[0] : request.assignment),

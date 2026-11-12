@@ -154,6 +154,12 @@ export interface SessionToolsHost {
 	sessionAgents(): readonly AgentDefinition[];
 	/** Runs a wait for the user's answer, such as an ACP client's permission request. */
 	waitForUser<T>(dialog: () => Promise<T>): Promise<T>;
+	/**
+	 * Apply the session's configured `auth.startupOAuthAccount` pin for `provider`/`sessionId`
+	 * before a built-in custom tool resolves that provider's credential (e.g. `generate_image`'s
+	 * Codex-subscription fallback landing on a different provider than the foreground model).
+	 */
+	applyStartupOAuthAccountPin(provider: string, sessionId: string): void;
 }
 
 /** Registry delta applied by the SDK's settings-gated tool reconcile. */
@@ -529,6 +535,7 @@ export class SessionTools {
 		},
 		settings: this.#host.settings,
 		localProtocolOptions: this.#host.localProtocolOptions(),
+		applyStartupOAuthAccountPin: (provider, sessionId) => this.#host.applyStartupOAuthAccountPin(provider, sessionId),
 	});
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];

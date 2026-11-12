@@ -50,6 +50,7 @@ import {
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgMnemopiInjectionTokenLimit } from "./settings";
+type ApplyStartupOAuthAccountPin = (provider: string, sessionId: string) => void;
 
 // `/diagnose` is the only user of this subpath; load it lazily alongside the
 // loaders in ./state to keep mnemopi off the CLI startup module graph.
@@ -148,6 +149,7 @@ export const mnemopiBackend: MemoryBackend = {
 				modelRegistry,
 				sessionId,
 				session.sessionManager,
+				(provider, providerSessionId) => session.applyStartupOAuthAccountPin(provider, providerSessionId),
 			);
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			await installMnemopiState(session, config, getMnemopiSessionStateFromParent(options));
@@ -215,6 +217,7 @@ export const mnemopiBackend: MemoryBackend = {
 					session.modelRegistry,
 					session.sessionId,
 					session.sessionManager,
+					(provider, providerSessionId) => session.applyStartupOAuthAccountPin(provider, providerSessionId),
 				);
 				await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 				state = await installMnemopiState(session, config);
@@ -488,6 +491,7 @@ async function loadMnemopiConfigWithProviders(
 	modelRegistry: ModelRegistry,
 	sessionId: string,
 	usageLedger: Partial<JudgmentUsageLedger>,
+	applyStartupOAuthAccountPin: ApplyStartupOAuthAccountPin,
 ): Promise<MnemopiBackendConfig> {
 	const config = loadMnemopiConfig(settings, agentDir);
 	config.providerOptions = await resolveMnemopiProviderOptions(
@@ -496,6 +500,7 @@ async function loadMnemopiConfigWithProviders(
 		modelRegistry,
 		sessionId,
 		usageLedger,
+		applyStartupOAuthAccountPin,
 	);
 	return config;
 }
@@ -512,8 +517,10 @@ async function openrouterKeyResolver(
 	modelRegistry: ModelRegistry,
 	sessionId: string,
 	baseUrl: string | undefined,
+	applyStartupOAuthAccountPin: ApplyStartupOAuthAccountPin,
 ): Promise<ApiKeyResolver | undefined> {
 	if (baseUrl !== undefined && !hostMatchesUrl(baseUrl, "openrouter")) return undefined;
+	applyStartupOAuthAccountPin("openrouter", sessionId);
 	const key = await modelRegistry.getApiKeyForProvider("openrouter", sessionId);
 	if (key === undefined || key === "") return undefined;
 	return modelRegistry.resolver("openrouter", { sessionId });
@@ -525,6 +532,7 @@ async function resolveMnemopiProviderOptions(
 	modelRegistry: ModelRegistry,
 	sessionId: string,
 	usageLedger: Partial<JudgmentUsageLedger>,
+	applyStartupOAuthAccountPin: ApplyStartupOAuthAccountPin,
 ): Promise<MnemopiProviderOptions> {
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
@@ -532,7 +540,12 @@ async function resolveMnemopiProviderOptions(
 		embeddingApiUrl: config.providerOptions.embeddingApiUrl,
 		embeddingApiKey:
 			config.providerOptions.embeddingApiKey ??
-			(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)),
+			(await openrouterKeyResolver(
+				modelRegistry,
+				sessionId,
+				config.providerOptions.embeddingApiUrl,
+				applyStartupOAuthAccountPin,
+			)),
 		llm: false,
 	};
 
@@ -549,7 +562,12 @@ async function resolveMnemopiProviderOptions(
 					config.llmApiKey ??
 					(config.llmBaseUrl === undefined
 						? undefined
-						: await openrouterKeyResolver(modelRegistry, sessionId, config.llmBaseUrl)),
+						: await openrouterKeyResolver(
+								modelRegistry,
+								sessionId,
+								config.llmBaseUrl,
+								applyStartupOAuthAccountPin,
+							)),
 				model: config.llmModel,
 			},
 		};
@@ -594,6 +612,7 @@ async function resolveMnemopiProviderOptions(
 						continue;
 					}
 
+					applyStartupOAuthAccountPin(model.provider, sessionId);
 					const hasApiKey = await modelRegistry.getApiKey(model, sessionId);
 					if (!hasApiKey) {
 						logger.warn("Mnemopi: memory completion model has no current API key; trying the next fallback.", {

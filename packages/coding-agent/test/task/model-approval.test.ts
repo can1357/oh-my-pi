@@ -416,6 +416,7 @@ describe("per-call model advertisement", () => {
 			evalPreludes: () => [],
 			sessionAgents: () => [],
 			waitForUser: dialog => dialog(),
+			applyStartupOAuthAccountPin: () => {},
 		};
 		const surface = new SessionTools(host, {
 			baseSystemPrompt: [],

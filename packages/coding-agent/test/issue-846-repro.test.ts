@@ -31,6 +31,7 @@ interface SessionLike {
 	model: Model;
 	modelRegistry: ModelRegistryLike;
 	refreshBaseSystemPrompt: () => Promise<undefined>;
+	applyStartupOAuthAccountPin: () => void;
 }
 
 interface ModelRegistryLike {
@@ -115,6 +116,7 @@ describe("issue #846: phase1 stage1 failures must be logged", () => {
 			model,
 			modelRegistry,
 			refreshBaseSystemPrompt: vi.fn(async () => undefined),
+			applyStartupOAuthAccountPin: () => {},
 		};
 
 		// Seed a thread whose rolloutPath does not exist on disk -> Bun.file().text()

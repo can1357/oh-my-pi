@@ -106,6 +106,10 @@ export class CredentialPool implements CredentialsApi {
 	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
 	#generation = 1;
 	#generationListeners: Set<(generation: number) => void> = new Set();
+	#refreshAttempts = 0;
+	#refreshListeners: Set<(refreshAttempts: number) => void> = new Set();
+	/** While set, {@link replace} skips its own bump so a multi-step update publishes one generation. */
+	#bumpSuppressed = false;
 	#closed = false;
 
 	#store: AuthCredentialStore;
@@ -122,6 +126,18 @@ export class CredentialPool implements CredentialsApi {
 
 	get generation(): number {
 		return this.#generation;
+	}
+
+	/**
+	 * Monotonic count of completed credential-view refreshes that count as
+	 * external evidence: each generation bump (a real content change) plus each
+	 * {@link notifyExternalRefresh}. A bare `reload()` does not advance it, since
+	 * many internal call sites reload with no external event. Consumers waiting
+	 * on "has the view had a real chance to catch up" key off this, because
+	 * {@link generation} never moves for an unchanged view.
+	 */
+	get refreshAttempts(): number {
+		return this.#refreshAttempts;
 	}
 
 	providers(): IterableIterator<string> {
@@ -147,11 +163,10 @@ export class CredentialPool implements CredentialsApi {
 	async storeLoginApiKey(provider: string, key: string): Promise<void> {
 		const credential: ApiKeyCredential = { type: "api_key", key, source: "login" };
 		const stored = await this.#store.upsertAuthCredential(provider, credential);
-		this.replace(
+		this.replaceAndReset(
 			provider,
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
-		this.reset(provider);
 	}
 
 	/**
@@ -219,6 +234,8 @@ export class CredentialPool implements CredentialsApi {
 		this.#pendingDisabledEvents = previous.#pendingDisabledEvents;
 		previous.#pendingDisabledEvents = [];
 		this.#generation = previous.#generation;
+		this.#refreshListeners = previous.#refreshListeners;
+		this.#refreshAttempts = previous.#refreshAttempts;
 	}
 
 	onGeneration(listener: (generation: number) => void): () => void {
@@ -230,6 +247,7 @@ export class CredentialPool implements CredentialsApi {
 
 	bump(reason: string): void {
 		this.#generation += 1;
+		this.#recordRefreshAttempt();
 		this.#store.acknowledgeLocalChanges?.();
 		for (const listener of Array.from(this.#generationListeners)) {
 			try {
@@ -239,6 +257,39 @@ export class CredentialPool implements CredentialsApi {
 					reason,
 					error: String(error),
 				});
+			}
+		}
+	}
+
+	/**
+	 * Subscribe to completed credential-view refreshes: every generation bump
+	 * plus every {@link notifyExternalRefresh}. Returns an unsubscribe function.
+	 */
+	onRefreshAttempted(listener: (refreshAttempts: number) => void): () => void {
+		this.#refreshListeners.add(listener);
+		return () => {
+			this.#refreshListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Signal an external credential-view event that `reload()` found unchanged,
+	 * e.g. a broker snapshot delivery confirming an account is still absent.
+	 * Only the caller that knows such an event occurred may call this; a bare
+	 * `reload()` is not evidence of one. Advances {@link refreshAttempts} and
+	 * notifies subscribers without changing {@link generation}.
+	 */
+	notifyExternalRefresh(): void {
+		this.#recordRefreshAttempt();
+	}
+
+	#recordRefreshAttempt(): void {
+		this.#refreshAttempts += 1;
+		for (const listener of Array.from(this.#refreshListeners)) {
+			try {
+				listener(this.#refreshAttempts);
+			} catch (error) {
+				logger.debug("AuthStorage refresh listener failed", { error: String(error) });
 			}
 		}
 	}
@@ -310,13 +361,24 @@ export class CredentialPool implements CredentialsApi {
 		}
 
 		const removedProviders = new Set(this.#data.keys());
-		for (const [provider, entries] of dedupedGrouped) {
-			this.replace(provider, entries);
-			removedProviders.delete(provider);
+		// Publish one generation for the whole reload: a subscriber must never
+		// observe some providers refreshed while later ones still hold their
+		// pre-reload data.
+		const wasSuppressed = this.#bumpSuppressed;
+		this.#bumpSuppressed = true;
+		let anyChanged = false;
+		try {
+			for (const [provider, entries] of dedupedGrouped) {
+				if (this.replace(provider, entries)) anyChanged = true;
+				removedProviders.delete(provider);
+			}
+			for (const provider of removedProviders) {
+				if (this.replace(provider, [])) anyChanged = true;
+			}
+		} finally {
+			this.#bumpSuppressed = wasSuppressed;
 		}
-		for (const provider of removedProviders) {
-			this.replace(provider, []);
-		}
+		if (anyChanged && !wasSuppressed) this.bump("credentials");
 	}
 
 	/**
@@ -337,10 +399,10 @@ export class CredentialPool implements CredentialsApi {
 	 * @param provider - Provider name (e.g., "anthropic", "openai")
 	 * @param stored - Array of stored credentials to cache
 	 */
-	replace(provider: string, stored: StoredCredential[]): void {
+	replace(provider: string, stored: StoredCredential[]): boolean {
 		const credentials = providerPauseReason(provider) === undefined ? stored : [];
 		const current = this.#data.get(provider) ?? [];
-		if (storedCredentialArraysEqual(current, credentials)) return;
+		if (storedCredentialArraysEqual(current, credentials)) return false;
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -356,7 +418,29 @@ export class CredentialPool implements CredentialsApi {
 		} else {
 			this.#data.set(provider, credentials);
 		}
-		this.bump("credentials");
+		if (!this.#bumpSuppressed) this.bump("credentials");
+		return true;
+	}
+
+	/**
+	 * Replace a provider's cached credentials and invalidate every assignment
+	 * derived from their old order, publishing a single generation afterwards.
+	 * A generation listener may immediately pin a newly added account; bumping
+	 * between the replace and the reset would let the reset erase that pin.
+	 * Assignments are reset even when the credentials compared equal.
+	 */
+	replaceAndReset(provider: string, credentials: StoredCredential[]): boolean {
+		const wasSuppressed = this.#bumpSuppressed;
+		this.#bumpSuppressed = true;
+		let changed = false;
+		try {
+			changed = this.replace(provider, credentials);
+			this.reset(provider);
+		} finally {
+			this.#bumpSuppressed = wasSuppressed;
+		}
+		if (changed && !wasSuppressed) this.bump("credentials");
+		return changed;
 	}
 
 	noteBearer(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -464,8 +548,7 @@ export class CredentialPool implements CredentialsApi {
 		const disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, disabledCause);
 		if (!disabled) return false;
 		const updated = entries.filter((_value, idx) => idx !== index);
-		this.replace(provider, updated);
-		this.reset(provider);
+		this.replaceAndReset(provider, updated);
 		this.emitDisabled(credentialDisabledEvent(provider, target, disabledCause));
 		return true;
 	}
@@ -577,14 +660,13 @@ export class CredentialPool implements CredentialsApi {
 		const deduped = this.dedupe(provider, normalized);
 		this.#options.policies.validateFor(provider, deduped);
 		const stored = await this.#store.replaceAuthCredentials(provider, deduped);
-		this.replace(
+		this.replaceAndReset(
 			provider,
 			stored.map(record => ({
 				id: record.id,
 				credential: record.credential,
 			})),
 		);
-		this.reset(provider);
 	}
 
 	/**
@@ -624,11 +706,10 @@ export class CredentialPool implements CredentialsApi {
 			provider,
 			stored.map(entry => entry.credential),
 		);
-		this.replace(
+		this.replaceAndReset(
 			provider,
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
-		this.reset(provider);
 	}
 
 	/**
@@ -636,8 +717,7 @@ export class CredentialPool implements CredentialsApi {
 	 */
 	async remove(provider: string): Promise<void> {
 		await this.#store.deleteAuthCredentials(provider, "deleted by user");
-		this.replace(provider, []);
-		this.reset(provider);
+		this.replaceAndReset(provider, []);
 	}
 
 	/**
@@ -650,8 +730,7 @@ export class CredentialPool implements CredentialsApi {
 		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
 		const deleted = await this.#store.deleteAuthCredential(credentialId, "deleted by user");
 		if (!deleted) return false;
-		this.replace(provider, remainingEntries);
-		this.reset(provider);
+		this.replaceAndReset(provider, remainingEntries);
 		return true;
 	}
 
@@ -767,8 +846,7 @@ export class CredentialPool implements CredentialsApi {
 			if (index === -1) continue;
 			if (!(await this.#store.deleteAuthCredential(id, disabledCause))) return false;
 			const next = entries.filter((_value, idx) => idx !== index);
-			this.replace(provider, next);
-			this.reset(provider);
+			this.replaceAndReset(provider, next);
 			this.emitDisabled(credentialDisabledEvent(provider, entries[index]!, disabledCause));
 			return true;
 		}
@@ -786,11 +864,10 @@ export class CredentialPool implements CredentialsApi {
 	 */
 	async upsert(provider: string, credential: AuthCredential): Promise<AuthCredentialSnapshotEntry[]> {
 		const stored = await this.#store.upsertAuthCredential(provider, credential);
-		this.replace(
+		this.replaceAndReset(
 			provider,
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
-		this.reset(provider);
 		return stored.map(entry => {
 			const persisted = entry.credential;
 			const redacted: SnapshotCredential =

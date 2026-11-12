@@ -143,6 +143,10 @@ export type AuthStorageProtocol = {
 	"credentials.generation": RpcMethod<[], number>;
 	/** Returns a sync unsubscribe (`rpcSync`). */
 	"credentials.onGeneration": RpcMethod<[listener: (generation: number) => void], () => void>;
+	"credentials.refreshAttempts": RpcMethod<[], number>;
+	/** Returns a sync unsubscribe (`rpcSync`). */
+	"credentials.onRefreshAttempted": RpcMethod<[listener: (refreshAttempts: number) => void], () => void>;
+	"credentials.notifyExternalRefresh": RpcMethod<[], void>;
 	/** Returns a sync unsubscribe (`rpcSync`). */
 	"credentials.onDisabled": RpcMethod<
 		[listener: (event: CredentialDisabledEvent) => void | Promise<void>],
@@ -275,6 +279,7 @@ export type AuthStorageProtocol = {
 	"blocks.deleteAll": RpcMethod<[credentialId: number], void>;
 
 	setAccountPolicies: RpcMethod<[config: AuthAccountPolicyConfig], void>;
+	sourceLabel: RpcMethod<[], string | undefined>;
 };
 
 /**

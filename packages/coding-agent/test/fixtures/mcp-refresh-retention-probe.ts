@@ -67,6 +67,7 @@ const host: SessionToolsHost = {
 	evalPreludes: () => [],
 	sessionAgents: () => [],
 	waitForUser: dialog => dialog(),
+	applyStartupOAuthAccountPin: () => {},
 };
 const sessionTools = new SessionTools(host, {
 	baseSystemPrompt: [],
