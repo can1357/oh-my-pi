@@ -329,23 +329,14 @@ prepared factories, not extension authority from a saved transcript. Cold
 discovery without prepared factories respects the owner's explicit-only or
 merged roots.
 
-Caller-supplied `CreateAgentSessionOptions.extensions` functions are recorded in
-`preparedExtensions` under synthetic `<inline-N>` source IDs (unlike new inline
-factories passed directly to a restricted child, which remain excluded above)
-and rebind only in-process. `CreateAgentSessionOptions.topLevelExtensions`
-(`@internal`, used by the interactive CLI's Warp terminal event bridge in
-`src/modes/warp-events.ts`) and the per-session
-[autoresearch](./autoresearch.md) and custom-tool wrapper factories built inside
-`createAgentSession` are bound only to that session and never added to
-`preparedExtensions`. When prepared extensions are sent to a subagent worker
-thread (`src/thread/services/integrations.ts`), only entries whose
-`resolvedPath` is an absolute filesystem path
-(`isFilesystemSourcePath(resolvedPath)`) are marked loadable and re-imported in
-the worker when the child session binds extensions. `<inline-N>` entries arrive
-in the worker with `factory: null`, so worker-hosted subagents run without their
-hooks, tools, or providers, and the main thread logs one warning per prepared
-inline extension with structured log fields `extension` (`<inline-N>`) and
-`factory` (the function's `name`, omitted when anonymous).
+Caller-supplied `CreateAgentSessionOptions.extensions` are recorded in
+`preparedExtensions` under synthetic `<inline-N>` source IDs and rebind only in
+in-process children. `topLevelExtensions` (`@internal`; the interactive CLI's
+Warp event bridge) and the session's own autoresearch and custom-tool factories
+stay with that session. Worker threads re-import only entries whose
+`resolvedPath` is a filesystem path; `<inline-N>` entries arrive without a
+factory, and the main thread logs one warning per inline extension naming its
+ID and factory.
 
 Extension factories still execute host code when rebound; tool restrictions are
 not an extension sandbox. Existing per-module load-failure handling is unchanged.

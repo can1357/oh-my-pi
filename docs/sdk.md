@@ -325,16 +325,10 @@ const { session } = await createAgentSession({
 
 ### Extensions
 
-- `extensions`: in-memory `ExtensionFactory[]` functions (`api => { ... }`),
-  merged with discovery. Non-isolated in-process child sessions spawned through
-  this session's `task` tool inherit `session.preparedExtensions` automatically
-  and rebind these functions. Worker-thread subagents (see
-  [`task`](./tools/task.md#modes--variants)) cannot import an
-  in-memory closure, so they run without those inline extensions and the parent
-  session's thread logs one warning per inline extension to the omp log (default
-  `~/.omp/logs/`) with its `<inline-N>` ID and `factory.name` (use a named
-  function to identify it in logs). Put hooks that must also run in
-  worker-thread subagents in an extension file (`additionalExtensionPaths`).
+- `extensions`: inline `ExtensionFactory[]`. In-process child sessions rebind
+  them; worker-thread subagents cannot import a closure and run without them
+  (see [Extension loading](./extension-loading.md#restricted-children-and-revival)).
+  Hooks that must run there belong in an extension file.
 - `additionalExtensionPaths`: load extra extension files
 - `disableExtensionDiscovery`: disable ambient scanning; explicit paths and
   inline factories still load
@@ -342,11 +336,8 @@ const { session } = await createAgentSession({
   session-owning process. Never pass loaded extension instances from a parent
   to another session; use `preloadedPreparedExtensions` so each session gets its
   own `ExtensionAPI` binding.
-- `preloadedPreparedExtensions`: prepared factories (`session.preparedExtensions`
-  or `LoadExtensionsResult.preparedExtensions` from `loadExtensions()`) to
-  rebind, including in restricted children (`restrictToolNames: true`).
-  In-process sessions rebind without re-importing extension files; worker
-  threads re-import file-backed entries and skip inline functions.
+- `preloadedPreparedExtensions`: already-imported factories to rebind, including
+  in restricted children; does not reevaluate the module graph.
 - `extensionRoots`: a live owner-root provider for child discovery and revival.
   Its explicit roots, discovery mode, and configured roots take precedence over
   the child's local extension-loading inputs.
