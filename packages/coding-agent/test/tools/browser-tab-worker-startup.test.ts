@@ -490,6 +490,351 @@ describe("OMP-owned browser evaluation", () => {
 		},
 		45_000,
 	);
+	async function runPageContract(code: string): Promise<unknown> {
+		const name = `run-page-contract-${crypto.randomUUID()}`;
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+		} as unknown as ToolSession;
+		const fixture = `<script>
+			globalThis.__ompPageMarker = 47;
+			customElements.define("x-answer", class extends HTMLElement { get answer() { return 42; } });
+		</script><x-answer id="first"></x-answer><x-answer></x-answer>`;
+		try {
+			await acquireTab(name, headless(), {
+				url: `data:text/html,${encodeURIComponent(fixture)}`,
+				timeoutMs: 30_000,
+			});
+			return (await runInTab(name, { code, session, timeoutMs: 15_000 })).returnValue;
+		} finally {
+			await releaseTab(name, { kill: true });
+		}
+	}
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("runs page evaluation methods and chained calls in the main world", async () => {
+		expect(
+			await runPageContract(`
+			const first = await page.$("#first");
+			const marker = await page.evaluateHandle(() => globalThis.__ompPageMarker);
+			try {
+				return {
+					evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
+					evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
+					evaluateHandle: await marker.jsonValue(),
+					elementArgument: await page.evaluate(element => element.answer, first),
+					$eval: await page.$eval("#first", (element, add) => element.answer + add, 1),
+					$$eval: await page.$$eval("x-answer", elements => elements.map(element => element.answer)),
+					chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
+					registry: await page.evaluate(() => String(customElements)),
+				};
+			} finally { await Promise.all([first.dispose(), marker.dispose()]); }
+		`),
+		).toEqual({
+			evaluate: 47,
+			evaluateString: 47,
+			evaluateHandle: 47,
+			elementArgument: 42,
+			$eval: 43,
+			$$eval: [42, 42],
+			chained: 47,
+			registry: "[object CustomElementRegistry]",
+		});
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("reports a missing $eval selector", async () => {
+		expect(
+			await runPageContract(`
+			return page.$eval("#absent", element => element.answer).catch(error => error.message);
+		`),
+		).toContain('failed to find element matching selector "#absent"');
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("bounds false and never-settling predicates by the wait deadline", async () => {
+		expect(
+			await runPageContract(`
+			const timedOut = await page.waitForFunction(() => false, { timeout: 200 })
+				.then(() => "resolved", error => error.name);
+			const stalled = await page.waitForFunction(() => Promise.withResolvers().promise, { timeout: 200 })
+				.then(() => "resolved", error => error.name);
+			return { timedOut, stalled };
+		`),
+		).toEqual({ timedOut: "TimeoutError", stalled: "TimeoutError" });
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("observes a transient DOM mutation without leaking query bindings", async () => {
+		expect(
+			await runPageContract(`
+			const pending = page.waitForFunction(() => {
+				globalThis.__ompChecks = (globalThis.__ompChecks ?? 0) + 1;
+				return document.querySelector("#flash")?.id;
+			}, { polling: "mutation" });
+			await page.waitForFunction(() => globalThis.__ompChecks >= 1);
+			await page.evaluate(() => {
+				const flash = document.createElement("i");
+				flash.id = "flash";
+				document.body.append(flash);
+				Promise.resolve().then(() => Promise.resolve()).then(() => flash.remove());
+			});
+			const handle = await pending;
+			try {
+				return {
+					value: await handle.jsonValue(),
+					leaked: await page.evaluate(() => Object.keys(globalThis).filter(key => /puppeteer|QuerySelector/.test(key))),
+				};
+			} finally { await handle.dispose(); }
+		`),
+		).toEqual({ value: "flash", leaked: [] });
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("runs numeric polling on the page interval", async () => {
+		expect(
+			await runPageContract(`
+			const clock = await page.createCDPSession();
+			await clock.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
+			const advance = async budget => {
+				const elapsed = Promise.withResolvers();
+				clock.once("Emulation.virtualTimeBudgetExpired", elapsed.resolve);
+				await clock.send("Emulation.setVirtualTimePolicy", { policy: "advance", budget });
+				await elapsed.promise;
+			};
+			const pending = page.waitForFunction(() => {
+				globalThis.__ompNumericChecks = (globalThis.__ompNumericChecks ?? 0) + 1;
+				return globalThis.__ompNumericChecks === 3;
+			}, { polling: 17, timeout: 0 });
+			try {
+				const ready = await page.waitForFunction(() => globalThis.__ompNumericChecks >= 1, { polling: "mutation" });
+				await ready.dispose();
+				const checks = [await page.evaluate(() => globalThis.__ompNumericChecks)];
+				for (const budget of [16, 1, 17]) {
+					await advance(budget);
+					checks.push(await page.evaluate(() => globalThis.__ompNumericChecks));
+				}
+				const handle = await pending;
+				await handle.dispose();
+				return checks;
+			} finally {
+				await clock.detach();
+			}
+		`),
+		).toEqual([1, 1, 2, 3]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("rejects unsupported polling values before evaluating the predicate", async () => {
+		expect(
+			await runPageContract(`
+			return Promise.all(["rafx", true].map(polling =>
+				page.waitForFunction(() => { throw new Error("predicate ran"); }, { polling, timeout: 0 })
+					.then(() => "resolved", error => error.message)));
+		`),
+		).toEqual(["Unknown polling option: rafx", "Unknown polling option: true"]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("preserves abort reasons and stops the page poller", async () => {
+		expect(
+			await runPageContract(`
+			const reason = new Error("caller stopped waiting");
+			const preAborted = new AbortController();
+			preAborted.abort(reason);
+			const pre = await page.waitForFunction(() => false, { signal: preAborted.signal })
+				.then(() => false, error => error === reason);
+			const cancelled = [];
+			for (const polling of ["raf", "mutation"]) {
+				await page.evaluate(() => { globalThis.__ompAbortChecks = 0; });
+				const controller = new AbortController();
+				const pending = page.waitForFunction(() => {
+					globalThis.__ompAbortChecks++;
+					return false;
+				}, { polling, timeout: 0, signal: controller.signal }).then(() => false, error => error === reason);
+				await page.waitForFunction(() => globalThis.__ompAbortChecks > 0);
+				controller.abort(reason);
+				const identity = await pending;
+				await page.evaluate(() => {
+					const { promise, resolve } = Promise.withResolvers();
+					requestAnimationFrame(resolve);
+					return promise;
+				});
+				const before = await page.evaluate(() => globalThis.__ompAbortChecks);
+				await page.evaluate(() => { document.body.append(document.createElement("b")); });
+				await page.evaluate(() => {
+					const { promise, resolve } = Promise.withResolvers();
+					requestAnimationFrame(resolve);
+					return promise;
+				});
+				cancelled.push({ identity, stopped: before === await page.evaluate(() => globalThis.__ompAbortChecks) });
+			}
+			return { pre, cancelled };
+		`),
+		).toEqual({
+			pre: true,
+			cancelled: [
+				{ identity: true, stopped: true },
+				{ identity: true, stopped: true },
+			],
+		});
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("disposes the specific result returned after host cancellation", async () => {
+		expect(
+			await runPageContract(`
+			const realm = page.mainFrame().mainRealm();
+			const originalEvaluateHandle = realm.evaluateHandle;
+			const sample = await page.evaluateHandle(() => ({}));
+			const prototype = Object.getPrototypeOf(sample);
+			const originalDispose = prototype.dispose;
+			const controller = new AbortController();
+			const release = Promise.withResolvers();
+			const disposed = Promise.withResolvers();
+			let lateHandle;
+			prototype.dispose = function() {
+				if (this === lateHandle) disposed.resolve();
+				return originalDispose.call(this);
+			};
+			realm.evaluateHandle = async function(fn, ...args) {
+				const handle = await originalEvaluateHandle.call(this, fn, ...args);
+				if (String(fn).includes("held.promise")) {
+					lateHandle = handle;
+					controller.abort();
+					await release.promise;
+				}
+				return handle;
+			};
+			try {
+				const outcome = await page.waitForFunction(() => ({ late: true }), { signal: controller.signal })
+					.then(() => "resolved", error => error.name);
+				release.resolve();
+				await disposed.promise;
+				return outcome;
+			} finally {
+				release.resolve();
+				realm.evaluateHandle = originalEvaluateHandle;
+				prototype.dispose = originalDispose;
+				await sample.dispose();
+			}
+		`),
+		).toBe("AbortError");
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("cancels a wait whose poller cleanup never settles", async () => {
+		expect(
+			await runPageContract(`
+			const sample = await page.evaluateHandle(() => ({}));
+			const prototype = Object.getPrototypeOf(sample);
+			const originalDispose = prototype.dispose;
+			const controller = new AbortController();
+			prototype.dispose = function() {
+				queueMicrotask(() => controller.abort());
+				return originalDispose.call(this).then(() => Promise.withResolvers().promise);
+			};
+			try {
+				return await page.waitForFunction(() => true, { timeout: 0, signal: controller.signal })
+					.then(() => "resolved", error => error.name);
+			} finally {
+				prototype.dispose = originalDispose;
+				await sample.dispose();
+			}
+		`),
+		).toBe("AbortError");
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("bounds the truthiness protocol call by timeout and cancellation", async () => {
+		expect(
+			await runPageContract(`
+			const outcomes = [];
+			for (const cancellation of ["timeout", "signal"]) {
+				const realm = page.mainFrame().mainRealm();
+				const originalEvaluate = realm.evaluate;
+				const controller = new AbortController();
+				realm.evaluate = function(fn, ...args) {
+					if (!String(fn).includes("!!held")) return originalEvaluate.call(this, fn, ...args);
+					if (cancellation === "signal") controller.abort();
+					return originalEvaluate.call(this, held => {
+						const { promise, resolve } = Promise.withResolvers();
+						globalThis.__ompTruthinessRelease = () => resolve(!!held);
+						return promise;
+					}, ...args);
+				};
+				try {
+					outcomes.push(await page.waitForFunction(() => true, {
+						timeout: cancellation === "timeout" ? 50 : 0, signal: controller.signal,
+					}).then(async handle => { await handle.dispose(); return "resolved"; }, error => error.name));
+				} finally {
+					realm.evaluate = originalEvaluate;
+					await originalEvaluate.call(realm, () => globalThis.__ompTruthinessRelease?.());
+				}
+			}
+			return outcomes;
+		`),
+		).toEqual(["TimeoutError", "AbortError"]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("accepts concise predicates despite page Promise and Boolean shims", async () => {
+		expect(
+			await runPageContract(`
+			await page.evaluate(() => {
+				globalThis.__ompOriginalPromise = Promise;
+				globalThis.__ompOriginalBoolean = Boolean;
+				class LegacyPromise extends Promise {}
+				Object.defineProperty(LegacyPromise, "withResolvers", { value: undefined });
+				globalThis.Promise = LegacyPromise;
+				globalThis.Boolean = () => false;
+			});
+			const values = [];
+			try {
+				for (const polling of [100, "raf", "mutation"]) {
+					const method = polling === "raf"
+						? { ready() { return globalThis.__ompPageMarker; } }.ready
+						: new class { async ready() { return globalThis.__ompPageMarker; } }().ready;
+					const handle = await page.waitForFunction(method, { polling });
+					values.push(await handle.jsonValue());
+					await handle.dispose();
+				}
+				return values;
+			} finally {
+				await page.evaluate(() => {
+					globalThis.Promise = globalThis.__ompOriginalPromise;
+					globalThis.Boolean = globalThis.__ompOriginalBoolean;
+				});
+			}
+		`),
+		).toEqual([47, 47, 47]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("reports predicate rejection without a page unhandled rejection", async () => {
+		expect(
+			await runPageContract(`
+			await page.evaluate(() => {
+				globalThis.__ompUnhandledWaits = 0;
+				addEventListener("unhandledrejection", event => {
+					if (String(event.reason).includes("expected poller rejection")) globalThis.__ompUnhandledWaits++;
+				});
+			});
+			const thrown = [];
+			for (const polling of ["raf", "mutation"]) {
+				thrown.push(await page.waitForFunction(() => { throw new Error("expected poller rejection"); }, { polling })
+					.then(() => "resolved", error => error.message));
+			}
+			return { thrown, unhandled: await page.evaluate(() => globalThis.__ompUnhandledWaits) };
+		`),
+		).toEqual({ thrown: ["expected poller rejection", "expected poller rejection"], unhandled: 0 });
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"retries a navigation context error without waiting for the polling interval",
+		async () => {
+			expect(
+				await runPageContract(`
+			const handle = await page.waitForFunction(() => {
+				if (globalThis.__ompRetriedContext) return "retried";
+				globalThis.__ompRetriedContext = true;
+				throw new Error("Execution context was destroyed, most likely because of a navigation.");
+			}, { polling: 5_000, timeout: 2_000 });
+			try { return await handle.jsonValue(); } finally { await handle.dispose(); }
+		`),
+			).toBe("retried");
+		},
+	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"tells a caller running calls on one tab together to await each one or use one run",
 		async () => {

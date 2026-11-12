@@ -129,6 +129,8 @@ The inner `tab` is the full worker helper API. In addition to the direct surface
 
 Runs use a persistent, per-tab JavaScript runtime with ordinary Eval helpers and full Bun/Node and tool-bridge access. This is API isolation, not a security sandbox. Raw `page.setRequestInterception` and run-added request listeners are cleaned up at run end; `tab.route` handlers persist until `unroute` or tab close.
 
+Code a run hands to `page.evaluate`, `page.evaluateHandle`, `page.$eval`, `page.$$eval`, and `page.waitForFunction` runs in the page's main world, where `tab.evaluate` runs and page globals and custom-element members live; element handles passed as arguments are adopted into it. On Chromium tabs omp's stealth patch runs every other Puppeteer evaluation in an isolated world that shares the DOM but not page scripts: `frame.evaluate`, `elementHandle.evaluate`, and any other `Page` object (`tab.page`, `frame.page()`, `browser.pages()`). Selectors resolve there too, so pass a handle to `page.evaluate(fn, handle)` to read what page scripts attached to it. A handle to a non-element value works only in the world that made it, so create one for `page.evaluate` with `page.evaluateHandle`.
+
 The return value stays structured. Only a value matching the full observation shape receives observation printing; other structured returns, including objects with an `elements` array, keep native inspection. Nonempty text printed inside the run (`print`, `console.*`) prints in the outer Eval cell, printed images remain Eval output, and a run with no printed text emits no placeholder.
 
 ## Python API
