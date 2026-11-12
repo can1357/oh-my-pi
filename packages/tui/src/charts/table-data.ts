@@ -850,6 +850,22 @@ export function analyzeTable(header: readonly string[], rows: readonly (readonly
 	};
 }
 
+/**
+ * `table` read with `measures` (some of its own) as its only measures and
+ * `label` naming its rows: the table as a planner sees it once something
+ * that knows what the numbers mean (a judge) says which are results. A
+ * composition stands while every part is still a measure.
+ */
+export function withMeasures(
+	table: TableAnalysis,
+	measures: readonly TableColumn[],
+	label: TableColumn | undefined = table.label,
+): TableAnalysis {
+	const parts = table.composition?.parts ?? [];
+	const whole = parts.length > 0 && parts.every(index => measures.some(column => column.index === index));
+	return { ...table, label, measures, composition: whole ? table.composition : undefined };
+}
+
 /** A header with its numbers blanked: `scale 1 (200 tiles)` and `scale 8 (1600 tiles)` are one sweep. */
 const SWEEP_STEP = /\d+(?:\.\d+)?/g;
 

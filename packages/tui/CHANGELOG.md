@@ -11,7 +11,10 @@
 
 ### Fixed
 
+- Table charts of factors against a rival column (`omp | ksh93 | bash`) are titled as gaps to it (`18× more vs omp`) rather than as improvements or regressions, however the chart was picked
 - In Tern, an edit's diff no longer opens with stray one-line hunks of far-off lines (the section heading or closing brace around the change), so a collapsed edit shows the change itself; lines after a second, distant change in the same edit carry their real line numbers
+- Table charts no longer read `with`, `to` or `from` inside a column name (`Runs with ≥10`) as a before/after condition, which turned unrelated columns into factors of each other
+- Chart row names keep a number with the name before it (`EmbeddingGemma 2`, `Jev 15`) instead of nesting them under a bare `EmbeddingGemma` or `Jev,`
 
 ## [18.18.9] - 2026-11-11
 

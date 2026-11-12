@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import type { Answer } from "@oh-my-pi/pi-ai";
+import { type Answer, type Judge, type JudgmentRequest, type Questions, tokenUsage } from "@oh-my-pi/pi-ai";
 import {
 	candidateCharts,
 	chartQuestions,
 	chosenChart,
+	pickTableChart,
 	readingQuestions,
 } from "@oh-my-pi/pi-coding-agent/auto-graph/planner";
+import type { ChainJudge, JudgeKind } from "@oh-my-pi/pi-coding-agent/judgment";
 import { planChart } from "@oh-my-pi/pi-tui/charts/chart-plan";
 import { analyzeTable } from "@oh-my-pi/pi-tui/charts/table-data";
 import type { TableChartRequest } from "@oh-my-pi/pi-tui/chat/table-chart";
@@ -141,6 +143,26 @@ describe("candidateCharts", () => {
 		expect(unsure?.plan.polarity?.[latency]).toBe("lower");
 		const [sure] = candidateCharts(ARMS, { [`p${latency}`]: choice("higher", 0.9) });
 		expect(sure?.plan.polarity?.[latency]).toBe("higher");
+	});
+});
+
+describe("pickTableChart", () => {
+	it("asks an on-device judge only which chart, over the charts of the local reading", async () => {
+		const asked: Questions[] = [];
+		const local: Judge = {
+			label: "local",
+			judge: async <Q extends Questions>(request: JudgmentRequest<Q>) => {
+				asked.push(request.questions);
+				const answers: Record<string, Answer> = { chart: choice("B", 0.9, { A: 0.05 }) };
+				return { api: "local", provider: "local", model: "tiny", answers, usage: tokenUsage(0, 0) } as never;
+			},
+		};
+		const judge = {
+			withCandidate: <T>(run: (candidate: Judge, kind: JudgeKind) => Promise<T>) => run(local, "local"),
+		} as unknown as ChainJudge;
+		const plan = await pickTableChart(LANES, judge);
+		expect(asked.map(questions => Object.keys(questions))).toEqual([["chart"]]);
+		expect(plan?.series).toEqual(candidateCharts(LANES, {})[1]!.plan.series);
 	});
 });
 
