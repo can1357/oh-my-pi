@@ -1016,6 +1016,52 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("plan-proposal handler treats elicitation RPC failure as refine, never approves", async () => {
+		// Single-value elicitation failures (client rejected the RPC, e.g.
+		// -32602) must stay fail-closed: the handler returns the refinement
+		// result instead of throwing, so plan mode stays active and write
+		// access is never granted by a transport/rendering failure.
+		const harness = await createHarness({
+			elicitationHandler: async () => {
+				throw new Error("connection closed");
+			},
+		});
+		cfgPlanEnabled.set(Settings.instance, true);
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://PLAN.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const updatesBefore = harness.updates.length;
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as { content: Array<{ type: string; text: string }> };
+
+		expect(result.content[0]?.text).toMatch(/refinement requested/i);
+		expect(await Bun.file(planPath).exists()).toBe(true);
+		expect(session.planModeState?.enabled).toBe(true);
+		expect(typeof session.planProposalHandler).toBe("function");
+		expect(session.planReferencePath).toBeUndefined();
+		const postFailureUpdates = harness.updates.slice(updatesBefore);
+		expect(
+			postFailureUpdates.some(
+				notification =>
+					notification.update.sessionUpdate === "current_mode_update" &&
+					notification.update.currentModeId === "default",
+			),
+		).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("buffers compaction notifications until the client knows the session", async () => {
 		const harness = await createHarness();
 		vi.useFakeTimers();
@@ -4213,16 +4259,17 @@ describe("ACP agent", () => {
 			expect(calls).toHaveLength(0);
 		});
 
-		it("rejects transport-level elicitation failures instead of reporting undecided input", async () => {
+		it("treats transport-level elicitation failures as undecided input", async () => {
 			const { connection, calls } = createElicitConnection(async () => {
 				throw new Error("connection closed");
 			});
 			const ctx = createAcpExtensionUiContext(connection, () => "session-throw", FORM_CAPABILITIES);
 
-			await expect(ctx.select("X", ["a"])).rejects.toThrow("connection closed");
-			await expect(ctx.confirm("X", "Y")).rejects.toThrow("connection closed");
-			await expect(ctx.input("X")).rejects.toThrow("connection closed");
-			expect(calls).toHaveLength(3);
+			expect(await ctx.select("X", ["a"])).toBeUndefined();
+			expect(await ctx.confirm("X", "Y")).toBe(false);
+			expect(await ctx.input("X")).toBeUndefined();
+			expect(await ctx.editor("X")).toBeUndefined();
+			expect(calls).toHaveLength(4);
 		});
 
 		it("skips the SDK call entirely when dialogOptions.signal is already aborted", async () => {

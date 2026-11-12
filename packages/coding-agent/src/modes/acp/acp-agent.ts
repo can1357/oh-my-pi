@@ -545,8 +545,11 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
  *
  * A client rejection that lands before abort/timeout instead rejects with the
  * RPC error (e.g. a client that cannot render the schema answering -32602),
- * so callers can tell a transport/rendering failure apart from an explicit
- * user cancel (`{ action: "cancel" }`, which still resolves `undefined`).
+ * so `formDialog`/`askDialog` callers can tell a transport/rendering failure
+ * apart from an explicit user cancel (`{ action: "cancel" }`, which still
+ * resolves `undefined`). The single-value bridge (`elicitFromAcpClient`)
+ * catches this rejection and resolves `undefined` so select/confirm/input/
+ * editor and the plan approval choice stay fail-closed.
  */
 async function elicitFormFromAcpClient(
 	connection: AgentSideConnection,
@@ -630,16 +633,31 @@ async function elicitFromAcpClient(
 	property: ElicitationPropertySchema,
 	dialogOptions: ExtensionUIDialogOptions | undefined,
 ): Promise<ElicitationContentValue | undefined> {
-	const content = await elicitFormFromAcpClient(
-		connection,
-		sessionId,
-		method,
-		message,
-		{ value: property },
-		["value"],
-		dialogOptions,
-	);
-	return content?.value;
+	// #18887 scopes RPC-error propagation to `formDialog`/`askDialog` only.
+	// Single-value prompts (select/confirm/input/editor, plus the plan
+	// approval choice) stay fail-closed: an RPC failure resolves `undefined`
+	// so callers fall back to undecided input / refine semantics instead of
+	// throwing. Explicit user cancel (`{ action: "cancel" }`) already
+	// resolves `undefined` inside `elicitFormFromAcpClient`.
+	try {
+		const content = await elicitFormFromAcpClient(
+			connection,
+			sessionId,
+			method,
+			message,
+			{ value: property },
+			["value"],
+			dialogOptions,
+		);
+		return content?.value;
+	} catch (error) {
+		logger.warn("ACP single-value elicitation failed; treating as undecided input", {
+			acpSessionId: sessionId,
+			method,
+			error,
+		});
+		return undefined;
+	}
 }
 
 /**
@@ -2716,14 +2734,13 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Ask the ACP client to confirm plan approval. Returns `true` only on an
-	 * explicit `APPROVE_OPTION` selection. Refine, dismissal (`undefined`), or
-	 * any unrecognized value falls through to refine semantics — the caller
-	 * keeps plan mode active and surfaces guidance text to the agent. A client
-	 * transport/rendering failure rejects instead, so it surfaces as a tool
-	 * error rather than a silent refine. Clients without `elicitation.form`
-	 * support auto-approve because there is no confirmation surface available;
-	 * without that, plan mode would strand the agent (the bug this method
-	 * exists to fix).
+	 * explicit `APPROVE_OPTION` selection. Refine, dismissal (`undefined`), a
+	 * client transport/rendering failure, or any unrecognized value falls
+	 * through to refine semantics — the caller keeps plan mode active and
+	 * surfaces guidance text to the agent, so a failed dialog can never grant
+	 * write access. Clients without `elicitation.form` support auto-approve
+	 * because there is no confirmation surface available; without that, plan
+	 * mode would strand the agent (the bug this method exists to fix).
 	 */
 	async #requestAcpPlanApprovalChoice(sessionId: string, title: string, planContent: string): Promise<boolean> {
 		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
