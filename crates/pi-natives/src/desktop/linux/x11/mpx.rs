@@ -766,6 +766,10 @@ impl Mpx {
 	/// The slaves a call sends through: the pointer's for a pointer gesture,
 	/// and the keyboard's once it exists.
 	fn routes(&self, pointer: bool) -> [Option<Route>; 2] {
+		#[cfg(test)]
+		if self.release_events.is_some() {
+			return [None, None];
+		}
 		[
 			pointer.then_some(Route {
 				slave:  self.pointer_slave,
