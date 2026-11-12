@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed macOS desktop capabilities claiming `globalEscape` while Secure Event Input is on (a focused password field, an authentication dialog, a terminal's secure keyboard entry), when macOS hides every key from the Escape and user-input monitors; capabilities now report `secureInput` and the holding app in `secureInputApp`
+- Fixed macOS desktop capabilities claiming `globalEscape` while Secure Event Input is on (a focused password field, an authentication dialog, a terminal's secure keyboard entry), when macOS hides every key from the Escape and user-input monitors; capabilities now report `secureInput` and the holding app in `secureInputApp` ([#18982](https://github.com/can1357/oh-my-pi/pull/18982) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.19.0] - 2026-11-12
 
