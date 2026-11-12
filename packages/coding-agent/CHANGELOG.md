@@ -491,6 +491,14 @@
 - A session whose request carries no titleable text of its own — an attached `@brief.md`, a greeting, a bare number — is now named once from the assistant's reading of it, instead of staying untitled until the next message that happens to be titleable (which, for an agent launched from one brief and left to run, never came) ([#18238](https://github.com/can1357/oh-my-pi/pull/18238) by [@sjawhar](https://github.com/sjawhar))
 - Prewalk no longer hands a subagent to its cheap model when the subagent messages its parent or another agent (`write agent://…`) before its first file edit ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
 
+### Added
+
+- Added `--title <text>` to name a session at launch, recorded as a title you set, so a relaunch can give the replacement the name its predecessor had ([#18283](https://github.com/can1357/oh-my-pi/pull/18283) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- A resumed session with no title now names itself from the transcript it carries, instead of staying unnamed until someone types ([#18283](https://github.com/can1357/oh-my-pi/pull/18283) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

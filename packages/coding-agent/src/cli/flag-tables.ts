@@ -35,6 +35,7 @@ import { parseMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
 import { parseMotionMode } from "../config/motion-presets";
 import { parseSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { cleanSessionTitle } from "../session/title-text";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
 
@@ -263,6 +264,14 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--export": (result, value) => {
 		result.export = value;
 	},
+	"--title": (result, value) => {
+		// Cleaned against the one definition of a title, so a value that would
+		// clean away to nothing is refused here rather than discovered later:
+		// `setSessionName` drops such a title and returns false without a word.
+		const title = cleanSessionTitle(value);
+		if (!title) throw new CliUsageError(`--title requires a session title; ${JSON.stringify(value)} holds none.`);
+		result.title = title;
+	},
 	"--hook": (result, value) => {
 		result.hooks = result.hooks ?? [];
 		result.hooks.push(value);
@@ -426,7 +435,10 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
  * session: the relaunch supplies its own session source, and replaying a
  * stale continue/fork/import selector would re-run its one-shot session
  * choice. `--goal` belongs here too: it seeds a fresh session only, and
- * `validateGoalLaunch` rejects it beside any resume/fork selector.
+ * `validateGoalLaunch` rejects it beside any resume/fork selector. So does
+ * `--title`: it names a session once, at launch, and the relaunch resumes a
+ * session that already carries its name — replaying it would undo a `/title`
+ * the operator typed since, or name a session they selected instead.
  */
 const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--resume": true,
@@ -439,6 +451,7 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--from-claude": true,
 	"--from-codex": true,
 	"--goal": true,
+	"--title": true,
 };
 
 /**

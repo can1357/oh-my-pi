@@ -240,3 +240,51 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 		}
 	});
 });
+
+describe("createAcpSessionFactory launch-title isolation", () => {
+	it("does not name an ACP session after the launch's --title", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-launch-title-");
+		try {
+			const settings = Settings.isolated({});
+			const fakeSession = {} as AgentSession;
+			const captured: CreateAgentSessionOptions[] = [];
+			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
+				captured.push(options);
+				return {
+					session: fakeSession,
+					extensionsResult: {
+						extensions: [],
+						errors: [],
+						runner: undefined,
+					} as unknown as CreateAgentSessionResult["extensionsResult"],
+					setToolUIContext: () => {},
+					eventBus: {
+						emit: () => {},
+						on: () => () => {},
+						off: () => {},
+					} as unknown as CreateAgentSessionResult["eventBus"],
+				};
+			};
+
+			// `--title` names the launch's own session once. Inheriting it here
+			// would stamp one name on every conversation the host opens.
+			const factory = createAcpSessionFactory({
+				baseOptions: { sessionTitle: "Launch title that must not leak." } as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: { invalidFlagValues: [] },
+				rawArgs: [],
+				createSession,
+			});
+
+			await factory(tempDir.join("project"));
+
+			expect(captured).toHaveLength(1);
+			expect(captured[0].sessionTitle).toBeUndefined();
+		} finally {
+			await tempDir.remove();
+		}
+	});
+});

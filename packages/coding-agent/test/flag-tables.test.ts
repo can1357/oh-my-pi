@@ -278,6 +278,19 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		expect(() => validateRestoreLaunch(parseArgs(relaunch), true)).not.toThrow();
 	});
 
+	it("drops a launch --title in both forms, so a relaunch cannot undo a later rename", () => {
+		// The relaunch resumes a session that already carries its name. Replaying
+		// the launch title would overwrite a `/title` typed since, and `/fork
+		// pane|window` would give both sessions the same name.
+		expect(restartArgv(["--title", "ShellPortAudit lane", "--model", "gpt-5"], "sid")).toEqual([
+			"--model",
+			"gpt-5",
+			"--resume",
+			"sid",
+		]);
+		expect(restartArgv(["--title=ShellPortAudit lane", "--no-tools"], undefined)).toEqual(["--no-tools"]);
+	});
+
 	it("drops caller-supplied overrides together with their values", () => {
 		expect(
 			restartArgv(["--model=a/b", "--thinking", "low", "--no-tools", "--cwd", "/old"], undefined, {
@@ -290,6 +303,17 @@ describe("restartArgv (/restart relaunch argv)", () => {
 
 	it("omits --restore for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
+	});
+});
+describe("--title", () => {
+	it("cleans the name it takes, and refuses at parse time what cleans to nothing", () => {
+		expect(parseArgs(["--title", "ShellPortAudit lane"]).title).toBe("ShellPortAudit lane");
+		expect(parseArgs(["--title", "  spaced  "]).title).toBe("spaced");
+		// Rejected here, like every other validated flag in this table, so no
+		// session is resolved — and a forked one never minted — before the error.
+		// `trim()` would call the second of these a title; the one cleaner does not.
+		expect(() => parseArgs(["--title", "   "])).toThrow(CliUsageError);
+		expect(() => parseArgs(["--title", "\u001b"])).toThrow(CliUsageError);
 	});
 });
 describe("--restore", () => {

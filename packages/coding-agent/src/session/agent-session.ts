@@ -905,7 +905,7 @@ type SetSessionNameWithTrigger = (
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
 
-/** The operator's latest message while an auto-titled session is unnamed: what its title names. */
+/** The latest title source while an auto-titled session is unnamed: an operator message, or the transcript a resume carried. */
 interface TitleInput {
 	sessionId: string;
 	/** Title-model text: the typed prompt, or a `/skill:` chip rather than the expanded skill body. */
@@ -914,6 +914,11 @@ interface TitleInput {
 	replied: boolean;
 	/** A title request ran for it; an interrupt clears this so its next reply tries again. */
 	tried: boolean;
+	/** Read from a resumed transcript rather than typed. An interrupt drops it
+	 *  instead of reviving it: an operator can send their message again, a
+	 *  transcript cannot, and reviving it would spend the one try per resume
+	 *  ({@link #adoptResumedTitleInput}) on every later wake. */
+	resumed?: true;
 }
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
@@ -1196,6 +1201,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
 	/** What the next automatic title names (see {@link #maybeStartTitle}). */
 	#titleInput: TitleInput | undefined;
+	/** The conversation whose carried transcript may still arm {@link #titleInput}
+	 *  once (see {@link #adoptResumedTitleInput}). `undefined` once spent, and a
+	 *  mismatch means this session is on a different conversation now. Keyed by
+	 *  {@link #sessionGeneration}, not by the persisted session id: `/new` and a
+	 *  switch bump the generation (a rolled-back switch restores it), while
+	 *  persistence minting a new id for the same transcript — a write conflict
+	 *  moving the session to a sibling file — does not. */
+	#resumeTitleGeneration: number | undefined;
 	/** Operator prompts since the last title check, toward `title.refreshAfterPrompts`. */
 	#titleDrift: { sessionId: string; prompts: number } | undefined;
 	#titleProviderSessionId: string | undefined;
@@ -2489,6 +2502,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
+		// A session built over a transcript was resumed. Its relaunch may send no
+		// operator message at all, so record that the carried transcript still owes
+		// THIS conversation one title try; {@link #adoptResumedTitleInput} spends it.
+		this.#resumeTitleGeneration =
+			this.#autoTitle && config.agent.state.messages.length > 0 ? this.#sessionGeneration : undefined;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#onPayload = config.onPayload;
@@ -4681,17 +4699,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const expectedSpawns =
 			event.type === "message_update" ? this.#spawnSignal?.observe(event.assistantMessageEvent) : undefined;
 		if (expectedSpawns) prewarmSubagentWorker(this.settings, this.#modelRegistry, expectedSpawns);
-		// Title the session once the reply to the operator's latest message starts
-		// a non-thinking block, synchronously: a title fork snapshots the streaming
+		// Title the session once the reply to the operator's latest message — or,
+		// on a resume that carries none, to the transcript itself — starts a
+		// non-thinking block, synchronously: a title fork snapshots the streaming
 		// reply before its first await.
 		if (event.type === "message_end") {
 			this.#noteTitleInput(event.message);
 			this.#noteTitleDrift(event.message);
-		} else if (event.type === "message_update" && this.#titleInput) {
+		} else if (event.type === "message_update") {
 			const kind = event.assistantMessageEvent.type;
 			if (kind === "text_start" || kind === "toolcall_start") {
-				this.#titleInput.replied = true;
-				this.#maybeStartTitle();
+				this.#adoptResumedTitleInput();
+				if (this.#titleInput) {
+					this.#titleInput.replied = true;
+					this.#maybeStartTitle();
+				}
 			}
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
@@ -11726,6 +11748,38 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Record the transcript a resumed session carries as its title source, once.
+	 *
+	 * A relaunch need not send an operator message: a wake notice arrives as a
+	 * `custom` message, which {@link operatorTitleText} reads only for `/skill:`
+	 * chips, so {@link #noteTitleInput} never fires and the session would stay
+	 * unnamed until a person typed. The carried transcript is a better source
+	 * than a first message anyway: it is what {@link #advanceDeferredTitle}
+	 * already retitles from.
+	 *
+	 * The bound is one title request per resumed session, the same budget one
+	 * operator message buys: the entitlement is spent on the first reply whatever
+	 * the outcome, so a decline, a refusal or an unnameable transcript costs one
+	 * call and no more, and a session that never replies costs none. A session
+	 * that is already named (including one named by `--title`) spends nothing,
+	 * and so does a session this one replaced through `/new` or a switch.
+	 */
+	#adoptResumedTitleInput(): void {
+		if (this.#resumeTitleGeneration !== this.#sessionGeneration) return;
+		this.#resumeTitleGeneration = undefined;
+		if (!this.#autoTitle || this.sessionName || this.#titleInput || $env.PI_NO_TITLE) return;
+		const text = this.#buildReplanTitleContext();
+		if (!text || isLowSignalTitleInput(text)) return;
+		this.#titleInput = {
+			sessionId: this.sessionManager.getSessionId(),
+			text,
+			replied: false,
+			tried: false,
+			resumed: true,
+		};
+	}
+
+	/**
 	 * Name the unnamed session from {@link #titleInput} once its reply has begun:
 	 * one request at a time, one try per operator message.
 	 *
@@ -11898,11 +11952,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * An interrupt cancelled `sessionId`'s title request: no title model and no
 	 * context retitle, but the operator's latest message tries again when its
 	 * next reply begins (a flushed steer or a continue).
+	 *
+	 * A resumed transcript gets no such retry. Nobody can send it again, so
+	 * reviving it would let every later wake start another request and break
+	 * the one-try-per-resume bound; the session waits for an operator message
+	 * instead, as it does when its transcript cannot be titled at all.
 	 */
 	#cancelTitle(sessionId: string): void {
 		this.#deferredTitle = undefined;
 		const input = this.#titleInput;
 		if (input?.sessionId !== sessionId) return;
+		if (input.resumed) {
+			this.#titleInput = undefined;
+			return;
+		}
 		input.tried = false;
 		input.replied = false;
 	}
