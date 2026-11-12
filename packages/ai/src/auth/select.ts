@@ -1131,36 +1131,24 @@ export class CredentialSelector {
 		}
 
 		try {
-			let result: { newCredentials: OAuthCredentials; apiKey: string } | null;
+			// Refresh first through the broker-aware single-flighted machinery
+			// so transient failures surface as network errors (5-min temp block)
+			// instead of `getOAuthApiKey`'s "expired" precondition error, which
+			// the definitive-failure regex below would otherwise classify as
+			// auth failure and soft-disable a still-valid credential. A broker
+			// refresh returns only token/identity fields, so the key is built
+			// from the merged row, which keeps provider routing metadata.
+			const refreshed = mergeRefreshedCredential(
+				selection.credential,
+				await this.#deps.refresher.refresh(provider, selection.credential, credentialId, options?.signal),
+			);
 			const customProvider = getOAuthProvider(provider);
-			if (customProvider) {
-				const refreshedCredentials = await this.#deps.refresher.refresh(
-					provider,
-					selection.credential,
-					credentialId,
-					options?.signal,
-				);
-				const apiKey = customProvider.getApiKey
-					? customProvider.getApiKey(refreshedCredentials)
-					: refreshedCredentials.access;
-				result = { newCredentials: refreshedCredentials, apiKey };
-			} else {
-				// Refresh first through the broker-aware single-flighted machinery
-				// so transient failures surface as network errors (5-min temp block)
-				// instead of `getOAuthApiKey`'s "expired" precondition error, which
-				// the definitive-failure regex below would otherwise classify as
-				// auth failure and soft-disable a still-valid credential.
-				const refreshedCredentials = await this.#deps.refresher.refresh(
-					provider,
-					selection.credential,
-					credentialId,
-					options?.signal,
-				);
-				const oauthCreds: Record<string, OAuthCredentials> = {
-					[provider]: refreshedCredentials,
-				};
-				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
-			}
+			const result = customProvider
+				? {
+						newCredentials: refreshed,
+						apiKey: customProvider.getApiKey ? customProvider.getApiKey(refreshed) : refreshed.access,
+					}
+				: await getOAuthApiKey(provider as OAuthProvider, { [provider]: refreshed });
 			if (!result) return undefined;
 			const updated = mergeRefreshedCredential(selection.credential, result.newCredentials);
 			if (credentialId !== undefined) {

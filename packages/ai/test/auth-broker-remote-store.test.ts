@@ -13,6 +13,8 @@ import {
 	type SnapshotResponse,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -500,36 +502,39 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(remote.listAuthCredentials("openai-codex")).toHaveLength(1);
 	});
 
-	test("a pool's accounts list selects one Kiro login, and a repeated upload of a login replaces it", async () => {
-		const kiroLogin = (loginId: string, access: string) => ({
-			type: "oauth" as const,
-			access,
-			refresh: `refresh-${loginId}`,
-			expires: Date.now() + 120_000,
+	test("a broker-refreshed Kiro login keeps the routing fields its API key needs", async () => {
+		const kiro = getProviderDefinition("kiro")!;
+		vi.spyOn(kiro, "refreshToken").mockImplementation(async current => ({
+			...current,
+			access: "access-fresh",
+			expires: Date.now() + 3_600_000,
+		}));
+		await storage!.credentials.upsert("kiro", {
+			type: "oauth",
+			access: "access-stale",
+			refresh: "refresh-kiro",
+			expires: Date.now() - 1_000,
 			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
-			kiroLoginId: loginId,
-			accountId: loginId,
+			kiroLoginId: "login-a",
+			accountId: "login-a",
 		});
-		await storage!.credentials.upsert("kiro", kiroLogin("login-a", "access-a"));
-		await storage!.credentials.upsert("kiro", kiroLogin("login-b", "access-b"));
-		await storage!.credentials.upsert("kiro", kiroLogin("login-a", "access-a2"));
-		const client = new AuthBrokerClient({ url: handle!.url, token });
-		const initialResult = await client.fetchSnapshot();
-		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
-		const kiroKeys = initialResult.snapshot.credentials
-			.filter(entry => entry.provider === "kiro")
-			.map(entry => entry.identityKey);
-		expect(kiroKeys.sort()).toEqual(["account:login-a", "account:login-b"]);
-
-		remote = new RemoteAuthCredentialStore({
-			client,
-			initialSnapshot: initialResult.snapshot,
-			streamSnapshots: false,
-			accountPool: new Map([["kiro", new Set(["account:login-a"])]]),
-		});
-		expect(
-			remote.listAuthCredentials("kiro").map(entry => entry.credential.type === "oauth" && entry.credential.access),
-		).toEqual(["access-a2"]);
+		remote = new RemoteAuthCredentialStore({ client: new AuthBrokerClient({ url: handle!.url, token }) });
+		await waitUntil(() => remote!.snapshot.credentials.some(entry => entry.provider === "kiro"));
+		const clientStorage = new AuthStorage(remote);
+		try {
+			await clientStorage.credentials.reload();
+			// `accessAll` refreshes the expired row in `tryOAuth`, without the key-selection preflight.
+			const [access] = await clientStorage.oauth.accessAll("kiro");
+			expect(access).toMatchObject({ ok: true, accessToken: "access-fresh", accountId: "login-a" });
+			const apiKey = await clientStorage.keys.get("kiro", "kiro-session");
+			expect(decodeKiroCredential(apiKey ?? "", {})).toMatchObject({
+				token: "access-fresh",
+				apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+				loginId: "login-a",
+			});
+		} finally {
+			clientStorage.close();
+		}
 	});
 
 	test("an allow-list pool hides unlisted providers and API keys over snapshots and SSE", async () => {
