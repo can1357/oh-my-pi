@@ -81,7 +81,7 @@ Global `{{name}}`, documented here in full (no `read` needed):
 {{/each}}
 {{/if}}
 
-~20+ homogeneous items sharing one yes/no, bucket or score question → `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}` with a rubric fixed before reading the data; NEVER hand-scan them.
+~20+ homogeneous items, one yes/no, bucket or score question → `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, rubric fixed before reading; NEVER hand-scan the bulk, read only items it flags, doubts or fails on.
 
 <critical>
 NEVER repeat successful setup. Kernel-loss notice means reload setup.
