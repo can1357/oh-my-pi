@@ -1,10 +1,18 @@
 import "@oh-my-pi/pi-utils/env";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils/dirs";
-import { BUILTIN_TOOL_NAMES, BUILTIN_TOOL_SUMMARIES } from "../tools/builtin-names";
+import { BUILTIN_TOOL_HELP, type BuiltinToolHelp } from "../tools/builtin-names";
 
-function renderBuiltinTools(): string {
-	return BUILTIN_TOOL_NAMES.map(name => `  ${name.padEnd(14)}- ${BUILTIN_TOOL_SUMMARIES[name]}`).join("\n");
+function renderBuiltinToolSummary(help: BuiltinToolHelp): string {
+	return help.defaultState === "detected" ? `${help.summary} (when ${help.detectedWhen})` : help.summary;
+}
+
+/** Lists tools in `BUILTIN_TOOL_HELP` entry order, which ranks them by how often they are used. */
+function renderBuiltinTools(group: "default" | "optional"): string {
+	return Object.entries(BUILTIN_TOOL_HELP)
+		.filter(([, help]) => (help.defaultState === "off") === (group === "optional"))
+		.map(([name, help]) => `  ${name.padEnd(14)}- ${renderBuiltinToolSummary(help)}`)
+		.join("\n");
 }
 
 export function getExtraHelpText(): string {
@@ -83,10 +91,15 @@ export function getExtraHelpText(): string {
   PI_NO_PTY                  - Disable PTY-based interactive bash execution
   For complete environment variable reference, see:
   ${chalk.dim("docs/environment-variables.md")}
-${chalk.bold("Built-in Tools (names accepted by --tools; some depend on settings or runtime support):")}
-${renderBuiltinTools()}
-  Python, browser, and computer use run inside eval: toggle with the eval.py,
-  browser.enabled, and computer.enabled (default off) settings.
+${chalk.bold("Built-in Tools (names accepted by --tools):")}
+  ${chalk.dim("# Enabled by default")}
+${renderBuiltinTools("default")}
+
+  ${chalk.dim("# Optional (off by default; enable in settings)")}
+${renderBuiltinTools("optional")}
+
+  Browser and computer use run inside eval: toggle with the browser.enabled and
+  computer.enabled (default off) settings.
 
 ${chalk.bold("Plugin Options:")}
   --plugin-dir <path>        Load plugin from directory (repeatable)
