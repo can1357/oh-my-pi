@@ -23,7 +23,6 @@ import {
 	type CallContext,
 	type Scorer,
 	type ShapedLines,
-	type ShapedTool,
 	type ShapeInput,
 	type ShapeOutcome,
 	type ShapeSink,
@@ -132,16 +131,12 @@ const WHOLE_READ = /^(?:agent|local|skill|rule):\/\//i;
  * Whether a result is shown whole besides page-backs and `:raw` reads: a {@link WHOLE_READ} target, or a `read` of
  * Markdown or of line ranges that all end (`file.ts:120-180`, `:5+30`, `:1-10,40-60`, `:-30`): the agent named the
  * lines it wants, and cuts of them were mostly read back. An open-ended range (`:120`, `:120-`) pages the file and is
- * shaped. A `;`/`,` path list is shown whole when every part would be.
+ * shaped.
  */
 function isWholeRead(input: ShapeInput): boolean {
-	if (input.parts) return input.parts.length > 0 && input.parts.every(part => isWholeTarget(input.tool, part.path));
-	return isWholeTarget(input.tool, input.path ?? "");
-}
-
-function isWholeTarget(tool: ShapedTool, target: string): boolean {
+	const target = input.path ?? "";
 	if (WHOLE_READ.test(target)) return true;
-	if (tool !== "read") return false;
+	if (input.tool !== "read") return false;
 	const { path: file, sel } = splitPathAndSel(target.trim());
 	if (isMarkdownPath(file)) return true;
 	try {
@@ -686,17 +681,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 }
 
 /**
- * Shapes one tool result and records what the agent was shown in `state`. A changed text reports what became of its
- * subject's lines: scores, kept lines, the reasons its steps recorded and the ranking of the last cut by rank. Never
- * throws for a scorer that cannot answer.
- *
- * A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against the input is dropped (`stats.reverted`).
- * `plain` is the unshaped text for the call (default: the input), which can be far less than the full output shaping
- * reads. A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against it is capped: the outcome keeps the
- * would-be text, adds the `plain-cap` step and sets `capped`. A `plain` whose lines the sink cut to its column cap
- * (`widthCut`) lost text only a read of the saved output brings back, so a cut up to {@link VALVE_OVER} characters is
- * applied even when longer than it. With `holdout`, a changed text is the cut shaping would make. Either way, and for
- * a text shaping keeps, the agent is shown `plain`'s text: `state` records that, not what the cut hid.
+ * Shapes one tool result and records what the agent was shown in `state`: {@link noteCall}, {@link shapeBlock}, and
+ * the block settled at once.
  */
 export async function shapeResult(
 	input: ShapeInput,
@@ -708,12 +694,52 @@ export async function shapeResult(
 	holdout = false,
 	plain?: { text: string; tokens: number; widthCut?: boolean },
 ): Promise<ShapeOutcome> {
+	noteCall(state, ctx, input.tool, input.command ?? "", input.toolCallId);
+	const block = await shapeBlock(input, ctx, scorer, state, sink, signal, holdout, plain);
+	block.settle();
+	return block.outcome;
+}
+
+/** One block of a call's text shaped: its outcome, and the step that records it in the session. */
+export interface ShapedBlock {
+	outcome: ShapeOutcome;
+	/**
+	 * Records what the block hid and folded (when its cut is applied) and what the agent was shown. A call's blocks are
+	 * settled once all are shaped, so no block of a call is collapsed as seen against another of the same call.
+	 */
+	settle(): void;
+}
+
+/**
+ * Shapes one block of a call's text (the call's whole result, or one part of a `;`/`,` path `read`); the caller has
+ * noted the call ({@link noteCall}) and settles the block. A changed text reports what became of its subject's lines:
+ * scores, kept lines, the reasons its steps recorded and the ranking of the last cut by rank. Never throws for a
+ * scorer that cannot answer.
+ *
+ * A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against the input is dropped (`stats.reverted`).
+ * `plain` is the unshaped text for the block (default: the input), which can be far less than the full output shaping
+ * reads. A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against it is capped: the outcome keeps the
+ * would-be text, adds the `plain-cap` step and sets `capped`. A `plain` whose lines the sink cut to its column cap
+ * (`widthCut`) lost text only a read of the saved output brings back, so a cut up to {@link VALVE_OVER} characters is
+ * applied even when longer than it. With `holdout`, a changed text is the cut shaping would make. Either way, and for
+ * a text shaping keeps, the agent is shown `plain`'s text: settling records that, not what the cut hid.
+ */
+export async function shapeBlock(
+	input: ShapeInput,
+	ctx: CallContext,
+	scorer: Scorer,
+	state: ShapeState,
+	sink: ShapeSink,
+	signal?: AbortSignal,
+	holdout = false,
+	plain?: { text: string; tokens: number; widthCut?: boolean },
+): Promise<ShapedBlock> {
 	const stats: Record<string, number> = { charsIn: input.text.length };
 	const inTokens = countTokens(input.text);
 	// Another tool's command is its arguments as JSON, which may name an artifact in passing: its `path` decides.
 	const target = shapesItself(input.tool) ? (input.command ?? input.path) : input.path;
 	const pageBack = isPageBack(target ?? "");
-	const rawRead = !pageBack && (input.raw === true || input.parts?.some(part => part.raw) === true);
+	const rawRead = !pageBack && input.raw === true;
 	const wholeRead = !pageBack && !rawRead && isWholeRead(input);
 	const short =
 		!pageBack &&
@@ -737,7 +763,6 @@ export async function shapeResult(
 		hid: new Set(),
 		folds: new Map(),
 	};
-	noteCall(state, ctx, input.tool, input.command ?? "", input.toolCallId);
 	let text = input.text;
 	let steps: string[] = [];
 	if (pageBack) bump(run, "pageBacks");
@@ -785,9 +810,6 @@ export async function shapeResult(
 		if (run.copy === input.text) textUrl ??= url;
 	}
 	const applied = text !== input.text && !holdout && !capped;
-	// What the cut hid and folded joins the session only now: a failed save above throws before the state changes.
-	if (applied) commit(run);
-	noteShown(state, applied ? text : (plain?.text ?? input.text), input.toolCallId);
 	stats.charsOut = text.length;
 	const outcome: ShapeOutcome = { text, steps: steps.length ? steps : ["none"], stats, inTokens, outTokens };
 	if (capped) outcome.capped = true;
@@ -795,7 +817,31 @@ export async function shapeResult(
 		outcome.lines = traceLines(run, text);
 		if (textUrl) outcome.textUrl = textUrl;
 	}
-	return outcome;
+	return {
+		outcome,
+		settle: () => {
+			// What the cut hid and folded joins the session only now: a failed save above threw before the state changed.
+			if (applied) commit(run);
+			noteShown(state, applied ? text : (plain?.text ?? input.text), input.toolCallId);
+		},
+	};
+}
+
+/**
+ * The trace of a block shown as `shown` though shaping did not cut it (kept whole, capped, or shown plain beside cut
+ * blocks of the same call): its base lines (a read's window, else its text) with no scores, matched to `shown`.
+ */
+export function traceUnchanged(input: ShapeInput, shown: string): ShapedLines {
+	const base = input.read?.lines ?? input.text.split("\n");
+	return traceLines(
+		{
+			input,
+			base,
+			heat: Array.from<number | null>({ length: base.length }).fill(null),
+			why: Array.from<SpotlightReason | undefined>({ length: base.length }),
+		},
+		shown,
+	);
 }
 
 /** A gap marker: a line of shaping standing for a hidden run (`… [lines A-B]`, `… [N lines: …]`, `… [A-B]`). */
@@ -826,7 +872,7 @@ function gapRun(marker: string): { count: number; range?: [number, number]; targ
  * next shaped line is the line after the run (or another marker, or no base line), so no shown line is matched to a
  * line inside it. A marker that names nothing fitting stands for the lines between the matches around it.
  */
-function traceLines(run: Run, text: string): ShapedLines {
+function traceLines(run: Pick<Run, "input" | "base" | "heat" | "why" | "rank">, text: string): ShapedLines {
 	const read = run.input.read;
 	const lines = read?.shown ?? run.base;
 	const index = lineIndex(lines);

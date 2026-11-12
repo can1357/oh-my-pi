@@ -5,7 +5,7 @@
 ### Fixed
 
 - With the Spotlight experiment on, a `read` with `:raw` returns the selected bytes instead of an outlined, compacted, collapsed or cut rendering ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
-- With the Spotlight experiment on, a `;`/`,` path `read` is shaped once, as one result, instead of again after its parts, which replaced their lines with `… [N lines as shown before]`; the list is left whole when a part is `:raw` or every part is a bounded line range or Markdown ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+- With the Spotlight experiment on, a `;`/`,` path `read` is shaped as one call: each part as that read alone would be (an outlined source file beside a `:raw` part kept verbatim), no part collapsed as already shown against another, and one trace whose notice opens the original ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
 
 ### Breaking Changes
 

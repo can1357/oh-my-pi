@@ -494,36 +494,37 @@ describe("spotlight raw reads and path lists", () => {
 		expect(entries(shaped.manager, SPOTLIGHT_ENTRY.shape)[0]?.stats).toMatchObject({ rawReads: 1 });
 	});
 
-	it("leaves a path list whole when a part is `:raw` or every part would be shown whole, journaling it once", async () => {
+	it("shapes each part of a path list on its own, as one call with one journal entry and one windowed trace", async () => {
 		const { shaped, plain } = await sessions();
-		for (const { session } of [shaped, plain]) await Bun.write(path.join(session.cwd, "wide.md"), WIDE);
-		const cases = [
-			["raw.py:raw;b.txt", "rawReads"],
-			["b.txt,raw.py;wide.ts:raw:1-10", "rawReads"],
-			["wide.ts:5-40;wide.md", "wholeReads"],
-		] as const;
+		const target = "raw.py;raw.py:raw;wide.ts:5-40;b.txt";
+		const plainRead = async (path: string) => resultText(await new ReadTool(plain.session).execute("p", { path }));
 
-		for (const [index, [target]] of cases.entries()) {
-			const id = `list${index}`;
-			const text = resultText(await new ReadTool(shaped.session).execute(id, { path: target }));
-			expect(text).toBe(resultText(await new ReadTool(plain.session).execute(id, { path: target })));
-		}
-		// One entry per call: the stats keep one row per call id.
+		const result = await new ReadTool(shaped.session).execute("list", { path: target });
+		const text = resultText(result);
+
+		// The `:raw` part and the bounded range stay as their own reads show them; the whole source file is outlined.
+		expect(text).toContain(SOURCE);
+		expect(text).toContain(await plainRead("wide.ts:5-40"));
+		expect(text.length).toBeLessThan((await plainRead(target)).length);
 		const journal = entries(shaped.manager, SPOTLIGHT_ENTRY.shape);
-		expect(journal.map(entry => entry.toolCallId)).toEqual(["list0", "list1", "list2"]);
-		expect(journal.map((entry, index) => (entry.stats as Record<string, number>)[cases[index][1]])).toEqual([
-			1, 1, 1,
-		]);
+		expect(journal.map(entry => entry.toolCallId)).toEqual(["list"]);
+		expect(journal[0]?.steps).toContain("outline");
+		expect(journal[0]?.stats).toMatchObject({ rawReads: 1, wholeReads: 1 });
+		// Each part is its own window of the original; the `:raw` part has no file window.
+		const windows = spotlightDetails(result.details)?.original?.windows;
+		expect(windows?.map(window => window.path)).toEqual(["raw.py", undefined, "wide.ts", "b.txt"]);
 	});
 
-	it("shapes a path list once, as one call, and traces the cut on the list's result", async () => {
+	it("leaves a path list no part of which is cut as its parts read, with no original", async () => {
 		const { shaped, plain } = await sessions();
+		for (const { session } of [shaped, plain]) await Bun.write(path.join(session.cwd, "wide.md"), WIDE);
 
-		const result = await new ReadTool(shaped.session).execute("list", { path: "raw.py;b.txt" });
-		const plainText = resultText(await new ReadTool(plain.session).execute("list", { path: "raw.py;b.txt" }));
+		const result = await new ReadTool(shaped.session).execute("list", { path: "wide.ts:5-40;wide.md" });
 
-		expect(resultText(result).length).toBeLessThan(plainText.length);
-		expect(spotlightDetails(result.details)?.steps).not.toEqual(["none"]);
+		expect(resultText(result)).toBe(
+			resultText(await new ReadTool(plain.session).execute("list", { path: "wide.ts:5-40;wide.md" })),
+		);
+		expect(spotlightDetails(result.details)?.original).toBeUndefined();
 		expect(entries(shaped.manager, SPOTLIGHT_ENTRY.shape).map(entry => entry.toolCallId)).toEqual(["list"]);
 	});
 

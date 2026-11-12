@@ -171,7 +171,14 @@ import {
 } from "./read-selector";
 import { splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { formatSingleLine } from "@oh-my-pi/pi-tui/tools/read";
-import { nativeShapingOff, shapesOutput, shapeToolResult, shapingExperiment } from "../spotlight";
+import {
+	nativeShapingOff,
+	type ShapePart,
+	shapesOutput,
+	shapeToolParts,
+	shapeToolResult,
+	shapingExperiment,
+} from "../spotlight";
 import type { ShapeInput } from "../spotlight/types";
 import { readBinary, resolveBinaryViewPath } from "./read-binary";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
@@ -911,16 +918,81 @@ const kSpotlightWindow = Symbol("read.spotlightWindow");
 const kSpotlightWide = Symbol("read.spotlightWide");
 
 /**
- * A `;`/`,` path list's parts, on its joined result: each part's target and whether it was read with `:raw`. The
- * parts are read unshaped and the list is shaped once, as one call; the shaper decides from these whether it is left
- * whole. A nested list contributes its own parts.
+ * A `;`/`,` path list's structure, on its joined result: {@link ReadTool.execute} shapes its parts as blocks of one
+ * call and joins them again ({@link joinReadList}).
  */
-const kSpotlightParts = Symbol("read.spotlightParts");
+const kReadList = Symbol("read.list");
 
 interface ReadDetailsWithWindow extends ReadToolDetails {
 	[kSpotlightWindow]?: ShapeInput["read"];
 	[kSpotlightWide]?: true;
-	[kSpotlightParts]?: ShapeInput["parts"];
+	[kReadList]?: ReadList;
+}
+
+/** A `;`/`,` path list as read: its note, then in order each part read, a nested list, or a part that failed. */
+interface ReadList {
+	notice: string;
+	entries: ({ part: ShapePart<ReadToolDetails> } | { list: ReadList } | { error: string })[];
+}
+
+/**
+ * The content of `list` with each part's result as `resultOf` gives it, and the layout of its joined text: the
+ * list's notes and the blank lines between entries are literal text, each part with text is a slot (its index in
+ * `parts`). Entries' texts join with a blank line into one text block until an image ends it; a nested list's entries
+ * join as the outer list's. A part's text is placed whole where its first text block was, its images after it.
+ */
+function joinReadList(
+	list: ReadList,
+	resultOf: (part: ShapePart<ReadToolDetails>) => AgentToolResult<ReadToolDetails>,
+): { content: Array<TextContent | ImageContent>; layout: (string | number)[]; parts: ShapePart<ReadToolDetails>[] } {
+	const content: Array<TextContent | ImageContent> = [];
+	const layout: (string | number)[] = [];
+	const parts: ShapePart<ReadToolDetails>[] = [];
+	let block: (string | number)[] = [];
+	let pendingText = "";
+	let wroteText = false;
+	const append = (piece: string | number, text: string) => {
+		if (pendingText.length > 0) {
+			pendingText += "\n\n";
+			block.push("\n\n");
+		}
+		pendingText += text;
+		block.push(piece);
+	};
+	const flush = () => {
+		if (pendingText.length > 0) {
+			// The joined text of a result's text blocks puts a newline between blocks.
+			if (wroteText) layout.push("\n");
+			content.push({ type: "text", text: pendingText });
+			layout.push(...block);
+			wroteText = true;
+		}
+		block = [];
+		pendingText = "";
+	};
+	const walk = (current: ReadList) => {
+		append(current.notice, current.notice);
+		for (const entry of current.entries) {
+			if ("error" in entry) append(`[${entry.error}]`, `[${entry.error}]`);
+			else if ("list" in entry) walk(entry.list);
+			else {
+				const result = resultOf(entry.part);
+				const texts = result.content.filter((item): item is TextContent => item.type === "text");
+				if (texts.length) {
+					parts.push(entry.part);
+					append(parts.length - 1, texts.map(item => item.text).join("\n"));
+				}
+				for (const item of result.content) {
+					if (item.type === "text") continue;
+					flush();
+					content.push(item);
+				}
+			}
+		}
+	};
+	walk(list);
+	flush();
+	return { content, layout, parts };
 }
 
 /**
@@ -1367,8 +1439,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	/**
-	 * Read each part as its own read, unshaped and paged as the plain result pages it: the caller shapes the joined
-	 * list once. `toolContext` carries flags such as `rawImages` into every part.
+	 * Read each part as its own read, unshaped: {@link execute} shapes the parts as blocks of the list's one call.
+	 * `toolContext` carries flags such as `rawImages` into every part.
 	 */
 	async #readDelimitedParts(
 		parts: string[],
@@ -1377,38 +1449,38 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
-		const content: Array<TextContent | ImageContent> = [];
+		const list: ReadList = { notice, entries: [] };
 		const displayReadTargets: string[] = [];
 		const displayReadTargetLinks: Array<string | null> = [];
-		const shapeParts: NonNullable<ShapeInput["parts"]> = [];
-		let pendingText = notice;
-		const flushText = () => {
-			if (pendingText.length === 0) return;
-			content.push({ type: "text", text: pendingText });
-			pendingText = "";
-		};
-		const appendText = (text: string) => {
-			pendingText = pendingText.length > 0 ? `${pendingText}\n\n${text}` : text;
-		};
+		const readPart = (part: string, plainWindow?: boolean) =>
+			this.#executeInner(
+				"read-delimited-part",
+				{ path: part },
+				signal,
+				undefined,
+				toolContext,
+				undefined,
+				undefined,
+				undefined,
+				plainWindow,
+			);
 
 		for (const part of parts) {
 			try {
-				const result = await this.#executeInner(
-					"read-delimited-part",
-					{ path: part },
-					signal,
-					undefined,
-					toolContext,
-					undefined,
-					undefined,
-					undefined,
-					true,
-				);
-				appendRepeatReadHint(this.session, part, result);
+				const result = await readPart(part);
 				const partDetails: ReadDetailsWithWindow | undefined = result.details;
-				const nestedParts = partDetails?.[kSpotlightParts];
-				if (nestedParts) shapeParts.push(...nestedParts);
-				else shapeParts.push({ path: part, raw: partDetails?.raw === true });
+				const nested = partDetails?.[kReadList];
+				list.entries.push(
+					nested
+						? { list: nested }
+						: {
+								part: {
+									request: { path: part, raw: partDetails?.raw, read: partDetails?.[kSpotlightWindow] },
+									result,
+									plain: partDetails?.[kSpotlightWide] ? () => readPart(part, true) : undefined,
+								},
+							},
+				);
 				const nestedTargets = result.details?.displayReadTargets;
 				if (nestedTargets?.length) {
 					const nestedLinks = result.details?.displayReadTargetLinks;
@@ -1420,14 +1492,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
 					displayReadTargetLinks.push(readDetailsLinkPath(result.details));
 				}
-				for (const block of result.content) {
-					if (block.type === "text") {
-						appendText(block.text);
-						continue;
-					}
-					flushText();
-					content.push(block);
-				}
 			} catch (error) {
 				if (error instanceof ToolAbortError || signal?.aborted) throw error;
 				const message = error instanceof Error ? error.message : String(error);
@@ -1435,18 +1499,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				notes.push(errorNote);
 				displayReadTargets.push(part);
 				displayReadTargetLinks.push(null);
-				appendText(`[${errorNote}]`);
+				list.entries.push({ error: errorNote });
 			}
 		}
-		flushText();
 
-		const details: ReadDetailsWithWindow = {
-			notes,
-			displayReadTargets,
-			displayReadTargetLinks,
-			[kSpotlightParts]: shapeParts,
-		};
-		return toolResult<ReadToolDetails>(details).content(content).done();
+		const details: ReadDetailsWithWindow = { notes, displayReadTargets, displayReadTargetLinks, [kReadList]: list };
+		return toolResult<ReadToolDetails>(details)
+			.content(joinReadList(list, part => part.result).content)
+			.done();
 	}
 
 	/**
@@ -1930,40 +1990,69 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (earlierEffects) await untilAborted(signal, earlierEffects);
 		const inner = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
 		const innerDetails: ReadDetailsWithWindow | undefined = inner.details;
-		const result = await shapeToolResult(
-			this.session,
-			toolCallId,
-			{
-				tool: "read",
-				source: `read ${params.path}`,
-				path: params.path,
-				raw: innerDetails?.raw,
-				parts: innerDetails?.[kSpotlightParts],
-				read: innerDetails?.[kSpotlightWindow],
-			},
-			inner,
-			signal,
-			{
-				plain: innerDetails?.[kSpotlightWide]
-					? () =>
-							this.#executeInner(
-								toolCallId,
-								params,
-								signal,
-								undefined,
-								toolContext,
-								undefined,
-								undefined,
-								undefined,
-								true,
-							)
-					: undefined,
-			},
-		);
+		const list = innerDetails?.[kReadList];
+		const result = list
+			? await this.#shapeList(toolCallId, params, inner, list, signal)
+			: await shapeToolResult(
+					this.session,
+					toolCallId,
+					{
+						tool: "read",
+						source: `read ${params.path}`,
+						path: params.path,
+						raw: innerDetails?.raw,
+						read: innerDetails?.[kSpotlightWindow],
+					},
+					inner,
+					signal,
+					{
+						plain: innerDetails?.[kSpotlightWide]
+							? () =>
+									this.#executeInner(
+										toolCallId,
+										params,
+										signal,
+										undefined,
+										toolContext,
+										undefined,
+										undefined,
+										undefined,
+										true,
+									)
+							: undefined,
+					},
+				);
 		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
 		return result;
+	}
+
+	/**
+	 * A `;`/`,` path list's parts shaped as blocks of one call (each part file-aware: its window, `:raw` or bounded
+	 * range decides for it), each with its repeat-read hint, joined again; the list carries the call's one trace.
+	 */
+	async #shapeList(
+		toolCallId: string,
+		params: ReadParams,
+		inner: AgentToolResult<ReadToolDetails>,
+		list: ReadList,
+		signal: AbortSignal | undefined,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		const { layout, parts } = joinReadList(list, part => part.result);
+		const shaped = await shapeToolParts(
+			this.session,
+			toolCallId,
+			{ tool: "read", source: `read ${params.path}` },
+			layout,
+			parts,
+			signal,
+		);
+		const results = new Map(parts.map((part, i) => [part, shaped.results[i]]));
+		for (const [part, result] of results) appendRepeatReadHint(this.session, part.request.path ?? "", result);
+		const { content } = joinReadList(list, part => results.get(part) ?? part.result);
+		const details = shaped.spotlight ? { ...inner.details, spotlight: shaped.spotlight } : inner.details;
+		return { ...inner, content, details };
 	}
 
 	async #executeInner(

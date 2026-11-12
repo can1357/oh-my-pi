@@ -107,12 +107,6 @@ export interface ShapeInput {
 	path?: string;
 	/** `read` with `:raw`: the text is the selected bytes, which paste back into tools, and is left whole. */
 	raw?: boolean;
-	/**
-	 * `read` of a `;`/`,` path list ({@link path} is the whole list): each part's target as written and whether it was
-	 * read with `:raw`. The joined parts are shaped as one result, left whole when any part is raw or every part would
-	 * be shown whole on its own.
-	 */
-	parts?: { path: string; raw: boolean }[];
 	/** `read` of a text file: its path as the agent named it, and the file's own content lines of the window. */
 	read?: {
 		path: string;
