@@ -66,11 +66,12 @@ function convertGoogleImagePart(image: ImageContent): Part {
 }
 
 /**
- * Thinking level for Gemini 3 models. Mirrors Google's `ThinkingLevel` enum values.
+ * Thinking level for Gemini 3+ models. Mirrors Google's `ThinkingLevel` enum values,
+ * plus the API-documented lowercase `xhigh` (Gemini 4 Hydrogen) the SDK enum lacks.
  * Defined here (not in any specific provider) so all Google providers can reference it
  * without inducing a circular dependency.
  */
-export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 
 /**
  * Sampling/thinking options shared by `streamGoogle` and `streamGoogleVertex`.
