@@ -26,7 +26,7 @@ import {
 import type { StructuredSubagentOutput } from "./task";
 import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
-import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
+import type { IrcDeliveryReceipt } from "./irc";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { card as cardNode, compact, elapsed, keyed, md, node, row, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
@@ -150,8 +150,6 @@ export interface CoordinationDetails {
 	from?: string;
 	to?: string;
 	receipts?: IrcDeliveryReceipt[];
-	/** Messages consumed by `wait`, oldest first. */
-	waited?: IrcMessage[];
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
@@ -646,11 +644,15 @@ function jobsRenderResult(
 		invalidate() {
 			cached = undefined;
 		},
+		releaseRenderCaches() {
+			cached = undefined;
+			previewRows.clear();
+		},
 	};
 }
 
 // =============================================================================
-// Display-only IRC cards and wait-message results
+// Display-only IRC cards
 // =============================================================================
 
 const BODY_LINES_COLLAPSED = 2;
@@ -844,33 +846,6 @@ function describeJobsResult(
 	};
 }
 
-/** One received message: sender (when the card holds several), terminal-clocked age, markdown body. */
-function describeMessage(msg: IrcMessage, single: boolean): NativeNode[] {
-	const sender = single
-		? []
-		: [text([span(plainText(msg.from), "toolTitle strong"), ...(msg.replyTo ? [span(" reply", "muted")] : [])])];
-	const age = msg.ts
-		? [text([span("received", "dim")]), elapsed(Date.now() - msg.ts), text([span("ago", "dim")])]
-		: [];
-	const head = [...sender, ...age];
-	return compact([head.length > 0 ? row(head, { gap: "xs" }) : undefined, msg.body.trim() ? md(msg.body) : undefined]);
-}
-
-/** Received-messages view: senders head, then each message oldest first. */
-function describeMessages(messages: readonly IrcMessage[]): NativeToolView {
-	const single = messages.length === 1;
-	const senders = [...new Set(messages.map(msg => plainText(msg.from)))];
-	const head: TspSpan[] = [span(`IRC ← ${senders.join(", ")}`, "toolTitle strong")];
-	if (!single) head.push(span(` ${messages.length} messages`, "muted"));
-	else if (messages[0]?.replyTo) head.push(span(" reply", "muted"));
-	return {
-		head,
-		tone: "info",
-		preview: { lines: (BODY_LINES_COLLAPSED + 1) * messages.length },
-		body: messages.flatMap(msg => describeMessage(msg, single)),
-	};
-}
-
 const waitResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /** Render either a received message or a background-job snapshot. */
@@ -898,9 +873,7 @@ export const waitToolRenderer = {
 					inline: true,
 				};
 			}
-			const waited = details?.waited;
-			if (!waited?.length) return describeJobsResult(result, options.isPartial);
-			return describeMessages(waited);
+			return describeJobsResult(result, options.isPartial);
 		});
 	},
 	renderResult(
@@ -919,24 +892,6 @@ export const waitToolRenderer = {
 				0,
 			);
 		}
-		const waited = result.details?.waited;
-		if (!waited?.length) return jobsRenderResult(result, options, uiTheme);
-		return createCachedComponent(
-			() => options.expanded,
-			(width, expanded) =>
-				waited
-					.flatMap(msg => [
-						renderStatusLine(
-							{
-								iconOverride: ircGlyph(uiTheme),
-								title: `IRC ${uiTheme.nav.back} ${replaceTabs(msg.from)}`,
-								meta: [messageAge(msg.ts), ...(msg.replyTo ? ["reply"] : [])],
-							},
-							uiTheme,
-						),
-						...bodyLines(msg.body, expanded, uiTheme, { indent: "  " }),
-					])
-					.map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
-		);
+		return jobsRenderResult(result, options, uiTheme);
 	},
 } satisfies ToolRenderer<object, CoordinationDetails>;

@@ -23,6 +23,7 @@ import {
 	capPreviewLines,
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
+	formatCount,
 	formatDuration,
 	formatExpandHint,
 	formatFeedModelBadge,
@@ -484,10 +485,10 @@ function renderTaskSection(
 	return lines;
 }
 
-function taskPreviewText(task: unknown, taskFile: unknown): string {
+/** A spawn's preview text: its `task`, else its first streamed step. */
+function taskPreviewText(task: unknown, steps: unknown): string {
 	if (typeof task === "string") return task;
-	if (typeof taskFile !== "string") return "";
-	return flattenLine(replaceTabs(shortenPath(sanitizeText(taskFile))));
+	return Array.isArray(steps) && typeof steps[0] === "string" ? steps[0] : "";
 }
 
 /**
@@ -519,6 +520,12 @@ export function agentTypeBadge(agent: string | undefined, theme: Theme): string 
 	return ` ${theme.fg("dim", `${theme.format.bracketLeft}${trimmed}${theme.format.bracketRight}`)}`;
 }
 
+/** Dim `[N steps]` badge for a spawn with sequential `steps`; empty without any. */
+function stepsBadge(steps: unknown, theme: Theme): string {
+	if (!Array.isArray(steps) || steps.length === 0) return "";
+	return theme.fg("dim", ` [${formatCount("step", steps.length)}]`);
+}
+
 /**
  * Render the call preview lines for the single spawned agent. The
  * args stream in token by token, so every field access is defensive.
@@ -530,13 +537,14 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 
 	const rawName = typeof args.name === "string" ? args.name.trim() : "";
 	const idLabel = rawName ? formatTaskId(rawName) : "";
-	const brief = taskFirstLine(taskPreviewText(args.task, args.taskFile));
+	const brief = taskFirstLine(taskPreviewText(args.task, args.steps));
 	if (idLabel || brief) {
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || "agent"))}`;
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(args.agent, theme);
+		line += stepsBadge(args.steps, theme);
 		lines.push(line);
 	}
 	lines.push(...renderTaskItemLines(args.tasks, theme));
@@ -566,11 +574,12 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		const rawName = typeof item?.name === "string" ? item.name.trim() : "";
 		const idLabel = rawName ? formatTaskId(rawName) : `#${i + 1}`;
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel))}`;
-		const brief = taskFirstLine(taskPreviewText(item?.task, item?.taskFile));
+		const brief = taskFirstLine(taskPreviewText(item?.task, item?.steps));
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(item?.agent, theme);
+		line += stepsBadge(item?.steps, theme);
 		if (item?.isolated === true) {
 			line += theme.fg("dim", " [isolated]");
 		}
@@ -604,11 +613,20 @@ function createAssignmentSectionRenderer(
 	// `renderResult` receives the raw tool args (unlike `renderCall`, which is
 	// fed through `repairTaskParams`), so undo any per-field double-encoding
 	// here too. The repair is idempotent on already-clean text.
-	const assignment = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : ""),
-	).trim();
+	const brief = typeof args?.task === "string" ? repairDoubleEncodedJsonString(args.task) : stepsMarkdown(args?.steps);
+	const assignment = sanitizeText(brief).trim();
 	if (!assignment) return undefined;
 	return createMarkdownSectionRenderer(assignment, theme);
+}
+
+/** A flat call's `steps` as numbered Markdown sections; skips entries still streaming in as non-strings. */
+function stepsMarkdown(steps: unknown): string {
+	if (!Array.isArray(steps)) return "";
+	return steps
+		.flatMap((step, index) =>
+			typeof step === "string" ? [`**Step ${index + 1}**\n\n${repairDoubleEncodedJsonString(step)}`] : [],
+		)
+		.join("\n\n");
 }
 
 /**
@@ -2056,7 +2074,7 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 			key,
 		);
 	const flatName = typeof args?.name === "string" ? args.name.trim() : "";
-	const flatBrief = taskPreviewText(args?.task, args?.taskFile);
+	const flatBrief = taskPreviewText(args?.task, args?.steps);
 	if (flatName || taskFirstLine(flatBrief)) {
 		agents.push(
 			pending(
@@ -2075,7 +2093,7 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 				pending(
 					name ? formatTaskId(name) : `#${index + 1}`,
 					entry?.agent,
-					taskPreviewText(entry?.task, entry?.taskFile),
+					taskPreviewText(entry?.task, entry?.steps),
 					entry?.isolated,
 					name || `#${index + 1}`,
 				),
@@ -2246,9 +2264,10 @@ export interface TaskItem {
 	sourceSession?: string;
 	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
 	model?: string | string[];
-	/** Inline instructions; exactly one of task or taskFile is required. */
+	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
-	taskFile?: string;
+	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
+	steps?: string[];
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
@@ -2280,8 +2299,8 @@ export interface TaskParams {
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
-	/** Absolute path or local:// URL to a UTF-8 file (flat form), mutually exclusive with task. */
-	taskFile?: string;
+	/** Ordered stages (flat form); see {@link TaskItem.steps}. */
+	steps?: string[];
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
@@ -2370,9 +2389,6 @@ export interface AgentProgress {
 	status: "pending" | "running" | "completed" | "failed" | "aborted";
 	task: string;
 	assignment?: string;
-	taskFile?: string;
-	/** SHA-256 of the exact task file bytes before decoding and trimming. */
-	taskFileSha256?: string;
 	description?: string;
 	lastIntent?: string;
 	currentTool?: string;
@@ -2481,8 +2497,6 @@ export interface SingleResult {
 	agentSource: AgentSource;
 	task: string;
 	assignment?: string;
-	taskFile?: string;
-	taskFileSha256?: string;
 	description?: string;
 	lastIntent?: string;
 	exitCode: number;

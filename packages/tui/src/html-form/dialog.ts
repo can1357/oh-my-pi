@@ -8,8 +8,9 @@
  * ({@link paginate}) at section boundaries where possible; focus drives the
  * visible page, so moving past a page's last control turns the page. A native
  * (Tern) terminal gets the form described semantically instead: one tab per
- * question (a top-level `<fieldset>`; context before it rides along) plus a
- * Review tab, the tab's content in a column the terminal scrolls, and an
+ * question (a top-level `<fieldset>`, or a field of loose content between
+ * fieldsets; context before it rides along) plus a Review tab, the tab's
+ * content in a column the terminal scrolls, and an
  * action bar that stays in view below it, with Submit on the last question
  * tab and on Review. Clicks come back through
  * {@link HtmlFormDialog.handleNativeEvent}.
@@ -171,10 +172,17 @@ interface Layout {
 	pictures: Map<PageAtom, Component>;
 }
 
-/** A native question tab: indices of the sections it shows, and the fields in them. */
+/** Blocks `start` up to `end` (exclusive) of one form section. */
+interface TabPart {
+	section: number;
+	start: number;
+	end: number;
+}
+
+/** A native question tab: the section parts it shows, and the fields in them. */
 interface FormTab {
 	label: string;
-	sections: number[];
+	parts: TabPart[];
 	fields: FormField[];
 }
 
@@ -233,33 +241,66 @@ function nativeSpans(spans: readonly FormSpan[], extra?: string): TspSpan[] {
 	});
 }
 
+/** Whether the keyboard can reach `field`: a text field, or a choice with an enabled option or an Other answer. */
+function reachable(field: FormField): boolean {
+	return field.kind === "text" || field.other || field.options.some(option => !option.disabled);
+}
+
 /**
  * Native question tabs: one per section holding fields, labeled by its legend
  * (else its first field's question). Sections of context alone join the next
- * tab, or the last one when nothing follows.
+ * tab, or the last one when nothing follows. In a form with two or more such
+ * tabs, loose content between fieldsets gets one tab per field, each with the
+ * context before it, so a question outside a `<fieldset>` does not share the
+ * tab of the question before it.
  */
 function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): FormTab[] {
+	const tabbed = form.sections.filter(section => section.blocks.some(block => block.kind === "field")).length > 1;
 	const tabs: FormTab[] = [];
-	let lead: number[] = [];
+	let lead: TabPart[] = [];
 	form.sections.forEach((section, index) => {
-		const fields = section.blocks.flatMap(block => (block.kind === "field" ? [block.field] : []));
-		if (fields.length === 0) {
-			lead.push(index);
+		const end = section.blocks.length;
+		if (!section.blocks.some(block => block.kind === "field")) {
+			lead.push({ section: index, start: 0, end });
 			return;
 		}
 		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
-		const label = title || sanitize(questions.get(fields[0]!) ?? "") || `Question ${tabs.length + 1}`;
-		tabs.push({
-			label: truncateToWidth(label, TAB_LABEL_WIDTH, Ellipsis.Unicode),
-			sections: [...lead, index],
-			fields,
-		});
-		lead = [];
+		// Where each tab of this section ends: after each loose field, the last one at the section's end.
+		// A group's tab also keeps the text between its options, unless its options straddle the next
+		// field: then that field keeps the context before it. A field the keyboard cannot reach (only
+		// disabled options) gets no tab of its own: it joins the next one.
+		const fieldBlocks = section.blocks.flatMap((block, at) =>
+			block.kind === "field" ? [{ at, through: Math.max(at + 1, block.optionsEnd ?? 0), field: block.field }] : [],
+		);
+		const cuts =
+			tabbed && !section.fieldset
+				? fieldBlocks.flatMap(({ at, through, field }, nth) => {
+						if (!reachable(field)) return [];
+						return [through <= (fieldBlocks[nth + 1]?.at ?? end) ? through : at + 1];
+					})
+				: [];
+		if (cuts.length === 0) cuts.push(end);
+		else cuts[cuts.length - 1] = end;
+		let start = 0;
+		for (const cut of cuts) {
+			const fields = section.blocks
+				.slice(start, cut)
+				.flatMap(block => (block.kind === "field" ? [block.field] : []));
+			const question = questions.get(fields.find(reachable) ?? fields[0]!) ?? "";
+			const label = title || sanitize(question) || `Question ${tabs.length + 1}`;
+			tabs.push({
+				label: truncateToWidth(label, TAB_LABEL_WIDTH, Ellipsis.Unicode),
+				parts: [...lead, { section: index, start, end: cut }],
+				fields,
+			});
+			lead = [];
+			start = cut;
+		}
 	});
 	if (lead.length > 0) {
 		const last = tabs.at(-1);
-		if (last) last.sections.push(...lead);
-		else tabs.push({ label: "", sections: lead, fields: [] });
+		if (last) last.parts.push(...lead);
+		else tabs.push({ label: "", parts: lead, fields: [] });
 	}
 	return tabs;
 }
@@ -551,17 +592,23 @@ export class HtmlFormDialog implements Component, Focusable {
 			if (event.act === "cancel") this.#cancel();
 			else if (event.act === "hide" || event.act === "show") this.#setHidden(event.act === "hide");
 			else if (this.#hidden) return;
-			else if (event.act === "submit") this.#submit();
-			else if (event.act === "next") this.#showTab(this.#tab + 1);
-			else if (event.act === "note") this.#noteFromPointer(event.key);
-			else if (event.act.startsWith(EDIT_ACT)) {
-				const field = this.#form.fields[Number(event.act.slice(EDIT_ACT.length))];
-				const stop = this.#stops.findIndex(candidate => candidate.kind === "text" && candidate.field === field);
-				if (stop !== -1) this.#setFocus(stop);
+			else {
+				// A pointer action on the dialog is an explicit hand-off from the draft.
+				this.#releaseGuardForPointer();
+				if (event.act === "submit") this.#submit();
+				else if (event.act === "next") this.#showTab(this.#tab + 1);
+				else if (event.act === "note") this.#noteFromPointer(event.key);
+				else if (event.act.startsWith(EDIT_ACT)) {
+					const field = this.#form.fields[Number(event.act.slice(EDIT_ACT.length))];
+					const stop = this.#stops.findIndex(candidate => candidate.kind === "text" && candidate.field === field);
+					if (stop !== -1) this.#setFocus(stop);
+				}
 			}
 			return;
 		}
 		if (this.#hidden || (event.type !== "select" && event.type !== "activate")) return;
+		// A click on a row (the Other one especially) takes the keys the same way up/down do.
+		this.#releaseGuardForPointer();
 		const leaf = leafKey(event.key);
 		if (leaf === "tabs") {
 			const index = event.item === REVIEW_ID ? this.#tabs.length : itemIndex(event.item, "t");
@@ -908,6 +955,13 @@ export class HtmlFormDialog implements Component, Focusable {
 	/** True while a draft that predates the form still owns typing. */
 	#guardBlocks(): boolean {
 		return !this.#guardReleased && (this.#options.inputGuard?.isBlocked() ?? false);
+	}
+
+	/** A pointer pick or action on the form is the user handing the keys over, as up/down does. */
+	#releaseGuardForPointer(): void {
+		if (!this.#guardBlocks()) return;
+		this.#guardReleased = true;
+		this.#changed();
 	}
 
 	#guardHint(guard: AskDialogInputGuard): string {
@@ -1712,7 +1766,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (review) {
 			children.push(...this.#describeReview());
 		} else {
-			const form = col(this.#describeSections(this.#tabs[this.#tab]?.sections ?? []), {
+			const form = col(this.#describeParts(this.#tabs[this.#tab]?.parts ?? []), {
 				gap: "lg",
 				role: "omp.ask.form",
 			});
@@ -1754,13 +1808,14 @@ export class HtmlFormDialog implements Component, Focusable {
 		return keyed(row([tabs], { role: "omp.ask.head", align: "center" }), "head");
 	}
 
-	#describeSections(sections: readonly number[]): NativeChild[] {
-		return sections.map(index => {
+	#describeParts(parts: readonly TabPart[]): NativeChild[] {
+		return parts.map(({ section: index, start, end }) => {
 			const section = this.#form.sections[index]!;
-			const blocks = section.blocks.map(block => this.#describeBlock(block));
+			const blocks = section.blocks.slice(start, end).map(block => this.#describeBlock(block));
+			const key = start === 0 ? `s${index}` : `s${index}.${start}`;
 			return section.title.length > 0
-				? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, blocks, `s${index}`)
-				: keyed(col(blocks, { gap: "md", role: "omp.ask.section" }), `s${index}`);
+				? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, blocks, key)
+				: keyed(col(blocks, { gap: "md", role: "omp.ask.section" }), key);
 		});
 	}
 

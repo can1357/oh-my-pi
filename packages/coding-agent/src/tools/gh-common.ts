@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { CwdLookupMemo } from "../utils/forge-cli";
 import { github } from "../utils/github";
@@ -14,7 +14,9 @@ export function normalizeText(value: string | null | undefined): string {
 }
 
 export function normalizeBlock(value: string | null | undefined): string {
-	return (value ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\t", "    ").trimEnd();
+	return sanitizeText(
+		(value ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\t", "    "),
+	).trimEnd();
 }
 
 export function normalizeOptionalString(value: string | null | undefined): string | undefined {

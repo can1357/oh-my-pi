@@ -979,12 +979,15 @@ export interface TspShellProps {
 	replayEpoch?: number;
 	/** This mounted call received a real execution-start event, not a settled historical load. */
 	liveOrigin?: boolean;
+	/** The command text is still streaming in: the host marks its write head and the preview follows it. */
+	stream?: boolean;
 	/** Working directory shown ahead of the script when it differs from the project's. */
 	cwd?: string;
 	lang?: "bash" | "zsh";
 	/**
-	 * Clamp the command to its first `lines` drawn lines under a "N more lines" button; gives way inside an open
-	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first line.
+	 * Clamp the command to `lines` drawn lines under an Expand button, the window following the write head
+	 * (`stream`), then the playhead, with the enclosing scope heads pinned; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first visible line.
 	 */
 	preview?: { lines: number };
 }

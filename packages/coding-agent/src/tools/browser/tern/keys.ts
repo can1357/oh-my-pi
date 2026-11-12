@@ -82,7 +82,7 @@ export function ternKey(name: string): TernKey {
 		const code = /^[a-z]$/i.test(name) ? `Key${name.toUpperCase()}` : /^\d$/.test(name) ? `Digit${name}` : undefined;
 		return code ? { key: name, code } : { key: name };
 	}
-	throw new ToolError(`Unknown key ${JSON.stringify(name)} for the Tern browser backend`);
+	throw new ToolError(`Unknown key ${JSON.stringify(name)} for this browser backend`);
 }
 
 /**

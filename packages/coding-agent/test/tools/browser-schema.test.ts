@@ -56,8 +56,7 @@ describe("browser prelude", () => {
 			{ init_scripts: ["valid", 1] },
 			{ downloads: false },
 			{ user_agent: 1 },
-			{ ignore_https_errors: "yes" },
-			{ allow_file_access: 1 },
+			{ insecure: "yes" },
 			{ headed: "yes" },
 		]) {
 			await expect(prelude.invoke({ action: "open", ...invalid }, context)).rejects.toThrow(
