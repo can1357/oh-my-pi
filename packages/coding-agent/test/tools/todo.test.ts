@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,12 +13,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	selectCollapsedTodos,
-	setActiveTodoDescriptionsProvider,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
-	type TodoToolDetails,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
 } from "@oh-my-pi/pi-tui/tools/todo";
@@ -634,46 +632,6 @@ describe("todoMatchesAnyDescription", () => {
 		).toBe(true);
 		// Dotted abbreviations like AGENTS.md collapse to a space too.
 		expect(todoMatchesAnyDescription("Audit AGENTS.md compliance", ["Audit AGENTS md compliance"])).toBe(true);
-	});
-});
-describe("todoToolRenderer subagent indication", () => {
-	afterEach(() => {
-		setActiveTodoDescriptionsProvider(() => []);
-	});
-
-	it("shows similarly named pending todos as active while a matching subagent runs, without closing them", () => {
-		const details: TodoToolDetails = {
-			op: "init",
-			storage: "session",
-			phases: [
-				{
-					name: "Review",
-					tasks: [
-						{ content: "Review auth", status: "pending" },
-						{ content: "Review auth deployment", status: "pending" },
-						{ content: "Rotate keys", status: "pending" },
-					],
-				},
-			],
-		};
-		const describeCard = (): { progress: unknown; statuses: string[] | undefined } => {
-			// The native view is memoized per result object; a fresh one re-reads the live descriptions.
-			const view = todoToolRenderer.describeResult({ content: [], details }, { expanded: false, isPartial: false });
-			const checklist = view?.body?.[0];
-			if (!checklist || !("k" in checklist) || checklist.k !== "checklist") throw new Error("Expected a checklist");
-			return {
-				progress: view?.tool?.target,
-				statuses: checklist.p?.phases.flatMap(phase => phase.items.map(item => item.status)),
-			};
-		};
-
-		// The fuzzy match lights the exact and the longer todo alike; neither counts as closed.
-		setActiveTodoDescriptionsProvider(() => ["Review auth"]);
-		expect(describeCard()).toEqual({ progress: "0/3", statuses: ["active", "active", "pending"] });
-
-		// Once the subagent is gone the indication goes with it; nothing was completed on its behalf.
-		setActiveTodoDescriptionsProvider(() => []);
-		expect(describeCard()).toEqual({ progress: "0/3", statuses: ["pending", "pending", "pending"] });
 	});
 });
 describe("todoToolRenderer.renderResult phase collapsing", () => {

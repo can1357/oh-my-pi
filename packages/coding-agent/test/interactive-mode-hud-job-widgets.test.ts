@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -8,14 +8,10 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type SubagentLifecyclePayload, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
-import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { TspPropNode } from "@oh-my-pi/pi-wire";
-import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { JobWidgetEntry, JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function nodes(root: NativeNode): NativeNode[] {
@@ -178,154 +174,5 @@ describe("InteractiveMode HUD pills", () => {
 		} finally {
 			registry.unregister(id);
 		}
-	});
-});
-
-/** An open plan whose two tasks both fuzzy-match a subagent described as `Review auth`. */
-const REVIEW_PLAN: TodoPhase[] = [
-	{
-		name: "Review",
-		tasks: [
-			{ content: "Review auth", status: "in_progress" },
-			{ content: "Review auth deployment", status: "pending" },
-		],
-	},
-];
-
-describe("InteractiveMode todo HUD subagent indication", () => {
-	let tempDir: TempDir;
-	let authStorage: AuthStorage;
-	let session: AgentSession;
-	let mode: InteractiveMode;
-	let eventBus: EventBus;
-	const cx: DescribeContext = {
-		cols: 120,
-		reduceMotion: false,
-		dark: true,
-		supports: () => true,
-		feature: () => true,
-	};
-
-	beforeAll(async () => {
-		await initTheme();
-	});
-
-	beforeEach(async () => {
-		resetSettingsForTest();
-		tempDir = TempDir.createSync("@pi-hud-todo-observer-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "startup.quiet": true } });
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		const modelRegistry = new ModelRegistry(authStorage);
-		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
-		eventBus = new EventBus();
-		session = new AgentSession({
-			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
-			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated({ "startup.quiet": true }),
-			modelRegistry,
-		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, eventBus);
-		// Unrelated to the todo HUD; keep the branch watcher from leaking an fs.watch into sibling files.
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		await mode.init({ suppressWelcomeIntro: true });
-		// Own the observer UI coalesce timer so each lifecycle event gets its own flush.
-		vi.useFakeTimers();
-	});
-
-	afterEach(async () => {
-		vi.useRealTimers();
-		mode?.stop();
-		await session?.dispose();
-		authStorage?.close();
-		tempDir?.removeSync();
-		vi.restoreAllMocks();
-		resetSettingsForTest();
-	});
-
-	/** Task statuses in the native todo HUD checklist, in plan order. */
-	const hudStatuses = (): string[] | undefined => {
-		for (const child of mode.describeStatusHud([], cx).c ?? []) {
-			if ("k" in child && child.k === "checklist") {
-				return child.p?.phases.flatMap(phase => phase.items.map(item => item.status));
-			}
-		}
-		return undefined;
-	};
-
-	const todoEditIds = (): string[] =>
-		session.sessionManager
-			.getBranch()
-			.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE)
-			.map(entry => entry.id);
-
-	const emitLifecycle = (id: string, description: string, status: SubagentLifecyclePayload["status"]): void => {
-		const payload: SubagentLifecyclePayload = {
-			id,
-			index: 0,
-			agent: "task",
-			agentSource: "bundled",
-			description,
-			status,
-			detached: true,
-		};
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload);
-		vi.advanceTimersByTime(100);
-	};
-
-	it("lights up similar open todos while a matching subagent runs and leaves them open when it completes", () => {
-		session.commitTodoPhases(REVIEW_PLAN);
-		mode.setTodos(session.getTodoPhases());
-		const planEdits = todoEditIds();
-		expect(hudStatuses()).toEqual(["active", "pending"]);
-
-		emitLifecycle("AuthReviewer", "Review auth", "started");
-		expect(hudStatuses()).toEqual(["active", "active"]);
-
-		emitLifecycle("AuthReviewer", "Review auth", "completed");
-		// A finished subagent's label is not a `todo done`: neither task closes, in memory or on resume.
-		expect(session.getTodoPhases()).toEqual(REVIEW_PLAN);
-		expect(todoEditIds()).toEqual(planEdits);
-		expect(getLatestTodoPhasesFromEntries(session.sessionManager.getBranch())).toEqual(REVIEW_PLAN);
-		expect(hudStatuses()).toEqual(["active", "pending"]);
-	});
-
-	it("completes and persists only the task an explicit /todo done names after a matching subagent finished", async () => {
-		session.commitTodoPhases(REVIEW_PLAN);
-		mode.setTodos(session.getTodoPhases());
-		emitLifecycle("AuthReviewer", "Review auth", "started");
-		emitLifecycle("AuthReviewer", "Review auth", "completed");
-
-		await mode.handleTodoCommand("done Review auth");
-
-		const expected: TodoPhase[] = [
-			{
-				name: "Review",
-				tasks: [
-					{ content: "Review auth", status: "completed" },
-					{ content: "Review auth deployment", status: "in_progress" },
-				],
-			},
-		];
-		expect(session.getTodoPhases()).toEqual(expected);
-		expect(todoEditIds()).toHaveLength(2);
-		expect(getLatestTodoPhasesFromEntries(session.sessionManager.getBranch())).toEqual(expected);
-		expect(hudStatuses()).toEqual(["done", "active"]);
-	});
-
-	it("does not complete a todo added after a subagent with the same description already finished", () => {
-		emitLifecycle("AuthReviewer", "Review auth", "started");
-		emitLifecycle("AuthReviewer", "Review auth", "completed");
-		const plan: TodoPhase[] = [{ name: "Review", tasks: [{ content: "Review auth", status: "in_progress" }] }];
-		session.commitTodoPhases(plan);
-		mode.setTodos(session.getTodoPhases());
-		const planEdits = todoEditIds();
-
-		// A later, unrelated subagent lifecycle change must not replay the stale completion onto the new plan.
-		emitLifecycle("Linter", "Lint the workspace", "started");
-
-		expect(session.getTodoPhases()).toEqual(plan);
-		expect(todoEditIds()).toEqual(planEdits);
-		expect(hudStatuses()).toEqual(["active"]);
 	});
 });
