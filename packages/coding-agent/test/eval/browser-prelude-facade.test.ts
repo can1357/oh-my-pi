@@ -7,6 +7,7 @@ import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/prelu
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import type { ObservationEntry } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { chromiumAvailable } from "../tools/chromium-probe";
 
 interface FacadeResponse {
@@ -333,6 +334,174 @@ describe("browser facade in real Eval runtimes", () => {
 			],
 		});
 	});
+
+	it("prints every observed element, one line each, and keeps the observation's data for code", async () => {
+		const elements: ObservationEntry[] = Array.from({ length: 150 }, (_, index) => ({
+			id: index + 1,
+			role: "button",
+			name: `Item ${index + 1}`,
+			value: undefined,
+			description: undefined,
+			keyshortcuts: undefined,
+			states: [],
+		}));
+		elements[1] = {
+			id: 2,
+			role: "textbox",
+			name: 'Two\nlines "quoted"',
+			value: "Ada",
+			description: "Full name",
+			keyshortcuts: "Alt+N",
+			states: ["focused", "required"],
+		};
+		elements[2] = { ...elements[2], value: 0 };
+		elements[3] = { ...elements[3], role: "menu item" };
+		const observation = {
+			url: "https://example.test/list",
+			title: "List",
+			viewport: { width: 800, height: 600 },
+			scroll: { x: 0, y: 40, width: 800, height: 600, scrollWidth: 800, scrollHeight: 4000 },
+			elements,
+		};
+		let runValue: unknown = observation;
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(() => definitions);
+		const shipped = createBrowserPrelude(session);
+		definitions = [
+			{
+				...shipped,
+				async invoke(parameters) {
+					const action = field(parameters, "action");
+					if (action === "open") return { content: [], details: { name: "many" } };
+					return { content: [], details: { value: structuredClone(action === "run" ? runValue : observation) } };
+				},
+			},
+		];
+		const sessionId = `browser-facade-observe-${crypto.randomUUID()}`;
+		const run = async (code: string) => {
+			const result = await executeJs(code, { cwd: process.cwd(), sessionId, session });
+			expect(result.exitCode).toBe(0);
+			return result.output.trimEnd();
+		};
+		await run('globalThis.tab = await browser.open({ name: "many" });');
+
+		const lines = [
+			'url: "https://example.test/list"',
+			'title: "List"',
+			"viewport: { width: 800, height: 600 }",
+			"scroll: { x: 0, y: 40, width: 800, height: 600, scrollWidth: 800, scrollHeight: 4000 }",
+			"elements (150; tab.id(n) acts on [n]):",
+			'[1] button "Item 1"',
+			'[2] textbox "Two\\nlines \\"quoted\\"" value="Ada" description="Full name" keyshortcuts="Alt+N" focused required',
+			'[3] button "Item 3" value=0',
+			'[4] "menu item" "Item 4"',
+			...elements.slice(4).map(element => `[${element.id}] button "${element.name}"`),
+		];
+		expect((await run("print(await tab.observe());")).split("\n")).toEqual(lines);
+		expect((await run("await tab.observe()")).split("\n")).toEqual(lines);
+		expect((await run("print((await tab.observe()).elements);")).split("\n")).toEqual(lines.slice(5));
+		const single = await executeJs("print(await tab.observe());", { cwd: process.cwd(), sessionId, session });
+		expect(single.output).toBe(`${lines.join("\n")}\n`);
+		expect(await run("print(await tab.run(async ({ tab }) => tab.observe()));")).toBe(lines.join("\n"));
+		expect((await run('print(await tab.observe(), "done");')).split("\n")).toEqual([...lines, " done"]);
+		expect((await run('print((await tab.observe()).elements, "done");')).split("\n")).toEqual([
+			...lines.slice(5),
+			" done",
+		]);
+		const expectedJson = JSON.stringify(JSON.stringify(observation));
+		expect(
+			JSON.parse(
+				await run(
+					`const o = await tab.observe(); print(JSON.stringify({ same: JSON.stringify(o) === ${expectedJson}, keys: Object.keys(o), element: Object.keys(o.elements[0]), length: o.elements.length }));`,
+				),
+			),
+		).toEqual({
+			same: true,
+			keys: ["url", "title", "viewport", "scroll", "elements"],
+			element: ["id", "role", "name", "value", "description", "keyshortcuts", "states"],
+			length: 150,
+		});
+		const nested = ["{", "  o: Observation {", ...lines.map(line => `    ${line}`), "  },", "  n: 1", "}"];
+		expect((await run("print({ o: await tab.observe(), n: 1 });")).split("\n")).toEqual(nested);
+		expect(
+			(
+				await run(
+					'print(require("node:util").inspect({ o: await tab.observe(), n: 1 }, { depth: null, breakLength: 120 }));',
+				)
+			).split("\n"),
+		).toEqual(nested);
+		expect((await run("print([(await tab.observe()).elements]);")).split("\n")).toEqual([
+			"[",
+			"  [",
+			...lines.slice(5).map(line => `    ${line}`),
+			"  ]",
+			"]",
+		]);
+		expect(await run("const p = await tab.observe(); delete p.elements; print(p);")).toContain(
+			"url: 'https://example.test/list'",
+		);
+		runValue = { elements: [{ href: "https://example.test/link" }], count: 1 };
+		const ordinary = await run(
+			'const value = await tab.run(() => ({ elements: [], count: 1 })); print(value); print(Object.hasOwn(value, Symbol.for("nodejs.util.inspect.custom")), Object.hasOwn(value.elements, Symbol.for("nodejs.util.inspect.custom")));',
+		);
+		expect(ordinary).toContain("href:");
+		expect(ordinary).not.toContain("tab.id");
+		expect(ordinary).toEndWith("false false");
+	});
+
+	const ran = '{ enumerable: true, configurable: true, get() { globalThis.ran++; throw new Error("ran"); } }';
+	it.each([
+		["annotation", "o.elements[0].extra = 1n", "extra: 1n"],
+		["cycle", "o.self = o", "[Circular"],
+		["getter annotation", `Object.defineProperty(o, "extra", ${ran})`, "extra: [Getter]"],
+		["getter field", `Object.defineProperty(o.elements[0], "name", ${ran})`, "name: [Getter]"],
+		["getter elements", `Object.defineProperty(o, "elements", ${ran})`, "elements: [Getter]"],
+		["Symbol state", 'o.elements[0].states.push(Symbol("busy"))', "Symbol(busy)"],
+		["getter slot", `Object.defineProperty(o.elements, 0, ${ran})`, "[Getter]"],
+		[
+			"Proxy element",
+			"o.elements[0] = new Proxy({}, { ownKeys() { globalThis.ran++; throw new Error('ran'); } })",
+			"id: 150",
+		],
+		["assigned field", 'o.elements[0].name = "Renamed"', "name: 'Renamed'"],
+		[
+			"swapped prototype",
+			"Object.setPrototypeOf(o.elements[0].states, { join() { globalThis.ran++; throw new Error('ran'); } })",
+			"id: 150",
+		],
+		[
+			"edited prototype",
+			"Object.getPrototypeOf(o.elements[0].states).join = () => { globalThis.ran++; throw new Error('ran'); }",
+			"id: 150",
+		],
+		["hidden field", 'Object.defineProperty(o.elements[0], "id", { enumerable: false })', "id: 150"],
+	])(
+		"prints an edited observation through plain inspect, whole, running none of its code: %s",
+		async (_name, edit, expected) => {
+			let definitions: readonly EvalPreludeDefinition[] = [];
+			const session = makeSession(() => definitions);
+			const elements = Array.from({ length: 150 }, (_, index) => ({ id: index + 1, role: "button", states: [] }));
+			definitions = [
+				{
+					...createBrowserPrelude(session),
+					invoke: async parameters => ({
+						content: [],
+						details:
+							field(parameters, "action") === "open" ? { name: "edited" } : { value: { url: "u", elements } },
+					}),
+				},
+			];
+			// util.inspect is the call under test; `print` adds its own JSON view, which reads the value separately.
+			const result = await executeJs(
+				`globalThis.ran = 0; const { inspect } = require("node:util"); const tab = await browser.open({ name: "edited" }); const o = await tab.observe(); const prototype = Object.getPrototypeOf(o.elements[0].states); const join = Object.getOwnPropertyDescriptor(prototype, "join"); let text; try { ${edit}; text = inspect(o, { depth: 6, breakLength: 120 }); } finally { Object.defineProperty(prototype, "join", join); } print(text); print(inspect(Object.getOwnPropertyDescriptor(o, "elements").value ?? null, { depth: 6 })); print("ids:", text.match(/\\bid: \\d+/g)?.length ?? 0, "ran:", globalThis.ran);`,
+				{ cwd: process.cwd(), sessionId: `browser-facade-edited-${crypto.randomUUID()}`, session },
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain(expected);
+			expect(result.output).not.toContain("more items");
+			expect(result.output).toMatch(_name === "getter elements" ? /ids: 0 ran: 0/ : /ids: 1(49|50) ran: 0/);
+		},
+	);
 
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {
 		const calls: unknown[] = [];
