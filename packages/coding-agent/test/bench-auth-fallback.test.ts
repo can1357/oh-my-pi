@@ -343,7 +343,7 @@ describe("bench OAuth account selection", () => {
 							keys.push(await options.apiKey({ error: undefined, lastChance: false }));
 							yield* stream;
 						})();
-						return Object.assign(iterator, { result: stream.result });
+						return Object.assign(iterator, { result: stream.result }) as unknown as AssistantMessageEventStream;
 					},
 				},
 			);
@@ -652,7 +652,7 @@ describe("bench service tier", () => {
 							yield event;
 						}
 					})();
-					return Object.assign(iterator, { result: stream.result });
+					return Object.assign(iterator, { result: stream.result }) as unknown as AssistantMessageEventStream;
 				},
 			},
 		);
