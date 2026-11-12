@@ -241,6 +241,7 @@ mod tests {
 
 	use windows_sys::Win32::{
 		Foundation::HWND,
+		UI::Input::KeyboardAndMouse::VK_RETURN,
 		UI::WindowsAndMessaging::{
 			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, ES_AUTOHSCROLL, GetForegroundWindow,
 			GetMessageW, MSG, PostMessageW, SendMessageW, SetForegroundWindow, TranslateMessage,
@@ -264,6 +265,8 @@ mod tests {
 	/// it stops reading messages for `wParam` milliseconds, as a busy app's
 	/// does, and the rest of the keys wait in its queue.
 	const HANG: u32 = WM_APP;
+	/// The target's closing Return moves the foreground to `wParam`.
+	const RETURN_TO: u32 = WM_APP + 1;
 
 	/// Two top-level edit windows in another process, as another app's would
 	/// be: the user's window and the takeover target, each on its own thread.
@@ -353,6 +356,7 @@ mod tests {
 		/// next key-down.
 		fn pump() {
 			let mut hang = 0;
+			let mut return_to = std::ptr::null_mut();
 			// SAFETY: `message` is writable for each call.
 			unsafe {
 				let mut message: MSG = std::mem::zeroed();
@@ -361,9 +365,19 @@ mod tests {
 						hang = message.wParam as u64;
 						continue;
 					}
+					if message.message == RETURN_TO {
+						return_to = message.wParam as HWND;
+						continue;
+					}
 					if message.message == WM_KEYDOWN && hang != 0 {
 						std::thread::sleep(Duration::from_millis(hang));
 						hang = 0;
+					}
+					if message.message == WM_KEYDOWN
+						&& message.wParam == usize::from(VK_RETURN)
+						&& !return_to.is_null()
+					{
+						SetForegroundWindow(return_to);
 					}
 					TranslateMessage(&message);
 					DispatchMessageW(&message);
@@ -474,6 +488,41 @@ mod tests {
 		// The target read every key before the foreground went back: none
 		// reached the user's window.
 		assert_eq!(Windows::text(windows.target), long_text());
+		assert_eq!(Windows::text(windows.user), USER);
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn takeover_typing_does_not_report_foreground_moved_by_its_closing_return() {
+		let windows = Windows::open();
+		let mut backend = Win32Backend::new(DisplaySelector::Active).unwrap();
+		let empty = wide("");
+		// SAFETY: these handles belong to the test host; WM_SETTEXT copies
+		// the string synchronously and RETURN_TO carries a window handle.
+		unsafe {
+			SendMessageW(windows.target, WM_SETTEXT, 0, empty.as_ptr() as isize);
+			PostMessageW(windows.target, RETURN_TO, windows.user as usize, 0);
+			SetForegroundWindow(windows.user);
+		}
+		assert!(
+			window::wait_for_foreground(windows.user, Duration::from_secs(2)).unwrap(),
+			"this process cannot take the foreground; run it from a focused terminal"
+		);
+		let token = CancellationSource::default().token();
+		control::take_text_unconfirmed();
+		backend
+			.type_text(
+				&Target::Window((windows.target as usize).to_string()),
+				"submitted\n",
+				DeliveryMode::ForegroundReturnFocus,
+				&token,
+			)
+			.unwrap();
+		assert_eq!(control::take_text_unconfirmed(), None);
+		// SAFETY: no preconditions.
+		assert_eq!(unsafe { GetForegroundWindow() }, windows.user);
+		assert_eq!(Windows::text(windows.target), "submitted");
 		assert_eq!(Windows::text(windows.user), USER);
 	}
 
