@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed a spent Codex account retrying every minute for days when its siblings were only refused the requested model: their short model-policy blocks no longer count as a sibling becoming available, so the usage-limit wait follows the spent account's reset and model fallback can take over ([#17637](https://github.com/can1357/oh-my-pi/issues/17637))
+- Fixed a spent Codex account retrying every minute for days when its siblings were only refused the requested model: their short model-policy blocks no longer count as a sibling becoming available, so the usage-limit wait follows the spent account's reset and model fallback can take over ([#17637](https://github.com/can1357/oh-my-pi/issues/17637), [#19019](https://github.com/can1357/oh-my-pi/pull/19019) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.19.0] - 2026-11-12
 
