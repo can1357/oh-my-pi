@@ -1,4 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import type { TspPrefsProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { PluginSettingsHost } from "@oh-my-pi/pi-tui/overlays/plugin-settings";
@@ -388,6 +390,108 @@ describe("settings as a native prefs page", () => {
 			selector.handleInput(ENTER);
 			// The save is that one entry: the higher layer's entry is not written along with it.
 			expect(entryWrites).toEqual([["tui.linkMap", "/mnt/projects", "file:///Z:/"]]);
+		});
+
+		it("keeps a refusal visible when a higher layer acquires an equivalent prefix during an open form", () => {
+			const map = { "/work": "file:///W:/" };
+			const shadowed: Record<string, string> = {};
+			const { selector, values, entryWrites, changes } = harness({ "tui.linkMap": map }, shadowed);
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			selector.handleInput(ENTER);
+			values.set("tui.linkMap", { ...map, "//work": "file:///Overlay:/" });
+			shadowed["//work"] = "--config overlay";
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("The --config overlay sets //work");
+			// Typing a still-valid target must not clear the layer refusal after Enter.
+			type(selector, "next");
+			expect(screen(selector)).toContain("The --config overlay sets //work");
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("The --config overlay sets //work");
+			expect(entryWrites).toEqual([]);
+			expect(changes).toEqual([]);
+			expect(values.get("tui.linkMap")).toEqual({ ...map, "//work": "file:///Overlay:/" });
+		});
+
+		it("refuses a nonempty edit to a later normalized duplicate but removes only that entry when cleared", () => {
+			const map = { "/a/b": "file:///First:/", "/a//b": "file:///Later:/" };
+			const { selector, values, entryWrites, changes } = harness({ "tui.linkMap": map });
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			// Alphabetical display puts /a//b first, but insertion order grants /a/b ownership.
+			expect(screen(selector)).toContain("ignored: same prefix as /a/b");
+			selector.handleInput(ENTER);
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("/a/b is already the entry for that prefix");
+			type(selector, "next");
+			expect(screen(selector)).toContain("Clear the target to remove this ignored entry.");
+			selector.handleInput(ENTER);
+			expect(entryWrites).toEqual([]);
+			expect(changes).toEqual([]);
+			expect(values.get("tui.linkMap")).toEqual(map);
+			selector.handleInput("\x01");
+			selector.handleInput("\x0b");
+			expect(screen(selector)).not.toContain("already the entry for that prefix");
+			selector.handleInput(ENTER);
+			expect(entryWrites).toEqual([["tui.linkMap", "/a//b", undefined]]);
+			expect(values.get("tui.linkMap")).toEqual({ "/a/b": "file:///First:/" });
+			expect(changes).toEqual([["tui.linkMap", { "/a/b": "file:///First:/" }]]);
+		});
+
+		for (const invalidFirst of [true, false]) {
+			it(`repairs an invalid stored target using its ${invalidFirst ? "earlier" : "later"} insertion position`, () => {
+				const map = invalidFirst
+					? { "/a/b": "bad?", "/a//b": "file:///Valid:/" }
+					: { "/a/b": "file:///Valid:/", "/a//b": "bad?" };
+				const key = invalidFirst ? "/a/b" : "/a//b";
+				const { selector, values, entryWrites, changes } = harness({ "tui.linkMap": map });
+				send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+				send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+				expect(screen(selector)).not.toContain("ignored: same prefix");
+				if (invalidFirst) selector.handleInput(DOWN);
+				selector.handleInput(ENTER);
+				selector.handleInput(ENTER);
+				expect(screen(selector)).toContain("Use a URI with a scheme");
+				selector.handleInput("\x01");
+				selector.handleInput("\x0b");
+				type(selector, "file:///Repaired:/");
+				selector.handleInput(ENTER);
+				if (invalidFirst) {
+					expect(entryWrites).toEqual([["tui.linkMap", key, "file:///Repaired:/"]]);
+					expect(values.get("tui.linkMap")).toEqual({ ...map, [key]: "file:///Repaired:/" });
+					expect(screen(selector)).toContain("ignored: same prefix as /a/b");
+				} else {
+					expect(screen(selector)).toContain("/a/b is already the entry for that prefix");
+					expect(entryWrites).toEqual([]);
+					expect(changes).toEqual([]);
+					expect(values.get("tui.linkMap")).toEqual(map);
+				}
+			});
+		}
+
+		it.skipIf(process.platform === "win32")("a rejected home alias does not reserve its other physical prefix", () => {
+			const home = spyOn(os, "homedir").mockReturnValue("/logical/home");
+			const real = spyOn(fs, "realpathSync").mockReturnValue("/physical/home");
+			try {
+				const map = {
+					"/logical/home": "file:///First:/",
+					"~": "file:///Ignored:/",
+					"/physical/home": "file:///Physical:/",
+				};
+				const { selector, values, entryWrites } = harness({ "tui.linkMap": map });
+				send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+				send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+				expect(screen(selector)).toContain("ignored: same prefix as /logical/home");
+				expect(screen(selector)).not.toContain("ignored: same prefix as ~");
+				selector.handleInput(DOWN);
+				selector.handleInput(ENTER);
+				selector.handleInput(ENTER);
+				expect(entryWrites).toEqual([["tui.linkMap", "/physical/home", "file:///Physical:/"]]);
+				expect(values.get("tui.linkMap")).toEqual(map);
+			} finally {
+				real.mockRestore();
+				home.mockRestore();
+			}
 		});
 
 		it.skipIf(process.platform === "win32")("tests a path against the map links use, and clears every entry", () => {

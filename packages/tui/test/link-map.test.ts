@@ -142,6 +142,30 @@ describe.skipIf(process.platform === "win32")("matching", () => {
 		}
 	});
 
+	it("rejects a whole home alias without reserving its nonoverlapping physical prefix", () => {
+		const real = spyOn(fs, "realpathSync").mockReturnValue("/physical/alice");
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		applyLinkMapSetting({
+			"/home/alice": "file:///First:/",
+			"~": "file:///Ignored:/",
+			"/physical/alice": "file:///Physical:/",
+		});
+		expect(matchLinkEntry("/home/alice/readme.md")).toEqual({
+			key: "/home/alice",
+			uri: "file:///First:/readme.md",
+		});
+		expect(matchLinkEntry("/physical/alice/readme.md")).toEqual({
+			key: "/physical/alice",
+			uri: "file:///Physical:/readme.md",
+		});
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn).toHaveBeenCalledWith("Ignoring duplicate tui.linkMap entry", {
+			key: "~",
+			sameAs: "/home/alice",
+		});
+		real.mockRestore();
+	});
+
 	it("ignores invalid entries and keeps the valid ones", () => {
 		spyOn(logger, "warn").mockImplementation(() => {});
 		applyLinkMapSetting({

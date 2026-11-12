@@ -27,6 +27,24 @@ function sharesLinkMapPrefix(a: string, b: string): boolean {
 	return linkMapPrefixes(b).some(prefix => prefixes.includes(prefix));
 }
 
+/** Ignored keys claim no prefixes; ownership follows the map's insertion order, not the displayed sort. */
+function ignoredLinkMapKeys(entries: Record<string, string>): Map<string, string> {
+	const owner = new Map<string, string>();
+	const ignored = new Map<string, string>();
+	for (const [key, target] of Object.entries(entries)) {
+		if (parseLinkTarget(target) === undefined) continue;
+		const prefixes = linkMapPrefixes(key);
+		const first = prefixes.find(prefix => owner.has(prefix));
+		if (first !== undefined) {
+			const earlier = owner.get(first);
+			if (earlier !== undefined) ignored.set(key, earlier);
+		} else {
+			for (const prefix of prefixes) owner.set(prefix, key);
+		}
+	}
+	return ignored;
+}
+
 function linkMapEntries(value: unknown): Record<string, string> {
 	const entries: Record<string, string> = {};
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return entries;
@@ -122,20 +140,7 @@ export class LinkMapSubmenu extends Container {
 			const layer = this.#settings.shadowingLayer(LINK_MAP_PATH, key);
 			if (layer !== undefined) layers.set(key, layer);
 		}
-		// The key links use for each prefix: the first valid one in the map's own order, the order entries load in.
-		const owner = new Map<string, string>();
-		const sameAs = new Map<string, string>();
-		for (const key of Object.keys(entries)) {
-			if (parseLinkTarget(entries[key]) === undefined) continue;
-			const prefixes = linkMapPrefixes(key);
-			const first = prefixes.find(prefix => owner.has(prefix));
-			if (first !== undefined) {
-				const earlier = owner.get(first);
-				if (earlier !== undefined) sameAs.set(key, earlier);
-			} else {
-				for (const prefix of prefixes) owner.set(prefix, key);
-			}
-		}
+		const sameAs = ignoredLinkMapKeys(entries);
 		const items: SelectItem[] = keys.map(key => {
 			const valid = isLinkMapKey(key) && parseLinkTarget(entries[key]) !== undefined;
 			const layer = layers.get(key);
@@ -223,6 +228,21 @@ export class LinkMapSubmenu extends Container {
 	#showTarget(key: string): void {
 		const initialValue = this.#entries()[key] ?? "";
 		const sample = new Text(formTheme.hint(sampleLine(key, initialValue)), 0, 0);
+		const validateTarget = (value: string): string | undefined => {
+			if (!acceptableTarget(value)) return "Use a URI with a scheme and no query or fragment, such as file:///Z:/";
+			const refusal = this.#refusal(key);
+			if (refusal !== undefined) return refusal;
+			const trimmed = value.trim();
+			if (trimmed === "") return undefined;
+			const prospective = this.#entries();
+			prospective[key] = trimmed;
+			const earlier = ignoredLinkMapKeys(prospective).get(key);
+			return earlier === undefined
+				? undefined
+				: sanitizeDisplayLine(
+						`${earlier} is already the entry for that prefix. Clear the target to remove this ignored entry.`,
+					);
+		};
 		const field = new TextFormField({
 			theme: formTheme,
 			label: sanitizeDisplayLine(`Link target: ${key}`),
@@ -232,10 +252,7 @@ export class LinkMapSubmenu extends Container {
 			empty: "submit",
 			summary: [sample],
 			hint: `  ${editorKey("tui.input.submit")} to save · ${editorKey("tui.select.cancel")} to cancel · Clear field to remove`,
-			validate: value =>
-				acceptableTarget(value)
-					? this.#refusal(key)
-					: "Use a URI with a scheme and no query or fragment, such as file:///Z:/",
+			validate: validateTarget,
 			onSubmit: value => {
 				const trimmed = value.trim();
 				this.#saveEntry(key, trimmed === "" ? undefined : trimmed);
@@ -247,8 +264,8 @@ export class LinkMapSubmenu extends Container {
 		this.#showText(field, () => {
 			const value = field.getValue();
 			sample.setText(formTheme.hint(sampleLine(key, value)));
-			// A refused save's error clears once the target is fixed.
-			if (field.hasError && acceptableTarget(value)) field.setError(undefined);
+			// Recheck the whole refusal, including layers that changed while the form was open.
+			if (field.hasError) field.setError(validateTarget(value));
 		});
 	}
 
