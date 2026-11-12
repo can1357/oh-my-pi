@@ -184,6 +184,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let cost: number | undefined;
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
+		let retry: JobSnapshot["retry"];
 		if (latest.type === "task") {
 			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
 			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
@@ -216,6 +217,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 				cost = finiteNumber(progressRecord?.cost);
 				contextTokens = finiteNumber(progressRecord?.contextTokens);
 				contextWindow = finiteNumber(progressRecord?.contextWindow);
+				retry = retrySnapshot(progressRecord?.retryState, now);
 			}
 		}
 		const running = latest.status === "running";
@@ -239,6 +241,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(cost !== undefined && running ? { cost } : {}),
 			...(contextTokens !== undefined && running ? { contextTokens } : {}),
 			...(contextWindow !== undefined && running ? { contextWindow } : {}),
+			...(retry && running ? { retry } : {}),
 			...(widget ? { widget } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
@@ -254,10 +257,38 @@ function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/** Longest retry error kept on a job row; provider messages can run to paragraphs. */
+const RETRY_ERROR_MAX_CHARS = 80;
+
+/**
+ * The automatic retry a task agent is waiting on, read from its progress
+ * record's `retryState` (see `AgentProgress.retryState`). The remaining wait is
+ * fixed at snapshot time so rows built from one snapshot agree.
+ */
+function retrySnapshot(value: unknown, now: number): JobSnapshot["retry"] {
+	if (typeof value !== "object" || value === null) return undefined;
+	const state = value as Record<string, unknown>;
+	const attempt = finiteNumber(state.attempt);
+	const maxAttempts = finiteNumber(state.maxAttempts);
+	if (attempt === undefined || maxAttempts === undefined) return undefined;
+	const startedAtMs = finiteNumber(state.startedAtMs) ?? now;
+	const delayMs = finiteNumber(state.delayMs) ?? 0;
+	const errorMessage = typeof state.errorMessage === "string" ? state.errorMessage.replace(/\s+/g, " ").trim() : "";
+	return {
+		attempt,
+		maxAttempts,
+		remainingMs: Math.max(0, startedAtMs + delayMs - now),
+		...(errorMessage ? { errorMessage } : {}),
+	};
+}
+
 /**
  * Progress suffix for a running task row, e.g.
  * ` — 5h7m · 90 req · $18.40 · ctx 160K/1M · stage: implementing`, from the
  * fields {@link snapshotJobs} copies out of the task's latest progress record.
+ * A task waiting on an automatic retry leads with it, e.g.
+ * ` — 6m15s · retrying 7/10 in 45s: usage limit reached · 7 req`, so a row
+ * that is only re-sending a failed request does not read as work.
  * Returns `""` for any other row and for a running task without progress
  * fields, so those rows keep their plain shape; duration alone never makes a
  * suffix. Pass `duration: false` where the row already shows the run time.
@@ -265,6 +296,14 @@ function finiteNumber(value: unknown): number | undefined {
 export function runningTaskProgressSuffix(job: JobSnapshot, options: { duration: boolean }): string {
 	if (job.type !== "task" || job.status !== "running") return "";
 	const parts: string[] = [];
+	if (job.retry) {
+		const wait = job.retry.remainingMs > 0 ? `in ${formatDuration(job.retry.remainingMs)}` : "now";
+		const error = job.retry.errorMessage;
+		const reason = error
+			? `: ${error.length > RETRY_ERROR_MAX_CHARS ? `${error.slice(0, RETRY_ERROR_MAX_CHARS - 1)}…` : error}`
+			: "";
+		parts.push(`retrying ${job.retry.attempt}/${job.retry.maxAttempts} ${wait}${reason}`);
+	}
 	if (job.requests !== undefined && job.requests > 0) parts.push(`${job.requests} req`);
 	if (job.cost !== undefined && job.cost > 0) parts.push(job.cost < 0.005 ? "<$0.01" : `$${job.cost.toFixed(2)}`);
 	if (job.contextTokens !== undefined && job.contextTokens > 0) {
