@@ -5,7 +5,7 @@ import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { type DaemonBrokerClient, daemonClientForProject } from "./client";
+import { type DaemonBrokerClient, DaemonRequestTimeoutError, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
@@ -263,17 +263,26 @@ export async function startService(
 		persist: cfgLaunchPersist.get(session.settings),
 		detached: false,
 	};
-	const result = await request(
-		session,
-		{
-			op: "start",
-			spec,
-			owner: serviceOwner(session) ?? undefined,
-			replace: true,
-			awaitReady: readyInterrupt === undefined,
-		},
-		signal,
-	);
+	const requestedAt = Date.now();
+	let result: DaemonRpcResult;
+	try {
+		result = await request(
+			session,
+			{
+				op: "start",
+				spec,
+				owner: serviceOwner(session) ?? undefined,
+				replace: true,
+				awaitReady: readyInterrupt === undefined,
+			},
+			signal,
+		);
+	} catch (error) {
+		if (!(error instanceof DaemonRequestTimeoutError) || signal?.aborted) throw error;
+		const described = await describeLaunch(session, spec, daemon => daemon.startedAt >= requestedAt, signal);
+		if (!described) throw error;
+		return described;
+	}
 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
 	const launched = result.daemon;
 	// A legacy broker ignores `awaitReady` and already waited: its result is
@@ -303,8 +312,37 @@ export async function startService(
 	} catch (error) {
 		if (readyInterrupt.aborted && !signal?.aborted)
 			return { daemon: launched, readyTimedOut: false, readyInterrupted: true };
-		throw error;
+		if (!(error instanceof DaemonRequestTimeoutError) || signal?.aborted) throw error;
+		const described = await describeLaunch(session, spec, daemon => daemon.startedAt === launched.startedAt, signal);
+		if (!described) throw error;
+		return described;
 	}
+}
+
+/**
+ * The outcome of one launch of `spec`, read after the client stopped waiting for the broker's
+ * answer to its start or readiness wait. The broker's readiness deadline and the client's request
+ * timer expire together when the host sleeps through the wait, and the timer wins, dropping the
+ * broker's ready/not-ready answer. Undefined when the broker does not answer or holds a service
+ * `isLaunch` rejects (a later launch).
+ */
+async function describeLaunch(
+	session: ToolSession,
+	spec: DaemonSpec,
+	isLaunch: (daemon: DaemonSnapshot) => boolean,
+	signal?: AbortSignal,
+): Promise<{ daemon: DaemonSnapshot; readyTimedOut: boolean; readyInterrupted: false } | undefined> {
+	let described: DaemonRpcResult;
+	try {
+		described = await request(session, { op: "describe", name: spec.name }, signal);
+	} catch {
+		return undefined;
+	}
+	if (described.op !== "describe" || !isLaunch(described.daemon)) return undefined;
+	const daemon = described.daemon;
+	// A pre-ready exit is reported by its terminal state, not as a timeout.
+	const readyTimedOut = spec.ready !== undefined && daemon.readyAt === undefined && !TERMINAL_STATES[daemon.state];
+	return { daemon, readyTimedOut, readyInterrupted: false };
 }
 
 export async function sendService(
