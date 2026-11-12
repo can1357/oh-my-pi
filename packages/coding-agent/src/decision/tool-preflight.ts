@@ -31,6 +31,8 @@ export const TOOL_PREFLIGHT_POLICY = {
 	contracts: 8,
 	/** One contract, framing included; a larger one is omitted, never truncated. */
 	contractBytes: 16 * 1024,
+	/** Whether the task needs any device's docs at all must reach this before anything is judged further. */
+	gateThreshold: 0.35,
 	relevance: 0.7,
 	sufficiency: 0.7,
 } as const;
@@ -152,7 +154,10 @@ export async function prepareToolPreflight(input: ToolPreflightInput): Promise<T
 		if (config.backend !== "judge" || candidates.length === pinned.length) {
 			return { selected: pinned, reason: pinned.length > 0 ? "explicit" : "no_candidates" };
 		}
-		const questions: Record<string, NoulQuestion> = { sufficient: QUESTIONS.sufficient };
+		const questions: Record<string, NoulQuestion> = {
+			needsTools: QUESTIONS.needsTools,
+			sufficient: QUESTIONS.sufficient,
+		};
 		candidates.forEach((_, index) => {
 			questions[`r${index}`] = renderQuestion(QUESTIONS.relevance, { index });
 		});
@@ -178,6 +183,10 @@ export async function prepareToolPreflight(input: ToolPreflightInput): Promise<T
 		);
 		if (judged.status === "unavailable") return { selected: pinned, reason: "judge_unavailable" };
 		const answers = judged.result.answers;
+		const needsTools = answers.needsTools;
+		if (needsTools?.type !== "noul" || needsTools.noul < TOOL_PREFLIGHT_POLICY.gateThreshold) {
+			return { selected: pinned, reason: "not_needed" };
+		}
 		const sufficient = answers.sufficient;
 		if (sufficient?.type !== "noul" || sufficient.noul < TOOL_PREFLIGHT_POLICY.sufficiency) {
 			return { selected: pinned, reason: "insufficient" };

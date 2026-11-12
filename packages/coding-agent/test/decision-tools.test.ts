@@ -81,8 +81,8 @@ interface JudgeBody {
 	questions: Record<string, unknown>;
 }
 
-/** Serve relevance Nouls by candidate name and a sufficiency Noul. */
-function serveJudge(relevance: Record<string, number>, sufficient = 0.9) {
+/** Serve relevance Nouls by candidate name, a sufficiency Noul, and the `needsTools` gate. */
+function serveJudge(relevance: Record<string, number>, sufficient = 0.9, needsTools = 0.9) {
 	const bodies: JudgeBody[] = [];
 	vi.spyOn(globalThis, "fetch").mockImplementation(
 		asGlobalFetch(async (_url, init) => {
@@ -91,7 +91,9 @@ function serveJudge(relevance: Record<string, number>, sufficient = 0.9) {
 			const answers: Record<string, { type: "noul"; noul: number }> = {};
 			for (const id of Object.keys(body.questions)) {
 				const name = body.state.candidates[Number(id.slice(1))]?.name ?? "";
-				answers[id] = { type: "noul", noul: id === "sufficient" ? sufficient : (relevance[name] ?? 0.05) };
+				const noul =
+					id === "needsTools" ? needsTools : id === "sufficient" ? sufficient : (relevance[name] ?? 0.05);
+				answers[id] = { type: "noul", noul };
 			}
 			return Response.json({ model: "jev-1.13.0", answers, usage: { input_tokens: 10, output_tokens: 1 } });
 		}),
@@ -189,6 +191,18 @@ describe("tool preflight", () => {
 		const failed = await preflight(automatic, "debug why the login test fails");
 		expect(failed.result.selected).toEqual([]);
 		expect(failed.records[0]?.reason).toBe("judge_unavailable");
+	});
+
+	it("returns nothing when the task needs no tool docs, except pinned tools", async () => {
+		const bodies = serveJudge({ [METRICS]: 0.95 }, 0.9, 0.2);
+		const gated = await preflight(automatic, "explain what cpu metrics mean for a node");
+		expect(bodies[0]?.questions).toHaveProperty("needsTools");
+		expect(gated.result).toEqual({ selected: [], contracts: [] });
+		expect(gated.records[0]?.reason).toBe("not_needed");
+
+		const pinned = await preflight(automatic, `explain xd://${METRICS} and how to restart the deployed application`);
+		expect(pinned.result.selected).toEqual([METRICS]);
+		expect(pinned.records[0]?.reason).toBe("not_needed");
 	});
 
 	it("shadow ranks after returning and only records", async () => {
