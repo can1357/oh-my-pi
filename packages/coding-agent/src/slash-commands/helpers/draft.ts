@@ -30,6 +30,20 @@ export function restoreDetachedDraft(
 	editor.setCollapsedText([restoredText, currentText].filter(part => part.trim()).join("\n\n"));
 }
 
+/** The merged, marker-shifted block `restoreQueuedDraft` would prepend for these entries. */
+export function queuedDraftText(editor: CustomEditor, entries: readonly RestoredQueuedMessage[]): string {
+	if (entries.length === 0) return "";
+	const queuedImages = entries.flatMap(entry => entry.images ?? []);
+	if (queuedImages.length === 0) return entries.map(entry => entry.text).join("\n\n");
+	const parts: string[] = [];
+	let imageOffset = editor.pendingImages.length;
+	for (const entry of entries) {
+		parts.push(shiftImageMarkers(entry.text, imageOffset));
+		if (entry.images?.length) imageOffset += entry.images.length;
+	}
+	return parts.join("\n\n");
+}
+
 /**
  * Merge explicit queued entries, oldest first, ahead of the current draft.
  * Existing draft images keep their positions; queued attachments append.
@@ -50,26 +64,15 @@ export function restoreQueuedDraft(
 	// indices by the running offset keeps the merged text aligned with the merged
 	// `pendingImages` order; draft markers stay valid because draft images
 	// keep their original positions.
-	const queuedImages = entries.flatMap(entry => entry.images ?? []);
-	let queuedText: string;
-	if (queuedImages.length > 0) {
-		const parts: string[] = [];
-		let imageOffset = editor.pendingImages.length;
-		for (const entry of entries) {
-			parts.push(shiftImageMarkers(entry.text, imageOffset));
-			if (entry.images?.length) imageOffset += entry.images.length;
-		}
-		queuedText = parts.join("\n\n");
-	} else {
-		queuedText = entries.map(entry => entry.text).join("\n\n");
-	}
+	const queuedText = queuedDraftText(editor, entries);
 	const current = currentText ?? editor.getText();
 	const combinedText = [queuedText, current].filter(text => text.trim()).join("\n\n");
 	// Hand queued images back to the pending-image buffer first (links are
 	// re-materialized lazily), then set the text: setCollapsedText folds the
 	// renumbered `[Image #N, WxH]` references back into chip tokens, and the
 	// collapse only recognizes indices within the merged pendingImages range.
-	if (queuedImages.length > 0) {
+	if (entries.some(entry => entry.images?.length)) {
+		const queuedImages = entries.flatMap(entry => entry.images ?? []);
 		editor.pendingImages.push(...queuedImages);
 		editor.pendingImageLinks.push(...queuedImages.map(() => undefined));
 		editor.imageLinks = editor.pendingImageLinks;

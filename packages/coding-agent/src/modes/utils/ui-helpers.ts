@@ -20,7 +20,7 @@ import {
 	continuesConversation,
 	conversationPosition,
 } from "../../session/conversation-position";
-import { restoreQueuedDraft } from "../../slash-commands/helpers/draft";
+import { queuedDraftText, restoreQueuedDraft } from "../../slash-commands/helpers/draft";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
@@ -267,6 +267,14 @@ export class UiHelpers {
 	/** Stable chronology across detached drains and their late first-prompt callbacks. */
 	#compactionEntryOrder = new WeakMap<CompactionQueuedMessage, number>();
 	#nextCompactionEntryOrder = 0;
+	/**
+	 * Block the most recent editor restore prepended, plus its newest entry rank.
+	 * A second, newer batch that fails later must land after that block (oldest
+	 * first), not prepended ahead of it. Dropped whenever the prefix no longer
+	 * heads the editor text (the user edited or resubmitted it).
+	 */
+	#editorRestorePrefix: string | undefined;
+	#editorRestoreNewestRank: number | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -1538,6 +1546,34 @@ export class UiHelpers {
 		}
 	}
 
+	/** Prepend a rejected batch to the editor, keeping successive restores in submission order. */
+	#restoreEditorEntries(entries: readonly CompactionQueuedMessage[]): void {
+		if (entries.length === 0) return;
+		this.#rememberCompactionOrder(entries);
+		const rankOf = (entry: CompactionQueuedMessage) => this.#compactionEntryOrder.get(entry)!;
+		const ordered = [...entries].sort((left, right) => rankOf(left) - rankOf(right));
+		const batchText = queuedDraftText(this.ctx.editor, ordered);
+		const prior = this.#editorRestorePrefix;
+		const priorRank = this.#editorRestoreNewestRank;
+		if (prior && priorRank !== undefined && priorRank < rankOf(ordered[0]!)) {
+			const expanded = this.ctx.editor.getExpandedText();
+			if (expanded.startsWith(prior)) {
+				// Older batch already heads the draft: insert this newer one after it.
+				const residual = expanded.slice(prior.length).replace(/^\n+/, "");
+				restoreQueuedDraft(this.ctx.editor, ordered, residual);
+				const merged = [prior, this.ctx.editor.getExpandedText()].filter(text => text.trim()).join("\n\n");
+				this.ctx.editor.setCollapsedText(merged);
+				this.#editorRestorePrefix = [prior, batchText].filter(text => text.trim()).join("\n\n");
+				this.#editorRestoreNewestRank = rankOf(ordered[ordered.length - 1]!);
+				this.ctx.updatePendingMessagesDisplay();
+				return;
+			}
+		}
+		restoreQueuedDraft(this.ctx.editor, ordered);
+		this.#editorRestorePrefix = batchText;
+		this.#editorRestoreNewestRank = rankOf(ordered[ordered.length - 1]!);
+	}
+
 	/** Return an explicit batch without borrowing or replacing a newer queue's origin. */
 	#returnCompactionEntries(entries: readonly CompactionQueuedMessage[], origin: ConversationPosition): boolean {
 		if (entries.length === 0) return true;
@@ -1547,7 +1583,7 @@ export class UiHelpers {
 			!continuesConversation(this.ctx.sessionManager, origin) ||
 			(live.length > 0 && liveOrigin && !continuesConversation(this.ctx.sessionManager, liveOrigin))
 		) {
-			restoreQueuedDraft(this.ctx.editor, entries);
+			this.#restoreEditorEntries(entries);
 			this.ctx.updatePendingMessagesDisplay();
 			return false;
 		}
@@ -1835,7 +1871,7 @@ export class UiHelpers {
 			// Each rejected entry belongs to this batch. Restore them together in
 			// submission order; repeated prepends would reverse A, B into B, A.
 			if (notAdmittedByGuest.length > 0) {
-				restoreQueuedDraft(this.ctx.editor, notAdmittedByGuest);
+				this.#restoreEditorEntries(notAdmittedByGuest);
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.showStatus("Collab prompts were not queued; returned them to the editor");
 			}

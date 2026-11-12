@@ -244,6 +244,46 @@ describe("compaction queue conversation ownership", () => {
 		}
 	});
 
+	it("restores detached batches in submission order after switching conversations", async () => {
+		const h = await harness();
+		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const reports = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		let dispatched = 0;
+		let reported = 0;
+		vi.spyOn(h.session, "prompt").mockImplementation(async (_text, options) => {
+			const index = dispatched++;
+			options?.onPromptAdmitted?.();
+			entered[index].resolve();
+			await release[index].promise;
+			throw new Error("Credential lookup failed");
+		});
+		try {
+			h.helpers.queueCompactionMessage("older detached batch", "followUp");
+			await h.helpers.flushCompactionQueue({ willRetry: false });
+			await entered[0].promise;
+			h.helpers.queueCompactionMessage("newer detached batch", "followUp");
+			await h.helpers.flushCompactionQueue({ willRetry: false });
+			await entered[1].promise;
+			await h.session.newSession();
+			h.editor.setText("current draft");
+			// Observe only recovery: queue insertion also reports status.
+			vi.spyOn(h.ctx, "showStatus").mockImplementation(() => reports[reported++]?.resolve());
+			vi.spyOn(h.ctx, "showError").mockImplementation(() => reports[reported++]?.resolve());
+			release[0].resolve();
+			await reports[0].promise;
+			expect(h.editor.getExpandedText()).toBe("older detached batch\n\ncurrent draft");
+			release[1].resolve();
+			await reports[1].promise;
+			expect(h.ctx.compactionQueuedMessages).toEqual([]);
+			expect(h.editor.getExpandedText()).toBe(
+				"older detached batch\n\nnewer detached batch\n\ncurrent draft",
+			);
+		} finally {
+			for (const gate of release) gate.resolve();
+		}
+	});
+
 	it("consumes a real queued /new once and restores only its old-conversation remainder", async () => {
 		const h = await harness();
 		const oldId = h.manager.getSessionId();
@@ -621,7 +661,9 @@ describe("compaction queue conversation ownership", () => {
 				keyRelease.resolve();
 				await joining;
 				replica = h.manager.getSessionFile();
-				expect(h.editor.getExpandedText()).toBe(recovered);
+				// Activation hands unsent local input back to the editor: a yielded
+				// "/compact" survives the replica switch instead of being dropped.
+				expect(h.editor.getExpandedText()).toBe(busy === "yield" ? `/compact\n\n${recovered}` : recovered);
 				expect(received).toEqual([]);
 			} finally {
 				busyRelease.resolve();
