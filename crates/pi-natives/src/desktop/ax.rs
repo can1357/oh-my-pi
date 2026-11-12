@@ -1186,6 +1186,7 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 	backend.perform(handle, "press")
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 /// Exact equality is the verdict: a field that shows a rewritten value has
 /// not been shown to hold what was sent (Contacts regroups a phone number in
 /// the field and stores none of it). The error never quotes the written text,
@@ -1194,7 +1195,6 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 /// the next step needs no extra read. What a secure field reads, or a field
 /// that reads back as mask characters (Qt password fields on macOS report a
 /// plain text field), is described, never quoted.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn text_readback(
 	sent: &str,
 	expected: &str,
@@ -1239,7 +1239,8 @@ pub(crate) fn text_readback(
 
 /// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
 /// toolkits fall back on.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+// Unused on Windows until it has a caller of `text_readback`.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", test)), allow(dead_code))]
 pub(crate) fn masked(actual: &str) -> bool {
 	let mut chars = actual.chars();
 	chars.next().is_some_and(|first| {
