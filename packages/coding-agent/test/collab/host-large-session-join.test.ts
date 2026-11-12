@@ -41,10 +41,13 @@ import {
 	waitFor,
 } from "./helpers/throttled-host";
 
-const cleanups: (() => void)[] = [];
-afterEach(() => {
-	for (const cleanup of cleanups.splice(0).reverse()) cleanup();
-	uninstallInMemoryRelay();
+const cleanups: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+	try {
+		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	} finally {
+		uninstallInMemoryRelay();
+	}
 });
 
 /**
@@ -73,7 +76,7 @@ async function startHost(snapshot: Snapshot, seen: HostObservations, throttle = 
 	const probe = instrumentRelay(relay, { throttle });
 	const context = makeHostContext(snapshot, seen);
 	const host = new CollabHost(context);
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
 	if ("error" in parsed) throw new Error(parsed.error);

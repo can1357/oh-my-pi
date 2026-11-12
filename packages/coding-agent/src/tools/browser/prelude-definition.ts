@@ -27,7 +27,7 @@ export function browserDocumentation(settings: Settings, platform: NodeJS.Platfo
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
 	host: Pick<EvalPreludeDefinition, "invoke" | "status"> & {
-		/** Where an open with `app.relay: false` goes; set only while an open without `app` goes to the relay. */
+		/** Where an open with `app: "auto"` goes; set only while an open without `app` goes to the relay. */
 		relayFallback?: BrowserKind;
 	},
 ): EvalPreludeDefinition {

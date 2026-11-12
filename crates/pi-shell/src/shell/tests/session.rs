@@ -1286,7 +1286,7 @@ async fn jq_run_that_reported_an_error_is_not_minimized() {
 	for command in [failing.clone(), format!("cd . && {failing}")] {
 		let (result, output) = run(&command).await;
 		assert_eq!(result.exit_code, Some(0), "{command}");
-		assert!(output.contains("prefixError: \"boom\""), "{command}: {output:?}");
+		assert!(output.contains("prefixjq: error (at in.jsonl:2): boom"), "{command}: {output:?}");
 		assert!(result.minimized.is_none(), "{command}: {:?}", result.minimized);
 		// Without the reported error the jq filter would shorten this capture.
 		let filtered = minimizer::apply(&failing, &output, 0, &minimizer::MinimizerConfig {

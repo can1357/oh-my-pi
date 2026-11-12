@@ -4211,6 +4211,25 @@ describe("ACP agent", () => {
 			expect(calls).toHaveLength(3);
 		});
 
+		it("rejects form and ask dialogs with the client's error instead of reporting a cancel", async () => {
+			const clientError = new RequestError(-32602, "Unsupported ACP elicitation form");
+			const { connection } = createElicitConnection(async () => {
+				throw clientError;
+			});
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-reject", FORM_CAPABILITIES);
+
+			const formError = await ctx.formDialog!(DEPLOY_FORM).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			expect(formError).toBeInstanceOf(Error);
+			expect((formError as Error).message).toContain("Unsupported ACP elicitation form");
+			expect((formError as Error).cause).toBe(clientError);
+			await expect(
+				ctx.askDialog!([{ id: "choice", question: "Choose", options: [{ label: "A" }] }]),
+			).rejects.toThrow("Unsupported ACP elicitation form");
+		});
+
 		it("skips the SDK call entirely when dialogOptions.signal is already aborted", async () => {
 			const { connection, calls } = createElicitConnection(async () => ({
 				action: "accept",

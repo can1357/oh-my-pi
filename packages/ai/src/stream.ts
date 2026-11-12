@@ -1109,19 +1109,20 @@ function isRetryableUpstreamError(
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
-	// `cyber_policy` are likewise rotatable. The exact ChatGPT-account model
-	// denial is rotatable only when its provider and requested model match.
+	// `cyber_policy` are likewise rotatable. A denial of only the requested
+	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404)
+	// is rotatable when its provider and requested model match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
 	// without transient rate-limit wording mean this account is parked but a
 	// sibling credential can usually pick the request up. Both are rotatable
-	// via `onAuthError` — the auth-gateway maps hard auth failures to
-	// `invalidateCredentialMatching` and temporary account constraints to a
-	// credential block. Transient 429s ("Too many requests", per-minute caps)
-	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
-	// provider's own backoff layer instead of burning siblings.
-	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
+	// via `onAuthError`, whose resolver hands the error to `limits.rotate` to
+	// choose between a credential block and invalidation. Transient 429s
+	// ("Too many requests", per-minute caps) classify as RATE_LIMIT_EXCEEDED in
+	// `parseRateLimitReason` and stay in the provider's own backoff layer
+	// instead of burning siblings.
+	if (AIError.isModelEntitlementDenial(error, model.provider, model.id)) return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
 	return isUsageLimitOutcome(status, message);
 }
@@ -1137,14 +1138,9 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 }
 
 function contextualizeAuthRetryError(model: Model<Api>, error: unknown): unknown {
-	if (
-		!error ||
-		typeof error !== "object" ||
-		!AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)
-	) {
-		return error;
-	}
-	return AIError.attach(error, AIError.create(AIError.Flag.AccountPolicy | AIError.Flag.ContentBlocked));
+	if (!error || typeof error !== "object" || AIError.isAccountPolicyError(error)) return error;
+	const kinds = AIError.modelEntitlementDenialKinds(error, model.provider, model.id);
+	return kinds === 0 ? error : AIError.attach(error, AIError.create(kinds));
 }
 
 function emitBufferedEvents(stream: AssistantMessageEventStream, events: AssistantMessageEvent[]): void {

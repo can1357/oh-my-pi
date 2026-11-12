@@ -67,7 +67,6 @@ describe("renderAdvisorDeltaChunks (delta-split)", () => {
 		const chunks = renderAdvisorDeltaChunks(msgs, {
 			wip: false,
 			includeThinking: true,
-			advisorRegexSecretValues: new Set(),
 		});
 		expect(chunksToText(chunks)).toBe(old);
 	});
@@ -77,7 +76,6 @@ describe("renderAdvisorDeltaChunks (delta-split)", () => {
 		const chunks = renderAdvisorDeltaChunks(msgs, {
 			wip: true,
 			includeThinking: true,
-			advisorRegexSecretValues: new Set(),
 		});
 		expect(chunks).not.toBeNull();
 		const texts = chunks!.map(c => ((c as { content: unknown }).content as { text: string }[])[0].text);
@@ -93,7 +91,6 @@ describe("renderAdvisorDeltaChunks (delta-split)", () => {
 		const chunks = renderAdvisorDeltaChunks(msgs, {
 			wip: false,
 			includeThinking: true,
-			advisorRegexSecretValues: new Set(),
 		});
 		expect(chunks!.length).toBeGreaterThan(1);
 	});
@@ -109,7 +106,6 @@ describe("renderAdvisorDeltaChunks (delta-split)", () => {
 		const chunks = renderAdvisorDeltaChunks([empty, user("visible", 2)], {
 			wip: false,
 			includeThinking: true,
-			advisorRegexSecretValues: new Set(),
 		});
 		expect(chunksToText(chunks)).toStartWith("### Session update\n\n");
 	});

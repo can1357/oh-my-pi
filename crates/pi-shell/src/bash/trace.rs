@@ -18,7 +18,7 @@ pub mod syntax;
 pub mod viz;
 
 use std::{
-	collections::{HashMap, HashSet, VecDeque},
+	collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
@@ -309,9 +309,11 @@ struct Inner {
 	origin:       Option<u64>,
 	run:          Option<RunId>,
 	root_vpid:    Option<Vpid>,
-	/// Exact membership learned from engine fork events. Engine forks
-	/// emit `run: None`; API-created subshells have their own `RunId`.
-	vpids:        HashSet<Vpid>,
+	/// Exact membership learned from engine fork events, each marked when
+	/// it runs a callout's script ([`Unit::callout`]): the callout's
+	/// subshell, or a fork of it. Engine forks emit `run: None`;
+	/// API-created subshells have their own `RunId`.
+	vpids:        HashMap<Vpid, bool>,
 	vpid_order:   VecDeque<Vpid>,
 	runs:         HashSet<RunId>,
 	run_order:    VecDeque<RunId>,
@@ -398,7 +400,7 @@ impl RunTrace {
 				origin:       None,
 				run:          None,
 				root_vpid:    None,
-				vpids:        HashSet::new(),
+				vpids:        HashMap::new(),
 				vpid_order:   VecDeque::new(),
 				runs:         HashSet::new(),
 				run_order:    VecDeque::new(),
@@ -511,22 +513,25 @@ impl EventSink for RunTrace {
 			}
 			inner.run = ev.run();
 			inner.root_vpid = Some(ev.vpid);
-			inner.vpids.insert(ev.vpid);
+			inner.vpids.insert(ev.vpid, false);
 		} else {
 			if ev.run() == inner.run && matches!(ev.data, EventData::RunStart { .. }) {
 				inner.root_vpid = Some(ev.vpid);
-				inner.vpids.insert(ev.vpid);
+				inner.vpids.insert(ev.vpid, false);
 			}
 			match ev.run() {
 				Some(id) if Some(id) == inner.run || inner.runs.contains(&id) => {},
 				Some(id)
 					if matches!(ev.data, EventData::RunStart { .. })
 						&& Some(ev.vpid) != inner.root_vpid
-						&& inner.vpids.contains(&ev.vpid) =>
+						&& let Some(callout) = inner.vpids.get_mut(&ev.vpid) =>
 				{
+					// Only callouts submit scripts on descendant runs
+					// (`ShellApi::run_subshell`).
+					*callout = true;
 					inner.descendant_run(id);
 				},
-				None if inner.vpids.contains(&ev.vpid) => {},
+				None if inner.vpids.contains_key(&ev.vpid) => {},
 				_ => return,
 			}
 		}
@@ -566,22 +571,25 @@ impl EventSink for RunTrace {
 
 impl Inner {
 	/// Learn only explicit engine lineage; never infer ownership from output.
+	/// A fork inherits its parent's callout mark.
 	fn descendants(&mut self, ev: &Event<'_>) {
+		let callout = self.vpids.get(&ev.vpid) == Some(&true);
 		match ev.data {
 			EventData::Subshell { child } | EventData::Background { pid: child, .. } => {
-				self.descendant(child);
+				self.descendant(child, callout);
 			},
 			EventData::Pipeline { stages } => {
 				for &child in stages {
-					self.descendant(child);
+					self.descendant(child, callout);
 				}
 			},
 			_ => {},
 		}
 	}
 
-	fn descendant(&mut self, child: Vpid) {
-		if self.vpids.insert(child) {
+	fn descendant(&mut self, child: Vpid, callout: bool) {
+		if let Entry::Vacant(entry) = self.vpids.entry(child) {
+			entry.insert(callout);
 			self.vpid_order.push_back(child);
 			if self.vpid_order.len() > history::HISTORY_EVENTS
 				&& let Some(old) = self.vpid_order.pop_front()
@@ -645,12 +653,11 @@ impl Inner {
 					parent
 						.map_or_else(|| Arc::clone(syntax), |parent| Arc::new(syntax.with_parent(parent)))
 				});
-				// Only callouts submit scripts on descendant runs
-				// (`ShellApi::run_subshell`); a function body they reach keeps
-				// its definition's unit.
+				// A fork of a callout's subshell re-announces the callout's
+				// units; a function body they reach keeps its definition's unit.
 				let callout = cu.parent.is_none()
 					&& cu.unit.root.is_none()
-					&& ev.run().is_some_and(|run| self.runs.contains(&run));
+					&& self.vpids.get(&ev.vpid) == Some(&true);
 				self.announce(
 					cu.id(),
 					ev.vpid,

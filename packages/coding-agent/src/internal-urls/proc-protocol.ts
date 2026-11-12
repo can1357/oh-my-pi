@@ -23,6 +23,7 @@ import {
 } from "../launch/services";
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
+import procReferenceDoc from "../prompts/internal-urls/proc-reference.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type {
 	InternalResource,
@@ -154,6 +155,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 
 	promptDoc(): string {
 		return procPromptDoc.trim();
+	}
+
+	promptReference(): string {
+		return procReferenceDoc.trim();
 	}
 
 	/**
@@ -311,7 +316,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await modeService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${content}` }],
-				details: { proc: { action: "mode", daemon: updated, mode: content } },
+				details: { proc: { action: "mode", daemon: updated, mode: content }, touchesNoFiles: true },
 			};
 		}
 		if (action === "stdin") {
@@ -319,7 +324,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await sendService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],
-				details: { proc: { action: "stdin", daemon: updated, input: content } },
+				details: { proc: { action: "stdin", daemon: updated, input: content }, touchesNoFiles: true },
 			};
 		}
 		if (service) {

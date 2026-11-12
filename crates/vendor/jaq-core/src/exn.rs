@@ -82,6 +82,8 @@ impl<V> From<Error<V>> for Exn<'_, V> {
 enum Part<V, S = &'static str> {
     Val(V),
     Str(S),
+    /// result of a filter that is not a path expression, used where a path was required
+    NotPath(V),
 }
 
 /// Error that occurred during filter execution.
@@ -94,12 +96,23 @@ impl<V> Error<V> {
         Self(Part::Val(v))
     }
 
-    /// Create a path expression error.
+    /// Create the error of a filter that yields `v` where a path expression is required,
+    /// as jq's `Invalid path expression with result ...`.
     pub fn path_expr(v: V) -> Self {
-        Self(Part::Str(Vec::from([
-            Part::Str("invalid path expression with input "),
-            Part::Val(v),
-        ])))
+        Self(Part::NotPath(v))
+    }
+
+    /// If the error is a [`Self::path_expr`] error, return its value.
+    pub(crate) fn not_path(&self) -> Option<&V> {
+        match &self.0 {
+            Part::NotPath(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Create the error of a filter that [`crate::DataT::may_recurse`] refused to enter.
+    pub(crate) fn too_deep() -> Self {
+        Self(Part::Str(Vec::from([Part::Str("filter recursion too deep")])))
     }
 
     /// Create a type error.
@@ -141,6 +154,53 @@ impl<V: From<String>> Error<V> {
     }
 }
 
+impl<V: From<String> + Display> Error<V> {
+    /// Fix the message of a [`Self::path_expr`] error, so that enclosing
+    /// path expressions do not reinterpret it.
+    pub(crate) fn seal(self) -> Self {
+        match self.0 {
+            Part::NotPath(_) => Self::str(self),
+            _ => self,
+        }
+    }
+
+    /// Error of a path expression that indexes `v` with `k`, where `v` is not at a path,
+    /// as jq's `Invalid path expression near attempt to access element ...`.
+    pub(crate) fn path_access(k: &V, v: &V) -> Self {
+        let (k, v) = (trunc(k), trunc(v));
+        Self::str(alloc::format!("Invalid path expression near attempt to access element {k} of {v}"))
+    }
+
+    /// Error of a path expression that iterates `v`, where `v` is not at a path.
+    pub(crate) fn path_iter(v: &V) -> Self {
+        let v = trunc(v);
+        Self::str(alloc::format!("Invalid path expression near attempt to iterate through {v}"))
+    }
+}
+
+/// `v` dumped and cut to fit jq's 30-byte message buffers, as `jv_dump_string_trunc`.
+fn trunc<V: Display>(v: &V) -> String {
+    const BUF: usize = 30;
+    let s = v.to_string();
+    if s.len() < BUF {
+        return s;
+    }
+    let delim = match s.as_bytes()[0] {
+        b'"' => Some('"'),
+        b'[' => Some(']'),
+        b'{' => Some('}'),
+        _ => None,
+    };
+    let mut l = BUF - if delim.is_some() { 5 } else { 4 };
+    while !s.is_char_boundary(l) {
+        l -= 1;
+    }
+    let mut out = String::from(&s[..l]);
+    out.push_str("...");
+    out.extend(delim);
+    out
+}
+
 impl<V> FromIterator<Part<V>> for Error<V> {
     fn from_iter<T: IntoIterator<Item = Part<V>>>(iter: T) -> Self {
         Self(Part::Str(iter.into_iter().collect()))
@@ -162,8 +222,9 @@ impl<V: Display> Display for Error<V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.0 {
             Part::Val(v) => v.fmt(f),
+            Part::NotPath(v) => write!(f, "Invalid path expression with result {}", trunc(v)),
             Part::Str(parts) => parts.iter().try_for_each(|part| match part {
-                Part::Val(v) => v.fmt(f),
+                Part::Val(v) | Part::NotPath(v) => v.fmt(f),
                 Part::Str(s) => s.fmt(f),
             }),
         }

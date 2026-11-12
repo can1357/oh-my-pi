@@ -12,7 +12,7 @@ export const cfgBrowserEnabled = register({
 		tab: "tools",
 		group: "Available Tools",
 		label: "Browser",
-		description: "Enable the browser eval prelude for scripted Chromium automation (Puppeteer)",
+		description: "Enable the browser eval prelude for scripted browser automation",
 	},
 });
 
@@ -25,7 +25,7 @@ export const cfgBrowserCdpUrl = register({
 		group: "Grep & Browser",
 		label: "Browser CDP URL",
 		description:
-			"Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser. Explicit app.cdp_url or app.path on the tool call take precedence.",
+			"Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser. An explicit app on the tool call takes precedence.",
 	},
 });
 
@@ -62,7 +62,8 @@ export const cfgBrowserHeadless = register({
 		tab: "tools",
 		group: "Grep & Browser",
 		label: "Headless Browser",
-		description: "Launch browser in headless mode (disable to show browser UI)",
+		description:
+			"Run the browser without a window (disable to show it). omp's WebKit tabs gain or lose their windows at once where the engine ships its viewer (macOS); elsewhere a visible browser is Chromium, launched in the new mode by the next open.",
 	},
 });
 
@@ -88,7 +89,33 @@ export const cfgBrowserTern = register({
 		group: "Grep & Browser",
 		label: "Tern Browser",
 		description:
-			"Inside a Tern pane, open browser tabs as picture-in-pictures over omp's pane (native web view) instead of headless Chromium; falls back to Chromium when no Tern window can host them. Explicit app options, the relay and Browser CDP URL take precedence; app.tern:false opts one open out. Set PI_BROWSER_TERN=0 or PI_BROWSER_TERN=1 to override.",
+			"Inside a Tern pane, open browser tabs as picture-in-pictures over omp's pane (native web view) instead of omp's own headless browser; falls back to that browser when no Tern window can host them. An explicit app, the relay and Browser CDP URL take precedence; app \"own\" opts one open out. Set PI_BROWSER_TERN=0 or PI_BROWSER_TERN=1 to override.",
+	},
+});
+
+export const cfgBrowserWebKit = register({
+	id: "browser.webkit",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Grep & Browser",
+		label: "WebKit Browser",
+		description:
+			'Open browser tabs in omp\'s own headless WebKit engine instead of managed Chromium when the engine is installed (omp downloads it to ~/.o2/lib/abkit before Chrome for Testing when no browser is installed; see Browser WebKit Path). Chromium still opens a visible browser where the engine ships no viewer, and tabs the engine fails to start; an explicit app, the relay, Browser CDP URL, Tern and cmux take precedence; app "chromium" opts one open out. Set PI_BROWSER_WEBKIT=0 or PI_BROWSER_WEBKIT=1 to override.',
+	},
+});
+
+export const cfgBrowserWebKitPath = register({
+	id: "browser.webkitPath",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tools",
+		group: "Grep & Browser",
+		label: "Browser WebKit Path",
+		description:
+			"omp's WebKit engine: its host executable, or an ABKit engine directory (which holds it as ABHost; ABHost.exe on Windows). If unset, omp runs the installed engine, ~/.o2/lib/abkit/ABHost (ABHost.exe on Windows). Supports ~. PI_BROWSER_WEBKIT_PATH overrides it.",
 	},
 });
 
@@ -101,7 +128,7 @@ export const cfgBrowserFreezeOnTurnEnd = register({
 		group: "Grep & Browser",
 		label: "Freeze Browser Tabs On Turn End",
 		description:
-			"Freeze OMP-owned headless browser tabs when a turn settles so animated pages stop burning CPU/GPU while idle. Tabs unfreeze automatically on next use; pass persist:true on open to opt a tab out.",
+			"Freeze OMP-owned headless Chromium tabs when a turn settles so animated pages stop burning CPU/GPU while idle (WebKit tabs draw nothing unless asked). Tabs unfreeze automatically on next use; pass persist:true on open to opt a tab out.",
 	},
 });
 
