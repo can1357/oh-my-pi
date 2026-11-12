@@ -634,8 +634,8 @@ describe("structured subagent primitive", () => {
 			mockDiscovery(AGENT);
 			const parent = session({ isolationEnabled: true });
 			parent.providerSecrets = {
-				obfuscate: (text: string) => text.replaceAll("40cf59cf8a", () => "$$BUILD_ab12:L$$"),
-				deobfuscate: (text: string) => text.replaceAll("$$BUILD_ab12:L$$", "40cf59cf8a"),
+				obfuscate: (text: string) => text.replaceAll("40cf59cf8a", () => "$$BUILD_AB12:L$$"),
+				deobfuscate: (text: string) => text.replaceAll("$$BUILD_AB12:L$$", "40cf59cf8a"),
 			} as never;
 			let dispatched: executorModule.ExecutorOptions["inheritedContext"];
 			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
@@ -649,8 +649,8 @@ describe("structured subagent primitive", () => {
 			);
 			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 			expect(dispatched).toEqual({
-				text: "parent decided to ship build $$BUILD_ab12:L$$\n",
-				identifiers: ["$$BUILD_ab12:L$$"],
+				text: "parent decided to ship build $$BUILD_AB12:L$$\n",
+				identifiers: ["$$BUILD_AB12:L$$"],
 			});
 		});
 	});

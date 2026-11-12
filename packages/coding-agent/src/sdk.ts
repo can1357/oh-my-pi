@@ -4743,6 +4743,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				transformed = await blobBroker.decorateContext(transformed, transformModel);
 				// Byte budget after decoration: URL/file-referenced images carry no inline bytes.
 				transformed = clampProviderContextImageBytes(transformed, transformModel);
+				// A clamp that dropped inherited frames would leave the child neither frames nor the tail.
+				transformed = inheritedContextFrames.restoreEvicted(transformed);
 				// Keep per-request volatility out of the system prompt: the date/cwd
 				// reminder rides on the first user turn so open-weight providers keep
 				// their tool-schema prefix cache (#7404).

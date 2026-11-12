@@ -141,6 +141,29 @@ describe("buildInheritedContext", () => {
 		const sent = new SecretObfuscator(entries).obfuscate(context?.text ?? "");
 		expect(sent).not.toContain("q".repeat(64));
 	});
+
+	it("lists no fragment of a secret in the identifier sidecar", () => {
+		// The hex pattern stops at each dash, so it would pull runs out of a UUID-shaped secret.
+		const secret = ["3f2a9c1e", "4b7d", "4e2a", "9c3f", "8a1b2c3d4e5f"].join("-");
+		const parent = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const context = buildInheritedContext([userMessage(`api key ${secret} for build ${HASH}`)], parent);
+		expect(context!.identifiers).toContain(HASH);
+		expect(context!.identifiers.some(token => secret.includes(token) || token.includes("$$"))).toBe(false);
+	});
+
+	it("sends tool output without the rasterizer's dim markers", () => {
+		const toolResult = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "bash",
+			content: [{ type: "text", text: "a.txt\nb.txt" }],
+			isError: false,
+			timestamp: 0,
+		} as Message;
+		const context = buildInheritedContext([userMessage("run it"), toolResult], undefined);
+		expect(context!.text).toContain("a.txt\nb.txt");
+		expect(context!.text).not.toMatch(/[\u000e\u000f]/);
+	});
 });
 
 /** The child's provider context for an inherited tail, built the way the session builds it. */
@@ -228,5 +251,24 @@ describe("inherited context turn", () => {
 		expect(frames.length).toBeLessThanOrEqual(INHERITED_CONTEXT_MAX_FRAMES);
 		expect(preambleText(sent)).toContain(HASH);
 		expect(preambleText(sent)).not.toContain(OLD_HASH);
+	});
+
+	it("goes back to text when a later image clamp drops its frames", async () => {
+		const frames = new InheritedContextFrames();
+		const built = childContext(context);
+		const sent = await frames.transform(built, visionModel(["text", "image"]), false);
+		const [turn] = sent.messages;
+		// What the oldest-first byte clamp leaves of the turn: the preamble and an omission stub.
+		const clamped = (turn!.content as { type: string }[]).filter(block => block.type === "text");
+		const evicted: Context = { messages: [{ ...turn!, content: clamped } as Message, ...sent.messages.slice(1)] };
+		const restored = frames.restoreEvicted(evicted);
+		expect(restored.messages[0]).toBe(built.messages[0]);
+		expect(restored.messages[1]).toBe(evicted.messages[1]);
+	});
+
+	it("keeps its frames when no clamp touched them", async () => {
+		const frames = new InheritedContextFrames();
+		const sent = await frames.transform(childContext(context), visionModel(["text", "image"]), false);
+		expect(frames.restoreEvicted(sent)).toBe(sent);
 	});
 });

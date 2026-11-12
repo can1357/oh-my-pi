@@ -21,6 +21,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import inheritedContextTemplate from "../prompts/system/subagent-inherited-context.md" with { type: "text" };
+import { PLACEHOLDER_RE } from "../secrets/placeholder";
 
 /** Tail size measured in the inheritance experiment: two frames of the 1568px dense shape. */
 export const INHERITED_CONTEXT_CHARS = 27_832;
@@ -59,7 +60,7 @@ const IDENTIFIER_PATTERNS: readonly RegExp[] = [
 	/(?<![\w.])\d[\d,_]*(?:\.\d+)?(?![\w.]*\w)/g,
 	// Secret placeholders (`$$NAME_HASH:CASE$$`): drawn into frames once the child's boundary encodes,
 	// and only an exact copy decodes.
-	/\$\$\w+(?::\w+)?\$\$/g,
+	new RegExp(PLACEHOLDER_RE.source, "g"),
 ];
 
 function isIdentifier(token: string, patternIndex: number): boolean {
@@ -148,13 +149,17 @@ export function buildInheritedContext(
 	// Encode the whole conversation, as the provider boundary does: a pre-encode slice would cut a
 	// secret (or the context its rule needs) at its start, and redaction can shrink the slice until
 	// that raw fragment lands inside the tail.
-	const raw = snapcompact.serializeConversation([...messages], { includeThinking: false });
+	// Plain tool output: dim markers mean something only to the rasterizer, and the text turn sends them as-is.
+	const raw = snapcompact.serializeConversation([...messages], { includeThinking: false, dimToolResults: false });
 	const encoded = (secrets ? secrets.obfuscate(raw) : raw).trim();
 	if (!encoded) return undefined;
 	const tail = tailText(encoded, INHERITED_CONTEXT_CHARS);
 	const text = secrets ? decodeForChild(tail, secrets) : tail;
 	if (!text?.trim()) return undefined;
-	return { text, identifiers: extractIdentifiers(text) };
+	// Identifiers come from the encoded text with its placeholders blanked: a pattern can match part of a
+	// secret (a UUID's hex runs) that no whole-value rule would encode again in the persisted sidecar.
+	const identifiers = extractIdentifiers(secrets ? secrets.obfuscate(text).replace(PLACEHOLDER_RE, " ") : text);
+	return { text, identifiers };
 }
 
 /**
@@ -237,15 +242,19 @@ function isInheritedContextTurn(message: Message): message is UserMessage & { co
  * inherited-context turn as frames for a vision model. Runs after secret obfuscation, so frames
  * only ever draw encoded text, and before snapcompact's inline transform, whose planner then
  * counts these frames and whose system-prompt frames land in front of this turn. Keeps the text
- * turn when the frames would push the request past the provider image budget, where the
- * oldest-first image clamp would drop them first; a switch between frames and text rewrites the
- * first turn, which costs one prompt-cache miss. Holds the last render, so a session re-sends
- * identical bytes (prompt caches stay warm) without re-rasterizing.
+ * turn when the frames would push the request past the provider image count budget, and
+ * {@link restoreEvicted} puts it back when a later clamp (the inline-image byte budget, which
+ * evicts oldest first) drops any frame; a switch between frames and text rewrites the first
+ * turn, which costs one prompt-cache miss. Holds the last render, so a session re-sends
+ * identical bytes (prompt caches stay warm) without re-rasterizing. One instance per
+ * conversation: it remembers the turn it swapped in the request it is transforming.
  */
 export class InheritedContextFrames {
 	#last?: { key: string; content: (TextContent | ImageContent)[] };
+	#swapped?: { text: UserMessage; frames: number };
 
 	async transform(context: Context, model: Model, blockImages: boolean): Promise<Context> {
+		this.#swapped = undefined;
 		if (blockImages || !sendsImageInputOnWire(model)) return context;
 		const index = context.messages.findIndex(isInheritedContextTurn);
 		if (index === -1) return context;
@@ -253,8 +262,28 @@ export class InheritedContextFrames {
 		const room = snapcompact.providerImageBudget(model) - imageCount(context.messages);
 		const content = await this.#render(message.content[1]!.text, model, room);
 		if (!content) return context;
+		this.#swapped = { text: message, frames: content.length - 1 };
 		const messages = context.messages.slice();
 		messages[index] = { ...message, content };
+		return { ...context, messages };
+	}
+
+	/**
+	 * After the provider's image clamps: when they dropped any of the frames {@link transform} swapped
+	 * in, send the text turn instead, so the child keeps the tail rather than a preamble without it.
+	 */
+	restoreEvicted(context: Context): Context {
+		const swapped = this.#swapped;
+		this.#swapped = undefined;
+		if (!swapped) return context;
+		const index = context.messages.findIndex(message => message.role === "user" && message.inheritedContext === true);
+		if (index === -1) return context;
+		const content = context.messages[index]!.content;
+		const frames = Array.isArray(content) ? content.filter(block => block.type === "image").length : 0;
+		if (frames >= swapped.frames) return context;
+		logger.debug("task: inherited context frames evicted by the image byte budget; sending text");
+		const messages = context.messages.slice();
+		messages[index] = swapped.text;
 		return { ...context, messages };
 	}
 

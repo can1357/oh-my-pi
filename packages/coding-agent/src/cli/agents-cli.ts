@@ -65,6 +65,7 @@ function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
 	if (agent.output !== undefined) frontmatter.output = agent.output;
 	if (agent.blocking) frontmatter.blocking = true;
 	if (agent.structured) frontmatter.structured = true;
+	if (agent.inheritContext === false) frontmatter.inheritContext = false;
 
 	return frontmatter;
 }
