@@ -95,6 +95,21 @@ class "gemini" {
 			thinking-efforts "low" "medium" "high" "xhigh"
 		}
 	}
+	// Gemini 4 Hydrogen decodes past one 65,536-token segment only when the
+	// request's `maxOutputTokens` is larger (up to 1,048,576 minus input); the
+	// provider then follows Google's continuation tokens. models.dev reports the
+	// per-segment 65,536, which would end every long answer at the first segment.
+	// 262,144 is the output cap Google's own Antigravity client advertises for
+	// every Hydrogen SKU. Zen is left alone: its continuation passthrough is
+	// unverified.
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen#long-decodes
+	on "google" "google-vertex" {
+		models "gemini-4-hydrogen" {
+			limits-patch {
+				max-tokens 262144
+			}
+		}
+	}
 	// Gemini 4 Argon's and Carbon's introductory list price ($2/$10, $0.10
 	// cached) ends 2026-11-30; from 2026-12-01 Google bills $4/$20, $0.20
 	// cached, on the Gemini API and Vertex global endpoint alike. Cloud Billing

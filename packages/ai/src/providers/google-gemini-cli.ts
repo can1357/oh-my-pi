@@ -758,12 +758,24 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
 					: undefined;
 				const resumeSegment = async (continuationToken: string) => {
-					const resumed = await (options?.fetch ?? fetch)(streamUrl, {
+					// Same contract as the initial POST: a pre-response watchdog cleared
+					// once headers arrive, and no absolute fetch timeout that would cut
+					// off a long segment while it is still decoding.
+					const watchdog = armPreResponseTimeout(responseSignal, firstEventTimeoutMs);
+					// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
+					const init: RequestInit & { timeout: false } = {
 						method: "POST",
 						headers: requestHeaders,
 						body: JSON.stringify({ ...requestBody, request: { ...requestBody.request, continuationToken } }),
-						signal: responseSignal,
-					});
+						signal: watchdog.signal,
+						timeout: false,
+					};
+					let resumed: Response;
+					try {
+						resumed = await (options?.fetch ?? fetch)(streamUrl, init);
+					} finally {
+						watchdog.clear();
+					}
 					if (!resumed.ok || !resumed.body) {
 						const errorText = await resumed.text();
 						throw new AIError.GeminiCliApiError(
