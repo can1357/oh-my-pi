@@ -1443,10 +1443,6 @@ mod foreground {
 		focus: impl FnOnce() -> CoreResult<()>,
 		held: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		let layout = super::keyboard_layout(Some(background::hwnd(id)?));
-		for &key in keys {
-			background::virtual_key(key, layout)?;
-		}
 		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
 			focus()?;
 			with_keys(Some(target), keys, held)
@@ -1466,7 +1462,12 @@ mod foreground {
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
 		control::check()?;
-		let layout = super::keyboard_layout(target);
+		// Focus may move to an embedded control on a different UI thread.
+		// Resolve every key there before holding() can send any input.
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let receiver = target.unwrap_or_else(|| unsafe { GetForegroundWindow() });
+		let receiver = window::focused_descendant(receiver).unwrap_or(receiver);
+		let layout = super::keyboard_layout(Some(receiver));
 		let mut virtual_keys = Vec::with_capacity(keys.len().saturating_mul(2));
 		for &key in keys {
 			control::check()?;

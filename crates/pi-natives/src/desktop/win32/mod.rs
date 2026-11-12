@@ -237,7 +237,7 @@ mod tests {
 	use std::{
 		fmt::Write as _,
 		io::{BufRead, BufReader, Write},
-		process::{Child, Command, Stdio},
+		process::{Child, ChildStdout, Command, Stdio},
 		time::Duration,
 	};
 
@@ -279,13 +279,20 @@ mod tests {
 	/// messages until it is killed. Their text is their title, which
 	/// `windows()` needs to list them.
 	struct Windows {
-		user:   HWND,
-		target: HWND,
-		host:   Child,
+		user:        HWND,
+		target:      HWND,
+		host:        Child,
+		output:      BufReader<ChildStdout>,
+		editor:      HWND,
+		editor_host: Option<Child>,
 	}
 
 	impl Windows {
 		fn open() -> Self {
+			Self::open_with_layout(false)
+		}
+
+		fn open_with_layout(editor: bool) -> Self {
 			let mut host = Command::new(std::env::current_exe().unwrap())
 				.args([
 					"--ignored",
@@ -294,10 +301,12 @@ mod tests {
 					"--nocapture",
 				])
 				.env(HOST, "1")
+				.env("OMP_TAKEOVER_TEST_LAYOUT", if editor { "1" } else { "" })
 				.stdout(Stdio::piped())
 				.spawn()
 				.unwrap();
-			let line = BufReader::new(host.stdout.take().unwrap())
+			let mut output = BufReader::new(host.stdout.take().unwrap());
+			let line = (&mut output)
 				.lines()
 				.map_while(Result::ok)
 				.find(|line| line.starts_with("windows "))
@@ -307,7 +316,39 @@ mod tests {
 				.skip(1)
 				.map(|handle| handle.parse::<usize>().unwrap());
 			let (user, target) = (handles.next().unwrap(), handles.next().unwrap());
-			Self { user: user as HWND, target: target as HWND, host }
+			let (editor, editor_host) = if editor {
+				let mut child = Command::new(std::env::current_exe().unwrap())
+					.args([
+						"--ignored",
+						"--exact",
+						"desktop::win32::tests::takeover_test_windows",
+						"--nocapture",
+					])
+					.env(HOST, "1")
+					.env("OMP_TAKEOVER_TEST_LAYOUT", "1")
+					.env("OMP_TAKEOVER_EDITOR_PARENT", target.to_string())
+					.stdout(Stdio::piped())
+					.spawn()
+					.unwrap();
+				output = BufReader::new(child.stdout.take().unwrap());
+				let line = (&mut output)
+					.lines()
+					.map_while(Result::ok)
+					.find(|line| line.starts_with("windows "))
+					.unwrap();
+				let editor = line.split(' ').nth(3).unwrap().parse::<usize>().unwrap();
+				(editor, Some(child))
+			} else {
+				(0, None)
+			};
+			Self {
+				user: user as HWND,
+				target: target as HWND,
+				host,
+				output,
+				editor: editor as HWND,
+				editor_host,
+			}
 		}
 
 		fn text(window: HWND) -> String {
@@ -321,6 +362,10 @@ mod tests {
 
 	impl Drop for Windows {
 		fn drop(&mut self) {
+			if let Some(editor) = &mut self.editor_host {
+				let _ = editor.kill();
+				let _ = editor.wait();
+			}
 			let _ = self.host.kill();
 			let _ = self.host.wait();
 		}
@@ -389,6 +434,46 @@ mod tests {
 			}
 		}
 
+		if let Ok(parent) = std::env::var("OMP_TAKEOVER_EDITOR_PARENT") {
+			use windows_sys::Win32::UI::{
+				Input::KeyboardAndMouse::{ActivateKeyboardLayout, LoadKeyboardLayoutW},
+				WindowsAndMessaging::{RegisterClassW, WNDCLASSW, WS_CHILD},
+			};
+			let target = parent.parse::<usize>().unwrap() as HWND;
+			// SAFETY: the class and layout strings outlive their calls.
+			unsafe {
+				let class = wide("omp layout receiver");
+				let definition = WNDCLASSW {
+					lpfnWndProc: Some(layout_receiver),
+					lpszClassName: class.as_ptr(),
+					..Default::default()
+				};
+				assert_ne!(RegisterClassW(&definition), 0);
+				let layout = LoadKeyboardLayoutW(wide("00000407").as_ptr(), 0);
+				assert!(!layout.is_null());
+				assert!(!ActivateKeyboardLayout(layout, 0).is_null());
+				let editor = CreateWindowExW(
+					0,
+					class.as_ptr(),
+					wide("").as_ptr(),
+					WS_CHILD | WS_VISIBLE,
+					0,
+					0,
+					200,
+					100,
+					target,
+					std::ptr::null_mut(),
+					std::ptr::null_mut(),
+					std::ptr::null(),
+				);
+				assert!(!editor.is_null());
+				println!("windows 0 0 {}", editor as usize);
+				std::io::stdout().flush().unwrap();
+			}
+			pump();
+			return;
+		}
+
 		let (sender, receiver) = std::sync::mpsc::channel();
 		std::thread::spawn(move || {
 			let user = create(USER);
@@ -398,9 +483,109 @@ mod tests {
 		let user = receiver.recv().unwrap();
 		let target = create(TARGET);
 		assert!(user != 0 && !target.is_null());
+		if std::env::var("OMP_TAKEOVER_TEST_LAYOUT").as_deref() == Ok("1") {
+			use windows_sys::Win32::UI::{
+				Input::KeyboardAndMouse::{ActivateKeyboardLayout, LoadKeyboardLayoutW},
+				WindowsAndMessaging::{GWLP_WNDPROC, SetWindowLongPtrW},
+			};
+			// SAFETY: the layout string is NUL-terminated; this thread owns
+			// the frame and the callback lives until exit.
+			unsafe {
+				ActivateKeyboardLayout(LoadKeyboardLayoutW(wide("00000409").as_ptr(), 0), 0);
+				SetWindowLongPtrW(target, GWLP_WNDPROC, layout_receiver as *const () as isize);
+			}
+		}
 		println!("windows {user} {}", target as usize);
 		std::io::stdout().flush().unwrap();
 		pump();
+	}
+
+	unsafe extern "system" fn layout_receiver(
+		hwnd: HWND,
+		message: u32,
+		wparam: usize,
+		lparam: isize,
+	) -> isize {
+		use windows_sys::Win32::UI::{
+			Input::KeyboardAndMouse::{ActivateKeyboardLayout, LoadKeyboardLayoutW, SetFocus},
+			WindowsAndMessaging::{DefWindowProcW, WM_APP, WM_CHAR, WM_INPUTLANGCHANGE},
+		};
+		match message {
+			WM_APP => {
+				// SAFETY: this callback runs on the window's owning thread.
+				unsafe {
+					if wparam == 0 {
+						SetFocus(hwnd);
+					} else {
+						ActivateKeyboardLayout(LoadKeyboardLayoutW(wide("00000409").as_ptr(), 0), 0);
+					}
+				}
+				0
+			},
+			WM_INPUTLANGCHANGE => 0,
+			WM_CHAR => {
+				println!("received {wparam}");
+				std::io::stdout().flush().unwrap();
+				0
+			},
+			// SAFETY: all arguments came from the window procedure.
+			_ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+		}
+	}
+
+	#[test]
+	#[ignore = "moves focus in a signed-in Windows desktop session"]
+	fn takeover_keys_use_the_focused_child_threads_layout_after_focus() {
+		use windows_sys::Win32::UI::WindowsAndMessaging::WM_APP;
+
+		let mut windows = Windows::open_with_layout(true);
+		// SAFETY: both handles belong to the host, and layout queries retain no
+		// pointers.
+		unsafe {
+			use windows_sys::Win32::UI::{
+				Input::KeyboardAndMouse::GetKeyboardLayout,
+				WindowsAndMessaging::GetWindowThreadProcessId,
+			};
+			let frame =
+				GetKeyboardLayout(GetWindowThreadProcessId(windows.target, std::ptr::null_mut()));
+			let child =
+				GetKeyboardLayout(GetWindowThreadProcessId(windows.editor, std::ptr::null_mut()));
+			assert_eq!(frame as usize & 0xffff, 0x0409, "frame layout");
+			assert_eq!(child as usize & 0xffff, 0x0407, "child layout");
+		}
+		// SAFETY: the window belongs to the test host.
+		unsafe { SetForegroundWindow(windows.user) };
+		assert!(window::wait_for_foreground(windows.user, Duration::from_secs(2)).unwrap());
+		input::element_foreground(
+			&(windows.target as usize).to_string(),
+			&ElementInput::Chord(vec![KeyName::Char('?')]),
+			|| {
+				// SAFETY: the test callback focuses the child on its owning thread.
+				unsafe { SendMessageW(windows.editor, WM_APP, 0, 0) };
+				// SAFETY: the live frame's callback keeps its layout independent
+				// from the focused child.
+				unsafe { SendMessageW(windows.target, WM_APP, 1, 0) };
+				assert_eq!(window::focused_descendant(windows.target), Some(windows.editor));
+				// SAFETY: the frame remains live while its child has focus.
+				unsafe {
+					use windows_sys::Win32::UI::{
+						Input::KeyboardAndMouse::GetKeyboardLayout,
+						WindowsAndMessaging::GetWindowThreadProcessId,
+					};
+					let frame =
+						GetKeyboardLayout(GetWindowThreadProcessId(windows.target, std::ptr::null_mut()));
+					assert_eq!(frame as usize & 0xffff, 0x0409, "focused frame layout");
+					let child =
+						GetKeyboardLayout(GetWindowThreadProcessId(windows.editor, std::ptr::null_mut()));
+					assert_eq!(child as usize & 0xffff, 0x0407, "focused child layout");
+				}
+				Ok(())
+			},
+		)
+		.unwrap();
+		let received = (&mut windows.output).lines().next().unwrap().unwrap();
+		assert_eq!(received, format!("received {}", u32::from('?')));
+		assert_eq!(Windows::text(windows.user), USER);
 	}
 
 	#[test]
