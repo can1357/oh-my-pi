@@ -537,8 +537,6 @@ behavior {
 	role-defaults "judge" {
 		model "typesafe/jev-1.14.0"
 		model "openrouter/typesafe/jev-1.14"
-		model "google/gemini-decision-1"
-		model "openrouter/google/gemini-decision-1"
 		model "@tiny"
 		model "@smol"
 		model "@default"

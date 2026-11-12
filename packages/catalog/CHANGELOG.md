@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the Gemini Decision 1 judge (`google/gemini-decision-1`, `GEMINI_API_KEY`) to the default `judge` chain after TypeSafe Jev, directly and through OpenRouter ([#18949](https://github.com/can1357/oh-my-pi/issues/18949), [#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube)).
+- Added the Gemini Decision 1 judge model (`google/gemini-decision-1`, `GEMINI_API_KEY`); assign it to the `judge` role to use it ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
 
 ### Fixed

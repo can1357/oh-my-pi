@@ -4,7 +4,7 @@
 
 ### Added
 
-- The `judge` role now uses Gemini Decision 1 (`google/gemini-decision-1`) when a `GEMINI_API_KEY` is set and TypeSafe Jev is not available, and `models.yml` accepts the `google-decisions` API ([#18949](https://github.com/can1357/oh-my-pi/issues/18949), [#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube)).
+- Added the Gemini Decision 1 judge (`google/gemini-decision-1`) for the `judge` role, and `models.yml` accepts the `google-decisions` API ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 
 ### Fixed
 
