@@ -318,6 +318,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 	// Adding a utility is expected to update this list.
 	let expected = [
 		"ast-grep",
+		"awk",
 		"b2sum",
 		"base32",
 		"base64",
@@ -353,6 +354,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"jq",
 		"ln",
 		"ls",
+		"md5",
 		"md5sum",
 		"mkdir",
 		"mktemp",
@@ -377,11 +379,14 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"sha256sum",
 		"sha384sum",
 		"sha512sum",
+		"shasum",
 		"sort",
 		"sponge",
 		"stat",
+		"strings",
 		"tac",
 		"tail",
+		"tar",
 		"tee",
 		"touch",
 		"tr",
@@ -425,12 +430,12 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
 		// Some builtins are registered under the familiar command name but
 		// keep their implementation's own help text, exactly as the
-		// standalone versions did: `rg` is ripgrep, `jq` is jaq, `sg`
-		// is ast-grep (whose help names itself only through its usage
-		// line, here `sg`).
+		// standalone versions did: `rg` is ripgrep, `sg` is ast-grep
+		// (whose help names itself only through its usage line, here
+		// `sg`), and `jq` prints jq 1.8.2's help.
 		let expected = match name {
 			"rg" => "ripgrep",
-			"jq" => "jaq",
+			"jq" => "jq - commandline JSON processor [version 1.8.2]",
 			"sg" => "using AST pattern",
 			other => other,
 		};
@@ -481,6 +486,7 @@ async fn every_process_builtin_is_installed_and_dispatches() {
 	// of work that still exercises dispatch; `nohup` with no operand is a
 	// usage error, which is still the builtin answering.
 	let probes = [
+		("lsof", "lsof -v"),
 		("nohup", "nohup"),
 		("pgrep", "pgrep --help"),
 		("pidwait", "pidwait --help"),
@@ -507,7 +513,7 @@ async fn every_process_builtin_is_installed_and_dispatches() {
 	registered.sort_unstable();
 	assert_eq!(
 		registered,
-		["pgrep", "pidwait", "pkill", "ps", "sleep", "top"],
+		["lsof", "pgrep", "pidwait", "pkill", "ps", "sleep", "top"],
 		"the process builtin registry changed"
 	);
 	let mut offered: Vec<&'static str> = registered.iter().copied().chain(tools).collect();

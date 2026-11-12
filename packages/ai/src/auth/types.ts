@@ -406,9 +406,11 @@ export type AuthStorageOptions = {
  * `getApiKey` will hand it out. When `false`, `retryAtMs` (epoch ms) carries
  * the earliest moment any same-type sibling's temporary block expires —
  * callers should prefer waiting until then over the provider's (often
- * multi-hour) retry-after when it is sooner. `retryAtMs` is `undefined` when
- * no sibling credentials exist at all, or when the session has no tracked
- * credential to rotate away from.
+ * multi-hour) retry-after when it is sooner. Siblings with a live model-policy
+ * block for the requested model are skipped: they were refused that model, so
+ * their expiry is no recovery. `retryAtMs` is `undefined` when no sibling
+ * credentials exist at all, when every blocked sibling was refused the model,
+ * or when the session has no tracked credential to rotate away from.
  *
  * `blockedUntilMs` (epoch ms) is the just-blocked credential's own unblock
  * deadline — the later of the caller's retry-after and any exhausted window
@@ -604,8 +606,13 @@ export interface OAuthAccountIdentity {
 	orgName?: string;
 }
 
-/** Successful OAuth access or account-specific failure. */
-export type OAuthAccessResolution = ({ ok: true } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
+/**
+ * Successful OAuth access or account-specific failure. A success also carries
+ * `apiKey`: the bytes the provider's transport sends for this account, which
+ * differ from `accessToken` for providers whose API key is a structured
+ * credential (`api-key-format "structured"`) or a provider `getApiKey` hook.
+ */
+export type OAuthAccessResolution = ({ ok: true; apiKey: string } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
 
 /**
  * Read-only identity of one stored OAuth account, in stable storage order.
@@ -783,6 +790,8 @@ export type MarkUsageLimitOptions = {
 export type RotateCredentialOptions = {
 	error?: unknown;
 	modelId?: string;
+	/** Provider base URL for usage-report probes during a usage-limit block. */
+	baseUrl?: string;
 	apiKey?: string;
 	credentialId?: number;
 	signal?: AbortSignal;

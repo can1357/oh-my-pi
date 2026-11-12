@@ -9,6 +9,7 @@ import {
 	type Api,
 	type AssistantMessage,
 	Effort,
+	type FetchImpl,
 	type Message,
 	type Model,
 	type ModelUsageHealth,
@@ -1134,6 +1135,7 @@ describe("AgentSession retry fallback", () => {
 			releaseDisplay(turn) {
 				releases.push(turn);
 			},
+			async reset() {},
 			async close() {},
 		});
 		let asked: { turn: number | undefined; releases: number[] } | undefined;
@@ -7935,6 +7937,205 @@ describe("AgentSession retry fallback", () => {
 			expect(session.configWarnings).toContain(
 				"Fallback chain for role 'default' references unknown model: github-copilot/no-such-model",
 			);
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			auth.close();
+		}
+	});
+
+	it("defers unknown-model warnings for an authenticated special provider on a cold cache and resolves or warns once after online discovery settles", async () => {
+		using dir = TempDir.createSync("@omp-fallback-codex-online-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			auth.keys.setRuntime("openai-codex", "codex-startup-token");
+			const discoveredId = "codex-discovery-only-model";
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (url.startsWith("https://chatgpt.com/backend-api") && url.includes("/models")) {
+					return Response.json({
+						models: [
+							{
+								slug: discoveredId,
+								display_name: "Codex Discovery Only",
+								context_window: 500_000,
+								supported_in_api: true,
+								input_modalities: ["text", "image"],
+							},
+						],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"), { fetch: fetchMock });
+			expect(registry.find("openai-codex", discoveredId)).toBeUndefined();
+			expect(registry.getProviderDiscoveryState("openai-codex")?.status).toBe("idle");
+			expect(registry.isProviderDiscoveryPending("openai-codex")).toBe(true);
+
+			const resolvedSelector = `openai-codex/${discoveredId}:xhigh`;
+			const unresolvedSelector = "openai-codex/no-such-codex-model";
+			const resolvedWarning = `Fallback chain for role 'default' references unknown model: ${resolvedSelector}`;
+			const unresolvedWarning = `Fallback chain for role 'default' references unknown model: ${unresolvedSelector}`;
+			session = createChainSession(registry, [resolvedSelector, unresolvedSelector]);
+			const { promise: warningsChanged, resolve } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "config_warnings_changed") resolve();
+			});
+
+			registry.refreshInBackground("online-if-uncached");
+			session.validateRetryFallbackChains();
+			expect(session.configWarnings).not.toContain(resolvedWarning);
+			expect(session.configWarnings).not.toContain(unresolvedWarning);
+
+			await Promise.race([
+				warningsChanged,
+				scheduler.wait(5_000).then(() => {
+					throw new Error("config_warnings_changed was not emitted after special-provider discovery settled");
+				}),
+			]);
+
+			expect(registry.find("openai-codex", discoveredId)).toBeDefined();
+			expect(registry.getProviderDiscoveryState("openai-codex")?.status).toBe("ok");
+			expect(session.configWarnings).not.toContain(resolvedWarning);
+			expect(session.configWarnings.filter(message => message === unresolvedWarning)).toHaveLength(1);
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			auth.close();
+		}
+	});
+
+	it("does not overwrite completed special-provider discovery status during lazy composition", async () => {
+		using dir = TempDir.createSync("@omp-fallback-codex-lazy-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			const baseCodex = getBundledModel("openai-codex", "gpt-6.1-sol");
+			if (!baseCodex) {
+				throw new Error("Expected bundled openai-codex gpt-6.1-sol model to exist");
+			}
+			const cacheDbPath = path.join(dir.path(), "models.db");
+			writeModelCache(resolveModelCacheProviderId("openai-codex"), Date.now(), [baseCodex], true, "", cacheDbPath);
+			auth.keys.setRuntime("openai-codex", "codex-startup-token");
+
+			const discoveredId = "codex-lazy-discovery-model";
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (url.startsWith("https://chatgpt.com/backend-api") && url.includes("/models")) {
+					return Response.json({
+						models: [
+							{
+								slug: discoveredId,
+								display_name: "Codex Lazy Discovery",
+								context_window: 500_000,
+								supported_in_api: true,
+								input_modalities: ["text"],
+							},
+						],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			// Construct without calling find("openai-codex", ...) first so startup cache stays lazy.
+			const registry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"), { fetch: fetchMock });
+			await registry.refresh("online");
+
+			expect(registry.getProviderDiscoveryState("openai-codex")?.status).toBe("ok");
+			expect(registry.find("openai-codex", discoveredId)).toBeDefined();
+			expect(registry.getProviderDiscoveryState("openai-codex")?.status).toBe("ok");
+		} finally {
+			auth.close();
+		}
+	});
+
+	it("does not defer unknown-model warnings for unauthenticated or disabled special model-manager providers", async () => {
+		using dir = TempDir.createSync("@omp-fallback-codex-noauth-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		const previousCodexToken = process.env.OPENAI_CODEX_OAUTH_TOKEN;
+		delete process.env.OPENAI_CODEX_OAUTH_TOKEN;
+		try {
+			const unauthedRegistry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"));
+			expect(unauthedRegistry.find("openai-codex", "codex-discovery-only-model")).toBeUndefined();
+			expect(unauthedRegistry.isProviderDiscoveryPending("openai-codex")).toBe(false);
+
+			const selector = "openai-codex/codex-discovery-only-model:xhigh";
+			const warning = `Fallback chain for role 'default' references unknown model: ${selector}`;
+			session = createChainSession(unauthedRegistry, [selector]);
+			unauthedRegistry.refreshInBackground("offline");
+			session.validateRetryFallbackChains();
+			expect(session.configWarnings).toContain(warning);
+			await unauthedRegistry.awaitInitialBackgroundRefresh();
+
+			auth.keys.setRuntime("openai-codex", "codex-startup-token");
+			const disabledRegistry = new ModelRegistry(auth, path.join(dir.path(), "disabled-models.yml"), {
+				settings: Settings.isolated({ disabledProviders: ["openai-codex"] }),
+			});
+			// Force standard-cache materialization before checking pending state.
+			disabledRegistry.getAll();
+			expect(disabledRegistry.getAvailable().some(model => model.provider === "openai-codex")).toBe(false);
+			expect(disabledRegistry.find("openai-codex", "codex-discovery-only-model")).toBeUndefined();
+			expect(disabledRegistry.isProviderDiscoveryPending("openai-codex")).toBe(false);
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			if (previousCodexToken === undefined) {
+				delete process.env.OPENAI_CODEX_OAUTH_TOKEN;
+			} else {
+				process.env.OPENAI_CODEX_OAUTH_TOKEN = previousCodexToken;
+			}
+			auth.close();
+		}
+	});
+
+	it("defers unknown-model warnings for cached or empty-cached special providers during refresh and warns when no refresh runs", async () => {
+		using dir = TempDir.createSync("@omp-fallback-codex-cached-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			const baseCodex = getBundledModel("openai-codex", "gpt-6.1-sol");
+			if (!baseCodex) {
+				throw new Error("Expected bundled openai-codex gpt-6.1-sol model to exist");
+			}
+			const discoveredCodex = buildModel({
+				...(baseCodex as ModelSpec<"openai-codex-responses">),
+				id: "codex-cached-later-model",
+				name: "Codex Cached Later",
+			});
+			const cacheDbPath = path.join(dir.path(), "models.db");
+			const cacheProviderId = resolveModelCacheProviderId("openai-codex");
+			auth.keys.setRuntime("openai-codex", "codex-startup-token");
+
+			// Fresh authoritative row with zero cached models must still defer while refreshInBackground is active,
+			// and warn immediately for embedders without a background refresh.
+			writeModelCache(cacheProviderId, Date.now(), [], true, "", cacheDbPath);
+			const emptyCacheRegistry = new ModelRegistry(auth, path.join(dir.path(), "empty-models.yml"));
+			expect(emptyCacheRegistry.find("openai-codex", discoveredCodex.id)).toBeUndefined();
+			expect(emptyCacheRegistry.getProviderDiscoveryState("openai-codex")?.status).toBe("unavailable");
+			expect(emptyCacheRegistry.isProviderDiscoveryPending("openai-codex")).toBe(false);
+
+			const selector = `openai-codex/${discoveredCodex.id}:xhigh`;
+			const warning = `Fallback chain for role 'default' references unknown model: ${selector}`;
+			const embedderSession = createChainSession(emptyCacheRegistry, [selector], false);
+			try {
+				expect(embedderSession.configWarnings).toContain(warning);
+			} finally {
+				await embedderSession.dispose();
+			}
+
+			writeModelCache(cacheProviderId, Date.now(), [baseCodex], true, "", cacheDbPath);
+			const registry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"));
+			expect(registry.find("openai-codex", discoveredCodex.id)).toBeUndefined();
+			expect(registry.getProviderDiscoveryState("openai-codex")?.status).toBe("cached");
+
+			session = createChainSession(registry, [selector]);
+			writeModelCache(cacheProviderId, Date.now(), [baseCodex, discoveredCodex], true, "", cacheDbPath);
+			registry.refreshInBackground("offline");
+			session.validateRetryFallbackChains();
+			expect(session.configWarnings).not.toContain(warning);
+
+			await registry.awaitInitialBackgroundRefresh();
+			await scheduler.wait(0);
+
+			expect(registry.find("openai-codex", discoveredCodex.id)).toBeDefined();
+			expect(session.configWarnings).not.toContain(warning);
 		} finally {
 			await session?.dispose();
 			session = undefined;

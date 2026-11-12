@@ -531,7 +531,8 @@ describe("model thinking derivation", () => {
 		});
 		expect(mapEffortToGoogleThinkingLevel(Effort.Low)).toBe("LOW");
 		expect(mapEffortToGoogleThinkingLevel(Effort.High)).toBe("HIGH");
-		expect(mapEffortToGoogleThinkingLevel(Effort.XHigh)).toBe("HIGH");
+		// The ladder, not the wire mapper, keeps `xhigh` off models that reject it.
+		expect(() => requireSupportedEffort(model, Effort.XHigh)).toThrow(/not supported/);
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 
@@ -617,6 +618,20 @@ describe("model thinking derivation", () => {
 					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, gemini4)).toBe("MEDIUM");
 				}
 			}
+		}
+
+		// Command Code's model list carries no reasoning metadata and skips
+		// cross-provider backfill, so Gemini 4 relies on its KDL effort list.
+		for (const id of ["google/gemini-4-argon", "google/gemini-4-carbon"]) {
+			const commandCode = createModel({
+				id,
+				api: "openai-completions",
+				provider: "commandcode",
+				baseUrl: "https://api.commandcode.ai/provider/v1",
+				reasoning: false,
+			});
+			expect(commandCode.reasoning).toBe(true);
+			expect(getSupportedEfforts(commandCode)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 		}
 
 		// The Argon ladder must not leak onto other Gemini 4 lines. No Gemini 4 Pro

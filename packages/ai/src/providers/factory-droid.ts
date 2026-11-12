@@ -60,8 +60,9 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  *   factory-droid` (WorkOS device code, refreshed through the auth store).
  *   Factory API keys are control-plane only and get 403 here.
  * - Identity headers: `factory-cli/<version>` user agent, `X-Client-Version`,
- *   `X-Factory-Client: cli`, `X-Factory-Org-Id`, and v4-shaped
- *   `x-session-id` / `x-assistant-message-id` used for usage attribution. No
+ *   `X-Factory-Client: cli`, `X-Factory-Request-Surface: cli_tui`,
+ *   `X-Factory-Org-Id`, and v4-shaped `x-session-id` /
+ *   `x-assistant-message-id` used for usage attribution. No
  *   SDK telemetry (`X-Stainless-*`), `x-api-key` or Claude Code app headers.
  * - System identity: one Droid identity sentence precedes the caller's system
  *   prompt without changing its contents. A historical plugin-without-prefix

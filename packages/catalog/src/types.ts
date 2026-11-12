@@ -53,7 +53,10 @@ export const RUNNER_APIS = [
 	"typesafe",
 	"openrouter-decisions",
 	"openai-decisions",
+	"google-decisions",
 	"workers-ai-systemone",
+	"liquid-systemone",
+	"nace-systemone",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
@@ -69,7 +72,10 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	typesafe: "judge",
 	"openrouter-decisions": "judge",
 	"openai-decisions": "judge",
+	"google-decisions": "judge",
 	"workers-ai-systemone": "judge",
+	"liquid-systemone": "judge",
+	"nace-systemone": "judge",
 	"openai-images": "image",
 	"openrouter-images": "image",
 	"xai-tts": "tts",
@@ -1297,11 +1303,19 @@ export interface DevinCompat {
 	supportsParallelToolCalls?: boolean;
 	/** See {@link BedrockCompat.supportsSamplingParams}. */
 	supportsSamplingParams?: boolean;
+	/**
+	 * Smallest explicit `temperature` this wire accepts. Cascade rejects
+	 * `temperature: 0` with an opaque `invalid_argument` while any positive
+	 * value works, so callers that pin 0 for deterministic decoding (session
+	 * titles, memory extraction) would fail and silently fall back to another
+	 * model. Unset sends the caller's value through unchanged.
+	 */
+	temperatureFloor?: number;
 }
 
 /** Fully-resolved devin-agent compat view. */
-export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingParams">> &
-	Pick<DevinCompat, "supportsSamplingParams">;
+export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingParams" | "temperatureFloor">> &
+	Pick<DevinCompat, "supportsSamplingParams" | "temperatureFloor">;
 /**
  * Compatibility settings for the Google API family (google-generative-ai,
  * google-vertex, google-gemini-cli). Class-driven defaults come from the

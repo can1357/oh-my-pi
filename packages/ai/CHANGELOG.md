@@ -5,6 +5,50 @@
 ### Fixed
 
 - Fixed Claude accounts staying blocked after recovery when `/usage` reports only one shared usage window ([#19090](https://github.com/can1357/oh-my-pi/pull/19090) by [@jeffscottward](https://github.com/jeffscottward))
+## [18.20.0] - 2026-11-12
+
+### Added
+
+- Added the `google-decisions` judgment API for Google's Gemini Decisions API (`gemini-decision-1`), with text and image input ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
+- Added `apiKey` to successful `OAuthAccessResolution` results from `oauth.accessById()` and `oauth.accessAll()`: the key normal requests send for that account, which differs from `accessToken` for providers with structured credentials ([#19030](https://github.com/can1357/oh-my-pi/pull/19030) by [@Xytronix](https://github.com/Xytronix))
+- Added an optional `exemptionAlias` to `ToolCallLoopGuard` so transport calls can match the dispatched tool's name in `exemptTools` ([#18860](https://github.com/can1357/oh-my-pi/issues/18860))
+- Added the `liquid-systemone` judgment API for Liquid AI's decision models, which rejects image sets over Liquid's 10,000 32×32-patch request cap before sending ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+- Added the `nace-systemone` judgment API for Nace's Drex decision models, which sends images as Drex's top-level `images` data URLs and replaces the base64 image, audio, video and PDF data URLs that Drex rejects in judged text with a description ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
+
+### Fixed
+
+- Fixed a spent Codex account retrying every minute for days when its siblings were only refused the requested model: their short model-policy blocks no longer count as a sibling becoming available, so the usage-limit wait follows the spent account's reset and model fallback can take over ([#17637](https://github.com/can1357/oh-my-pi/issues/17637), [#19019](https://github.com/can1357/oh-my-pi/pull/19019) by [@wolfiesch](https://github.com/wolfiesch))
+- Auth-gateway client tokens (`serve --clients`) can no longer set who a request is from, who pays, or how the gateway reaches the provider: chat routes drop their request headers, `userProfileId`, `initiatorOverride`, `metadata`, `serviceTier`, `cacheRetention` and the other gateway-only options, while the gateway token keeps them ([#19067](https://github.com/can1357/oh-my-pi/pull/19067) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the auth gateway's `/v1/pi/stream` dropping `taskBudget`, `include` and `anthropicPrefixMismatchBehavior`, which its other chat routes accept ([#19067](https://github.com/can1357/oh-my-pi/pull/19067) by [@alphastorm](https://github.com/alphastorm))
+- Fixed requests to Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) failing because they were sent in Anthropic's request format ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added Gemini's `xhigh` thinking level, sent on the Gemini API and Vertex for models whose ladder exposes it (Gemini 4 Hydrogen).
+- Fixed omp failing to start with `ENOTDIR: not a directory, stat '~/.aws/credentials'` when `~/.aws` is a file instead of a directory ([#19083](https://github.com/can1357/oh-my-pi/pull/19083) by [@iamshatter](https://github.com/iamshatter))
+
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added the `liquid-systemone` judgment API for Liquid AI decision models, including validation that rejects image sets exceeding Liquid’s 10,000 32×32-patch request limit before submission.
+
+### Fixed
+
+- Fixed Gemini CLI and Antigravity responses losing or misordering thought signatures and reply text, including responses that follow tool calls.
+- Fixed Gemini CLI and Antigravity merging reply text around a thought signature, dropping signatures at the start of a reply or after a tool call, and placing a thought ahead of reply text that streamed before it ([#18942](https://github.com/can1357/oh-my-pi/pull/18942) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed Google Antigravity judging Gemini models by quota buckets they do not consume: Gemini 3.x requests ignore the Gemini 4 Argon weekly bucket, and Argon requests ignore `gemini-weekly`, so an exhausted or low bucket no longer blocks, reserves, or caps an account for the other models ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
+
+## [18.18.9] - 2026-11-11
+
+- Fixed Anthropic OAuth turns ending on a model-specific `404 not_found_error` instead of switching to another logged-in Anthropic account that serves the model while keeping the denied account available for other models ([#18799](https://github.com/can1357/oh-my-pi/issues/18799), [#18807](https://github.com/can1357/oh-my-pi/pull/18807) by [@alphastorm](https://github.com/alphastorm))
+
+### Added
+
+- Added `SOFYA_API_KEY` as the env key for the `sofya` provider ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
+
+### Fixed
+
+- Devin requests no longer send `temperature: 0`: the catalog's `temperature-floor` raises it to `0.0001`, so session titles and Mnemopi memory extraction work on Devin instead of failing with Cascade's opaque `invalid_argument` and silently falling back to another model ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
+- Auth-gateway `/v1/messages` now answers `400 invalid_request_error` for `output_config.format` (and the pre-GA `output_format`) instead of returning 200 with output the schema never constrained, so structured-output clients fall back to prompt-side schemas ([#18842](https://github.com/can1357/oh-my-pi/issues/18842))
+- Auth-gateway requests denied only the requested model (Codex ChatGPT account, Cursor plan) now switch to another account and keep the denied one usable for other models, instead of marking a working credential suspect; gateway rotation now follows the same rules as local sessions, including waiting out a sibling's short usage block
 
 ## [18.18.8] - 2026-11-11
 
@@ -2177,76 +2221,4 @@
 - Fixed Codex OAuth credential selection to re-check blocked accounts during ranking and clear stale usage-limit blocks once live usage indicates recovery.
 - Fixed sequential-cutoff reasoning summaries duplicating section headers across Codex reasoning items by tracking the cumulative summary response-globally, so replayed sections and replay-only items no longer re-emit text earlier thinking blocks already streamed.
 
-## [16.3.15] - 2026-07-09
-
-### Breaking Changes
-
-- Renamed `OpenAIResponsesCacheOptions`, `normalizeOpenAIResponsesPromptCacheKey`, and `getOpenAIResponsesPromptCacheKey` to the endpoint-neutral `OpenAICacheOptions`, `normalizeOpenAIPromptCacheKey`, and `getOpenAIPromptCacheKey`.
-
-### Added
-
-- Added automatic prompt-cache affinity header injection for OpenAI-family chat completions
-- Added support for explicit prompt-cache affinity headers in OpenAI-family chat completions
-- Added OpenAI pro reasoning mode support: models carrying the catalog `reasoningMode: "pro"` marker (GPT-5.6 Pro aliases) send `reasoning: { mode: "pro" }` on OpenAI Responses and Codex Responses requests, alongside the configured effort. The Codex request body now honors `requestModelId` so catalog aliases request the base upstream model id.
-
-### Changed
-
-- Updated xAI OAuth to use a dedicated device-code flow instead of redirect/loopback server
-
-### Fixed
-
-- Improved account routing for GPT-5.6 models to better respect paid tier requirements
-- Refined account selection logic to correctly identify plan types from account metadata
-- Fixed OpenAI Codex multi-account routing for GPT-5.6: Sol and Luna requests now prefer Plus-or-higher accounts while Terra remains available to Free/Go accounts; local pro-mode aliases inherit their base model's Codex plan eligibility.
-- Fixed xAI Grok OAuth login to use xAI's device authorization flow: `/login` now opens the verification URL, displays the device code, and polls for approval instead of asking for a pasted redirect or linking to Hermes Agent documentation.
-
-## [16.3.14] - 2026-07-09
-
-### Changed
-
-- Updated Codex reasoning effort mapping to support shifted wire tiers for newer models
-
-### Fixed
-
-- Fixed the Codex Responses request transformer bypassing catalog/compat reasoning effort maps: the clamped user effort is now remapped to the provider wire tier (GPT-5.6's shifted five-tier scale sends `max` for user `xhigh` and `xhigh` for `high`), failing loudly if a map produces a value outside the Codex wire vocabulary.
-
-## [16.3.13] - 2026-07-09
-
-### Changed
-
-- Changed the xAI Grok OAuth (`xai-oauth`) provider to use manual code-paste login by default. `/login` now accepts a pasted authorization code or full `http://127.0.0.1:56121/callback?code=...` redirect URL without starting a local callback listener ([#3277](https://github.com/can1357/oh-my-pi/pull/3277) by [@Jaaneek](https://github.com/Jaaneek)).
-- Renamed the xAI Grok OAuth provider in login and credential prompts to "xAI Grok OAuth (SuperGrok or X Premium+)" ([#3277](https://github.com/can1357/oh-my-pi/pull/3277) by [@Jaaneek](https://github.com/Jaaneek)).
-
-### Fixed
-
-- Fixed the generic lazy-stream idle watchdog aborting healthy `cursor-agent` streams with "Provider stream stalled while waiting for the next event" while a Cursor exec-channel local tool (shell/read/grep/write/MCP/…) legitimately ran longer than the idle budget. Provider streams now advertise consumer-side local work in flight and the watchdog slides its deadline instead of aborting; genuinely silent streams still time out. ([#4593](https://github.com/can1357/oh-my-pi/issues/4593))
-- Fixed OpenAI Codex/Responses reasoning streams so streamed thinking content is preserved when the final `output_item.done` reconstructs to an empty summary ([#4918](https://github.com/can1357/oh-my-pi/issues/4918)).
-- Fixed Anthropic streams hanging forever when generation wedges mid-stream (notably long `write` tool calls on Opus 4.8 high/xhigh) while the server keeps sending `ping` keepalives: pings now extend the idle watchdog only within a bounded window (3x the idle timeout) since the last real stream event, so a stalled tool-call stream times out and recovers instead of hanging with no retry path ([#4900](https://github.com/can1357/oh-my-pi/issues/4900)).
-
-## [16.3.12] - 2026-07-08
-
-### Added
-
-- Added `AssistantMessage.toolCallAbortMessages` for per-tool placeholder labels on aborted assistant turns ([#2783](https://github.com/can1357/oh-my-pi/issues/2783)).
-
-### Fixed
-
-- Fixed Anthropic replay 400s (`tool_use ids were found without tool_result blocks immediately after`) when a persisted assistant turn carries content after a completed tool call — such as a mid-turn `server-side-fallback` handoff (fallback block plus continued text/tool calls after the primary model's `tool_use`) or trailing text from cross-provider replays — by stable-partitioning assistant content so all `tool_use` blocks trail the non-`tool_use` chain. ([#4781](https://github.com/can1357/oh-my-pi/issues/4781), [#544](https://github.com/can1357/oh-my-pi/issues/544))
-- Fixed access-token-only OAuth credentials attempting token refresh with an empty refresh token after expiry.
-- Fixed gateway usage-limit retries falling through to cross-provider model fallback before trying a sibling credential from the same provider.
-- Fixed Codex usage-limit rotation treating Plus and K-12 accounts as separate quota groups for shared 5-hour/7-day windows.
-- Fixed OpenAI Responses streams that end with `response.done` being misclassified as premature stream closures.
-- Fixed OpenCode Go `/login` credentials being shadowed by an existing `OPENCODE_API_KEY` env fallback after switching accounts. ([#4688](https://github.com/can1357/oh-my-pi/issues/4688))
-- Fixed OpenAI Codex WebSocket continuations to treat proxy stale-anchor codes such as `codex_previous_response_stale` as an expired `previous_response_id` chain — same recovery class as the OpenAI-standard `previous_response_not_found` — so the turn is retried with full context instead of surfacing the error to the user ([#4624](https://github.com/can1357/oh-my-pi/issues/4624)).
-- Fixed Azure Foundry Anthropic utility requests to omit the structured-output beta whenever strict tools are disabled, preventing `structured_outputs not supported in your workspace` failures for Sonnet 5 compaction ([#4679](https://github.com/can1357/oh-my-pi/issues/4679)).
-- Fixed OAuth `launchUrl` advertisement for flows whose redirect never returns to the local callback server: custom-scheme redirects (e.g. GitLab Duo's `vscode://` URI, which `new URL` parses without complaint) and fixed non-loopback hosts no longer receive a `http://localhost:<port>/launch` copy target that misrepresents the callback endpoint and resolves nowhere for remote users.
-- Codex load balancing: clear stale persisted and in-memory usage-limit blocks for an `openai-codex` account when a fresh live usage report shows it is allowed and below all limits, including broker-backed gateway snapshots, so traffic returns to recovered accounts instead of funneling to one sibling.
-
-## [16.3.11] - 2026-07-06
-
-### Fixed
-
-- Fixed `openai-codex-responses` fresh plan execution requests that contained only system/developer guidance by mirroring the final instruction as user input so Codex accepts the first turn. ([#4714](https://github.com/can1357/oh-my-pi/issues/4714))
-- Fixed Codex WebSocket compact/resume delta diagnostics to record request shape and raw-vs-displayed usage buckets, so persistent server-reported uncached suffixes without `orchestration_*` fields are visible in debug stats. ([#4707](https://github.com/can1357/oh-my-pi/issues/4707))
-
-Older entries are archived in [packages/ai/CHANGELOG.md@0f88ff08d2bb](https://github.com/can1357/oh-my-pi/blob/0f88ff08d2bbdd1d3eeb39dd15557986a27f75a5/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@15b63dda377c](https://github.com/can1357/oh-my-pi/blob/15b63dda377c99cead82ce07d5aac567f2b413b3/packages/ai/CHANGELOG.md).

@@ -3029,6 +3029,12 @@ export class Markdown implements Component {
 		for (let i = 0; i < index; i++) start += tokens[i]!.raw.length;
 		const key = tableLockKey(start, token.raw);
 		if (key === undefined) return;
+		// Widths locked before a body row ends would come from the header
+		// alone, and every later row would wrap inside them. Such a lock
+		// settles no rows either (see below), so offer one only once the first
+		// body row has ended.
+		const body = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		if (!token.raw.includes("\n", body)) return;
 		this.#openTableKey = key;
 		if (!this.tableLocks?.has(key)) return;
 		// Like a list, the table must start at the settled boundary: a
@@ -3049,7 +3055,7 @@ export class Markdown implements Component {
 		// the settled rows also stop in front of the first row holding one.
 		const table = token as TableToken;
 		if (table.header.some(cell => REFERENCE_LABEL_RE.test(labelSource(cell.tokens ?? [])))) return;
-		let finished = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		let finished = body;
 		for (const row of table.rows) {
 			const next = token.raw.indexOf("\n", finished) + 1;
 			if (next === 0) break;
