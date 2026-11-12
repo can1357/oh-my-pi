@@ -2148,11 +2148,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const archiveSubPath = located
 					? { path: archivePath.archiveSubPath, sel: located.sel }
 					: splitPathAndSel(archivePath.archiveSubPath);
-				const archiveParsed = parseSel(archiveSubPath.sel);
 				return readArchive(
 					this.session,
 					located?.url ?? readPath,
-					archiveParsed,
+					archiveSubPath.sel,
 					{ ...archivePath, archiveSubPath: archiveSubPath.path },
 					options => this.#readPdfPageScreenshot(options),
 					signal,
