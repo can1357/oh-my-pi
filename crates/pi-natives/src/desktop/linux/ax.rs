@@ -30,6 +30,8 @@ mod menus;
 /// the action inside its D-Bus dispatch, so an action that opens a modal
 /// dialog leaves the app answering no request until that dialog closes.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Most windows [`AtSpiAx::windows`] lists.
+const MAX_WINDOWS: usize = 48;
 
 pub struct AtSpiAx {
 	rt:            Runtime,
@@ -313,29 +315,28 @@ impl AtSpiAx {
 
 	pub(crate) fn windows(&self) -> CoreResult<AtSpiWindows> {
 		self.run(async {
-			let mut listed = AtSpiWindows { windows: Vec::new(), unanswered: Vec::new() };
-			for app in Self::apps(&self.connection)
+			let apps = Self::apps(&self.connection)
 				.await
-				.map_err(DesktopError::ax_failed)?
-			{
-				// The windows of an application that does not answer are left
-				// out rather than holding back every other application's.
-				let limit = 48 - listed.windows.len();
-				let windows = match self.app_windows(&app, limit).await {
-					Ok(windows) => windows,
+				.map_err(DesktopError::ax_failed)?;
+			// Every application is asked at once, so ones that do not answer
+			// cost the listing one reply limit together, not one each, and are
+			// left out rather than holding back every other application's.
+			let answers =
+				futures::future::join_all(apps.iter().map(|app| self.app_windows(app, MAX_WINDOWS)))
+					.await;
+			let mut listed = AtSpiWindows { windows: Vec::new(), unanswered: Vec::new() };
+			for (app, answer) in apps.iter().zip(answers) {
+				match answer {
+					Ok(windows) => listed.windows.extend(windows),
 					Err(error) if error.code == ErrorCode::Timeout => {
 						listed
 							.unanswered
 							.extend(app.name().map(ToString::to_string));
-						continue;
 					},
 					Err(error) => return Err(error),
-				};
-				listed.windows.extend(windows);
-				if listed.windows.len() == 48 {
-					break;
 				}
 			}
+			listed.windows.truncate(MAX_WINDOWS);
 			Ok(listed)
 		})?
 	}
@@ -3041,6 +3042,33 @@ mod tests {
 				panic!("the answering application's focus must be found");
 			};
 			assert_eq!(focused.path_as_str(), "/editor/frame");
+		}
+
+		#[test]
+		fn applications_that_never_answer_cost_the_listing_one_reply_limit_together() {
+			let (ax, _server) = backend(HUNG_CALL_TIMEOUT, |server| {
+				server
+					.serve_at("/org/a11y/atspi/accessible/root", Element {
+						delay:    Duration::ZERO,
+						name:     "main",
+						role:     Role::DesktopFrame,
+						focused:  false,
+						children: (0..3)
+							.map(|index| (format!(":1.{}", 8 + index), path(&format!("/silent{index}"))))
+							.collect(),
+					})
+					.unwrap()
+					.serve_at("/silent0", Silent { cancel: None })
+					.unwrap()
+					.serve_at("/silent1", Silent { cancel: None })
+					.unwrap()
+					.serve_at("/silent2", Silent { cancel: None })
+					.unwrap()
+			});
+			let started = std::time::Instant::now();
+			let listed = ax.windows().unwrap();
+			assert_eq!(listed.unanswered, [":1.8", ":1.9", ":1.10"]);
+			assert!(started.elapsed() < HUNG_CALL_TIMEOUT * 2, "{:?}", started.elapsed());
 		}
 
 		#[test]
