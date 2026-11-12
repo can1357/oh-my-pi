@@ -7,7 +7,11 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import { nativeWorkspace, runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import {
+	externalCommandWorkspace,
+	nativeWorkspace,
+	runIsolatedSubprocess,
+} from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
@@ -128,6 +132,50 @@ describe("isolated agent release", () => {
 
 	it("commits follow-up work made after the run-end branch", async () => {
 		expect(await commitsAcrossRelease("ReleaseChanged", patch, `${patch}+follow-up\n`)).toBe(2);
+	});
+
+	it("routes isolationCommand spawns through ensureExternalIsolation and skips the PAL", async () => {
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-ext-"));
+		tempRoots.push(artifactsDir);
+		const externalEnsure = vi.spyOn(worktreeModule, "ensureExternalIsolation").mockResolvedValue({
+			mergedDir: "/repo/ext-wt",
+			external: true,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		const palEnsure = vi.spyOn(worktreeModule, "ensureIsolation");
+		vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue({
+			root: { repoRoot: "/repo", headCommit: "base", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
+			nested: [],
+		});
+		vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+		vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: "", nestedPatches: [] });
+		vi.spyOn(worktreeModule, "commitToBranch").mockResolvedValue({
+			branchName: "omp/task/ExternalDispatch",
+			baseSha: "base",
+			rootPatch: "",
+			nestedPatches: [],
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result("ExternalDispatch"));
+
+		await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: "/repo",
+				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
+				task: "Do work",
+				index: 0,
+				id: "ExternalDispatch",
+			},
+			context: { repoRoot: "/repo" },
+			openWorkspace: externalCommandWorkspace("make-wt"),
+			agentId: "ExternalDispatch",
+			mergeMode: "branch",
+			artifactsDir,
+			buildFailureResult: error => ({ ...result("ExternalDispatch"), exitCode: 1, error: String(error) }),
+		});
+
+		expect(externalEnsure).toHaveBeenCalledWith("/repo", "ExternalDispatch", "make-wt");
+		expect(palEnsure).not.toHaveBeenCalled();
 	});
 
 	it("lets held peer messages wake the agent only after the run-end branch is committed", async () => {
