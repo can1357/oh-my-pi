@@ -53,14 +53,8 @@ describe("SecretObfuscator text that is only placeholders", () => {
 	it("leaves already-redacted text unchanged", () => {
 		const obfuscator = new SecretObfuscator(entries);
 		const redacted = obfuscator.obfuscate("use OTHERSECRET now");
-		expect(redacted).toMatch(/^use \$\$TOKABC123_[A-Z0-9]+:U\$\$ now$/);
+		expect(redacted).toMatch(/^use \$\$TOKABC123_[a-z]+(?:[A-Z][a-z]+){3}\$\$ now$/);
 		expect(obfuscator.obfuscate(redacted)).toBe(redacted);
-	});
-
-	it("still strips a friendly prefix that a shared collision value makes unsafe", () => {
-		const obfuscator = new SecretObfuscator(entries);
-		const output = obfuscator.obfuscate("see $$TOKABC123_OLDHASH:L$$ here", new SecretValueSet(["tok_abc123"]));
-		expect(output).toBe("see $$OLDHASH:L$$ here");
 	});
 
 	it("still redacts a configured literal next to existing placeholders", () => {

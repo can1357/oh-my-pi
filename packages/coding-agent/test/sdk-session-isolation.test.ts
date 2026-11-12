@@ -521,13 +521,16 @@ describe("createAgentSession session storage isolation", () => {
 					enableLsp: false,
 				});
 				try {
-					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(
-						"token sdk-secret-token-123456",
-					);
+					const displayed = () =>
+						getAssistantText(
+							session.buildTranscriptSessionContext().messages.at(-1) as AssistantMessage | undefined,
+						);
+					// The agent replays the model's placeholder form; the transcript shows the value.
+					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(placeholder);
+					expect(displayed()).toBe("token sdk-secret-token-123456");
 					await session.reload();
-					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(
-						"token sdk-secret-token-123456",
-					);
+					expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toBe(placeholder);
+					expect(displayed()).toBe("token sdk-secret-token-123456");
 				} finally {
 					await session.dispose();
 				}

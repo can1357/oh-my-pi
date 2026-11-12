@@ -221,7 +221,7 @@ import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
-	obfuscateProviderContext,
+	obfuscateAssistantContent,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
@@ -411,7 +411,6 @@ import {
 	CHECKPOINT_ACTIVE_REMINDER_TYPE,
 	type CustomMessage,
 	type CustomMessagePayload,
-	convertToLlm,
 	dedupeEphemeralReply,
 	demoteInterruptedThinking,
 	didSessionMessagesChange,
@@ -2649,7 +2648,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return thunks;
 		});
-		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
+		// The session owns the obfuscator, so its default conversion encodes too.
+		this.#convertToLlm = config.convertToLlm ?? (messages => this.#convertToLlmForSideRequest(messages));
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -4786,11 +4786,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				? this.#queueMessageEndPersistence(event.message, eventPromptGeneration)
 				: undefined;
 
-		// Deobfuscate assistant message content for display emission — the LLM echoes back
-		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
-		// values. The original event.message stays obfuscated so the persistence path below
-		// writes `$$HASH$$` tokens to the session file; convertToLlm re-obfuscates outbound
-		// traffic on the next turn. Walks text, thinking, and toolCall arguments/intent.
+		// Deobfuscate assistant message content for display emission — the model writes
+		// placeholders, but listeners (TUI, extensions, exporters) must see real values.
+		// The original event.message keeps its placeholder form: persisted and replayed
+		// byte-identical. Walks text, thinking, and toolCall arguments/intent.
 		let displayEvent: AgentEvent = event;
 		const obfuscator = this.#obfuscator;
 		if (obfuscator && event.type === "message_end" && event.message.role === "assistant") {
@@ -13774,11 +13773,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				`Model ${modelDescription} cannot support tools: false with historical tool calls. Omit tools: false or start from tool-free history.`,
 			);
 		}
-		// Apply after context transforms, without mutating a potentially shared context.
-		const context = obfuscateProviderContext(
-			this.#obfuscator,
-			args.tools === false ? { ...sideContext, tools: [] } : sideContext,
-		);
+		// Messages were encoded when converted; copy so a shared context is never mutated.
+		const context = args.tools === false ? { ...sideContext, tools: [] } : sideContext;
 		if (
 			args.maxContextBytes !== undefined &&
 			Buffer.byteLength(JSON.stringify(context), "utf8") > args.maxContextBytes
@@ -13907,10 +13903,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
+	/**
+	 * Caller-supplied history is outside input whatever its roles (/btw rebuilds
+	 * replies from displayed text), so its assistant content is encoded here;
+	 * the other roles are encoded by the session's conversion.
+	 */
 	async #prepareSideHistory(history: readonly Message[], signal?: AbortSignal): Promise<AgentMessage[]> {
 		const prepared: AgentMessage[] = [];
+		const obfuscator = this.#obfuscator;
 		for (const message of history) {
-			const normalized = await this.#normalizeAgentMessageImages(message);
+			let normalized = await this.#normalizeAgentMessageImages(message);
+			if (obfuscator && normalized.role === "assistant") {
+				const content = obfuscateAssistantContent(obfuscator, normalized.content);
+				if (content !== normalized.content) normalized = { ...normalized, content };
+			}
 			const images =
 				normalized.role === "user" && Array.isArray(normalized.content)
 					? normalized.content.filter((part): part is ImageContent => part.type === "image")
@@ -15062,12 +15068,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
 		}
 
-		// Update agent state — build display context to populate agent messages.
+		// Update agent state from the stored context: the agent replays what the
+		// model wrote in placeholder form, never a display copy.
 		const stateContext = this.sessionManager.buildSessionContext({
 			maxFrameDataBytes: frameDataBytesBudget(this.model),
 			model: this.model,
 		});
-		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
+		const displayContext = this.#withEvalStateContext(stateContext);
 		this.replaceMessagesFromSessionContext(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
