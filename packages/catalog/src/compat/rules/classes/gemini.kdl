@@ -89,8 +89,7 @@ class "gemini" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}
-		// Gemini 4 Hydrogen adds XHIGH; MINIMAL and `thinkingBudget` still 400.
-		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+		// Gemini 4 Hydrogen adds an `xhigh` level (default `high`).
 		models "gemini-4-hydrogen" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high" "xhigh"

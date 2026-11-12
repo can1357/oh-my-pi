@@ -298,7 +298,8 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 				expect(request.attributedModel).toBe(family);
 				expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
 					includeThoughts: true,
-					thinkingLevel: tier.toUpperCase(),
+					// Google documents the extra level in lowercase (`xhigh`).
+					thinkingLevel: tier === Effort.XHigh ? "xhigh" : tier.toUpperCase(),
 				});
 			}
 

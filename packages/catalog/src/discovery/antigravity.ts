@@ -19,8 +19,8 @@ const ANTIGRAVITY_THINKING_LEVELS: Readonly<Record<number, AntigravityModelWireP
 	1: "LOW",
 	2: "MEDIUM",
 	3: "HIGH",
-	// Gemini 4 Hydrogen's `-xhigh` SKU.
-	100: "XHIGH",
+	// Gemini 4 Hydrogen's `-xhigh` SKU; Google documents this level in lowercase.
+	100: "xhigh",
 };
 
 /**
