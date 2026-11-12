@@ -1548,8 +1548,8 @@ mod foreground {
 	/// front, so when the foreground leaves it before or during the wait and
 	/// the text ends in a Return (`closing_return`), that Return is taken to
 	/// have moved it (it opened or closed a window) and nothing is reported;
-	/// otherwise, the end of the text may have gone to the new window. Returns why
-	/// the target was not seen reading the text: it could not be waited for,
+	/// otherwise, the end of the text may have gone to the new window. Returns
+	/// why the target was not seen reading the text: it could not be waited for,
 	/// the wait ran out or was cancelled, or the foreground left it.
 	fn drain(root: HWND, name: &str, closing_return: bool) -> Option<String> {
 		// SAFETY: GetForegroundWindow has no preconditions.
