@@ -3369,8 +3369,6 @@ export class WorkerCore {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: screenshotArea(opts), scale: captureScale },

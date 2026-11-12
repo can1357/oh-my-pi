@@ -45,7 +45,7 @@ import type { BrowserEmulateOptions, ClipboardActionResult, ClipboardReadResult 
 import type { BrowserFrameInfo } from "../frames";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
 import { loadedKnownDevices, loadPuppeteer } from "../launch";
-import { pushStateInPage } from "../navigation";
+import { pushStateInPage, sameAddress } from "../navigation";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -420,16 +420,6 @@ function withoutTrailingUndefined(args: unknown[]): unknown[] {
 	let end = args.length;
 	while (end > 0 && args[end - 1] === undefined) end--;
 	return end === args.length ? args : args.slice(0, end);
-}
-
-/** Whether `requested` is the address `current` already shows (`https://a.test` is `https://a.test/`). */
-function sameAddress(requested: string, current: string): boolean {
-	if (requested === current) return true;
-	try {
-		return new URL(requested).href === new URL(current).href;
-	} catch {
-		return false;
-	}
 }
 
 /** A Tern cookie as the tab API reports it. */
@@ -2717,8 +2707,6 @@ export class TernTab implements InProcessRunTab {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: screenshotArea(opts), scale },

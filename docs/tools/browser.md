@@ -41,7 +41,7 @@ const length = await tab.run(async ({ tab }, suffix) => ((await tab.title()) + s
 await tab.close();
 ```
 
-- `browser.open(options?) -> Promise<BrowserTab>` opens or reuses a named tab and returns its handle.
+- `browser.open(options?) -> Promise<BrowserTab>` opens or reuses a named tab and returns its handle. Its text is one line naming the tab and its browser, the page it landed on when that differs from the requested `url` (or none was given), and the page title, followed by any notices.
 - `browser.tab(name = "main") -> BrowserTab` creates a proxy for that name; it does not open a tab or check that one exists.
 - `browser.tabs() -> Promise<ManagedTabInfo[]>` lists live managed tabs with `name`, `url`, `title`, `targetId`, `kind`, and `persist`.
 - `browser.close({ name?, all?, kill?, timeout? }) -> Promise<void>` releases one or all managed tabs.
@@ -178,7 +178,7 @@ On Linux under X11, Chrome 150 and later activates its window when a mouse butto
 
 Chromium-backed captures never activate the tab or raise its window: a background tab, a minimized window, or a window behind other apps is captured where it is, with its current content, so the user's frontmost app keeps focus. On relay and CDP-attached browsers this includes an adopted tab the user has since switched away from.
 
-Images are saved beneath `browser.screenshotDir`, or the OS temporary directory when unset. Chromium saves full resolution when that directory or an explicit format is supplied; otherwise it saves the resized image. Model-visible images are resized to at most 1024×1024 and 150 KiB. When the image's pixels are not CSS pixels (resized, or captured at a device scale other than 1), the capture text gives the factor from image coordinates to CSS pixels: viewport pixels for `clickAt` on a plain capture, page pixels for `fullPage`, element-relative pixels for `selector`. Unless `silent: true`, a capture emits an Eval image. `annotate: true` overlays numeric interactive-element labels and refreshes `tab.id` mappings. Screenshot options do not accept an output path; `diffScreenshot(baselinePath, { threshold?, output? })` does, and `pdf({ path?, ... })` writes a PDF.
+Images are saved beneath `browser.screenshotDir`, or the OS temporary directory when unset. Chromium saves full resolution when that directory or an explicit format is supplied; otherwise it saves the resized image. Model-visible images are resized to at most 1024×1024 and 150 KiB. The capture text is one line: the size the model sees, the full-size file when one was kept, and, when the image's pixels are not CSS pixels (resized, or captured at a device scale other than 1), the factor from image coordinates to CSS pixels: viewport pixels for `clickAt` on a plain capture, page pixels for `fullPage`, element-relative pixels for `selector`. Unless `silent: true`, a capture emits an Eval image. `annotate: true` overlays numeric interactive-element labels and refreshes `tab.id` mappings. Screenshot options do not accept an output path; `diffScreenshot(baselinePath, { threshold?, output? })` does, and `pdf({ path?, ... })` writes a PDF.
 
 Host result details preserve structured `value` separately from displayed content. Printed text is capped by the shared inline-output policy; over-cap text is stored as a session artifact and the capped text is printed.
 
