@@ -1651,24 +1651,32 @@ fn extract_indicator_style(
 	}
 }
 
-/// Parses the width value from either the command line arguments or the
-/// environment variables.
-fn parse_width(width_match: Option<&String>, host: &Host, runtime: &LsRuntime) -> Result<u16, LsError> {
-	let parse_width_from_args = |s: &str| -> Result<u16, LsError> {
-		let radix = if s.starts_with('0') && s.len() > 1 {
-			8
-		} else {
-			10
-		};
-		match u16::from_str_radix(s, radix) {
-			Ok(x) => Ok(x),
-			Err(e) => match e.kind() {
-				IntErrorKind::PosOverflow => Ok(u16::MAX),
-				_ => Err(LsError::InvalidLineWidth(s.into())),
-			},
-		}
+pub(super) fn parse_width_from_args(s: &str) -> Result<u16, LsError> {
+	let radix = if s.starts_with('0') && s.len() > 1 {
+		8
+	} else {
+		10
 	};
+	match u16::from_str_radix(s, radix) {
+		Ok(x) => Ok(x),
+		Err(e) => match e.kind() {
+			// Overflow can be reported before a later invalid digit is reached.
+			IntErrorKind::PosOverflow
+				if s
+					.strip_prefix('+')
+					.unwrap_or(s)
+					.bytes()
+					.all(|c| c.is_ascii_digit() && (radix == 10 || c <= b'7')) =>
+			{
+				Ok(u16::MAX)
+			},
+			_ => Err(LsError::InvalidLineWidth(s.into())),
+		},
+	}
+}
 
+/// Resolves the parsed command-line width or the environment/terminal fallback.
+fn parse_width(width_match: Option<&u16>, host: &Host, runtime: &LsRuntime) -> u16 {
 	let parse_width_from_env = |columns: OsString| {
 		if let Some(columns) = columns.to_str().and_then(|s| s.parse().ok()) {
 			columns
@@ -1707,15 +1715,13 @@ fn parse_width(width_match: Option<&String>, host: &Host, runtime: &LsRuntime) -
 		DEFAULT_TERM_WIDTH
 	};
 
-	let ret = match width_match {
-		Some(x) => parse_width_from_args(x)?,
+	match width_match {
+		Some(x) => *x,
 		None => match host.var("COLUMNS").map(OsString::from) {
 			Some(columns) => parse_width_from_env(columns),
 			None => calculate_term_size(),
 		},
-	};
-
-	Ok(ret)
+	}
 }
 
 impl Config {
@@ -1869,7 +1875,7 @@ impl Config {
 				numeric_uid_gid,
 			}
 		};
-		let width = parse_width(options.get_one::<String>(options::WIDTH), host, &runtime)?;
+		let width = parse_width(options.get_one::<u16>(options::WIDTH), host, &runtime);
 
 		// pi-uutils: non-tty context, so SHOW_CONTROL_CHARS and the default both
 		// enable control chars; only --hide-control-chars disables them.
@@ -2050,8 +2056,8 @@ impl Config {
 			Some(0)
 		} else {
 			options
-				.get_one::<String>(options::format::TAB_SIZE)
-				.and_then(|size| size.parse::<usize>().ok())
+				.get_one::<usize>(options::format::TAB_SIZE)
+				.copied()
 				.or_else(|| host.var("TABSIZE").and_then(|s| s.parse().ok()))
 		}
 		.unwrap_or(SPACES_IN_TAB);
@@ -4059,7 +4065,7 @@ fn write_os_str<W: Write>(writer: &mut W, string: &OsStr) -> std::io::Result<()>
 
 use colors::StyleManager;
 pub use config::{Config, options};
-use config::{Dereference, Files, Sort, options::QUOTING_STYLE};
+use config::{Dereference, Files, Sort, options::QUOTING_STYLE, parse_width_from_args};
 use dired::DiredOutput;
 pub use display::Format;
 use display::{display_items, display_size, should_display, show_dir_name};
@@ -4285,6 +4291,7 @@ pub fn uu_app() -> Command {
 				.short('T')
 				.long(options::format::TAB_SIZE)
 				.value_name("COLS")
+				.value_parser(clap::value_parser!(usize))
 				.help("Assume tab stops at each COLS instead of 8"),
 		)
 		.arg(
@@ -4776,6 +4783,7 @@ pub fn uu_app() -> Command {
 				.long(options::WIDTH)
 				.short('w')
 				.help("Assume that the terminal is COLS columns wide.")
+				.value_parser(parse_width_from_args)
 				.value_name("COLS"),
 		)
 		.arg(
@@ -5697,6 +5705,110 @@ mod integration_tests {
 		let (code, capture) = run_util::<Ls>(&["visible-name"], "", dir.path());
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "visible-name\n");
+	}
+
+	#[test]
+	fn nonnumeric_tab_sizes_fail_without_listing_the_working_directory() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+		std::fs::create_dir(dir.path().join("target")).unwrap();
+		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
+
+		for args in [
+			&["-T", "target"][..],
+			&["-laT", "target"],
+			&["--tabsize=target"],
+		] {
+			let (code, capture) = run_util::<Ls>(args, "", dir.path());
+			assert_eq!(code, 2, "{args:?}: {}", capture.out());
+			assert!(capture.out().is_empty(), "{args:?}: {}", capture.out());
+			assert!(capture.err().contains("invalid value"), "{}", capture.err());
+			assert!(capture.err().contains("target"), "{}", capture.err());
+		}
+	}
+
+	#[test]
+	fn colored_output_does_not_hide_invalid_tab_sizes() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+		std::fs::create_dir(dir.path().join("target")).unwrap();
+		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
+
+		let (code, capture) =
+			run_util::<Ls>(&["--color=always", "-T", "target"], "", dir.path());
+
+		assert_eq!(code, 2, "{}", capture.out());
+		assert!(capture.out().is_empty(), "{}", capture.out());
+		assert!(capture.err().contains("invalid value"), "{}", capture.err());
+		assert!(capture.err().contains("target"), "{}", capture.err());
+	}
+
+	#[test]
+	fn negative_and_overflowing_tab_sizes_fail_without_listing() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+
+		for arg in ["--tabsize=-1", "--tabsize=18446744073709551616"] {
+			let (code, capture) = run_util::<Ls>(&[arg], "", dir.path());
+			assert_eq!(code, 2, "{arg}: {}", capture.out());
+			assert!(capture.out().is_empty(), "{arg}: {}", capture.out());
+			assert!(capture.err().contains("invalid value"), "{}", capture.err());
+		}
+	}
+
+	#[test]
+	fn numeric_tab_sizes_preserve_directory_operands() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+		std::fs::create_dir(dir.path().join("target")).unwrap();
+		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
+
+		for args in [
+			&["-T", "4", "target"][..],
+			&["--tabsize=4", "target"],
+			&["--tabsize=0", "target"],
+		] {
+			let (code, capture) = run_util::<Ls>(args, "", dir.path());
+			assert_eq!(code, 0, "{args:?}: {}", capture.err());
+			assert_eq!(capture.out(), "TARGET_ONLY\n", "{args:?}");
+			assert!(capture.err().is_empty(), "{args:?}: {}", capture.err());
+		}
+	}
+
+	#[test]
+	fn invalid_width_digits_after_overflow_fail_without_listing() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("CWD_ONLY")).unwrap();
+		std::fs::create_dir(dir.path().join("target")).unwrap();
+		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
+
+		for args in [&["-w", "65536x", "target"][..], &["--width=07777778", "target"]] {
+			let (code, capture) = run_util::<Ls>(args, "", dir.path());
+			assert_eq!(code, 2, "{args:?}: {}", capture.out());
+			assert!(capture.out().is_empty(), "{args:?}: {}", capture.out());
+			assert!(capture.err().contains("invalid value"), "{}", capture.err());
+		}
+	}
+
+	#[test]
+	fn numeric_widths_keep_octal_and_saturating_layout() {
+		let dir = tempfile::tempdir().unwrap();
+		for name in ["aa", "bb", "cc"] {
+			File::create(dir.path().join(name)).unwrap();
+		}
+
+		for (width, expected) in [
+			("010", "aa  bb\ncc\n"),
+			("10", "aa  bb  cc\n"),
+			("999999999999999999999999999999999999", "aa  bb  cc\n"),
+			("+999999999999999999999999999999999999", "aa  bb  cc\n"),
+		] {
+			let (code, capture) =
+				run_util::<Ls>(&["-x", "-T0", "-w", width], "", dir.path());
+			assert_eq!(code, 0, "{width}: {}", capture.err());
+			assert_eq!(capture.out(), expected, "{width}");
+			assert!(capture.err().is_empty(), "{width}: {}", capture.err());
+		}
 	}
 
 	#[cfg(windows)]
