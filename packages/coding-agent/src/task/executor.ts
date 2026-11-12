@@ -5365,9 +5365,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				}
 			}
 			if (options.inheritedContext) {
-				const { content, details } = await awaitAbortable(
-					inheritedContextMessage(options.inheritedContext, session.model),
-				);
+				// Persisted as text; the provider transform draws frames per request for a vision model.
+				const { content, details } = inheritedContextMessage(options.inheritedContext);
 				await session.sendCustomMessage(
 					{ customType: INHERITED_CONTEXT_MESSAGE_TYPE, content, display: false, details },
 					{ triggerTurn: false },

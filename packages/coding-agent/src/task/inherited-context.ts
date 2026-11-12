@@ -2,24 +2,25 @@
  * Inherited parent context for task subagents (a task item's `inheritContext: true`, offered
  * while `task.inheritContext` is on).
  *
- * The parent's most recent conversation tail rides into the child's initial context as
- * snapcompact frames, with a text sidecar of the exact identifiers (hashes, paths, flags,
- * numbers) found in that tail: frame readers recover gist well but misread long hashes and
- * paths, so the sidecar carries those verbatim. A child model without image input gets the
- * tail as plain text instead.
+ * The parent's most recent conversation tail rides into the child's initial context with a
+ * text sidecar of the exact identifiers (hashes, paths, flags, numbers) found in it. The child
+ * persists both as text, as an agent-authored user turn (background, never developer authority).
+ * On each request to a vision model, {@link InheritedContextFrames} swaps the tail for at most
+ * two snapcompact frames and lists the identifiers of the part those frames hold: frame readers
+ * recover gist well but misread long hashes and paths, so the sidecar carries those verbatim.
+ * Like other snapcompact frames, these are built per request and never reach session.jsonl, so
+ * a text-only model, blocked images, or a model switch get the text instead.
  *
- * Secrets are encoded before anything is cut, listed, or drawn: the provider boundary only
- * rewrites text blocks, so a secret rendered into a frame would otherwise leave as pixels.
- *
- * The parent prepares the tail ({@link buildInheritedContext}, plain data that crosses into a
- * worker); the child renders frames for its own model ({@link inheritedContextMessage}).
+ * The parent encodes secrets before it cuts the tail ({@link buildInheritedContext}); the
+ * child's provider boundary encodes text again before it draws frames.
  */
-import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import inheritedContextTemplate from "../prompts/system/subagent-inherited-context.md" with { type: "text" };
 
+/** Custom message type of the child's inherited-context turn. */
 export const INHERITED_CONTEXT_MESSAGE_TYPE = "task-inherited-context";
 
 /** Tail size measured in the inheritance experiment: two frames of the 1568px dense shape. */
@@ -108,60 +109,114 @@ function tailText(text: string, chars: number): string {
 	return lineStart !== -1 && lineStart - start < LINE_SNAP_CHARS ? text.slice(lineStart + 1) : text.slice(start);
 }
 
-/** Raw serialized window per context array, so a batch of spawns serializes once. */
-const rawWindows = new WeakMap<readonly Message[], string>();
-
 /**
  * Serialize the parent's live context (thinking excluded), encode its secrets with `obfuscate`,
- * and keep the tail and its identifiers. Encoding runs per call, so a redaction toggle between
- * spawns takes effect. `undefined` when the parent has no conversation text yet.
+ * and keep the tail and its identifiers. `undefined` when the parent has no conversation text yet.
  */
 export function buildInheritedContext(
 	messages: readonly Message[],
 	obfuscate: ((text: string) => string) | undefined,
 ): InheritedContext | undefined {
-	let raw = rawWindows.get(messages);
-	if (raw === undefined) {
-		raw = snapcompact.serializeConversation([...messages], { includeThinking: false }).slice(-ENCODE_WINDOW_CHARS);
-		rawWindows.set(messages, raw);
-	}
+	const raw = snapcompact.serializeConversation([...messages], { includeThinking: false }).slice(-ENCODE_WINDOW_CHARS);
 	const encoded = (obfuscate ? obfuscate(raw) : raw).trim();
 	if (!encoded) return undefined;
 	const text = tailText(encoded, INHERITED_CONTEXT_CHARS);
 	return { text, identifiers: extractIdentifiers(text) };
 }
 
-export interface InheritedContextMessage {
-	content: (TextContent | ImageContent)[];
-	details: { frames: number; chars: number; identifiers: number };
+function renderPreamble(frames: number, identifiers: readonly string[]): string {
+	return prompt.render(inheritedContextTemplate, { frames, identifiers });
 }
 
-/** The child's hidden context message: preamble and sidecar, then the frames (or the tail as text). */
-export async function inheritedContextMessage(
-	context: InheritedContext,
-	model: Model | undefined,
-): Promise<InheritedContextMessage> {
-	let frames: ImageContent[] = [];
-	if (model && sendsImageInputOnWire(model)) {
+export interface InheritedContextMessage {
+	content: TextContent[];
+	details: { chars: number; identifiers: number };
+}
+
+/** The child's persisted inherited-context turn: preamble with sidecar, then the tail as text. */
+export function inheritedContextMessage(context: InheritedContext): InheritedContextMessage {
+	return {
+		content: [
+			{ type: "text", text: renderPreamble(0, context.identifiers) },
+			{ type: "text", text: context.text },
+		],
+		details: { chars: context.text.length, identifiers: context.identifiers.length },
+	};
+}
+
+/** Most re-cuts while fitting the tail into {@link INHERITED_CONTEXT_MAX_FRAMES} frames. */
+const FIT_ATTEMPTS = 6;
+
+/**
+ * The latest part of `text` that fits {@link INHERITED_CONTEXT_MAX_FRAMES} frames of the shape
+ * `model` resolves for it, or `undefined` when no cut fits. Shapes differ in capacity (provider
+ * geometry, the CJK grid), so the cut follows the shape instead of keeping the last frames of an
+ * overflowing render, which would drop text the sidecar still lists.
+ */
+function fitTail(text: string, model: Model): { text: string; shape: snapcompact.Shape } | undefined {
+	let fitted = text;
+	for (let attempt = 0; attempt < FIT_ATTEMPTS && fitted; attempt++) {
+		const shape = snapcompact.resolveShapeForText(fitted, model);
+		const frames = snapcompact.frames(fitted, { shape });
+		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, shape };
+		// Proportional cut with a margin: line snapping and wrapping make capacity uneven.
+		fitted = tailText(fitted, Math.floor(((fitted.length * INHERITED_CONTEXT_MAX_FRAMES) / frames) * 0.95));
+	}
+	return undefined;
+}
+
+function isInheritedContextTurn(message: Message): message is UserMessage & { content: TextContent[] } {
+	return (
+		message.role === "user" &&
+		message.inheritedContext === true &&
+		Array.isArray(message.content) &&
+		message.content.length === 2 &&
+		message.content.every(block => block.type === "text")
+	);
+}
+
+/**
+ * Per-request provider transform: renders the inherited tail of an agent-authored
+ * inherited-context turn as frames for a vision model. Run after secret obfuscation so frames
+ * only ever draw encoded text. Holds the last render, so a session re-sends identical bytes
+ * (prompt caches stay warm) without re-rasterizing.
+ */
+export class InheritedContextFrames {
+	#last?: { key: string; content: (TextContent | ImageContent)[] };
+
+	async transform(context: Context, model: Model, blockImages: boolean): Promise<Context> {
+		if (blockImages || !sendsImageInputOnWire(model)) return context;
+		const index = context.messages.findIndex(isInheritedContextTurn);
+		if (index === -1) return context;
+		const message = context.messages[index] as UserMessage & { content: TextContent[] };
+		const content = await this.#render(message.content[1]!.text, model);
+		if (!content) return context;
+		const messages = context.messages.slice();
+		messages[index] = { ...message, content };
+		return { ...context, messages };
+	}
+
+	async #render(tail: string, model: Model): Promise<(TextContent | ImageContent)[] | undefined> {
+		const fit = fitTail(tail, model);
+		if (!fit) return undefined;
+		const key = `${JSON.stringify(fit.shape)}\n${fit.text}`;
+		if (this.#last?.key === key) return this.#last.content;
+		let frames: ImageContent[];
 		try {
-			const shape = snapcompact.resolveShapeForText(context.text, model);
-			frames = (await snapcompact.renderMany(context.text, { shape })).slice(-INHERITED_CONTEXT_MAX_FRAMES);
+			frames = await snapcompact.renderMany(fit.text, { shape: fit.shape, maxFrames: INHERITED_CONTEXT_MAX_FRAMES });
 		} catch (error) {
-			// Background, not the assignment: a render failure degrades to the text tail instead of failing the spawn.
+			// Background, not the assignment: a render failure leaves the text turn in place.
 			logger.warn("task: inherited context frames failed to render; sending text", {
 				error: error instanceof Error ? error.message : String(error),
 			});
+			return undefined;
 		}
+		if (frames.length === 0) return undefined;
+		const content = [
+			{ type: "text", text: renderPreamble(frames.length, extractIdentifiers(fit.text)) } satisfies TextContent,
+			...frames,
+		];
+		this.#last = { key, content };
+		return content;
 	}
-	const preamble = prompt.render(inheritedContextTemplate, {
-		frames: frames.length,
-		identifiers: context.identifiers,
-	});
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: preamble }];
-	if (frames.length > 0) content.push(...frames);
-	else content.push({ type: "text", text: context.text });
-	return {
-		content,
-		details: { frames: frames.length, chars: context.text.length, identifiers: context.identifiers.length },
-	};
 }

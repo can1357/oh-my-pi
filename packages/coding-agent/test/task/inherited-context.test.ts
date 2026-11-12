@@ -1,11 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import type { Message, Model } from "@oh-my-pi/pi-ai";
+import type { Context, Message, Model } from "@oh-my-pi/pi-ai";
+import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import {
 	buildInheritedContext,
 	extractIdentifiers,
 	INHERITED_CONTEXT_CHARS,
 	INHERITED_CONTEXT_MAX_FRAMES,
+	INHERITED_CONTEXT_MESSAGE_TYPE,
+	InheritedContextFrames,
+	type InheritedContext,
 	inheritedContextMessage,
 } from "@oh-my-pi/pi-coding-agent/task/inherited-context";
 
@@ -91,25 +95,73 @@ describe("buildInheritedContext", () => {
 	});
 });
 
-describe("inheritedContextMessage", () => {
+/** The child's provider context for an inherited tail, built the way the session builds it. */
+function childContext(context: InheritedContext): Context {
+	const { content, details } = inheritedContextMessage(context);
+	const custom = {
+		role: "custom",
+		customType: INHERITED_CONTEXT_MESSAGE_TYPE,
+		content,
+		display: false,
+		details,
+		timestamp: 0,
+	} as CustomMessage;
+	return { messages: [...convertToLlm([custom]), userMessage("Do the assigned work.")] };
+}
+
+function preambleText(context: Context): string {
+	const block = (context.messages[0]!.content as { type: string; text?: string }[])[0]!;
+	return block.text ?? "";
+}
+
+describe("inherited context turn", () => {
 	const context = { text: `Build ${HASH} passed.\n`.repeat(40), identifiers: [HASH] };
 
-	it("sends frames and the identifier sidecar to a vision model", async () => {
-		const message = await inheritedContextMessage(context, visionModel(["text", "image"]));
-		const [preamble, ...rest] = message.content;
-		expect(preamble.type).toBe("text");
-		expect(preamble.type === "text" && preamble.text).toContain(`- \`${HASH}\``);
-		expect(rest.length).toBeGreaterThan(0);
-		expect(rest.length).toBeLessThanOrEqual(INHERITED_CONTEXT_MAX_FRAMES);
-		expect(rest.every(block => block.type === "image" && block.mimeType === "image/png")).toBe(true);
-		expect(message.details.frames).toBe(rest.length);
+	it("reaches the provider as an agent-authored user turn, never developer authority", () => {
+		const [turn] = childContext(context).messages;
+		expect(turn).toMatchObject({ role: "user", attribution: "agent", inheritedContext: true });
+		expect((turn!.content as { type: string }[]).map(block => block.type)).toEqual(["text", "text"]);
 	});
 
-	it("falls back to the tail as text for a model without image input", async () => {
-		const message = await inheritedContextMessage(context, visionModel(["text"]));
-		expect(message.content.map(block => block.type)).toEqual(["text", "text"]);
-		const tail = message.content[1];
-		expect(tail.type === "text" && tail.text).toBe(context.text);
-		expect(message.details.frames).toBe(0);
+	it("is drawn as frames with the identifier sidecar for a vision model", async () => {
+		const sent = await new InheritedContextFrames().transform(
+			childContext(context),
+			visionModel(["text", "image"]),
+			false,
+		);
+		const [preamble, ...frames] = sent.messages[0]!.content as { type: string; text?: string; mimeType?: string }[];
+		expect(preamble!.text).toContain(`- \`${HASH}\``);
+		expect(frames.length).toBeGreaterThan(0);
+		expect(frames.length).toBeLessThanOrEqual(INHERITED_CONTEXT_MAX_FRAMES);
+		expect(frames.every(block => block.type === "image" && block.mimeType === "image/png")).toBe(true);
+		expect(sent.messages[1]).toMatchObject({ role: "user" });
+	});
+
+	it("stays text for a model without image input or with images blocked", async () => {
+		const frames = new InheritedContextFrames();
+		const built = childContext(context);
+		expect(await frames.transform(built, visionModel(["text"]), false)).toBe(built);
+		expect(await frames.transform(built, visionModel(["text", "image"]), true)).toBe(built);
+		const tail = (built.messages[0]!.content as { text: string }[])[1]!;
+		expect(tail.text).toBe(context.text);
+	});
+
+	it("lists only identifiers from the part the frames hold when the shape fits less than the tail", async () => {
+		const OLD_HASH = "9a8b7c6d5e4f30211203f4e5d6c7b8a9";
+		// A full-size CJK tail: the CJK grid holds far less per frame than the dense Latin shape.
+		const cjk = "检查构建结果并记录每一步的输出。\n".repeat(Math.floor((INHERITED_CONTEXT_CHARS - 200) / 17));
+		const text = `start ${OLD_HASH}\n${cjk}end ${HASH}\n`;
+		const tail = { text, identifiers: extractIdentifiers(text) };
+		expect(tail.identifiers).toContain(OLD_HASH);
+		const sent = await new InheritedContextFrames().transform(
+			childContext(tail),
+			visionModel(["text", "image"]),
+			false,
+		);
+		const frames = (sent.messages[0]!.content as { type: string }[]).slice(1);
+		expect(frames.length).toBeGreaterThan(0);
+		expect(frames.length).toBeLessThanOrEqual(INHERITED_CONTEXT_MAX_FRAMES);
+		expect(preambleText(sent)).toContain(HASH);
+		expect(preambleText(sent)).not.toContain(OLD_HASH);
 	});
 });

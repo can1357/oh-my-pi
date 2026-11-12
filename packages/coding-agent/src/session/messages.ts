@@ -57,6 +57,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { INHERITED_CONTEXT_MESSAGE_TYPE } from "../task/inherited-context";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
@@ -1197,6 +1198,20 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
 						attribution: ircIncoming ? "agent" : "user",
+						timestamp: m.timestamp,
+					},
+				];
+			}
+			// A task child's inherited parent tail carries that parent's tool output: background
+			// authored by an agent, never developer authority. The marker lets the provider
+			// transform draw it as frames for a vision model.
+			if (m.customType === INHERITED_CONTEXT_MESSAGE_TYPE) {
+				return [
+					{
+						role: "user",
+						content: customMessageContentToLlmContent(m.content),
+						attribution: "agent",
+						inheritedContext: true,
 						timestamp: m.timestamp,
 					},
 				];

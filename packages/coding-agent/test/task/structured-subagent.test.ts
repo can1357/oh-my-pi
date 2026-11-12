@@ -596,6 +596,75 @@ describe("structured subagent primitive", () => {
 		expect(settled.result.modelRole).toBe("reviewer");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+	describe("inherited parent context", () => {
+		const inheritedContext = { text: "parent decided to ship build 40cf59cf8a\n", identifiers: ["40cf59cf8a"] };
+
+		async function dispatchedContext(
+			agent: AgentDefinition,
+			overrides: Partial<StructuredSubagentRequest> = {},
+		): Promise<executorModule.ExecutorOptions["inheritedContext"]> {
+			mockDiscovery(agent);
+			const dispatched: executorModule.ExecutorOptions[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				dispatched.push(options);
+				return result();
+			});
+			const settled = await runStructuredSubagent(
+				request({ agent: agent.name, inheritedContext, retainArtifacts: true, ...overrides }),
+			);
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+			return dispatched[0]?.inheritedContext;
+		}
+
+		it("reaches a task child", async () => {
+			expect(await dispatchedContext(AGENT)).toEqual(inheritedContext);
+		});
+
+		it("is withheld from an agent that declares inheritContext: false, as the bundled reviewers do", async () => {
+			expect(getBundledAgent("reviewer")?.inheritContext).toBe(false);
+			expect(getBundledAgent("security-reviewer")?.inheritContext).toBe(false);
+			expect(await dispatchedContext({ ...AGENT, inheritContext: false })).toBeUndefined();
+		});
+
+		it("is withheld from eval agent() spawns", async () => {
+			expect(await dispatchedContext(AGENT, { invocationKind: "eval" })).toBeUndefined();
+		});
+	});
+
+	it.each([
+		{ setting: true, flagged: true, inherits: true },
+		{ setting: false, flagged: true, inherits: false },
+		{ setting: true, flagged: false, inherits: false },
+	])(
+		"task tool: setting=$setting flagged=$flagged → child inherits=$inherits",
+		async ({ setting, flagged, inherits }) => {
+			mockDiscovery();
+			const dispatched: executorModule.ExecutorOptions[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				dispatched.push(options);
+				return result();
+			});
+			const parent = {
+				...session({ settings: Settings.isolated({ "task.inheritContext": setting, "async.enabled": false }) }),
+				getContextMessages: () => [{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }],
+			} as unknown as ToolSession;
+			const tool = await TaskTool.create(parent);
+			await tool.execute("tc-inherit", {
+				context: "Shared background.",
+				tasks: [
+					{
+						agent: "worker",
+						name: "Worker",
+						task: "Report.",
+						solutionSpace: "one fix: report given",
+						...(flagged ? { inheritContext: true } : {}),
+					},
+				],
+			} as TaskParams);
+			expect(dispatched).toHaveLength(1);
+			expect(dispatched[0]?.inheritedContext?.text.includes("PLUM-7731") ?? false).toBe(inherits);
+		},
+	);
 	it("does not treat a spawn handle as the HUD description", async () => {
 		mockDiscovery();
 		const dispatched: executorModule.ExecutorOptions[] = [];

@@ -51,6 +51,7 @@ import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import { buildInheritedContext, type InheritedContext } from "./inherited-context";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
@@ -804,6 +805,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
+	/** The last call's inherited-context capture, shared by every item of that call. */
+	#inheritedCapture?: { toolCallId: string; context: InheritedContext | undefined };
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
 			const plan = planSpawns(
@@ -954,13 +957,28 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return { effort: params.effort };
 	}
 
+	/** Flagged item while `task.inheritContext` is on; the setting also drops a stale `true` at spawn time. */
+	#wantsInheritedContext(params: TaskParams): boolean {
+		return params.inheritContext === true && cfgTaskInheritContext.get(this.session.settings);
+	}
+
 	/**
-	 * Inherited parent context for a spawn. Like `effort`, `task.inheritContext` gates the item flag at
-	 * runtime too, so a stale transcript cannot opt a child in while the setting is off.
+	 * The parent's conversation tail for a flagged spawn, captured when the call dispatches (before
+	 * any concurrency wait, so a queued child sees the context its brief was written in). One
+	 * capture serves every item of a call.
 	 */
-	#inheritContextParams(params: TaskParams): Pick<StructuredSubagentRequest, "inheritContext"> {
-		if (params.inheritContext !== true || !cfgTaskInheritContext.get(this.session.settings)) return {};
-		return { inheritContext: true };
+	#captureInheritedContext(toolCallId: string, params: TaskParams): InheritedContext | undefined {
+		if (!this.#wantsInheritedContext(params)) return undefined;
+		if (this.#inheritedCapture?.toolCallId !== toolCallId) {
+			this.#inheritedCapture = {
+				toolCallId,
+				context: buildInheritedContext(
+					this.session.getContextMessages?.() ?? [],
+					this.session.obfuscateForProvider,
+				),
+			};
+		}
+		return this.#inheritedCapture.context;
 	}
 
 	#seanceSchemaFields() {
@@ -1008,6 +1026,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId?: string;
 		detached: boolean;
 	}): SpawnRun {
+		const inheritedContext = this.#captureInheritedContext(spawn.toolCallId, spawn.params);
 		return new SpawnRun(
 			this.#permit,
 			run =>
@@ -1022,6 +1041,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
 					run.tools,
+					inheritedContext,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
@@ -1039,6 +1059,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal: AbortSignal,
 	): Promise<SpawnRun | undefined> {
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
+		// The parent's still-streaming turn (usually the reason for the spawn) is not in its context yet.
+		if (this.#wantsInheritedContext(spawn)) return undefined;
 		let blocking: boolean;
 		try {
 			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
@@ -1910,6 +1932,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
 		tools?: TextTap,
+		inheritedContext?: InheritedContext,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = spawnAssignment(params);
@@ -1927,7 +1950,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...this.#effortParams(params),
-				...this.#inheritContextParams(params),
+				...(inheritedContext ? { inheritedContext } : {}),
 				solutionSpace: params.solutionSpace,
 				...(params.tools?.length
 					? {
