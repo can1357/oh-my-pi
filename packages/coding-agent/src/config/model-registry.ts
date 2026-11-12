@@ -1696,7 +1696,11 @@ export class ModelRegistry {
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 			const additiveSharedCatalogProvider = ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
-			const specialProvider = SPECIAL_MODEL_MANAGER_PROVIDER_ID_LOOKUP[providerId] === true;
+			// An enabled, authenticated special provider runs its own discovery after startup.
+			const specialDiscovery =
+				SPECIAL_MODEL_MANAGER_PROVIDER_ID_LOOKUP[providerId] === true &&
+				!disabledProviders.has(providerId) &&
+				this.authStorage.keys.source(providerId) !== undefined;
 			if (!cache) {
 				const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
 				const discoveryExpected =
@@ -1706,7 +1710,7 @@ export class ModelRegistry {
 							(this.authStorage.keys.source(providerId) !== undefined ||
 								descriptor.allowUnauthenticated === true ||
 								this.#keylessProviders.has(providerId))) ||
-						(specialProvider && this.authStorage.keys.source(providerId) !== undefined));
+						specialDiscovery);
 				if (discoveryExpected && !this.#providerDiscoveryStates.has(providerId)) {
 					this.#providerDiscoveryStates.set(providerId, {
 						provider: providerId,
@@ -1815,12 +1819,7 @@ export class ModelRegistry {
 					source: cacheContributed ? "cache" : "bundled",
 					models: cachedModels.map(model => model.id),
 				});
-			} else if (
-				specialProvider &&
-				!disabledProviders.has(providerId) &&
-				this.authStorage.keys.source(providerId) !== undefined &&
-				!this.#providerDiscoveryStates.has(providerId)
-			) {
+			} else if (specialDiscovery && !this.#providerDiscoveryStates.has(providerId)) {
 				const hasCachedModels = cachedModels.length > 0;
 				const stale = !cache.fresh || !cache.authoritative || !hasCachedModels;
 				this.#providerDiscoveryStates.set(providerId, {
