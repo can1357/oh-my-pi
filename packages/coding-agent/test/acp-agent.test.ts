@@ -1399,6 +1399,57 @@ describe("ACP agent", () => {
 		}
 	});
 
+	it("starts the child tombstone release before the abort settles", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-race",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const abortGate = Promise.withResolvers<void>();
+		let abortCalls = 0;
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "worker-race",
+			displayName: "worker-race",
+			kind: "sub",
+			session: {
+				abort: async () => {
+					abortCalls++;
+					await abortGate.promise;
+				},
+				dispose: async () => {},
+			} as never,
+			sessionFile: null,
+			status: "running",
+		});
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release");
+		try {
+			// A finishing run accepted while the abort is still in flight must
+			// not flip the ref to idle: the tombstone lands first, so the
+			// executor's settle path sees the terminal `aborted` row.
+			const cancelled = harness.agent.cancel({ sessionId: "worker-race" });
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(abortCalls).toBe(1);
+			expect(release).toHaveBeenCalledWith("worker-race", expect.anything(), { tombstone: true });
+			abortGate.resolve();
+			await cancelled;
+			expect(registry.get("worker-race")?.status).toBe("aborted");
+		} finally {
+			release.mockRestore();
+			const current = registry.get("worker-race");
+			if (current) registry.unregister("worker-race", current);
+			await harness.agent.dispose();
+		}
+	});
+
 	it("forwards AIR child session events tagged with the child routing key", async () => {
 		const airCapabilities = {
 			_meta: { jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } } },
@@ -1430,6 +1481,62 @@ describe("ACP agent", () => {
 		});
 		expect(tagged.length).toBeGreaterThan(0);
 		expect(tagged.every(update => update.sessionId !== "worker-7")).toBe(true);
+		await harness.agent.dispose();
+	});
+
+	it("dual-capable clients get one child projection, not both", async () => {
+		const dualCapabilities = {
+			subagents: {},
+			_meta: { jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } } },
+		};
+		const harness = await createHarness({ clientCapabilities: dualCapabilities, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-dual",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "hello" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "m",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-dual",
+			event: { type: "message_update", message, assistantMessageEvent: { type: "text_delta", delta: "hello" } },
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-dual",
+			event: { type: "message_end", message },
+		});
+		await flushBusDelivery();
+		// The RFD projection (child id as outer sessionId) must stay silent:
+		// it shares mapper state with the AIR projection, so both firing
+		// duplicates every streamed child response.
+		expect(harness.updates.filter(update => update.sessionId === "worker-dual")).toEqual([]);
+		const airChunks = harness.updates.filter(
+			update =>
+				(update.update as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk" &&
+				(
+					(update.update as { _meta?: unknown })._meta as
+						| { jetbrains?: { air?: { subagentSessionId?: unknown } } }
+						| undefined
+				)?.jetbrains?.air?.subagentSessionId === "worker-dual",
+		);
+		expect(airChunks).toHaveLength(1);
 		await harness.agent.dispose();
 	});
 

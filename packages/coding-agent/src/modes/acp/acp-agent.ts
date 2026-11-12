@@ -1652,10 +1652,12 @@ export class AcpAgent implements Agent {
 	/**
 	 * Cancel a native child session by its `subagentSessionId` (the task-executor
 	 * registry id). Returns true when the id named a live child of one of this
-	 * connection's sessions. Mirrors `cancelAgentRegistration`: abort the live
-	 * run, then release through the lifecycle manager so the kill is terminal
-	 * (the executor publishes the `aborted` tombstone and the terminal
-	 * `subagent_state_update` flows through the tracker's normal subscription).
+	 * connection's sessions. Mirrors `handleRpcCancelSubagent`: start the
+	 * tombstone release first — it publishes the terminal `aborted` row
+	 * synchronously, so the executor cannot accept a finishing run (flipping
+	 * the ref to idle and emitting `completed`/`end_turn`) while the abort
+	 * below is still settling — then abort the live run. Settle both together
+	 * so a failed tombstone still rejects the ACP cancel request.
 	 */
 	async #cancelSubagentChild(sessionId: string): Promise<boolean> {
 		for (const record of this.#sessions.values()) {
@@ -1669,10 +1671,17 @@ export class AcpAgent implements Agent {
 			if (ref?.kind !== "sub") return true;
 			if (!this.#isOwnedDescendant(ref, ownerId)) continue;
 			try {
-				if (ref.status === "running" && ref.session) {
-					await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-				}
-				await AgentLifecycleManager.global().release(sessionId, ref, { tombstone: true });
+				// Capture the live session before starting the release: the
+				// tombstone transition detaches `ref.session` synchronously,
+				// so reading it after `release()` returns would skip the abort
+				// (mirrors `resolveOwnedLiveSubagent` capturing `owned.session`).
+				const liveSession = ref.status === "running" ? ref.session : null;
+				const [released, aborted] = await Promise.allSettled([
+					AgentLifecycleManager.global().release(sessionId, ref, { tombstone: true }),
+					liveSession ? liveSession.abort({ reason: USER_INTERRUPT_LABEL }) : Promise.resolve(),
+				]);
+				if (released.status === "rejected") throw released.reason;
+				if (aborted.status === "rejected") throw aborted.reason;
 			} catch (error) {
 				// A failed kill must reject the ACP cancel request: returning true
 				// would tell the client the child stopped while it is still running.
@@ -2221,9 +2230,15 @@ export class AcpAgent implements Agent {
 	 * Subscribe the upstream-RFD child-session tracker when the client
 	 * advertises `subagents`. Other clients never see `subagent_update`
 	 * (the tracker stays uninstalled, and the RFD requires the advertisement).
+	 * Skipped when the AIR-private tracker is installed: both projections
+	 * share the record's child mapper state, so installing both would emit
+	 * every streamed child response twice (once tagged under the parent,
+	 * once under the child id). The AIR projection wins ties because AIR
+	 * renders only the private contract.
 	 */
 	#installRfdSubagentTracker(record: ManagedSessionRecord, subagentEventBus: EventBus | undefined): void {
 		if (!isStandardSubagentClient(this.#clientCapabilities)) return;
+		if (record.subagentTracker) return;
 		if (!subagentEventBus) return;
 		const tracker = new RfdSubagentTracker({
 			parentSessionId: record.protocolSessionId,

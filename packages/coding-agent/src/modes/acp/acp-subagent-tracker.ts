@@ -122,6 +122,14 @@ function terminalState(status: SubagentLifecyclePayload["status"]): AcpSubagentT
 export class AcpSubagentTracker {
 	readonly #children = new Map<string, AcpSubagentChild>();
 	readonly #toolCallOwners = new Map<string, string>();
+	/**
+	 * Parent tool calls claimed by more than one child. A batched `task`
+	 * call shares one tool call id across siblings, so no single child owns
+	 * its combined progress: the shared frames stay on the parent transcript
+	 * instead of following whichever sibling started (or settled) last.
+	 * Sticky once set; only `dispose` clears it.
+	 */
+	readonly #ambiguousToolCalls = new Set<string>();
 	readonly #parentSessionId: string;
 	readonly #send: AcpRawUpdateSender;
 	#unsubscribers: Array<() => void> = [];
@@ -140,6 +148,7 @@ export class AcpSubagentTracker {
 
 	/** Child that owns a parent-side tool call, via the spawn's `parentToolCallId`. */
 	childForToolCall(toolCallId: string): string | undefined {
+		if (this.#ambiguousToolCalls.has(toolCallId)) return undefined;
 		const id = this.#toolCallOwners.get(toolCallId);
 		return id !== undefined && this.#children.has(id) ? id : undefined;
 	}
@@ -163,6 +172,7 @@ export class AcpSubagentTracker {
 		this.#unsubscribers = [];
 		this.#children.clear();
 		this.#toolCallOwners.clear();
+		this.#ambiguousToolCalls.clear();
 	}
 
 	async handleLifecycle(payload: SubagentLifecyclePayload): Promise<void> {
@@ -181,7 +191,13 @@ export class AcpSubagentTracker {
 				this.#children.set(payload.id, child);
 			}
 			if (typeof payload.parentToolCallId === "string" && payload.parentToolCallId.length > 0) {
-				this.#toolCallOwners.set(payload.parentToolCallId, payload.id);
+				const existing = this.#toolCallOwners.get(payload.parentToolCallId);
+				if (existing === undefined) {
+					this.#toolCallOwners.set(payload.parentToolCallId, payload.id);
+				} else if (existing !== payload.id) {
+					this.#toolCallOwners.delete(payload.parentToolCallId);
+					this.#ambiguousToolCalls.add(payload.parentToolCallId);
+				}
 			}
 			if (child.announced) return;
 			child.announced = true;

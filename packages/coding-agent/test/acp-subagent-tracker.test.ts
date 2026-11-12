@@ -145,6 +145,21 @@ describe("acp subagent tracker", () => {
 		expect(bus.hasListeners(TASK_SUBAGENT_PROGRESS_CHANNEL)).toBe(false);
 	});
 
+	test("batched siblings sharing one task call clear ownership ambiguity", async () => {
+		const tracker = new AcpSubagentTracker({ parentSessionId: "parent-1", send: async () => {} });
+		await tracker.handleLifecycle(lifecycle({ id: "worker-a", parentToolCallId: "tc-shared" }));
+		await tracker.handleLifecycle(lifecycle({ id: "worker-b", parentToolCallId: "tc-shared" }));
+		// Two announced children on one tool call: neither owns it alone, so
+		// the shared progress stays on the parent instead of being attributed
+		// to whichever child started last.
+		expect(tracker.childForToolCall("tc-shared")).toBeUndefined();
+		await tracker.handleLifecycle(lifecycle({ id: "worker-a", status: "completed" }));
+		expect(tracker.childForToolCall("tc-shared")).toBeUndefined();
+		await tracker.handleLifecycle(lifecycle({ id: "worker-b", status: "completed" }));
+		expect(tracker.childForToolCall("tc-shared")).toBeUndefined();
+		tracker.dispose();
+	});
+
 	test("tool ownership follows parentToolCallId and clears on terminal", async () => {
 		const tracker = new AcpSubagentTracker({ parentSessionId: "parent-1", send: async () => {} });
 		expect(tracker.childForToolCall("tc-9")).toBeUndefined();
