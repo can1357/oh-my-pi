@@ -6,6 +6,7 @@
  * below are load-bearing, not cosmetic.
  */
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isDefinitiveOAuthFailure } from "@oh-my-pi/pi-ai/error";
 
 describe("isDefinitiveOAuthFailure", () => {
@@ -19,6 +20,27 @@ describe("isDefinitiveOAuthFailure", () => {
 		]) {
 			expect(isDefinitiveOAuthFailure(msg)).toBe(true);
 		}
+	});
+
+	it("honors typed definitive metadata without relying on provider message text", () => {
+		const definitive = new AIError.OAuthError("opaque refresh rejection", {
+			kind: "token-refresh",
+			provider: "test",
+			status: 400,
+			definitive: true,
+		});
+		expect(isDefinitiveOAuthFailure(definitive)).toBe(true);
+		// The marker survives a wrapping error on the cause chain.
+		expect(isDefinitiveOAuthFailure(new Error("wrapper", { cause: definitive }))).toBe(true);
+		expect(
+			isDefinitiveOAuthFailure(
+				new AIError.OAuthError("opaque refresh rejection", {
+					kind: "token-refresh",
+					provider: "test",
+					status: 400,
+				}),
+			),
+		).toBe(false);
 	});
 
 	it("treats a bare 401 from the token endpoint as definitive", () => {

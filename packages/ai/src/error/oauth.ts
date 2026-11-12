@@ -34,18 +34,23 @@ export interface OAuthErrorOptions {
 	provider?: string;
 	status?: number;
 	cause?: unknown;
+	/** Retry cannot repair the persisted grant/client; reauthorization is required. */
+	definitive?: boolean;
 }
 
 /**
  * A failure inside an interactive OAuth / device-code login flow. The `kind`
  * pinpoints the stage. Timeout/polling are classified transient; everything
  * else is a hard auth failure. The auth-retry classifier separately treats
- * `token-refresh` as an explicit request to refresh and replay once.
+ * `token-refresh` as an explicit request to refresh and replay once. A
+ * `definitive` failure also carries {@link Flag.OAuthExpiry}, so the credential
+ * lifecycle disables the row without matching provider message text.
  */
 export class OAuthError extends Error {
 	readonly kind: OAuthErrorKind;
 	readonly provider: string | undefined;
 	readonly status: number | undefined;
+	readonly definitive: boolean;
 
 	constructor(message: string, options: OAuthErrorOptions = {}) {
 		super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -53,9 +58,14 @@ export class OAuthError extends Error {
 		this.kind = options.kind ?? "http";
 		this.provider = options.provider;
 		this.status = options.status;
+		this.definitive = options.definitive === true;
 		attach(
 			this,
-			this.kind === "timeout" || this.kind === "polling" ? create(Flag.Transient) : create(Flag.AuthFailed),
+			this.definitive
+				? create(Flag.AuthFailed, Flag.OAuthExpiry)
+				: this.kind === "timeout" || this.kind === "polling"
+					? create(Flag.Transient)
+					: create(Flag.AuthFailed),
 		);
 	}
 }
