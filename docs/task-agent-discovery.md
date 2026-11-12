@@ -27,7 +27,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `structured`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`, `inheritContext` (`false` ignores a task item's `inheritContext: true`; set on the bundled `reviewer` and `security-reviewer`)
+- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `structured`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`, `inheritContext` (`false` ignores a task item's `inheritContext: true`; set on the bundled `reviewer`, `security-reviewer`, and `seance`)
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
@@ -246,11 +246,11 @@ A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`;
 
 `task.perCallModel` decides where a model-facing call may pick its model:
 
-| Value           | Behavior                                                                                                                                                                                                    |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Value           | Behavior                                                                                                                                                                                                                                                                                             |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `off` (default) | A task item, flat call, `agent()` or `workpool()` that passes `model` fails preflight (the bundled seance agent's own `model` is separate; see below). The task schema does not advertise the field, but a sent one still reaches preflight; an empty task `model` (`""` or `[]`) counts as omitted. |
-| `eval`          | Accepted by eval `agent()` and `workpool()` only; task items behave as `off`. Use it to route a specialist (e.g. a pinned `reviewer`) from a script while ordinary delegation keeps its configured routing. |
-| `on`            | Accepted everywhere.                                                                                                                                                                                        |
+| `eval`          | Accepted by eval `agent()` and `workpool()` only; task items behave as `off`. Use it to route a specialist (e.g. a pinned `reviewer`) from a script while ordinary delegation keeps its configured routing.                                                                                          |
+| `on`            | Accepted everywhere.                                                                                                                                                                                                                                                                                 |
 
 Only the operator's layers can turn it on: a project's `task.perCallModel` can lower the mode (`on` → `eval` → `off`) but never raise it.
 

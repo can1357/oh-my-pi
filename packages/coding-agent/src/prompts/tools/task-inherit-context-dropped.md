@@ -1,1 +1,1 @@
-{{names}} started without your conversation: `inheritContext` could not carry it safely, so {{#if plural}}each had{{else}}it had{{/if}} only its brief.
+{{#each ids}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}} started without your conversation: `inheritContext` could not carry it safely, so {{#if ids.[1]}}each{{else}}it{{/if}} had only its brief.

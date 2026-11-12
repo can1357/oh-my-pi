@@ -1213,16 +1213,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			normalizedSpawnParams,
 			policies,
 		);
-		// The parent was told a flagged child starts with its conversation; say so when one did not.
-		const inheritanceNote =
-			droppedContexts.length > 0
-				? prompt
-						.render(taskInheritContextDroppedTemplate, {
-							names: `Task ${droppedContexts.map(index => spawnItems[index]!.name?.trim() || `#${index + 1}`).join(", ")}`,
-							plural: droppedContexts.length > 1,
-						})
-						.trim()
-				: undefined;
+		// The parent was told a flagged child starts with its conversation; say so, by the id it sees, when one did not.
+		const droppedContextNote = (ids: readonly string[]) =>
+			ids.length > 0 ? prompt.render(taskInheritContextDroppedTemplate, { ids }).trim() : undefined;
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -1247,6 +1240,41 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		);
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 
+		const spawnAdvisory = (willRunAsync: boolean) =>
+			this.session.suppressSpawnAdvisory
+				? undefined
+				: composeSpawnAdvisory({
+						agents: resolvedAgents,
+						items: asyncItems,
+						depthCapacity,
+						ircEnabled,
+						willRunAsync,
+						scoutAvailable: isScoutSpawnable(
+							cfgTaskDisabledAgents.get(this.session.settings),
+							this.session.getSessionSpawns?.() ?? "*",
+						),
+					});
+		// Returns a fresh result (copied content array, copied text part) rather
+		// than mutating the caller's — task results are short-lived here, but an
+		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
+		const withNotes = (
+			result: AgentToolResult<TaskToolDetails>,
+			...notes: (string | undefined)[]
+		): AgentToolResult<TaskToolDetails> => {
+			const text = notes.filter(Boolean).join("\n\n");
+			if (!text) return result;
+			let appended = false;
+			const content = result.content.map(part => {
+				if (!appended && part.type === "text" && typeof part.text === "string") {
+					appended = true;
+					return { ...part, text: `${part.text}\n\n${text}` };
+				}
+				return part;
+			});
+			if (!appended) content.push({ type: "text", text });
+			return { ...result, content };
+		};
+
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
 			// wired a job manager, or every item's agent type declares
@@ -1254,25 +1282,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (asyncEnabled && !this.session.asyncJobManager) {
 				logger.warn("task: no AsyncJobManager registered; falling back to sync execution");
 			}
-			const advisory =
-				[
-					inheritanceNote,
-					this.session.suppressSpawnAdvisory
-						? undefined
-						: composeSpawnAdvisory({
-								agents: resolvedAgents,
-								items: asyncItems,
-								depthCapacity,
-								ircEnabled,
-								willRunAsync: false,
-								scoutAvailable: isScoutSpawnable(
-									cfgTaskDisabledAgents.get(this.session.settings),
-									this.session.getSessionSpawns?.() ?? "*",
-								),
-							}),
-				]
-					.filter(Boolean)
-					.join("\n\n") || undefined;
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
@@ -1286,57 +1295,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
+			const droppedIds = (result.details?.results ?? [])
+				.filter(single => droppedContexts.includes(single.index))
+				.map(single => single.id);
+			return withNotes(result, droppedContextNote(droppedIds), spawnAdvisory(false));
 		}
 
 		// Coordination only makes sense for spawns that keep running after this
 		// call returns (the async subset). Blocking items have already completed
 		// by then, so a "coordinate while they run" hint would misfire.
-		const advisory =
-			[
-				inheritanceNote,
-				this.session.suppressSpawnAdvisory
-					? undefined
-					: composeSpawnAdvisory({
-							agents: resolvedAgents,
-							items: asyncItems,
-							depthCapacity,
-							ircEnabled,
-							willRunAsync: asyncItems.length > 0,
-							scoutAvailable: isScoutSpawnable(
-								cfgTaskDisabledAgents.get(this.session.settings),
-								this.session.getSessionSpawns?.() ?? "*",
-							),
-						}),
-			]
-				.filter(Boolean)
-				.join("\n\n") || undefined;
-		// Returns a fresh result (copied content array, copied text part) rather
-		// than mutating the caller's — task results are short-lived here, but an
-		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
-		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
-		};
+		const advisory = spawnAdvisory(asyncItems.length > 0);
+		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> =>
+			withNotes(
+				result,
+				droppedContextNote(
+					spawns.filter(spawn => droppedContexts.includes(spawn.index)).map(spawn => spawn.agentId),
+				),
+				advisory,
+			);
 		const outputManager = this.#outputManager();
 		const callStartedAt = Date.now();
 		const spawns: Array<{

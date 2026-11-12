@@ -710,20 +710,26 @@ describe("structured subagent primitive", () => {
 				const executed = await tool.execute("tc-inherit", {
 					context: "Shared background.",
 					tasks: [
-						{ agent: "worker", name: "Flagged", task: "Report.", solutionSpace: "one fix", inheritContext: true },
+						// Unnamed: the note must name the id the parent sees, not the item's position.
+						{ agent: "worker", task: "Report.", solutionSpace: "one fix", inheritContext: true },
 						{ agent: "worker", name: "Plain", task: "Report.", solutionSpace: "one fix" },
 					],
 				} as TaskParams);
-				await Promise.all(["Flagged", "Plain"].map(id => manager?.getJob(id)?.promise));
-				return executed.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+				const details = executed.details!;
+				const ids = [0, 1].map(
+					index =>
+						(details.progress ?? details.results).find(entry => entry.index === index)?.id ?? `missing-${index}`,
+				);
+				await Promise.all(ids.map(id => manager?.getJob(id)?.promise));
+				return { ids, text: executed.content.map(part => (part.type === "text" ? part.text : "")).join("\n") };
 			};
 			try {
 				const dropped = await run([]);
-				expect(dropped).toContain("Task Flagged started without your conversation");
-				expect(dropped).not.toContain("Plain started without");
-				expect(await run([{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }])).not.toContain(
-					"started without your conversation",
+				expect(dropped.text.split("\n").find(line => line.includes("started without your conversation"))).toBe(
+					`\`${dropped.ids[0]}\` started without your conversation: \`inheritContext\` could not carry it safely, so it had only its brief.`,
 				);
+				const inherited = await run([{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }]);
+				expect(inherited.text).not.toContain("started without your conversation");
 			} finally {
 				await manager?.dispose({ timeoutMs: 1000 });
 			}

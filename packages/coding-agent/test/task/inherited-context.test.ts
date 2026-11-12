@@ -342,6 +342,28 @@ describe("inherited context turn", () => {
 		const sent = await new InheritedContextFrames().transform(built, visionModel(["text", "image"]), false);
 		expect(restoreEvictedFrames(sent, built, sent)).toBe(sent);
 	});
+
+	it("judges and replaces only its own part when inline snapcompact prepended system-prompt frames", async () => {
+		const built = childContext(context);
+		const sent = await new InheritedContextFrames().transform(built, visionModel(["text", "image"]), false);
+		const [turn] = sent.messages;
+		const own = turn!.content as { type: string }[];
+		const note = { type: "text", text: "System prompt frames follow." };
+		const systemFrame = { type: "image", data: "U1lT", mimeType: "image/png" };
+		const withSystem = (blocks: { type: string }[]): Context => ({
+			messages: [{ ...turn!, content: blocks } as Message, ...sent.messages.slice(1)],
+		});
+		const prefixed = withSystem([note, systemFrame, systemFrame, ...own]);
+		// The clamp evicted the system-prompt frames only: this turn's frames all arrived.
+		const systemEvicted = withSystem([note, ...own]);
+		expect(restoreEvictedFrames(systemEvicted, built, sent)).toBe(systemEvicted);
+		// It evicted one of this turn's frames but kept the system-prompt ones: those stay, the tail goes text.
+		const ownEvicted = withSystem([note, systemFrame, systemFrame, ...own.slice(0, -1)]);
+		const restored = restoreEvictedFrames(ownEvicted, built, sent).messages[0]!;
+		const textTurn = built.messages[0] as { content: unknown[] };
+		expect(restored.content as unknown[]).toEqual([note, systemFrame, systemFrame, ...textTurn.content]);
+		expect(restoreEvictedFrames(prefixed, built, sent)).toBe(prefixed);
+	});
 });
 
 describe("inherited frame profile", () => {

@@ -19,7 +19,6 @@
  */
 import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
-import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import inheritedContextTemplate from "../prompts/system/subagent-inherited-context.md" with { type: "text" };
@@ -257,55 +256,26 @@ export function inheritedContextMessage(context: InheritedContext): InheritedCon
 /** The `snapcompact.shape` setting: a named frame shape, or `auto` to resolve one per model. */
 export type ShapeSetting = snapcompact.ShapeVariantName | "auto";
 
-/**
- * Frame shape and sidecar per model class under `auto`, measured on inherited tails rather than
- * taken from snapcompact's compaction shapes (each fits a full tail in exactly two 1568px frames).
- * Claude: `8x13-bw` read 0.94 of the context vs 0.93 for `11on16-bw`, with 2.7% exact-string
- * errors vs 2.2%, on 0.76x the prompt tokens (0.55x the text). Gemini: `11on16-bw` without the
- * sidecar, which left exact-string errors unchanged (6/93 either way); one larger frame billed the
- * same but lost 0.15-0.18 of the context. Other classes keep snapcompact's own shape and the sidecar.
- */
-const AUTO_PROFILES: Partial<Record<string, { variant: snapcompact.ShapeVariantName; sidecar: boolean }>> = {
-	anthropic: { variant: "8x13-bw", sidecar: true },
-	gemini: { variant: "11on16-bw", sidecar: false },
-};
-
-interface FrameProfile {
-	shape: snapcompact.Shape;
-	/** Whether the preamble lists the frames' identifiers. */
-	sidecar: boolean;
-}
-
-/** An explicit `snapcompact.shape` wins; `auto` uses {@link AUTO_PROFILES} where measured. */
-function frameProfile(text: string, model: Model, setting: ShapeSetting): FrameProfile {
-	const shape = snapcompact.resolveShapeForText(text, model, setting);
-	const profile =
-		setting === "auto" ? AUTO_PROFILES[classifyModel(model.provider, model.id, { lenient: true }).class] : undefined;
-	if (!profile) return { shape, sidecar: true };
-	// Auto's CJK grid stays: both profiles draw the default font, which cannot hold that text.
-	if (shape.font === "silver") return { shape, sidecar: profile.sidecar };
-	return { shape: snapcompact.resolveShape(model, profile.variant), sidecar: profile.sidecar };
-}
-
 /** Most re-cuts while fitting the tail into {@link INHERITED_CONTEXT_MAX_FRAMES} frames. */
 const FIT_ATTEMPTS = 6;
 
 /**
- * The latest part of `text` that fits {@link INHERITED_CONTEXT_MAX_FRAMES} frames of the shape
- * `model` resolves for it, or `undefined` when no cut fits. Shapes differ in capacity (provider
- * geometry, the CJK grid), so the cut follows the shape instead of keeping the last frames of an
- * overflowing render, which would drop text the sidecar still lists.
+ * The latest part of `text` that fits {@link INHERITED_CONTEXT_MAX_FRAMES} frames of the tail shape
+ * `model` resolves for it ({@link snapcompact.resolveTailShapeForText}: an explicit `snapcompact.shape`
+ * wins), or `undefined` when no cut fits. Shapes differ in capacity (provider geometry, the CJK
+ * grid), so the cut follows the shape instead of keeping the last frames of an overflowing render,
+ * which would drop text the sidecar still lists.
  */
 function fitTail(
 	text: string,
 	model: Model,
 	setting: ShapeSetting,
-): ({ text: string; frames: number } & FrameProfile) | undefined {
+): ({ text: string; frames: number } & snapcompact.TailShape) | undefined {
 	let fitted = text;
 	for (let attempt = 0; attempt < FIT_ATTEMPTS && fitted; attempt++) {
-		const profile = frameProfile(fitted, model, setting);
-		const frames = snapcompact.frames(fitted, { shape: profile.shape });
-		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, frames, ...profile };
+		const tail = snapcompact.resolveTailShapeForText(fitted, model, setting);
+		const frames = snapcompact.frames(fitted, { shape: tail.shape });
+		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, frames, ...tail };
 		// Proportional cut with a margin: line snapping and wrapping make capacity uneven.
 		fitted = tailText(fitted, Math.floor(((fitted.length * INHERITED_CONTEXT_MAX_FRAMES) / frames) * 0.95));
 	}
@@ -389,7 +359,7 @@ export class InheritedContextFrames {
 		const content = [
 			{
 				type: "text",
-				text: renderPreamble(frames.length, fit.sidecar ? extractIdentifiers(fit.text) : []),
+				text: renderPreamble(frames.length, fit.identifierList ? extractIdentifiers(fit.text) : []),
 			} satisfies TextContent,
 			...frames,
 		];
@@ -400,20 +370,30 @@ export class InheritedContextFrames {
 
 /**
  * After the provider's image clamps: when they dropped any frame {@link InheritedContextFrames}
- * swapped into `framed` (its result for `unframed`), send the text turn instead, so the child
- * keeps the tail rather than a preamble without it. Stateless, so overlapping requests on one
- * transform (side requests, compaction) cannot mix up each other's turns.
+ * swapped into `framed` (its result for `unframed`), send the text tail instead, so the child
+ * keeps the tail rather than a preamble without it. Only this turn's own part counts and is
+ * replaced: inline snapcompact prepends its system-prompt note and frames to the first user turn,
+ * which in a child is this one, and those stay whichever images a clamp evicts. Stateless, so
+ * overlapping requests on one transform (side requests, compaction) cannot mix up each other's turns.
  */
 export function restoreEvictedFrames(context: Context, unframed: Context, framed: Context): Context {
 	if (framed === unframed) return context;
 	const textTurn = unframed.messages.find(isInheritedContextTurn);
 	const framedTurn = framed.messages.find(message => message.role === "user" && message.inheritedContext === true);
 	const index = context.messages.findIndex(message => message.role === "user" && message.inheritedContext === true);
-	if (!textTurn || !framedTurn || index === -1) return context;
-	const sentFrames = imageCount([context.messages[index]!]);
+	if (!textTurn || !framedTurn || index === -1 || !Array.isArray(framedTurn.content)) return context;
+	const preamble = framedTurn.content[0];
+	const sent = context.messages[index] as UserMessage;
+	const content = typeof sent.content === "string" ? [{ type: "text" as const, text: sent.content }] : sent.content;
+	const own = content.findIndex(
+		block => block.type === "text" && preamble?.type === "text" && block.text === preamble.text,
+	);
+	// Without its preamble the turn was rewritten past recognition; the whole text turn is the safe send.
+	const prefix = own === -1 ? [] : content.slice(0, own);
+	const sentFrames = imageCount([{ ...sent, content: own === -1 ? content : content.slice(own) }]);
 	if (sentFrames >= imageCount([framedTurn])) return context;
 	logger.debug("task: inherited context frames evicted by the image byte budget; sending text");
 	const messages = context.messages.slice();
-	messages[index] = textTurn;
+	messages[index] = prefix.length === 0 ? textTurn : { ...textTurn, content: [...prefix, ...textTurn.content] };
 	return { ...context, messages };
 }

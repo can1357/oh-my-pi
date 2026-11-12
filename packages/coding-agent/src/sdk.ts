@@ -5112,6 +5112,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return toolSession.skills;
 			},
+			// Live too: Hide Secrets can turn on after launch, and the advisor's task captures must encode.
+			get providerSecrets() {
+				return toolSession.providerSecrets;
+			},
 			hasEditTool: true,
 			requireYieldTool: false,
 			getSessionId: () => {
