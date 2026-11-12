@@ -657,12 +657,14 @@ describe("structured subagent primitive", () => {
 	});
 
 	it.each([
-		{ setting: true, flagged: true, inherits: true },
-		{ setting: false, flagged: true, inherits: false },
-		{ setting: true, flagged: false, inherits: false },
+		{ setting: true, flagged: true, withheld: false, inherits: true },
+		{ setting: false, flagged: true, withheld: false, inherits: false },
+		{ setting: true, flagged: false, withheld: false, inherits: false },
+		// The advisor's session: its context reader is the primary's transcript.
+		{ setting: true, flagged: true, withheld: true, inherits: false },
 	])(
-		"task tool: setting=$setting flagged=$flagged → child inherits=$inherits",
-		async ({ setting, flagged, inherits }) => {
+		"task tool: setting=$setting flagged=$flagged withheld=$withheld → child inherits=$inherits",
+		async ({ setting, flagged, withheld, inherits }) => {
 			mockDiscovery();
 			const dispatched: executorModule.ExecutorOptions[] = [];
 			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -672,8 +674,10 @@ describe("structured subagent primitive", () => {
 			const parent = {
 				...session({ settings: Settings.isolated({ "task.inheritContext": setting, "async.enabled": false }) }),
 				getContextMessages: () => [{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }],
+				withholdInheritedContext: withheld,
 			} as unknown as ToolSession;
 			const tool = await TaskTool.create(parent);
+			expect(JSON.stringify(tool.parameters.toJsonSchema()).includes('"inheritContext"')).toBe(setting && !withheld);
 			await tool.execute("tc-inherit", {
 				context: "Shared background.",
 				tasks: [
@@ -688,6 +692,16 @@ describe("structured subagent primitive", () => {
 			} as TaskParams);
 			expect(dispatched).toHaveLength(1);
 			expect(dispatched[0]?.inheritedContext?.text.includes("PLUM-7731") ?? false).toBe(inherits);
+		},
+	);
+	it.each([true, false])(
+		"marks agents that ignore inheritContext only while the item flag exists (setting=%p)",
+		async setting => {
+			mockDiscovery({ ...AGENT, inheritContext: false });
+			const tool = await TaskTool.create(
+				session({ settings: Settings.isolated({ "task.inheritContext": setting }) }) as unknown as ToolSession,
+			);
+			expect(tool.description.includes("- `worker` (ignores inheritContext): Test worker")).toBe(setting);
 		},
 	);
 	it.each([false, true])(
@@ -726,7 +740,7 @@ describe("structured subagent primitive", () => {
 			try {
 				const dropped = await run([]);
 				expect(dropped.text.split("\n").find(line => line.includes("started without your conversation"))).toBe(
-					`\`${dropped.ids[0]}\` started without your conversation: \`inheritContext\` could not carry it safely, so it had only its brief.`,
+					`\`${dropped.ids[0]}\` started without your conversation: \`inheritContext\` could not capture it, so it had only its brief.`,
 				);
 				const inherited = await run([{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }]);
 				expect(inherited.text).not.toContain("started without your conversation");

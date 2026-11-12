@@ -198,6 +198,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		blocking: agent.blocking === true,
 		// Marked only while `task.structured` is off; with it on, every agent's result is structured.
 		structured: !options.structured && agent.structured === true,
+		// Marked only while the item flag exists, so the description is unchanged with the setting off.
+		noInheritContext: options.inheritContextEnabled && agent.inheritContext === false,
 	}));
 	const seanceAgent = filteredAgents.find(agent => agent.name === SEANCE_AGENT_NAME);
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -853,7 +855,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
-			inheritContextEnabled: cfgTaskInheritContext.get(this.session.settings),
+			inheritContextEnabled: this.#isInheritContextEnabled(),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			steps: cfgTaskSteps.get(this.session.settings),
@@ -903,7 +905,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
-			inheritContextEnabled: cfgTaskInheritContext.get(this.session.settings),
+			inheritContextEnabled: this.#isInheritContextEnabled(),
 			perCallModelEnabled: perCallModel,
 			perCallModelAdvertisement,
 			evalToolsEnabled: evalToolsEnabled(this.session),
@@ -959,7 +961,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	/** Flagged item while `task.inheritContext` is on; the setting also drops a stale `true` at spawn time. */
 	#wantsInheritedContext(params: TaskParams): boolean {
-		return params.inheritContext === true && cfgTaskInheritContext.get(this.session.settings);
+		return params.inheritContext === true && this.#isInheritContextEnabled();
+	}
+
+	/** `task.inheritContext`, unless this session's context reader is another agent's transcript. */
+	#isInheritContextEnabled(): boolean {
+		return !this.session.withholdInheritedContext && cfgTaskInheritContext.get(this.session.settings);
 	}
 
 	/**

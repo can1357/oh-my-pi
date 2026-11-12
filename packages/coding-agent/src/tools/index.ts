@@ -526,6 +526,11 @@ export interface ToolSession {
 	 * cut on encoded text, so no secret is split at the cut, then decoded for the child's own boundary.
 	 */
 	providerSecrets?: SecretObfuscator;
+	/**
+	 * Set where `getContextMessages` reads another agent's transcript (the advisor's session shares the
+	 * primary's): task spawns never inherit context there, and the task schema omits `inheritContext`.
+	 */
+	withholdInheritedContext?: boolean;
 	/** The Spotlight experiment's handle on this session; present only while `spotlight.experiment.enabled`. */
 	spotlight?: SpotlightSession;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */

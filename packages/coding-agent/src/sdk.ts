@@ -5116,6 +5116,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get providerSecrets() {
 				return toolSession.providerSecrets;
 			},
+			// `getContextMessages` above is the primary's transcript, not the advisor's own reasoning.
+			withholdInheritedContext: true,
 			hasEditTool: true,
 			requireYieldTool: false,
 			getSessionId: () => {
