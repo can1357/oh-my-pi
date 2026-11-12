@@ -1076,7 +1076,7 @@ async fn write_value(
 		if tokio::time::Instant::now() >= deadline {
 			// The range only where it explains the value: an unbounded control
 			// reports ±f64::MAX, hundreds of digits each.
-			let range = match (proxy.minimum_value().await, proxy.maximum_value().await) {
+			let range = match futures::join!(proxy.minimum_value(), proxy.maximum_value()) {
 				(Ok(min), _) if value < min && min != -f64::MAX => {
 					format!(" (its minimum is {min})")
 				},
@@ -1516,8 +1516,7 @@ impl AxBackend for AtSpiAx {
 				}
 				write_value(&self.connection, &name, &object, numeric).await
 			})
-			.map_err(unconfirmed)
-			.map_err(|error| text_write_error(error, emptied))
+			.map_err(|error| text_write_error(unconfirmed(error), emptied))
 	}
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
