@@ -1590,7 +1590,8 @@ mod foreground {
 		}
 		// SAFETY: no preconditions.
 		let before = unsafe { GetKeyState(i32::from(DRAIN_KEY)) } & 1;
-		let marker = [key_event(DRAIN_KEY, false), key_event(DRAIN_KEY, true)];
+		let layout = super::keyboard_layout(Some(reader));
+		let marker = [key_event(DRAIN_KEY, false, layout), key_event(DRAIN_KEY, true, layout)];
 		// The text is out, so the marker goes even after a cancel that came
 		// since; the wait below ends on it.
 		// SAFETY: `marker` is an initialized INPUT slice copied synchronously.
