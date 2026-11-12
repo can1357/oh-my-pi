@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
