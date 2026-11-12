@@ -122,6 +122,10 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
  * PATH if the original physical path was unlinked on disk (e.g. Homebrew or a
  * package manager pruned the prior version directory during an in-flight
  * upgrade, leaving `process.execPath` pointing at a missing path).
+ *
+ * A new install that leaves the old file in place does not come through here:
+ * workers must keep spawning the binary this process is already running.
+ * `/restart` uses {@link resolveRestartEntryCmd} so it can exec the live shim.
  */
 export function resolveExecutablePath(): string {
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
@@ -146,8 +150,9 @@ export function resolveExecutablePath(): string {
 
 /**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
- * binary itself, or the runtime plus the declared worker-host entry. Used by
- * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
+ * binary itself, or the runtime plus the declared worker-host entry. Fork,
+ * gc, and worktree rewrites use this; `/restart` uses
+ * {@link resolveRestartEntryCmd}. Workers go through {@link resolveWorkerSpawnCmd},
  * whose no-host fallback deliberately differs (cwd-relative entry pinned to the
  * package root for `bun test` IPC). Outside a CLI host this falls back to the
  * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
@@ -158,6 +163,22 @@ export function resolveCliEntryCmd(): string[] {
 	const hostEntry = workerHostEntry();
 	if (hostEntry) return [executable, hostEntry];
 	return [executable, path.resolve(import.meta.dir, "..", "cli.ts")];
+}
+
+/**
+ * Relaunch argv for `/restart` and the idle binary reload.
+ *
+ * When `liveExecutable` is set, a compiled session execs that path even if
+ * `process.execPath` still exists. A mise install lives at a new path and
+ * leaves the old file in place; {@link resolveExecutablePath} would keep the
+ * old build. Workers do not call this — they stay on the running binary.
+ * A non-compiled session (bun + `cli.ts`) ignores `liveExecutable` so a dev
+ * run does not jump onto the installed binary.
+ */
+export function resolveRestartEntryCmd(liveExecutable?: string): string[] {
+	const cmd = resolveCliEntryCmd();
+	if (!isCompiledBinary() || !liveExecutable || !isExecutable(liveExecutable)) return cmd;
+	return [liveExecutable, ...cmd.slice(1)];
 }
 
 /**

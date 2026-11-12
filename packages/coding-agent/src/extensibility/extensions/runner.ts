@@ -711,7 +711,17 @@ export class ExtensionRunner {
 	 * the cost is that a first registration for that seam after `initialize` never
 	 * takes effect, which is why the API documents load-time registration.
 	 */
-	#fileFallbackDisposers: Array<() => void> = [];
+	#fileFallbackDisposers = new Map<Extension, Array<() => void>>();
+	/**
+	 * Timers scheduled through `ctx.setInterval` / `ctx.setTimeout` from inside one extension's
+	 * own event handlers, kept per extension so retiring it ({@link replaceExtension},
+	 * {@link removeExtension}) clears exactly its timers. A timer scheduled where no handler is
+	 * running (a command or tool body) cannot be attributed and lives in {@link #managedTimers}
+	 * until session teardown.
+	 */
+	#extensionTimers = new Map<Extension, ManagedTimers>();
+	/** The extension whose handler is running, so `ctx.setInterval` can attribute its timers. */
+	#extensionScope = new AsyncLocalStorage<Extension>();
 	/**
 	 * Dedup markers for `tool_call` emission, keyed `${toolCallId}:${toolName}`.
 	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
@@ -1174,8 +1184,10 @@ export class ExtensionRunner {
 	 * contract and registration order for a backup-handler setup.
 	 */
 	#installFileFallbacks(ext: Extension): void {
+		const disposers = this.#fileFallbackDisposers.get(ext) ?? [];
+		this.#fileFallbackDisposers.set(ext, disposers);
 		if (ext.fileWriteFallbackHandlers.length > 0) {
-			this.#fileFallbackDisposers.push(
+			disposers.push(
 				addFileWriteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
@@ -1194,7 +1206,7 @@ export class ExtensionRunner {
 			);
 		}
 		if (ext.fileDeleteFallbackHandlers.length > 0) {
-			this.#fileFallbackDisposers.push(
+			disposers.push(
 				addFileDeleteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
@@ -1234,31 +1246,222 @@ export class ExtensionRunner {
 		if (this.#initialized) {
 			for (const extension of added) this.#installFileFallbacks(extension);
 		}
-		for (const extension of added) {
-			const scope: ToolRegistrationScope = {
-				pending: new Set(),
-				closed: false,
-				signal: AbortSignal.timeout(extensionHandlerTimeoutMs),
-			};
-			this.#toolRegistrationScope.run(scope, () => {
-				for (const attach of this.#toolRegistrationSubscribers) {
-					const listener = attach(extension);
-					for (const toolName of extension.tools.keys()) listener(toolName);
-				}
+		for (const extension of added) await this.#attachToolRegistrations(extension);
+		if (this.#sessionStartEvent) await this.#emitTo(added, this.#sessionStartEvent);
+	}
+
+	/** Hand `extension`'s tools to every {@link onToolRegistered} subscriber and wait for their activation. */
+	async #attachToolRegistrations(extension: Extension): Promise<void> {
+		const scope: ToolRegistrationScope = {
+			pending: new Set(),
+			closed: false,
+			signal: AbortSignal.timeout(extensionHandlerTimeoutMs),
+		};
+		this.#toolRegistrationScope.run(scope, () => {
+			for (const attach of this.#toolRegistrationSubscribers) {
+				const listener = attach(extension);
+				for (const toolName of extension.tools.keys()) listener(toolName);
+			}
+		});
+		scope.closed = true;
+		try {
+			await this.#flushToolRegistrations(scope.pending);
+		} catch (error) {
+			this.emitError({
+				extensionPath: extension.path,
+				event: "tool_registration",
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
 			});
-			scope.closed = true;
+		}
+	}
+
+	/**
+	 * Release what the runner holds on behalf of `extension`: its file fallbacks and the timers it
+	 * scheduled from inside its handlers. Event-bus subscriptions are dropped separately (see
+	 * {@link Extension.disposeEventSubscriptions}) so a reload that has to be undone can keep them.
+	 */
+	#releaseExtensionResources(extension: Extension): void {
+		for (const dispose of this.#fileFallbackDisposers.get(extension) ?? []) dispose();
+		this.#fileFallbackDisposers.delete(extension);
+		this.#extensionTimers.get(extension)?.clearAll();
+		this.#extensionTimers.delete(extension);
+	}
+
+	/** Run `extension`'s `session_shutdown` handlers alone. Handler failures are routed to {@link onError}. */
+	async #shutdownExtension(extension: Extension): Promise<void> {
+		if (this.#suspendedExtensions.has(extension)) return;
+		await this.#emitTo([extension], { type: "session_shutdown" });
+	}
+
+	/**
+	 * Bring a loaded-but-idle `extension` live the way {@link addExtensions} does: file fallbacks,
+	 * tool activation, and the replayed `session_start`. Resolves the reason the replayed
+	 * `session_start` failed (a handler threw or timed out), else `undefined`.
+	 */
+	async #activateExtension(extension: Extension): Promise<string | undefined> {
+		if (this.#initialized) this.#installFileFallbacks(extension);
+		if (this.#suspendedExtensions.has(extension)) return undefined;
+		await this.#attachToolRegistrations(extension);
+		const startEvent = this.#sessionStartEvent;
+		if (!startEvent) return undefined;
+		let failure: string | undefined;
+		const stopListening = this.onError(error => {
+			if (error.extensionPath === extension.path && error.event === startEvent.type) failure ??= error.error;
+		});
+		try {
+			await this.#emitTo([extension], startEvent);
+		} catch (error) {
+			failure ??= error instanceof Error ? error.message : String(error);
+		} finally {
+			stopListening();
+		}
+		return failure;
+	}
+
+	/**
+	 * Swap `previous` for `next` - a fresh instance of the same extension from re-imported source.
+	 * `previous` receives `session_shutdown` and gives up its file fallbacks and timers; `next`
+	 * takes its place in load order (inheriting a suspension), is activated like a late-added
+	 * extension, and receives the replayed `session_start`. Only once `next` has started is
+	 * `commit` run, providers `previous` registered are dropped, and `previous`'s event-bus
+	 * subscriptions released.
+	 *
+	 * If `next` fails to start, it is torn down and `previous` is put back and started again, so
+	 * a failed reload leaves the extension running as before (its `session_shutdown` and
+	 * `session_start` having run once more). Resolves `{ ok: false, error }` in that case; never throws.
+	 */
+	async replaceExtension(
+		previous: Extension,
+		next: Extension,
+		commit?: () => void,
+	): Promise<{ ok: true } | { ok: false; error: string }> {
+		this.#loadOrder ??= [...this.extensions];
+		if (!this.#loadOrder.includes(previous)) {
+			next.disposeEventSubscriptions?.();
+			return { ok: false, error: `Extension is not loaded: ${previous.path}` };
+		}
+		const suspended = this.#suspendedExtensions.has(previous);
+		await this.#shutdownExtension(previous);
+		this.#releaseExtensionResources(previous);
+		this.#substituteExtension(previous, next, suspended);
+		let failure: string | undefined;
+		try {
+			failure = await this.#activateExtension(next);
+		} catch (error) {
+			failure = error instanceof Error ? error.message : String(error);
+		}
+		if (failure === undefined) {
+			if (previous.registersProviders) this.modelRegistry.clearSourceRegistrations(previous.path);
 			try {
-				await this.#flushToolRegistrations(scope.pending);
+				commit?.();
 			} catch (error) {
-				this.emitError({
-					extensionPath: extension.path,
-					event: "tool_registration",
+				logger.warn("Extension provider registration failed after reload", {
+					extension: next.path,
 					error: error instanceof Error ? error.message : String(error),
-					stack: error instanceof Error ? error.stack : undefined,
+				});
+				this.emitError({
+					extensionPath: next.path,
+					event: "reload",
+					error: error instanceof Error ? error.message : String(error),
 				});
 			}
+			previous.disposeEventSubscriptions?.();
+			return { ok: true };
 		}
-		if (this.#sessionStartEvent) await this.#emitTo(added, this.#sessionStartEvent);
+		// Undo: stop `next`, put `previous` back, restart it.
+		await this.#shutdownExtension(next);
+		this.#releaseExtensionResources(next);
+		next.disposeEventSubscriptions?.();
+		this.#substituteExtension(next, previous, suspended);
+		try {
+			const restartFailure = await this.#activateExtension(previous);
+			if (restartFailure !== undefined) {
+				logger.warn("Extension failed to restart after a reload was rolled back", {
+					extension: previous.path,
+					error: restartFailure,
+				});
+			}
+		} catch (error) {
+			logger.warn("Extension failed to restart after a reload was rolled back", {
+				extension: previous.path,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return { ok: false, error: failure };
+	}
+
+	/**
+	 * Add an extension whose source appeared after startup, like {@link addExtensions} but atomic:
+	 * if it fails to start (`session_start` threw or timed out) it is shut down, released, and
+	 * dropped again, and `{ ok: false, error }` comes back. `commit` runs only on success. Never throws.
+	 */
+	async addReloadedExtension(
+		next: Extension,
+		commit?: () => void,
+	): Promise<{ ok: true } | { ok: false; error: string }> {
+		this.#loadOrder ??= [...this.extensions];
+		this.extensions.push(next);
+		this.#loadOrder.push(next);
+		let failure: string | undefined;
+		try {
+			failure = await this.#activateExtension(next);
+		} catch (error) {
+			failure = error instanceof Error ? error.message : String(error);
+		}
+		if (failure === undefined) {
+			try {
+				commit?.();
+			} catch (error) {
+				logger.warn("Extension provider registration failed after reload", {
+					extension: next.path,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				this.emitError({
+					extensionPath: next.path,
+					event: "reload",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return { ok: true };
+		}
+		await this.#shutdownExtension(next);
+		this.#releaseExtensionResources(next);
+		next.disposeEventSubscriptions?.();
+		this.#loadOrder.splice(this.#loadOrder.indexOf(next), 1);
+		const active = this.extensions.indexOf(next);
+		if (active !== -1) this.extensions.splice(active, 1);
+		return { ok: false, error: failure };
+	}
+
+	/**
+	 * Retire a loaded extension for good (its source is gone): `session_shutdown`, then release its
+	 * fallbacks, timers, bus subscriptions, and providers, and drop it from the runner. Tools it
+	 * registered stop resolving through {@link getRegisteredTool}; the host reconciles its own registry.
+	 */
+	async removeExtension(extension: Extension): Promise<void> {
+		this.#loadOrder ??= [...this.extensions];
+		const index = this.#loadOrder.indexOf(extension);
+		if (index === -1) return;
+		await this.#shutdownExtension(extension);
+		this.#releaseExtensionResources(extension);
+		extension.disposeEventSubscriptions?.();
+		if (extension.registersProviders) this.modelRegistry.clearSourceRegistrations(extension.path);
+		this.#loadOrder.splice(index, 1);
+		const active = this.extensions.indexOf(extension);
+		if (active !== -1) this.extensions.splice(active, 1);
+		this.#suspendedExtensions.delete(extension);
+	}
+
+	/** Put `incoming` where `outgoing` stood in load order and in the active list, carrying over suspension. */
+	#substituteExtension(outgoing: Extension, incoming: Extension, suspended: boolean): void {
+		const order = this.#loadOrder ?? this.extensions;
+		const loadIndex = order.indexOf(outgoing);
+		if (loadIndex !== -1) order[loadIndex] = incoming;
+		const activeIndex = this.extensions.indexOf(outgoing);
+		if (activeIndex !== -1) this.extensions[activeIndex] = incoming;
+		this.#suspendedExtensions.delete(outgoing);
+		if (suspended) this.#suspendedExtensions.add(incoming);
 	}
 
 	getExtensionPaths(): string[] {
@@ -1864,9 +2067,12 @@ export class ExtensionRunner {
 			get annotations(): ExtensionAnnotationsAPI {
 				return createAnnotations ? createAnnotations(() => this, sendUserMessage) : UNAVAILABLE_ANNOTATIONS;
 			},
-			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
-			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
-			clearTimer: timer => this.#managedTimers.clear(timer),
+			setInterval: (callback, ms, ...args) => this.#timersForRunningExtension().setInterval(callback, ms, ...args),
+			setTimeout: (callback, ms, ...args) => this.#timersForRunningExtension().setTimeout(callback, ms, ...args),
+			clearTimer: timer => {
+				this.#managedTimers.clear(timer);
+				for (const timers of this.#extensionTimers.values()) timers.clear(timer);
+			},
 			addAdditionalContext: delegation?.context?.addAdditionalContext,
 			invokeTool:
 				delegation !== undefined && this.hasNativeTool(delegation.toolName)
@@ -1898,6 +2104,22 @@ export class ExtensionRunner {
 	 */
 	clearManagedTimers(): void {
 		this.#managedTimers.clearAll();
+		for (const timers of this.#extensionTimers.values()) timers.clearAll();
+		this.#extensionTimers.clear();
+	}
+
+	/** The timer pool of the extension whose handler is running, else the shared pool. */
+	#timersForRunningExtension(): ManagedTimers {
+		const extension = this.#extensionScope.getStore();
+		if (!extension) return this.#managedTimers;
+		let timers = this.#extensionTimers.get(extension);
+		if (!timers) {
+			timers = new ManagedTimers((event, error, stack) =>
+				this.emitError({ extensionPath: extension.path, event, error, stack }),
+			);
+			this.#extensionTimers.set(extension, timers);
+		}
+		return timers;
 	}
 
 	/**
@@ -1907,7 +2129,10 @@ export class ExtensionRunner {
 	 * context can never fire for another session sharing this process.
 	 */
 	disposeFileFallbacks(): void {
-		for (const dispose of this.#fileFallbackDisposers.splice(0)) dispose();
+		for (const disposers of this.#fileFallbackDisposers.values()) {
+			for (const dispose of disposers) dispose();
+		}
+		this.#fileFallbackDisposers.clear();
 	}
 
 	createCommandContext(): ExtensionCommandContext {
@@ -1967,7 +2192,7 @@ export class ExtensionRunner {
 								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+								this.#extensionScope.run(ext, () => handler(event, handlerContext)),
 							);
 						} catch (error) {
 							handlerFailure = { error };

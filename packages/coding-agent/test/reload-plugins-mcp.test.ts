@@ -49,6 +49,8 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 	const session = {
 		effectiveExtensionRoots: TEST_EXTENSION_ROOTS,
 		getEvalPreludes: () => [],
+		refreshCustomTools: vi.fn(async (_options?: unknown) => undefined),
+		refreshExtensions: vi.fn(async (_options?: unknown) => undefined),
 		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
 	};
@@ -91,6 +93,9 @@ describe("/reload-plugins runtime refresh", () => {
 		expect(session.refreshMCPTools).toHaveBeenCalledWith(mcpTools);
 		expect(session.setMCPPromptCommands).toHaveBeenCalledTimes(1);
 		expect(session.setMCPPromptCommands).toHaveBeenCalledWith([]);
+		expect(session.refreshCustomTools).toHaveBeenCalledTimes(1);
+		expect(session.refreshCustomTools).toHaveBeenCalledWith({ retryFailed: true });
+		expect(session.refreshExtensions).toHaveBeenCalledTimes(1);
 	});
 
 	test("honors mcp.enableProjectConfig=false so opted-out project servers are not started on reload", async () => {

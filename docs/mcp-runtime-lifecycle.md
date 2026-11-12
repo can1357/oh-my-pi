@@ -176,6 +176,11 @@ Both preserve MCP content and metadata; `structuredContent` is retained in `deta
 
 The owning SDK session listens for `mcp.enableProjectConfig` changes: it disconnects affected project entries, restores user definitions they shadowed, or loads newly allowed project entries without `/mcp reload`. Browser-MCP reconciliation is serialized and follows whether the built-in browser prelude is actually callable. Borrowed managers keep the parent's single-slot tools/prompts/resources callbacks; each session still installs its own notification listener.
 
+`hotReload.enabled` (default on) gates two MCP hot-reload subsystems on the owning session's `HotReloadCoordinator`:
+
+- **`hotReload.mcpConfig` (default on):** polls `mcp.json` and `.mcp.json` configuration files by BLAKE2b-256 content digest. When a config file is created, edited, or deleted, the session reconciles added, updated, and removed MCP servers (`MCPManager.reconcileConfigs()`) and refreshes the session's MCP tools without touching unaffected connections or requiring `/mcp reload`. Changes that land mid-turn are deferred until the turn ends.
+- **`hotReload.mcpServers` (default on):** watches every connected stdio server's executable and every argument that names an existing file (`node server.js`). Files are polled by `stat`; a changed stat that holds for two polls is hashed (BLAKE2b-256) and, only if the bytes differ from the version the server was spawned with, the server is reconnected and its tools are refreshed. A `touch` or an identical rebuild does nothing; remote servers are never watched.
+
 ## Server-initiated notifications
 
 MCP servers may push JSON-RPC notification frames at any point after `initialize` completes. The transport surfaces them via `onNotification`; the manager fans them out in two paths:

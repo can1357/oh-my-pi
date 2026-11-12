@@ -31,7 +31,7 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
-import { EventBus } from "../../utils/event-bus";
+import { EventBus, ScopedEventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
@@ -527,16 +527,89 @@ async function bindExtension(
 	if (imported.error !== null || factory === null) {
 		return { extension: null, error: imported.error };
 	}
+	// Each extension subscribes through its own view of the session bus, so retiring it (a hot
+	// reload, a removal) can drop exactly its listeners.
+	const scopedBus = new ScopedEventBus(eventBus);
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
+		extension.disposeEventSubscriptions = () => scopedBus.disposeAll();
+		const api = new ConcreteExtensionAPI(extension, runtime, cwd, scopedBus);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
 		return { extension, error: null };
 	} catch (err) {
+		// A factory that subscribed before throwing must not leave listeners behind.
+		scopedBus.disposeAll();
 		const message = err instanceof Error ? err.message : String(err);
 		return { extension: null, error: `Failed to load extension: ${message}` };
 	}
+}
+
+/**
+ * A runtime that stands in for the live one while a reloaded factory runs. Provider
+ * registrations and flag defaults the factory makes are held back until `commit`, so a
+ * factory (or `session_start`) that fails leaves the live runtime exactly as it was. After
+ * `commit` the runtime forwards to the live one.
+ */
+function createStagedRuntime(live: IExtensionRuntime): { runtime: IExtensionRuntime; commit: () => void } {
+	const stagedFlags = new Map(live.flagValues);
+	const stagedProviderOps: Array<() => void> = [];
+	let committed = false;
+	const runtime = Object.create(live) as IExtensionRuntime;
+	Object.defineProperties(runtime, {
+		flagValues: { get: () => (committed ? live.flagValues : stagedFlags) },
+		// Staged ops replace the queue; a factory's own rollback of this list is then a no-op.
+		pendingProviderRegistrations: { value: [], writable: true },
+		registerProvider: {
+			value: (name: string, config: ProviderConfig, sourceId: string) => {
+				if (committed) return live.registerProvider(name, config, sourceId);
+				stagedProviderOps.push(() => live.registerProvider(name, config, sourceId));
+			},
+		},
+		unregisterProvider: {
+			value: (name: string, sourceId: string) => {
+				if (committed) return live.unregisterProvider(name, sourceId);
+				stagedProviderOps.push(() => live.unregisterProvider(name, sourceId));
+			},
+		},
+	});
+	const commit = (): void => {
+		if (committed) return;
+		committed = true;
+		// A flag the live session already holds (set from the command line, say) keeps its value.
+		for (const [name, value] of stagedFlags) {
+			if (!live.flagValues.has(name)) live.flagValues.set(name, value);
+		}
+		for (const op of stagedProviderOps.splice(0)) op();
+	};
+	return { runtime, commit };
+}
+
+/** An extension rebound from a freshly imported module, not yet installed in any runner. */
+export interface ReboundExtension {
+	extension: Extension;
+	/** Applies what the factory registered outside the extension (providers, flag defaults) to the live runtime. */
+	commit: () => void;
+}
+
+/**
+ * Import `extensionPath` as a fresh module instance and run its factory against a staging
+ * runtime. Never throws: a malformed module (syntax error, throwing import or factory) comes back
+ * as `error` and has touched nothing - not the runtime, not the event bus. The caller installs
+ * `extension` in a runner and calls `commit()` once it is accepted; if it is rejected, dropping
+ * `extension` (after `disposeEventSubscriptions`) is all the cleanup there is.
+ */
+export async function loadExtensionForReload(
+	extensionPath: string,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: IExtensionRuntime,
+): Promise<{ rebound: ReboundExtension; error: null } | { rebound: null; error: string }> {
+	const imported = await importExtensionModule(extensionPath, cwd);
+	const staged = createStagedRuntime(runtime);
+	const { extension, error } = await bindExtension(extensionPath, imported, cwd, eventBus, staged.runtime);
+	if (!extension) return { rebound: null, error: error ?? `Failed to load extension: ${extensionPath}` };
+	return { rebound: { extension, commit: staged.commit }, error: null };
 }
 
 /**

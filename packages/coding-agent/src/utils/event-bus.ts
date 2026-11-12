@@ -83,6 +83,36 @@ export class EventBus {
 }
 
 /**
+ * A view of a parent bus that remembers what its owner subscribed to, so the owner can be
+ * retired (an extension reloaded or removed) without leaving its listeners behind. Emitting and
+ * subscribing reach the parent bus; {@link disposeAll} unsubscribes only what this view added.
+ */
+export class ScopedEventBus extends EventBus {
+	readonly #subscriptions = new Set<() => void>();
+
+	constructor(parent: EventBus) {
+		super();
+		this.emit = parent.emit;
+		this.clear = parent.clear;
+		this.on = (channel, handler) => {
+			const unsubscribe = parent.on(channel, handler);
+			const tracked = () => {
+				this.#subscriptions.delete(tracked);
+				unsubscribe();
+			};
+			this.#subscriptions.add(tracked);
+			return tracked;
+		};
+	}
+
+	/** Unsubscribes every listener this view added and has not already removed. */
+	disposeAll(): void {
+		// Each unsubscribe removes itself from the set mid-iteration, which Set iteration tolerates.
+		for (const unsubscribe of this.#subscriptions) unsubscribe();
+	}
+}
+
+/**
  * Publishes a subagent frame on the session bus and the observability bus.
  * SDK embedders may pass the same EventBus for both slots; the identity check
  * skips the aliased re-emit so listeners never see duplicate frames.

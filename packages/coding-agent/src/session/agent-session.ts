@@ -149,7 +149,7 @@ import { WorkPoolRegistry } from "../task/workpool";
 import { type BashResult, drainAbortedShells, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
-import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { CustomTool, CustomToolsRefreshOptions } from "../extensibility/custom-tools/types";
 import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
@@ -505,11 +505,23 @@ import {
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
+import {
+	describeExtensionsRefresh,
+	type ExtensionsRefresher,
+	type ExtensionsRefreshOptions,
+	type ExtensionsRefreshSummary,
+} from "./extensions-hot-reload";
+import type { HotReloadCoordinator, HotReloadSubsystem } from "./hot-reload";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
+import {
+	type CustomToolsRefresher,
+	type CustomToolsRefreshSummary,
+	describeCustomToolsRefresh,
+} from "./tools-hot-reload";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
@@ -1070,6 +1082,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#slashCommands: FileSlashCommand[];
 	/** Tail of the serialized {@link refreshSkillsAndCommands} chain. */
 	#skillsAndCommandsRefresh: Promise<void> = Promise.resolve();
+	/** Installed by the host that owns custom tool loading; absent for subagents and bare SDK sessions. */
+	#customToolsRefresher: CustomToolsRefresher | undefined;
+	/** Tail of the serialized {@link refreshCustomTools} chain. */
+	#customToolsRefresh: Promise<unknown> = Promise.resolve();
+	/** Installed by the host that owns extension loading; absent for subagents and bare SDK sessions. */
+	#extensionsRefresher: ExtensionsRefresher | undefined;
+	/** Tail of the serialized {@link refreshExtensions} chain. */
+	#extensionsRefresh: Promise<unknown> = Promise.resolve();
+	/** Session-scoped hot-reload coordinator for pluggable subsystems. */
+	#hotReloadCoordinator: HotReloadCoordinator | undefined;
 	/**
 	 * Raw text the caller originally submitted for a queued plain `role: "user"`
 	 * message — before slash/custom-command rewriting, prompt-template expansion,
@@ -7655,6 +7677,87 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#tools.refreshSkills();
 			});
 		this.#skillsAndCommandsRefresh = refresh;
+		return refresh;
+	}
+
+	/** Installs the function {@link refreshCustomTools} runs; called once by the host that loaded this session's custom tools. */
+	setCustomToolsRefresher(refresher: CustomToolsRefresher): void {
+		this.#customToolsRefresher = refresher;
+	}
+
+	/**
+	 * Re-reads the custom tool sources (`tools/` directories, plugins, configured paths) and applies
+	 * the difference to the live session: new tools are registered, edited modules replace their
+	 * tools, and tools whose files are gone are removed. The result is announced as a notice
+	 * (`tools reloaded: +2 ~1 -0`, with failed modules listed); nothing is announced when nothing
+	 * changed. A module that fails to load never disturbs the others. Overlapping calls run in order.
+	 * Resolves `undefined` when this session does not load custom tools (subagents, restricted tool sets).
+	 */
+	refreshCustomTools(options?: CustomToolsRefreshOptions): Promise<CustomToolsRefreshSummary | undefined> {
+		const refresh = this.#customToolsRefresh
+			.catch(() => {})
+			.then(async () => {
+				if (!this.#customToolsRefresher || this.#isDisposed) return undefined;
+				const summary = await this.#customToolsRefresher(options);
+				const notice = describeCustomToolsRefresh(summary);
+				if (notice) this.emitNotice(notice.level, notice.message, "tools");
+				return summary;
+			});
+		this.#customToolsRefresh = refresh;
+		return refresh;
+	}
+
+	/** Installs the function {@link refreshExtensions} runs; called once by the host that loaded this session's extensions. */
+	setExtensionsRefresher(refresher: ExtensionsRefresher): void {
+		this.#extensionsRefresher = refresher;
+	}
+
+	/** Installs the {@link HotReloadCoordinator} that owns live subsystem hot-reloading for this session. */
+	setHotReloadCoordinator(coordinator: HotReloadCoordinator): void {
+		this.#hotReloadCoordinator = coordinator;
+	}
+
+	/**
+	 * Registers a custom {@link HotReloadSubsystem} on this session's hot-reload coordinator
+	 * and returns an unregister callback. Returns a no-op callback when this session does not
+	 * run a hot-reload coordinator.
+	 */
+	registerHotReloadSubsystem<TSummary = void>(subsystem: HotReloadSubsystem<TSummary>): () => void {
+		if (!this.#hotReloadCoordinator || this.#isDisposed) return () => {};
+		const unregister = this.#hotReloadCoordinator.register(subsystem);
+		void this.#hotReloadCoordinator.sync();
+		return unregister;
+	}
+
+	/**
+	 * Re-reads the extension sources (`extensions/` directories, plugins, configured paths) and
+	 * applies the difference to the live session: edited extensions are re-imported as fresh module
+	 * instances and swapped in (the old instance gets `session_shutdown`, the new one the replayed
+	 * `session_start`), new ones are added, and ones whose files are gone are unloaded. Each
+	 * extension is atomic: one that is malformed or fails to start is reported and leaves its old
+	 * instance, and every other extension, running. The result is announced as a notice
+	 * (`extensions reloaded: +1 ~2 -0`, with failures listed); nothing is announced when nothing
+	 * changed. Never rejects: an unexpected failure is announced and resolves `undefined`.
+	 * Overlapping calls run in order. Resolves `undefined` when this session does not load
+	 * extensions (subagents, restricted tool sets).
+	 */
+	refreshExtensions(options?: ExtensionsRefreshOptions): Promise<ExtensionsRefreshSummary | undefined> {
+		const refresh = this.#extensionsRefresh
+			.catch(() => {})
+			.then(async () => {
+				if (!this.#extensionsRefresher || this.#isDisposed) return undefined;
+				try {
+					const summary = await this.#extensionsRefresher(options);
+					const notice = describeExtensionsRefresh(summary);
+					if (notice) this.emitNotice(notice.level, notice.message, "extensions");
+					return summary;
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					this.emitNotice("error", `extensions reload failed: ${reason}`, "extensions");
+					return undefined;
+				}
+			});
+		this.#extensionsRefresh = refresh;
 		return refresh;
 	}
 
