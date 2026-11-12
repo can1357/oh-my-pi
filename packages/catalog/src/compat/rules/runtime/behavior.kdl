@@ -378,6 +378,8 @@ behavior {
 	model-limits provider="alibaba-token-plan" {
 		limits "qwen3.6-plus" context=1000000 max-tokens=65536
 		limits "qwen3.8-max" context=1000000 max-tokens=131072
+		limits "qwen4-max-preview" context=1000000 max-tokens=393216
+		limits "qwen4.0-max-preview" context=1000000 max-tokens=393216
 		limits "deepseek-v4-flash" context=1000000 max-tokens=384000
 		limits "deepseek-v4-flash-0731" context=1000000 max-tokens=384000
 		limits "deepseek-v4-pro-0813" context=1000000 max-tokens=384000
