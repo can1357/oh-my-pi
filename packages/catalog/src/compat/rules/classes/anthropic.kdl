@@ -363,6 +363,22 @@ class "anthropic" {
 			}
 		}
 	}
+	// Bedrock Runtime's `/anthropic` route takes per-message `output_config`
+	// on Opus 5.5; Opus 5, Opus 4.8 and Sonnet 5 answer it with 400
+	// `messages.N.output_config: Extra inputs are not permitted`. Converse has
+	// no mid-conversation system message, hence the Messages API conjunct.
+	// Sonnet 5.5 takes it too, but stays off: with thinking off it rejects a
+	// replayed `xhigh`/`max` control and this route has no `between_tools`.
+	// Haiku 5.5, Fable/Mythos and Mantle stay off until verified.
+	on "amazon-bedrock" {
+		on-api "anthropic-messages" {
+			family "opus" {
+				revision ">=5.5 <6" {
+					supports-per-message-effort #true
+				}
+			}
+		}
+	}
 	on "aimlapi" "gitlab-duo" "kilo" "nanogpt" "venice" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-message effort for Claude Opus 5.5 on Amazon Bedrock's Anthropic Messages route (`amazon-bedrock` models with `api: anthropic-messages`), so changing the thinking level mid-session keeps the prompt cache.
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
