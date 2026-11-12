@@ -903,8 +903,9 @@ mod foreground {
 			},
 			WindowsAndMessaging::{
 				GA_ROOTOWNER, GetAncestor, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
-				GetWindowThreadProcessId, IsWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-				SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos, WindowFromPoint,
+				GetWindowThreadProcessId, IsHungAppWindow, IsWindow, SM_CXVIRTUALSCREEN,
+				SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos,
+				WindowFromPoint,
 			},
 		},
 	};
@@ -1548,9 +1549,12 @@ mod foreground {
 	/// front, so when the foreground leaves it before or during the wait and
 	/// the text ends in a Return (`closing_return`), that Return is taken to
 	/// have moved it (it opened or closed a window) and nothing is reported;
-	/// otherwise, the end of the text may have gone to the new window. Returns
-	/// why the target was not seen reading the text: it could not be waited for,
-	/// the wait ran out or was cancelled, or the foreground left it.
+	/// otherwise, the end of the text may have gone to the new window. A
+	/// thread Windows reports as hung is not joined: sharing its input queue
+	/// would tie this thread to it, and it would not read the marker anyway.
+	/// Returns why the target was not seen reading the text: it could not be
+	/// waited for (hung, or not joinable), the wait ran out or was cancelled,
+	/// or the foreground left it.
 	fn drain(root: HWND, name: &str, closing_return: bool) -> Option<String> {
 		// SAFETY: GetForegroundWindow has no preconditions.
 		let in_front = || window::root(unsafe { GetForegroundWindow() }) == root;
@@ -1566,6 +1570,13 @@ mod foreground {
 			return left();
 		}
 		let reader = window::focused_descendant(root).unwrap_or(root);
+		// SAFETY: IsHungAppWindow only reads the window's responsiveness state.
+		if unsafe { IsHungAppWindow(reader) } != 0 {
+			return Some(format!(
+				"{name} is not responding, so omp could not wait for it to read the typed text; the \
+				 rest may reach whichever window is in front next"
+			));
+		}
 		// SAFETY: a null process-id pointer is permitted; Win32 validates the
 		// handle.
 		let target = unsafe { GetWindowThreadProcessId(reader, null_mut()) };
