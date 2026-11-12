@@ -20,6 +20,10 @@
 
 - Removed the `blocked` status from `TodoStatus`, the `blocker` field from `TodoItem`, and the `block`/`unblock` operations from `TodoOperation`.
 
+### Fixed
+
+- The `/resume` picker deletes sessions through the `app.session.delete` action (default Backspace or Delete) and shows its keys in the hints, so `keybindings.yml` can replace the shortcut, for example with Ctrl+D, or disable it with `[]`; a bound key that also deletes backward, such as Backspace or Ctrl+W, still edits a typed search query ([#17938](https://github.com/can1357/oh-my-pi/issues/17938), [#18961](https://github.com/can1357/oh-my-pi/pull/18961) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
