@@ -199,7 +199,7 @@ describe("eval tool description", () => {
 			},
 		};
 		const tool = new EvalTool(makeSession({ preludes: () => [prelude] }));
-		expect(tool.description).toContain("`fixture`: Fixture summary line. → `xd://eval/fixture`");
+		expect(tool.description).toContain("`fixture`: Fixture summary line. → xd://eval/fixture");
 		expect(tool.description).not.toContain("CURRENT PRELUDE DOCUMENTATION");
 		expect(tool.docTopics().fixture).toContain("CURRENT PRELUDE DOCUMENTATION");
 		enabled = false;

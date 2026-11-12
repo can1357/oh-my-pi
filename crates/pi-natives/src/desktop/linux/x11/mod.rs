@@ -59,6 +59,8 @@ impl Backend for X11Backend {
 			global_escape: std::env::var_os("WAYLAND_DISPLAY").is_none()
 				&& !std::env::var("XDG_SESSION_TYPE")
 					.is_ok_and(|session| session.eq_ignore_ascii_case("wayland")),
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: if displays.is_ok() {
 				"granted"
 			} else {

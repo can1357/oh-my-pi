@@ -1,10 +1,9 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
-import { type ApiKeyResolver, createOAuthProvenance, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
+import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey, resolveAfterRotation } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
 import * as AIError from "../error";
 import { assertProviderEnabled, providerPauseReason } from "../registry/oauth";
-import { isUsageLimitOutcome } from "../error/rate-limit";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
@@ -516,19 +515,11 @@ export class KeyCascade implements KeysApi {
 				const rotation = await this.#deps.rotate(provider, sessionId, {
 					error,
 					modelId,
+					baseUrl,
 					signal,
 					apiKey: previousKey,
 				});
-				if (!rotation.switched) {
-					const status = AIError.status(error);
-					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-					// Preserve no-sibling quota backoff instead of re-resolving an
-					// already-blocked fallback. Hard-auth declines still re-resolve
-					// because a peer may have refreshed the failed bearer.
-					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
-				}
-				const resolved = await resolve({ signal });
-				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
+				return resolveAfterRotation(rotation, error, () => resolve({ signal }));
 			}
 			return resolve({
 				forceRefresh: true,

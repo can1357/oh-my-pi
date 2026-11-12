@@ -26,7 +26,7 @@ import {
 	createNativeJudge,
 	type ImageContent,
 	isJudgmentApi,
-	nativeJudgmentAcceptsImages,
+	judgmentImagesWithin,
 	nativeJudgmentImageBounds,
 	nativeJudgmentSupportsBoxes,
 	nativeJudgmentSupportsImages,
@@ -49,13 +49,19 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import type { JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { type FittedImage, fitImage } from "../utils/image-resize";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgJudgmentAttemptTimeoutMs } from "../config/model-settings";
-import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	resolveModelRoleValue,
+	resolveRoleChain,
+	type RoleChainCandidate,
+} from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { CostGateApi } from "../session/cost-gate";
@@ -63,7 +69,7 @@ import type { SessionManager } from "../session/session-manager";
 import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
-import type { JudgmentCache } from "./cache";
+import { type JudgmentCache, sharedJudgmentCache } from "./cache";
 
 export * from "./cache";
 
@@ -101,6 +107,12 @@ export interface JudgeDeps {
 	cache?: JudgmentCache;
 	/** The session tree's cost gate: refuses each candidate attempt at the cap and adds billed attempts' cost. */
 	costGate?: CostGateApi;
+	/**
+	 * Model selector tried first, as an explicit candidate, before the `judge` role chain
+	 * (which follows without duplicates). Resolved against the judge role's candidate pool
+	 * with role-value syntax; a selector matching nothing is logged once and ignored.
+	 */
+	leadModel?: string;
 }
 
 /**
@@ -150,10 +162,11 @@ const LOCAL_ANSWER_MAX_TOKENS = 16;
 const LOCAL_REASONING_MAX_TOKENS = 1024;
 
 /**
- * How long a candidate stays skipped after its account rejected a judgment
- * outright (401/403 credential, 402 billing cap). Every judgment rebuilds the
- * chain, so without this each call re-pays the rejected request plus a
- * credential-rotation round trip before reaching the next candidate.
+ * How long a candidate stays skipped after a rejection that persists until
+ * something changes out of band: 401/403 credential, 402 billing cap, or 404
+ * for a model the route no longer serves. Every judgment rebuilds the chain,
+ * so without this each call re-pays the rejected request (plus a
+ * credential-rotation round trip) before reaching the next candidate.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
 /** A transient hang should not consume the next judgment's budget in the same session. */
@@ -166,17 +179,18 @@ const CANDIDATE_TIMEOUT_COOLDOWN_MS = 30_000;
  * per-call consumers (auto-thinking, subagent starts) resolve a fresh judge.
  */
 const CANDIDATE_TTL_MS = 1_000;
-/** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
+/** Skip-until timestamps and reasons keyed by routed model identity, carried by the registry that produced the rejection. */
 const kRejections = Symbol("judgment.rejections");
 const kTimeouts = Symbol("judgment.timeouts");
 /** Last resolved judge role chain, carried by the registry it was drawn from. */
 const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
-	[kRejections]?: Map<string, number>;
+	[kRejections]?: Map<string, CandidateRejection>;
 	[kTimeouts]?: Map<string, number>;
 	[kRoleChain]?: {
 		settings: Settings;
 		revision: number;
+		pool: Model[];
 		roleChain: RoleChainCandidate[];
 		list: RoleChainCandidate[];
 		expiresAt: number;
@@ -192,17 +206,19 @@ interface RegistryWithRejections extends ModelRegistry {
 function cachedJudgeRoleChain(
 	settings: Settings,
 	registry: RegistryWithRejections,
-): { roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] } {
+): { pool: Model[]; roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] } {
 	const now = Date.now();
 	const revision = settings.revision;
 	const cached = registry[kRoleChain];
 	if (cached && cached.settings === settings && cached.revision === revision && now < cached.expiresAt) {
 		return cached;
 	}
-	const roleChain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+	const pool = roleCandidatePool("judge", settings, registry);
+	const roleChain = resolveRoleChain("judge", settings, pool);
 	const entry = {
 		settings,
 		revision,
+		pool,
 		roleChain,
 		list: textJudgeRoleChain(roleChain),
 		expiresAt: now + CANDIDATE_TTL_MS,
@@ -229,6 +245,15 @@ function withSessionFallback(
 		return candidates;
 	}
 	return [...candidates, { model: sessionModel, explicit: false }];
+}
+
+/** `lead` first as an explicit candidate, then `roleChain` without `lead`'s routed identity. */
+function leadRoleChain(roleChain: RoleChainCandidate[], lead: Model): RoleChainCandidate[] {
+	const identity = formatModelStringWithRouting(lead);
+	return [
+		{ model: lead, explicit: true },
+		...roleChain.filter(candidate => formatModelStringWithRouting(candidate.model) !== identity),
+	];
 }
 
 /** Which backend a judge-role candidate routes to: native System One decisions, on-device keywords, or a chat model. */
@@ -300,21 +325,27 @@ const WHOLE_IMAGE: BoxEdges = { top: 0, bottom: 1, left: 0, right: 1 };
 
 /**
  * `images` sized into `model`'s native judgment bounds, which the API enforces by rejecting rather than
- * resizing: an image already within them is sent as is, any other goes through {@link fitImage}. A
- * request-wide byte cap is split evenly so the fitted set also fits as a whole.
+ * resizing: an image within its even share of them is sent as is, any other goes through {@link fitImage}.
+ * The share splits request-wide byte and patch caps so the fitted set also fits as a whole.
  */
 async function fitNativeImages(model: Model, images: readonly ImageContent[]): Promise<FittedImage[]> {
 	const bounds = nativeJudgmentImageBounds(model);
 	if (!bounds) return images.map(image => ({ image, content: WHOLE_IMAGE }));
-	const maxBytes = Math.min(
-		bounds.maxBytes ?? Infinity,
-		Math.floor((bounds.maxTotalBytes ?? Infinity) / images.length),
-	);
+	const share: JudgmentImageInput = { ...bounds };
+	if (bounds.maxTotalBytes !== undefined) {
+		share.maxBytes = Math.min(bounds.maxBytes ?? Infinity, Math.floor(bounds.maxTotalBytes / images.length));
+	}
+	if (bounds.maxTotalPatches !== undefined) {
+		share.maxTotalPatches = Math.floor(bounds.maxTotalPatches / images.length);
+	}
 	const fitted: FittedImage[] = [];
 	// Sequential on purpose: each fit decodes and re-encodes a whole image.
 	for (const image of images) {
-		const within = nativeJudgmentAcceptsImages(model, [image]) && Buffer.byteLength(image.data, "base64") <= maxBytes;
-		fitted.push(within ? { image, content: WHOLE_IMAGE } : await fitImage(image, { ...bounds, maxBytes }));
+		fitted.push(
+			judgmentImagesWithin([image], share)
+				? { image, content: WHOLE_IMAGE }
+				: await fitImage(image, { ...share, maxPatches: share.maxTotalPatches }),
+		);
 	}
 	return fitted;
 }
@@ -363,9 +394,49 @@ export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boo
 	return primary !== undefined && kindOf(primary) === "native";
 }
 
-/** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. */
+/** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. With `deps.leadModel`, that model is tried first. */
 export function resolveJudge(deps: JudgeDeps): ChainJudge {
 	return new ChainJudge(deps);
+}
+
+/** What a per-turn classifier needs to judge on its session's behalf through {@link judgeNatively}. */
+export interface NativeJudgmentDeps {
+	settings: Settings;
+	registry: ModelRegistry;
+	sessionId?: string;
+	signal?: AbortSignal;
+	onUsage?: (usage: JudgmentUsage) => void;
+	telemetry?: AgentTelemetryConfig;
+}
+
+/**
+ * Answers `request` on the native backend the `judge` role resolves to, for per-turn classifiers
+ * (auto-prewalk, auto-parallel) whose thresholds assume calibrated probabilities. Answers are shared
+ * across the session tree through {@link sharedJudgmentCache}; usage is labelled `purpose`.
+ * @throws when the cached role chain does not lead with a native backend (it can lag {@link hasNativeJudge}
+ * after a credential or discovery change), after `timeoutMs`, on abort, or when the provider fails.
+ */
+export async function judgeNatively<Q extends Questions>(
+	purpose: string,
+	request: JudgmentRequest<Q>,
+	deps: NativeJudgmentDeps,
+	timeoutMs: number,
+): Promise<JudgmentResult<Q>> {
+	const judge = resolveJudge({
+		settings: deps.settings,
+		registry: deps.registry,
+		sessionId: deps.sessionId,
+		purpose,
+		onUsage: deps.onUsage,
+		telemetry: deps.telemetry,
+		cache: sharedJudgmentCache(),
+	});
+	const timeout = AbortSignal.timeout(timeoutMs);
+	const options = { signal: deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout };
+	return judge.withCandidate((candidate, kind) => {
+		if (kind !== "native") throw new Error(`${purpose}: the judge role has no native backend`);
+		return candidate.judge(request, options);
+	}, options);
 }
 
 /**
@@ -379,6 +450,14 @@ export class ChainJudge implements Judge {
 	readonly #telemetry: AgentTelemetry | undefined;
 	/** Text-judgment candidates memoized per resolved chain; image candidates depend on each request's images. */
 	#candidates: { chain: RoleChainCandidate[]; list: RoleChainCandidate[] } | undefined;
+	#lead:
+		| {
+				source: { pool: Model[]; roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] };
+				roleChain: RoleChainCandidate[];
+				list: RoleChainCandidate[];
+		  }
+		| undefined;
+	#leadWarned = false;
 	/** Without a session id, cooldowns belong to this judge, not every anonymous caller of the registry. */
 	#anonymousTimeouts: Map<string, number> | undefined;
 
@@ -464,10 +543,10 @@ export class ChainJudge implements Judge {
 			if (timedOutBefore && !candidate.explicit) continue;
 			const configuredFallbackRemains = index < lastExplicitIndex;
 			const identity = formatModelStringWithRouting(candidate.model);
-			const skippedUntil = rejections.get(identity);
-			if (skippedUntil !== undefined) {
-				if (skippedUntil > Date.now()) {
-					lastUnavailable = `${identity} rejected the account recently`;
+			const rejection = rejections.get(identity);
+			if (rejection !== undefined) {
+				if (rejection.until > Date.now()) {
+					lastUnavailable = `${identity} ${rejection.reason} recently`;
 					continue;
 				}
 				rejections.delete(identity);
@@ -506,8 +585,10 @@ export class ChainJudge implements Judge {
 				const timedOut =
 					timeout !== undefined && (timeout.aborted || (error instanceof Error && error.name === "TimeoutError"));
 				if (!timedOut && isAbortOrTimeout(error)) throw error;
-				const rejected = isAccountRejection(error);
-				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
+				const rejected = rejectionReason(error);
+				if (rejected) {
+					rejections.set(identity, { until: Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS, reason: rejected });
+				}
 				if (timedOut) {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
@@ -560,7 +641,7 @@ export class ChainJudge implements Judge {
 		}).catch(error => logger.warn("judgment telemetry failed", { error: String(error) }));
 	}
 
-	#rejections(): Map<string, number> {
+	#rejections(): Map<string, CandidateRejection> {
 		const registry: RegistryWithRejections = this.#deps.registry;
 		return (registry[kRejections] ??= new Map());
 	}
@@ -578,9 +659,30 @@ export class ChainJudge implements Judge {
 		return timeouts;
 	}
 
+	#roleChains(): { roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] } {
+		const { settings, registry, leadModel, purpose } = this.#deps;
+		const cached = cachedJudgeRoleChain(settings, registry);
+		const selector = leadModel?.trim();
+		if (!selector) return cached;
+		if (this.#lead?.source === cached) return this.#lead;
+		const resolved = resolveModelRoleValue(selector, cached.pool, { settings });
+		if (!resolved.model && !this.#leadWarned) {
+			this.#leadWarned = true;
+			logger.warn("judgment lead model matched no judge candidate; using the judge role chain", {
+				leadModel: selector,
+				purpose,
+				warning: resolved.warning,
+			});
+		}
+		const roleChain = resolved.model ? leadRoleChain(cached.roleChain, resolved.model) : cached.roleChain;
+		const list = resolved.model ? textJudgeRoleChain(roleChain) : cached.list;
+		this.#lead = { source: cached, roleChain, list };
+		return this.#lead;
+	}
+
 	#resolveCandidates(request?: JudgmentRequest): RoleChainCandidate[] {
-		const { settings, registry, sessionModel } = this.#deps;
-		const { roleChain, list: chain } = cachedJudgeRoleChain(settings, registry);
+		const { sessionModel } = this.#deps;
+		const { roleChain, list: chain } = this.#roleChains();
 		const images = request?.images ?? [];
 		// A prompted model cannot locate anything, so no session fallback either.
 		if (request && asksForBoxes(request.questions)) {
@@ -784,10 +886,27 @@ function nativeJudge(
 	};
 }
 
-/** Credential or billing rejection: the account cannot serve this candidate until something changes out of band. */
-function isAccountRejection(error: unknown): boolean {
-	const status = AIError.status(error);
-	return status === 401 || status === 402 || status === 403;
+/** Why a candidate is skipped until {@link CandidateRejection.until}; rendered as `<identity> <reason> recently`. */
+interface CandidateRejection {
+	until: number;
+	reason: string;
+}
+
+/**
+ * Reason for a rejection the route keeps answering until something changes out of band — a credential or
+ * billing rejection of the account, or a 404 for a model the route does not serve — else `undefined`.
+ */
+function rejectionReason(error: unknown): string | undefined {
+	switch (AIError.status(error)) {
+		case 401:
+		case 402:
+		case 403:
+			return "rejected the account";
+		case 404:
+			return "did not serve the model";
+		default:
+			return undefined;
+	}
 }
 
 function isAbortOrTimeout(error: unknown): boolean {

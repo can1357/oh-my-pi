@@ -208,20 +208,22 @@ export function startCompletionProbe(options: CompletionProbeOptions): void {
 					},
 				}),
 				signal,
+				onUsage: message => {
+					if (!message.usage) return;
+					session.sessionManager.appendModelUsage(
+						{
+							purpose: "task-completion-probe",
+							api: message.api,
+							provider: message.provider,
+							model: message.model,
+							usage: message.usage,
+							stopReason: message.stopReason,
+							errorMessage: message.errorMessage,
+						},
+						usageOwner,
+					);
+				},
 			});
-			if (assistantMessage.usage) {
-				session.sessionManager.appendModelUsage(
-					{
-						purpose: "task-completion-probe",
-						api: assistantMessage.api,
-						provider: assistantMessage.provider,
-						model: assistantMessage.model,
-						usage: assistantMessage.usage,
-						stopReason: assistantMessage.stopReason,
-					},
-					usageOwner,
-				);
-			}
 			const estimate = parseCompletionEstimate(replyText);
 			if (signal.aborted) return;
 			if (estimate === undefined) {

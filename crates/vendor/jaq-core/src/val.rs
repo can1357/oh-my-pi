@@ -152,4 +152,35 @@ pub trait ValT:
     ///
     /// This is used by `"\(v)"`.
     fn into_string(self) -> Self;
+
+    /// The value at `path` (an array of keys), as `getpath(path)`.
+    ///
+    /// This and [`Self::setpath`] and [`Self::delpaths`] are used by `p |= f`,
+    /// which jq defines by the paths of `p` (`_modify` in its builtin.jq).
+    fn getpath(self, path: &Self) -> ValR<Self>;
+
+    /// The value with `v` at `path`, as `setpath(path; v)`.
+    fn setpath(self, path: &Self, v: Self) -> ValR<Self>;
+
+    /// The value without the values at `paths` (an array of paths), as
+    /// `delpaths(paths)`.
+    fn delpaths(self, paths: &Self) -> ValR<Self>;
+
+    /// Compare the value with another one.
+    ///
+    /// This is used by `l < r`, `l == r` and the other comparison operators.
+    /// Override it if a comparison can fail.
+    fn cmp_op(&self, op: crate::ops::Cmp, other: &Self) -> ValR<bool, Self> {
+        Ok(op.run(self, other))
+    }
+
+    /// The null value.
+    ///
+    /// This is used by `null` and by variables of destructuring alternatives
+    /// that are not bound by the alternative that matched.
+    /// By default, this is the element at index 0 of an empty array.
+    fn null() -> Self {
+        let empty: Self = core::iter::empty().collect();
+        empty.index(&Self::from(0isize)).unwrap_or_else(|_| Self::from(false))
+    }
 }

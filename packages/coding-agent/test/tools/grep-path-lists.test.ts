@@ -125,6 +125,56 @@ describe("tool path arrays", () => {
 		resetSettingsForTest();
 	});
 
+	it("search finds a named NUL-containing file and sanitizes matches and context", async () => {
+		await Bun.write(path.join(tempDir, "nul-named.md"), "before\0\x07\nneedle\0\x1b[31m red\x1b[0m\nafter\0\n");
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "grep");
+		if (!tool) throw new Error("Missing grep tool");
+
+		const result = await tool.execute("search-nul-named", { pattern: "needle", path: "nul-named.md" });
+		const text = getText(result);
+		const details = result.details as { matchCount?: number; displayContent?: string } | undefined;
+		expect(details?.matchCount).toBe(1);
+		expect(text).toContain("needle red");
+		expect(text).toContain("before");
+		expect(text).toContain("after");
+		expect(text).not.toMatch(/[\0\x07\x1b]/);
+		expect(details?.displayContent).not.toMatch(/[\0\x07\x1b]/);
+	});
+
+	it("search names skipped binaries that match instead of claiming a directory has no matches", async () => {
+		await Bun.write(path.join(tempDir, "nul-directory", "f.md"), "needle\n\0\n");
+		await Bun.write(path.join(tempDir, "nul-directory", "image.png"), "\x89PNG\0\0 no hit");
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "grep");
+		if (!tool) throw new Error("Missing grep tool");
+
+		const result = await tool.execute("search-nul-directory", { pattern: "needle", path: "nul-directory/" });
+		const details = result.details as { binaryMatches?: string[] } | undefined;
+		expect(details?.binaryMatches).toEqual(["nul-directory/f.md"]);
+		expect(getText(result)).toBe(
+			"No matches in text files\nBinary files also match (name one as `path` to search it as text): nul-directory/f.md",
+		);
+	});
+
+	it("search preserves named NUL matches and binary matches across mixed scopes", async () => {
+		await Bun.write(path.join(tempDir, "nul-mixed", "discovered", "f.md"), "needle\n\0\n");
+		await Bun.write(path.join(tempDir, "nul-mixed", "named.md"), "needle named\0\n");
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "grep");
+		if (!tool) throw new Error("Missing grep tool");
+
+		const result = await tool.execute("search-nul-mixed", {
+			pattern: "needle",
+			path: "nul-mixed/discovered/;nul-mixed/named.md",
+		});
+		const details = result.details as { matchCount?: number; binaryMatches?: string[] } | undefined;
+		expect(details?.matchCount).toBe(1);
+		expect(details?.binaryMatches).toEqual(["nul-mixed/discovered/f.md"]);
+		expect(getText(result)).toContain("needle named");
+		expect(getText(result)).not.toContain("\0");
+	});
+
 	it("search accepts a semicolon-delimited path list", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "grep");

@@ -191,6 +191,21 @@ function preferXAI(chain: RoleChainCandidate[], modelRegistry: ModelRegistry): R
 	return [...xaiModelChain(modelRegistry, settings).map(model => ({ model, explicit: false })), ...chain];
 }
 
+function isHackerNewsEngine(model: Model<Api>): boolean {
+	return model.provider === "web" && model.id === "hackernews";
+}
+
+/**
+ * Move the chain's `web/hackernews` candidate to the front, or prepend the
+ * pool's as an automatic candidate when the chain has none.
+ */
+function preferHackerNews(chain: RoleChainCandidate[], pool: Model<Api>[]): RoleChainCandidate[] {
+	const listed = chain.filter(candidate => isHackerNewsEngine(candidate.model));
+	if (listed.length > 0) return [...listed, ...chain.filter(candidate => !isHackerNewsEngine(candidate.model))];
+	const model = pool.find(isHackerNewsEngine);
+	return model ? [{ model, explicit: false }, ...chain] : chain;
+}
+
 /** Execute web search */
 async function executeSearch(
 	_toolCallId: string,
@@ -216,6 +231,11 @@ async function executeSearch(
 	);
 	// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
 	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry);
+	// General engines index HN threads sparsely and late; a query whose every
+	// `site:` is Hacker News (with or without a path) tries the HN Search API first.
+	const hnOnly =
+		parsedQuery.sites.length > 0 && parsedQuery.sites.every(site => site.split("/", 1)[0] === "news.ycombinator.com");
+	if (!params.model && hnOnly) expanded = preferHackerNews(expanded, pool);
 
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;

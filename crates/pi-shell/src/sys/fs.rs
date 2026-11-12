@@ -16,9 +16,9 @@
 //!
 //! Windows specifics: `test -x` holds for directories, files with a
 //! `PATHEXT` extension and files starting with `#!`; process substitution
-//! uses a named pipe `\\.\pipe\obash-<pid>-<n>` (a regular temp file when
-//! the engine asks for [`TempPurpose::HereDoc`], e.g. for a consumer that
-//! must seek).
+//! uses a named pipe `\\.\pipe\obash-<pid>-<n>` (`\\.\pipe\LOCAL\…` in an
+//! `AppContainer`; a regular temp file when the engine asks for
+//! [`TempPurpose::HereDoc`], e.g. for a consumer that must seek).
 
 use std::{
 	cell::RefCell,
@@ -1007,7 +1007,7 @@ mod pipe {
 
 	use crate::{
 		bash::{File, FileKind, OpenFlags, OsHandle, fs::TempNode},
-		sys::pump::os::OsPipe,
+		sys::pump::os::{OsPipe, PIPE_PREFIX},
 	};
 
 	/// Server ends not yet taken, by path; `true` when the server writes.
@@ -1019,7 +1019,7 @@ mod pipe {
 	/// Create the pipe for a `<( )` (`output == false`: we write, the
 	/// consumer reads) or `>( )` substitution.
 	pub fn create(output: bool, seq: u32) -> io::Result<TempNode> {
-		let name = format!(r"\\.\pipe\obash-{}-{seq}", std::process::id());
+		let name = format!("{}obash-{}-{seq}", *PIPE_PREFIX, std::process::id());
 		let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
 		let access = if output {
 			PIPE_ACCESS_INBOUND
