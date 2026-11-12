@@ -235,7 +235,7 @@ import {
 	waitForMainFrameDocument,
 } from "./navigation";
 
-import type { HiddenFrame } from "./relay/protocol";
+import { type HiddenFrame, isHiddenFrame } from "./relay/protocol";
 import { cloneSafe, RunOutput } from "./run-output";
 import { type UploadRoute, UploadStaging } from "./upload-files";
 import {
@@ -283,6 +283,15 @@ declare module "puppeteer-core" {
 		readonly backendNodeId?: number;
 		/** Loader of the frame's document when the snapshot was taken (`@internal` upstream, stripped from published types). */
 		readonly loaderId: string;
+	}
+}
+
+declare module "devtools-protocol/types/protocol-mapping" {
+	namespace ProtocolMapping {
+		interface Commands {
+			/** The omp relay's own command: the other extensions' frames it hid in the tab, for the worker driving it. */
+			"OMP.takeHiddenFrames": { paramsType: []; returnType: { frames?: unknown } };
+		}
 	}
 }
 
@@ -1666,11 +1675,13 @@ export class WorkerCore {
 	/** Take what the omp relay hid in the tab and holds for the worker driving it (`OMP.takeHiddenFrames`). */
 	async #takeHiddenFrames(page: Page): Promise<void> {
 		this.#hiddenFramesWaiting = false;
-		// Puppeteer's protocol map cannot express the relay-private method; the send signature is otherwise identical.
-		const session = page.mainFrame().client as unknown as { send(method: string): Promise<unknown> };
-		// A relay of an older omp forwards the unknown method to Chrome, which rejects it.
-		const reply = await session.send("OMP.takeHiddenFrames").catch(() => undefined);
-		if (isRecord(reply) && Array.isArray(reply.frames)) this.#hiddenFrames.push(...(reply.frames as HiddenFrame[]));
+		// A relay of an older omp forwards the unknown method to Chrome, which rejects it. The reply crosses a socket,
+		// so only well-formed frames are kept.
+		const reply = await page
+			.mainFrame()
+			.client.send("OMP.takeHiddenFrames")
+			.catch(() => undefined);
+		if (Array.isArray(reply?.frames)) this.#hiddenFrames.push(...reply.frames.filter(isHiddenFrame));
 	}
 
 	/** Answer run `id`, handing over what the relay hid, which the supervisor reports whether the run failed or not. */

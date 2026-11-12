@@ -3,6 +3,7 @@ import {
 	getPuppeteerDir,
 	logger,
 	postmortem,
+	prompt,
 	Snowflake,
 	untilAborted,
 	withTimeout,
@@ -11,6 +12,7 @@ import {
 import type { CDPSession, Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
+import hiddenFramesNotice from "../../prompts/tools/browser-hidden-frames.md" with { type: "text" };
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
@@ -314,18 +316,18 @@ function noteHiddenFrames(tab: WorkerTabSession, frames: HiddenFrame[] | undefin
  */
 function takeHiddenFramesNotice(tab: TabSession | undefined): string | undefined {
 	if (tab?.backend !== "worker" || !tab.hiddenFrames) return undefined;
-	const hidden = new Set<string>();
+	const frames = new Map<string, { extensionId: string; path: string; title?: string }>();
 	for (const { extensionId, path, title } of tab.hiddenFrames) {
-		// The title is the other extension's own text, so it is labelled as such rather than as a name Chrome vouches for.
-		const extension = title
-			? `the extension whose page calls itself ${JSON.stringify(title)} (${extensionId})`
-			: `the extension ${extensionId}`;
-		hidden.add(`the frame ${JSON.stringify(path)} of ${extension}`);
+		// Quoted: the path is the page's text and the title the other extension's, which the notice labels as such
+		// rather than as a name Chrome vouches for.
+		const frame = { extensionId, path: JSON.stringify(path), ...(title ? { title: JSON.stringify(title) } : {}) };
+		frames.set(JSON.stringify(frame), frame);
 	}
 	tab.hiddenFrames = undefined;
-	const named = [...hidden].slice(0, MAX_HIDDEN_FRAMES_NAMED);
-	if (hidden.size > named.length) named.push(`${hidden.size - named.length} more`);
-	return `Nothing was saved: omp emptied and hid ${named.join(", and ")} in this tab, for the user as well, because Chrome lets omp do nothing in a tab while another extension's frame is open in it. If that frame offered to save a login, the login was not saved and the prompt is gone; never tell the user a login was saved or that the prompt is still there. In your final reply, tell the user that nothing was saved and what omp hid.`;
+	const named = [...frames.values()].slice(0, MAX_HIDDEN_FRAMES_NAMED);
+	return prompt
+		.render(hiddenFramesNotice, { frames: named, more: frames.size - named.length, several: frames.size > 1 })
+		.trim();
 }
 
 /** Chrome's `chrome.debugger.onDetach` reason when the user pressed Cancel on its debugging bar. */

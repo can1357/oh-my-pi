@@ -64,6 +64,8 @@ const MAX_PATH_LENGTH = 100;
 const MAX_TITLE_LENGTH = 60;
 /** How long a frame's page may take to load for the report. */
 const PROBE_TIMEOUT_MS = 500;
+/** Most of a frame's page read for its title, which sits in its head; the page may be any size. */
+const PROBE_MAX_BYTES = 64 * 1024;
 
 /**
  * Report what a sweep emptied, off the sweep's path: the retry and the attach or command waiting on it go on at once,
@@ -85,14 +87,24 @@ async function reportEmptied(tabId: number, srcsByFrame: Map<number, string[]>):
 				world: "ISOLATED",
 				// A document still parsing (a page that streams forever) would otherwise hold the injection.
 				injectImmediately: true,
-				args: [srcs, PROBE_TIMEOUT_MS],
-				func: async (urls: string[], timeoutMs: number) =>
+				args: [srcs, PROBE_TIMEOUT_MS, PROBE_MAX_BYTES],
+				func: async (urls: string[], timeoutMs: number, maxBytes: number) =>
 					await Promise.all(
 						urls.map(async url => {
 							try {
 								const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
 								if (!response.ok) return null;
-								const title = /<title[^>]*>([^<]*)<\/title>/i.exec(await response.text())?.[1]?.trim();
+								const reader = response.body?.getReader();
+								const decoder = new TextDecoder();
+								let head = "";
+								for (let read = 0; reader && read < maxBytes && !/<\/title>/i.test(head); ) {
+									const chunk = await reader.read();
+									if (chunk.done) break;
+									read += chunk.value.byteLength;
+									head += decoder.decode(chunk.value, { stream: true });
+								}
+								void reader?.cancel().catch(() => {});
+								const title = /<title[^>]*>([^<]*)<\/title>/i.exec(head.slice(0, maxBytes))?.[1]?.trim();
 								return { url: response.url, title };
 							} catch {
 								return null;

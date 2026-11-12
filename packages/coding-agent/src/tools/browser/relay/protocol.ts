@@ -76,6 +76,19 @@ export interface HiddenFrame {
 	title?: string;
 }
 
+/** Whether `value`, read off a socket, is a well-formed `HiddenFrame`. */
+export function isHiddenFrame(value: unknown): value is HiddenFrame {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"extensionId" in value &&
+		typeof value.extensionId === "string" &&
+		"path" in value &&
+		typeof value.path === "string" &&
+		(!("title" in value) || value.title === undefined || typeof value.title === "string")
+	);
+}
+
 /** Hello capability of an extension that answers `findDownload` (it holds Chrome's `downloads` permission). */
 export const DOWNLOADS_PROTOCOL_VERSION = 1;
 /**

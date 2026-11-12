@@ -4,7 +4,7 @@ import {
 	ensureChromiumExecutable,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import type { HiddenFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
+import { type HiddenFrame, isHiddenFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import puppeteer from "puppeteer-core";
 import { onForeignFramesHidden, pastForeignFrames } from "../../../browser-relay/extension/foreign-frames";
 import { rejectionOf } from "../helpers/rejection";
@@ -231,4 +231,80 @@ describe("pastForeignFrames", () => {
 		},
 		30_000,
 	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"reads a frame's page only up to its title, however large the page",
+		async () => {
+			// A page whose title comes first and whose body never ends.
+			const encoder = new TextEncoder();
+			const server = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				fetch: request =>
+					new URL(request.url).pathname === "/endless"
+						? new Response(
+								new ReadableStream({
+									start: controller => controller.enqueue(encoder.encode("<title>Endless vault page</title>")),
+									pull: controller => controller.enqueue(new Uint8Array(64 * 1024)),
+								}),
+								{ headers: { "Content-Type": "text/html" } },
+							)
+						: new Response("<title>Login</title>", { headers: { "Content-Type": "text/html" } }),
+			});
+			const browser = await puppeteer.launch({
+				executablePath: await ensureChromiumExecutable(),
+				headless: true,
+				args: ["--no-first-run", ...RENDERER_PRIORITY_ARGS],
+			});
+			try {
+				const page = await browser.newPage();
+				await page.goto(server.url.href);
+				const endless = new URL("/endless", server.url).href;
+				// The sweep empties a frame of that page; the probe runs in the page, as Chrome runs it.
+				const probed = Promise.withResolvers<unknown>();
+				Reflect.set(globalThis, "chrome", {
+					runtime: { id: RELAY_ID },
+					scripting: {
+						executeScript: async (injection: {
+							target: { frameIds?: number[] };
+							func: (...args: never[]) => unknown;
+							args?: unknown[];
+						}) => {
+							if (!injection.target.frameIds) return [{ frameId: 0, result: { found: 1, emptied: [endless] } }];
+							const result = await page.evaluate(
+								`(${String(injection.func)})(...${JSON.stringify(injection.args ?? [])})`,
+							);
+							probed.resolve(result);
+							return [{ frameId: 0, result }];
+						},
+					},
+				});
+				await pastForeignFrames(1, refused(1));
+				// Reading the whole body would run into the probe's time limit and name nothing.
+				expect(await probed.promise).toEqual([{ url: endless, title: "Endless vault page" }]);
+			} finally {
+				await closeLaunchedBrowser(browser);
+				server.stop(true);
+			}
+		},
+		30_000,
+	);
+});
+
+describe("isHiddenFrame", () => {
+	it("keeps only well-formed frames from a reply off the socket", () => {
+		expect(
+			[
+				{ extensionId: OTHER_ID, path: "inline/menu.html", title: "Vault" },
+				{ extensionId: OTHER_ID, path: "inline/notification.html" },
+				{ extensionId: OTHER_ID, path: "x.html", title: { toString: "Vault" } },
+				{ extensionId: OTHER_ID },
+				"inline/menu.html",
+				null,
+			].filter(isHiddenFrame),
+		).toEqual([
+			{ extensionId: OTHER_ID, path: "inline/menu.html", title: "Vault" },
+			{ extensionId: OTHER_ID, path: "inline/notification.html" },
+		]);
+	});
 });
