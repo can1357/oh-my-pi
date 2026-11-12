@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Text an Eval cell enters through browser `fill`, `type`, `clipboardWrite` or `handleDialog`, or computer `type`, `setValue` or `clipboard.write`, no longer appears in the cell's status lines, which the session file keeps and the terminal shows; a password a cell filled without printing it was written there in plain text
+- Text an Eval cell enters through browser `fill`, `type`, `clipboardWrite` or `handleDialog`, or computer `type`, `setValue` or `clipboard.write`, no longer appears in the cell's status lines, which the session file keeps and the terminal shows; a password a cell filled without printing it was written there in plain text ([#18981](https://github.com/can1357/oh-my-pi/pull/18981) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.19.0] - 2026-11-12
 
