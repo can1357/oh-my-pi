@@ -1485,6 +1485,7 @@ Mistral AI provides access to Mistral, Codestral, Devstral, Ministral, and Pixtr
 
 - **Authentication**: Authenticates using bearer tokens from the `MISTRAL_API_KEY` environment variable (`packages/catalog/src/compat/rules/providers/mistral.kdl`: `mistral`).
 - **Usage Tracking**: Standard OpenAI chat completions usage parsing (`packages/ai/src/providers/openai-completions.ts`).
+- **Plan budgets**: `mistralUsageProvider` (`packages/ai/src/usage/mistral.ts`) reads `GET {baseUrl}/billing/budget` and `GET {baseUrl}/billing/subscription` with the bearer API key, as the Mistral Vibe CLI does. `vibe_budget` and `api_budget` become monthly limits (`mistral:vibe:monthly`, `mistral:api:monthly`) in dollars when `currency` is `USD`, otherwise as percentages with the currency in a note; a zero `initial_budget` is skipped. Pay-as-you-go (`vibe_budget.payg_enabled`, falling back to the subscription's `vibe_payg_enabled`; `payg_enabled` for the API budget) keeps a budget past 100% at `warning` instead of `exhausted`. `plan_name` maps to `metadata.planType` (`EDU` → Student, `INDIVIDUAL` → Pro). `/budget` needs the `see_org_inference_usage` permission: a 403 for a member without it, a 404, or a network failure reports no usage instead of an error. A 401 (invalid or revoked key) throws `ProviderHttpError`, so the cached report is purged instead of re-served.
 
 ### Catalog model handling
 
