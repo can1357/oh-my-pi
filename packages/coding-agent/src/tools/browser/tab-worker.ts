@@ -73,6 +73,7 @@ import {
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
 import { assertTabPressArgs } from "./tab-arguments";
+import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
 import {
 	type BrowserCookie,
 	type ClearCookiesOptions,
@@ -118,7 +119,7 @@ import {
 } from "./queries";
 import { DownloadManager, type BrowserDownload } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
-import { applyIgnoreHttpsErrors } from "./open-options";
+import { applyInsecure } from "./open-options";
 import {
 	BrowserNetworkManager,
 	type HarContentPolicy,
@@ -176,6 +177,7 @@ import {
 	dragBetween,
 	fillViaHandle,
 	highlightElement,
+	hoverElement,
 	type HighlightOptions,
 	type InteractionHandle,
 	installCancelledReleaseGuard,
@@ -194,6 +196,7 @@ import {
 	TypingInterruptedError,
 	typeIntoElement,
 	wheel,
+	withLiveElement,
 } from "./interactions";
 import {
 	captureScreenshotBuffer,
@@ -239,6 +242,7 @@ import { type UploadRoute, UploadStaging } from "./upload-files";
 import {
 	type Observation,
 	type ObservationEntry,
+	isMissingPageGlobal,
 	ownsPage,
 	type ReadyInfo,
 	type RunErrorPayload,
@@ -413,10 +417,7 @@ interface TabApi {
 		pattern: string | RegExp | ((response: HTTPResponse) => boolean | Promise<boolean>),
 		opts?: { timeout?: number },
 	): Promise<HTTPResponse>;
-	waitForSelector(
-		selector: string,
-		opts?: { timeout?: number; visible?: boolean; hidden?: boolean },
-	): Promise<ActionableHandle | null>;
+	waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<ActionableHandle | null>;
 	waitForNavigation(opts?: {
 		waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 		timeout?: number;
@@ -887,6 +888,17 @@ export function toActionableHandle(
 				invalidate,
 			),
 		);
+	enriched.hover = () =>
+		guard<void>("handle.hover()", signal =>
+			runGuardedHandleAction(
+				enriched,
+				originals,
+				"handle.hover()",
+				signal,
+				() => hoverElement(enriched, signal),
+				invalidate,
+			),
+		);
 	enriched.check = () =>
 		guard<void>("handle.check()", signal =>
 			runGuardedHandleAction(
@@ -1211,7 +1223,14 @@ function errorPayload(error: unknown): RunErrorPayload {
 		};
 	}
 	if (error instanceof Error) {
-		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
+		return {
+			name: error.name,
+			message: error.message,
+			stack: error.stack,
+			isToolError: false,
+			isAbort: false,
+			missingPageGlobal: isMissingPageGlobal(error) || undefined,
+		};
 	}
 	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
 }
@@ -1553,7 +1572,7 @@ export class WorkerCore {
 	#emulation?: BrowserEmulationController;
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
 	#webmcp?: WebMcpController;
-	/** Session holding `ignore_https_errors`; Chromium drops the override once it detaches. */
+	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
 	readonly #recording = new RecordingController();
 	/** Set once the core stops for good: by {@link terminate}, or by a close. */
@@ -1822,7 +1841,7 @@ export class WorkerCore {
 			await installVitalsObservers(this.#page);
 			await installCancelledReleaseGuard(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
-			if (payload.ignoreHttpsErrors) this.#certificateOverride = await applyIgnoreHttpsErrors(this.#page);
+			if (payload.insecure) this.#certificateOverride = await applyInsecure(this.#page);
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
@@ -2596,12 +2615,9 @@ export class WorkerCore {
 							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig, click);
 							return;
 						}
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await clickElement(handle, label, sig, click);
-						} finally {
-							void handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							clickElement(handle, label, sig, click),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -2683,13 +2699,22 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: opts?.timeout === undefined ? ZERO_MATCH_FAIL_FAST_MS : undefined },
 				);
 			},
-			waitForSelector: (selector, opts) => {
+			waitForSelector: async (selector, opts) => {
+				opts = selectorWaitOptions(opts);
 				const w = waitMs(opts?.timeout);
 				return act(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
-						if (parseAriaRefSelector(selector) !== null) return enrich(await this.#resolveAriaRef(selector));
+						const ref = parseAriaRefSelector(selector);
+						if (ref !== null) {
+							const handle = await waitForSelectorHandle(() => resolveAriaRefHandle(page, ref), opts, sig);
+							return handle ? enrich(handle) : null;
+						}
+						if (opts.state === "detached") {
+							const normalized = normalizeSelector(selector);
+							return await waitForDetached(() => page.$(normalized), sig);
+						}
 						const handle = (await untilAborted(sig, () =>
 							page.waitForSelector(normalizeSelector(selector), {
 								timeout: w,
@@ -2703,7 +2728,10 @@ export class WorkerCore {
 					{
 						selector,
 						// `hidden: true` waits for zero matches — that is success, never a fast-fail.
-						zeroMatchAfterMs: opts?.timeout === undefined && !opts?.hidden ? ZERO_MATCH_FAIL_FAST_MS : undefined,
+						zeroMatchAfterMs:
+							opts?.timeout === undefined && !opts?.hidden && opts?.state !== "detached"
+								? ZERO_MATCH_FAIL_FAST_MS
+								: undefined,
 					},
 				);
 			},
@@ -3053,12 +3081,9 @@ export class WorkerCore {
 					`tab.dblclick(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 });
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 }),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3069,7 +3094,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await untilAborted(sig, () => handle.hover());
+							await hoverElement(handle, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
@@ -3095,12 +3120,9 @@ export class WorkerCore {
 					`tab.check(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await setElementChecked(handle, true, `tab.check(${JSON.stringify(selector)})`, sig);
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							setElementChecked(handle, true, `tab.check(${JSON.stringify(selector)})`, sig),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3109,12 +3131,9 @@ export class WorkerCore {
 					`tab.uncheck(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await setElementChecked(handle, false, `tab.uncheck(${JSON.stringify(selector)})`, sig);
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							setElementChecked(handle, false, `tab.uncheck(${JSON.stringify(selector)})`, sig),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3350,8 +3369,6 @@ export class WorkerCore {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: screenshotArea(opts), scale: captureScale },
@@ -3480,8 +3497,11 @@ export class WorkerCore {
 		}
 	}
 
-	/** Find what takes a `tab.uploadFile` under the action deadline; the result owns the resolved handle. */
-	async #prepareTabUpload(
+	/**
+	 * Find what takes a `tab.uploadFile` under the action deadline, looking the selector up again when the page
+	 * replaced a chooser trigger before its click ({@link withLiveElement}); the result owns the resolved handle.
+	 */
+	#prepareTabUpload(
 		selector: string,
 		filePaths: string[],
 		label: string,
@@ -3491,29 +3511,35 @@ export class WorkerCore {
 		session: SessionSnapshot,
 	): Promise<PreparedUpload> {
 		const page = this.#requirePage();
-		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
-		try {
-			const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
-			const prepared = await prepareElementUpload(
-				page,
-				handle,
-				absolute,
-				label,
-				route,
-				this.#requireUploads(),
-				signal,
-			);
-			return {
-				...prepared,
-				dispose: async () => {
-					await prepared.dispose();
+		const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
+		return withLiveElement(
+			() => this.#resolveActionHandle(selector, timeoutMs, signal),
+			async handle => {
+				try {
+					const prepared = await prepareElementUpload(
+						page,
+						handle,
+						absolute,
+						label,
+						route,
+						this.#requireUploads(),
+						signal,
+					);
+					return {
+						...prepared,
+						dispose: async () => {
+							await prepared.dispose();
+							await handle.dispose().catch(() => undefined);
+						},
+					};
+				} catch (error) {
 					await handle.dispose().catch(() => undefined);
-				},
-			};
-		} catch (error) {
-			await handle.dispose().catch(() => undefined);
-			throw error;
-		}
+					throw error;
+				}
+			},
+			signal,
+			{ retry: parseAriaRefSelector(selector) === null },
+		);
 	}
 
 	async #waitForUrl(pattern: string | RegExp, timeout: number, signal: AbortSignal): Promise<string> {
@@ -3611,6 +3637,32 @@ export class WorkerCore {
 			this.#requirePage().locator(normalizeSelector(selector)).setTimeout(timeoutMs).waitHandle({ signal: sig }),
 		)) as ElementHandle;
 	}
+
+	/**
+	 * Runs `click` on the element `selector` resolves to, resolving it again whenever the page replaced it before the
+	 * click reached it ({@link withLiveElement}). An `aria-ref` resolves to the replaced node again, so its replacement
+	 * fails at once.
+	 */
+	#clickSelector(
+		selector: string,
+		timeoutMs: number,
+		sig: AbortSignal,
+		click: (handle: ElementHandle) => Promise<void>,
+	): Promise<void> {
+		return withLiveElement(
+			() => this.#resolveActionHandle(selector, timeoutMs, sig),
+			async handle => {
+				try {
+					await click(handle);
+				} finally {
+					void handle.dispose().catch(() => undefined);
+				}
+			},
+			sig,
+			{ retry: parseAriaRefSelector(selector) === null },
+		);
+	}
+
 	#clearElementCache(): void {
 		this.#observedElements.clear();
 		if (this.#elementCache.size === 0) {

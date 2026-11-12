@@ -1740,7 +1740,9 @@ fn create_backend(_: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
 /// thread rather than through the session worker.
 #[cfg(target_os = "macos")]
 use macos::screen_state as read_screen_state;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+use win32::screen_state as read_screen_state;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const fn read_screen_state(_: &DisplaySelector) -> ScreenState {
 	ScreenState { locked: false, display_asleep: false }
 }

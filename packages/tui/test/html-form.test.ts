@@ -58,6 +58,13 @@ function findPath(root: NativeNode, predicate: (node: NativeNode) => boolean, pa
 	return undefined;
 }
 
+/** The text of every `text` node under `root`, in order. */
+function textsOf(root: NativeNode): string[] {
+	const spans = root.k === "text" && root.p && "spans" in root.p ? root.p.spans : undefined;
+	const own = spans ? [spans.map(item => item.t).join("")] : [];
+	return [...own, ...(root.c ?? []).flatMap(child => (isNode(child) ? textsOf(child) : []))];
+}
+
 const DB_FORM = `<form>
 <fieldset><legend>Database</legend>
 <p>Which store should <code>ledger</code> use?</p>
@@ -909,6 +916,97 @@ describe("html form", () => {
 			}
 		});
 
+		it("natively: each question after the fieldsets gets its own tab, with the context before it", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label><label><input type="radio" name="length" value="long"> Long</label></fieldset>
+				<fieldset><legend>Languages</legend><label><input type="checkbox" name="languages" value="ts"> TypeScript</label><label><input type="checkbox" name="languages" value="py"> Python</label></fieldset>
+				<label>Editor <select name="editor"><option value="vscode">VS Code</option><option value="zed">Zed</option></select></label>
+				<p>How urgent is it?</p>
+				<label>Priority <input type="number" name="priority" value="3"></label>
+			</form>`);
+			const root = form.describe(CX);
+			const tabs = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of tabs.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			const editorTab = form.describe(CX);
+			expect(textsOf(editorTab)).toContain("Editor");
+			expect(textsOf(editorTab)).not.toContain("How urgent is it?");
+			// The Priority input's well, clickable while another field has focus.
+			expect(
+				findPath(editorTab, node => !!node.p && "actions" in node.p && node.p.actions?.click === "edit:3"),
+			).toBeUndefined();
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t3" });
+			const priorityTab = textsOf(form.describe(CX));
+			expect(priorityTab).toEqual(expect.arrayContaining(["How urgent is it?", "Priority"]));
+			expect(priorityTab).not.toContain("Editor");
+		});
+
+		it("natively: text between a loose group's options stays on the group's tab", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
+				<p>Premium includes backups</p>
+				<label><input type="radio" name="plan" value="premium"> Premium</label>
+				<label>Notes <input name="notes"></label>
+			</form>`);
+			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
+			expect(textsOf(form.describe(CX))).toContain("Premium includes backups");
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Notes"]));
+			expect(textsOf(form.describe(CX))).not.toContain("Premium includes backups");
+		});
+
+		it("natively: a field between a loose group's options keeps the context before it", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
+				<p>Choose a compliant region</p>
+				<label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label>
+				<label><input type="radio" name="plan" value="premium"> Premium</label>
+			</form>`);
+			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
+			expect(textsOf(form.describe(CX))).not.toContain("Choose a compliant region");
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Choose a compliant region", "Region"]));
+		});
+
+		it("natively: a loose field with only disabled options shares the next tab, so the focused field stays shown", () => {
+			const { form } = dialog(`<form>
+				<label><input type="checkbox" name="locked" disabled> Locked</label>
+				<label>Name <input name="name"></label>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+			</form>`);
+			const root = form.describe(CX);
+			const path = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+			// The shared tab is named after Name, the question the keyboard reaches.
+			const first = items[0];
+			expect(first && "label" in first && typeof first.label !== "string" ? first.label[0]?.t : "").toBe("Name");
+			// Focus opens on Name, the first control the keyboard reaches; the shown tab holds it.
+			expect(textsOf(root)).toContain("Name");
+		});
+
+		it("natively: a fieldset without a legend stays one tab", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<fieldset><label>Name <input name="name"></label><label>Email <input name="email"></label></fieldset>
+			</form>`);
+			const root = form.describe(CX);
+			const path = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+		});
+
 		it("natively: the form sits in the card's shrinking, scrolling list and the action bar stays outside it", () => {
 			const options = Array.from({ length: 40 }, (_, index) => `<option value="${index}">Option ${index}</option>`);
 			const { form } = dialog(
@@ -993,6 +1091,37 @@ describe("html form", () => {
 				len: 0,
 			});
 			expect(form.data()).toMatchObject({ db: "Fly Postgres HA" });
+		});
+
+		it("natively: clicking Other hands the keys over even while a composer draft owns typing", () => {
+			const typed: string[] = [];
+			const { form } = dialog(DB_FORM, {
+				inputGuard: {
+					isBlocked: () => true,
+					handleInput: (data: string) => typed.push(data),
+					hint: "typing edits your prompt",
+				},
+			});
+			const radios = findPath(form.describe(CX), node => node.k === "list" && node.key === "f0")!;
+			form.handleNativeEvent({ type: "select", key: radios, item: "other" });
+			for (const key of ["F", "l", "y"]) form.handleInput(key);
+			expect(form.data()).toMatchObject({ db: "Fly" });
+			expect(typed).toEqual([]);
+		});
+
+		it("natively: clicking a text well hands the keys over even while a composer draft owns typing", () => {
+			const typed: string[] = [];
+			const { form } = dialog(DB_FORM, {
+				inputGuard: {
+					isBlocked: () => true,
+					handleInput: (data: string) => typed.push(data),
+					hint: "typing edits your prompt",
+				},
+			});
+			form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
+			form.handleInput("5");
+			expect(form.data()).toMatchObject({ workers: 54 });
+			expect(typed).toEqual([]);
 		});
 
 		it("natively: keys act immediately even though rows were never rendered", () => {

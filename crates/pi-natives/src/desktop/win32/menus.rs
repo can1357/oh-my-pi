@@ -2,7 +2,7 @@
 //! Neither route activates a window or substitutes keyboard input. Lazy menus
 //! absent from the provider's current tree are refused rather than guessed.
 
-use std::ptr::with_exposed_provenance_mut;
+use std::{ptr::with_exposed_provenance_mut, time::Instant};
 
 use uiautomation::{
 	UIAutomation, UIElement, UITreeWalker,
@@ -12,16 +12,16 @@ use uiautomation::{
 	types::{ControlType, ExpandCollapseState, Handle, ToggleState},
 };
 use windows_sys::Win32::{
-	Foundation::{E_POINTER, HWND},
+	Foundation::{E_POINTER, HWND, LPARAM},
 	System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
 	UI::{
 		Input::KeyboardAndMouse::IsWindowEnabled,
 		WindowsAndMessaging::{
-			GetMenu, GetMenuInfo, GetMenuItemCount, GetMenuItemInfoW, GetWindowThreadProcessId, HMENU,
-			IsWindow, MENUINFO, MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR, MIIM_FTYPE,
-			MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_NOTIFYBYPOS,
-			SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT, SendMessageTimeoutW, WM_COMMAND,
-			WM_MENUCOMMAND,
+			EnumThreadWindows, GW_OWNER, GetMenu, GetMenuInfo, GetMenuItemCount, GetMenuItemInfoW,
+			GetWindow, GetWindowThreadProcessId, HMENU, IsWindow, IsWindowVisible, MENUINFO,
+			MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MIIM_STATE,
+			MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_NOTIFYBYPOS, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+			SMTO_ERRORONEXIT, SendMessageTimeoutW, WM_COMMAND, WM_MENUCOMMAND, WM_NULL,
 		},
 	},
 };
@@ -30,10 +30,11 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
-		menus::{DesktopMenuItem, match_index, require_command, require_enabled, validate_path},
+		menus::{DesktopMenuItem, match_offered, require_command, require_enabled, validate_path},
 		types::DesktopWindow,
 	},
 	ax::Win32Ax,
+	delivery::{ModalPopup, command_completed},
 	window,
 };
 
@@ -260,7 +261,7 @@ fn native_resolve(root: HMENU, path: &[String]) -> CoreResult<NativeNode> {
 	let mut chain = Vec::with_capacity(path.len());
 	for (depth, label) in path.iter().enumerate() {
 		let mut level = native_level(menu, &canonical)?;
-		let index = match_index(&level.items, label)?;
+		let index = match_offered(&level.items, label)?;
 		let item = level.items.swap_remove(index);
 		require_enabled(&item)?;
 		let entry = level.entries[index];
@@ -288,6 +289,66 @@ fn native_message(id: u32, position: u32, style: u32) -> CoreResult<(u32, usize)
 	} else {
 		Err(failed("menu command ID cannot be represented by WM_COMMAND; no command was dispatched"))
 	}
+}
+
+fn thread_windows(thread: u32) -> Option<Vec<usize>> {
+	unsafe extern "system" fn collect(hwnd: HWND, data: LPARAM) -> i32 {
+		// SAFETY: EnumThreadWindows calls synchronously with our live Vec.
+		unsafe { &mut *(data as *mut Vec<usize>) }.push(hwnd.expose_provenance());
+		1
+	}
+	let mut windows = Vec::new();
+	// SAFETY: the callback only writes to windows during this call.
+	if unsafe { EnumThreadWindows(thread, Some(collect), &raw mut windows as LPARAM) } == 0 {
+		return None;
+	}
+	Some(windows)
+}
+
+fn modal_popups<'a>(
+	target: &'a Target,
+	before: &'a [usize],
+) -> impl Iterator<Item = ModalPopup> + 'a {
+	let windows = thread_windows(target.thread).unwrap_or_default();
+	let started = Instant::now();
+	windows.into_iter().map_while(move |id| {
+		// Share one 200 ms budget across every candidate, not one per window.
+		let remaining = 200_u128.saturating_sub(started.elapsed().as_millis());
+		if remaining == 0 {
+			return None;
+		}
+		let hwnd = with_exposed_provenance_mut(id);
+		let mut pid = 0;
+		// SAFETY: pid is writable and Windows validates the window handles.
+		let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+		let mut popup = ModalPopup {
+			id,
+			// SAFETY: GetWindow only queries ownership of the opaque HWND.
+			owned_by_target: unsafe { GetWindow(hwnd, GW_OWNER) } == target.hwnd,
+			same_thread: thread == target.thread && pid == target.pid,
+			// SAFETY: IsWindowEnabled only queries the opaque HWND.
+			enabled: unsafe { IsWindowEnabled(hwnd) } != 0,
+			// SAFETY: IsWindowVisible only queries the opaque HWND.
+			visible: unsafe { IsWindowVisible(hwnd) } != 0,
+			responsive: false,
+		};
+		if popup.is_candidate(before) {
+			let mut result = 0;
+			// SAFETY: WM_NULL carries no data and has no window side effects.
+			popup.responsive = unsafe {
+				SendMessageTimeoutW(
+					hwnd,
+					WM_NULL,
+					0,
+					0,
+					SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+					remaining as u32,
+					&mut result,
+				)
+			} != 0;
+		}
+		Some(popup)
+	})
 }
 
 fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()> {
@@ -320,12 +381,13 @@ fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()
 		0
 	};
 	target.attached(root)?;
+	let before = thread_windows(target.thread);
 	let mut result = 0;
 	control::check()?;
 	// SAFETY: only scalar command data is sent to the exact validated HWND.
 	// A finite timeout avoids waiting indefinitely on a hung target or modal
 	// command handler. A timeout is NOT evidence that dispatch did not occur.
-	if unsafe {
+	let sent = unsafe {
 		SendMessageTimeoutW(
 			target.hwnd,
 			message,
@@ -335,8 +397,16 @@ fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()
 			1500,
 			&mut result,
 		)
-	} == 0
-	{
+	} != 0;
+	// A modal handler cannot return until its dialog closes. Only a newly
+	// observed, responsive owned dialog with a disabled owner confirms it.
+	// SAFETY: IsWindowEnabled only inspects the opaque HWND.
+	let owner_enabled = unsafe { IsWindowEnabled(target.hwnd) } != 0;
+	let popups = before
+		.as_deref()
+		.into_iter()
+		.flat_map(|before| modal_popups(target, before));
+	if !command_completed(sent, owner_enabled, before.as_deref(), popups) {
 		return Err(failed(
 			"native menu command delivery failed or timed out and may already have taken effect; do \
 			 not replay automatically",
@@ -566,7 +636,7 @@ impl<'a> UiaMenus<'a> {
 			if level.items.is_empty() {
 				return Err(unexposed_menu());
 			}
-			let index = match_index(&level.items, label)?;
+			let index = match_offered(&level.items, label)?;
 			let item = level.items.swap_remove(index);
 			require_enabled(&item)?;
 			if depth + 1 < path.len() && !item.has_submenu {

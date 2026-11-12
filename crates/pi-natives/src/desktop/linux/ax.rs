@@ -7,7 +7,7 @@ use atspi::{
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_atspi, text_readback},
+	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masked, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	error::{CoreResult, DesktopError},
 	types::DesktopWindow,
@@ -420,8 +420,8 @@ impl AtSpiAx {
 	}
 
 	/// `object`'s `Action` proxy, without zbus's property cache: the cache
-	/// reads properties with `GetAll`, which Qt refuses, so `NActions` would
-	/// fail on every Qt element.
+	/// fills itself with `GetAll`, which Qt 5 crashes on and newer Qt refuses,
+	/// so `NActions` is read with `Get`.
 	async fn action<'a>(
 		connection: &'a atspi::zbus::Connection,
 		object: &'a ObjectRefOwned,
@@ -540,21 +540,7 @@ impl AtSpiAx {
 			let multiline = state
 				.as_ref()
 				.is_some_and(|states| states.contains(State::MultiLine));
-			let value = if let Some(name) = object.name().cloned() {
-				let builder = atspi::proxy::text::TextProxy::builder(connection.connection())
-					.destination(name)
-					.and_then(|builder| builder.path(object.path().clone()));
-				if let Ok(builder) = builder
-					&& let Ok(text) = builder.build().await
-				{
-					let count = text.character_count().await.unwrap_or(0).min(16_384);
-					text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
-				} else {
-					None
-				}
-			} else {
-				None
-			};
+			let value = text_value(connection.connection(), &object).await;
 			let bounds = if bounds == WalkBounds::Read {
 				frames
 					.screen_bounds(connection.connection(), native.as_deref(), &object)
@@ -930,24 +916,14 @@ async fn write_text(
 		}
 		return text_readback(value, value, None, true).map_err(emptied);
 	}
-	// A role that cannot be read counts as a password field's, so no password
-	// enters an error.
-	let secure = actual.as_deref().is_some_and(masked)
-		|| accessible
-			.get_role()
-			.await
-			.ok()
-			.is_none_or(|role| role == Role::PasswordText);
+	// A role that cannot be read counts as a password field's, so what such a
+	// field reads never enters an error.
+	let secure = accessible
+		.get_role()
+		.await
+		.ok()
+		.is_none_or(|role| role == Role::PasswordText);
 	text_readback(value, value, actual.as_deref(), secure)
-}
-
-/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
-/// toolkits fall back on.
-fn masked(actual: &str) -> bool {
-	let mut chars = actual.chars();
-	chars.next().is_some_and(|first| {
-		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
-	})
 }
 
 /// Whether `actual` masks `value`: one mask character per character, or per
@@ -971,6 +947,27 @@ async fn text_contents(
 		.await?;
 	let count = text.character_count().await?;
 	text.get_text(0, count).await
+}
+
+/// The text of an element with the `Text` interface, up to 16,384 characters.
+/// The proxy keeps no property cache: zbus fills one with `GetAll`, which
+/// crashes Qt 5 and Qt 6 before 6.9.2, and GTK 3 and Firefox apps on
+/// at-spi2-core before 2.45; newer Qt refuses it.
+async fn text_value(
+	connection: &atspi::zbus::Connection,
+	object: &ObjectRefOwned,
+) -> Option<String> {
+	let text = atspi::proxy::text::TextProxy::builder(connection)
+		.destination(object.name()?.clone())
+		.ok()?
+		.path(object.path().clone())
+		.ok()?
+		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
+		.build()
+		.await
+		.ok()?;
+	let count = text.character_count().await.unwrap_or(0).min(16_384);
+	text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
 }
 
 fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> CoreResult<String> {
@@ -1000,37 +997,43 @@ const fn top_level_role(role: Role, child_of_application: bool) -> bool {
 	}
 }
 
+/// Machine names that activate an element, compared by [`folds_to`]: GTK
+/// (`click`, `activate`), Qt (`Toggle`), Chromium and Electron (`click`,
+/// `open`, `jump`, `clickAncestor`, and `doDefault` on elements without a
+/// verb), and `do default` / `do-default` from other ATK bridges. `press`
+/// itself matches before these are tried.
+const ACTIVATIONS: [&str; 8] =
+	["click", "clickancestor", "activate", "invoke", "toggle", "open", "jump", "dodefault"];
+
+/// Chromium's, Firefox's and `LibreOffice`'s activation of menu items,
+/// options and tabs, taken only when an element has none of [`ACTIVATIONS`]:
+/// a GTK colour swatch lists `select` (set the selected flag) before
+/// `activate`.
+const SELECT: &str = "select";
+
+/// Whether `name` is `safe`, ignoring case and the spaces, hyphens and
+/// underscores toolkits spell action names with.
+fn folds_to(name: &str, safe: &str) -> bool {
+	name
+		.bytes()
+		.filter(|byte| !matches!(byte, b' ' | b'-' | b'_'))
+		.map(|byte| byte.to_ascii_lowercase())
+		.eq(safe.bytes())
+}
+
 /// Generic press means activation, not action zero (GTK4 text views put
 /// `buffer.delete-line` there). Explicit advertised actions remain available.
 fn action_index<'a>(
-	mut actions: impl Iterator<Item = &'a str> + Clone,
+	actions: impl Iterator<Item = &'a str> + Clone,
 	requested: &str,
 ) -> Option<usize> {
-	actions
-		.clone()
-		.position(|name| name.eq_ignore_ascii_case(requested))
-		.or_else(|| {
-			requested
-				.eq_ignore_ascii_case("press")
-				.then(|| {
-					actions.position(|name| {
-						[
-							"click",
-							"clickAncestor",
-							"activate",
-							"invoke",
-							"toggle",
-							"open",
-							"jump",
-							"do default",
-							"do-default",
-						]
-						.iter()
-						.any(|safe| name.eq_ignore_ascii_case(safe))
-					})
-				})
-				.flatten()
-		})
+	let position = |matches: &dyn Fn(&str) -> bool| actions.clone().position(matches);
+	position(&|name| name.eq_ignore_ascii_case(requested)).or_else(|| {
+		requested.eq_ignore_ascii_case("press").then(|| {
+			position(&|name| ACTIVATIONS.iter().any(|safe| folds_to(name, safe)))
+				.or_else(|| position(&|name| folds_to(name, SELECT)))
+		})?
+	})
 }
 
 /// The most actions read of one element: the count comes from the app.
@@ -1408,12 +1411,121 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn text_value_reads_text_without_get_all() {
+		use atspi::zbus::{
+			MessageStream, connection::Builder as ConnectionBuilder, message::Type, zvariant::Value,
+		};
+		use futures::StreamExt;
+
+		const TEXT: &str = "org.a11y.atspi.Text";
+		const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
+		const PEER: &str = ":1.7";
+
+		// Reject GetAll on any interface rather than crashing as affected apps
+		// do.
+		async fn app(server: atspi::zbus::Connection, calls: &mut Vec<(String, String)>) {
+			let mut stream = MessageStream::from(&server);
+			while let Some(message) = stream.next().await {
+				let message = message.unwrap();
+				if message.message_type() != Type::MethodCall {
+					continue;
+				}
+				let header = message.header();
+				let interface = header.interface().unwrap().as_str();
+				let member = header.member().unwrap().as_str();
+				match (interface, member) {
+					(PROPERTIES, "GetAll") => {
+						let requested: String = message.body().deserialize().unwrap();
+						calls.push((member.to_owned(), requested));
+						server
+							.reply_error(
+								&header,
+								"org.freedesktop.DBus.Error.NotSupported",
+								&"GetAll is unsafe",
+							)
+							.await
+							.unwrap();
+					},
+					(PROPERTIES, "Get") => {
+						let (requested, property): (String, String) =
+							message.body().deserialize().unwrap();
+						assert_eq!((requested.as_str(), property.as_str()), (TEXT, "CharacterCount"));
+						calls.push((member.to_owned(), format!("{requested}.{property}")));
+						server.reply(&header, &Value::from(12_i32)).await.unwrap();
+					},
+					(TEXT, "GetText") => {
+						let (start, end): (i32, i32) = message.body().deserialize().unwrap();
+						let result: String = "initial text"
+							.chars()
+							.skip(usize::try_from(start).unwrap())
+							.take(usize::try_from(end - start).unwrap())
+							.collect();
+						server.reply(&header, &result).await.unwrap();
+					},
+					_ => panic!("unexpected AT-SPI call: {interface}.{member}"),
+				}
+			}
+		}
+
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let (text, calls) = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let server = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p()
+				.build();
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(server, client).unwrap();
+			let object = ObjectRefOwned::from_static_str_unchecked(PEER, "/text");
+			let mut calls = Vec::new();
+			let text = tokio::select! {
+				text = text_value(&client, &object) => text,
+				() = app(server, &mut calls) => unreachable!("the app stopped answering"),
+			};
+			(text, calls)
+		});
+
+		assert!(
+			calls.iter().all(|(member, _)| member != "GetAll"),
+			"unsafe property calls: {calls:?}"
+		);
+		assert_eq!(text.as_deref(), Some("initial text"));
+		assert!(
+			calls.iter().any(|(member, property)| member == "Get"
+				&& property == "org.a11y.atspi.Text.CharacterCount")
+		);
+	}
+
+	#[test]
 	fn generic_press_never_selects_an_unrelated_editing_action() {
 		let actions = ["buffer.delete-line", "clipboard.cut", "activate"];
 		assert_eq!(action_index(actions.into_iter(), "press"), Some(2));
 		assert_eq!(action_index(actions[..2].iter().copied(), "press"), None);
 		assert_eq!(action_index(actions.into_iter(), "buffer.delete-line"), Some(0));
 		assert_eq!(action_index(std::iter::empty(), "press"), None);
+	}
+
+	/// Machine names in order, as the GTK 3, GTK 4, Qt 5, Qt 6 and Chromium
+	/// 156 matrix fixtures on Ubuntu 22.04 list them (the colour swatch as GTK
+	/// declares it), with the action `action_index` resolves a generic press to.
+	#[test]
+	fn generic_press_takes_each_toolkits_activation() {
+		let cases: [(&str, &[&str], Option<usize>); 10] = [
+			("GTK 4 label", &["clipboard.copy", "link.open", "menu.popup"], None),
+			("Qt slider", &["SetFocus", "Increase", "Decrease"], None),
+			("Qt menu bar item", &["ShowMenu"], None),
+			("Chromium ARIA menu item", &["select", "showContextMenu"], Some(0)),
+			("Chromium tab", &["doDefault", "showContextMenu"], Some(0)),
+			("Chromium section", &["clickAncestor", "showContextMenu"], Some(0)),
+			("GTK colour swatch", &["select", "activate", "customize"], Some(1)),
+			("spaced spelling", &["Do Default"], Some(0)),
+			("hyphenated spelling", &["do-default"], Some(0)),
+			("context menu only", &["showContextMenu"], None),
+		];
+		for (widget, actions, expected) in cases {
+			assert_eq!(action_index(actions.iter().copied(), "press"), expected, "{widget}");
+		}
 	}
 
 	#[test]
@@ -1506,7 +1618,7 @@ mod tests {
 			}
 		}
 
-		/// An error naming what the field reads, one that names no text, or one
+		/// An error naming what the field reads, one that quotes no text, or one
 		/// saying the field was emptied.
 		enum Verdict {
 			Ok,
@@ -1612,7 +1724,7 @@ mod tests {
 				(Verdict::Ok, Ok(())) => {},
 				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
 				(Verdict::Hidden, Err(err))
-					if err.message.contains("secure") && !err.message.contains("new") => {},
+					if !err.message.contains("new") && !err.message.contains(r#""old""#) => {},
 				(Verdict::Emptied, Err(err))
 					if err.message.contains("emptied") && !err.message.contains("new") => {},
 				(_, result) => panic!("{path}: {result:?}"),
@@ -1908,8 +2020,8 @@ mod tests {
 		];
 		const PEER: &str = ":1.7";
 
-		/// Answers like the apps, `GetAll` refused as Qt refuses it, so a proxy
-		/// that caches properties cannot read `NActions`.
+		/// Rejects `GetAll` rather than emulating Qt 5's crash. A proxy that
+		/// caches properties therefore cannot read `NActions`.
 		async fn app(server: atspi::zbus::Connection) {
 			let mut stream = MessageStream::from(&server);
 			while let Some(Ok(message)) = stream.next().await {

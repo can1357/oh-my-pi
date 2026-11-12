@@ -24,7 +24,7 @@
  * string.
  *
  * This is deliberately scoped to the task tool's natural-language fields
- * (`task`, shared `context`); identifier fields (`name`, `agent`)
+ * (`task`, `steps`, shared `context`); identifier fields (`name`, `agent`)
  * are never repaired. It is NOT applied to code-bearing
  * tools (write/edit/bash/search), where a backslash or quote is load-bearing
  * and a false-positive unescape would silently corrupt a file or command.
@@ -79,17 +79,31 @@ export function repairDoubleEncodedJsonString(value: string): string {
 	return typeof decoded === "string" && decoded !== value ? decoded : value;
 }
 
-/** Repair a single (possibly partial) task item's prose field (`task`). */
+/** Repair each string of a (possibly partial) `steps` list; the same reference when nothing changed. */
+function repairSteps(steps: string[] | undefined): string[] | undefined {
+	if (!Array.isArray(steps)) return steps;
+	let changed = false;
+	const repaired = steps.map(step => {
+		if (typeof step !== "string") return step;
+		const next = repairDoubleEncodedJsonString(step);
+		if (next !== step) changed = true;
+		return next;
+	});
+	return changed ? repaired : steps;
+}
+
+/** Repair a single (possibly partial) task item's prose fields (`task`, `steps`). */
 function repairTaskItem(item: TaskItem): TaskItem {
 	if (item === null || typeof item !== "object") return item;
 	const task = typeof item.task === "string" ? repairDoubleEncodedJsonString(item.task) : item.task;
-	if (task === item.task) return item;
-	return { ...item, task };
+	const steps = repairSteps(item.steps);
+	if (task === item.task && steps === item.steps) return item;
+	return { ...item, task, steps };
 }
 
 /**
- * Repair double-encoded prose in task-tool params (flat `task`, shared
- * `context`, and each batch task item's `task`). Returns the same reference
+ * Repair double-encoded prose in task-tool params (flat `task`/`steps`, shared
+ * `context`, and each batch task item's `task`/`steps`). Returns the same reference
  * when nothing changed so callers can cheaply skip work. Defensive against
  * partially-streamed args (missing/undefined fields, partial task arrays) so
  * it is safe on the render path as well as on execution.
@@ -99,6 +113,7 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 
 	const task = typeof params.task === "string" ? repairDoubleEncodedJsonString(params.task) : params.task;
 	const context = typeof params.context === "string" ? repairDoubleEncodedJsonString(params.context) : params.context;
+	const steps = repairSteps(params.steps);
 
 	let tasks = params.tasks;
 	if (Array.isArray(params.tasks)) {
@@ -111,8 +126,8 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 		if (changed) tasks = repaired;
 	}
 
-	if (task === params.task && context === params.context && tasks === params.tasks) {
+	if (task === params.task && steps === params.steps && context === params.context && tasks === params.tasks) {
 		return params;
 	}
-	return { ...params, task, context, tasks };
+	return { ...params, task, steps, context, tasks };
 }

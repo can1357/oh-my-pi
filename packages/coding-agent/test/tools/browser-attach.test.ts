@@ -59,6 +59,8 @@ function makeSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 		}),
@@ -269,7 +271,7 @@ describe("pickElectronTarget", () => {
 							name,
 							url: "data:text/html,<title>First attached page</title>",
 							timeout: 15,
-							app: { cdp_url: cdpUrl },
+							app: cdpUrl,
 						},
 						{ ...context, signal: controller.signal },
 					)
@@ -361,7 +363,7 @@ describe("pickElectronTarget", () => {
 
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {
 		expect(() => normalizeConnectedCdpUrl("ws://127.0.0.1:9222/devtools/browser/id")).toThrow(
-			"browser app.cdp_url must be the HTTP CDP discovery endpoint",
+			"browser app CDP URL must be the HTTP CDP discovery endpoint",
 		);
 		expect(normalizeConnectedCdpUrl("http://127.0.0.1:9222/")).toBe("http://127.0.0.1:9222");
 	});
@@ -518,6 +520,8 @@ describe("pickElectronTarget", () => {
 				"--no-default-browser-check",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				// `open` always adds this to a spawned app; without it the open keys a second browser.
+				"--allow-file-access-from-files",
 				...RENDERER_PRIORITY_ARGS,
 			];
 			const child = Bun.spawn(
@@ -543,13 +547,15 @@ describe("pickElectronTarget", () => {
 					action: "open",
 					name: borrowedName,
 					url: "data:text/html,<title>Borrowed</title>",
-					app: { path: exe, args: [...flags, "--user-data-dir", borrowedProfile] },
+					app: exe,
+					argv: [...flags, "--user-data-dir", borrowedProfile],
 				});
 				await invoke({
 					action: "open",
 					name: ownedName,
 					url: "data:text/html,<title>Owned</title>",
-					app: { path: exe, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
+					app: exe,
+					argv: [...flags, "--user-data-dir", path.join(root, "owned")],
 				});
 				const borrowedTab = getTab(borrowedName);
 				const ownedTab = getTab(ownedName);
@@ -591,6 +597,8 @@ describe("pickElectronTarget", () => {
 				"--no-first-run",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				// `open` always adds this to a spawned app; without it the open keys a second browser.
+				"--allow-file-access-from-files",
 				...RENDERER_PRIORITY_ARGS,
 				`--user-data-dir=${profile}`,
 			];
@@ -606,7 +614,8 @@ describe("pickElectronTarget", () => {
 				await invoke({
 					action: "open",
 					name,
-					app: { path: exe, args: flags },
+					app: exe,
+					argv: flags,
 					url: "data:text/html,<title>Fresh profile</title>",
 				});
 				const tab = getTab(name);
@@ -653,7 +662,7 @@ describe("pickElectronTarget", () => {
 			const name = `connected-viewport-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
-				const app = { cdp_url: `http://127.0.0.1:${port}` };
+				const app = `http://127.0.0.1:${port}`;
 				// No `scale`: the window keeps its own device scale (2 here).
 				const viewport = { width: 390, height: 844 };
 				// An open that fails after adopting the page (a file where the downloads folder goes) leaves no size
@@ -730,7 +739,7 @@ describe("pickElectronTarget", () => {
 					action: "open",
 					name: tabName,
 					url: requested,
-					app: { cdp_url: `http://${endpoint.host}` },
+					app: `http://${endpoint.host}`,
 				});
 				opened = true;
 
@@ -829,7 +838,7 @@ describe("pickElectronTarget", () => {
 					{
 						action: "open",
 						name: `refused-${crypto.randomUUID()}`,
-						app: { cdp_url: `http://127.0.0.1:${cdp.port}` },
+						app: `http://127.0.0.1:${cdp.port}`,
 					},
 					{ session, toolCallId: "refused-websocket" },
 				),

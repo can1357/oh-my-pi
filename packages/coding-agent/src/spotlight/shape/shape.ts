@@ -62,7 +62,7 @@ import {
  */
 export const SHAPE_PROBE: string = shapeProbe.trimEnd();
 
-/** The system-prompt paragraph telling the agent how shaped output reads (read narrowly, batch calls). */
+/** The system prompt's Tool I/O notice on how shaped output reads (read narrowly, batch calls). */
 export const SHAPE_RULE: string = shapeRule.trim();
 
 let tokenizer: Tokenizer | undefined;
@@ -128,9 +128,10 @@ const VERBATIM = /[;,]\s*verbatim(?: copy)?: \S+\]$/;
 const WHOLE_READ = /^(?:agent|local|skill|rule):\/\//i;
 
 /**
- * Whether a result is shown whole besides page-backs: a {@link WHOLE_READ} target, or a `read` of Markdown or of one
- * line range without `:raw` (`file.ts:120-180`). Cuts of those two were mostly read back, or saved only on rereads
- * of the same few files.
+ * Whether a result is shown whole besides page-backs: a {@link WHOLE_READ} target, or a `read` of Markdown or of
+ * line ranges that all end (`file.ts:120-180`, `:5+30`, `:1-10,40-60`, `:raw:5-40`, `:-30`): the agent named the
+ * lines it wants, and cuts of them were mostly read back. An open-ended range (`:120`, `:120-`) pages the file and is
+ * shaped.
  */
 function isWholeRead(input: ShapeInput): boolean {
 	const target = input.path ?? "";
@@ -140,9 +141,8 @@ function isWholeRead(input: ShapeInput): boolean {
 	if (isMarkdownPath(file)) return true;
 	try {
 		const parsed = parseSel(sel);
-		return (
-			parsed.kind === "lines" && !parsed.raw && parsed.ranges.length === 1 && parsed.ranges[0].endLine !== undefined
-		);
+		if (parsed.kind === "tail") return parsed.ranges?.every(r => r.endLine !== undefined) ?? true;
+		return parsed.kind === "lines" && parsed.ranges.every(r => r.endLine !== undefined);
 	} catch {
 		// `read` rejects a malformed range before shaping; what only another reader parses (a video frame) is no range.
 		return false;

@@ -183,8 +183,8 @@ impl X11Input {
 						let result = pointer_mpx(wm, mpx, window, &event);
 						if control::check().is_err() {
 							// Retire cancelled devices, never replay uncertain queued
-							// input. A later explicit operation
-							// may create a fresh isolated pair.
+							// input. A later explicit operation takes a pair again
+							// with fresh slaves.
 							self.mpx = None;
 						}
 						return result;
@@ -1071,7 +1071,7 @@ impl X11Input {
 }
 
 /// The session's MPX pair, created on first use; `Err` carries why the route
-/// is unavailable. A creation failure is remembered for the session.
+/// is unavailable. Capability failures, but not contention, are remembered.
 fn ensure_mpx<'a>(
 	slot: &'a mut Option<Mpx>,
 	unavailable: &mut Option<String>,
@@ -1082,7 +1082,7 @@ fn ensure_mpx<'a>(
 	let mpx = match slot.take() {
 		Some(mpx) => mpx,
 		None => Mpx::create().map_err(|error| {
-			if control::check().is_err() {
+			if error.code == ErrorCode::InputBusy || control::check().is_err() {
 				error.message
 			} else {
 				unavailable.insert(error.message).clone()
@@ -1283,6 +1283,21 @@ const fn event_kind(event: &PointerEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	#[ignore = "needs an isolated Xorg display with uinput hotplug"]
+	fn temporary_pair_contention_does_not_disable_mpx_for_the_session() {
+		let first = Mpx::create().unwrap();
+		let _second = Mpx::create().unwrap();
+		let mut slot = None;
+		let mut unavailable = None;
+		assert!(ensure_mpx(&mut slot, &mut unavailable).is_err(), "both pairs are held");
+		drop(first);
+		assert!(
+			ensure_mpx(&mut slot, &mut unavailable).is_ok(),
+			"a later action takes the freed pair"
+		);
+	}
 
 	#[test]
 	fn a_refusal_that_disturbed_focus_is_not_rerunnable() {
