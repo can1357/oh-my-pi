@@ -715,6 +715,147 @@ describe("web_search stays top-level under xdev", () => {
 });
 
 describe("xd:// and top-level calls share the canonical tool map", () => {
+	it("documents an active apply_patch wire alias with the canonical edit schema", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-xdev-wire-"));
+		try {
+			const session = xdevSession(tempDir, {
+				enableLsp: false,
+				settings: Settings.isolated({ "edit.mode": "apply_patch" }),
+			});
+			const tools = await createTools(session, ["read", "write", "edit"]);
+			const read = tools.find(tool => tool.name === "read");
+			if (!read) throw new Error("expected read tool");
+
+			const canonical = await read.execute("read-xdev-edit", { path: "xd://edit" });
+			const alias = await read.execute("read-xdev-wire", { path: "xd://apply_patch" });
+			expect(alias.content).toEqual(canonical.content);
+			expect(alias.content.find(entry => entry.type === "text")?.text).toContain("input: string");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("applies a real patch through the active wire alias without writing a device path", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-wire-"));
+		try {
+			const target = path.join(tempDir, "target.txt");
+			await Bun.write(target, "before\n");
+			const session = xdevSession(tempDir, {
+				enableLsp: false,
+				settings: Settings.isolated({ "edit.mode": "apply_patch" }),
+			});
+			const tools = await createTools(session, ["read", "write", "edit"]);
+			const write = tools.find(tool => tool.name === "write");
+			if (!write) throw new Error("expected write tool");
+			const input = [
+				"*** Begin Patch",
+				"*** Update File: target.txt",
+				"@@",
+				"-before",
+				"+after",
+				"*** End Patch",
+			].join("\n");
+
+			const result = await write.execute("write-xdev-wire-patch", {
+				path: "xd://apply_patch",
+				content: JSON.stringify({ input }),
+			});
+
+			expect(result.isError).toBeUndefined();
+			expect(result.details?.xdev).toMatchObject({ tool: "apply_patch", mode: "execute", tier: "write" });
+			expect(await Bun.file(target).text()).toBe("after\n");
+			expect(await fs.readdir(tempDir)).toEqual(["target.txt"]);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("makes a mounted wire alias unavailable when its canonical tool is disabled", async () => {
+		let calls = 0;
+		const device: Tool = {
+			name: "canonical",
+			customWireName: "wire",
+			label: "Device",
+			description: "Mounted wire-alias fixture",
+			parameters: type({}),
+			async execute() {
+				calls++;
+				return { content: [{ type: "text", text: "executed" }] };
+			},
+		};
+		const xdev = createTestXdevState([device]);
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+
+		const enabled = await write.execute("wire-mounted", { path: "xd://wire", content: "{}" });
+		expect(enabled.isError).toBeUndefined();
+		expect(calls).toBe(1);
+
+		xdev.mountedNames.clear();
+		for (const name of ["canonical", "wire"]) {
+			expect(() => xdevDocs(xdev, name)).toThrow(`No such tool: xd://${name}`);
+			const disabled = await write.execute(`disabled-${name}`, { path: `xd://${name}`, content: "{}" });
+			expect(disabled.isError).toBe(true);
+			expect(disabled.content.find(entry => entry.type === "text")?.text).toContain(`No such tool: xd://${name}`);
+		}
+		expect(calls).toBe(1);
+	});
+
+	it("keeps exact device names ahead of wire aliases even after the exact tool is disabled", async () => {
+		const calls: string[] = [];
+		const tools = ["canonical", "wire"].map((name): Tool => ({
+			name,
+			customWireName: name === "canonical" ? "wire" : undefined,
+			label: name,
+			description: `${name} device`,
+			parameters: type({}),
+			async execute() {
+				calls.push(name);
+				return { content: [{ type: "text", text: name }] };
+			},
+		}));
+		const xdev = createTestXdevState(tools);
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+
+		expect(xdevDocs(xdev, "wire")).toContain("# wire");
+		const exact = await write.execute("wire-exact", { path: "xd://wire", content: "{}" });
+		expect(exact.isError).toBeUndefined();
+		expect(calls).toEqual(["wire"]);
+
+		xdev.mountedNames.delete("wire");
+		expect(() => xdevDocs(xdev, "wire")).toThrow("No such tool: xd://wire");
+		const disabled = await write.execute("wire-exact-disabled", { path: "xd://wire", content: "{}" });
+		expect(disabled.isError).toBe(true);
+		expect(calls).toEqual(["wire"]);
+	});
+
+	it("rejects ambiguous wire aliases even when one claimant is disabled", async () => {
+		const calls: string[] = [];
+		const tools = ["first", "second"].map((name): Tool => ({
+			name,
+			customWireName: "shared",
+			label: name,
+			description: `${name} device`,
+			parameters: type({}),
+			async execute() {
+				calls.push(name);
+				return { content: [{ type: "text", text: name }] };
+			},
+		}));
+		const xdev = createTestXdevState(tools);
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+
+		for (const secondEnabled of [true, false]) {
+			if (!secondEnabled) xdev.mountedNames.delete("second");
+			expect(() => xdevDocs(xdev, "shared")).toThrow("No such tool: xd://shared");
+			const result = await write.execute(`wire-ambiguous-${secondEnabled}`, {
+				path: "xd://shared",
+				content: "{}",
+			});
+			expect(result.isError).toBe(true);
+		}
+		expect(calls).toEqual([]);
+	});
+
 	it("dispatches and documents an unmounted top-level tool, and still rejects unknown names", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-fallback-"));
 		try {

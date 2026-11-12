@@ -260,10 +260,19 @@ export const XDEV_DOCS_PER_DEVICE_CAP = 10_000;
 /** Description cap for external mounted tools; their full docs remain readable on demand. */
 export const XDEV_EXTERNAL_DESCRIPTION_CAP = 200;
 
-/** Resolve any enabled tool through the canonical session map. */
+/** Resolve enabled canonical names or unambiguous wire aliases through the session map. */
 export function resolveXdevTool(state: XdevState, name: string): Tool | undefined {
-	if (!state.mountedNames.has(name) && !state.isActive(name)) return undefined;
-	return state.tools.get(name);
+	// Exact registry names shadow aliases even when the exact tool is disabled.
+	let resolved = state.tools.get(name);
+	if (!resolved) {
+		for (const tool of state.tools.values()) {
+			if (tool.customWireName !== name) continue;
+			if (resolved) return undefined;
+			resolved = tool;
+		}
+	}
+	if (!resolved || (!state.mountedNames.has(resolved.name) && !state.isActive(resolved.name))) return undefined;
+	return resolved;
 }
 
 /**
