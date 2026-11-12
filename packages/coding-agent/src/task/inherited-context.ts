@@ -256,6 +256,12 @@ export function inheritedContextMessage(context: InheritedContext): InheritedCon
 /** The `snapcompact.shape` setting: a named frame shape, or `auto` to resolve one per model. */
 export type ShapeSetting = snapcompact.ShapeVariantName | "auto";
 
+/** The cut of the tail that fits, its frame count, and the shape it was fitted to. */
+interface FittedTail extends snapcompact.TailShape {
+	text: string;
+	frames: number;
+}
+
 /** Most re-cuts while fitting the tail into {@link INHERITED_CONTEXT_MAX_FRAMES} frames. */
 const FIT_ATTEMPTS = 6;
 
@@ -266,11 +272,7 @@ const FIT_ATTEMPTS = 6;
  * grid), so the cut follows the shape instead of keeping the last frames of an overflowing render,
  * which would drop text the sidecar still lists.
  */
-function fitTail(
-	text: string,
-	model: Model,
-	setting: ShapeSetting,
-): ({ text: string; frames: number } & snapcompact.TailShape) | undefined {
+function fitTail(text: string, model: Model, setting: ShapeSetting): FittedTail | undefined {
 	let fitted = text;
 	for (let attempt = 0; attempt < FIT_ATTEMPTS && fitted; attempt++) {
 		const tail = snapcompact.resolveTailShapeForText(fitted, model, setting);
@@ -314,7 +316,7 @@ function isInheritedContextTurn(message: Message): message is UserMessage & { co
  */
 export class InheritedContextFrames {
 	/** The latest fit and its render (`null` once it failed), so a failure is not redone or logged per request. */
-	#last?: { key: string; fit: ReturnType<typeof fitTail>; content?: (TextContent | ImageContent)[] | null };
+	#last?: { key: string; fit: FittedTail | undefined; content?: (TextContent | ImageContent)[] | null };
 
 	/** `context` itself when the turn stays text. */
 	async transform(

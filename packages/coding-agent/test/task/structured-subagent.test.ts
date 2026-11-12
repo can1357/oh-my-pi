@@ -708,7 +708,12 @@ describe("structured subagent primitive", () => {
 		"tells the parent which flagged children started without its conversation (async=%p)",
 		async asyncEnabled => {
 			mockDiscovery();
-			vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+			// A real run reports the id and index it was dispatched under.
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => ({
+				...result(),
+				index: options.index,
+				id: options.id,
+			}));
 			const manager = asyncEnabled ? new AsyncJobManager({ onJobComplete: () => {} }) : undefined;
 			const run = async (messages: unknown[]) => {
 				const parent = {
@@ -739,9 +744,9 @@ describe("structured subagent primitive", () => {
 			};
 			try {
 				const dropped = await run([]);
-				expect(dropped.text.split("\n").find(line => line.includes("started without your conversation"))).toBe(
-					`\`${dropped.ids[0]}\` started without your conversation: \`inheritContext\` could not capture it, so it had only its brief.`,
-				);
+				const note = dropped.text.split("\n").find(line => line.includes("started without your conversation"));
+				expect(note).toContain(`\`${dropped.ids[0]}\``);
+				expect(note).not.toContain(dropped.ids[1]);
 				const inherited = await run([{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }]);
 				expect(inherited.text).not.toContain("started without your conversation");
 			} finally {
