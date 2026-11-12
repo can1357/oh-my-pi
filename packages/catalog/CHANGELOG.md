@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Gemini 4 Hydrogen on Google Vertex (`google-vertex/gemini-4-hydrogen`) and as one Google Antigravity model, both with low, medium and high thinking levels; no price is listed until Google publishes one.
+- Added Gemini 4 Hydrogen on Google Vertex (`google-vertex/gemini-4-hydrogen`) and as one Google Antigravity model, both with low, medium and high thinking levels; no price is listed until Google publishes one ([#19059](https://github.com/can1357/oh-my-pi/pull/19059) by [@kevcube](https://github.com/kevcube)).
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
 
 ### Fixed
