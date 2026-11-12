@@ -741,12 +741,7 @@ describe("computer prelude", () => {
 		expect(
 			await runInContext("computer.run(fn, { args: [7, /save/gi, argFn], read_only: true, timeout: 5 })", realm),
 		).toBe(42);
-		expect(
-			await runInContext(
-				'computer.run("41 + 1", { timeout: 2, action: "close", code: "old", fn: "old", unexpected: true })',
-				realm,
-			),
-		).toBe(42);
+		expect(await runInContext('computer.run("41 + 1", { timeout: 2 })', realm)).toBe(42);
 		expect(await runInContext("computer.capabilities()", realm)).toEqual(capabilities);
 
 		expect(
@@ -870,6 +865,20 @@ describe("computer prelude", () => {
 		});
 		runInContext(prelude.javascript, realm);
 
+		await expect(
+			runInContext('computer.run("return 1;", { timeouts: 3, readOnly: true })', realm),
+		).rejects.toMatchObject({
+			name: "ToolError",
+			message: expect.stringContaining("readOnly: did you mean read_only"),
+		});
+		for (const key of ["a", "read", "out", ""]) {
+			await expect(
+				runInContext(`computer.run("return 1;", { ${JSON.stringify(key)}: true })`, realm),
+			).rejects.toMatchObject({
+				name: "ToolError",
+				message: expect.not.stringContaining("did you mean"),
+			});
+		}
 		await expect(
 			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
 		).rejects.toThrow("computer.run() args must be an array of the function's arguments after its scope");
@@ -1350,7 +1359,7 @@ describe("computer prelude", () => {
 				`(async () => {
 					const win = await computer.window(42);
 					await win.ref("e1").doubleClick({ button: "right" });
-					await (await win.ref("e1")).doubleClick({ count: 3 });
+					await (await win.ref("e1")).doubleClick();
 					const found = await win.find({ role: "button" });
 					await found[0].doubleClick();
 					await computer.run(async ({ desktop }) => {
@@ -1503,6 +1512,86 @@ describe("computer prelude", () => {
 });
 
 describe("computer worker round trips", () => {
+	it("rejects unknown computer options and forwards drag buttons", async () => {
+		class OptionsSession extends FakeNativeSession {
+			readonly draggedButtons: Array<string | undefined> = [];
+			override async axNode(ref: string): Promise<AxNode> {
+				if (ref === "e9") throw new Error("stale ref");
+				return super.axNode(ref);
+			}
+			override async drag(target: string, points: DesktopPoint[], options?: PointerOptions | null) {
+				this.draggedButtons.push(options?.button);
+				return super.drag(target, points, options);
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new OptionsSession();
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"strict-options",
+			`
+			const win = await desktop.window("42");
+			const el = await win.ref("e1");
+			const screen = await desktop.display("active");
+			const failures = [];
+			const check = async (name, call, invalid = { unexpected: true }) => {
+				let error;
+				try { await call(invalid); } catch (caught) { error = caught; }
+				if (!error) {
+					failures.push(name + " accepted " + Object.keys(invalid).join(", "));
+				} else if (error.name !== "ToolError" || !error.message.includes(name) || !error.message.includes("Valid names:")) {
+					failures.push(name + ": " + error.message);
+				} else {
+					for (const key of Object.keys(invalid)) assert(error.message.includes(key), error.message);
+					if (!invalid.max_depth) assert(!error.message.includes("did you mean"), error.message);
+					if (invalid.max_depth && !error.message.includes("max_depth: did you mean maxDepth")) failures.push("ax missing max_depth spelling hint");
+				}
+			};
+			await check("ax", o => win.ax(o), { depth: 3, max_depth: 3 });
+			await check("wait", o => wait(() => true, o), { timeoutMs: 10 });
+			await check("wait", o => wait(0, o), { timeout: 10, interval: 10 });
+			await check("observe", o => win.observe(o));
+			await check("find", o => win.find(o));
+			await check("windows", o => desktop.windows(o), { includeOffscreen: true });
+			await check("windows", o => desktop.windows(o), { wait: 5000 });
+			await check("windows", o => desktop.windows(o), { d: true });
+			await check("click", o => win.click(1, 2, o), { on: true });
+			await check("control.acquire", o => desktop.control.acquire(o), { "": true });
+			await check("window", o => desktop.window(o));
+			await check("apps.list", o => desktop.apps.list(o));
+			await check("apps.open", o => desktop.apps.open("test.editor", o));
+			await check("selectText", o => el.selectText("Save", o));
+			await check("perform", o => el.perform("press", o));
+			await check("press", o => el.press(o));
+			await check("press", o => el.press("enter", o));
+			await check("press", o => el.press(undefined, o), { takeover: true });
+			await check("press", o => el.press({ menu: ["Save"] }, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press(undefined, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press({ menu: ["Save"] }, o), { takeover: true });
+			await check("type", o => el.type("Save", o));
+			await check("click", o => el.click(o));
+			await check("doubleClick", o => el.doubleClick(o), { count: 3 });
+			await check("screenshot", o => win.screenshot(o));
+			await check("zoom", o => win.zoom({ x: 0, y: 0, width: 1, height: 1 }, o));
+			await check("doubleClick", o => win.doubleClick(1, 2, o));
+			await check("move", o => win.move(1, 2, o));
+			await check("drag", o => win.drag([[1, 2], [3, 4]], o));
+			await check("scroll", o => win.scroll(1, 2, o), { x: 1, y: 2, dx: 3 });
+			await check("type", o => win.type("Save", o));
+			await check("press", o => win.press("enter", o));
+			await check("holdKeys", o => win.holdKeys(["shift"], o));
+			await check("holdMouse", o => win.holdMouse(1, 2, o));
+			for (const target of [win, screen, desktop]) {
+				await target.drag([[1, 2], [3, 4]], { button: "middle" });
+			}
+			assert(failures.length === 0, failures.join("; "));
+		`,
+		);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(native.draggedButtons).toEqual(["middle", "middle", "middle"]);
+	});
+
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
@@ -5057,7 +5146,7 @@ describe("computer background fallback", () => {
 		});
 	});
 
-	it("never forwards a model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
+	it("rejects model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
 		const native = new RefusingSession();
 		const holds: NativeHoldOptions[] = [];
 		native.holdKeys = async (_target: string, _keys: string[], options: NativeHoldOptions) => {
@@ -5067,10 +5156,18 @@ describe("computer background fallback", () => {
 		native.holdMouse = async (_target: string, _x: number, _y: number, options: NativeHoldOptions) => {
 			holds.push(options);
 		};
+		const rejected = await run(
+			native,
+			'const win = await desktop.window("42"); await win.holdMouse(1, 2, { duration: 0, returnFocus: true });',
+			"takeover",
+		);
+		expect(rejected.ok).toBe(false);
+		if (!rejected.ok) expect(rejected.error.message).toContain("unknown option(s): returnFocus");
+		expect(holds).toEqual([]);
 		const code = [
 			'const win = await desktop.window("42");',
-			"await win.holdMouse(1, 2, { duration: 0, takeover: true, returnFocus: true });",
-			"await win.holdKeys(['a'], { duration: 0, returnFocus: true });",
+			"await win.holdMouse(1, 2, { duration: 0, takeover: true });",
+			"await win.holdKeys(['a'], { duration: 0 });",
 		].join("\n");
 		await run(native, code, "takeover");
 		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);

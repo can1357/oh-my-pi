@@ -50,6 +50,10 @@ await computer.capabilities();
 await computer.close();
 ```
 
+Unknown option or filter keys are rejected with the helper name and valid keys. A spelling suggestion appears only when exactly one valid key matches after ignoring case, underscores, and hyphens.
+`windows()` lists once and rejects `wait`; use `window({ ..., wait })` to wait for one matching window.
+Options are checked for the selected overload: `wait(milliseconds)` accepts no option keys, and element `press()` or `press({ menu })` accepts no second-argument input option keys. Use `wait(predicate, { timeout, interval })` or `press(chord, { takeover })` for those options.
+
 Python uses the same names; keyword arguments become the trailing options object, and `win.raise_()` stands in for the keyword `raise`:
 
 ```python
@@ -109,7 +113,7 @@ Window methods include:
 - `screenshot({ silent? })`
 - `zoom({ x, y, width, height }, { silent? })`
 - `click(x, y, { button?, count?, modifiers?, takeover? })` and `doubleClick(x, y)`
-- `move(x, y, { takeover? })`, `drag([[x, y], ...], options?)`, and `scroll(x, y, { dx?, dy?, takeover? })`
+- `move(x, y, { takeover? })`, `drag([[x, y], ...], { button?, keys?, modifiers?, takeover? })`, and `scroll(x, y, { dx?, dy?, takeover? })`
 - `type(text, { takeover? })` and `press(chord, { takeover? })`
 - `raise()`
 
