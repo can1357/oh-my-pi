@@ -327,6 +327,17 @@ describe("compaction queue conversation ownership", () => {
 		expect(h.editor.getExpandedText()).toBe("older queued\n\nnewer queued with my suffix");
 	});
 
+	it("preserves a replaced block when an older entry dequeues after the edit", async () => {
+		const h = await harness();
+		h.helpers.queueCompactionMessage("older queued", "followUp");
+		h.helpers.queueCompactionMessage("newer queued", "followUp");
+		h.input.handleDequeue();
+		expect(h.editor.getExpandedText()).toBe("newer queued");
+		h.editor.setText("X rewritten");
+		h.input.handleDequeue();
+		expect(h.editor.getExpandedText()).toBe("older queued\n\nX rewritten");
+	});
+
 	it("merges three overlapping restores and a controller-path restore in submission order", async () => {
 		const h = await harness();
 		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
