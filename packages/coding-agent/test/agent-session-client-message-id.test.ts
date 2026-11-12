@@ -395,6 +395,24 @@ describe("AgentSession client intent identity", () => {
 		await manager.close();
 	});
 
+	test("a prompt waiting on deferred extension loading across a session change cannot reuse an ID the destination took", async () => {
+		const loading = Promise.withResolvers<void>();
+		const { session, manager } = setup();
+		session.setDeferredExtensionLoader(() => loading.promise);
+		const waiting = session.prompt("origin request", intent("intent-deferred-load"));
+		expect(await withTimeout(session.newSession(), 5_000, "newSession waited on extension loading")).toBe(true);
+		// The destination never saw the ID, so a new prompt there may take it.
+		const destination = session.prompt("destination request", intent("intent-deferred-load"));
+		loading.resolve();
+		await expect(waiting).rejects.toThrow("clientMessageId already submitted: intent-deferred-load");
+		await destination;
+		await session.settleInFlightMessagePersistence();
+		const carriers = manager
+			.getEntries()
+			.filter(entry => entry.type === "message" && entry.clientMessageId === "intent-deferred-load");
+		expect(carriers).toHaveLength(1);
+	});
+
 	test("a queued custom message whose image preprocessing crosses a session change cannot reuse an ID the destination took", async () => {
 		const normalizing = Promise.withResolvers<void>();
 		const finishNormalizing = Promise.withResolvers<void>();

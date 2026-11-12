@@ -1950,9 +1950,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			throw new Error(`clientMessageId already submitted: ${id}`);
 		}
 	};
-	/** A prompt that may run a slash command, which can switch sessions (`ctx.newSession()`) before later input. */
+	/**
+	 * A prompt that may run a command, which can switch sessions (`ctx.newSession()`) before later input:
+	 * a slash command, or any text while an `input` hook can still rewrite it into one.
+	 */
 	const mayChangeSession = (command: RpcCommand): boolean =>
-		(command.type === "prompt" || command.type === "abort_and_prompt") && command.message.startsWith("/");
+		(command.type === "prompt" || command.type === "abort_and_prompt") &&
+		(command.message.startsWith("/") || session.extensionRunner?.hasHandlers("input") === true);
 	/** Returns false when the frame must be rejected without entering the input gate. */
 	const acceptClientMessageId = (command: RpcCommand): boolean => {
 		if (Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) {

@@ -10,9 +10,9 @@ afterEach(async () => {
 });
 
 // Exercise the existing real runRpcMode + AgentSession fixture, not RpcClient option forwarding.
-async function start(script = "") {
+async function start(script = "", fixture = "queued-message-rpc-agent.ts") {
 	const directory = TempDir.createSync("@rpc-client-message-id-");
-	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")], {
+	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures", fixture)], {
 		cwd: directory.path(),
 		env: { ...Bun.env, PI_CODING_AGENT_DIR: directory.path(), PI_NO_TITLE: "1", QUEUED_RPC_SCRIPT: script },
 		stdin: "pipe",
@@ -336,6 +336,26 @@ describe("RPC client message identity", () => {
 				frame.clientMessageId === "intent-moved" &&
 				isRecord(frame.message) &&
 				JSON.stringify(frame.message.content).includes("after the move"),
+		);
+	});
+
+	test("checks a prompt pipelined behind an input-hook rewrite into a session-switching command against the new session", async () => {
+		const rpc = await start("", "input-hook-rpc-agent.ts");
+		await rpc.command("prompt", { message: "old session", clientMessageId: "intent-rewritten" });
+		await rpc.next(frame => frame.type === "agent_end");
+		// Plain `hop` only becomes `/hop` once the input hook runs, after both frames were accepted.
+		const [hopped, prompted] = await rpc.pipeline(
+			["prompt", { message: "hop" }],
+			["prompt", { message: "after the hop", clientMessageId: "intent-rewritten" }],
+		);
+		expect(hopped).toMatchObject({ success: true });
+		expect(prompted).toMatchObject({ success: true });
+		await rpc.next(
+			frame =>
+				frame.type === "message_end" &&
+				frame.clientMessageId === "intent-rewritten" &&
+				isRecord(frame.message) &&
+				JSON.stringify(frame.message.content).includes("after the hop"),
 		);
 	});
 

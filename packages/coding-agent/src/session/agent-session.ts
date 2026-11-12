@@ -637,6 +637,16 @@ const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
  * One session transition in its session's tree of transitions. Transitions it starts itself queue
  * on its `childTail`; it hands its parent's queue on once it and every one in `nested` settled.
  */
+/**
+ * One submission's hold on its client message ID: taken at the public entry, re-admitted
+ * by {@link AgentSession} right before the input is enqueued or dispatched, in whichever
+ * journal is current then. `journalId` is the journal it holds the ID in now.
+ */
+interface ClientMessageClaim {
+	readonly id: string;
+	journalId: string;
+}
+
 interface SessionTransitionTurn {
 	readonly parent: SessionTransitionTurn | undefined;
 	readonly nested: Set<Promise<unknown>>;
@@ -8705,8 +8715,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * {@link PromptDroppedError} instead.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
-		this.#reserveClientMessageId(options?.clientMessageId);
-		return this.#admitSubmission(() => this.#prompt(text, options));
+		const claim = this.#reserveClientMessageId(options?.clientMessageId);
+		return this.#admitSubmission(() => this.#prompt(text, options, claim));
 	}
 
 	/**
@@ -8789,7 +8799,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 	}
 
-	async #prompt(text: string, options?: PromptOptions): Promise<boolean> {
+	async #prompt(text: string, options?: PromptOptions, claim?: ClientMessageClaim): Promise<boolean> {
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -8816,9 +8826,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Locally handled commands and failed dispatches release that claim.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
+			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps, claim);
 			try {
-				return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
+				return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps, claim);
 			} finally {
 				release(outcome.sessionClaimed);
 			}
@@ -8847,6 +8857,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		submittedAt: number,
 		outcome: PromptDispatchOutcome,
 		followUps: PromptFollowUps | undefined,
+		claim: ClientMessageClaim | undefined,
 	): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
@@ -8896,8 +8907,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							return false;
 						}
 						text = customResult;
-						// A session change while the command ran retargets its prompt: admit its ID there too.
-						if (registration) this.#readmitClientMessageId(registration.id, registration.journalId);
 					}
 				} finally {
 					if (registration) await this.finishLocalClientMessage(registration, consumed);
@@ -8948,7 +8957,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const queueGeneration = this.#promptGeneration;
 			const queued = await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
-				clientMessageId: options?.clientMessageId,
+				clientMessage: claim,
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
 				rawText: typedText,
@@ -9023,7 +9032,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			const queued = await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
-				clientMessageId: options?.clientMessageId,
+				clientMessage: claim,
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
 				rawText: typedText,
@@ -9056,7 +9065,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
-		this.#trackClientMessage(message, options?.clientMessageId);
+		this.#admitClientMessageClaim(claim);
+		this.#trackClientMessage(message, claim?.id);
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -9146,8 +9156,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
 	): Promise<boolean> {
-		this.#reserveClientMessageId(options?.clientMessageId);
-		return this.#admitSubmission(() => this.#promptCustomMessage(message, options));
+		const claim = this.#reserveClientMessageId(options?.clientMessageId);
+		return this.#admitSubmission(() => this.#promptCustomMessage(message, options, claim));
 	}
 
 	async #promptCustomMessage<T = unknown>(
@@ -9160,6 +9170,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
+		claim?: ClientMessageClaim,
 	): Promise<boolean> {
 		const followUps = this.#createPromptFollowUps(options?.followUps);
 		try {
@@ -9169,9 +9180,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// compaction or before a handoff commits its history.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchCustomPrompt(message, options, outcome, followUps);
+			if (!release) return await this.#dispatchCustomPrompt(message, options, outcome, followUps, claim);
 			try {
-				return await this.#dispatchCustomPrompt(message, options, outcome, followUps);
+				return await this.#dispatchCustomPrompt(message, options, outcome, followUps, claim);
 			} finally {
 				release(outcome.sessionClaimed);
 			}
@@ -9217,6 +9228,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			| undefined,
 		outcome: PromptDispatchOutcome,
 		followUps: PromptFollowUps | undefined,
+		claim: ClientMessageClaim | undefined,
 	): Promise<boolean> {
 		// A prompt that lands on a queue reaches the agent there: its follow-ups queue right behind it.
 		const onPromptQueuedAdmitted = followUps
@@ -9261,7 +9273,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
-				clientMessageId: options?.clientMessageId,
+				clientMessage: claim,
 				prependMessages: queuedNotices,
 				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
@@ -9287,7 +9299,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			customMessage.content.some(part => part.type === "image");
 		const preparationGeneration = this.#promptGeneration;
 		const preparedMessage = hasSkillImages ? await this.#normalizeAgentMessageImages(customMessage) : customMessage;
-		this.#trackClientMessage(preparedMessage, options?.clientMessageId);
+		this.#trackClientMessage(preparedMessage, claim?.id);
 		const descriptionNotice = hasSkillImages
 			? await this.#buildSkillImageDescriptionNotice(preparedMessage)
 			: undefined;
@@ -9312,7 +9324,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
-				clientMessageId: options?.clientMessageId,
+				clientMessage: claim,
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
 				prependMessages: queuedNotices,
 				onPromptAdmitted: onPromptQueuedAdmitted,
@@ -9323,6 +9335,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			outcome.sessionClaimed = true;
 			return true;
 		}
+		this.#admitClientMessageClaim(claim);
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
 			followUpBatch: followUps,
@@ -10025,7 +10038,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
-		this.#reserveClientMessageId(options?.clientMessageId);
+		const claim = this.#reserveClientMessageId(options?.clientMessageId);
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -10036,7 +10049,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const submittedAt = Date.now();
 		await this.#queueUserMessage(expandedText, images, "steer", {
 			timestamp: submittedAt,
-			clientMessageId: options?.clientMessageId,
+			clientMessage: claim,
 			attribution: options?.attribution,
 			rawText: text,
 			onPromptQueued: options?.onPromptQueued,
@@ -10051,8 +10064,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * flipping advisor auto-resume.
 	 */
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
-		this.#reserveClientMessageId(options?.clientMessageId);
-		const admittedJournal = this.sessionManager.getSessionId();
+		const claim = this.#reserveClientMessageId(options?.clientMessageId);
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -10065,7 +10077,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!options?.synthetic) {
 			await this.#queueUserMessage(expandedText, images, "followUp", {
 				timestamp: submittedAt,
-				clientMessageId: options?.clientMessageId,
+				clientMessage: claim,
 				attribution: options?.attribution,
 				rawText: text,
 				onPromptQueued: options?.onPromptQueued,
@@ -10084,7 +10096,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
-		this.#readmitClientMessageId(options.clientMessageId, admittedJournal);
+		this.#admitClientMessageClaim(claim);
 		this.#allowQueuedMessageDrainRetry();
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		const directive: AgentMessage = {
@@ -10097,7 +10109,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// user's prompt anchor, matching the live agent_start clear.
 			synthetic: true,
 		};
-		this.#trackClientMessage(directive, options.clientMessageId);
+		this.#trackClientMessage(directive, claim?.id);
 		this.agent.followUp(directive);
 		options.onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
 		this.#scheduleIdleQueueDrain();
@@ -10224,7 +10236,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp" | "aside",
 		options?: {
-			clientMessageId?: string;
+			/** The submission's {@link ClientMessageClaim}, re-admitted right before the enqueue. */
+			clientMessage?: ClientMessageClaim;
 			timestamp?: number;
 			attribution?: MessageAttribution;
 			prependMessages?: readonly CustomMessage[];
@@ -10282,8 +10295,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// description was in flight and drop a record that would otherwise land in a
 		// different session's queue.
 		const sessionGeneration = this.#sessionGeneration;
-		// The journal this input's ID was admitted in, for re-admission after the awaits below.
-		const admittedJournal = this.sessionManager.getSessionId();
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed. An aside is non-interrupting by design — it must
@@ -10329,11 +10340,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
-			this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
+			this.#admitClientMessageClaim(options?.clientMessage);
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
-			this.#trackClientMessage(userMessage, options?.clientMessageId);
+			this.#trackClientMessage(userMessage, options?.clientMessage?.id);
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
@@ -10346,7 +10357,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return true;
 		}
 		// Normalization and the vision description can span a journal change (switch, branch).
-		this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
+		this.#admitClientMessageClaim(options?.clientMessage);
 		// The session-agent notice rides via prependMessages (from prompt()),
 		// so it arrives alongside the user message in the same turn (#14093).
 		const queued = this.#pushQueuedUserMessage(
@@ -10356,7 +10367,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution,
 			timestamp ?? Date.now(),
 			rawText,
-			options?.clientMessageId,
+			options?.clientMessage?.id,
 		);
 		options?.onPromptQueued?.(queued);
 		options?.onPromptAdmitted?.();
@@ -10852,7 +10863,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		options?: {
-			clientMessageId?: string;
+			/** The submission's {@link ClientMessageClaim}, re-admitted right before the enqueue. */
+			clientMessage?: ClientMessageClaim;
 			queueChipText?: string;
 			/** Content and vision companion already prepared by the caller; skips re-normalizing and re-describing. */
 			preprocessed?: { content: CustomMessage<T>["content"]; descriptionNotice?: CustomMessage };
@@ -10866,8 +10878,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
-		// The journal this input's ID was admitted in, for re-admission after the awaits below.
-		const admittedJournal = this.sessionManager.getSessionId();
 		const details =
 			options?.queueChipText !== undefined
 				? ({
@@ -10894,13 +10904,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const normalizedAppMessage = preprocessed
 			? { ...appMessage, content: preprocessed.content }
 			: await this.#normalizeAgentMessageImages(appMessage);
-		this.#trackClientMessage(normalizedAppMessage, options?.clientMessageId);
+		this.#trackClientMessage(normalizedAppMessage, options?.clientMessage?.id);
 		const descriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
-			this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
+			this.#admitClientMessageClaim(options?.clientMessage);
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
@@ -10918,7 +10928,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		// Normalization and the vision description can span a journal change (switch, branch).
-		this.#readmitClientMessageId(options?.clientMessageId, admittedJournal);
+		this.#admitClientMessageClaim(options?.clientMessage);
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
 		if (deliverAs === "followUp") {
@@ -11358,24 +11368,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.sessionManager.isClientMessageResolved(id)) throw new Error(`clientMessageId already resolved: ${id}`);
 	}
 
-	#reserveClientMessageId(id: string | undefined): void {
-		if (id === undefined) return;
+	#reserveClientMessageId(id: string | undefined): ClientMessageClaim | undefined {
+		if (id === undefined) return undefined;
 		this.assertClientMessageAvailable(id);
 		const journalId = this.sessionManager.getSessionId();
 		if (this.#clientMessageAdmissions?.sessionId !== journalId) {
 			this.#clientMessageAdmissions = { sessionId: journalId, ids: new Set() };
 		}
 		this.#clientMessageAdmissions.ids.add(id);
+		return { id, journalId };
 	}
 
 	/**
-	 * Re-admit `id` when awaited work crossed a session change: its reservation lives in the journal
-	 * that admitted it (`admittedJournal`), so check and reserve it in the current one instead of
-	 * sharing an ID the destination already took.
+	 * The single admission point before a correlated input is enqueued or dispatched. A reservation
+	 * holds its ID only in the journal that took it, and any await since (extension loading, command
+	 * expansion, image preparation) may have crossed a session change. The claim is then checked and
+	 * reserved again in the current journal, so it never shares an ID that journal already gave out.
+	 * Synchronous: callers enqueue or dispatch right after it, with no await in between.
 	 */
-	#readmitClientMessageId(id: string | undefined, admittedJournal: string): void {
-		if (id === undefined || admittedJournal === this.sessionManager.getSessionId()) return;
-		this.#reserveClientMessageId(id);
+	#admitClientMessageClaim(claim: ClientMessageClaim | undefined): void {
+		if (!claim) return;
+		const journalId = this.sessionManager.getSessionId();
+		if (claim.journalId === journalId) return;
+		this.#reserveClientMessageId(claim.id);
+		claim.journalId = journalId;
 	}
 
 	#trackClientMessage(message: AgentMessage, clientMessageId: string | undefined): void {
