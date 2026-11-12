@@ -37,7 +37,7 @@
 
 ### Added
 
-- Agent names in Task tool rows and agent hub rows take a colour of their own in the terminal UI: Main is blue, and each subagent keeps the same one of six other colours in both places, live or finished
+- Agent names in Task tool rows and agent hub rows take a colour of their own in the terminal UI: Main is blue, and each subagent keeps the same one of six other colours in both places, live or finished ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.19.0] - 2026-11-12
 

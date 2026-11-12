@@ -82,7 +82,7 @@
 
 ### Changed
 
-- Computer `InputBusy` names the agent holding input/focus control and its omp process id (`agent "Main.Scout" (omp pid 4242) owns input/focus control`) when the holder's session set `agentId`, on macOS and Linux, and on Windows when that agent runs in the same omp
+- Computer `InputBusy` names the agent holding input/focus control and its omp process id (`agent "Main.Scout" (omp pid 4242) owns input/focus control`) when the holder's session set `agentId`, on macOS and Linux, and on Windows when that agent runs in the same omp ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.19.0] - 2026-11-12
 
