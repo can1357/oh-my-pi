@@ -438,6 +438,23 @@ mod tests {
 		assert_eq!(steps, ["insert text", "read focus"]);
 	}
 
+	#[test]
+	fn a_declined_unfocused_entry_keeps_the_key_route() {
+		let declined = TextRoute::Declined("the field's selection after focusing is unknown");
+		let (delivered, steps) =
+			deliver_text(DeliveryMode::Background, declined, false, "gtk", "3.24.41");
+		let Err(error) = delivered else {
+			panic!("an unfocused entry was sent background keys")
+		};
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(steps, ["insert text", "read focus"]);
+
+		let (delivered, steps) =
+			deliver_text(DeliveryMode::Foreground, declined, false, "gtk", "3.24.41");
+		assert!(matches!(delivered, Ok(ElementDelivery::Delivered)));
+		assert_eq!(steps, ["takeover keys"]);
+	}
+
 	/// An insert that failed may still have reached the element (a timeout or
 	/// a cancel), so no keys follow it: they could type the text twice.
 	#[test]

@@ -535,7 +535,7 @@ fn element_input_outcome(route: Option<TextRoute>) -> CoreResult<ElementDelivery
 			 window, and its accessibility text route was not used, since {why}, so el.type is \
 			 refused before the element is focused; nothing was sent. Click the field where a \
 			 desktop screenshot shows it (AX bounds are window-relative here) and then type with \
-			 desktop input; setValue replaces its whole text the same way"
+			 desktop input"
 		),
 		Some(TextRoute::Absent) => "wayland-compositor-focus-only: Wayland cannot programmatically \
 		                            activate the element's window, and the element took no text \
