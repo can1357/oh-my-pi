@@ -166,6 +166,16 @@ export const frameDefs = {
 		title: "string",
 		options: "string[]",
 		"optionDetails?": "SelectOptionDetail[]",
+		"initialIndex?": doc("number.integer", "Index into `options` to focus first."),
+		"selectionMarker?": doc("'radio' | 'checkbox'", "Marker style for the first `markableCount` options."),
+		"checkedIndices?": doc(
+			"number.integer[]",
+			"For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option.",
+		),
+		"markableCount?": doc(
+			"number.integer",
+			"Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set.",
+		),
 		"timeout?": "number.integer",
 	},
 	ConfirmUiRequest: {
