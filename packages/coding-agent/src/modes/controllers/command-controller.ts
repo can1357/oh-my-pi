@@ -147,17 +147,35 @@ const PTY_INPUT_TAIL = 256;
 const TRAILING_ESCAPES = /(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_])+$/u;
 
 /**
- * Whether a `!` command's last output ended mid-line, which is what a command
- * waiting for input looks like: `Password: ` and `Choose [Y/n]: ` leave the
- * line open, while finished output ends with a newline or with the carriage
- * return a progress meter rewrites. Trailing escape sequences are what a
- * colored line ends with, so they are dropped rather than read as content.
+ * Endings a command that reads its answer prints: `Password: `, `Continue?`,
+ * `Choose [Y/n]: `, `(yes/no) `, or a shell's own `name> `. Output that merely
+ * has not ended its line — `Working...`, `Compiling this crate…` — ends in
+ * text instead, and a keypress typed there belongs to the composer.
+ */
+const PROMPT_ENDINGS = new Set([":", "?", ">", "]", ")"]);
+
+/**
+ * Whether a `!` command's last output ended mid-line as a prompt, which is what
+ * a command waiting for input looks like: `Password: ` and `Choose [Y/n]: `
+ * leave the line open with a prompt's own ending, while finished output ends
+ * with a newline or with the carriage return a progress meter rewrites, and a
+ * half-written message (`Working...`) ends in text.
+ *
+ * The gate reads the last 256 bytes of output because it is all a keystroke has
+ * to go on without asking the kernel whether the child is blocked in `read(2)`
+ * on the tty — a probe that would need a native termios/proc call per key and
+ * does not exist on macOS. Erring toward the composer is deliberate: a key that
+ * stays in the draft is visible and recoverable, while a key swallowed by a
+ * command that never reads it is not. The cost is a prompt that ends in bare
+ * text (`Enter name `): its answer is typed into the composer instead, and the
+ * user sends it with Enter.
  */
 function ptyAwaitsInput(tail: string): boolean {
 	const text = tail.replace(TRAILING_ESCAPES, "");
-	if (!text) return false;
 	const last = text.at(-1);
-	return last !== "\n" && last !== "\r";
+	if (last === undefined || last === "\n" || last === "\r") return false;
+	const mark = text.trimEnd().at(-1);
+	return mark !== undefined && PROMPT_ENDINGS.has(mark);
 }
 
 function formatCreditValue(value: number): string {
@@ -1943,10 +1961,11 @@ export class CommandController {
 		block.setExpanded(this.ctx.toolOutputExpanded);
 		let detachInput: (() => void) | undefined;
 		let finished = false;
-		// The `!` PTY owns the keyboard only while the command has printed an
-		// unfinished line. A command that is merely working (`git push`, a build)
-		// ends its output lines and must leave the composer editable, while a
-		// prompt (`Password: `, `Choose [Y/n]: `) leaves one open.
+		// The `!` PTY owns the keyboard only while the command has printed a prompt.
+		// A command that is merely working (`git push`, a build) ends its output
+		// lines, or leaves a half-written message that ends in text, and must leave
+		// the composer editable; a prompt (`Password: `, `Choose [Y/n]: `) leaves a
+		// line open that ends the way a prompt does.
 		let ptyTail = "";
 		let ptyOwnsKeys = false;
 		const setPtyKeys = (owns: boolean) => {

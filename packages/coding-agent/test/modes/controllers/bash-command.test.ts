@@ -370,7 +370,7 @@ describe("bash shortcut command", () => {
 		expect(listeners.size).toBe(1);
 	});
 
-	it("leaves the composer editable until a `!` command prints an unfinished line", async () => {
+	it("leaves the composer editable until a `!` command prints a prompt", async () => {
 		const { ctx, executeBash } = createCwdContext("/tmp");
 		type Listener = (data: string) => { consume?: boolean } | undefined;
 		let listeners = new Set<Listener>();
@@ -400,7 +400,12 @@ describe("bash shortcut command", () => {
 			options?.pty?.onChunk("Connecting to knot...\r\nfatal: repository not found\n\x1b[0m");
 			expect(editor.nativeKeyPassthrough).toBe(false);
 			pressed.draftWhileWorking = press("a");
-			// A prompt is what an unfinished line looks like, colors or not.
+			// A half-written message is not a prompt either: `printf 'Working...'; sleep 60`
+			// leaves its line open, and the draft typed there stays the user's.
+			options?.pty?.onChunk("Working...");
+			expect(editor.nativeKeyPassthrough).toBe(false);
+			pressed.draftWhileTalking = press("a");
+			// A prompt is what an unfinished line that ends like one looks like, colors or not.
 			options?.pty?.onChunk("\x1b[1mPassword: \x1b[0m");
 			expect(editor.nativeKeyPassthrough).toBe(true);
 			pressed.answer = press("s");
@@ -425,7 +430,12 @@ describe("bash shortcut command", () => {
 		expect(editor.nativeKeyPassthrough).toBe(false);
 
 		expect(written).toEqual(["s"]);
-		expect(pressed).toEqual({ draftWhileWorking: false, answer: true, draftAfter: false });
+		expect(pressed).toEqual({
+			draftWhileWorking: false,
+			draftWhileTalking: false,
+			answer: true,
+			draftAfter: false,
+		});
 		expect(listeners.size).toBe(0);
 	});
 
