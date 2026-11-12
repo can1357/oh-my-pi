@@ -13,7 +13,7 @@
 use std::{
 	fmt,
 	hash::{BuildHasher, Hash},
-	sync::{Arc, LazyLock},
+	sync::{Arc, LazyLock, Weak},
 };
 
 use hashbrown::{DefaultHashBuilder, Equivalent, HashTable};
@@ -21,14 +21,49 @@ use hashbrown::{DefaultHashBuilder, Equivalent, HashTable};
 /// Entries of one shard.
 type Shard<K, V> = HashTable<Arc<(K, V)>>;
 
-/// The shards of a map, a power of two of them.
-type Shards<K, V> = Arc<[Arc<Shard<K, V>>]>;
+/// The shard list of a map, a power of two of them.
+type ShardList<K, V> = [Arc<Shard<K, V>>];
+
+/// The shards of a map.
+type Shards<K, V> = Arc<ShardList<K, V>>;
 
 /// Persistent hash map (see the module docs).
 pub struct CowMap<K, V> {
 	/// `None` until the first insert: an empty map allocates nothing.
 	shards: Option<Shards<K, V>>,
 	len:    usize,
+}
+
+/// A handle on a [`CowMap`] that does not keep its entries shared
+/// ([`CowMap::downgrade`]): it recognises the map while it is untouched and
+/// gives it back while a clone of it lives.
+pub struct WeakCowMap<K, V> {
+	shards: Option<Weak<ShardList<K, V>>>,
+	len:    usize,
+}
+
+impl<K, V> Clone for WeakCowMap<K, V> {
+	fn clone(&self) -> Self {
+		Self { shards: self.shards.clone(), len: self.len }
+	}
+}
+
+impl<K, V> fmt::Debug for WeakCowMap<K, V> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("WeakCowMap")
+			.field("len", &self.len)
+			.finish_non_exhaustive()
+	}
+}
+
+impl<K, V> WeakCowMap<K, V> {
+	/// The map, while a clone of it lives untouched.
+	pub fn upgrade(&self) -> Option<CowMap<K, V>> {
+		match &self.shards {
+			Some(weak) => Some(CowMap { shards: Some(weak.upgrade()?), len: self.len }),
+			None => Some(CowMap::default()),
+		}
+	}
 }
 
 /// The hasher of every map: one per process, so two maps place a key in
@@ -105,6 +140,24 @@ impl<K, V> CowMap<K, V> {
 	pub fn same_as(&self, other: &Self) -> bool {
 		match (&self.shards, &other.shards) {
 			(Some(a), Some(b)) => Arc::ptr_eq(a, b),
+			(None, None) => true,
+			_ => false,
+		}
+	}
+
+	/// A handle that recognises this map while it is untouched
+	/// ([`Self::same_as_weak`]) without sharing it: a write through any
+	/// clone that would have copied the path still moves it, so the handle
+	/// stops matching.
+	pub fn downgrade(&self) -> WeakCowMap<K, V> {
+		WeakCowMap { shards: self.shards.as_ref().map(Arc::downgrade), len: self.len }
+	}
+
+	/// [`Self::same_as`] against a [`WeakCowMap`]. The handle keeps the
+	/// shard list's allocation, so another map cannot take its address.
+	pub fn same_as_weak(&self, other: &WeakCowMap<K, V>) -> bool {
+		match (&self.shards, &other.shards) {
+			(Some(a), Some(b)) => std::ptr::addr_eq(Arc::as_ptr(a), b.as_ptr()),
 			(None, None) => true,
 			_ => false,
 		}
@@ -392,5 +445,26 @@ mod tests {
 			want.sort();
 			assert_eq!(changed, want, "n={n} extra={extra}");
 		}
+	}
+
+	/// A weak handle never hands back a map written since, nor keeps one
+	/// alive: it matches and upgrades only while a clone holds the map
+	/// untouched.
+	#[test]
+	fn weak_handle_matches_only_the_untouched_live_map() {
+		let mut shared = map(100);
+		let weak = shared.downgrade();
+		assert!(shared.same_as_weak(&weak));
+		let held = shared.clone();
+		shared.insert(1, "changed".into());
+		assert!(!shared.same_as_weak(&weak));
+		assert_eq!(weak.upgrade().and_then(|m| m.get(&1).cloned()).as_deref(), Some("1"));
+		drop(held);
+		assert!(weak.upgrade().is_none());
+		// Written in place by its only holder: no longer the map it was.
+		let mut alone = map(10);
+		let weak = alone.downgrade();
+		alone.insert(1, "changed".into());
+		assert!(!alone.same_as_weak(&weak) && weak.upgrade().is_none());
 	}
 }

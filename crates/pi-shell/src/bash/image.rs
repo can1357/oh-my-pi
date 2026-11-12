@@ -16,7 +16,7 @@ use bstr::{BStr, BString};
 use serde::{Deserialize, Serialize};
 
 use crate::bash::{
-	cow_map::CowMap,
+	cow_map::{CowMap, WeakCowMap},
 	store::{Attrs, Key, KeyBuf, Record, Table, Var, VarValue},
 };
 
@@ -208,15 +208,20 @@ impl Image {
 	/// What `self` changed relative to `base` (the image it was cloned
 	/// from, or another clone of that lineage), in its forked records
 	/// ([`Key::forked`]) only: what a restore needs to rebuild `self` from
-	/// `base`. Shared entries cost nothing to skip ([`CowMap::diff`]).
+	/// `base`. Shared entries cost nothing to skip ([`CowMap::diff`]); an
+	/// entry written since but holding `base`'s value (a run's environment
+	/// put back) is no change either.
 	pub fn diff(&self, base: &Self) -> ImageDiff {
 		let mut vars = Vec::new();
 		self.vars.diff(&base.vars, |name, slot| {
-			vars.push((name.clone(), slot.and_then(Slot::record).cloned()));
+			let record = slot.and_then(Slot::record);
+			if record != base.var_record(name) {
+				vars.push((name.clone(), record.cloned()));
+			}
 		});
 		let mut records = Vec::new();
 		self.records.diff(&base.records, |key, rec| {
-			if key.as_key().forked() {
+			if key.as_key().forked() && rec != base.records.get(key) {
 				records.push((key.clone(), rec.cloned()));
 			}
 		});
@@ -243,20 +248,28 @@ impl Image {
 
 	/// A handle on the image's records other than variables (O(1)), to
 	/// recognise and reuse them ([`Self::shares_records`],
-	/// [`Self::set_records`]).
+	/// [`Self::set_records`]). It does not keep them shared: once no image
+	/// holds them, it neither matches nor gives them back.
 	pub fn records(&self) -> Records {
-		Records(self.records.clone())
+		Records(self.records.downgrade())
 	}
 
 	/// Whether the image's records other than variables are `records`,
 	/// untouched since.
 	pub fn shares_records(&self, records: &Records) -> bool {
-		self.records.same_as(&records.0)
+		self.records.same_as_weak(&records.0)
 	}
 
-	/// Replace the image's records other than variables with `records`.
-	pub fn set_records(&mut self, records: &Records) {
-		self.records = records.0.clone();
+	/// Replace the image's records other than variables with `records`;
+	/// `false` (and no change) when no image holds them any more.
+	pub fn set_records(&mut self, records: &Records) -> bool {
+		match records.0.upgrade() {
+			Some(map) => {
+				self.records = map;
+				true
+			},
+			None => false,
+		}
 	}
 
 	/// Number of records (deferred variables counted once observed).
@@ -272,9 +285,10 @@ impl Image {
 	}
 }
 
-/// An [`Image`]'s records other than variables ([`Image::records`]).
+/// An [`Image`]'s records other than variables ([`Image::records`]), held
+/// weakly.
 #[derive(Clone, Debug)]
-pub struct Records(CowMap<KeyBuf, Record>);
+pub struct Records(WeakCowMap<KeyBuf, Record>);
 
 /// An [`Image`] relative to another ([`Image::diff`]): the serialized form
 /// of a forked vproc's image, against the root's when it was saved.
@@ -328,5 +342,23 @@ mod tests {
 		assert_eq!(rebuilt.get(Key::Misc(MiscKey::Umask)), Some(&Record::Misc("077".into())));
 		assert_eq!(rebuilt.get(Key::Misc(MiscKey::NextVpid)), None);
 		assert_eq!(rebuilt.len(), child.len() - 1);
+	}
+
+	/// A record written back with the value it had (a run's environment
+	/// put back, a `PWD` set again) is no change: a diff leaves it out, so
+	/// a saved image never carries the base's values as the child's own.
+	#[test]
+	fn diff_leaves_out_values_written_back_unchanged() {
+		let mut base = Image::default();
+		base.put_var(b"v", scalar("same"));
+		base.put(Key::Misc(MiscKey::Umask), Record::Misc("022".into()));
+		let mut child = base.clone();
+		child.put_var(b"v", scalar("other"));
+		child.put_var(b"v", scalar("same"));
+		child.put(Key::Misc(MiscKey::Umask), Record::Misc("022".into()));
+		child.put_var(b"w", scalar("new"));
+		let diff = child.diff(&base);
+		assert_eq!(diff.vars, vec![(BString::from("w"), Some(scalar("new")))]);
+		assert!(diff.records.is_empty());
 	}
 }

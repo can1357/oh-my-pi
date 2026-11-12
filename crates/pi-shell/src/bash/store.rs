@@ -1366,11 +1366,11 @@ impl MiscKey {
 	/// Whether a fork copies this value into the child's
 	/// [`crate::bash::Image`]: process state, as `fork(2)` copies memory.
 	/// The others are never a forked vproc's records: kernel state every
-	/// vproc shares (the vpid and job counters, the shell's start time,
-	/// zftp's shared status files) and the root vproc's own fields the
-	/// store persists (cwd, mode, `$?`, `PIPESTATUS`, `$!`, the job marks,
-	/// `getopts` progress, `ulimit` values), which a forked vproc keeps as
-	/// fields of its own.
+	/// vproc shares (the vpid and job counters, the `$RANDOM` generator, the
+	/// shell's start time, zftp's shared status files) and the root vproc's
+	/// own fields the store persists (cwd, mode, `$?`, `PIPESTATUS`, `$!`,
+	/// the job marks, `getopts` progress, `ulimit` values), which a forked
+	/// vproc keeps as fields of its own.
 	pub const fn forked(self) -> bool {
 		match self {
 			Self::Cwd
@@ -1383,6 +1383,7 @@ impl MiscKey {
 			| Self::ChldOwed
 			| Self::NextJob
 			| Self::NextVpid
+			| Self::Random
 			| Self::StartNs
 			| Self::Getopts
 			| Self::Rlimits
@@ -1416,7 +1417,6 @@ impl MiscKey {
 			| Self::NestedShell
 			| Self::Subshell
 			| Self::LoggedOut
-			| Self::Random
 			| Self::ZshNamedDirs
 			| Self::BashCommandNumber
 			| Self::ZshTxtAttr

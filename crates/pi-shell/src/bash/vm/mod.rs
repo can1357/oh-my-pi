@@ -453,7 +453,9 @@ pub struct Kernel {
 	pub spawned:            Vec<Box<Vproc>>,
 	/// The records an asynchronous command's signal ignores
 	/// (`exec::ignore_async_signals`) last turned which (mode, records)
-	/// into: the next one forked from the same records shares them.
+	/// into: the next one forked from the same records shares them. Held
+	/// weakly, so neither the root's records nor an exited job's stay
+	/// shared through it.
 	pub async_ignored:      Option<(ModeId, Records, Records)>,
 	/// Subshells the host submitted to the root since the last turn (no
 	/// store at hand): `adopt` gives each the root's state then, with its

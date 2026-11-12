@@ -4294,7 +4294,8 @@ fn set_root_global(k: &mut Kernel, store: &mut dyn StateStore, name: &[u8], var:
 ///
 /// Every asynchronous command forked from the same records gets the same
 /// ones back: the first one's are kept ([`Kernel::async_ignored`]) and
-/// shared by the next, rather than each copying its parent's.
+/// shared by the next while one of them lives, rather than each copying its
+/// parent's.
 fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
 	use crate::bash::Signal;
 	if k.engine.config().platform != crate::bash::ids::Platform::Windows {
@@ -4314,8 +4315,8 @@ fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
 	if let Some((mode, from, to)) = &k.async_ignored
 		&& *mode == child.mode
 		&& image.shares_records(from)
+		&& image.set_records(to)
 	{
-		image.set_records(to);
 		return;
 	}
 	let from = image.records();
