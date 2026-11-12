@@ -45,6 +45,16 @@ function mentionRow(value: string, description: string): AutocompleteItem {
 }
 
 /**
+ * A bare model row's description: its display name, then the `:level` pins it accepts
+ * (`Claude Sonnet 4.5 · :low/:medium/:high`), so the pin syntax shows up before a `:` is typed.
+ */
+function modelRowDescription(model: Model): string {
+	const name = modelMentionDisplayName(model);
+	const efforts = getSupportedEfforts(model);
+	return efforts.length > 0 ? `${name} · :${efforts.join("/:")}` : name;
+}
+
+/**
  * Some provider model ids contain a colon or end in a level name (`qwen3:8b`, `glm-4.7:max`),
  * so literal matches are listed before level rows.
  */
@@ -67,7 +77,7 @@ function mentionRows(query: string, candidates: ModelMentionCandidateSource): Au
 			for (const item of candidates(query)) {
 				if (literalRows.length === MAX_MODEL_MENTION_SUGGESTIONS) break;
 				if (item.selector.toLowerCase().includes(lowered)) {
-					literalRows.push(mentionRow(item.selector, modelMentionDisplayName(item.model)));
+					literalRows.push(mentionRow(item.selector, modelRowDescription(item.model)));
 				}
 			}
 			const literalValues = new Set(literalRows.map(row => row.value));
@@ -80,7 +90,7 @@ function mentionRows(query: string, candidates: ModelMentionCandidateSource): Au
 	}
 	return candidates(query)
 		.slice(0, MAX_MODEL_MENTION_SUGGESTIONS)
-		.map(item => mentionRow(item.selector, modelMentionDisplayName(item.model)));
+		.map(item => mentionRow(item.selector, modelRowDescription(item.model)));
 }
 
 /** Build model mention choices for the whitespace-delimited token at the cursor. */

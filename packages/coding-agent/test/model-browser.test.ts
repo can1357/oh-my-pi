@@ -171,6 +171,37 @@ describe("createModelMentionSource", () => {
 			"a/glm:high",
 		]);
 	});
+
+	test("lists a model's effort pins on its bare row, before a colon is typed", async () => {
+		await initTheme();
+		const glm = buildModel({
+			id: "glm",
+			name: "GLM",
+			api: "ollama-chat",
+			provider: "a",
+			baseUrl: "https://example.com",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High, Effort.Max] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1024,
+		});
+		const plain = makeModel("a", "glm-plain");
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(Settings.isolated()),
+			registry: { getError: () => undefined, getAvailable: () => [glm, plain], getAll: () => [glm, plain] },
+			scopedModels: () => [glm, plain],
+		});
+
+		const completion = getModelMentionSuggestions("^glm", candidates);
+		const descriptions =
+			completion.kind === "matched"
+				? Object.fromEntries(completion.suggestions.items.map(item => [item.value, item.description]))
+				: {};
+		expect(descriptions["a/glm"]).toBe("GLM · :low/:high/:max");
+		expect(descriptions["a/glm-plain"]).not.toContain(":");
+	});
 });
 
 describe("ModelBrowser search ranking", () => {
