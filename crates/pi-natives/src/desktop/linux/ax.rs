@@ -1359,7 +1359,7 @@ async fn insert_typed_text(
 	if actual.as_deref() == Some(before.as_str()) {
 		return ABSENT;
 	}
-	let secure = actual.as_deref().is_some_and(masked);
+	let secure = actual.as_deref().is_some_and(crate::desktop::ax::masked);
 	text_readback(text, &expected, actual.as_deref(), secure).map(|()| TextRoute::Inserted)
 }
 
