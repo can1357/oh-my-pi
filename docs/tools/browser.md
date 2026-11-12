@@ -47,7 +47,9 @@ await tab.close();
 - `browser.close({ name?, all?, kill?, timeout? }) -> Promise<void>` releases one or all managed tabs.
 - `tab.close({ kill?, timeout? }) -> Promise<void>` releases that handle's tab.
 
-`close` and `run` resolve `timeout` like `open`: seconds, default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. `waitFor*` helpers take `timeout` in milliseconds and cannot outlast the enclosing call's `timeout`.
+`close` and `run` resolve `timeout` like `open`: seconds, default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. A `run` without `timeout`, and every direct helper call (`tab.evaluate(…)`, `tab.click(…)`, …), defaults instead to the Eval cell's `timeout` when that is longer (300 for a cell with `timeout: 0`): the cell's own timer is suspended while a browser call runs. `waitFor*` helpers take `timeout` in milliseconds and cannot outlast the enclosing call's `timeout`.
+
+On Chromium tabs, a call that runs out of time fails and omp tries for up to 5 seconds to reattach the tab to a new worker without reloading its page, which resets the tab state set since it was opened (routes, emulation, init scripts, element ids, run globals). A worker that does not stop within 750 ms of the deadline or cancellation is released with its tab. Cancellation stays active during recovery and also stops a stalled replacement worker.
 
 ### Open options
 
@@ -126,6 +128,8 @@ Functions receive `{ tab, page, browser, wait, assert }` as their first argument
 The inner `tab` is the full worker helper API. In addition to the direct surface it includes handle-returning `waitFor`/`waitForSelector` and run-scoped `waitForNavigation`/`waitForResponse`. Start a navigation/response wait before the action that triggers it.
 
 Runs use a persistent, per-tab JavaScript runtime with ordinary Eval helpers and full Bun/Node and tool-bridge access. This is API isolation, not a security sandbox. Raw `page.setRequestInterception` and run-added request listeners are cleaned up at run end; `tab.route` handlers persist until `unroute` or tab close.
+
+Code a run hands to `page.evaluate`, `page.evaluateHandle`, `page.$eval`, `page.$$eval`, and `page.waitForFunction` runs in the page's main world, where `tab.evaluate` runs and page globals and custom-element members live; element handles passed as arguments are adopted into it. On Chromium tabs omp's stealth patch runs every other Puppeteer evaluation in an isolated world that shares the DOM but not page scripts: `frame.evaluate`, `elementHandle.evaluate`, and any other `Page` object (`tab.page`, `frame.page()`, `browser.pages()`). Selectors resolve there too, so pass a handle to `page.evaluate(fn, handle)` to read what page scripts attached to it. A handle to a non-element value works only in the world that made it, so create one for `page.evaluate` with `page.evaluateHandle`.
 
 The return value stays structured. Only a value matching the full observation shape receives observation printing; other structured returns, including objects with an `elements` array, keep native inspection. Nonempty text printed inside the run (`print`, `console.*`) prints in the outer Eval cell, printed images remain Eval output, and a run with no printed text emits no placeholder.
 

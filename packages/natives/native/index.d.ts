@@ -632,57 +632,6 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
-/** One secret rule; see the module docs. */
-export declare class SecretRegex {
-  /**
-   * # Errors
-   * Returns the compile error when `pattern` or `flags` is not a valid rule.
-   */
-  constructor(pattern: string, flags?: string | undefined | null)
-  /**
-   * The first match starting at or after UTF-16 offset `from`, as UTF-16
-   * offsets `[start, end, matchStart]`: the range it redacts (the `secret`
-   * group when that participates, else the whole match) and where the whole
-   * match, context included, begins. `null` when there is none.
-   */
-  exec(text: SecretText, from: number): Array<number> | null
-}
-
-/**
- * Which rules match a text and whether a configured literal occurs; see the
- * module docs.
- */
-export declare class SecretScanner {
-  /**
-   * # Errors
-   * Names the first rule that does not compile, or reports an automaton
-   * build failure.
-   */
-  constructor(rules: Array<SecretScanRule>, literals: Array<string>)
-  /**
-   * Replaces the configured literals (plain secrets, the placeholder key,
-   * `$$`).
-   *
-   * # Errors
-   * Returns an error when the literal automaton cannot be built.
-   */
-  setLiterals(literals: Array<string>): void
-  /** Literal hit and matching rules of one text; `null` when neither. */
-  scan(text: string): SecretScanHits | null
-  /** [`Self::scan`] over many texts in parallel, in input order. */
-  scanMany(texts: Array<string>): Array<SecretScanHits | undefined | null>
-}
-
-/**
- * A text converted once for every [`SecretRegex`] that runs over it.
- *
- * It maps its UTF-8 bytes to the caller's UTF-16 offsets. Lone surrogates
- * arrive as U+FFFD, one unit like the surrogate they replace.
- */
-export declare class SecretText {
-  constructor(text: string)
-}
-
 /** Persistent embedded bash engine (pi-shell) shell session. */
 export declare class Shell {
   /**
@@ -3620,20 +3569,6 @@ export interface SearchResult {
   limitReached: boolean
   /** Error message, if any. */
   error?: string
-}
-
-/** What [`SecretScanner::scan`] found in a text. */
-export interface SecretScanHits {
-  /** A configured literal (or `$$`) occurs. */
-  literal: boolean
-  /** Indices of the rules that match. */
-  rules: Array<number>
-}
-
-/** One rule for [`SecretScanner`]: its pattern and flags (see the module docs). */
-export interface SecretScanRule {
-  pattern: string
-  flags?: string
 }
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void

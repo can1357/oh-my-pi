@@ -35,7 +35,7 @@ import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
@@ -1470,13 +1470,26 @@ export function findReadableCompactionIndex(
 /**
  * Pass the caller's warm `tokenizer` (the Agent's for the active model) so the
  * full-branch estimate walk hits its memo; the cold default is for one-shot
- * callers that have no live agent.
+ * callers that have no live agent. A cold walk over a long branch blocks the
+ * event loop for hundreds of milliseconds, so it runs as the
+ * `compaction.prepare` loop phase.
  */
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
+): CompactionPreparation | undefined {
+	return withLoopPhase("compaction.prepare", () =>
+		prepareCompactionUnlabeled(pathEntries, settings, activeModel, tokenizer),
+	);
+}
+
+function prepareCompactionUnlabeled(
+	pathEntries: SessionEntry[],
+	settings: CompactionSettings,
+	activeModel: Model | undefined,
+	tokenizer: Tokenizer,
 ): CompactionPreparation | undefined {
 	const lastEntry = pathEntries[pathEntries.length - 1];
 	// A speculative native record may leave uncovered messages before the record.

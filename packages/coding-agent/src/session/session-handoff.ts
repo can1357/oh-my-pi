@@ -13,6 +13,7 @@ import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
+import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
@@ -170,19 +171,23 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
-			const rawHandoffText = await generateHandoffFromContext(handoffContext, model, {
-				streamOptions: handoffStreamOptions,
-				completeImpl: async (requestModel, requestContext, requestOptions) => {
-					const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-					return stream.result();
+			const rawHandoffText = await generateHandoffFromContext(
+				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
+				model,
+				{
+					streamOptions: handoffStreamOptions,
+					completeImpl: async (requestModel, requestContext, requestOptions) => {
+						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+						return stream.result();
+					},
+					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
+					// Honor the user's /model thinking selection on the handoff path.
+					// Clamped per-model inside generateHandoffFromContext via
+					// resolveCompactionEffort so unsupported-effort models don't trip
+					// requireSupportedEffort.
+					thinkingLevel: this.#host.thinkingLevel(),
 				},
-				telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
-				// Honor the user's /model thinking selection on the handoff path.
-				// Clamped per-model inside generateHandoffFromContext via
-				// resolveCompactionEffort so unsupported-effort models don't trip
-				// requireSupportedEffort.
-				thinkingLevel: this.#host.thinkingLevel(),
-			});
+			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
 
 			throwIfHandoffAborted(handoffSignal);
