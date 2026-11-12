@@ -33,6 +33,10 @@
 - Added Gemini's `xhigh` thinking level, sent on the Gemini API and Vertex for models whose ladder exposes it (Gemini 4 Hydrogen).
 - Fixed omp failing to start with `ENOTDIR: not a directory, stat '~/.aws/credentials'` when `~/.aws` is a file instead of a directory ([#19083](https://github.com/can1357/oh-my-pi/pull/19083) by [@iamshatter](https://github.com/iamshatter))
 
+### Fixed
+
+- Fixed Kimi and DeepSeek on OpenRouter writing "reasoning unavailable" as their own reasoning after a model switch: earlier turns now replay the previous model's thinking instead of that placeholder.
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
