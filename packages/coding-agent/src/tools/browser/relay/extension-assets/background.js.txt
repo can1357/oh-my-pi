@@ -1,9 +1,9 @@
-// packages/coding-agent/src/tools/browser/relay/protocol.ts
+// ../coding-agent/src/tools/browser/relay/protocol.ts
 var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 var FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
 var DOWNLOADS_PROTOCOL_VERSION = 1;
 
-// packages/browser-relay/extension/debugger-ownership.ts
+// extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
     if (!target.attached || target.tabId === undefined)
@@ -18,7 +18,7 @@ async function ownedDebuggerTabs(targets, probe) {
   return owned.filter((tabId) => tabId !== undefined);
 }
 
-// packages/browser-relay/extension/download-pairing.ts
+// extension/download-pairing.ts
 var DOWNLOAD_PAIRING_MS = 5000;
 var DOWNLOAD_LOOKUP_MS = 60000;
 
@@ -69,7 +69,7 @@ class DownloadPairing {
   }
 }
 
-// packages/browser-relay/extension/foreign-frames.ts
+// extension/foreign-frames.ts
 var RETRY_DELAYS_MS = [50, 100, 200, 400];
 var sweeps = new Map;
 async function pastForeignFrames(tabId, request) {
@@ -93,14 +93,58 @@ function sweep(tabId) {
   }
   return pending;
 }
+var reportHidden = () => {};
+function onForeignFramesHidden(report) {
+  reportHidden = report;
+}
+var MAX_PATH_LENGTH = 100;
+var MAX_TITLE_LENGTH = 60;
+var PROBE_TIMEOUT_MS = 500;
+async function reportEmptied(tabId, srcsByFrame) {
+  const probes = await Promise.allSettled(Array.from(srcsByFrame, ([frameId, srcs]) => chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    world: "ISOLATED",
+    injectImmediately: true,
+    args: [srcs, PROBE_TIMEOUT_MS],
+    func: async (urls, timeoutMs) => await Promise.all(urls.map(async (url) => {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!response.ok)
+          return null;
+        const title = /<title[^>]*>([^<]*)<\/title>/i.exec(await response.text())?.[1]?.trim();
+        return { url: response.url, title };
+      } catch {
+        return null;
+      }
+    }))
+  })));
+  const frames = new Map;
+  for (const probe of probes) {
+    if (probe.status === "rejected")
+      continue;
+    for (const loaded of probe.value.flatMap(({ result }) => result ?? [])) {
+      if (!loaded?.url.startsWith("chrome-extension://"))
+        continue;
+      const { host: extensionId, pathname } = new URL(loaded.url);
+      if (!/^[a-p]{32}$/.test(extensionId) || extensionId === chrome.runtime.id)
+        continue;
+      const path = pathname.slice(1, 1 + MAX_PATH_LENGTH);
+      const title = loaded.title?.slice(0, MAX_TITLE_LENGTH);
+      frames.set(`${extensionId}/${path}`, { extensionId, path, ...title ? { title } : {} });
+    }
+  }
+  if (frames.size > 0)
+    reportHidden(tabId, [...frames.values()]);
+}
 async function neutralizeForeignFrames(tabId) {
+  let results;
   try {
-    const results = await chrome.scripting.executeScript({
+    results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       injectImmediately: true,
       args: [chrome.runtime.id],
       func: (self) => {
-        let found = 0;
+        const swept = { found: 0, emptied: [] };
         const visit = (root) => {
           const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
           for (let element = walker.nextNode();element; element = walker.nextNode()) {
@@ -108,12 +152,15 @@ async function neutralizeForeignFrames(tabId) {
             if (tag === "IFRAME" || tag === "FRAME") {
               const src = element.getAttribute("src") ?? "";
               if (src.startsWith("chrome-extension://") && !src.startsWith(`chrome-extension://${self}/`)) {
-                if (tag === "FRAME")
+                if (tag === "FRAME") {
                   element.setAttribute("src", "about:blank");
-                else if (element.getAttribute("srcdoc") === null)
+                  swept.emptied.push(src);
+                } else if (element.getAttribute("srcdoc") === null) {
                   element.setAttribute("srcdoc", "");
+                  swept.emptied.push(src);
+                }
                 element.style.setProperty("display", "none", "important");
-                found++;
+                swept.found++;
               }
             }
             const shadow = chrome.dom.openOrClosedShadowRoot(element);
@@ -122,16 +169,25 @@ async function neutralizeForeignFrames(tabId) {
           }
         };
         visit(document);
-        return found;
+        return swept;
       }
     });
-    return results.reduce((total, frame) => total + (frame.result ?? 0), 0);
   } catch {
     return 0;
   }
+  let found = 0;
+  const srcsByFrame = new Map;
+  for (const { frameId, result } of results) {
+    found += result?.found ?? 0;
+    if (result && result.emptied.length > 0)
+      srcsByFrame.set(frameId, result.emptied);
+  }
+  if (srcsByFrame.size > 0)
+    reportEmptied(tabId, srcsByFrame).catch(() => {});
+  return found;
 }
 
-// packages/browser-relay/extension/background.ts
+// extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
@@ -431,6 +487,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
   post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
+onForeignFramesHidden((tabId, frames) => post({ t: "framesHidden", tabId, frames }));
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);
   if (snap)

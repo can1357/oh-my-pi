@@ -19,7 +19,7 @@ import {
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
 import { DownloadPairing } from "./download-pairing";
-import { pastForeignFrames } from "./foreign-frames";
+import { onForeignFramesHidden, pastForeignFrames } from "./foreign-frames";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -378,6 +378,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
+
+onForeignFramesHidden((tabId, frames) => post({ t: "framesHidden", tabId, frames }));
 
 chrome.tabs.onCreated.addListener(tab => {
 	const snap = snapshot(tab);

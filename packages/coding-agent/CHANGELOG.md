@@ -6,6 +6,10 @@
 
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
 
+### Fixed
+
+- When the browser relay hides another extension's frame in a tab omp drives (a password manager's inline menu or save card), the call that ran into it, or a later one on that tab, now says first that nothing was saved, then names the extension by its id and the page's own title, and that the frame is hidden for the user too
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes

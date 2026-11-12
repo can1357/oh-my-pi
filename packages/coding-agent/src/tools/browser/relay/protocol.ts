@@ -66,6 +66,16 @@ export const EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 /** Chrome's refusal of a debugger request while another extension's frame (a password manager's menu) is in the tab. */
 export const FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
 
+/** Another extension's frame the relay extension emptied and hid in a tab omp drives, so Chrome lets omp attach. */
+export interface HiddenFrame {
+	/** The id in the frame's `chrome-extension://<id>/` URL. */
+	extensionId: string;
+	/** The page the frame showed: its URL's path, without the query or fragment, which may carry tokens. */
+	path: string;
+	/** That page's own `<title>`, as the other extension wrote it, cut short. */
+	title?: string;
+}
+
 /** Hello capability of an extension that answers `findDownload` (it holds Chrome's `downloads` permission). */
 export const DOWNLOADS_PROTOCOL_VERSION = 1;
 /**
@@ -135,6 +145,7 @@ export type ExtToRelayMessage =
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }
+	| { t: "framesHidden"; tabId: number; frames: HiddenFrame[] }
 	| { t: "tabCreated"; tab: TabSnapshot }
 	| { t: "tabUpdated"; tab: TabSnapshot }
 	| { t: "tabRemoved"; tabId: number }
