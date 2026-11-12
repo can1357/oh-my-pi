@@ -648,11 +648,13 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 			.frames
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Function { .. }))
-		&& vp
-			.runs
-			.front()
-			.is_some_and(|r| r.started && !r.exit_trap_started)
-		&& start_trap(k, vp, cx, TrapKey::Exit)
+		&& match vp.runs.front() {
+			Some(r) => r.started && !r.exit_trap_started,
+			// A forked subshell has no run: it is its own exit, and its
+			// own flag is what keeps the trap from starting twice.
+			None => vp.transient && !vp.exit_trap_run,
+		}
+		&& start_exit_trap_once(k, vp, cx)
 	{
 		if let Some(run) = vp.runs.front_mut() {
 			run.exit_trap_started = true;
@@ -674,8 +676,23 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		super::zsh::zexit::start(k, cx, vp);
 	}
 	if !in_exit_trap && vp.transient && vp.runs.is_empty() {
-		start_trap(k, vp, cx, TrapKey::Exit);
+		start_exit_trap_once(k, vp, cx);
 	}
+}
+
+/// Start this vproc's EXIT trap, at most once for a forked subshell: it has
+/// no [`Run`](super::proc::Run) to keep `exit_trap_started` on, and
+/// `own_traps`, `trap_frames` and the frame scans all return to their
+/// pre-trap values when the trap's frame is popped. A root vproc is
+/// unaffected: its guard is its run's own flag, one per shell invocation.
+fn start_exit_trap_once(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
+	if vp.transient {
+		if vp.exit_trap_run {
+			return false;
+		}
+		vp.exit_trap_run = true;
+	}
+	start_trap(k, vp, cx, TrapKey::Exit)
 }
 
 fn top_frame(vp: &mut Vproc) -> &mut Frame {
@@ -1001,29 +1018,42 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		None => (feat, aliases.as_ref()),
 	};
 	let pending = aux.as_deref().and_then(|a| a.pending.as_ref());
+	// Text read to its end has no command left: no parser needed (each
+	// `eval` would otherwise build one just to see the end).
+	let at_end = !*stdin && pending.is_none() && pos.0 as usize >= src.len();
 	let resume_from = Resume {
 		pos:     Pos { offset: pos.0, line: pos.1 },
 		pending: pending.map_or_default(|p| p.0.to_vec()),
 		active:  pending.map_or_default(|p| p.1.iter().map(|a| a.to_vec()).collect()),
 	};
-	let mut parser = match aliases {
-		Some(a) => Parser::new(src, feat, a),
-		None => Parser::new(src, feat, crate::bash::syntax::NO_ALIASES),
+	let mut parser = (!at_end).then(|| {
+		let mut p = match aliases {
+			Some(a) => Parser::new(src, feat, a),
+			None => Parser::new(src, feat, crate::bash::syntax::NO_ALIASES),
+		}
+		.with_resume(&resume_from);
+		p.recycle(core::mem::take(&mut k.spare_tree));
+		p
+	});
+	let res = parser.as_mut().and_then(Parser::next_command);
+	if res.is_none()
+		&& let Some(p) = &mut parser
+	{
+		k.keep_spare_tree(p.take_tree());
 	}
-	.with_resume(&resume_from);
-	let res = parser.next_command();
 	// zsh: the input ran out with a construct open (`a ||`, `a &&` parse as
 	// complete commands here; interactive zsh's lexer reads another line).
 	if *stdin
-		&& (needs_more_input(src, res.as_ref(), parser.resume().pos)
-			|| parser.zsh_cmdstack().is_some_and(|s| !s.is_empty()))
+		&& let Some(p) = &parser
+		&& (needs_more_input(src, res.as_ref(), p.resume().pos)
+			|| p.zsh_cmdstack().is_some_and(|s| !s.is_empty()))
 	{
 		if reader {
 			// A command left open continues on a `PS2` line; `%_` shows
 			// what is open.
 			let cont = res.is_some();
 			let cmdstack = if cont {
-				parser.zsh_cmdstack().unwrap_or_default()
+				p.zsh_cmdstack().unwrap_or_default()
 			} else {
 				Vec::new()
 			};
@@ -1092,7 +1122,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			vp.status = 0;
 		}
 		if sub_end {
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 			return None;
 		}
 		if let Some(cancel) = cancel {
@@ -1135,7 +1165,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		return None;
 	};
 	let from_stdin = *stdin;
-	let resume = parser.resume();
+	// A command came, so a parser read it.
+	let resume = parser.as_ref().expect("a command was parsed").resume();
 	let next = resume.pos;
 	let read = (history && !zhist).then(|| input_lines(src, pos.0 as usize, next.offset as usize));
 	// zsh `hend`: the event joins the history; `:p` and `histverify` keep
@@ -1193,8 +1224,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 					_ => BString::default(),
 				}
 			};
-			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(&cc.list));
-			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(&cc.list, 0));
+			let list = cc.list();
+			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(list));
+			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(list, 0));
 			return super::zle::reader::before_run(k, vp, cx, at, [hist, jobtext, permtext]);
 		}
 	}
@@ -1219,7 +1251,11 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		Ok(cc) => {
 			let line = cc.line;
 			let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-			(k.engine.compile(cc, src, mode, feat, observed), line)
+			let (unit, tree) = k.engine.compile(cc, src, mode, feat, observed);
+			if let Some(tree) = tree {
+				k.keep_spare_tree(tree);
+			}
+			(unit, line)
 		},
 		Err(e) => {
 			// bash abandons the rest of a script after a syntax error,
@@ -1592,7 +1628,7 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 		FrameKind::NoFork | FrameKind::Stage => pop_frame(&mut k.root, cx.store, vp),
 		FrameKind::Subshell | FrameKind::Job { .. } => {
 			unwind(&mut k.root, cx.store, vp, 0);
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 		},
 	}
 }
@@ -2077,6 +2113,27 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 		)
 }
 
+/// The status a fatal expansion error leaves when the EXIT trap is the
+/// innermost trap action running: bash's EXIT trap keeps the status the
+/// shell was exiting with (`last_command_exit_value` is saved across the
+/// trap), so the shell leaves with that status and not with the constant
+/// below. Only the EXIT trap does this, so a nested trap action of any
+/// other kind answers `None` and keeps the constant.
+///
+/// The saved status is carried as the `i32` the frame holds, exactly as
+/// every other reader of it does (`return` with no argument inside a
+/// trap, the frame-pop restore); it is already a wait status in `0..=255`
+/// on every path that arms a trap, and narrowing it here would be a
+/// silent second opinion about a value this function does not own.
+fn exit_trap_status(vp: &Vproc) -> Option<i32> {
+	vp.frames.iter().rev().find_map(|frame| match frame.kind {
+		FrameKind::Script { what: ScriptKind::Trap { key, status, .. }, .. } => {
+			Some((key == TrapKey::Exit).then_some(status))
+		},
+		_ => None,
+	})?
+}
+
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
@@ -2104,10 +2161,22 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
 			k.diag(cx, vp, line, d);
+			// The EXIT trap keeps the status the shell was exiting with.
+			// Under `set -e` bash reaches the same rows through its own
+			// errexit jump, which this change does not model, so the
+			// upstream constant stays whenever errexit is on.
+			if vp.mode.dialect() != Dialect::Zsh
+				&& let Some(status) = exit_trap_status(vp)
+				&& !errexit_on(k, cx, vp)
+			{
+				return Flow::Exit(status);
+			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
-			let command = super::subshell_depth(vp) == 0
+			// zsh exits 1 from any of them (`errflag` ends `loop` with 1).
+			let command = vp.mode.dialect() != Dialect::Zsh
+				&& super::subshell_depth(vp) == 0
 				&& matches!(
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
@@ -2373,7 +2442,10 @@ pub fn start_zsh_procsub(
 	let mut fds = vp.fds.clone();
 	fds.set(their_fd, Some(theirs));
 	let line = line_of(vp, 0);
-	let child = vp.child_text(k, cx.store, text, line, fds);
+	let mut child = vp.child_text(k, cx.store, text, line, fds);
+	if !job_control(k, cx, vp) {
+		ignore_async_signals(k, cx, &mut child);
+	}
 	let vpid = child.vpid;
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal (zsh `ESUB_ASYNC`).
@@ -2452,7 +2524,7 @@ fn nofork_unit(
 	}?
 	.ok()?;
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-	let unit = k.engine.compile(cc, &src, key.4, feat, observed);
+	let (unit, _) = k.engine.compile(cc, &src, key.4, feat, observed);
 	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
 	if aliases.is_none() {
 		if k.nofork_units.len() >= NOFORK_UNITS {
@@ -2946,7 +3018,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			} else {
 				// A subshell, pipeline stage or job ends: its EXIT trap runs.
 				unwind(&mut k.root, cx.store, vp, 0);
-				start_trap(k, vp, cx, TrapKey::Exit);
+				start_exit_trap_once(k, vp, cx);
 			}
 			Flow::Call
 		},
@@ -3842,13 +3914,36 @@ fn stage_level(unit: &Unit, entry: u32, background: bool) -> u32 {
 
 /// Whether the background job whose body starts at `entry` may be known by
 /// its program's OS pid ([`Bang`]): its body is one simple command
-/// ([`BangStage::Lone`]), or a group that `exec`s one (`{ exec cmd; }`,
-/// [`BangStage::Exec`]). Any other compound job keeps its virtual pid at
-/// once: its readers never wait.
+/// ([`BangStage::Lone`]), a group that `exec`s one (`{ exec cmd; }`,
+/// [`BangStage::Exec`]), or a pipeline, whose last stage decides
+/// ([`BangStage::Pipeline`], [`retarget_bang`]). Any other compound job
+/// keeps its virtual pid at once: its readers never wait.
 fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 	let code = |at: u32| unit.ops.get(at as usize).map(|op| op.code);
 	if code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit) {
 		return Some(BangStage::Lone);
+	}
+	// `time` and `!` wrap the pipeline's spawn: `[TimeStart] Spawn …
+	// [Not] [TimeEnd]`, then the job's `SubExit`.
+	let at = if code(entry) == Some(Opcode::TimeStart) {
+		entry + 1
+	} else {
+		entry
+	};
+	if let Some(op) = unit.ops.get(at as usize)
+		&& op.code == Opcode::Spawn
+		&& let Some(spawn) = unit.spawns.get(op.a as usize)
+		&& spawn.kind == SpawnKind::Pipeline
+	{
+		let mut end = spawn.end;
+		for wrap in [Opcode::Not, Opcode::TimeEnd] {
+			if code(end) == Some(wrap) {
+				end += 1;
+			}
+		}
+		if code(end) == Some(Opcode::SubExit) {
+			return Some(BangStage::Pipeline);
+		}
 	}
 	let group = [Opcode::Enter, Opcode::Exec, Opcode::Leave, Opcode::SubExit]
 		.iter()
@@ -3865,6 +3960,47 @@ fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 			|w| matches!(w.parts.as_slice(), [ir::Part::Lit(name)] if name.as_slice() == b"exec"),
 		);
 	(group && exec).then_some(BangStage::Exec)
+}
+
+/// The pipeline a background job's body is ([`BangStage::Pipeline`])
+/// started `stages` (`(vproc, entry)`; the last one a child, or the job's
+/// own vproc under `lastpipe`): its last stage decides the job's pid as a
+/// job body of its own would (bash and zsh name the last process in `$!`).
+/// While the job's `[n] pid…` line waits, every earlier stage decides the
+/// pid that line shows for it the same way (zsh names each process).
+fn retarget_bang(k: &mut Kernel, job_vproc: Vpid, unit: &Unit, stages: &[(Vpid, u32)]) {
+	let Some(i) = k
+		.bangs
+		.iter()
+		.position(|b| b.vproc == job_vproc && b.stage == BangStage::Pipeline)
+	else {
+		return;
+	};
+	let Some(&(last, last_entry)) = stages.last() else {
+		return;
+	};
+	let lone = |entry: u32| bang_stage(unit, entry).filter(|s| *s != BangStage::Pipeline);
+	if super::jobctl::announcing(k, job_vproc) {
+		let mut pids = Vec::with_capacity(stages.len());
+		for &(stage, entry) in stages {
+			let decides = lone(entry);
+			if let Some(kind) = decides
+				&& stage != last
+			{
+				k.bangs.push(Bang { vproc: stage, job: stage, stage: kind });
+			}
+			pids.push((stage, decides.is_some()));
+		}
+		super::jobctl::pipeline_started(k, job_vproc, &pids);
+	}
+	match lone(last_entry) {
+		Some(stage) => {
+			let bang = &mut k.bangs[i];
+			bang.vproc = last;
+			bang.stage = stage;
+		},
+		None => k.settle_bang(job_vproc, None),
+	}
 }
 
 /// Source text of stage `i` of pipeline `info`, for a pipe tap: the node of
@@ -3887,8 +4023,15 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		.is_some_and(|s| !s.children.is_empty());
 	if !started {
 		// A job that forks (a subshell, pipeline, job or coprocess of its
-		// own) is not just one program: it keeps its virtual pid.
-		if !k.bangs.is_empty() {
+		// own) is not just one program: it keeps its virtual pid. The
+		// pipeline a job's body is passes the decision to its last stage
+		// ([`retarget_bang`]).
+		let own_pipeline = info.kind == SpawnKind::Pipeline
+			&& k
+				.bangs
+				.iter()
+				.any(|b| b.vproc == vp.vpid && b.stage == BangStage::Pipeline);
+		if !k.bangs.is_empty() && !own_pipeline {
 			k.settle_bang(vp.vpid, None);
 		}
 		let mut children = Vec::with_capacity(info.stages.len());
@@ -3918,6 +4061,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, Some(null.clone()));
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
+				if info.kind == SpawnKind::Background && !control {
+					ignore_async_signals(k, cx, &mut child);
+				}
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
@@ -3972,6 +4118,15 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				let mut stdin = vp.fds.get(0).cloned();
 				for (i, stage) in info.stages.iter().enumerate() {
 					if lastpipe && i + 1 == n {
+						if !k.bangs.is_empty() {
+							let stages: Vec<(Vpid, u32)> = children
+								.iter()
+								.zip(&info.stages)
+								.map(|(&child, s)| (child, s.entry))
+								.chain([(vp.vpid, stage.entry)])
+								.collect();
+							retarget_bang(k, vp.vpid, unit, &stages);
+						}
 						k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
 						let line_shift = top_frame(vp).line_shift;
 						let sc = scratch(vp);
@@ -4014,6 +4169,14 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					}
 					children.push(child.vpid);
 					k.spawned.push(Box::new(child));
+				}
+				if !k.bangs.is_empty() {
+					let stages: Vec<(Vpid, u32)> = children
+						.iter()
+						.zip(&info.stages)
+						.map(|(&child, s)| (child, s.entry))
+						.collect();
+					retarget_bang(k, vp.vpid, unit, &stages);
 				}
 				k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
 			},
@@ -4084,14 +4247,14 @@ pub(super) fn job_text(
 		let feat = feat | Features::ZSH;
 		return match crate::bash::syntax::parse_all(&src, feat) {
 			Ok(p) if p.commands.len() == 1 => {
-				BString::from(crate::bash::syntax::zsh::getjobtext(&p.commands[0].list))
+				BString::from(crate::bash::syntax::zsh::getjobtext(p.commands[0].list()))
 			},
 			_ => src,
 		};
 	}
 	match crate::bash::syntax::parse_all(&src, feat) {
 		Ok(p) if p.commands.len() == 1 => {
-			BString::from(crate::bash::syntax::command_string(&p.commands[0].list))
+			BString::from(crate::bash::syntax::command_string(p.commands[0].list()))
 		},
 		_ => src,
 	}
@@ -4101,6 +4264,52 @@ pub(super) fn job_text(
 /// outside forked subshells. Decides job flags, async stdin and `lastpipe`.
 pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	!vp.jobs.subshell && state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false)
+}
+
+/// On Windows, an asynchronous command without job control ignores
+/// `SIGINT` (and in zsh `SIGQUIT`), as zsh (`entersubsh` with
+/// `ESUB_ASYNC`) and bash (`setup_async_signals`) have it: the keyboard's
+/// Ctrl-C leaves it running (its programs lead console groups of their
+/// own, out of the console's Ctrl-C). Ignored traps it lists (`trap -- ''
+/// INT`) and may replace, and its programs start with them ignored
+/// ([`SpawnSpec::sigmask_ign`](crate::bash::SpawnSpec)). bash's ignored
+/// `SIGQUIT`, which it does not list, is not modelled. A bash subshell cannot
+/// trap the ignore away (it was ignored on entry, [`MiscKey::HardIgnored`]);
+/// zsh's can. Elsewhere the dispositions are left as they are.
+fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
+	use crate::bash::Signal;
+	if k.engine.config().platform != crate::bash::ids::Platform::Windows {
+		return;
+	}
+	let sigs: &[Signal] = if child.mode.dialect() == Dialect::Zsh {
+		&[Signal::Int, Signal::Quit]
+	} else {
+		&[Signal::Int]
+	};
+	for &sig in sigs {
+		let key = TrapKey::Signal(sig);
+		child.own_traps = child.own_traps.with(key);
+		let record = Record::Trap { mode: child.mode, action: BString::default() };
+		state::store_record(&mut k.root, cx.store, child, KeyBuf::Trap(key), Some(record));
+	}
+	if child.mode.dialect() != Dialect::Zsh {
+		let mut names = match state::record(cx.store, child, Key::Misc(MiscKey::HardIgnored)) {
+			Ok(Some(Record::Words(names))) => names.clone(),
+			_ => Vec::new(),
+		};
+		let int = BString::from(Signal::Int.to_string());
+		if !names.contains(&int) {
+			names.push(int);
+		}
+		let record = Record::Words(names);
+		state::store_record(
+			&mut k.root,
+			cx.store,
+			child,
+			KeyBuf::Misc(MiscKey::HardIgnored),
+			Some(record),
+		);
+	}
 }
 
 /// The job table a child that lists its parent's jobs starts with (a
@@ -4160,7 +4369,10 @@ fn start_coproc(
 	let mut fds = vp.fds.clone();
 	fds.set(0, Some(FdRef::mem(in_r)));
 	fds.set(1, Some(FdRef::mem(out_w)));
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	if !job_control(k, cx, vp) {
+		ignore_async_signals(k, cx, &mut child);
+	}
 	// A job of its own under job control (never in the foreground).
 	super::jobctl::own_job(k, child.vpid);
 	let vpid = child.vpid;

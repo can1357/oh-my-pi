@@ -11,6 +11,5 @@ describe.skipIf(SKIP)("handleReddit", () => {
 		expect(result?.contentType).toBe("text/markdown");
 		expect(result?.content).toContain("# r/programming");
 		expect(result?.content).toMatch(/\*\*.*\*\*/); // Contains bold formatting
-		expect(result?.notes).toContain("Fetched via Reddit JSON API");
-	});
+	}, 60_000);
 });

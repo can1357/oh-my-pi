@@ -506,6 +506,24 @@ export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): bool
 	);
 }
 
+/** Whether `msg` carries mid-conversation Anthropic request controls (`clearAt`, `effort`, `toolChanges`). */
+export function hasAnthropicMessageControls(msg: Message): boolean {
+	if (msg.role !== "developer" || msg.providerPayload?.type !== "anthropicMessage") return false;
+	const { clearAt, effort, toolChanges } = msg.providerPayload;
+	return clearAt !== undefined || effort !== undefined || (toolChanges !== undefined && toolChanges.length > 0);
+}
+
+/**
+ * Whether a `user` or `developer` message emits a non-tool-result wire turn
+ * that ends an assistant tool loop instead of being dropped as empty.
+ */
+export function isReplayTurnBoundary(msg: Message): boolean {
+	if (msg.role === "assistant" || msg.role === "toolResult") return false;
+	if (hasAnthropicMessageControls(msg)) return true;
+	if (typeof msg.content === "string") return msg.content.trim().length > 0;
+	return msg.content.some(block => (block.type === "text" && block.text.trim().length > 0) || block.type === "image");
+}
+
 function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
@@ -672,15 +690,24 @@ function normalizeAnthropicTargetToolCallId<TApi extends Api>(
  * - Injects synthetic "aborted" tool results
  */
 /**
- * Credential-shaped token patterns scrubbed from outbound provider traffic when
- * credential redaction is enabled. Exported so hosts can route the same shapes
- * through reversible obfuscation (keyed placeholders restored before local tool
- * execution) instead of the irreversible `[*_token_redacted]` rewrite below —
- * an irreversible placeholder echoed back in edit-tool `old_string` can never
- * match the real bytes on disk.
+ * Credential-shaped tokens, as a bare alternation (no boundaries) written in
+ * syntax JavaScript and Rust `regex` read alike. Exported so hosts can route
+ * the same shapes through reversible obfuscation (keyed placeholders restored
+ * before local tool execution) instead of the irreversible
+ * `[*_token_redacted]` rewrite below — an irreversible placeholder echoed back
+ * in edit-tool `old_string` can never match the real bytes on disk.
  */
-export const SENSITIVE_TOKEN_RE =
-	/(?<![a-zA-Z0-9_*-])(gh[opusr]_[a-zA-Z0-9_*]{36,}|github_pat_[a-zA-Z0-9_*]{36,}|glpat-[a-zA-Z0-9_*-]{20,}|sk-proj-[a-zA-Z0-9_*-]{36,}|sk-ant-[a-zA-Z0-9_*-]{36,}|sk-[a-zA-Z0-9_*-]{48,})(?![a-zA-Z0-9_*-])/gi;
+export const SENSITIVE_TOKEN_BODY =
+	"gh[opusr]_[a-zA-Z0-9_*]{36,}|github_pat_[a-zA-Z0-9_*]{36,}|glpat-[a-zA-Z0-9_*-]{20,}|sk-proj-[a-zA-Z0-9_*-]{36,}|sk-ant-[a-zA-Z0-9_*-]{36,}|sk-[a-zA-Z0-9_*-]{48,}";
+
+/** Class body of the characters a {@link SENSITIVE_TOKEN_BODY} token must not touch on either side. */
+export const SENSITIVE_TOKEN_EDGE = "a-zA-Z0-9_*-";
+
+/** Credential-shaped tokens scrubbed from outbound provider traffic when credential redaction is enabled. */
+export const SENSITIVE_TOKEN_RE = new RegExp(
+	`(?<![${SENSITIVE_TOKEN_EDGE}])(${SENSITIVE_TOKEN_BODY})(?![${SENSITIVE_TOKEN_EDGE}])`,
+	"gi",
+);
 
 function hasPlausibleCredentialEntropy(token: string): boolean {
 	const lower = token.toLowerCase();

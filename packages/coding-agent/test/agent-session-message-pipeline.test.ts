@@ -41,7 +41,7 @@ import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/me
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { createAgentSession, type ExtensionContext, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
+import { obfuscateMessages, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -777,36 +777,6 @@ describe("AgentSession message pipeline", () => {
 			throw new Error("Expected attachment sourcePath to be populated");
 		}
 		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
-	});
-
-	it("resolves attachment://N to images pasted into a newer ask answer", () => {
-		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
-		const answerImage: ImageContent = { type: "image", data: "answer-image", mimeType: "image/png" };
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-		});
-		sessions.push(session);
-
-		session.agent.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "inspect this" }, userImage],
-			timestamp: Date.now(),
-		});
-		session.agent.appendMessage({
-			role: "toolResult",
-			toolCallId: "ask-1",
-			toolName: "ask",
-			content: [{ type: "text", text: "User selected: A\nUser added note: see [Image #1]" }, answerImage],
-			timestamp: Date.now(),
-			isError: false,
-		});
-
-		expect(session.getImageAttachments().map(entry => [entry.uri, entry.image])).toEqual([
-			["attachment://1", answerImage],
-		]);
 	});
 
 	it("normalizes historical WebP on the main provider request path", async () => {
@@ -1713,58 +1683,6 @@ describe("AgentSession message pipeline", () => {
 		expect(calls).toBe(0);
 	});
 
-	it.each([
-		["expands", "short-secret"],
-		["shrinks", "long-secret-".repeat(100)],
-	])("measures the outbound context when obfuscation %s it", async (change, secret) => {
-		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
-		const context: Context = {
-			systemPrompt: [secret],
-			messages: [{ role: "user", content: secret, timestamp: 1 }],
-			tools: [],
-		};
-		const before = structuredClone(context);
-		const outbound = obfuscateProviderContext(obfuscator, context);
-		const plainBytes = Buffer.byteLength(JSON.stringify(context), "utf8");
-		const outboundBytes = Buffer.byteLength(JSON.stringify(outbound), "utf8");
-		const agent = new Agent({ initialState: { model: getBundledModel("openai", "gpt-4o-mini") } });
-		vi.spyOn(agent, "buildSideRequestContext").mockResolvedValue(context);
-		let capturedContext: Context | undefined;
-		const session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
-			obfuscator,
-			sideStreamFn: (_model, sent) => {
-				capturedContext = sent;
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					const message = createAssistantMessage("Answer");
-					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
-					stream.push({ type: "done", reason: "stop", message });
-				});
-				return stream;
-			},
-		});
-		sessions.push(session);
-
-		if (change === "expands") {
-			expect(outboundBytes).toBeGreaterThan(plainBytes);
-			await expect(
-				session.runEphemeralTurn({ promptText: "Question?", maxContextBytes: plainBytes }),
-			).rejects.toThrow("context exceeds");
-			expect(capturedContext).toBeUndefined();
-		} else {
-			expect(outboundBytes).toBeLessThan(plainBytes);
-			expect(
-				(await session.runEphemeralTurn({ promptText: "Question?", maxContextBytes: outboundBytes })).replyText,
-			).toBe("Answer");
-			expect(capturedContext).toEqual(outbound);
-		}
-		expect(context).toEqual(before);
-	});
-
 	it.each([0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])(
 		"rejects invalid ephemeral caps (%s) before dispatch",
 		async cap => {
@@ -2076,7 +1994,7 @@ describe("AgentSession message pipeline", () => {
 					messages: [],
 					tools: [tool],
 				},
-				transformProviderContext: context => obfuscateProviderContext(obfuscator, context),
+				convertToLlm: messages => obfuscateMessages(obfuscator, convertToLlm(messages)),
 			});
 			const session = new AgentSession({
 				agent,

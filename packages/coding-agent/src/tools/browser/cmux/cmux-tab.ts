@@ -1133,8 +1133,6 @@ export class CmuxTab implements InProcessRunTab {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: "viewport", scale: cssWidth && resized.originalWidth / cssWidth },
@@ -1963,7 +1961,8 @@ export class CmuxTab implements InProcessRunTab {
 					else if (element.multiple) for (const option of options) option.selected = wanted.includes(option);
 					else element.selectedIndex = wanted[0].index;
 					inputEvent(element);
-					return options.filter(option => option.selected).map(option => option.value);
+					// The handlers may have reset the choice or replaced the options.
+					return Array.from(element.options).filter(option => option.selected).map(option => option.value);
 				}
 				case "uploadFile": {
 					const transfer = new DataTransfer();

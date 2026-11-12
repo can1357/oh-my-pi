@@ -1,3 +1,5 @@
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+
 export const BUILTIN_TOOL_NAMES = [
 	"read",
 	"bash",
@@ -60,6 +62,12 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 		out.push(normalized);
 	}
 	return out;
+}
+
+/** The name the model calls tool `name` by (its custom wire name when it declares one), for prompts that reference it. */
+export function toolWireName(registry: ReadonlyMap<string, AgentTool>, name: string): string {
+	const tool = registry.get(name);
+	return typeof tool?.customWireName === "string" ? tool.customWireName : name;
 }
 
 /** MCP tool names carry the `mcp__<server>_<tool>` prefix minted by `createMCPToolName`. */

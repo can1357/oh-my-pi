@@ -8,6 +8,7 @@ import {
 	executeCancel,
 	runningAgentsOutsideJobs,
 	runningTaskProgressSuffix,
+	settledJobIds,
 	snapshotJobs,
 } from "../async/job-control";
 import {
@@ -22,6 +23,7 @@ import {
 } from "../launch/services";
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
+import procReferenceDoc from "../prompts/internal-urls/proc-reference.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type {
 	InternalResource,
@@ -155,6 +157,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		return procPromptDoc.trim();
 	}
 
+	promptReference(): string {
+		return procReferenceDoc.trim();
+	}
+
 	/**
 	 * A project service's output log. Jobs and running agents have no log file,
 	 * so their URLs (and the listing) locate to null. Never contacts the daemon broker.
@@ -270,6 +276,12 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				"Write requires proc://<service> for stdin, proc://<id>/kill, or proc://<service>/mode; stdin and modes are services-only.",
 			);
 		const ownerId = session.getAgentId?.() ?? undefined;
+		// Stamped before the broker lookup below: a job that settles while that
+		// await runs finished during this call, and the kill snapshot must say so
+		// rather than calling the result genuinely late (#16052 review).
+		const callStartedAt = Date.now();
+		const manager = session.asyncJobManager;
+		const settledAtEntry = manager ? settledJobIds(manager, ownerId) : undefined;
 		const jobs = ownerJobs(session);
 		const exactJob = jobs.find(item => item.id === id);
 		const agentJob = exactJob ? undefined : runningJobOfAgent(jobs, id);
@@ -304,7 +316,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await modeService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${content}` }],
-				details: { proc: { action: "mode", daemon: updated, mode: content } },
+				details: { proc: { action: "mode", daemon: updated, mode: content }, touchesNoFiles: true },
 			};
 		}
 		if (action === "stdin") {
@@ -312,7 +324,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await sendService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],
-				details: { proc: { action: "stdin", daemon: updated, input: content } },
+				details: { proc: { action: "stdin", daemon: updated, input: content }, touchesNoFiles: true },
 			};
 		}
 		if (service) {
@@ -323,7 +335,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if ((job || agent) && session.asyncJobManager) {
-			const result = await executeCancel(session, session.asyncJobManager, ownerId, [job?.id ?? id]);
+			const result = await executeCancel(session, session.asyncJobManager, ownerId, [job?.id ?? id], {
+				startedAtMs: callStartedAt,
+				settledAtEntry,
+			});
 			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {

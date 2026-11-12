@@ -11,14 +11,17 @@ import type { Settings } from "../config/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
-import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
+import {
+	getReadableCompactionEntry,
+	type SessionContext,
+	type TranscriptSessionContextOptions,
+} from "./session-context";
 import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
@@ -65,17 +68,13 @@ export class SessionProviderBoundary {
 
 	/**
 	 * Latest image attachments addressable by tools as `Image #N` or `attachment://N`: the newest
-	 * user/developer message with images, or `ask` result whose answers carry pasted images.
+	 * user/developer message with images.
 	 */
 	getImageAttachments(): { label: string; uri: string; image: ImageContent; sourcePath: string }[] {
 		for (let i = this.#host.agent.state.messages.length - 1; i >= 0; i--) {
 			const message = this.#host.agent.state.messages[i];
 			if (!message) continue;
-			const carriesUserImages =
-				message.role === "user" ||
-				message.role === "developer" ||
-				(message.role === "toolResult" && message.toolName === "ask");
-			if (!carriesUserImages || !Array.isArray(message.content)) continue;
+			if ((message.role !== "user" && message.role !== "developer") || !Array.isArray(message.content)) continue;
 			const images = message.content.filter((part): part is ImageContent => part.type === "image");
 			if (images.length === 0) continue;
 			return images.flatMap((image, index) => {
@@ -113,17 +112,25 @@ export class SessionProviderBoundary {
 	}
 
 	/**
-	 * Builds the current deobfuscated context for agent display and replay, sized for `model`'s frame budget
-	 * (the active model unless a caller is about to adopt another).
+	 * Builds the stored context the agent replays as `model` reads it: sized for its frame budget, standing on
+	 * the newest compaction it can replay (the active model unless a caller is about to adopt another). What the
+	 * model wrote stays in placeholder form; display restores it via {@link buildTranscriptSessionContext}.
 	 */
 	buildDisplaySessionContext(model = this.#host.model()): SessionContext {
-		return deobfuscateSessionContext(
-			this.#host.sessionManager.buildSessionContext({
-				inFlightToolCallIds: this.#inFlightToolCallIds(),
-				maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
-			}),
-			this.#host.obfuscator(),
-		);
+		return this.#host.sessionManager.buildSessionContext({
+			inFlightToolCallIds: this.#inFlightToolCallIds(),
+			maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
+			model,
+		});
+	}
+
+	/**
+	 * Whether `a` and `b` read the stored context from different compaction boundaries (one cannot replay a
+	 * provider-native compaction the other can), so the context built for one does not serve the other.
+	 */
+	readsOtherCompaction(a: Model | undefined, b: Model | undefined): boolean {
+		const branch = this.#host.sessionManager.getBranch();
+		return getReadableCompactionEntry(branch, a) !== getReadableCompactionEntry(branch, b);
 	}
 
 	/**
@@ -194,11 +201,14 @@ export class SessionProviderBoundary {
 		return obfuscator.deobfuscate(text);
 	}
 
-	/** Deobfuscates a streamed delta and removes an incomplete secret placeholder suffix. */
+	/**
+	 * Deobfuscates streamed provider text up to a trailing run that could still
+	 * become a placeholder; that run waits for more text (or the final flush).
+	 */
 	deobfuscateDelta(text: string): string {
-		const deobfuscated = this.deobfuscateText(text);
-		if (!this.#host.obfuscator()?.hasSecrets()) return deobfuscated;
-		return stripPendingSecretPlaceholderSuffix(deobfuscated);
+		const obfuscator = this.#host.obfuscator();
+		if (!obfuscator?.hasSecrets()) return text;
+		return obfuscator.deobfuscate(text.slice(0, obfuscator.pendingPlaceholderStart(text)));
 	}
 
 	/** Converts side-request messages through the session's secret boundary. */

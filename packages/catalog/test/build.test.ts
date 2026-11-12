@@ -571,6 +571,19 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 });
 
+describe("Morph worker affinity", () => {
+	// Morph is reached only through custom providers, so the base URL alone identifies it.
+	it.each([
+		["openai-completions", completionsSpec],
+		["openai-responses", responsesSpec],
+	] as const)("sends x-session-id only to Morph over %s", (_api, spec) => {
+		const morph = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://api.morphllm.com/v1" }));
+		const other = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://llm.example.com/v1" }));
+		expect(morph.compat.promptCacheSessionHeader).toBe("x-session-id");
+		expect(other.compat.promptCacheSessionHeader).toBeUndefined();
+	});
+});
+
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "firepass" })).compat.wireModelIdMode).toBe("firepass");
@@ -657,10 +670,17 @@ describe("openai-completions wire-quirk compat detection", () => {
 			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4-flash", input: ["text", "image"] }))
 				.compat.stripImageInput,
 		).toBe(true);
-		// The lineage glob covers dated SKUs, not just the bare id.
+		// The lineage carve-out covers dated SKUs, not just the bare id.
 		expect(
 			resolveModelPolicy(
 				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-0731", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Hosts that spell the release with a hyphen (Mistral's live roster:
+		// `deepseek-v4-1-flash-1017`) serve the same multimodal weights (#18405).
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "mistral", id: "deepseek-v4-1-flash-1017", input: ["text", "image"] }),
 			).compat.stripImageInput,
 		).toBe(false);
 		// A V4.1 id that also carries a `vision` token matches both exceptions at

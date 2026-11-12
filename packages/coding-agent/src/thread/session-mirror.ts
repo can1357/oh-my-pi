@@ -139,14 +139,6 @@ export interface SessionQueuedEntry {
 	readonly claimed: boolean;
 }
 
-/** Approvals a session holds for the rest of its conversation (backs `hasSessionApproval` / `getApprovalGrants`). */
-export interface SessionApprovalState {
-	/** Approval scope keys the session's extension runner granted. */
-	readonly scopes: readonly string[];
-	/** `always-ask-cached` grant keys of the conversation tier. */
-	readonly grants: readonly string[];
-}
-
 /** View-only data of a worker-homed session, published while main watches it (see the module doc). */
 export interface SessionViewState {
 	/** Provider-facing session id (`AgentSession.sessionId`). */
@@ -193,7 +185,6 @@ export interface SessionViewState {
 	todoPhases: TodoPhase[];
 	queuedMessages: SessionQueuedMessages;
 	restorableQueue: SessionRestorableQueue;
-	approvals: SessionApprovalState;
 	ephemeralMaxTokensPreservesRequest: boolean;
 	settings: SessionSettingsSource;
 	/**

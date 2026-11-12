@@ -11,6 +11,7 @@ import { HindsightSessionState } from "../src/hindsight/state";
 import type { AgentSession, AgentSessionEventListener } from "../src/session/agent-session";
 import type { ToolSession } from "../src/tools";
 import { MemoryRetainTool } from "../src/tools/memory-retain";
+import * as atomicFile from "../src/utils/atomic-file";
 
 interface WireItem {
 	document_id: string;
@@ -131,6 +132,12 @@ async function age(file: string, ms: number): Promise<void> {
 	await fs.utimes(file, then, then);
 }
 
+function eventWithContent(pending: OutboxEvent[], content: string): OutboxEvent {
+	const event = pending.find(candidate => candidate.content === content);
+	if (!event) throw new Error(`Expected an outbox event containing ${content}`);
+	return event;
+}
+
 describe("Hindsight retain outbox", () => {
 	it("persists a sanitized private event before acknowledging, without contacting the API", async () => {
 		const { tool } = fixture({ "hindsight.apiToken": "test-sensitive-bearer" });
@@ -249,17 +256,172 @@ describe("Hindsight retain outbox", () => {
 		expect(await events()).toHaveLength(0);
 	});
 
-	it("deletes quarantined events once their 30-day review period ends", async () => {
+	it("keeps delivery and quarantine notices when a reviewed file disappears during cleanup", async () => {
 		status = 400;
-		const { tool, state } = fixture();
-		await tool.execute("first-refused", { items: [{ content: "first refused" }] });
+		const { tool, state, notices } = fixture();
+		await tool.execute("old-refusals", {
+			items: [{ content: "first expired refusal" }, { content: "second expired refusal" }],
+		});
+		const pending = await events();
+		const expired = ["first expired refusal", "second expired refusal"].map(content =>
+			eventWithContent(pending, content),
+		);
 		await state.flushRetainQueue();
-		const [expired] = await fs.readdir(quarantineDir());
-		await age(path.join(quarantineDir(), expired), 31 * DAY_MS);
-		await tool.execute("second-refused", { items: [{ content: "second refused" }] });
-		const [second] = await events();
+		const expiredFiles = expired.map(event => path.join(quarantineDir(), `${event.id}.json`));
+		for (const file of expiredFiles) await age(file, 31 * DAY_MS);
+
+		status = items => (items.some(item => item.content === "new refusal") ? 400 : 202);
+		await tool.execute("mixed-delivery", { items: [{ content: "valid memory" }, { content: "new refusal" }] });
+		const newRefusal = eventWithContent(await events(), "new refusal");
+		notices.length = 0;
+
+		const realStat = fs.stat;
+		const realRm = fs.rm;
+		let vanished = false;
+		vi.spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+			if (expiredFiles.includes(String(args[0])) && !vanished) {
+				vanished = true;
+				await realRm(args[0], { force: true });
+			}
+			return realStat(...args);
+		}) as typeof fs.stat);
+
 		await state.flushRetainQueue();
-		expect(await fs.readdir(quarantineDir())).toEqual([`${second.id}.json`]);
+		expect(vanished).toBe(true);
+		expect(accepted.map(item => item.content)).toEqual(["valid memory"]);
+		expect(await fs.readdir(quarantineDir())).toEqual([`${newRefusal.id}.json`]);
+		expect(notices.filter(notice => notice.includes("Hindsight memory moved to"))).toHaveLength(1);
+		expect(notices.join(" ")).not.toContain("Hindsight outbox unavailable");
+	});
+
+	it("keeps a successful delivery when quarantine cleanup fails", async () => {
+		const { tool, state, notices } = fixture();
+		await tool.execute("valid-delivery", { items: [{ content: "valid memory" }] });
+		const realReaddir = fs.readdir;
+		vi.spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+			if (String(args[0]) === quarantineDir()) throw new Error("simulated quarantine cleanup failure");
+			return realReaddir(...args);
+		}) as typeof fs.readdir);
+
+		await state.flushRetainQueue();
+		expect(accepted.map(item => item.content)).toEqual(["valid memory"]);
+		expect(await events()).toEqual([]);
+		expect(notices).toEqual([]);
+	});
+
+	it("deletes expired quarantined events on an empty drain", async () => {
+		status = 400;
+		const first = fixture();
+		await first.tool.execute("refused", {
+			items: [{ content: "expired refused" }, { content: "recent refused" }],
+		});
+		const pending = await events();
+		const expired = eventWithContent(pending, "expired refused");
+		const recent = eventWithContent(pending, "recent refused");
+		await first.state.flushRetainQueue();
+		await age(path.join(quarantineDir(), `${expired.id}.json`), 31 * DAY_MS);
+		await age(path.join(quarantineDir(), `${recent.id}.json`), 29 * DAY_MS);
+		first.notices.length = 0;
+		requests = [];
+		status = 202;
+		const second = fixture({}, "session-b");
+
+		await second.state.flushRetainQueue();
+		expect(await fs.readdir(quarantineDir())).toEqual([`${recent.id}.json`]);
+		expect(requests).toHaveLength(0);
+		expect([...first.notices, ...second.notices]).toEqual([]);
+	});
+
+	it("serializes concurrent quarantine pruning", async () => {
+		status = 400;
+		const first = fixture();
+		const second = fixture({}, "session-b");
+		await first.tool.execute("refused", { items: [{ content: "expired refused" }] });
+		const expired = eventWithContent(await events(), "expired refused");
+		await first.state.flushRetainQueue();
+		const expiredFile = path.join(quarantineDir(), `${expired.id}.json`);
+		await age(expiredFile, 31 * DAY_MS);
+		first.notices.length = 0;
+		requests = [];
+		status = 202;
+
+		const realStat = fs.stat;
+		const realRm = fs.rm;
+		const expiredRemoved = Promise.withResolvers<void>();
+		let expiredStats = 0;
+		vi.spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+			if (String(args[0]) === expiredFile && ++expiredStats > 1) await expiredRemoved.promise;
+			return realStat(...args);
+		}) as typeof fs.stat);
+		vi.spyOn(fs, "rm").mockImplementation(async (...args) => {
+			try {
+				return await realRm(...args);
+			} finally {
+				if (String(args[0]) === expiredFile) expiredRemoved.resolve();
+			}
+		});
+
+		await Promise.all([first.state.flushRetainQueue(), second.state.flushRetainQueue()]);
+		expect(await fs.readdir(quarantineDir())).toEqual([]);
+		expect(requests).toHaveLength(0);
+		expect([...first.notices, ...second.notices]).toEqual([]);
+	});
+
+	it("starts a new quarantine review period before a concurrent prune", async () => {
+		const first = fixture();
+		const second = fixture({}, "session-b");
+		await first.tool.execute("stale-undelivered", { items: [{ content: "stale undelivered" }] });
+		const stale = eventWithContent(await events(), "stale undelivered");
+		const staleFile = (await eventFiles())[0];
+		if (!staleFile) throw new Error("Expected the stale event file");
+		await age(staleFile, 31 * DAY_MS);
+
+		let inFlightFs = 0;
+		let fsIdle = Promise.withResolvers<void>();
+		const trackFs = async <T>(op: () => Promise<T>): Promise<T> => {
+			inFlightFs++;
+			try {
+				return await op();
+			} finally {
+				if (--inFlightFs === 0) {
+					fsIdle.resolve();
+					fsIdle = Promise.withResolvers<void>();
+				}
+			}
+		};
+		const waitForIdleFs = async () => {
+			for (let tick = 0; tick < 5; tick++) {
+				while (inFlightFs > 0) await fsIdle.promise;
+				await Promise.resolve();
+			}
+		};
+
+		const realReaddir = fs.readdir;
+		const realStat = fs.stat;
+		const realRm = fs.rm;
+		const realUtimes = fs.utimes;
+		let concurrentDrain: Promise<void> | undefined;
+		vi.spyOn(fs, "readdir").mockImplementation(((...args: Parameters<typeof fs.readdir>) =>
+			trackFs(() => realReaddir(...args))) as typeof fs.readdir);
+		vi.spyOn(fs, "stat").mockImplementation(((...args: Parameters<typeof fs.stat>) =>
+			trackFs(() => realStat(...args))) as typeof fs.stat);
+		vi.spyOn(fs, "rm").mockImplementation((...args) => trackFs(() => realRm(...args)));
+		vi.spyOn(fs, "utimes").mockImplementation(async (...args) => {
+			if (String(args[0]) === path.join(quarantineDir(), `${stale.id}.json`) && !concurrentDrain) {
+				concurrentDrain = second.state.flushRetainQueue();
+				await waitForIdleFs();
+			}
+			return realUtimes(...args);
+		});
+
+		await first.state.flushRetainQueue();
+		if (!concurrentDrain) throw new Error("Expected the concurrent empty drain");
+		await concurrentDrain;
+		expect(await fs.readdir(quarantineDir())).toEqual([`${stale.id}.json`]);
+		expect(requests).toHaveLength(0);
+		expect(first.notices).toHaveLength(1);
+		expect(first.notices[0]).toContain("1 Hindsight memory moved to");
+		expect(second.notices).toEqual([]);
 	});
 
 	it("retries a transient failure on its own backoff timer", async () => {
@@ -298,6 +460,49 @@ describe("Hindsight retain outbox", () => {
 		await firstDrain;
 		expect(requests).toHaveLength(1);
 		expect(await events()).toHaveLength(0);
+	});
+
+	it("delivers nothing from a multi-item call that fails midway, even to a drain running alongside it", async () => {
+		const midBatch = Promise.withResolvers<void>();
+		const drainerSettled = Promise.withResolvers<void>();
+		const write = atomicFile.writeFileAtomically;
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (filePath, content, mode) => {
+			// Park the second item's publication with the batch half-written; the
+			// concurrent drain below runs to completion before the call fails and rolls back.
+			if (content.includes("second of the failed batch")) {
+				midBatch.resolve();
+				await drainerSettled.promise;
+				throw new Error("simulated outbox write failure");
+			}
+			return write(filePath, content, mode);
+		});
+
+		const first = fixture();
+		const second = fixture({}, "session-b");
+		let enqueueError: unknown;
+		const enqueue = (async () => {
+			try {
+				await first.tool.execute("concurrent-drain-race", {
+					items: [{ content: "first of the failed batch" }, { content: "second of the failed batch" }],
+				});
+			} catch (error) {
+				enqueueError = error;
+			}
+		})();
+		// The first item is on disk and the enqueue holds the destination's queue lock mid-batch.
+		await midBatch.promise;
+		const drain = second.state.flushRetainQueue();
+		drain.then(
+			() => drainerSettled.resolve(),
+			() => drainerSettled.resolve(),
+		);
+		await enqueue;
+		await drain;
+
+		expect(enqueueError).toBeInstanceOf(Error);
+		expect((enqueueError as Error).message).toMatch(/NOT queued/);
+		expect(requests.flat().map(item => item.content)).toEqual([]);
+		expect(await events()).toEqual([]);
 	});
 
 	it("quarantines malformed events, and other destinations' events only once they are 7 days old", async () => {

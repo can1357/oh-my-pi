@@ -77,6 +77,65 @@ describe("reconcileEmbeddingModel on store open", () => {
 		}
 	});
 
+	it("preserves updated embeddings and skips deleted memories when a rebuild commits", async () => {
+		const { db } = seedDb(OLD_MODEL);
+		const ts = new Date().toISOString();
+		db.prepare(
+			"INSERT INTO working_memory (id, content, source, timestamp, session_id) VALUES (?, ?, 'test', ?, 'default')",
+		).run("wm-deleted", "delete during rebuild", ts);
+		db.prepare("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)").run(
+			"wm-deleted",
+			JSON.stringify([1, 0, 0, 0]),
+			OLD_MODEL,
+		);
+
+		const oldContent = "alpha working memory";
+		const updatedContent = "updated working memory";
+		const updatedVector = [0, 1, 0, 0];
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const provider = async function* (texts: readonly string[]) {
+			if (texts.includes(oldContent)) {
+				rebuildStarted.resolve();
+				await releaseRebuild.promise;
+			}
+			yield texts.map(text => {
+				if (text === oldContent) return [1, 0, 0, 0];
+				if (text === updatedContent) return updatedVector;
+				return [0, 0, 1, 0];
+			});
+		};
+		const memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider } });
+		try {
+			await rebuildStarted.promise;
+			const pendingBeforeUpdate = new Set(memory.beam.pendingExtractions);
+			expect(memory.update("wm-1", updatedContent)).toBe(true);
+			expect(memory.forget("wm-deleted")).toBe(true);
+			const updateEmbedding = [...memory.beam.pendingExtractions].find(task => !pendingBeforeUpdate.has(task));
+			expect(updateEmbedding).toBeDefined();
+			await updateEmbedding;
+
+			releaseRebuild.resolve();
+			await memory.flushExtractions();
+
+			const results = await memory.recall("unrelated lexical query", 5, {
+				queryEmbedding: updatedVector,
+				vecWeight: 1,
+				ftsWeight: 0,
+				importanceWeight: 0,
+			});
+			const updated = results.find(result => result.id === "wm-1");
+			expect(updated?.content).toBe(updatedContent);
+			expect(updated?.dense_score).toBe(1);
+			expect(memory.conn.query("SELECT 1 FROM memory_embeddings WHERE memory_id = 'wm-deleted'").get()).toBeNull();
+		} finally {
+			releaseRebuild.resolve();
+			await memory.flushExtractions();
+			memory.close();
+			db.close();
+		}
+	});
+
 	it("keeps stale embeddings when the new provider does not answer", async () => {
 		const { db } = seedDb(OLD_MODEL);
 		const down = async function* (_texts: readonly string[]): AsyncGenerator<number[][]> {

@@ -2,6 +2,16 @@ import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Page, WaitForOptions } from "puppeteer-core";
 import { puppeteerTimeoutError } from "./launch";
 
+/** Whether `requested` is the address `current` already shows (`https://a.test` is `https://a.test/`). */
+export function sameAddress(requested: string, current: string): boolean {
+	if (requested === current) return true;
+	try {
+		return new URL(requested).href === new URL(current).href;
+	} catch {
+		return false;
+	}
+}
+
 declare module "puppeteer-core" {
 	interface Frame {
 		/** CDP lifecycle events the frame's current document has reached (`@internal` upstream, stripped from published types). */
@@ -62,14 +72,14 @@ export function readyStateInPage(): string {
 
 /**
  * Whether one of our own page evaluations failed because a navigation replaced the document whose execution context
- * it targeted: the context was destroyed while the call ran, or was already gone when it arrived (Puppeteer rewrites
- * that into the first message; the relay passes Chrome's own on). Puppeteer's own waits retry on the same two.
+ * it targeted: the context was destroyed, was already gone, or a handle belongs to the replaced document's world.
  */
 export function isNavigatedContextError(error: unknown): boolean {
 	return (
 		error instanceof Error &&
 		(error.message.includes("Execution context was destroyed") ||
-			error.message.includes("Cannot find context with specified id"))
+			error.message.includes("Cannot find context with specified id") ||
+			error.message.includes("should belong to the same JavaScript world"))
 	);
 }
 

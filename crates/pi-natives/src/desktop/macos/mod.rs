@@ -42,8 +42,8 @@ use super::{
 	frame::FrameGeometry,
 	keys::KeyName,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
-		ScreenState, Target,
+		AxTextSelection, CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow,
+		DisplaySelector, ScreenState, Target,
 	},
 };
 
@@ -80,6 +80,7 @@ impl Backend for MacosBackend {
 			0
 		};
 		let screen = session::screen_state(self.capture.selector());
+		let (secure_input, secure_input_app) = session::secure_input();
 		DesktopCapabilities {
 			backend: "quartz".to_string(),
 			display_server: Some("Quartz WindowServer".to_string()),
@@ -92,7 +93,10 @@ impl Backend for MacosBackend {
 			menus: ax_trusted,
 			held_input: ax_trusted,
 			spaces: spaces::supported(),
-			global_escape: permission::listen_events(),
+			// The Escape monitor sees no key at all while secure input holds.
+			global_escape: permission::listen_events() && !secure_input,
+			secure_input,
+			secure_input_app,
 			capture_permission: permission_label(capture_permission),
 			input_permission: permission_label(permission::post_events()),
 			ax_permission: permission_label(ax_trusted),
@@ -170,6 +174,18 @@ impl Backend for MacosBackend {
 				.input
 				.pointer(target, event, None, mode, EntryFront::now(), &self.capture)
 		})
+	}
+
+	fn drag_selection(
+		&mut self,
+		target: &Target,
+		event: &PointerEvent,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<Option<AxTextSelection>> {
+		token.check()?;
+		Self::require_input_permission()?;
+		input::drag_selection(target, event, mode, &self.capture)
 	}
 
 	fn pointer_menu(

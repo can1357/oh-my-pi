@@ -34,7 +34,9 @@ impl X11Backend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
 		let capture = X11Capture::new(display)?;
 		let input = X11Input::new(capture.connection(), capture.root())?;
-		let ax = AtSpiAx::new().ok();
+		let ax = AtSpiAx::new()
+			.ok()
+			.map(|ax| ax.with_native_windows(Box::new(capture.clone())));
 		Ok(Self { capture, input, ax, display_server: std::env::var("DISPLAY").ok() })
 	}
 }
@@ -57,6 +59,8 @@ impl Backend for X11Backend {
 			global_escape: std::env::var_os("WAYLAND_DISPLAY").is_none()
 				&& !std::env::var("XDG_SESSION_TYPE")
 					.is_ok_and(|session| session.eq_ignore_ascii_case("wayland")),
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: if displays.is_ok() {
 				"granted"
 			} else {

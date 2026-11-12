@@ -493,9 +493,21 @@ class ProxyGitTransport:
         del pool_dir
         self._post("/gh/v1/git/fetch_ref", {"repo": repo, "ref": ref})
 
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
         del pool_dir
-        self._post("/gh/v1/git/fetch_pr_head", {"repo": repo, "pr_number": pr_number})
+        self._post(
+            "/gh/v1/git/fetch_pr_head",
+            {"repo": repo, "pr_number": pr_number, "head_ref": head_ref, "head_sha": head_sha, "same_repo": same_repo},
+        )
 
     def push_branch(
         self,

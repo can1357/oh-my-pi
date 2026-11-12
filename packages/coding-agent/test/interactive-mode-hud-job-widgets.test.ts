@@ -124,6 +124,25 @@ describe("InteractiveMode HUD pills", () => {
 		expect(JSON.stringify(next)).toContain("191 tok/s");
 	});
 
+	// A refresh recomputes the view from the wall clock (rate decay) even when no data moved:
+	// updatedAt and state stand still while the view object is swapped for a fresh one.
+	it("re-describes the segment when a refresh swaps the view object without moving updatedAt or state", () => {
+		let entries: JobWidgetEntry[] = [{ id: "bg_1", type: "bash", view: decode }];
+		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(1);
+		spyOn(session, "getRunningJobWidgets").mockImplementation(() => entries);
+
+		const segment = jobsSegment()!;
+		expect(prop(segment, "title")).toContain("bg_1  loadtest · decode — decode 186 tok/s ▲ 15%");
+
+		entries = [{ id: "bg_1", type: "bash", view: { ...decode, headline: { text: "171 tok/s" } } }];
+
+		const next = jobsSegment()!;
+		expect(next).not.toBe(segment);
+		const glance = nodes(next).find(node => prop(node, "role") === "omp.hud.glance");
+		expect(prop(glance, "spans")).toEqual([{ t: "171 tok/s", s: "num strong" }]);
+		expect(prop(next, "title")).toBe("1 job running  /jobs\nbg_1  loadtest · decode — 171 tok/s");
+	});
+
 	it("keeps the bare count segment while no running job draws a widget", () => {
 		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(1);
 		spyOn(session, "getRunningJobWidgets").mockReturnValue([]);
