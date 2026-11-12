@@ -806,15 +806,18 @@ describe("Generate E2E Tests", () => {
 		});
 
 		it("routes Vertex Mistral rawPredict with ADC auth and an OpenAI-shaped body (#19010)", async () => {
-			const originalProject = Bun.env.GOOGLE_CLOUD_PROJECT;
-			const originalGcpProject = Bun.env.GCP_PROJECT;
-			const originalGcloudProject = Bun.env.GCLOUD_PROJECT;
-			const originalVertexLocation = Bun.env.GOOGLE_VERTEX_LOCATION;
-			const originalCloudLocation = Bun.env.GOOGLE_CLOUD_LOCATION;
-			const originalLocation = Bun.env.VERTEX_LOCATION;
-			const originalApiKey = Bun.env.GOOGLE_CLOUD_API_KEY;
-			const originalGac = Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
-			const originalAppData = Bun.env.APPDATA;
+			const envKeys = [
+				"GOOGLE_CLOUD_PROJECT",
+				"GCP_PROJECT",
+				"GCLOUD_PROJECT",
+				"GOOGLE_VERTEX_LOCATION",
+				"GOOGLE_CLOUD_LOCATION",
+				"VERTEX_LOCATION",
+				"GOOGLE_CLOUD_API_KEY",
+				"GOOGLE_APPLICATION_CREDENTIALS",
+				"APPDATA",
+			] as const;
+			const originalEnv = envKeys.map(key => [key, Bun.env[key]] as const);
 			// Force the metadata-server token path (see the Claude rawPredict test above).
 			const absentAdcHome = path.join(os.tmpdir(), `vertex-adc-mistral-${Date.now()}`);
 			const homedirSpy = spyOn(os, "homedir").mockReturnValue(absentAdcHome);
@@ -839,14 +842,9 @@ describe("Generate E2E Tests", () => {
 
 			try {
 				__resetVertexTokenCache();
+				for (const key of envKeys) delete Bun.env[key];
 				Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
 				Bun.env.GOOGLE_VERTEX_LOCATION = "global";
-				delete Bun.env.GCP_PROJECT;
-				delete Bun.env.GCLOUD_PROJECT;
-				delete Bun.env.GOOGLE_CLOUD_LOCATION;
-				delete Bun.env.VERTEX_LOCATION;
-				delete Bun.env.GOOGLE_CLOUD_API_KEY;
-				delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
 				Bun.env.APPDATA = absentAdcHome;
 
 				// Replay one tool call issued by another model: a long
@@ -960,24 +958,10 @@ describe("Generate E2E Tests", () => {
 			} finally {
 				__resetVertexTokenCache();
 				homedirSpy.mockRestore();
-				if (originalProject === undefined) delete Bun.env.GOOGLE_CLOUD_PROJECT;
-				else Bun.env.GOOGLE_CLOUD_PROJECT = originalProject;
-				if (originalGcpProject === undefined) delete Bun.env.GCP_PROJECT;
-				else Bun.env.GCP_PROJECT = originalGcpProject;
-				if (originalGcloudProject === undefined) delete Bun.env.GCLOUD_PROJECT;
-				else Bun.env.GCLOUD_PROJECT = originalGcloudProject;
-				if (originalVertexLocation === undefined) delete Bun.env.GOOGLE_VERTEX_LOCATION;
-				else Bun.env.GOOGLE_VERTEX_LOCATION = originalVertexLocation;
-				if (originalCloudLocation === undefined) delete Bun.env.GOOGLE_CLOUD_LOCATION;
-				else Bun.env.GOOGLE_CLOUD_LOCATION = originalCloudLocation;
-				if (originalLocation === undefined) delete Bun.env.VERTEX_LOCATION;
-				else Bun.env.VERTEX_LOCATION = originalLocation;
-				if (originalApiKey === undefined) delete Bun.env.GOOGLE_CLOUD_API_KEY;
-				else Bun.env.GOOGLE_CLOUD_API_KEY = originalApiKey;
-				if (originalGac === undefined) delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
-				else Bun.env.GOOGLE_APPLICATION_CREDENTIALS = originalGac;
-				if (originalAppData === undefined) delete Bun.env.APPDATA;
-				else Bun.env.APPDATA = originalAppData;
+				for (const [key, value] of originalEnv) {
+					if (value === undefined) delete Bun.env[key];
+					else Bun.env[key] = value;
+				}
 			}
 		});
 	});

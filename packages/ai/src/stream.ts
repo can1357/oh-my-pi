@@ -4,7 +4,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
+import {
+	isVertexAnthropicRawPredictUrl,
+	isVertexExpressOpenAIUrl,
+	isVertexRawPredictUrl,
+	resolveVertexEndpointHost,
+} from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
@@ -752,10 +757,9 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
 		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
-		// Only the Anthropic publisher serves the Messages wire shape; partner
-		// publishers (e.g. Mistral) serve OpenAI-shaped bodies where `model`
-		// is required and `anthropic_version` is rejected.
-		if (url.includes("/publishers/anthropic/") && isVertexRawPredictUrl(url)) {
+		// Partner publishers other than Anthropic (e.g. Mistral) take OpenAI-shaped
+		// bodies, where `model` is required and `anthropic_version` is rejected.
+		if (isVertexAnthropicRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
 			return baseFetch(url, {

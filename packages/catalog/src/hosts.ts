@@ -163,9 +163,17 @@ export function isVertexExpressOpenAIUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/endpoints/openapi");
 }
 
-/** Vertex AI Anthropic raw-predict endpoints (`:streamRawPredict` / `:rawPredict`). */
+/** Vertex AI partner-model raw-predict endpoints (`:streamRawPredict` / `:rawPredict`), e.g. Anthropic or Mistral. */
 export function isVertexRawPredictUrl(baseUrl: string): boolean {
 	return baseUrl.includes(":streamRawPredict") || baseUrl.includes(":rawPredict");
+}
+
+/**
+ * Vertex AI Anthropic raw-predict endpoints: the only publisher whose body is the
+ * Messages shape, carrying `anthropic_version` instead of `model`.
+ */
+export function isVertexAnthropicRawPredictUrl(baseUrl: string): boolean {
+	return baseUrl.includes("/publishers/anthropic/") && isVertexRawPredictUrl(baseUrl);
 }
 
 /** Azure OpenAI deployment-scoped path (`…/deployments/<name>/…`). */
