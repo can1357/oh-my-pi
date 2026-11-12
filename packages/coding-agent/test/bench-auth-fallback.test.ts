@@ -359,6 +359,50 @@ describe("bench OAuth account selection", () => {
 			auth.close();
 		}
 	});
+
+	it("sends a structured-credential provider's encoded key for the selected account", async () => {
+		const auth = createInMemoryAuthStorage();
+		try {
+			await auth.credentials.set(
+				"google-gemini-cli",
+				["a", "b"].map(suffix => ({
+					type: "oauth" as const,
+					access: `access-${suffix}`,
+					refresh: `refresh-${suffix}`,
+					expires: Date.now() + 3_600_000,
+					projectId: `project-${suffix}`,
+					email: `${suffix}@example.com`,
+				})),
+			);
+			const model = fakeModel("google-gemini-cli", "test-model");
+			const registry = fakeRegistry({ models: [model], authedProviders: ["google-gemini-cli"] });
+			const keys: unknown[] = [];
+			const summary = await runBenchCommand(
+				{ models: ["google-gemini-cli/test-model"], flags: { account: 2, runs: 1, json: true } },
+				{
+					createRuntime: async () => ({ modelRegistry: registry, oauth: auth.oauth }),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					streamSimple: (_model, _context, options) => {
+						const stream = fakeStream();
+						const iterator = (async function* () {
+							if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
+							keys.push(await options.apiKey({ error: undefined, lastChance: false }));
+							yield* stream;
+						})();
+						return Object.assign(iterator, { result: stream.result }) as unknown as AssistantMessageEventStream;
+					},
+				},
+			);
+			expect(summary.failures).toBe(0);
+			expect(keys.map(key => JSON.parse(String(key)))).toEqual([
+				expect.objectContaining({ token: "access-b", projectId: "project-b", refreshToken: "refresh-b" }),
+			]);
+		} finally {
+			auth.close();
+		}
+	});
 });
 
 describe("bench credential-aware provider selection", () => {
