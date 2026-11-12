@@ -74,7 +74,7 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 export const XDEV_TRANSPORT_TOOLS: Record<string, true> = { read: true, write: true };
 
 /** Controls which mounted-device docs are inlined into the system prompt. */
-export type XdevDocsMode = "inline" | "builtins" | "catalog";
+export type XdevDocsMode = "inline" | "builtins" | "catalog" | "none";
 
 /**
  * Whether an enabled tool is presented under `xd://` (rather than top-level)
@@ -348,6 +348,7 @@ export function planXdevPromptDocs(
 	mode: XdevDocsMode = "inline",
 	inlinePatterns: readonly string[] = [],
 ): XdevPromptDocs {
+	if (mode === "none") return { sections: [], catalog: new Map() };
 	const sections: string[] = [];
 	const catalog = new Map<string, string>();
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
