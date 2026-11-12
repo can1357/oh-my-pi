@@ -9,6 +9,8 @@
  *    launched, aborts every speculative agent.
  * 4. The host only authorizes launches under auto-allow approval with no
  *    extension lifecycle handlers.
+ * 5. An `inheritContext` item waits for dispatch (the parent's streaming turn
+ *    is not in its context yet) without halting later items.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolCall, SpeculativeOperationSink } from "@oh-my-pi/pi-agent-core";
@@ -39,11 +41,11 @@ const sink: SpeculativeOperationSink = {
 	close: () => {},
 };
 
-function createSession(manager: AsyncJobManager): ToolSession {
+function createSession(manager: AsyncJobManager, settings: Record<string, unknown> = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated({ "async.enabled": true, "task.batch": true }),
+		settings: Settings.isolated({ "async.enabled": true, "task.batch": true, ...settings }),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getAgentId: () => null,
@@ -145,10 +147,12 @@ describe("task speculative launch", () => {
 		return events;
 	};
 
-	async function openSession(): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
+	async function openSession(
+		settings: Record<string, unknown> = {},
+	): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		managers.push(manager);
-		const tool = await TaskTool.create(createSession(manager));
+		const tool = await TaskTool.create(createSession(manager, settings));
 		const session = await tool.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
 		if (!session) throw new Error("expected a task launch session");
 		return { tool, manager, session: session as TaskLaunchSession };
@@ -206,6 +210,29 @@ describe("task speculative launch", () => {
 		await manager.getJob("Beta")!.promise;
 		expect(manager.getJob("Alpha")!.status).toBe("completed");
 		expect(manager.getJob("Beta")!.status).toBe("completed");
+	});
+
+	it("leaves an inheritContext item to dispatch while later items still start early", async () => {
+		const { tool, manager, session } = await openSession({ "task.inheritContext": true });
+		const flagged = {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", task: "Do A.", inheritContext: true },
+				{ name: "Beta", agent: "task", task: "Do B." },
+			],
+		};
+		session.update(toolCall, JSON.stringify(flagged));
+		await spawn("Beta").started.promise;
+		expect(startedIds.has("Alpha")).toBe(false);
+
+		session.finalize({ toolCall, args: flagged });
+		await tool.execute(toolCall.id, flagged);
+		await spawn("Alpha").started.promise;
+		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(2);
+		spawn("Alpha").release.resolve();
+		spawn("Beta").release.resolve();
+		await manager.getJob("Alpha")!.promise;
+		await manager.getJob("Beta")!.promise;
 	});
 
 	it("adopts an empty model placeholder without changing the submitted arguments", async () => {

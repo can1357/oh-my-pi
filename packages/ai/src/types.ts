@@ -1235,7 +1235,7 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
-	/** True for a task subagent's inherited parent tail; the provider transform may render its excerpt as image frames. Never sent. */
+	/** True for a task subagent's inherited parent tail; the provider transform may render its excerpt as image frames. Provider mappers copy message fields explicitly, so it never reaches the wire. */
 	inheritedContext?: boolean;
 	/** True when the provider delivered this steer into the response it was streaming (`response.steer`). Display-only; never sent. */
 	liveSteered?: boolean;

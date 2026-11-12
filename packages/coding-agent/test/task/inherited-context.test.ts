@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Context, Message, Model } from "@oh-my-pi/pi-ai";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import {
 	buildInheritedContext,
@@ -81,17 +82,33 @@ describe("buildInheritedContext", () => {
 		expect(buildInheritedContext([], undefined)).toBeUndefined();
 	});
 
-	it("encodes secrets before the tail and identifiers are built", () => {
-		const secret = "hunter2-not-a-real-token-0000";
-		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
-		const messages = [userMessage(`export GITHUB_TOKEN=${secret}\nthen push to /srv/repos/app.git`)];
-		const context = buildInheritedContext(messages, text => obfuscator.obfuscate(text));
-		expect(context!.text).not.toContain(secret);
-		expect(context!.text).toContain("export GITHUB_TOKEN=");
-		expect(context!.identifiers.some(id => id.includes(secret))).toBe(false);
-		expect(context!.identifiers).toContain("/srv/repos/app.git");
-		// Encoding runs per call: the cached raw window does not pin an earlier redaction state.
-		expect(buildInheritedContext(messages, undefined)!.text).toContain(secret);
+	it("hands the child secrets it can encode and decode itself, including regex-matched ones", () => {
+		const plain = "hunter2-not-a-real-token-0000";
+		const matched = "tok_examplefixture";
+		const entries = [
+			{ type: "plain" as const, content: plain },
+			{ type: "regex" as const, content: "tok_[a-z0-9]+" },
+		];
+		const parent = new SecretObfuscator(entries);
+		const messages = [userMessage(`export GITHUB_TOKEN=${plain}\ncurl -H "X-Key: ${matched}" /srv/api/v1/run`)];
+		const context = buildInheritedContext(messages, parent);
+		expect(context!.text).toContain(`export GITHUB_TOKEN=${plain}`);
+		// A separate session, as the child is: its boundary encodes the tail and decodes the model's reuse of it.
+		const child = new SecretObfuscator(entries);
+		const sent = child.obfuscate(context!.text);
+		expect(sent).not.toContain(plain);
+		expect(sent).not.toContain(matched);
+		expect(child.deobfuscate(sent)).toBe(context!.text);
+	});
+
+	it("never keeps part of a secret cut at the tail edge", () => {
+		const secret = `tok_${"a1".repeat(40)}`;
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "tok_[a-z0-9]+" }]);
+		// One long line, so the cut cannot snap to a line start: raw, it lands 20 characters before the secret ends.
+		const line = `${"x".repeat(2_000)} ${secret}${"y".repeat(INHERITED_CONTEXT_CHARS - 20)}`;
+		const context = buildInheritedContext([userMessage(line)], obfuscator);
+		expect(context!.text.includes(secret) || !context!.text.includes(secret.slice(-20))).toBe(true);
+		expect(buildInheritedContext([userMessage(line)], undefined)!.text.startsWith(secret.slice(-20))).toBe(true);
 	});
 });
 
@@ -135,6 +152,23 @@ describe("inherited context turn", () => {
 		expect(frames.length).toBeLessThanOrEqual(INHERITED_CONTEXT_MAX_FRAMES);
 		expect(frames.every(block => block.type === "image" && block.mimeType === "image/png")).toBe(true);
 		expect(sent.messages[1]).toMatchObject({ role: "user" });
+	});
+
+	it("stays text when its frames would push the request past the provider image budget", async () => {
+		const model = visionModel(["text", "image"]);
+		const built = childContext(context);
+		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		const full: Context = {
+			messages: [
+				...built.messages,
+				{
+					role: "user",
+					content: Array.from({ length: providerImageBudget(model) }, () => image),
+					timestamp: 0,
+				} as Message,
+			],
+		};
+		expect(await new InheritedContextFrames().transform(full, model, false)).toBe(full);
 	});
 
 	it("stays text for a model without image input or with images blocked", async () => {

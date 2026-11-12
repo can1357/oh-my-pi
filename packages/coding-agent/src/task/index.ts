@@ -972,10 +972,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (this.#inheritedCapture?.toolCallId !== toolCallId) {
 			this.#inheritedCapture = {
 				toolCallId,
-				context: buildInheritedContext(
-					this.session.getContextMessages?.() ?? [],
-					this.session.obfuscateForProvider,
-				),
+				context: buildInheritedContext(this.session.getContextMessages?.() ?? [], this.session.providerSecrets),
 			};
 		}
 		return this.#inheritedCapture.context;
@@ -1057,10 +1054,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawn: TaskParams,
 		index: number,
 		signal: AbortSignal,
-	): Promise<SpawnRun | undefined> {
+	): Promise<SpawnRun | "dispatch" | undefined> {
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
-		// The parent's still-streaming turn (usually the reason for the spawn) is not in its context yet.
-		if (this.#wantsInheritedContext(spawn)) return undefined;
+		// The parent's still-streaming turn (usually the reason for the spawn) is not in its context
+		// yet, so a flagged item waits for dispatch; later items still start early.
+		if (this.#wantsInheritedContext(spawn)) return "dispatch";
 		let blocking: boolean;
 		try {
 			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;

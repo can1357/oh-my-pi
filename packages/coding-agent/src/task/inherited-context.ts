@@ -11,8 +11,10 @@
  * Like other snapcompact frames, these are built per request and never reach session.jsonl, so
  * a text-only model, blocked images, or a model switch get the text instead.
  *
- * The parent encodes secrets before it cuts the tail ({@link buildInheritedContext}); the
- * child's provider boundary encodes text again before it draws frames.
+ * Secrets: the parent cuts the tail on secret-encoded text, so a secret at the cut is dropped
+ * whole rather than split, then decodes the kept tail ({@link buildInheritedContext}). The child
+ * stores raw text, as it stores its raw brief, and its own provider boundary encodes it with
+ * placeholders the child can decode; frames are drawn after that encoding.
  */
 import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
@@ -38,6 +40,12 @@ const LINE_SNAP_CHARS = 400;
  * final tail, so the final cut drops it.
  */
 const ENCODE_WINDOW_CHARS = 2 * INHERITED_CONTEXT_CHARS;
+
+/** The session's secret encoder, as {@link buildInheritedContext} uses it. */
+export interface InheritedContextSecrets {
+	obfuscate(text: string): string;
+	deobfuscate(text: string): string;
+}
 
 /** Parent tail and its identifiers: plain data, safe to structured-clone into a worker. */
 export interface InheritedContext {
@@ -110,17 +118,20 @@ function tailText(text: string, chars: number): string {
 }
 
 /**
- * Serialize the parent's live context (thinking excluded), encode its secrets with `obfuscate`,
- * and keep the tail and its identifiers. `undefined` when the parent has no conversation text yet.
+ * Serialize the parent's live context (thinking excluded) and keep the tail and its identifiers.
+ * With `secrets`, the tail is cut on encoded text (a secret at the cut is dropped whole, never
+ * split) and decoded afterwards, for the child's own provider boundary to encode with placeholders
+ * it can decode. `undefined` when the parent has no conversation text yet.
  */
 export function buildInheritedContext(
 	messages: readonly Message[],
-	obfuscate: ((text: string) => string) | undefined,
+	secrets: InheritedContextSecrets | undefined,
 ): InheritedContext | undefined {
 	const raw = snapcompact.serializeConversation([...messages], { includeThinking: false }).slice(-ENCODE_WINDOW_CHARS);
-	const encoded = (obfuscate ? obfuscate(raw) : raw).trim();
+	const encoded = (secrets ? secrets.obfuscate(raw) : raw).trim();
 	if (!encoded) return undefined;
-	const text = tailText(encoded, INHERITED_CONTEXT_CHARS);
+	const tail = tailText(encoded, INHERITED_CONTEXT_CHARS);
+	const text = secrets ? secrets.deobfuscate(tail) : tail;
 	return { text, identifiers: extractIdentifiers(text) };
 }
 
@@ -153,16 +164,25 @@ const FIT_ATTEMPTS = 6;
  * geometry, the CJK grid), so the cut follows the shape instead of keeping the last frames of an
  * overflowing render, which would drop text the sidecar still lists.
  */
-function fitTail(text: string, model: Model): { text: string; shape: snapcompact.Shape } | undefined {
+function fitTail(text: string, model: Model): { text: string; shape: snapcompact.Shape; frames: number } | undefined {
 	let fitted = text;
 	for (let attempt = 0; attempt < FIT_ATTEMPTS && fitted; attempt++) {
 		const shape = snapcompact.resolveShapeForText(fitted, model);
 		const frames = snapcompact.frames(fitted, { shape });
-		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, shape };
+		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, shape, frames };
 		// Proportional cut with a margin: line snapping and wrapping make capacity uneven.
 		fitted = tailText(fitted, Math.floor(((fitted.length * INHERITED_CONTEXT_MAX_FRAMES) / frames) * 0.95));
 	}
 	return undefined;
+}
+
+function imageCount(messages: readonly Message[]): number {
+	let count = 0;
+	for (const message of messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const block of message.content) if (block.type === "image") count++;
+	}
+	return count;
 }
 
 function isInheritedContextTurn(message: Message): message is UserMessage & { content: TextContent[] } {
@@ -177,9 +197,12 @@ function isInheritedContextTurn(message: Message): message is UserMessage & { co
 
 /**
  * Per-request provider transform: renders the inherited tail of an agent-authored
- * inherited-context turn as frames for a vision model. Run after secret obfuscation so frames
- * only ever draw encoded text. Holds the last render, so a session re-sends identical bytes
- * (prompt caches stay warm) without re-rasterizing.
+ * inherited-context turn as frames for a vision model. Runs after secret obfuscation, so frames
+ * only ever draw encoded text, and before snapcompact's inline transform, whose planner then
+ * counts these frames and whose system-prompt frames land in front of this turn. Keeps the text
+ * turn when the frames would push the request past the provider image budget, where the
+ * oldest-first image clamp would drop them first. Holds the last render, so a session re-sends
+ * identical bytes (prompt caches stay warm) without re-rasterizing.
  */
 export class InheritedContextFrames {
 	#last?: { key: string; content: (TextContent | ImageContent)[] };
@@ -189,16 +212,17 @@ export class InheritedContextFrames {
 		const index = context.messages.findIndex(isInheritedContextTurn);
 		if (index === -1) return context;
 		const message = context.messages[index] as UserMessage & { content: TextContent[] };
-		const content = await this.#render(message.content[1]!.text, model);
+		const room = snapcompact.providerImageBudget(model) - imageCount(context.messages);
+		const content = await this.#render(message.content[1]!.text, model, room);
 		if (!content) return context;
 		const messages = context.messages.slice();
 		messages[index] = { ...message, content };
 		return { ...context, messages };
 	}
 
-	async #render(tail: string, model: Model): Promise<(TextContent | ImageContent)[] | undefined> {
+	async #render(tail: string, model: Model, room: number): Promise<(TextContent | ImageContent)[] | undefined> {
 		const fit = fitTail(tail, model);
-		if (!fit) return undefined;
+		if (!fit || fit.frames > room) return undefined;
 		const key = `${JSON.stringify(fit.shape)}\n${fit.text}`;
 		if (this.#last?.key === key) return this.#last.content;
 		let frames: ImageContent[];

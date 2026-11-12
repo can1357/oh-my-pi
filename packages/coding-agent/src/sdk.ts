@@ -2732,7 +2732,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
 			getContextMessages: () => convertToLlm(session?.messages ?? []),
-			obfuscateForProvider: text => obfuscator?.obfuscate(text) ?? text,
+			providerSecrets: obfuscator,
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
@@ -4712,7 +4712,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// only when a provider fetches them, never held as pixels here.
 			blobBroker,
 		);
-		// A task child's inherited parent tail, drawn as frames for vision models (after obfuscation).
+		// A task child's inherited parent tail, drawn as frames for vision models (after obfuscation, before inline snapcompact).
 		const inheritedContextFrames = new InheritedContextFrames();
 		// One transform per conversation: the date/cwd reminder remembers what each
 		// conversation was sent, so the main loop and every advisor get their own.
@@ -4723,12 +4723,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
 				transformed = capArchiveFrameBytes(transformed, transformModel);
-				transformed = await snapcompactInline.transform(transformed, transformModel);
+				// Before inline snapcompact: its planner counts these frames against the image budget.
 				transformed = await inheritedContextFrames.transform(
 					transformed,
 					transformModel,
 					cfgImagesBlockImages.get(settings),
 				);
+				transformed = await snapcompactInline.transform(transformed, transformModel);
 				transformed = clampProviderContextImages(transformed, transformModel);
 				transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 				// After the model-specific normalizers: they carry better wording for the
