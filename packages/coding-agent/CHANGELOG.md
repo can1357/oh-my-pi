@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
@@ -273,10 +277,6 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
-
-### Changed
-
-- When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id
 
 ## [18.19.0] - 2026-11-12
 
