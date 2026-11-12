@@ -6,6 +6,10 @@
 
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
 
+### Fixed
+
+- Fixed `edit` results after `lsp.formatOnWrite` (or an editor's format-on-save) reformatted the file showing the lines as sent under the formatted file's `[path#TAG]`; the result now shows the written lines and no longer blames the editor ([#18998](https://github.com/can1357/oh-my-pi/issues/18998))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
