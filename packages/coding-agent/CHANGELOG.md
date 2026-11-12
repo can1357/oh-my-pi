@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A seance `task` whose `sourceSession` id belongs to another project now fails with a hint to pass that session's `.jsonl` path, which works from any project, instead of only "was not found"
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
