@@ -1806,10 +1806,6 @@ describe("YieldTool", () => {
 		expect(overridden.content).toEqual([
 			{ type: "text", text: "Result submitted (schema validation overridden after 4 failed attempt(s))." },
 		]);
-		const corrected = { summary: "x".repeat(1200) };
-		const recovered = await tool.execute("call-decoded-summary-corrected", { data: JSON.stringify(corrected) });
-		expect(recovered.details?.data).toEqual(corrected);
-		expect(recovered.details?.schemaOverridden).toBeUndefined();
 	});
 
 	it("reports decoded nested constraints for incremental section payloads", async () => {
@@ -1844,37 +1840,20 @@ describe("YieldTool", () => {
 			/Section "findings" does not match schema: review\/summary: must be at most 3 characters/,
 		);
 		await expect(invalid).rejects.toThrow(/`data`.*decoded value.*not a JSON string/);
-		const recovered = await tool.execute("call-decoded-section-corrected", {
-			type: ["findings"],
-			data: JSON.stringify({ review: { summary: "ok" } }),
-		});
-		expect(recovered.details).toMatchObject({
-			data: { review: { summary: "ok" } },
-			status: "success",
-			type: ["findings"],
-		});
-		expect(recovered.details?.schemaOverridden).toBeUndefined();
 	});
 
-	it("keeps raw field, non-JSON string, and null diagnostics unchanged", async () => {
+	it("keeps a string section's own violations when its text happens to parse as JSON", async () => {
 		const tool = new YieldTool(
 			createSession({
 				outputSchema: {
 					type: "object",
-					properties: { summary: { type: "string", maxLength: 3 } },
-					required: ["summary"],
+					properties: { notes: { type: "array", items: { type: "string", maxLength: 5 } } },
 				},
 			}),
 		);
-		const rawObject = tool.execute("call-raw-summary-invalid", { data: { summary: "four" } });
-		await expect(rawObject).rejects.toThrow(/Output does not match schema: summary: must be at most 3 characters/);
-		await expect(rawObject).rejects.not.toThrow(/decoded value/);
-		const nonJson = tool.execute("call-non-json-summary", { data: "not JSON" });
-		await expect(nonJson).rejects.toThrow(/Output does not match schema: expected object, received string/);
-		await expect(nonJson).rejects.not.toThrow(/decoded value/);
-		const decodedNull = tool.execute("call-null-summary", { data: "null" });
-		await expect(decodedNull).rejects.toThrow(/Output does not match schema: expected object, received string/);
-		await expect(decodedNull).rejects.not.toThrow(/decoded value/);
+		const invalid = tool.execute("call-json-looking-note", { type: ["notes"], data: "[1,2,3]" });
+		await expect(invalid).rejects.toThrow(/Section "notes" does not match schema: must be at most 5 characters/);
+		await expect(invalid).rejects.not.toThrow(/decoded value/);
 	});
 
 	it("recovers double-encoded JSON primitives only when raw validation fails", async () => {

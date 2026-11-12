@@ -677,11 +677,14 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				const decoded = parseJsonEncodedValue(data);
 				if (decoded.parsed && decoded.value !== null) {
 					const normalized = normalizeData(decoded.value);
-					// Report decoded constraints even when recovery cannot adopt the value.
-					sectionFailure = validateData(normalized);
-					if (sectionFailure === undefined || sectionFailure.success) {
+					const revalidated = validateData(normalized);
+					if (revalidated === undefined || revalidated.success) {
 						data = normalized;
-					} else {
+						sectionFailure = revalidated;
+					} else if (sectionFailure.issues.some(issue => issue.path.length === 0 && issue.keyword === "type")) {
+						// Only a string the schema rejects outright was meant as the decoded
+						// value; a string it accepts keeps its own violations (`maxLength`, …).
+						sectionFailure = revalidated;
 						decodedFailureHint = " Send `data` as the decoded value, not a JSON string.";
 					}
 				}
