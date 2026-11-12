@@ -612,7 +612,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
 		// An intercepted call is refused outright; asking first would only approve a doomed call.
-		const cwdCommand = input.cwd ? command : (extractLeadingCdTarget(command)?.rest ?? command);
+		const cwdCommand = extractLeadingCdTarget(command)?.rest ?? command;
 		const name = typeof input.name === "string" ? blankToUndefined(input.name) : undefined;
 		const interception = this.#interception(command, cwdCommand, name, ctx?.toolNames ?? []);
 		if (interception) {
@@ -667,6 +667,33 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
+	};
+	readonly approvalRestrictionPaths = (args: unknown): string[] => {
+		const input = (args ?? {}) as Partial<BashToolInput>;
+		let command = typeof input.command === "string" ? input.command : "";
+		let cd = extractLeadingCdTarget(command);
+		if (!cd) return [];
+		const router = InternalUrlRouter.instance();
+		const cwd =
+			input.cwd && router.canHandle(input.cwd)
+				? router.normalize(input.cwd)
+				: resolveCommandCwd(input.cwd, this.session.cwd, false);
+		let directories = new Set([cwd]);
+		const maxDirectories = 64;
+		while (cd) {
+			// Failed cd commands can leave later semicolon-separated commands in any earlier directory.
+			const next = new Set(directories);
+			for (const directory of directories) {
+				next.add(router.canHandle(cd.path) ? router.normalize(cd.path) : resolveShellDirectory(cd.path, directory));
+				if (next.size > maxDirectories) {
+					throw new ToolError("Too many possible leading cd directories; use cwd instead.");
+				}
+			}
+			directories = next;
+			command = cd.rest;
+			cd = extractLeadingCdTarget(command);
+		}
+		return [...directories];
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const rawCommand = (args as Partial<BashToolInput>).command;

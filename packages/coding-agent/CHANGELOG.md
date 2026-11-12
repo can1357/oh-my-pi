@@ -304,6 +304,10 @@
 - `lsp.formatOnWrite` no longer re-indents 2/4-space files at 1 space per level when they contain JSDoc/block comments or one-off odd indents, and no longer converts tab-indented files that open with a JSDoc block to spaces ([#18544](https://github.com/can1357/oh-my-pi/issues/18544))
 - Isolated task sandboxes now finish cleanup after a SIGHUP or other signal even when releasing them takes longer than the agent shutdown grace period ([#18519](https://github.com/can1357/oh-my-pi/issues/18519)).
 
+### Changed
+
+- Eval's `sh()` helper now applies Bash command policies, including required approval; unmatched commands in restrictive approval modes can prompt or fail without an interactive UI. ([#18594](https://github.com/can1357/oh-my-pi/pull/18594) by [@jasonharrison](https://github.com/jasonharrison))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

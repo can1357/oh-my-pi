@@ -216,7 +216,7 @@ Valid rule approvals are `allow`, `prompt`, and `deny`. Regardless of the opt-in
 
 Project settings can tighten `bash.patterns` but never loosen them: `deny` and `prompt` rules from the operator's layers (global config, `--config` overlays, and runtime overrides) still apply when a project's `bash.patterns` would allow the command, because repository settings files are writable by the agent.
 
-`bash.patterns` is an approval policy, not containment. An allowed program still has the bash process's filesystem, network, and subprocess access, and a seemingly narrow program can perform broader actions through its own options or configuration. The rules govern the `bash` tool only; they do not cover shells started through `eval`. To close that path, add a `tools.approval.eval` policy (`prompt` or `deny`) as well; see [Tool approval mode](./approval-mode.md).
+`bash.patterns` is an approval policy, not containment. An allowed program still has the bash process's filesystem, network, and subprocess access, and a seemingly narrow program can perform broader actions through its own options or configuration. The rules cover the `bash` tool and eval's built-in [`sh()` helper](./tools/eval.md#sh), not arbitrary subprocesses started by eval code. Use `tools.approval.eval` (`prompt` or `deny`) to gate general eval access; see [Tool approval mode](./approval-mode.md).
 
 ### Bash interceptor patterns
 

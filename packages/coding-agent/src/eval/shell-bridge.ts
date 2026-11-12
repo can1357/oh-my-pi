@@ -12,11 +12,13 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { executeBash } from "../exec/bash-executor";
-import { cfgBashGitGuard } from "../exec/settings";
+import { cfgBashEnabled, cfgBashGitGuard } from "../exec/settings";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
+import { BashTool } from "../tools/bash";
 import { resolveToCwd } from "../tools/path-utils";
 import type { JsStatusEvent } from "./js/shared/types";
+import { approveEvalHostCall } from "./preludes";
 
 /** Synthetic bridge name reserved for the `sh` helper across both runtimes. */
 export const EVAL_SHELL_BRIDGE_NAME = "__shell__";
@@ -54,11 +56,38 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 	}
 	const { session, signal } = options;
 	const sessionId = session.getSessionId?.() ?? undefined;
+	const commandCwd = cwd ? resolveToCwd(cwd, session.cwd) : session.cwd;
+	const registeredBash = session.getToolByName?.("bash");
+	const bash = session.getToolForEvalBridge
+		? session.getToolForEvalBridge("bash")
+		: session.getToolByName
+			? registeredBash
+			: cfgBashEnabled.get(session.settings)
+				? new BashTool(session)
+				: undefined;
+	if (!bash) throw new ToolError("sh() requires Bash to be enabled in this session");
+
+	await approveEvalHostCall(
+		bash,
+		{ command, cwd: commandCwd },
+		{ session, signal, context: session.getToolContext?.() },
+	);
+	signal?.throwIfAborted();
+	const currentBash = session.getToolForEvalBridge?.("bash");
+	if (
+		(session.getToolForEvalBridge && (!currentBash || (!session.getToolByName && currentBash !== bash))) ||
+		(session.getToolByName && session.getToolByName("bash") !== registeredBash) ||
+		(!session.getToolForEvalBridge && !session.getToolByName && !cfgBashEnabled.get(session.settings)) ||
+		(session.getSessionId?.() ?? undefined) !== sessionId
+	) {
+		throw new ToolError("sh() authorization became stale; retry the command");
+	}
+
 	const chunks: string[] = [];
 	let length = 0;
 	let truncated = false;
 	const result = await executeBash(command, {
-		cwd: cwd ? resolveToCwd(cwd, session.cwd) : session.cwd,
+		cwd: commandCwd,
 		// 0 disables the executor deadline: the cell's own deadline governs.
 		timeout: timeout === undefined ? 0 : timeout * 1000,
 		signal,

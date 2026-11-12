@@ -3,10 +3,12 @@ import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import {
 	approvalRestrictions,
+	type ApprovalSubject,
 	denyError,
 	requestApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
+	type ResolvedApproval,
 } from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
@@ -91,44 +93,58 @@ export function findEnabledEvalPrelude(session: ToolSession, name: string): Eval
 	return definition?.enabled?.() === false ? undefined : definition;
 }
 
-async function approvePreludeInvocation(
-	definition: EvalPreludeDefinition,
+/** Authorize one eval host call through the existing tool policy and approval UI. */
+export async function approveEvalHostCall(
+	subject: ApprovalSubject,
 	parameters: unknown,
-	context: EvalPreludeContext,
+	context: Pick<EvalPreludeContext, "session" | "signal" | "context">,
 ): Promise<void> {
 	context.signal?.throwIfAborted();
-	// Fourth execute-time site: same helper as wrapper/cursor/mcp so a missing
-	// context cannot silently yolo. Empty `context.context` fail-closes;
-	// omitting it inherits the live session settings (schema default yolo).
-	const settings = context.context?.settings ?? context.session.settings;
-	const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
-		context.context ?? (settings ? { settings } : undefined),
-	);
-	const subject: { name: string; approval?: ToolApproval } = { name: definition.name };
-	if (definition.approval !== undefined) subject.approval = definition.approval;
-	// A prelude names no path of its own, so a restricted folder matches it by the session's directory.
-	const resolved = resolveApproval(
-		subject,
-		parameters,
-		mode,
-		policies,
-		undefined,
-		approvalRestrictions(settings, context.session.cwd),
-	);
-	if (resolved.policy === "deny") throw denyError(resolved, definition.name);
+	const cwd = context.session.cwd;
+	const resolveCurrentApproval = (toolContext = context.context): ResolvedApproval => {
+		// An omitted context inherits session policy; an explicitly empty context fails closed.
+		const settings = toolContext?.settings ?? context.session.settings;
+		const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
+			toolContext ?? (settings ? { settings } : undefined),
+		);
+		return resolveApproval(
+			subject,
+			parameters,
+			mode,
+			policies,
+			undefined,
+			approvalRestrictions(settings, cwd),
+			toolContext,
+		);
+	};
+	const resolved = resolveCurrentApproval();
+	if (resolved.policy === "deny") throw denyError(resolved, subject.name);
 	if (resolved.policy !== "prompt") return;
 
 	const ui = context.context?.ui;
 	if (!ui || context.context?.hasUI === false) {
+		const reason = resolved.reason ? `\nReason: ${resolved.reason}` : "";
 		throw new Error(
-			`Eval prelude "${definition.name}" requires approval but no interactive UI is available.\n` +
-				`Set tools.approval.${definition.name}: allow or use an interactive UI to approve the call.`,
+			`Eval host call "${subject.name}" requires approval but no interactive UI is available.${reason}\n` +
+				"Use an interactive session to approve this call.",
 		);
 	}
 	const answer = await untilAborted(context.signal, () =>
 		requestApproval(ui, subject, parameters, { reason: resolved.reason }),
 	);
-	if (answer === "deny") throw new Error(`Eval prelude call denied by user: ${definition.name}`);
+	if (answer === "deny") throw new Error(`Eval host call denied by user: ${subject.name}`);
+	const current = resolveCurrentApproval(context.session.getToolContext?.() ?? context.context);
+	if (current.policy === "deny") throw denyError(current, subject.name);
+	if (
+		current.policy === "prompt" &&
+		(current.reason !== resolved.reason ||
+			current.source !== resolved.source ||
+			current.tier !== resolved.tier ||
+			current.override !== resolved.override ||
+			current.policyKey !== resolved.policyKey)
+	) {
+		throw new Error(`Eval host call "${subject.name}" authorization changed; retry the call.`);
+	}
 }
 
 /**
@@ -146,13 +162,13 @@ export async function invokeEvalPrelude(
 	let definition = findEnabledEvalPrelude(context.session, name);
 	if (!definition) throw new Error(`Eval prelude "${name}" is not enabled in the current session.`);
 
-	await approvePreludeInvocation(definition, parameters, context);
+	await approveEvalHostCall(definition, parameters, context);
 	context.signal?.throwIfAborted();
 	const current = findEnabledEvalPrelude(context.session, name);
 	if (!current) throw new Error(`Eval prelude "${name}" is not enabled in the current session.`);
 	if (current !== definition) {
 		definition = current;
-		await approvePreludeInvocation(definition, parameters, context);
+		await approveEvalHostCall(definition, parameters, context);
 		context.signal?.throwIfAborted();
 		if (findEnabledEvalPrelude(context.session, name) !== definition) {
 			throw new Error(`Eval prelude "${name}" changed while authorizing the call.`);
