@@ -801,6 +801,10 @@ type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
 	config?: SimpleProviderConfig;
 	headers?: SimpleProviderDiscoveryHeaders;
 	dynamicModelsAuthoritative?: true;
+	/** Live rows are the whole truth for reasoning (no OR-merge with the bundle). */
+	dynamicReasoningAuthoritative?: true;
+	/** Live rows are the whole truth for input modality (no OR-merge with the bundle). */
+	dynamicInputAuthoritative?: true;
 	requireApiKey?: true;
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	cacheProviderId?: string;
@@ -828,6 +832,8 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 		providerId: options.providerId,
 		...(options.cacheProviderId && { cacheProviderId: options.cacheProviderId }),
 		...(options.dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
+		...(options.dynamicReasoningAuthoritative && { dynamicReasoningAuthoritative: true }),
+		...(options.dynamicInputAuthoritative && { dynamicInputAuthoritative: true }),
 		...(options.dropCachedModelIdsOnStaticMismatch && {
 			dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch,
 		}),
@@ -4828,6 +4834,69 @@ export function togetherModelManagerOptions(
 	config?: TogetherModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	return createSimpleOpenAICompletionsOptions("together", "https://api.together.xyz/v1", config);
+}
+
+// ---------------------------------------------------------------------------
+// Chutes
+// ---------------------------------------------------------------------------
+
+function chutesHasFeature(features: unknown[], feature: string): boolean {
+	return features.includes(feature);
+}
+
+/**
+ * Chutes rows carry a flat `pricing` object in USD per million tokens
+ * (`prompt`, `completion`, `input_cache_read`), plus `context_length`,
+ * `max_output_length`, `input_modalities`, and `supported_features`. Each
+ * field falls back independently to the bundled row when absent, so a row
+ * missing one field keeps the rest of its live metadata.
+ */
+function mapChutesModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	const features = Array.isArray(entry.supported_features) ? entry.supported_features : undefined;
+	const reasoning = features ? chutesHasFeature(features, "reasoning") : model.reasoning;
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	return {
+		...model,
+		reasoning,
+		// A row that reports no reasoning must not carry a reference effort ladder.
+		...(reasoning ? {} : { thinking: undefined }),
+		...(features ? { supportsTools: chutesHasFeature(features, "tools") } : {}),
+		input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
+		// Chutes reports a nonzero price for every priced chute; an absent
+		// price falls back to the bundled row, so cost is not authoritative.
+		cost: {
+			input: toPositiveNumber(pricing.prompt, model.cost.input),
+			output: toPositiveNumber(pricing.completion, model.cost.output),
+			cacheRead: toPositiveNumber(pricing.input_cache_read, model.cost.cacheRead),
+			cacheWrite: 0,
+		},
+		maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
+	};
+}
+
+/** Builds Chutes' model-discovery manager (`https://llm.chutes.ai/v1/models`). */
+export function chutesModelManagerOptions(config?: SimpleProviderConfig): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "chutes",
+		defaultBaseUrl: "https://llm.chutes.ai/v1",
+		config,
+		requireApiKey: true,
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+		// `supported_features` / `input_modalities` are the deployment's whole
+		// truth: a live row without `reasoning` or `image` must not regain them
+		// from the bundled row.
+		dynamicReasoningAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		mapModel: mapChutesModel,
+	});
 }
 
 // ---------------------------------------------------------------------------

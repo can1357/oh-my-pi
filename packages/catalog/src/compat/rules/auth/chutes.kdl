@@ -1,0 +1,11 @@
+auth "chutes" {
+	name "Chutes"
+	login "api-key" {
+		auth-url "https://chutes.ai/app/settings/api-keys"
+		instructions "Create or copy your API key from the Chutes dashboard"
+		prompt "Paste your Chutes API key" placeholder="cpk_..."
+		// Validate against inference, not /models: Chutes' models endpoint is
+		// public and would accept any string as a key.
+		validate "chat-completions" label="Chutes" base-url="https://llm.chutes.ai/v1" model="deepseek-ai/DeepSeek-V4-Flash-0731-TEE"
+	}
+}
