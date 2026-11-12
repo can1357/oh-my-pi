@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { deobfuscateSessionContext, obfuscateMessages } from "@oh-my-pi/pi-coding-agent/secrets";
+import { learnFromPlaintext } from "@oh-my-pi/pi-coding-agent/secrets/message-transform";
 import { type SecretEntry, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 
@@ -75,10 +76,16 @@ describe("secret placeholders", () => {
 		expect(obfuscator.deobfuscate(output)).toBe(input);
 	});
 
-	it("still lets rules match camelCase that is not made of placeholder words", () => {
-		const obfuscator = new SecretObfuscator([{ type: "regex", content: "[A-Za-z]{20,}" }], KEY);
+	it("lets rules redact word runs it never minted as placeholders", () => {
+		const token = new SecretObfuscator([{ type: "regex", content: "zzk_[A-Za-z0-9]{20,}" }], KEY);
+		const password = new SecretObfuscator([{ type: "regex", content: "password=(?P<secret>\\S+)" }], KEY);
 
-		expect(obfuscator.obfuscate("id getUserAccountSettingsQuickly")).not.toContain("getUserAccountSettingsQuickly");
+		// A suffix of list words after `_` does not hide the token...
+		expect(token.obfuscate("tok zzk_ABCDEFGHIJ0123456789xyz_abandonAbilityAbleAbout")).not.toContain(
+			"zzk_ABCDEFGHIJ0123456789xyz",
+		);
+		// ...and a passphrase made of list words is still a secret.
+		expect(password.obfuscate("password=correctHorseAbandonAbility")).not.toContain("correctHorseAbandonAbility");
 	});
 
 	it("holds back only a streamed tail that could still become a placeholder", () => {
@@ -140,11 +147,12 @@ describe("session codec", () => {
 		expect(outbound[1]).toEqual({ role: "user", content: `now use ${placeholder}`, timestamp: 3 });
 	});
 
-	it("replays a placeholder whose plaintext left the session byte-identical under a broad rule", () => {
-		const earlier = new SecretObfuscator([{ type: "plain", content: "hunter2-database-pass" }], KEY);
-		const placeholder = earlier.obfuscate("hunter2-database-pass");
-		// A fresh process that never saw the plaintext, with a rule that matches long words.
-		const fresh = new SecretObfuscator([{ type: "regex", content: "[A-Za-z]{12,}" }], KEY);
+	it("replays a placeholder byte-identical under a broad rule once the session's plaintext is learned", () => {
+		const entries: SecretEntry[] = [{ type: "regex", content: "[A-Za-z]{12,}" }];
+		const placeholder = new SecretObfuscator(entries, KEY).obfuscate("hunterdatabasepass");
+		// A fresh process learns the session it loads, as AgentSession does.
+		const fresh = new SecretObfuscator(entries, KEY);
+		learnFromPlaintext(fresh, [{ role: "user", content: "use hunterdatabasepass", timestamp: 1 }]);
 		const reply = assistant(`stored ${placeholder}`, `thought ${placeholder}`);
 
 		expect(obfuscateMessages(fresh, [reply])[0]).toBe(reply);

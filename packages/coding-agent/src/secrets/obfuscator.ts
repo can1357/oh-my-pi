@@ -3,7 +3,6 @@ import { deepWalkStrings } from "./json-strings";
 import {
 	buildPlaceholder,
 	defaultPlaceholderKey,
-	isPlaceholderWords,
 	labelShowsSecret,
 	MIN_OBFUSCATE_SECRET_LEN,
 	PLACEHOLDER_WORDS,
@@ -53,26 +52,6 @@ const NO_CANDIDATES: ReadonlySet<CompiledRegexEntry> = new Set();
 const ALNUM = /[A-Za-z0-9]/;
 /** A run that could still grow into placeholder words: lowercase first word, camelCased after. */
 const WORDS_PREFIX = /^[a-z]+(?:[A-Z][a-z]*)*$/;
-
-/**
- * Ranges of placeholders in `text`: runs of list words, minted here or not,
- * with the `Name_` before them. Rules never match inside them, so encoding is
- * idempotent, including for a placeholder whose plaintext left the session.
- */
-function placeholderRanges(text: string): Array<readonly [number, number]> {
-	const ranges: Array<readonly [number, number]> = [];
-	for (const match of text.matchAll(PLACEHOLDER_WORDS_RE)) {
-		if (!isPlaceholderWords(match[0])) continue;
-		let start = match.index;
-		if (text[start - 1] === "_") {
-			let nameStart = start - 1;
-			while (nameStart > 0 && ALNUM.test(text[nameStart - 1]!)) nameStart--;
-			if (nameStart < start - 1) start = nameStart;
-		}
-		ranges.push([start, match.index + match[0].length]);
-	}
-	return ranges;
-}
 
 /**
  * Encodes local plaintext for a provider and decodes provider text back.
@@ -190,6 +169,22 @@ export class SecretObfuscator {
 		if (this.#secretByWords.size === 0) return text;
 		let out = "";
 		let cursor = 0;
+		for (const { start, end, secret } of this.#knownPlaceholders(text)) {
+			out += text.slice(cursor, start) + secret;
+			cursor = end;
+		}
+		return cursor === 0 ? text : out + text.slice(cursor);
+	}
+
+	/**
+	 * Placeholders this instance minted in `text`, in order: the minted words
+	 * and, when it is right before them, the exact `Name_` minted with them.
+	 * Word runs it never minted are plain text, whatever their shape.
+	 */
+	#knownPlaceholders(text: string): Array<{ start: number; end: number; secret: string }> {
+		const found: Array<{ start: number; end: number; secret: string }> = [];
+		if (this.#secretByWords.size === 0) return found;
+		let cursor = 0;
 		for (const match of text.matchAll(PLACEHOLDER_WORDS_RE)) {
 			const known = this.#secretByWords.get(match[0]);
 			if (known === undefined) continue;
@@ -203,10 +198,10 @@ export class SecretObfuscator {
 			) {
 				start = before;
 			}
-			out += text.slice(cursor, start) + known.secret;
 			cursor = match.index + match[0].length;
+			found.push({ start, end: cursor, secret: known.secret });
 		}
-		return cursor === 0 ? text : out + text.slice(cursor);
+		return found;
 	}
 
 	/**
@@ -342,9 +337,10 @@ export class SecretObfuscator {
 	 * later ones. `mint` decides whether placeholders are minted for them.
 	 *
 	 * Literals are found everywhere: a placeholder never contains a configured
-	 * secret, so a literal inside a placeholder-shaped token is plaintext. Rules
-	 * run only between placeholder-shaped tokens, which keeps encoding
-	 * idempotent under rules broad enough to match placeholder words.
+	 * secret, so a literal inside one is plaintext. Rules run only outside the
+	 * placeholders this instance minted, which keeps encoding idempotent under
+	 * rules broad enough to match placeholder words; an unknown word run is
+	 * plain text and rules see it.
 	 */
 	#spans(text: string, native: NativeScan, mint: boolean): Span[] {
 		const candidates: Span[] = [];
@@ -357,7 +353,7 @@ export class SecretObfuscator {
 		}
 		if (native.candidates.size > 0) {
 			let cursor = 0;
-			for (const [start, end] of [...placeholderRanges(text), [text.length, text.length] as const]) {
+			for (const { start, end } of [...this.#knownPlaceholders(text), { start: text.length, end: text.length }]) {
 				if (start > cursor) this.#ruleSpans(text.slice(cursor, start), cursor, native, mint, candidates);
 				cursor = end;
 			}

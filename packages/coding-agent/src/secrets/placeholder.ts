@@ -12,7 +12,6 @@ import wordList from "./words.txt" with { type: "text" };
  * each word carries 11 bits.
  */
 const WORDS = wordList.trim().split("\n");
-const WORD_SET = new Set(WORDS);
 const BITS_PER_WORD = 11;
 /** Words in a placeholder: 44 bits of a keyed digest, so unrelated secrets practically never share one. */
 export const PLACEHOLDER_WORDS = 4;
@@ -65,14 +64,6 @@ export function buildPlaceholder(words: string, friendlyName?: string): string {
  * replaces words this codec minted, so ordinary camelCase never restores.
  */
 export const PLACEHOLDER_WORDS_RE = /(?<![A-Za-z0-9])[a-z]+(?:[A-Z][a-z]+){3,}(?![A-Za-z0-9])/g;
-
-/** Whether a {@link PLACEHOLDER_WORDS_RE} run is made only of list words, as every placeholder's is. */
-export function isPlaceholderWords(words: string): boolean {
-	for (const word of words.split(/(?=[A-Z])/)) {
-		if (!WORD_SET.has(word.toLowerCase())) return false;
-	}
-	return true;
-}
 
 /** Normalize a friendly name into the model-visible placeholder prefix: letters and digits, case kept. */
 export function sanitizeSecretFriendlyName(name: string): string | undefined {
