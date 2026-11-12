@@ -8,7 +8,16 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { complete, stream } from "@oh-my-pi/pi-ai/stream";
-import type { Api, AssistantMessage, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Model,
+	OptionsForApi,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $which } from "@oh-my-pi/pi-utils";
