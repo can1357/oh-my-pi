@@ -580,20 +580,14 @@ export const cfgFindHitThreshold = register({
 	id: "find.hitThreshold",
 	type: "number",
 	default: undefined,
+	// The registry reads a non-number config value as the default, so quoted text must fail here.
 	validate: raw => {
-		if (raw !== undefined && raw !== null) parseProbability("find.hitThreshold", raw);
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !(raw > 0 && raw <= 1)) {
+			throw new Error(`Invalid find.hitThreshold: expected a number above 0, up to 1, got ${Bun.inspect(raw)}.`);
+		}
 	},
-	normalize: raw => (raw === undefined || raw === null ? raw : parseProbability("find.hitThreshold", raw)),
 });
-
-/**
- * A probability from 0 to 1. Only a number passes: a loaded config layer is not normalized, and the
- * registry reads any non-number there as the default, so quoted text must fail here instead.
- */
-function parseProbability(id: string, raw: unknown): number {
-	if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw;
-	throw new Error(`Invalid ${id}: expected a number from 0 to 1, got ${Bun.inspect(raw)}.`);
-}
 
 // Optional tools
 

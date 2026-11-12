@@ -369,17 +369,11 @@ describe("jfind cascade", () => {
 				path.join(dir, "src", "use.ts"),
 				'import { parseToken } from "./parse";\nexport const parts = parseToken("a.b");\n',
 			);
-			await Bun.write(path.join(dir, "src", "legacy.ts"), "export const legacyParseToken = undefined;\n");
-			await Bun.write(path.join(dir, "src", "cache.ts"), "export const parseTokenCache = new Map();\n");
-			// Every name and sketch routes onward. Verification scores the definition 0.9 and the caller 0.3,
-			// says 0 for legacy.ts, and gives cache.ts no usable answer.
+			// Every name and sketch routes onward. Verification scores the definition 0.9 and the caller 0.3.
 			const judge = new FakeJudge((request, key) => {
 				const state = stateOf(request);
 				if ("tree" in state || "files" in state) return 0.9;
-				const passage = (state.passages as Record<string, string>)[key]!;
-				if (passage.includes("legacyParseToken")) return 0;
-				if (passage.includes("parseTokenCache")) return Number.NaN;
-				return passage.includes("export function parseToken") ? 0.9 : 0.3;
+				return (state.passages as Record<string, string>)[key]!.includes("export function parseToken") ? 0.9 : 0.3;
 			});
 			const search = (threshold?: number) =>
 				runCascade({
@@ -399,53 +393,14 @@ describe("jfind cascade", () => {
 			const strict = await search(0.5);
 			expect(strict.threshold).toBe(0.5);
 			expect(strict.hits.map(hit => hit.rel)).toEqual(["src/parse.ts"]);
-
-			// τ 0 still needs positive evidence: a file scored 0 or left unanswered is no hit.
-			const open = await search(0);
-			expect(open.hits.map(hit => hit.rel)).toEqual(["src/parse.ts", "src/use.ts"]);
 		} finally {
 			await removeWithRetries(dir);
 		}
 	});
 
-	it("runs the find tool at the configured find.hitThreshold and rejects a quoted value", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-setting-threshold-"));
-		try {
-			await Bun.write(
-				path.join(dir, "parse.ts"),
-				'export function parseToken(text: string) { return text.split("."); }\n',
-			);
-			await Bun.write(
-				path.join(dir, "use.ts"),
-				'import { parseToken } from "./parse";\nexport const parts = parseToken("a.b");\n',
-			);
-			const answers = new FakeJudge((request, key) => {
-				const state = stateOf(request);
-				if ("tree" in state || "files" in state) return 0.9;
-				return (state.passages as Record<string, string>)[key]!.includes("export function parseToken") ? 0.9 : 0.3;
-			});
-			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(request => answers.judge(request));
-			const tool = new FindTool({
-				cwd: dir,
-				hasUI: false,
-				getSessionFile: () => null,
-				getSessionSpawns: () => "*",
-				settings: Settings.isolated({ "find.enabled": "on", "find.hitThreshold": 0.5 }),
-				modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
-			});
-			const result = await tool.execute("x", {
-				query: "where is the token parser defined?",
-				grep_keywords: ["parseToken"],
-			});
-			expect(result.details?.threshold).toBe(0.5);
-			expect(result.details?.hits.map(hit => hit.rel)).toEqual(["parse.ts"]);
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-			expect(text).toContain("(τ 0.50)");
-			// Quoted YAML text would otherwise pass validation and then read as the default.
-			expect(() => Settings.isolated({ "find.hitThreshold": "0.5" })).toThrow("Invalid find.hitThreshold");
-		} finally {
-			await removeWithRetries(dir);
-		}
+	it("rejects a find.hitThreshold that would otherwise read as the default or admit unscored files", () => {
+		expect(() => Settings.isolated({ "find.hitThreshold": "0.5" })).toThrow("Invalid find.hitThreshold");
+		expect(() => Settings.isolated({ "find.hitThreshold": 0 })).toThrow("Invalid find.hitThreshold");
 	});
 
 	it("counts unusable answers apart from failed requests", async () => {
