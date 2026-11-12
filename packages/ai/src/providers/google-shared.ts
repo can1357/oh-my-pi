@@ -456,6 +456,8 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "STOP":
 			return "stop";
 		case "MAX_TOKENS":
+		// Only reached when a segment ends without a token to resume from: the output was cut short.
+		case "CONTINUATION":
 			return "length";
 		case "BLOCKLIST":
 		case "PROHIBITED_CONTENT":
@@ -488,6 +490,7 @@ export function mapStopReasonString(reason: string): StopReason {
 		case "STOP":
 			return "stop";
 		case "MAX_TOKENS":
+		case "CONTINUATION":
 			return "length";
 		default:
 			return "error";
@@ -560,6 +563,72 @@ export function mapGoogleUsage(metadata: UsageMetadata): Usage {
 		...(thinking > 0 ? { reasoningTokens: thinking } : {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
+}
+
+const USAGE_COUNTS = [
+	"promptTokenCount",
+	"candidatesTokenCount",
+	"thoughtsTokenCount",
+	"totalTokenCount",
+	"cachedContentTokenCount",
+] as const;
+
+function addGoogleUsage(earlier: UsageMetadata, segment: UsageMetadata): UsageMetadata {
+	const sum: UsageMetadata = { ...segment };
+	for (const key of USAGE_COUNTS) {
+		if (earlier[key] !== undefined || segment[key] !== undefined)
+			sum[key] = (earlier[key] ?? 0) + (segment[key] ?? 0);
+	}
+	return sum;
+}
+
+/**
+ * Streams a generation Google splits into output segments as one stream of chunks.
+ *
+ * Gemini 4 Hydrogen ends each 65,536-token segment of a longer generation with
+ * `finishReason: CONTINUATION` and a `continuationToken`; resending the same request with
+ * that token streams the next segment. `resume` sends that request. Chunks pass through
+ * as they arrive, except that a CONTINUATION finish carrying a token is dropped (the next
+ * segment follows it), so the consumer sees one generation, and usage is summed across
+ * segments: each segment reports only its own request, whose prompt is the original prompt
+ * plus all output so far.
+ * A CONTINUATION without a token is passed on and ends the generation as cut short.
+ * Ref: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+ */
+export async function* followGoogleContinuations<C>(
+	firstSegment: AsyncIterable<C>,
+	responseOf: (chunk: C) =>
+		| {
+				candidates?: { finishReason?: string; continuationToken?: string }[];
+				usageMetadata?: UsageMetadata;
+		  }
+		| undefined,
+	resume: (continuationToken: string) => Promise<AsyncIterable<C>>,
+): AsyncGenerator<C> {
+	let segment: AsyncIterable<C> | undefined = firstSegment;
+	let earlierUsage: UsageMetadata = {};
+	while (segment) {
+		let continuationToken: string | undefined;
+		let segmentUsage: UsageMetadata | undefined;
+		for await (const chunk of segment) {
+			const response = responseOf(chunk);
+			const candidate = response?.candidates?.[0];
+			if (candidate?.finishReason === "CONTINUATION" && candidate.continuationToken) {
+				continuationToken = candidate.continuationToken;
+				candidate.finishReason = undefined;
+			}
+			if (response?.usageMetadata) {
+				segmentUsage = response.usageMetadata;
+				response.usageMetadata = addGoogleUsage(earlierUsage, segmentUsage);
+			}
+			yield chunk;
+		}
+		segment = undefined;
+		if (continuationToken) {
+			if (segmentUsage) earlierUsage = addGoogleUsage(earlierUsage, segmentUsage);
+			segment = await resume(continuationToken);
+		}
+	}
 }
 
 /**
@@ -1092,7 +1161,8 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				headers: plan.headers,
 			};
 
-			const bodyJson = JSON.stringify(paramsToWireBody(params));
+			const wireBody = paramsToWireBody(params);
+			const bodyJson = JSON.stringify(wireBody);
 			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
 			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers
@@ -1102,13 +1172,13 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
-			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
+			const openStreamAt = async (requestUrl: string, requestBody: string): Promise<ReadableStream<Uint8Array>> => {
 				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
 				// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
 				const init: RequestInit & { timeout: false } = {
 					method: "POST",
 					headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
-					body: bodyJson,
+					body: requestBody,
 					signal: watchdog.signal,
 					timeout: false,
 				};
@@ -1140,13 +1210,13 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			// A regional Vertex endpoint 404s for models published only on the
 			// global endpoint; retry global once so a stale/ambient region never
 			// breaks a request that worked before regional routing existed.
-			const openStream = async (): Promise<ReadableStream<Uint8Array>> => {
-				if (!plan.fallbackUrl) return openStreamAt(plan.url);
+			const openStream = async (requestBody = bodyJson): Promise<ReadableStream<Uint8Array>> => {
+				if (!plan.fallbackUrl) return openStreamAt(plan.url, requestBody);
 				try {
-					return await openStreamAt(plan.url);
+					return await openStreamAt(plan.url, requestBody);
 				} catch (error) {
 					if (error instanceof AIError.GoogleApiError && error.status === 404) {
-						return openStreamAt(plan.fallbackUrl);
+						return openStreamAt(plan.fallbackUrl, requestBody);
 					}
 					throw error;
 				}
@@ -1165,7 +1235,16 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			// text part and no tool call. Delivered as-is the agent receives a blank message and
 			// silently halts mid-task, so retry a bounded number of times before giving up.
 			for (let emptyAttempt = 0; ; emptyAttempt++) {
-				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver);
+				const googleStream = followGoogleContinuations(
+					readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver),
+					chunk => chunk,
+					async continuationToken =>
+						readSseJson<GenerateContentResponse>(
+							await openStream(JSON.stringify({ ...wireBody, continuationToken })),
+							options?.signal,
+							sseObserver,
+						),
+				);
 				await consumeGoogleStream({
 					googleStream,
 					output,
