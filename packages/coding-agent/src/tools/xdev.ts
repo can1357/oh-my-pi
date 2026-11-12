@@ -38,6 +38,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
+import { resolveToolWireName } from "../utils/tool-wire-name";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
@@ -262,15 +263,7 @@ export const XDEV_EXTERNAL_DESCRIPTION_CAP = 200;
 
 /** Resolve enabled canonical names or unambiguous wire aliases through the session map. */
 export function resolveXdevTool(state: XdevState, name: string): Tool | undefined {
-	// Exact registry names shadow aliases even when the exact tool is disabled.
-	let resolved = state.tools.get(name);
-	if (!resolved) {
-		for (const tool of state.tools.values()) {
-			if (tool.customWireName !== name) continue;
-			if (resolved) return undefined;
-			resolved = tool;
-		}
-	}
+	const resolved = resolveToolWireName(state.tools, name);
 	if (!resolved || (!state.mountedNames.has(resolved.name) && !state.isActive(resolved.name))) return undefined;
 	return resolved;
 }
