@@ -644,6 +644,19 @@ async function startDeviceAuthorization(
 	};
 }
 
+/**
+ * The identity of one Kiro login. No Kiro sign-in returns an account claim
+ * (device-grant and social tokens are opaque, and profiles are shared
+ * org-wide or by every social user), so a random id minted here is the
+ * account. It survives token refresh and keys the model cache, and as
+ * `accountId` it is the identity account pools and account policies name.
+ * It never embeds the AWS account number the profile ARN carries.
+ */
+function kiroLoginIdentity(): { kiroLoginId: string; accountId: string } {
+	const id = crypto.randomUUID();
+	return { kiroLoginId: id, accountId: id };
+}
+
 export async function loginKiroDevice(ctrl: OAuthController, config: KiroDeviceConfig = {}): Promise<OAuthCredentials> {
 	const { startUrl, region } = await resolveDeviceInputs(ctrl, config);
 	throwIfCancelled(ctrl.signal);
@@ -718,10 +731,7 @@ export async function loginKiroDevice(ctrl: OAuthController, config: KiroDeviceC
 		kiroClientSecretExpiresAt: client.clientSecretExpiresAt,
 		kiroTokenEndpoint: client.tokenEndpoint,
 		kiroOidcRegion: region,
-		// Stable per-login id (survives token refresh) so the model cache can be
-		// scoped to this login. Neither IdC profile ARNs (shared org-wide) nor
-		// Builder ID bearers (no profile) uniquely identify one login.
-		kiroLoginId: crypto.randomUUID(),
+		...kiroLoginIdentity(),
 	};
 
 	// Builder ID signs in without an organization, so there is no profile to pick
@@ -926,9 +936,7 @@ export async function loginKiroSocial(
 		orgId: parsedProfile.profileArn,
 		orgName: profileName ?? label,
 		kiroLoginProvider: loginProvider,
-		// Every social account without its own profile shares the default one, so
-		// only a per-login id keeps their model caches apart.
-		kiroLoginId: crypto.randomUUID(),
+		...kiroLoginIdentity(),
 	};
 }
 
@@ -988,6 +996,7 @@ async function refreshKiroSocialToken(
 		orgId: parsedProfile.profileArn,
 		kiroLoginProvider: loginProvider,
 		kiroLoginId: current.kiroLoginId,
+		accountId: current.kiroLoginId,
 	};
 }
 
@@ -1128,6 +1137,7 @@ export async function refreshKiroToken(
 		kiroTokenEndpoint: current.kiroTokenEndpoint,
 		kiroOidcRegion: current.kiroOidcRegion,
 		kiroLoginId: current.kiroLoginId,
+		accountId: current.kiroLoginId,
 	};
 }
 

@@ -609,8 +609,13 @@ export interface OAuthAccountIdentity {
 	orgName?: string;
 }
 
-/** Successful OAuth access or account-specific failure. */
-export type OAuthAccessResolution = ({ ok: true } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
+/**
+ * Successful OAuth access or account-specific failure. A success also carries
+ * `apiKey`: the bytes the provider's transport sends for this account, which
+ * differ from `accessToken` for providers whose API key is a structured
+ * credential (`api-key-format "structured"`) or a provider `getApiKey` hook.
+ */
+export type OAuthAccessResolution = ({ ok: true; apiKey: string } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
 
 /**
  * Read-only identity of one stored OAuth account, in stable storage order.

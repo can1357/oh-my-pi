@@ -25,7 +25,7 @@ OMP registers a public Kiro client for the selected OIDC region, requests a devi
 
 The selected profile determines the Kiro runtime route. Its profile identity, registered client metadata, and validated token endpoint are stored with the OAuth credential. If a registration response omits `tokenEndpoint` or returns it as `null`, OMP uses and persists the validated canonical regional endpoint `https://oidc.<region>.amazonaws.com/token`; a returned non-null endpoint is preserved only after the same validation.
 
-OMP registers a fresh public client on every login rather than reusing an earlier registration. Each login also gets its own login id, which survives token refresh and scopes the model cache to that login.
+OMP registers a fresh public client on every login rather than reusing an earlier registration. Each login also gets its own login id, which survives token refresh, scopes the model cache to that login, and is the login's account identity (see [Several Kiro accounts](#several-kiro-accounts)).
 
 When a refresh is rejected with `invalid_grant` or `expired_token`, or the stored refresh state can no longer work (the registered client expired, or the client binding is missing or invalid), the grant cannot recover: OMP disables the stored credential and asks you to run `/login kiro` again. Other refresh failures are treated as transient and retried later.
 
@@ -108,16 +108,17 @@ With `retry.usageAwareFallback` on, the pre-turn check measures stored Kiro logi
 
 ## Several Kiro accounts
 
-`/login kiro` keeps one Kiro credential, also when the store is an [auth broker](./auth-broker-gateway.md): a login from a broker client replaces every Kiro credential that client can see. `KIRO_API_KEY` is not a second account; a stored Kiro credential always wins over it. Several Kiro accounts exist only on a broker that received them as uploads, such as `omp auth-broker migrate --from-local --include-oauth` run on several machines that each signed in once. Kiro credentials carry no account identity, so the broker cannot tell that an upload repeats a login it already holds: re-running `migrate` on the same machine stores that login a second time.
+`/login kiro` keeps one Kiro credential, also when the store is an [auth broker](./auth-broker-gateway.md): a login from a broker client replaces every Kiro credential that client can see. `KIRO_API_KEY` is not a second account; a stored Kiro credential always wins over it. Several Kiro accounts exist only on a broker that received them as uploads, such as `omp auth-broker migrate --from-local --include-oauth` run on several machines that each signed in once.
+
+No Kiro sign-in returns an account id or email, so each Identity Center, Builder ID, Google, or GitHub login is identified by its login id: its identity key is `account:<login id>`, and `omp usage accounts` lists it. The id is random, never contains the AWS account number, and survives token refresh and `migrate`, so re-running `migrate` on the same machine skips a login the broker already holds instead of storing it twice. Logging in again creates a new login id, and with it a new account. A `ksk_…` API key has no identity key.
 
 With several accounts, requests prefer one with free credits (plan or bonus) left; an account that can only draw paid overage yields to any account with free credits but still serves when it is the only one, so overage is spent only after the free credits on every Kiro account are used.
 
-Because a Kiro login has no identity key (`omp usage accounts` lists it without one), nothing that selects accounts by identity can name it:
+Account selection names a Kiro login like any other OAuth account:
 
-- `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` can show or hide Kiro as a whole (`"kiro": true`, `false`, or `{ "apiKeys": … }`), but an `accounts` list for `kiro` hides every Kiro login.
-- `task.agentAccountPools` and gateway client `accounts` that list `kiro` leave that agent or client with no usable Kiro credential.
-- `auth.accountPolicies` cannot match a Kiro account, so per-account `priority`, `reservePct`, and `reclaimAbovePct` do not apply; `retry.usageReservePct` does.
-- `omp token kiro --list` numbers the stored OAuth logins as `credential #<id>`, followed by the profile name when the login has one, and `omp token kiro --account <n>` prints that login's raw access token. `omp bench --account <n>` sends that raw token, which the Kiro transport rejects, so benchmark Kiro without `--account`.
+- `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` `accounts` lists, `task.agentAccountPools`, and gateway client `accounts` take its identity key (`account:<login id>`).
+- `auth.accountPolicies` match it with `account: { accountId: "<login id>" }`.
+- `omp token kiro --list` numbers the stored logins (by login id, followed by the profile name when the login has one). `omp bench --account <n>` benchmarks that login; `omp token kiro --account <n>` prints its access token, and with `--raw` the full Kiro credential the transport sends.
 
 ## Troubleshooting
 

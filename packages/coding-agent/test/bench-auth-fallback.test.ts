@@ -15,6 +15,7 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
 import { type BenchModelRegistry, resolveBenchTargets } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -349,6 +350,56 @@ describe("bench OAuth account selection", () => {
 			);
 			expect(summary.failures).toBe(0);
 			expect(keys).toEqual(["access-b", "access-b"]);
+		} finally {
+			auth.close();
+		}
+	});
+
+	it("sends a structured-credential provider's encoded key for the selected account", async () => {
+		const auth = createInMemoryAuthStorage();
+		try {
+			await auth.credentials.set(
+				"kiro",
+				["a", "b"].map(suffix => ({
+					type: "oauth" as const,
+					access: `access-${suffix}`,
+					refresh: `refresh-${suffix}`,
+					expires: Date.now() + 3_600_000,
+					apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+					kiroLoginId: `login-${suffix}`,
+					accountId: `login-${suffix}`,
+				})),
+			);
+			const model = fakeModel("kiro", "test-model");
+			const registry = fakeRegistry({ models: [model], authedProviders: ["kiro"] });
+			const keys: unknown[] = [];
+			const summary = await runBenchCommand(
+				{ models: ["kiro/test-model"], flags: { account: 2, runs: 1, json: true } },
+				{
+					createRuntime: async () => ({ modelRegistry: registry, oauth: auth.oauth }),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					streamSimple: (_model, _context, options) => {
+						const stream = fakeStream();
+						const iterator = (async function* () {
+							if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
+							keys.push(await options.apiKey({ error: undefined, lastChance: false }));
+							yield* stream;
+						})();
+						return Object.assign(iterator, { result: stream.result }) as unknown as AssistantMessageEventStream;
+					},
+				},
+			);
+			expect(summary.failures).toBe(0);
+			expect(keys.map(key => decodeKiroCredential(String(key), {}))).toEqual([
+				{
+					kind: "oauth",
+					token: "access-b",
+					apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+					loginId: "login-b",
+				},
+			]);
 		} finally {
 			auth.close();
 		}

@@ -500,6 +500,38 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(remote.listAuthCredentials("openai-codex")).toHaveLength(1);
 	});
 
+	test("a pool's accounts list selects one Kiro login, and a repeated upload of a login replaces it", async () => {
+		const kiroLogin = (loginId: string, access: string) => ({
+			type: "oauth" as const,
+			access,
+			refresh: `refresh-${loginId}`,
+			expires: Date.now() + 120_000,
+			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+			kiroLoginId: loginId,
+			accountId: loginId,
+		});
+		await storage!.credentials.upsert("kiro", kiroLogin("login-a", "access-a"));
+		await storage!.credentials.upsert("kiro", kiroLogin("login-b", "access-b"));
+		await storage!.credentials.upsert("kiro", kiroLogin("login-a", "access-a2"));
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await client.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
+		const kiroKeys = initialResult.snapshot.credentials
+			.filter(entry => entry.provider === "kiro")
+			.map(entry => entry.identityKey);
+		expect(kiroKeys.sort()).toEqual(["account:login-a", "account:login-b"]);
+
+		remote = new RemoteAuthCredentialStore({
+			client,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+			accountPool: new Map([["kiro", new Set(["account:login-a"])]]),
+		});
+		expect(
+			remote.listAuthCredentials("kiro").map(entry => entry.credential.type === "oauth" && entry.credential.access),
+		).toEqual(["access-a2"]);
+	});
+
 	test("an allow-list pool hides unlisted providers and API keys over snapshots and SSE", async () => {
 		await storage!.credentials.upsert("anthropic", { type: "api_key", key: "hidden-anthropic-key" });
 		await storage!.credentials.upsert("openai-codex", mintOAuthCredential("codex", Date.now() + 120_000));

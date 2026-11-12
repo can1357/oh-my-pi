@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { AuthStorage, resolveCredentialIdentityKey, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getOAuthApiKey } from "@oh-my-pi/pi-ai/registry/oauth";
 import {
@@ -193,6 +193,19 @@ describe("Kiro login", () => {
 			const peeked = decodeKiroCredential((await auth.keys.peek("kiro")) ?? "", {});
 			expect(peeked).toMatchObject({ kind: "api_key", token: "ksk_replacement" });
 		});
+	});
+
+	it("gives each login a distinct identity key that survives refresh and hides the AWS account", async () => {
+		const login = () => loginKiroDevice({ ...noAuth, fetch: queued(idcResponses()).fetch }, IDC);
+		const [first, second] = [await login(), await login()];
+		const key = (credentials: OAuthCredentials) =>
+			resolveCredentialIdentityKey("kiro", { type: "oauth", ...credentials });
+		expect(key(first)).toBe(`account:${first.kiroLoginId}`);
+		expect(key(second)).not.toBe(key(first));
+		expect(key(first)).not.toContain("123456789012");
+
+		const refreshed = await refreshKiroToken(first, queued([json({ accessToken: "next", expiresIn: 3600 })]));
+		expect([refreshed.access, key(refreshed)]).toEqual(["next", key(first)]);
 	});
 });
 

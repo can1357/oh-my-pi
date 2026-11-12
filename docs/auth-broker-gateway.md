@@ -288,7 +288,7 @@ Broker clients can restrict which broker credentials they see by setting `OMP_AU
 }
 ```
 
-An array lists exact `identityKey` values from the broker snapshot protocol. `identityKey` is the token-free identity field already carried by each authenticated `/v1/snapshot` credential entry. Operator tooling should project only `provider` and `identityKey`; it must not retain or print the accompanying credential payload. A dedicated account-listing CLI is intentionally outside this routing feature's scope. An OAuth account without an identity key, such as every Kiro login, is never in an `accounts` list; see [Kiro](./kiro.md#several-kiro-accounts).
+An array lists exact `identityKey` values from the broker snapshot protocol. `identityKey` is the token-free identity field already carried by each authenticated `/v1/snapshot` credential entry. Operator tooling should project only `provider` and `identityKey`; it must not retain or print the accompanying credential payload. A dedicated account-listing CLI is intentionally outside this routing feature's scope. An OAuth account without an identity key is never in an `accounts` list. A Kiro login's identity key is `account:<login id>`; see [Kiro](./kiro.md#several-kiro-accounts).
 
 | Value                                             | OAuth accounts visible                                                                   | API keys visible             |
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------- |

@@ -73,12 +73,10 @@ describe("exact security OAuth resolver", () => {
 	});
 
 	test("resolves and refreshes only the pinned durable row", async () => {
-		const getOAuthAccessByCredentialId = vi.fn(async (_provider, credentialId, options) => ({
-			ok: true as const,
-			accessToken: options?.forceRefresh ? "refreshed" : "initial",
-			credentialId,
-			accountId: "workspace-a",
-		}));
+		const getOAuthAccessByCredentialId = vi.fn(async (_provider, credentialId, options) => {
+			const token = options?.forceRefresh ? "refreshed" : "initial";
+			return { ok: true as const, accessToken: token, apiKey: token, credentialId, accountId: "workspace-a" };
+		});
 		const authStorage = { oauth: { accessById: getOAuthAccessByCredentialId } } as unknown as AuthStorage;
 		const resolver = createExactSecurityOAuthResolver({
 			authStorage,

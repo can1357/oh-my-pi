@@ -317,6 +317,12 @@ export const kiroUsageProvider: UsageProvider = {
 		const report = parseKiroUsage(payload);
 		if (!report) {
 			ctx.logger?.warn("Kiro usage response has no readable credit breakdown", { provider: PROVIDER_ID });
+			return null;
+		}
+		// Attribute the report to the login it measured, so several logins that
+		// share one profile stay separate accounts.
+		if (credential.type === "oauth" && credential.accountId) {
+			report.metadata = { ...report.metadata, accountId: credential.accountId };
 		}
 		return report;
 	},
