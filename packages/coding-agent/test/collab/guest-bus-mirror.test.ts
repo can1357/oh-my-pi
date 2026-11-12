@@ -49,6 +49,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
+		restoreCompactionQueueToEditor: () => {},
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
