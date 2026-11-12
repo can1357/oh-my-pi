@@ -360,17 +360,13 @@ function createAttempt(model: Model, stream: AssistantMessageEventStream, timest
 	return state;
 }
 
-function isTruncatedFrame(error: unknown): boolean {
-	return error instanceof AIError.EventStreamFrameError && error.kind === "truncated";
-}
-
 /**
  * One replay, only while nothing is visible or billed, and only for failures
  * where the identical request is known to succeed.
  */
 function shouldRetry(state: AttemptState, attempt: number, error: unknown): boolean {
 	if (attempt >= MAX_ATTEMPTS || state.visible || state.metered) return false;
-	return isKiroCapacityError(error) || isKiroTransientToolFormatError(error) || isTruncatedFrame(error);
+	return isKiroCapacityError(error) || isKiroTransientToolFormatError(error);
 }
 
 /** The service's classifier ended the turn: a terminal, non-retryable content block. */
@@ -526,7 +522,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 					}
 				} catch (error) {
 					// Replay only before output or billing; the error frame itself
-					// (capacity throttle, truncated frame) produced neither.
+					// (capacity throttle) produced neither.
 					if (shouldRetry(state, attempt, error)) {
 						await waitForRetry(options.providerRetryWait, RETRY_DELAY_MS, options.signal);
 						continue;

@@ -1228,7 +1228,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						throw new Error(
 							`Could not get token for account ${command.flags.account} of "${model.provider}": ${result?.error ?? "no OAuth credential available"}`,
 						);
-					return result.apiKey;
+					return result.accessToken;
 				};
 			}
 			const preflightKey = selectedResolver

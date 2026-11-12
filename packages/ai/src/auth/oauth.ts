@@ -240,12 +240,11 @@ export class OAuthAccounts implements OAuthApi {
 					error: "OAuth access unavailable",
 				};
 			}
-			const { credential, apiKey } = resolved;
+			const { credential } = resolved;
 			return {
 				ok: true,
 				credentialId: selection.credentialId,
 				accessToken: credential.access,
-				apiKey,
 				accountId: credential.accountId,
 				email: credential.email,
 				projectId: credential.projectId,

@@ -86,7 +86,6 @@ A Kiro request is retried at most once, with an identical request body and a fre
 
 - A `ThrottlingError` whose `reason` is `INSUFFICIENT_MODEL_CAPACITY`, the runtime's capacity rejection, whether it arrives as an HTTP error or as an exception frame before any output.
 - `HTTP 400 ValidationException: Invalid tool use format.`, which the runtime fleet occasionally returns for a fresh remote session's first request. Replaying the same payload succeeds.
-- An event-stream frame cut off before any output, unless the service already sent its billing (`meteringEvent`) frame for the request.
 
 A request the service has billed is never replayed. Any other failure, including another HTTP 400 or a stream that ends without output, is terminal and is reported as-is.
 
@@ -118,7 +117,7 @@ Account selection names a Kiro login like any other OAuth account:
 
 - `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` `accounts` lists, `task.agentAccountPools`, and gateway client `accounts` take its identity key (`account:<login id>`).
 - `auth.accountPolicies` match it with `account: { accountId: "<login id>" }`.
-- `omp token kiro --list` numbers the stored logins (by login id, followed by the profile name when the login has one). `omp bench --account <n>` benchmarks that login; `omp token kiro --account <n>` prints its access token, and with `--raw` the full Kiro credential the transport sends.
+- `omp token kiro --list` numbers the stored logins (by login id, followed by the profile name when the login has one), and `omp token kiro --account <n>` prints that login's access token. `omp bench --account <n>` needs the account-key fix: without it, it sends that raw access token, which the Kiro transport rejects.
 
 ## Troubleshooting
 

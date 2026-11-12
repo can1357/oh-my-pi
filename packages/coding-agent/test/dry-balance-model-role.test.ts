@@ -22,8 +22,6 @@ test("dry-balance resolves configured bare role names", async () => {
 		authStorage: {
 			oauth: {
 				access: async () => ({ accessToken: "test-token", email: "test@example.com" }) as unknown as OAuthAccess,
-				accessAll: async () => [],
-				accessById: async () => undefined,
 			},
 		},
 		getAll: () => [model],

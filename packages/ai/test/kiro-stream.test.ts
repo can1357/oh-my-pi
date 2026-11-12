@@ -53,7 +53,6 @@ const CAPACITY_FRAME = encodeFrame(
 );
 const METERING = ev("meteringEvent", { unit: "credit", unitPlural: "credits", usage: 0.02 });
 const VISIBLE = ev("assistantResponseEvent", { content: "partial answer" });
-const TRUNCATED = new Uint8Array([0, 0, 0, 20]);
 
 /** A 200 event-stream response, split mid-frame to exercise chunk reassembly. */
 function framesResponse(frames: readonly Uint8Array[]): Response {
@@ -204,9 +203,6 @@ test.each<[string, Uint8Array[] | (() => Response), number]>([
 	["in-stream capacity after billing", [METERING, CAPACITY_FRAME], 1],
 	["transient tool-format rejection", json(400, "ValidationException", "Invalid tool use format."), 2],
 	["other validation rejection", json(400, "ValidationException", "Missing required field."), 1],
-	["frame truncated before output", [ev("metadataEvent", { requestId: "x" }), TRUNCATED], 2],
-	["billed stream truncated", [METERING, TRUNCATED], 1],
-	["truncation after visible output", [VISIBLE, TRUNCATED], 1],
 	["clean stream ending without output", [ev("initial-response", { requestId: "x" })], 1],
 ])("replay policy: %s", async (_name, first, expectedAttempts) => {
 	const { attempts, result } = await run(attempt =>

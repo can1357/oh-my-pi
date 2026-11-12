@@ -8,17 +8,13 @@
 - Added the native Kiro provider: sign in with AWS IAM Identity Center, AWS Builder ID, or a Kiro API key (`KIRO_API_KEY`), and stream responses with reasoning, tool calls, and images ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Added Google and GitHub sign-in for Kiro through Kiro's device sign-in, so it also works over SSH or on a headless machine
 - Added a Kiro usage provider: reports monthly plan credits, active bonus credits, and enabled overage from Kiro's `GetUsageLimits`, and, where an auth broker holds several Kiro accounts, ranks them by remaining free credits, spending paid overage last. Each Kiro login has a stable identity key (`account:<login id>`) that survives refresh and broker migration, so account pools, `auth.accountPolicies`, and broker upload dedupe can name it
-- Added a `definitive` option to `OAuthError`; `isDefinitiveOAuthFailure` now takes the error object and disables a credential marked definitive without matching its message (adapted from [@noita-player](https://github.com/noita-player)'s downstream work)
-- Kiro retries a model-capacity rejection once before any output, reports token usage and context size from Kiro's metadata, surfaces content-filter refusals as refusals, and disables a login whose refresh state can no longer recover (adapted from [@noita-player](https://github.com/noita-player)'s downstream work)
+- Added a `definitive` option to `OAuthError`; `isDefinitiveOAuthFailure` now takes the error object and disables a credential marked definitive without matching its message
+- Kiro retries a model-capacity rejection once before any output, reports token usage and context size from Kiro's metadata, surfaces content-filter refusals as refusals, and disables a login whose refresh state can no longer recover
 
 ### Changed
 
 - Kiro requests now identify as the official Kiro CLI 3.2.0, with the same headers and service targets; OMP still opts out of sharing content with AWS
 - Kiro no longer cuts every tool result to 25 KB: results are sent as OMP's tool output limit produced them, up to Kiro's 800 KB service limit; only when a request is over budget are older tool results shrunk to 25 KB, before falling back to compaction
-
-### Fixed
-
-- Fixed a corrupt AWS event-stream frame length (Amazon Bedrock, Kiro) making the decoder wait for and buffer the bogus length instead of failing the stream (adapted from [@noita-player](https://github.com/noita-player)'s downstream work)
 
 ## [18.19.0] - 2026-11-12
 

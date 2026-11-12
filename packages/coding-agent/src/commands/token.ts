@@ -155,9 +155,7 @@ export default class Token extends Command {
 					process.exitCode = 1;
 					return;
 				}
-				// Same output as the default path: the access token, or with --raw the
-				// provider's full credential (a structured provider's JSON key).
-				process.stdout.write(`${flags.raw ? resolution.apiKey : resolution.accessToken}\n`);
+				process.stdout.write(`${resolution.accessToken}\n`);
 				return;
 			}
 
