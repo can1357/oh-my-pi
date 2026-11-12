@@ -651,7 +651,7 @@ describe("compaction queue conversation ownership", () => {
 		h.editor.imageLinks = h.editor.pendingImageLinks;
 		h.helpers.queueCompactionMessage("read-only guest [Image #1]", "followUp", [originalImage]);
 		const sendPrompt = vi.fn(() => true);
-		h.ctx.collabGuest = { readOnly: true, sendPrompt } as unknown as typeof h.ctx.collabGuest;
+		Object.assign(h.ctx, { collabGuest: { readOnly: true, sendPrompt } });
 		try {
 			h.editor.pendingImages = [newerImage];
 			h.editor.pendingImageLinks = ["local://current.png"];
@@ -666,7 +666,7 @@ describe("compaction queue conversation ownership", () => {
 			expect(h.editor.pendingImageLinks[0]).toBe("local://current.png");
 			expect(h.editor.pendingImageLinks.length).toBe(2);
 		} finally {
-			h.ctx.collabGuest = undefined;
+			Object.assign(h.ctx, { collabGuest: undefined });
 		}
 	});
 
