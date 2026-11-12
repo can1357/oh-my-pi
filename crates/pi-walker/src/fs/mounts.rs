@@ -76,6 +76,7 @@ impl Mounts {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Fences {
 	points: Arc<[Box<[u8]>]>,
+	remote: bool,
 }
 
 impl Fences {
@@ -98,7 +99,7 @@ impl Fences {
 
 	fn below(mounts: &Mounts, root: &Path) -> Self {
 		if mounts.holding(root).is_some_and(|mount| mount.remote) {
-			return Self::default();
+			return Self { points: Arc::default(), remote: true };
 		}
 		let points = mounts
 			.0
@@ -110,12 +111,18 @@ impl Fences {
 				(!rel.is_empty()).then(|| walk_spelling(rel))
 			})
 			.collect();
-		Self { points }
+		Self { points, remote: false }
 	}
 
 	/// Whether the directory at walk-relative `rel` is fenced off.
 	pub(crate) fn contains(&self, rel: &[u8]) -> bool {
 		self.points.iter().any(|fenced| **fenced == *rel)
+	}
+
+	/// The walk's root lies on a network filesystem: every listing is a round
+	/// trip, so walks keep more of them in flight.
+	pub(crate) const fn remote_root(&self) -> bool {
+		self.remote
 	}
 }
 
@@ -383,9 +390,10 @@ mod tests {
 		assert!(!fences.contains(b"checkouts"));
 		assert!(!fences.contains(b"nas"));
 		assert_eq!(fences.points.len(), 2);
+		assert!(!fences.remote_root());
 		for remote in ["/Users/me/OrbStack/docker", "/Users/me/OrbStack"] {
 			let fences = Fences::below(&mounts, Path::new(remote));
-			assert!(fences.points.is_empty(), "{remote}");
+			assert!(fences.points.is_empty() && fences.remote_root(), "{remote}");
 		}
 	}
 
