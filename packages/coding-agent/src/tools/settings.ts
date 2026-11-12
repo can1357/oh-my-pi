@@ -1,4 +1,3 @@
-import type { ToolLoadModes } from "./load-mode";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
@@ -9,6 +8,7 @@ import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import type { ToolLoadModes } from "./load-mode";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 

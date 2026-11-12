@@ -4,7 +4,12 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { type MCPLoadResult, MCPManager, type MCPStartupStatus } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import {
+	type MCPLoadResult,
+	MCPManager,
+	type MCPManagerApi,
+	type MCPStartupStatus,
+} from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { MCP_DISCOVERY_TURN_WAIT_MS } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -115,7 +120,7 @@ function fakeServers() {
 	};
 }
 
-async function createDeferredSession(settings?: Settings) {
+async function createDeferredSession(settings?: Settings, mcpManager?: MCPManagerApi) {
 	const servers = fakeServers();
 	const root = TempDir.createSync("@pi-mcp-first-turn-");
 	cleanups.push(() => root.removeSync());
@@ -146,6 +151,8 @@ async function createDeferredSession(settings?: Settings) {
 		skipPythonPreflight: true,
 		enableMCP: true,
 		hasUI: true,
+		mcpManager,
+		mcpTools: mcpManager?.getTools(),
 		extensions: [
 			pi => {
 				pi.on("before_agent_start", () => {
@@ -199,6 +206,122 @@ describe("createAgentSession deferred MCP discovery and the first turn", () => {
 		expect(session.configWarnings.filter(message => message.startsWith("tools.loadMode."))).toEqual([
 			...startupWarnings,
 			expect.stringContaining(`tools.loadMode.${missingMCPTool}`),
+		]);
+		await session.setActiveToolsByName(session.getEnabledToolNames());
+		expect(notices).toHaveLength(1);
+	});
+
+	it("warns once when startup fails after discovery's bounded wait without a tool change", async () => {
+		const missingTool = "mcp__failed_lookup";
+		const startupWaitReached = Promise.withResolvers<void>();
+		const boundedStartup = Promise.withResolvers<MCPStartupStatus>();
+		const settlement = Promise.withResolvers<void>();
+		let pending = true;
+		vi.spyOn(MCPManager.prototype, "hasPendingStartup").mockImplementation(() => pending);
+		vi.spyOn(MCPManager.prototype, "waitForStartup").mockImplementation(() => {
+			startupWaitReached.resolve();
+			return boundedStartup.promise;
+		});
+		vi.spyOn(MCPManager.prototype, "waitForPendingConnections").mockImplementation(() => settlement.promise);
+		const { session, servers } = await createDeferredSession(
+			Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+				"tools.loadMode": { [MCP_TOOL_NAME]: "essential", [missingTool]: "essential" },
+			}),
+		);
+		const notices: string[] = [];
+		const warned = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "tools.loadMode") {
+				notices.push(event.message);
+				warned.resolve();
+			}
+		});
+		expect(session.configWarnings.filter(message => message.startsWith("tools.loadMode."))).toEqual([]);
+
+		servers.closeStartupWindow(probeTools());
+		await startupWaitReached.promise;
+		boundedStartup.resolve({ connected: ["probe"], pending: ["failed"], failed: [] });
+		await session.prompt("hello");
+		const beforeFailure = await session.agent.buildSideRequestContext([]);
+		const connectedTool = beforeFailure.tools?.find(tool => tool.name === MCP_TOOL_NAME);
+		expect(connectedTool && toolWireSchema(connectedTool).properties).toHaveProperty("q");
+		expect(beforeFailure.tools?.some(tool => tool.name === missingTool)).toBe(false);
+		expect(session.getMountedXdevToolNames()).not.toContain(MCP_TOOL_NAME);
+		expect(session.configWarnings.filter(message => message.startsWith("tools.loadMode."))).toEqual([]);
+		expect(notices).toEqual([]);
+
+		// A failed connection settles startup without producing any tools-changed event.
+		pending = false;
+		settlement.resolve();
+		await warned.promise;
+		const afterFailure = await session.agent.buildSideRequestContext([]);
+		expect(afterFailure.tools?.some(tool => tool.name === missingTool)).toBe(false);
+		expect(notices).toEqual([expect.stringContaining(`tools.loadMode.${missingTool}`)]);
+		expect(session.configWarnings.filter(message => message.startsWith("tools.loadMode."))).toEqual(notices);
+	});
+
+	it("rechecks pending startup on a structural SDK-supplied MCP manager", async () => {
+		const missingTool = "mcp__structural_missing";
+		const settlement = Promise.withResolvers<void>();
+		const tools = probeTools();
+		let pending = true;
+		const manager: MCPManagerApi = {
+			getTools: () => tools,
+			openToolScope: () => {},
+			trackToolCall: () => () => {},
+			addToolsChangedListener: () => () => {},
+			addNotificationListener: () => () => {},
+			getConnectedServers: () => ["probe"],
+			getServerResources: () => undefined,
+			ensureServerResources: async () => {},
+			hasPendingStartup: () => pending,
+			waitForPendingConnections: () => settlement.promise,
+			readServerResource: async () => undefined,
+			getServerInstructions: () => new Map(),
+			reconcileBrowserFilter: async () => {},
+		};
+		const { session } = await createDeferredSession(
+			Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+				"tools.loadMode": {
+					[MCP_TOOL_NAME]: "essential",
+					[missingTool]: "essential",
+					unknown_tool: "essential",
+				},
+			}),
+			manager,
+		);
+		const initialWarnings = session.configWarnings.filter(message => message.startsWith("tools.loadMode."));
+		expect(initialWarnings).toEqual([expect.stringContaining("tools.loadMode.unknown_tool")]);
+		const request = await session.agent.buildSideRequestContext([]);
+		const connectedTool = request.tools?.find(tool => tool.name === MCP_TOOL_NAME);
+		expect(connectedTool && toolWireSchema(connectedTool).properties).toHaveProperty("q");
+		expect(request.tools?.some(tool => tool.name === missingTool)).toBe(false);
+		expect(session.getMountedXdevToolNames()).not.toContain(MCP_TOOL_NAME);
+		const notices: string[] = [];
+		const warned = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "tools.loadMode") {
+				notices.push(event.message);
+				warned.resolve();
+			}
+		});
+		expect(notices).toEqual([]);
+
+		pending = false;
+		settlement.resolve();
+		await warned.promise;
+		const settledRequest = await session.agent.buildSideRequestContext([]);
+		expect(settledRequest.tools?.some(tool => tool.name === MCP_TOOL_NAME)).toBe(true);
+		expect(notices).toEqual([expect.stringContaining(`tools.loadMode.${missingTool}`)]);
+		expect(session.configWarnings.filter(message => message.startsWith("tools.loadMode."))).toEqual([
+			...initialWarnings,
+			...notices,
 		]);
 		await session.setActiveToolsByName(session.getEnabledToolNames());
 		expect(notices).toHaveLength(1);

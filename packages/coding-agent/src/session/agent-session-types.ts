@@ -306,6 +306,8 @@ export interface AgentSessionConfig {
 	mcpManagerToolNames?: Iterable<string>;
 	/** Whether MCP discovery or initial tool registration is still pending. */
 	isMCPDiscoveryPending?: () => boolean;
+	/** Whether startup-deferred extensions may still register tools. */
+	isExtensionDiscoveryPending?: () => boolean;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
 	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
 	/** Updates tool-session predicates from the live active tool set. */

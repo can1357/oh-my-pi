@@ -38,7 +38,7 @@ import {
 } from "../tools/approval";
 import { getApprovalGrants } from "../tools/approval-cache";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
-import { toolLoadMode, warnToolLoadModes } from "../tools/load-mode";
+import { hasEssentialOverride, warnToolLoadModes } from "../tools/load-mode";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -163,6 +163,8 @@ interface SessionToolsOptions {
 	mcpManagerToolNames?: Iterable<string>;
 	/** Unknown MCP names cannot be checked until their discovery completes. */
 	isMCPDiscoveryPending?: () => boolean;
+	/** Deferred extensions may register unknown names when they bind. */
+	isExtensionDiscoveryPending?: () => boolean;
 	ensureWriteRegistered?: () => Promise<boolean>;
 	isDeviceOnlyWrite?: () => boolean;
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
@@ -478,6 +480,7 @@ export class SessionTools {
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	readonly #isMCPDiscoveryPending: SessionToolsOptions["isMCPDiscoveryPending"];
+	readonly #isExtensionDiscoveryPending: SessionToolsOptions["isExtensionDiscoveryPending"];
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
@@ -506,6 +509,7 @@ export class SessionTools {
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
 		this.#isMCPDiscoveryPending = options.isMCPDiscoveryPending;
+		this.#isExtensionDiscoveryPending = options.isExtensionDiscoveryPending;
 		if (options.mcpManagerToolNames === undefined) {
 			for (const name of this.#toolRegistry.keys()) {
 				if (isMCPToolName(name)) this.#mcpManagerToolNames.add(name);
@@ -1350,6 +1354,7 @@ export class SessionTools {
 			loadModes,
 			message => this.#host.emitNotice("warning", message, "tools.loadMode"),
 			this.#isMCPDiscoveryPending?.() === true,
+			this.#isExtensionDiscoveryPending?.() === true,
 		);
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
@@ -1357,7 +1362,7 @@ export class SessionTools {
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
 				!isPresentationPinned(name) &&
-				toolLoadMode(tool, loadModes) === undefined &&
+				!hasEssentialOverride(tool, loadModes) &&
 				isMountableUnderXdev(tool),
 		);
 		const mountNames = new Set(mountCandidates.map(({ name }) => name));

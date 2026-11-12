@@ -41,6 +41,8 @@ export type McpManagerProtocol = {
 		{ resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined
 	>;
 	ensureServerResources: RpcMethod<[name: string], void>;
+	/** Read live startup state independently of the tool-view revision. */
+	hasPendingStartup: RpcMethod<[], boolean>;
 	waitForPendingConnections: RpcMethod<[], void>;
 	readServerResource: RpcMethod<
 		[name: string, uri: string, options: MCPRequestOptions | undefined],
@@ -98,6 +100,10 @@ export class RemoteMCPManager implements MCPManagerApi {
 
 	ensureServerResources(name: string): Promise<void> {
 		return this.#remote.call("ensureServerResources", name);
+	}
+
+	hasPendingStartup(): boolean {
+		return this.#remote.callSync("hasPendingStartup");
 	}
 
 	waitForPendingConnections(): Promise<void> {

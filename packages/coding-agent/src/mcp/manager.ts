@@ -284,6 +284,8 @@ export interface MCPManagerApi {
 	getServerResources(name: string): { resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined;
 	/** Wait until one server's resource catalog is loaded. */
 	ensureServerResources(name: string): Promise<void>;
+	/** Whether initial connections, tool registration, or reconnects are still in flight. */
+	hasPendingStartup(): boolean;
 	/** Wait for in-flight connection attempts. */
 	waitForPendingConnections(): Promise<void>;
 	/** Read one resource from a server. */
@@ -1524,6 +1526,7 @@ export class MCPManager implements MCPManagerApi {
 				...this.#pendingConnections.values(),
 				...this.#pendingToolLoads.values(),
 				...this.#pendingReconnections.values(),
+				...this.#startupUpdates.values(),
 			];
 			if (pending.length === 0) return;
 			await Promise.allSettled(pending);

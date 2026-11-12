@@ -324,7 +324,7 @@ import {
 } from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
-import { toolLoadMode, warnToolLoadModes } from "./tools/load-mode";
+import { hasEssentialOverride, warnToolLoadModes } from "./tools/load-mode";
 import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
@@ -2842,9 +2842,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const customTools: CustomTool[] = [];
 		const initialMcpManagerTools: CustomTool[] = [];
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
+		const deferredExtensionPaths = restrictToolNames ? [] : (options.deferredExtensionPaths ?? []);
+		let extensionDiscoveryPending = deferredExtensionPaths.length > 0;
+		const isExtensionDiscoveryPending = () => extensionDiscoveryPending;
 		const isMCPDiscoveryPending = () =>
-			startDeferredMCPDiscovery !== undefined ||
-			(mcpManager instanceof MCPManager && mcpManager.hasPendingStartup());
+			startDeferredMCPDiscovery !== undefined || mcpManager?.hasPendingStartup() === true;
+		const recheckToolLoadModeWarnings = (liveSession: AgentSession) => {
+			if (liveSession.isDisposed) return;
+			warnToolLoadModes(
+				toolRegistry,
+				cfgToolsLoadMode.get(settings),
+				message => {
+					liveSession.configWarnings.push(message);
+					liveSession.emitNotice("warning", message, "tools.loadMode");
+				},
+				isMCPDiscoveryPending(),
+				isExtensionDiscoveryPending(),
+			);
+		};
+		const recheckAfterMCPStartup = async (liveSession: AgentSession) => {
+			try {
+				while (!liveSession.isDisposed && mcpManager?.hasPendingStartup()) {
+					await mcpManager.waitForPendingConnections();
+				}
+				recheckToolLoadModeWarnings(liveSession);
+			} catch (error) {
+				logger.warn("MCP startup wait failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
 		const onMCPStatus = (event: McpConnectionStatusEvent) => {
 			if (!options.hasUI || cfgStartupQuiet.get(settings)) return;
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
@@ -2918,17 +2945,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							});
 						} finally {
 							startDeferredMCPDiscovery = undefined;
-							if (!liveSession.isDisposed) {
-								warnToolLoadModes(
-									toolRegistry,
-									cfgToolsLoadMode.get(settings),
-									message => {
-										liveSession.configWarnings.push(message);
-										liveSession.emitNotice("warning", message, "tools.loadMode");
-									},
-									isMCPDiscoveryPending(),
-								);
-							}
+							void recheckAfterMCPStartup(liveSession);
 						}
 					})();
 					liveSession.setPendingMCPDiscovery(discovery);
@@ -3100,7 +3117,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 		}
-		const deferredExtensionPaths = restrictToolNames ? [] : (options.deferredExtensionPaths ?? []);
 		// Deferred extensions append to the forwarded lists after the session
 		// captured them, so subagents and forks still inherit them.
 		if (deferredExtensionPaths.length > 0) extensionsResult.preparedExtensions ??= [];
@@ -4600,6 +4616,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialLoadModes,
 			message => toolLoadModeWarnings.push(message),
 			isMCPDiscoveryPending(),
+			isExtensionDiscoveryPending(),
 		);
 
 		// Partition the initial enabled set for the xd:// transport. Tool instances
@@ -4619,7 +4636,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					xdevReadAvailable &&
 					xdevWriteAvailable &&
 					!explicitlyRequested &&
-					toolLoadMode(tool, initialLoadModes) === undefined &&
+					!hasEssentialOverride(tool, initialLoadModes) &&
 					isMountableUnderXdev(tool)
 				)
 					mountedNames.push(name);
@@ -5175,6 +5192,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
 			isMCPDiscoveryPending,
+			isExtensionDiscoveryPending,
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);
@@ -5408,7 +5426,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
-						toolLoadMode(liveTool, cfgToolsLoadMode.get(settings)) === undefined &&
+						!hasEssentialOverride(liveTool, cfgToolsLoadMode.get(settings)) &&
 						isMountableUnderXdev(liveTool);
 					const nextMounted = shouldMount
 						? mounted.includes(name)
@@ -5952,31 +5970,39 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const forwardedPreparedExtensions = extensionsResult.preparedExtensions ?? [];
 			const runtime = extensionsResult.runtime;
 			session.setDeferredExtensionLoader(async () => {
-				const loaded = await logger.time(
-					"loadDeferredExtensions",
-					loadExtensions,
-					[...deferredExtensionPaths],
-					cwd,
-					eventBus,
-					runtime,
-				);
-				const storage = settings.getStorage();
-				if (storage) await recordStartupVerdicts(storage, loaded.extensions);
-				for (const { path, error } of loaded.errors) logger.error("Failed to load extension", { path, error });
-				for (const message of formatExtensionLoadNotifications(loaded.errors)) {
-					session.emitNotice("warning", message, "extensions");
+				try {
+					const loaded = await logger.time(
+						"loadDeferredExtensions",
+						loadExtensions,
+						[...deferredExtensionPaths],
+						cwd,
+						eventBus,
+						runtime,
+					);
+					const storage = settings.getStorage();
+					if (storage) await recordStartupVerdicts(storage, loaded.extensions);
+					for (const { path, error } of loaded.errors) logger.error("Failed to load extension", { path, error });
+					for (const message of formatExtensionLoadNotifications(loaded.errors)) {
+						session.emitNotice("warning", message, "extensions");
+					}
+					if (session.isDisposed) return;
+					// Providers queue until the runner is initialized; drain them as session creation does.
+					for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
+						modelRegistry.registerProvider(name, config, sourceId);
+					}
+					forwardedPreparedExtensions.push(...(loaded.preparedExtensions ?? []));
+					extensionPaths.push(...loaded.extensions.map(extension => extension.resolvedPath));
+					await extensionRunner.addExtensions(loaded.extensions);
+				} finally {
+					extensionDiscoveryPending = false;
+					recheckToolLoadModeWarnings(session);
 				}
-				if (session.isDisposed) return;
-				// Providers queue until the runner is initialized; drain them as session creation does.
-				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
-					modelRegistry.registerProvider(name, config, sourceId);
-				}
-				forwardedPreparedExtensions.push(...(loaded.preparedExtensions ?? []));
-				extensionPaths.push(...loaded.extensions.map(extension => extension.resolvedPath));
-				await extensionRunner.addExtensions(loaded.extensions);
 			});
 		}
 		startDeferredMCPDiscovery?.(session);
+		if (mcpManager && !deferMCPDiscoveryForUI && mcpManager.hasPendingStartup()) {
+			void recheckAfterMCPStartup(session);
+		}
 
 		startupCleanup.move();
 		return {

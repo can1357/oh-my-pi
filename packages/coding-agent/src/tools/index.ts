@@ -78,7 +78,7 @@ import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
-import { toolLoadMode } from "./load-mode";
+import { hasEssentialOverride } from "./load-mode";
 import { YieldTool } from "./yield";
 
 import {
@@ -943,7 +943,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		for (const tool of tools) {
 			const mountable =
 				mountBuiltinTools &&
-				toolLoadMode(tool, loadModes) === undefined &&
+				!hasEssentialOverride(tool, loadModes) &&
 				isMountableUnderXdev(tool) &&
 				tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);

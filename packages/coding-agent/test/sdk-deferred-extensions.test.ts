@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -148,4 +149,87 @@ describe("startup-deferred extensions", () => {
 			await session.dispose();
 		}
 	});
+
+	it.each(["loaded", "failed"] as const)(
+		"checks essential overrides only after a deferred extension has %s",
+		async outcome => {
+			const deferredPath = path.join(tempDir.path(), `load-mode-${outcome}.ts`);
+			const missingTool = "genuinely_missing_extension_tool";
+			fs.writeFileSync(
+				deferredPath,
+				outcome === "loaded"
+					? DEFERRED_TOOL_EXTENSION(path.join(tempDir.path(), "load-mode.log")).replace(
+							"Type.Object({})",
+							'Type.Object({ query: Type.String({ description: "The query to probe." }) })',
+						)
+					: 'export default function() { throw new Error("deferred binding failed"); }',
+			);
+			const { session } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager: SessionManager.inMemory(),
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+				settings: Settings.isolated({
+					"tools.loadMode": {
+						deferred_probe: "essential",
+						[missingTool]: "essential",
+					},
+				}),
+				hasUI: true,
+				preloadedExtensions: await loadExtensions([], tempDir.path()),
+				deferredExtensionPaths: [deferredPath],
+				enableLsp: false,
+				enableMCP: false,
+				skipPythonPreflight: true,
+				skills: [],
+				rules: [],
+				preloadedCustomToolPaths: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				toolNames: ["read"],
+			});
+			const notices: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice" && event.source === "tools.loadMode") notices.push(event.message);
+			});
+			const warnings = () => session.configWarnings.filter(message => message.startsWith("tools.loadMode."));
+			try {
+				expect(warnings()).toEqual([]);
+				expect(session.agent.state.tools.some(tool => tool.name === "deferred_probe")).toBe(false);
+				await session.setActiveToolsByName(session.getEnabledToolNames());
+				expect(notices).toEqual([]);
+				expect(warnings()).toEqual([]);
+
+				await session.loadDeferredExtensions();
+
+				const request = await session.agent.buildSideRequestContext([]);
+				const tool = request.tools?.find(tool => tool.name === "deferred_probe");
+				if (outcome === "loaded") {
+					expect(session.getActiveToolNames()).toContain("deferred_probe");
+					expect(session.getMountedXdevToolNames()).not.toContain("deferred_probe");
+					expect(tool).toBeDefined();
+					expect(tool && toolWireSchema(tool)).toMatchObject({
+						type: "object",
+						properties: { query: { type: "string", description: "The query to probe." } },
+						required: expect.arrayContaining(["query"]),
+					});
+					expect(notices).toEqual([expect.stringContaining(`tools.loadMode.${missingTool}`)]);
+				} else {
+					expect(tool).toBeUndefined();
+					expect(notices).toEqual([
+						expect.stringContaining("tools.loadMode.deferred_probe"),
+						expect.stringContaining(`tools.loadMode.${missingTool}`),
+					]);
+				}
+				expect(warnings()).toEqual(notices);
+				await session.loadDeferredExtensions();
+				await session.setActiveToolsByName(session.getEnabledToolNames());
+				expect(warnings()).toEqual(notices);
+				expect(notices).toHaveLength(outcome === "loaded" ? 1 : 2);
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
 });

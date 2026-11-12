@@ -73,7 +73,6 @@ describe("essential tool load-mode overrides", () => {
 
 		cfgToolsLoadMode.override(settings, { lsp: "essential" });
 		await settle(session);
-		session.setClientBridge(undefined);
 		request = await session.agent.buildSideRequestContext([]);
 		expect(toolWireSchema(request.tools!.find(tool => tool.name === "lsp")!).properties).toHaveProperty("action");
 		expect(session.getMountedXdevToolNames()).not.toContain("lsp");

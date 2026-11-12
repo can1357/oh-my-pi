@@ -333,6 +333,7 @@ function serveMcpManager(state: PeerIntegrationState): RpcServe<MCPManager, McpM
 		connectedServers: manager => manager.getConnectedServers(),
 		serverResources: (manager, name) => manager.getServerResources(name),
 		ensureServerResources: (manager, name) => manager.ensureServerResources(name),
+		hasPendingStartup: manager => manager.hasPendingStartup(),
 		waitForPendingConnections: manager => manager.waitForPendingConnections(),
 		readServerResource: (manager, name, uri, options) => manager.readServerResource(name, uri, options),
 		serverInstructions: manager => manager.getServerInstructions(),

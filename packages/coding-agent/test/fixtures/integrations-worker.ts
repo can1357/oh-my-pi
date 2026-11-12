@@ -30,6 +30,8 @@ export interface IntegrationsProbe {
 	mcpGlobal(): Promise<{ available: boolean; remote: boolean; servers: string[]; tools: string[] }>;
 	/** Each scope's MCP tool names as this worker reads them, in order, through one `RemoteMCPManager`. */
 	mcpViews(scopes: string[]): Promise<string[][]>;
+	/** Read startup state, optionally after waiting for the main manager's pending connections. */
+	mcpStartup(wait: boolean): Promise<{ pending: boolean; tools: string[] }>;
 	/** Call an MCP tool through `createMCPProxyTools(MCPManager.instance())`, as a child session would. */
 	mcpCall(
 		registry: ModelRegistry,
@@ -129,6 +131,12 @@ function buildProbe(): IntegrationsProbe {
 			const manager = MCPManager.instance();
 			if (!manager) throw new Error("no MCP manager in worker");
 			return scopes.map(scope => manager.getTools(scope).map(tool => tool.mcpToolName ?? ""));
+		},
+		mcpStartup: async wait => {
+			const manager = MCPManager.instance();
+			if (!manager) throw new Error("no MCP manager in worker");
+			if (wait) await manager.waitForPendingConnections();
+			return { pending: manager.hasPendingStartup(), tools: manager.getTools().map(tool => tool.name) };
 		},
 		mcpCall: async (registry, toolName, args, signal) => {
 			const manager = MCPManager.instance();
