@@ -2671,6 +2671,44 @@ describe("Settings", () => {
 			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
 
+		// The migration moved settings.json onto settings.json.bak with a plain
+		// rename, which replaced a backup already there — an earlier migration's,
+		// or one the user made — and its only copy of what it held.
+		it("keeps an existing settings.json.bak and moves settings.json to the next free backup name", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			const legacy = JSON.stringify({ symbolPreset: "ascii", queueMode: "all" });
+			await fs.promises.writeFile(jsonPath, legacy);
+			await fs.promises.writeFile(`${jsonPath}.bak`, "ONLY COPY OF AN EARLIER BACKUP");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgSymbolPreset.get(settings)).toBe("ascii");
+			expect(fs.existsSync(jsonPath)).toBe(false);
+			expect(await fs.promises.readFile(`${jsonPath}.bak`, "utf8")).toBe("ONLY COPY OF AN EARLIER BACKUP");
+			expect(await fs.promises.readFile(`${jsonPath}.bak.1`, "utf8")).toBe(legacy);
+		});
+
+		it("leaves settings.json and no empty backup when moving settings.json aside fails", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			const legacy = JSON.stringify({ symbolPreset: "ascii", queueMode: "all" });
+			await fs.promises.writeFile(jsonPath, legacy);
+			const rename = fs.promises.rename.bind(fs.promises);
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+				if (String(from) === jsonPath) throw new FsCodeError("EACCES", "injected move failure");
+				return rename(from, to);
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(await fs.promises.readFile(jsonPath, "utf8")).toBe(legacy);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(false);
+			expect(warnSpy).toHaveBeenCalledWith(
+				"Settings: failed to archive settings.json after migration",
+				expect.objectContaining({ path: jsonPath }),
+			);
+		});
+
 		it("migrates legacy power booleans with system=true to system level", async () => {
 			await writeSettings({
 				power: {
