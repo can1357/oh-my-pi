@@ -267,7 +267,7 @@ mod tests {
 	/// it stops reading messages for `wParam` milliseconds, as a busy app's
 	/// does, and the rest of the keys wait in its queue.
 	const HANG: u32 = WM_APP;
-	/// The target's closing Return moves the foreground to `wParam`.
+	/// The target's Return moves the foreground to `wParam`.
 	const RETURN_TO: u32 = WM_APP + 1;
 
 	/// Two top-level edit windows in another process, as another app's would
@@ -493,10 +493,7 @@ mod tests {
 		assert_eq!(Windows::text(windows.user), USER);
 	}
 
-	#[test]
-	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
-	            terminal in a signed-in desktop session"]
-	fn takeover_typing_does_not_report_foreground_moved_by_its_closing_return() {
+	fn type_with_return_moving_foreground(text: &str) -> Option<String> {
 		let windows = Windows::open();
 		let mut backend = Win32Backend::new(DisplaySelector::Active).unwrap();
 		let empty = wide("");
@@ -516,16 +513,35 @@ mod tests {
 		backend
 			.type_text(
 				&Target::Window((windows.target as usize).to_string()),
-				"submitted\n",
+				text,
 				DeliveryMode::ForegroundReturnFocus,
 				&token,
 			)
 			.unwrap();
-		assert_eq!(control::take_text_unconfirmed(), None);
+		let unconfirmed = control::take_text_unconfirmed();
 		// SAFETY: no preconditions.
 		assert_eq!(unsafe { GetForegroundWindow() }, windows.user);
-		assert_eq!(Windows::text(windows.target), "submitted");
-		assert_eq!(Windows::text(windows.user), USER);
+		if text.ends_with('\n') {
+			assert_eq!(Windows::text(windows.target), "submitted");
+			assert_eq!(Windows::text(windows.user), USER);
+		}
+		unconfirmed
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn takeover_typing_does_not_report_foreground_moved_by_its_closing_return() {
+		assert_eq!(type_with_return_moving_foreground("submitted\n"), None);
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn takeover_typing_reports_foreground_moved_by_a_mid_text_return() {
+		let reason = type_with_return_moving_foreground("submitted\nremaining")
+			.expect("a mid-text Return cannot confirm the remaining text arrived");
+		assert!(reason.contains("foreground left"), "{reason}");
 	}
 
 	#[test]

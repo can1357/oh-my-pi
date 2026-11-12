@@ -604,13 +604,32 @@ async function focusReport(
 	return `focus is on ${front}; it did not return to ${user}`;
 }
 
-/**
- * Says that typed text went out but the target was not seen reading it, so
- * the call's success covers sending only.
- */
-function reportUnconfirmed(context: ComputerRunContext, reason: string | undefined): void {
-	if (!reason) return;
-	context.output.push({ type: "text", text: `type sent the text but could not confirm it arrived: ${reason}` });
+async function sendType(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	takeover: boolean | undefined,
+	send: (fallback?: Fallback) => TypeCall,
+	target?: number,
+): Promise<void> {
+	let unconfirmed: string | undefined;
+	await sendInput(
+		session,
+		context,
+		"type",
+		takeover,
+		async fallback => {
+			const result = await send(fallback);
+			unconfirmed = result?.unconfirmed;
+			return result?.focusReturn;
+		},
+		target,
+		() => !unconfirmed,
+	);
+	if (unconfirmed)
+		context.output.push({
+			type: "text",
+			text: `type sent the text but could not confirm it arrived: ${unconfirmed}`,
+		});
 }
 
 /**
@@ -903,21 +922,9 @@ class El {
 		guardRun(context, "type");
 		validateString(text, "type(text)");
 		const native = pointerOptions(options);
-		let unconfirmed: string | undefined;
-		await sendInput(
-			this.#session,
-			context,
-			"type",
-			native.takeover,
-			async fallback => {
-				const result = await this.#session.axType(this.ref, text, { ...native, ...fallback });
-				unconfirmed = result?.unconfirmed;
-				return result?.focusReturn;
-			},
-			undefined,
-			() => !unconfirmed,
+		await sendType(this.#session, context, native.takeover, fallback =>
+			this.#session.axType(this.ref, text, { ...native, ...fallback }),
 		);
-		reportUnconfirmed(context, unconfirmed);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -1261,21 +1268,13 @@ class Win {
 		const context = this.#guardInput("type");
 		validateString(text, "type(text)");
 		const native = pointerOptions(options);
-		let unconfirmed: string | undefined;
-		await sendInput(
+		await sendType(
 			this.#session,
 			context,
-			"type",
 			native.takeover,
-			async fallback => {
-				const result = await this.#session.typeText(this.id, text, { ...native, ...fallback });
-				unconfirmed = result?.unconfirmed;
-				return result?.focusReturn;
-			},
+			fallback => this.#session.typeText(this.id, text, { ...native, ...fallback }),
 			this.pid,
-			() => !unconfirmed,
 		);
-		reportUnconfirmed(context, unconfirmed);
 	}
 
 	async press(chord: string | string[], options?: InputOptions): Promise<void> {

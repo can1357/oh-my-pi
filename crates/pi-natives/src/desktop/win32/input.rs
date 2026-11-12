@@ -1546,16 +1546,16 @@ mod foreground {
 	/// focused control's thread is the one reading keys: a UWP frame's own
 	/// thread refuses to be joined. Every packet went while `root` was in
 	/// front, so when the foreground leaves it before or during the wait and
-	/// the text held a Return (`enter`), that Return is taken to have moved
-	/// it (it opened or closed a window) and nothing is reported; without
-	/// one, the end of the text may have gone to the new window. Returns why
+	/// the text ends in a Return (`closing_return`), that Return is taken to
+	/// have moved it (it opened or closed a window) and nothing is reported;
+	/// otherwise, the end of the text may have gone to the new window. Returns why
 	/// the target was not seen reading the text: it could not be waited for,
 	/// the wait ran out or was cancelled, or the foreground left it.
-	fn drain(root: HWND, name: &str, enter: bool) -> Option<String> {
+	fn drain(root: HWND, name: &str, closing_return: bool) -> Option<String> {
 		// SAFETY: GetForegroundWindow has no preconditions.
 		let in_front = || window::root(unsafe { GetForegroundWindow() }) == root;
 		let left = || {
-			(!enter).then(|| {
+			(!closing_return).then(|| {
 				format!(
 					"the foreground left {name} before it had read all the typed text, so the rest may \
 					 have reached the window in front"
@@ -1638,8 +1638,8 @@ mod foreground {
 		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
 			focus()?;
 			send_text(Some(target), text)?;
-			let enter = text_units(text).any(|unit| matches!(unit, TextUnit::Enter));
-			if let Some(reason) = drain(target, &format!("window {id}"), enter) {
+			let closing_return = text.ends_with(['\r', '\n']);
+			if let Some(reason) = drain(target, &format!("window {id}"), closing_return) {
 				control::report_text_unconfirmed(reason);
 			}
 			Ok(())
