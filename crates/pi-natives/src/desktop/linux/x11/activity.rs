@@ -17,7 +17,11 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use x11rb::protocol::Event;
+use x11rb::{
+	connection::Connection as _,
+	protocol::{Event, screensaver::ConnectionExt as _},
+	rust_connection::RustConnection,
+};
 
 use super::listener::{Listener, Source, source_of};
 use crate::desktop::{
@@ -58,7 +62,13 @@ impl UserActivity {
 	pub(super) fn start(display: Option<&str>) -> CoreResult<Self> {
 		let conn = Listener::connect(display)?;
 		let started = Instant::now();
-		let presses = Arc::<Presses>::default();
+		// Presses before the listener started are unseen; the server's idle time
+		// says how long the user has left input alone, so the first takeover
+		// need not wait a whole QUIET period from here.
+		let presses = Arc::new(Presses {
+			count: AtomicU64::new(0),
+			last:  Mutex::new(user_idle(&conn).and_then(|idle| started.checked_sub(idle))),
+		});
 		let sent = Arc::new(AtomicU64::new(0));
 		let listener = {
 			let (presses, sent) = (Arc::clone(&presses), Arc::clone(&sent));
@@ -166,6 +176,14 @@ impl UserActivity {
 	pub(super) fn disconnect(&mut self, conn: &x11rb::rust_connection::RustConnection) {
 		self.listener.as_mut().expect("listening").disconnect(conn);
 	}
+}
+
+/// How long ago the server last saw user input from any device, when it
+/// reports it (MIT-SCREEN-SAVER).
+fn user_idle(conn: &RustConnection) -> Option<Duration> {
+	let root = conn.setup().roots.first()?.root;
+	let info = conn.screensaver_query_info(root).ok()?.reply().ok()?;
+	Some(Duration::from_millis(info.ms_since_user_input.into()))
 }
 
 fn admission_limit(now: Instant, deadline: Option<Instant>) -> Instant {
