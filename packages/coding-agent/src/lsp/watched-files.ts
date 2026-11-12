@@ -34,6 +34,8 @@ const RESYNC_MS = 100;
 const RESCAN_SLACK_MS = 2_000;
 /** Stats in flight at once while a rescan checks which files changed (each is a round trip on network drives). */
 const RESCAN_STAT_CONCURRENCY = 32;
+/** How long a change the client reported itself suppresses the watcher's echo of it. */
+const ANNOUNCED_TTL_MS = 10_000;
 
 /** Matches the servers' view: tsgo and friends treat Windows and macOS file names case-insensitively. */
 const caseInsensitive = process.platform === "win32" || process.platform === "darwin";
@@ -55,6 +57,14 @@ const AdvertisesWatching = type({
 /** Whether `initialize` params advertise `workspace/didChangeWatchedFiles` dynamic registration. */
 export function advertisesWatchedFiles(initializeParams: unknown): boolean {
 	return !(AdvertisesWatching(initializeParams) instanceof type.errors);
+}
+
+/** `DidChangeWatchedFilesParams`, as the client sends them for its own writes. */
+const ChangeParams = type({ changes: type({ uri: "string", type: "number" }).array() });
+
+/** Size and modification time of a path, or undefined when it does not exist. */
+function snapshotOf(stat: fs.Stats | null | undefined): string | undefined {
+	return stat ? `${stat.mtimeMs}:${stat.size}` : undefined;
 }
 
 /** One watcher of a registration: a glob relative to `base`. */
@@ -207,6 +217,8 @@ export class WatchedFilesForwarder {
 	#layoutPaths = new Set<string>();
 	/** Batches go out one after another, so a later batch's disk state never precedes an earlier one's. */
 	#delivery: Promise<void> = Promise.resolve();
+	/** Paths the client reported itself, with their size and mtime then (undefined: absent). */
+	readonly #announced = new Map<string, { at: number; snapshot: Promise<string | undefined> }>();
 
 	constructor(options: WatchedFilesForwarderOptions) {
 		this.#roots = options.roots;
@@ -241,6 +253,27 @@ export class WatchedFilesForwarder {
 		return this.#sync();
 	}
 
+	/**
+	 * Note a `workspace/didChangeWatchedFiles` the client sent for its own
+	 * writes: while the paths stay as they were then, the watcher's echo of
+	 * them is not sent again.
+	 */
+	announced(params: unknown): void {
+		if (this.#closed) return;
+		const parsed = ChangeParams(params);
+		if (parsed instanceof type.errors) return;
+		const now = Date.now();
+		for (const [key, entry] of this.#announced) if (now - entry.at > ANNOUNCED_TTL_MS) this.#announced.delete(key);
+		for (const { uri, type: changeType } of parsed.changes) {
+			const target = uriToFile(uri);
+			const snapshot =
+				changeType === FileChangeType.Deleted
+					? Promise.resolve(undefined)
+					: fs.promises.lstat(target).then(snapshotOf, () => undefined);
+			this.#announced.set(foldCase(path.resolve(target)), { at: now, snapshot });
+		}
+	}
+
 	/** Stop every watcher and drop changes not yet sent. */
 	close(): void {
 		this.#closed = true;
@@ -253,6 +286,7 @@ export class WatchedFilesForwarder {
 		this.#registrations.clear();
 		this.#specs = [];
 		this.#layoutPaths.clear();
+		this.#announced.clear();
 	}
 
 	/**
@@ -327,11 +361,15 @@ export class WatchedFilesForwarder {
 			watcher.close();
 			this.#watches.delete(key);
 		}
-		for (const [key, target] of wanted) {
-			if (!this.#watches.has(key) && !this.#failed.has(key)) this.#open(key, target.dir, target.recursive);
-		}
+		await Promise.all(
+			[...wanted]
+				.filter(([key]) => !this.#watches.has(key) && !this.#failed.has(key))
+				.map(([key, target]) => this.#open(key, target.dir, target.recursive)),
+		);
+		if (this.#closed) return;
 		// A base that appeared since the last pass was watched only through an
-		// ancestor until now; report what was created in it meanwhile.
+		// ancestor until now; now that its own watch is armed, report what was
+		// created in it meanwhile.
 		for (const [base, deep] of rescanned) {
 			void this.#rescan(base, deep, 0).catch(error => {
 				logger.debug("LSP watched-files rescan failed", { dir: base, error: String(error) });
@@ -346,7 +384,8 @@ export class WatchedFilesForwarder {
 		if (moved.includes(true)) this.#syncAgain = true;
 	}
 
-	#open(key: string, dir: string, recursive: boolean): void {
+	/** Open one watch; settles once it reports changes (or failed). */
+	#open(key: string, dir: string, recursive: boolean): Promise<void> {
 		const fail = (error: unknown) => {
 			logger.warn("LSP watched-files watcher failed; changes below it go unreported", { dir, error: String(error) });
 			// A watch that fails on a directory that still exists stays off while it
@@ -365,19 +404,24 @@ export class WatchedFilesForwarder {
 			fail(error);
 		};
 		try {
-			const watch: Watch =
-				process.platform === "win32"
-					? this.#openNative(dir, recursive, error => ended(watch, error))
-					: this.#openFsWatch(dir, recursive, error => ended(watch, error));
+			if (process.platform === "win32") {
+				const opening = this.#openNative(dir, recursive, error => ended(opening.watch, error));
+				this.#watches.set(key, opening.watch);
+				return opening.armed;
+			}
+			const watch: Watch = this.#openFsWatch(dir, recursive, error => ended(watch, error));
 			this.#watches.set(key, watch);
 		} catch (error) {
 			fail(error);
 		}
+		return Promise.resolve();
 	}
 
-	#openNative(dir: string, recursive: boolean, ended: (error: unknown) => void): Watch {
-		const watch = newWatch(() => watcher.close());
-		const watcher = DirectoryWatcher.start(dir, recursive, (error: Error | null, batch: DirectoryChanges) => {
+	/** The native watch is registered at once; `armed` settles when it reports changes or has failed. */
+	#openNative(dir: string, recursive: boolean, ended: (error: unknown) => void): { watch: Watch; armed: Promise<void> } {
+		let watcher: DirectoryWatcher | undefined;
+		const watch = newWatch(() => watcher?.close());
+		const armed = DirectoryWatcher.start(dir, recursive, (error: Error | null, batch: DirectoryChanges) => {
 			if (this.#closed || watch.closed) return;
 			if (error) return ended(error);
 			if (batch.overflow) return this.#lost(watch, dir, recursive);
@@ -393,8 +437,17 @@ export class WatchedFilesForwarder {
 				const added = action === DirectoryChangeAction.Added || action === DirectoryChangeAction.RenamedTo;
 				this.#record(target, !added, added);
 			}
-		});
-		return watch;
+		}).then(
+			started => {
+				// Closed while it was starting: stop it now.
+				if (watch.closed) started.close();
+				else watcher = started;
+			},
+			error => {
+				if (!watch.closed && !this.#closed) ended(error);
+			},
+		);
+		return { watch, armed };
 	}
 
 	#openFsWatch(dir: string, recursive: boolean, ended: (error: unknown) => void): Watch {
@@ -517,7 +570,9 @@ export class WatchedFilesForwarder {
 		// directory, which "changes" whenever its entries do (they report themselves).
 		const stats = await Promise.all(
 			batch.map(([target, { before, after }]) =>
-				after === undefined || (before && after) ? fs.promises.lstat(target).catch(() => null) : undefined,
+				after === undefined || (before && after) || this.#announcement(target)
+					? fs.promises.lstat(target).catch(() => null)
+					: undefined,
 			),
 		);
 		const changes: FileEvent[] = [];
@@ -533,8 +588,35 @@ export class WatchedFilesForwarder {
 			} else if (after) type = FileChangeType.Created;
 			else if (before) type = FileChangeType.Deleted;
 			else continue;
-			if (kinds & (1 << (type - 1))) changes.push({ uri: fileToUri(target), type });
+			if (!(kinds & (1 << (type - 1)))) continue;
+			if (await this.#alreadyAnnounced(target, stat)) continue;
+			changes.push({ uri: fileToUri(target), type });
 		}
 		if (changes.length > 0 && !this.#closed) await this.#send(changes);
+	}
+
+	/** The fresh announcement covering `target`, if any; expired ones are dropped. */
+	#announcement(target: string): Promise<string | undefined> | undefined {
+		const key = foldCase(path.resolve(target));
+		const entry = this.#announced.get(key);
+		if (!entry) return undefined;
+		if (Date.now() - entry.at > ANNOUNCED_TTL_MS) {
+			this.#announced.delete(key);
+			return undefined;
+		}
+		return entry.snapshot;
+	}
+
+	/**
+	 * Whether the client already reported `target` as it is now (`stat` as
+	 * looked up at delivery, null when absent). A path that moved on since is
+	 * reported again and its announcement dropped.
+	 */
+	async #alreadyAnnounced(target: string, stat: fs.Stats | null | undefined): Promise<boolean> {
+		const announced = this.#announcement(target);
+		if (!announced || stat === undefined) return false;
+		if ((await announced) === snapshotOf(stat)) return true;
+		this.#announced.delete(foldCase(path.resolve(target)));
+		return false;
 	}
 }

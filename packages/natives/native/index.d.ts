@@ -192,10 +192,12 @@ export declare class DiffStream {
 export declare class DirectoryWatcher {
   /**
    * Start watching `dir`, its whole subtree when `recursive`. Changes that
-   * happen once this returns are reported. Throws when the directory cannot
-   * be opened or watched; on platforms other than Windows, always.
+   * happen once the promise resolves are reported. Opening the directory and
+   * arming the first read run off the JS thread (each is a round trip on a
+   * network share). Rejects when the directory cannot be opened or watched;
+   * on platforms other than Windows, always.
    */
-  static start(dir: string, recursive: boolean, callback: (err: null | Error, changes: DirectoryChanges) => void): DirectoryWatcher
+  static start(dir: string, recursive: boolean, callback: (err: null | Error, changes: DirectoryChanges) => void): Promise<DirectoryWatcher>
   /**
    * Stop watching and join the reader thread. Batches or an error it queued
    * before stopping may still reach the callback afterwards; ignore them.

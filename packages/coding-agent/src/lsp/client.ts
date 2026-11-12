@@ -2128,7 +2128,10 @@ export async function notifyWorkspaceWatchedFiles(
 					return { uri, type: change.type };
 				});
 			if (clientChanges.length === 0) return;
-			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			const params = { changes: clientChanges };
+			// The watcher sees these writes too; it skips echoing them (the mux does this for shared servers).
+			client.watchedFiles?.announced(params);
+			await sendNotification(client, WATCHED_FILES_METHOD, params, sendSignal);
 			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
 			await refreshOpenFiles(client, sendSignal);
 		}),

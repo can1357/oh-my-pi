@@ -10,6 +10,8 @@
 use napi::{Status, bindgen_prelude::Unknown, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
 
+use crate::task;
+
 /// What happened to an entry, as reported by the file system.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,24 +61,32 @@ pub struct DirectoryWatcher {
 #[napi]
 impl DirectoryWatcher {
 	/// Start watching `dir`, its whole subtree when `recursive`. Changes that
-	/// happen once this returns are reported. Throws when the directory cannot
-	/// be opened or watched; on platforms other than Windows, always.
-	#[napi(factory)]
+	/// happen once the promise resolves are reported. Opening the directory and
+	/// arming the first read run off the JS thread (each is a round trip on a
+	/// network share). Rejects when the directory cannot be opened or watched;
+	/// on platforms other than Windows, always.
+	#[napi(ts_return_type = "Promise<DirectoryWatcher>")]
+	#[allow(
+		clippy::use_self,
+		reason = "napi expands this into a wrapper where `Self` does not resolve"
+	)]
 	pub fn start(
 		dir: String,
 		recursive: bool,
 		#[napi(ts_arg_type = "(err: null | Error, changes: DirectoryChanges) => void")]
 		callback: ChangeSink,
-	) -> napi::Result<Self> {
-		#[cfg(windows)]
-		{
-			Ok(Self { inner: Some(platform::Watch::start(&dir, recursive, callback)?) })
-		}
-		#[cfg(not(windows))]
-		{
-			let _ = (dir, recursive, callback);
-			Err(napi::Error::from_reason("DirectoryWatcher is only available on Windows"))
-		}
+	) -> task::Promise<DirectoryWatcher> {
+		task::blocking("dir_watch.start", (), move |_| {
+			#[cfg(windows)]
+			{
+				Ok(DirectoryWatcher { inner: Some(platform::Watch::start(&dir, recursive, callback)?) })
+			}
+			#[cfg(not(windows))]
+			{
+				let _ = (dir, recursive, callback);
+				Err(napi::Error::from_reason("DirectoryWatcher is only available on Windows"))
+			}
+		})
 	}
 
 	/// Stop watching and join the reader thread. Batches or an error it queued

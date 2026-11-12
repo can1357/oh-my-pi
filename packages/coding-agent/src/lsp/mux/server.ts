@@ -319,6 +319,12 @@ export class LspMuxServer {
 			await this.#writeServer(server, message);
 			return;
 		}
+		if (message.method === WATCHED_FILES_METHOD && !request) {
+			// A client reporting its own writes: the mux's watcher skips echoing them.
+			server.watchedFiles?.announced(message.params);
+			await this.#writeServer(server, message);
+			return;
+		}
 		if (message.method === "$/cancelRequest" && !request) {
 			if (!isRecord(message.params)) return;
 			const originalId = message.params.id;

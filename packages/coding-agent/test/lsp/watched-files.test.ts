@@ -177,4 +177,21 @@ describe("WatchedFilesForwarder", () => {
 		await Bun.sleep(QUIET_MS);
 		expect(sent).toEqual([]);
 	});
+
+	it("does not echo a write the client reported itself, but reports a later change to the same file", async () => {
+		const { root, sent, forwarder } = setup();
+		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		const own = path.join(root, "own.ts");
+		const marker = path.join(root, "marker.ts");
+		fsSync.writeFileSync(own, "export {};\n");
+		forwarder.announced({ changes: [{ uri: fileToUri(own), type: FileChangeType.Created }] });
+		fsSync.writeFileSync(marker, "export {};\n");
+		await waitForEvent(sent, { uri: fileToUri(marker), type: FileChangeType.Created });
+		await Bun.sleep(QUIET_MS);
+		expect(sent.filter(change => change.uri === fileToUri(own))).toEqual([]);
+
+		// Another program edits it afterwards: that change is new to the server.
+		fsSync.writeFileSync(own, "export const edited = 1;\n");
+		await waitForEvent(sent, { uri: fileToUri(own), type: FileChangeType.Changed });
+	});
 });
