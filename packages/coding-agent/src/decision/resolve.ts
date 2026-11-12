@@ -12,7 +12,8 @@ import {
 
 export type DecisionMode = (typeof DECISION_MODES)[number];
 export type DecisionBackend = "off" | "deterministic" | "judge";
-export type DecisionFeature = "skills";
+export const DECISION_FEATURES = ["skills"] as const;
+export type DecisionFeature = (typeof DECISION_FEATURES)[number];
 
 export interface DecisionFeatureConfig {
 	mode: DecisionMode;
@@ -33,5 +34,3 @@ export function resolveDecisionFeature(settings: Settings, feature: DecisionFeat
 	const { mode, deadlineMs } = FEATURES[feature](settings);
 	return { mode: backend === "off" ? "off" : mode, backend, deadlineMs };
 }
-
-export const DECISION_FEATURES = Object.keys(FEATURES) as DecisionFeature[];

@@ -5,6 +5,7 @@
  *
  * URL forms:
  * - skill:// or skill://?q=<query> - Pages the non-hidden catalogue, or searches it locally
+ *   (only while the progressive skill catalogue is active for the calling session)
  * - skill://<name> - Reads SKILL.md
  * - skill://<name>/<path> - Reads relative path within skill's baseDir
  * - skill://<namespace>/<name>[/<path>] - Same, for a collision-namespaced skill
@@ -14,6 +15,7 @@ import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { progressiveSkillsRequested } from "../decision/skill-projection";
 import { searchSkills, skillCatalogueDigest } from "../decision/skills";
 import { resolveContainedPath } from "../discovery/contained-path";
 import {
@@ -365,7 +367,11 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		if (!(url.rawHost || url.hostname)) return skillCatalogue(url, context?.skills ?? getActiveSkills());
+		// The catalogue backs the progressive variant's discovery guidance; otherwise every
+		// non-hidden skill is already listed in the system prompt.
+		if (!(url.rawHost || url.hostname) && context?.settings && progressiveSkillsRequested(context.settings)) {
+			return skillCatalogue(url, context.skills ?? getActiveSkills());
+		}
 		let target: LocatedSkillTarget;
 		try {
 			target = await locateSkillTarget(url, context, false);

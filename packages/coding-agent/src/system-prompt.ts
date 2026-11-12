@@ -1066,7 +1066,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		subagent,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
-		hasSkillReader ? (progressive ?? skills.filter(skill => skill.hide !== true)) : [],
+		hasSkillReader ? (progressive ?? skills).filter(skill => skill.hide !== true) : [],
 	);
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [

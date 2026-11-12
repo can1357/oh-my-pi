@@ -1,8 +1,9 @@
 /**
  * Which skills the system prompt advertises. The `roster` variant lists every non-hidden skill; the
  * `progressive` variant lists only `alwaysApply: true` skills and their `requiresSkills` closure and
- * leaves the rest to per-turn judge suggestions and `skill://?q=` search. Presentation only: the
- * loaded registry, `/skill:<name>` and `skill://<name>` are unchanged.
+ * leaves the rest to per-turn judge suggestions and `skill://?q=` search. Hidden skills (`hide`,
+ * `disable-model-invocation`, `skills.manualSkills`) are never listed or autoloaded. Presentation only:
+ * the loaded registry, `/skill:<name>` and `skill://<name>` are unchanged.
  */
 import type { Settings } from "../config/settings";
 import type { Skill } from "../extensibility/skills";
@@ -17,7 +18,9 @@ export interface SkillClosure {
 
 /**
  * `names` plus every skill they transitively require. The whole loaded graph is validated, not just
- * the requested part, so a broken declaration anywhere never authorizes a partial closure.
+ * the requested part, so a broken declaration anywhere never authorizes a partial closure. Hidden
+ * skills are pruned, along with anything reachable only through them: a skill the model must not
+ * invoke on its own is never pulled in by a dependency edge.
  */
 export function skillDependencyClosure(skills: readonly Skill[], names: readonly string[]): SkillClosure {
 	const byName = new Map(skills.map(skill => [skill.name, skill]));
@@ -46,8 +49,10 @@ export function skillDependencyClosure(skills: readonly Skill[], names: readonly
 	const selected = new Set<string>();
 	const include = (name: string): void => {
 		if (selected.has(name)) return;
+		const skill = byName.get(name);
+		if (!skill || skill.hide === true) return;
 		selected.add(name);
-		for (const dependency of byName.get(name)?.requiresSkills ?? []) include(dependency);
+		for (const dependency of skill.requiresSkills ?? []) include(dependency);
 	};
 	for (const name of names) include(name);
 	return { skills: [...selected].flatMap(name => byName.get(name) ?? []), diagnostics };

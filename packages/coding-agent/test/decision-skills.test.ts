@@ -263,6 +263,40 @@ describe("progressive skill catalogue", () => {
 		expect(progressiveSkillProjection(settings, missing)).toBeUndefined();
 	});
 
+	it("never lists or autoloads a hidden dependency", async () => {
+		const settings = Settings.isolated(progressive);
+		const graph: Skill[] = [
+			{ ...skills[0]!, name: "policy", alwaysApply: true, requiresSkills: ["secret-op"] },
+			{ ...skills[1]!, name: "secret-op", hide: true },
+			skills[2]!,
+		];
+		expect(progressiveSkillProjection(settings, graph)?.mandatory.map(skill => skill.name)).toEqual(["policy"]);
+		expect(skillDependencyClosure(graph, ["policy"]).skills.map(skill => skill.name)).toEqual(["policy"]);
+		const prompt = await buildSystemPrompt({
+			cwd: root,
+			contextFiles: [],
+			rules: [],
+			toolNames: ["read"],
+			skills: graph,
+			progressiveSkills: loaded => progressiveSkillProjection(settings, loaded)?.mandatory,
+		});
+		expect(prompt.systemPrompt.join("\n")).not.toContain("secret-op");
+		const turn = await prepareSkillTurn({
+			settings,
+			skills: graph,
+			request: "hi",
+			history: [],
+			isCurrent: () => true,
+			judge: { settings, registry: new ModelRegistry(createInMemoryAuthStorage()) },
+			onRecord: () => {},
+		});
+		expect(
+			turn.map(
+				message => message.role === "custom" && message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.details,
+			),
+		).toEqual([{ name: "policy", path: skills[0]!.filePath }]);
+	});
+
 	it("reads alwaysApply and requires-skills from SKILL.md frontmatter", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "decision-skill-frontmatter-"));
 		try {
@@ -278,24 +312,34 @@ describe("progressive skill catalogue", () => {
 		}
 	});
 
-	it("searches and pages the catalogue through skill://", async () => {
+	it("searches and pages the catalogue through skill:// only under the progressive variant", async () => {
 		const handler = new SkillProtocolHandler();
+		await expect(
+			handler.resolve(parseInternalUrl("skill://?q=terraform"), { skills, settings: Settings.isolated({}) }),
+		).rejects.toThrow();
+		const settings = Settings.isolated(progressive);
 		const search = JSON.parse(
-			(await handler.resolve(parseInternalUrl("skill://?q=terraform%20drift"), { skills })).content,
+			(await handler.resolve(parseInternalUrl("skill://?q=terraform%20drift"), { skills, settings })).content,
 		);
 		expect(search.skills.map((skill: Skill) => skill.name)).toEqual(["terraform-plan"]);
 
-		const first = JSON.parse((await handler.resolve(parseInternalUrl("skill://?limit=2"), { skills })).content);
+		const first = JSON.parse(
+			(await handler.resolve(parseInternalUrl("skill://?limit=2"), { skills, settings })).content,
+		);
 		expect(first).toMatchObject({ total: 3, coverageComplete: false });
 		const second = JSON.parse(
-			(await handler.resolve(parseInternalUrl(`skill://?limit=2&cursor=${first.nextCursor}`), { skills })).content,
+			(await handler.resolve(parseInternalUrl(`skill://?limit=2&cursor=${first.nextCursor}`), { skills, settings }))
+				.content,
 		);
 		expect(second).toMatchObject({ coverageComplete: true, nextCursor: null });
 		expect([...first.skills, ...second.skills].map((skill: Skill) => skill.name)).toEqual(skills.map(s => s.name));
 
 		// A cursor never pages a catalogue that changed under it.
 		await expect(
-			handler.resolve(parseInternalUrl(`skill://?limit=2&cursor=${first.nextCursor}`), { skills: skills.slice(1) }),
+			handler.resolve(parseInternalUrl(`skill://?limit=2&cursor=${first.nextCursor}`), {
+				skills: skills.slice(1),
+				settings,
+			}),
 		).rejects.toThrow(/stale skill catalogue cursor/);
 	});
 });

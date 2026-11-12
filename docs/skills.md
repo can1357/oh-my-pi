@@ -128,7 +128,7 @@ The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enabl
 
 ```yaml
 skills:
-   manualSkills: ["third-party-*", "pdf"]
+  manualSkills: ["third-party-*", "pdf"]
 ```
 
 - Matches stay reachable through `/skill:<name>` (when skill commands are enabled) and `skill://<name>`, and report `hide: true` in `omp skill list --json`.
@@ -198,7 +198,7 @@ Invoked skill content is identified by invocation kind, each with its own prompt
 `src/internal-urls/skill-protocol.ts` supports:
 
 - `skill://<name>` → resolves to that skill's `SKILL.md` for `read`; in `bash` it is the skill directory (instructions at `skill://<name>/SKILL.md`), and `realpath`/`readlink` print the physical path
-- `skill://` → pages the non-hidden catalogue as JSON (`name`, `description`); `skill://?q=<query>` searches names and descriptions locally, with `limit` (1–100) and a `cursor` from `nextCursor`
+- `skill://` → pages the non-hidden catalogue as JSON (`name`, `description`); `skill://?q=<query>` searches names and descriptions locally, with `limit` (1–100) and a `cursor` from `nextCursor`. Available only while the progressive catalogue is active (`decision.skills.variant: progressive` with skill decisions in `suggest` or `automatic` mode)
 - `skill://<name>/<relative-path>` → resolves inside that skill directory
 
 ```text

@@ -63,7 +63,9 @@ omp config set decision.skills.variant progressive
 
 With skills mode `suggest` or `automatic`, the main agent's system prompt lists only `alwaysApply: true` skills and their `requiresSkills` closure, plus short discovery guidance, instead of every skill. The listed skills' bodies are preloaded with each user task. Every other skill stays loaded and reachable through hints, `/skill:<name>`, and `skill://<name>`. When the judge cannot answer, the hint lists up to five unverified local matches instead; when nothing matches, it points at search. An invalid `requiresSkills` graph keeps the full roster. Changing the variant rebuilds the system prompt like other prompt settings.
 
-The agent searches the full catalogue with `read`:
+Hidden skills (`hide: true`, `disable-model-invocation: true`, or matched by `skills.manualSkills`) are never listed or autoloaded, even when an `alwaysApply` or selected skill requires them: the dependency edge is dropped (along with anything reachable only through it), so the model never pulls in a skill it must not invoke on its own. They remain available through `/skill:<name>` and `skill://<name>`.
+
+While the progressive catalogue is active, the agent searches the full catalogue with `read`; otherwise bare `skill://` is not a catalogue, since the system prompt already lists every non-hidden skill:
 
 - `skill://` pages every non-hidden skill by name.
 - `skill://?q=<query>` searches names and descriptions locally.
