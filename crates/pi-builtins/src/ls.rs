@@ -2055,13 +2055,15 @@ impl Config {
 			Dereference::DirArgs
 		};
 
+		// Validated even when color forces tab stops off, as GNU does.
+		let tab_size_arg = options
+			.get_one::<String>(options::format::TAB_SIZE)
+			.map(|size| size.parse::<usize>().map_err(|_| LsError::InvalidTabSize(size.clone())))
+			.transpose()?;
 		let tab_size = if needs_color {
 			Some(0)
 		} else {
-			options
-				.get_one::<usize>(options::format::TAB_SIZE)
-				.copied()
-				.or_else(|| host.var("TABSIZE").and_then(|s| s.parse().ok()))
+			tab_size_arg.or_else(|| host.var("TABSIZE").and_then(|s| s.parse().ok()))
 		}
 		.unwrap_or(SPACES_IN_TAB);
 
@@ -4078,6 +4080,9 @@ enum LsError {
 	#[error("invalid line width: '{0}'")]
 	InvalidLineWidth(String),
 
+	#[error("invalid tab size: '{0}'")]
+	InvalidTabSize(String),
+
 	#[error("general io error: {0}")]
 	IOError(#[from] std::io::Error),
 
@@ -4116,7 +4121,7 @@ enum LsError {
 impl LsError {
 	fn code(&self) -> i32 {
 		match self {
-			Self::InvalidLineWidth(_) => 2,
+			Self::InvalidLineWidth(_) | Self::InvalidTabSize(_) => 2,
 			Self::IOError(_) => 1,
 			Self::IOErrorContext(_, _, false, _) => 1,
 			Self::IOErrorContext(_, _, true, _) => 2,
@@ -4294,7 +4299,6 @@ pub fn uu_app() -> Command {
 				.short('T')
 				.long(options::format::TAB_SIZE)
 				.value_name("COLS")
-				.value_parser(clap::value_parser!(usize))
 				.help("Assume tab stops at each COLS instead of 8"),
 		)
 		.arg(
@@ -5710,51 +5714,21 @@ mod integration_tests {
 	}
 
 	#[test]
-	fn nonnumeric_tab_sizes_fail_without_listing_the_working_directory() {
+	fn invalid_tab_sizes_keep_gnu_errors_without_listing() {
 		let dir = tempfile::tempdir().unwrap();
 		File::create(dir.path().join("CWD_ONLY")).unwrap();
 		std::fs::create_dir(dir.path().join("target")).unwrap();
-		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
 
-		for args in [
-			&["-T", "target"][..],
-			&["-laT", "target"],
-			&["--tabsize=target"],
+		for (args, size) in [
+			(&["-laT", "target"][..], "target"),
+			(&["--color=always", "-T", "target"], "target"),
+			(&["--tabsize=-1"], "-1"),
+			(&["--tabsize=18446744073709551616"], "18446744073709551616"),
 		] {
 			let (code, capture) = run_util::<Ls>(args, "", dir.path());
 			assert_eq!(code, 2, "{args:?}: {}", capture.out());
 			assert!(capture.out().is_empty(), "{args:?}: {}", capture.out());
-			assert!(capture.err().contains("invalid value"), "{}", capture.err());
-			assert!(capture.err().contains("target"), "{}", capture.err());
-		}
-	}
-
-	#[test]
-	fn colored_output_does_not_hide_invalid_tab_sizes() {
-		let dir = tempfile::tempdir().unwrap();
-		File::create(dir.path().join("CWD_ONLY")).unwrap();
-		std::fs::create_dir(dir.path().join("target")).unwrap();
-		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
-
-		let (code, capture) =
-			run_util::<Ls>(&["--color=always", "-T", "target"], "", dir.path());
-
-		assert_eq!(code, 2, "{}", capture.out());
-		assert!(capture.out().is_empty(), "{}", capture.out());
-		assert!(capture.err().contains("invalid value"), "{}", capture.err());
-		assert!(capture.err().contains("target"), "{}", capture.err());
-	}
-
-	#[test]
-	fn negative_and_overflowing_tab_sizes_fail_without_listing() {
-		let dir = tempfile::tempdir().unwrap();
-		File::create(dir.path().join("CWD_ONLY")).unwrap();
-
-		for arg in ["--tabsize=-1", "--tabsize=18446744073709551616"] {
-			let (code, capture) = run_util::<Ls>(&[arg], "", dir.path());
-			assert_eq!(code, 2, "{arg}: {}", capture.out());
-			assert!(capture.out().is_empty(), "{arg}: {}", capture.out());
-			assert!(capture.err().contains("invalid value"), "{}", capture.err());
+			assert_eq!(capture.err(), format!("ls: invalid tab size: '{size}'\n"), "{args:?}");
 		}
 	}
 
