@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
+import type { Judge, JudgmentRequest, JudgmentResult, Model, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
 import { tokenUsage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
@@ -225,6 +226,15 @@ function stateOf(request: JudgmentRequest): Record<string, unknown> {
 	return request.state as Record<string, unknown>;
 }
 
+const BUNDLED_JEV = getBundledModel("typesafe", "jev-1.14.0");
+if (!BUNDLED_JEV) throw new Error("Expected bundled TypeSafe judge model");
+const JEV: Model = {
+	...BUNDLED_JEV,
+	id: "jev-preview",
+	baseUrl: "https://judge.example.test/",
+};
+const VERIFIER: Model = { ...JEV, id: "verifier", api: "openrouter-decisions", provider: "openrouter" };
+
 describe("jfind cascade", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -284,6 +294,138 @@ describe("jfind cascade", () => {
 			expect(result.stats.failures).toEqual([]);
 			expect(judge.peak).toBeGreaterThan(1);
 		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("verifies with verifyJudge and routes filenames and sketches with judge", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-verifier-"));
+		try {
+			await Bun.write(
+				path.join(dir, "src", "retry.ts"),
+				Array.from({ length: 600 }, (_, i) =>
+					i === 250 ? "function retryBudget() { return attempts * 2; } // retry" : `const noise${i} = ${i};`,
+				).join("\n"),
+			);
+			await Bun.write(path.join(dir, "src", "other.ts"), "export const unrelated = 1;\n");
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("tree" in state) return String(state.tree).includes(`${key} retry.ts`) ? 0.9 : 0.1;
+				if ("files" in state) {
+					return (state.passages as Record<string, [string, string]>)[key]![1].includes("retryBudget") ? 0.8 : 0.2;
+				}
+				return 0.3;
+			});
+			const verifyJudge = new FakeJudge((request, key) =>
+				(stateOf(request).passages as Record<string, string>)[key]!.includes("retryBudget") ? 0.95 : 0.05,
+			);
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "how is the retry budget computed?",
+				extraKeywords: ["attempts"],
+				judge,
+				verifyJudge,
+				includeHidden: false,
+			});
+
+			expect(result.hits.map(hit => hit.rel)).toEqual(["src/retry.ts"]);
+			expect(result.hits[0]!.contentScore).toBe(0.95);
+			expect(judge.requests.some(request => "tree" in stateOf(request))).toBe(true);
+			expect(judge.requests.some(request => "files" in stateOf(request))).toBe(true);
+			expect(judge.requests.some(request => "file" in stateOf(request))).toBe(false);
+			expect(verifyJudge.requests.length).toBeGreaterThan(0);
+			expect(verifyJudge.requests.every(request => "file" in stateOf(request))).toBe(true);
+			expect(result.stats.requests).toBe(judge.requests.length + verifyJudge.requests.length);
+			expect(result.stats.inputTokens).toBe(100 * result.stats.requests);
+			expect(result.coverage).toBe("complete");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("a failing verifyJudge degrades coverage without retrying verification on judge", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-verifier-down-"));
+		try {
+			await Bun.write(
+				path.join(dir, "src", "retry.ts"),
+				Array.from({ length: 600 }, (_, i) =>
+					i === 250 ? "function retryBudget() { return attempts * 2; } // retry" : `const noise${i} = ${i};`,
+				).join("\n"),
+			);
+			await Bun.write(path.join(dir, "src", "other.ts"), "export const unrelated = 1;\n");
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("tree" in state) return String(state.tree).includes(`${key} retry.ts`) ? 0.9 : 0.1;
+				if ("files" in state) {
+					return (state.passages as Record<string, [string, string]>)[key]![1].includes("retryBudget") ? 0.8 : 0.2;
+				}
+				return 0.3;
+			});
+			const verifyJudge = new FakeJudge(() => new Error("verifier down"));
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "how is the retry budget computed?",
+				extraKeywords: ["attempts"],
+				judge,
+				verifyJudge,
+				includeHidden: false,
+			});
+
+			expect(result.hits).toEqual([]);
+			expect(verifyJudge.requests.length).toBeGreaterThan(0);
+			expect(result.stats.failed).toBe(verifyJudge.requests.length);
+			expect(result.coverage).toBe("partial");
+			expect(result.stats.failures).toContain("verification: verifier down");
+			expect(judge.requests.some(request => "file" in stateOf(request))).toBe(false);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it.each([
+		["openrouter/verifier", "verifier"],
+		[undefined, "jev-preview"],
+	])("uses find.verifyModel only for verification when set (selector=%s)", async (selector, expected) => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-setting-verifier-"));
+		const authStorage = createInMemoryAuthStorage();
+		try {
+			await Bun.write(path.join(dir, "retry.ts"), "export function retryBudget() { return attempts * 2; }\n");
+			authStorage.keys.setRuntime("typesafe", "ts-key");
+			authStorage.keys.setRuntime("openrouter", "or-key");
+			const registry = new ModelRegistry(authStorage, "/nonexistent/jfind-models.yml");
+			vi.spyOn(registry, "getAvailable").mockReturnValue([JEV, VERIFIER]);
+			const answers = new FakeJudge(() => 0.9);
+			const routed: { verifying: boolean; primary: string | undefined }[] = [];
+			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(function (this: ChainJudge, request) {
+				routed.push({ verifying: "file" in stateOf(request), primary: this.primaryModel()?.id });
+				return answers.judge(request);
+			});
+			const tool = new FindTool({
+				cwd: dir,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({
+					"find.enabled": "on",
+					modelRoles: { judge: "typesafe/jev-preview" },
+					...(selector ? { "find.verifyModel": selector } : {}),
+				}),
+				modelRegistry: registry,
+			});
+			const result = await tool.execute("x", {
+				query: "how is the retry budget computed?",
+				grep_keywords: ["retryBudget"],
+			});
+
+			expect(result.details?.hits.map(hit => hit.rel)).toEqual(["retry.ts"]);
+			expect(routed.some(entry => entry.verifying)).toBe(true);
+			expect(routed.filter(entry => entry.verifying).every(entry => entry.primary === expected)).toBe(true);
+			expect(routed.some(entry => !entry.verifying)).toBe(true);
+			expect(routed.filter(entry => !entry.verifying).every(entry => entry.primary === JEV.id)).toBe(true);
+		} finally {
+			authStorage.close();
 			await removeWithRetries(dir);
 		}
 	});

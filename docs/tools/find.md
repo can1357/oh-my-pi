@@ -62,6 +62,8 @@ Use `find` first when the implementing location is unknown. Use `grep` for known
 
 Each judged phase drains through a dispatcher with 16 requests in flight before the next begins, so the critical path is three dependent waves.
 
+`find.verifyModel` (unset by default) takes a model role value, for example `openrouter/liquid/d1-ultra` or `nace/drex-max-v1.1`. Only verification uses it; filename and sketch routing stay on `judge`. The selector resolves against the judge role's candidates and is tried first as an explicit candidate, then the `judge` chain without duplicates, under the same fallback rules: a native-only tail after the first native candidate, an attempt timeout while a configured fallback remains, and cooldowns. A selector matching nothing logs a warning and the plain `judge` chain verifies; empty or whitespace-only values are unset. Native decision models are recommended because τ assumes calibrated probabilities. Footer stats and coverage span both judges, while `find.enabled: auto` still gates on `judge` alone. `omp find` reads the setting from the same project settings as the judge role. A slower verifier makes the tool's 20 s partial timeout more likely.
+
 ## Side Effects
 
 - Filesystem: reads up to 20 candidate files (4 MB each); never writes.

@@ -9,6 +9,7 @@ import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesyste
 import { openStandaloneJudge } from "../judgment/standalone";
 import { standaloneFindSpotlight } from "../spotlight/session";
 import { formatPathRelativeToCwd, resolveSearchResultPath } from "../tools/path-utils";
+import { cfgFindVerifyModel } from "../tools/settings";
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
 import { rankedHeat } from "../tools/jfind/passages";
 import { resolveSearchRoot, type SearchRoot } from "../tools/jfind/tree";
@@ -101,7 +102,9 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	// scope has none of its own, so it keeps the caller's.
 	const baseCwd = root.type === "directory" && !isUrlPath(root.path) ? root.path : cwd;
 	log("resolving judge");
-	const { judge, settings, close } = await openStandaloneJudge(baseCwd, "find");
+	const { judge, settings, leadJudge, close } = await openStandaloneJudge(baseCwd, "find");
+	const verifyModel = cfgFindVerifyModel.get(settings)?.trim();
+	const verifyJudge = verifyModel ? leadJudge(verifyModel) : undefined;
 	const spotlight = standaloneFindSpotlight(settings);
 	try {
 		const started = performance.now();
@@ -111,6 +114,7 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 			query: cmd.query.trim(),
 			extraKeywords: cmd.keywords,
 			judge,
+			verifyJudge,
 			spotlight,
 			includeHidden: cmd.hidden,
 			threshold: cfgFindHitThreshold.get(settings),
