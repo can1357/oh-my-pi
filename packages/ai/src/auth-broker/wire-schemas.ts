@@ -102,7 +102,7 @@ export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = ty
 	"authorizedAt?": "number",
 	"kiroClientId?": "string",
 	// Redacted by `redactCredentialForWire`; a snapshot carrying it is rejected.
-	"kiroClientSecret?": "never",
+	"kiroClientSecret?": "undefined",
 	"kiroClientSecretExpiresAt?": "number",
 	"kiroTokenEndpoint?": "string",
 	"kiroOidcRegion?": "string",
