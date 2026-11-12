@@ -1867,7 +1867,7 @@ impl Shell {
 			if let Some(store) = store {
 				state::set_positional(&mut self.k.root, store, &mut vp, args);
 			} else if let Some(overlay) = &mut vp.overlay {
-				overlay.positional = Some(args);
+				overlay.positional = Some(args.into_boxed_slice());
 			}
 		}
 		vp.mode = mode;
@@ -2868,8 +2868,7 @@ impl Vproc {
 	}
 
 	/// A subshell of `self` with `fds` whose first frame is `frame`; it
-	/// starts with a copy of `self`'s function scopes (the root's are read
-	/// from the store).
+	/// starts with `self`'s function scopes and a fork-time root snapshot.
 	fn child_running(
 		&self,
 		k: &mut Kernel,
@@ -2878,14 +2877,11 @@ impl Vproc {
 		mut frame: Frame,
 	) -> Self {
 		let vpid = k.vpid(store);
-		let mut vp = Self::new(
-			vpid,
-			Some(self.vpid),
-			fds,
-			self.cwd.clone(),
-			Some(self.overlay.clone().unwrap_or_default()),
-			true,
-		);
+		let overlay = Overlay::fork(&mut k.root, store, self).unwrap_or_else(|err| {
+			k.fail(err);
+			Overlay::default()
+		});
+		let mut vp = Self::new(vpid, Some(self.vpid), fds, self.cwd.clone(), Some(overlay), true);
 		// `$BASH_SUBSHELL`: one more than the parent's (a pipeline stage
 		// or background job adjusts it, `exec::spawn`). The parent's
 		// caught-signal traps stay in the overlay: the child lists them but

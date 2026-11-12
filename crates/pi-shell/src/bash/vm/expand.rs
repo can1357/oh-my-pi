@@ -2471,13 +2471,16 @@ impl<'e, 'c> Expander<'e, 'c> {
 				if !self_ref {
 					return Ok(Val::Unset);
 				}
-				let global = match self.vp.overlay.as_ref().and_then(|ov| ov.vars.get(name)) {
-					Some(entry) => entry.clone(),
-					None => state::global(self.cx.store, name)?.cloned(),
-				};
+				let global = state::binding(
+					&self.k.root,
+					self.cx.store,
+					self.vp,
+					name,
+					state::Level::Global,
+				)?;
 				return Ok(global
 					.filter(|v| !v.attrs.contains(Attrs::INVISIBLE) && !v.attrs.contains(Attrs::NAMEREF))
-					.map_or(Val::Unset, |v| plain_element(&v, index, list)));
+					.map_or(Val::Unset, |v| plain_element(v, index, list)));
 			},
 			state::Deref::To { name: target, index: Some(sub) } if index.is_none() && !list => {
 				let key = if self.is_assoc(&target)? {

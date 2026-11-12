@@ -365,7 +365,7 @@ fn fresh_shell(
 		ov.records
 			.insert(KeyBuf::Misc(key), Some(Record::Misc(value)));
 	}
-	ov.positional = Some(args.args.clone());
+	ov.positional = Some(args.args.clone().into_boxed_slice());
 	// The environment, as `Shell::create` imports it.
 	let mut foreign = Vec::new();
 	for (name, value) in env {

@@ -54,22 +54,12 @@ pub fn usable(
 	resolved: Option<IntrinsicId>,
 ) -> Result<Option<IntrinsicId>, StoreError> {
 	// Runs for every builtin command: nothing disabled (the root's flag,
-	// unless a subshell changed the list) skips the list.
-	let disabled = match vp
-		.overlay
-		.as_ref()
-		.and_then(|ov| ov.records.get(&KeyBuf::Misc(MiscKey::DisabledBuiltins)))
-	{
-		Some(Some(Record::Words(w))) => w.iter().any(|w| w == name),
-		Some(_) => false,
-		None => {
-			k.root.builtins_disabled(store)?
-				&& matches!(
-					store.get(Key::Misc(MiscKey::DisabledBuiltins))?,
-					Some(Record::Words(w)) if w.iter().any(|w| w == name)
-				)
-		},
-	};
+	// or the subshell's own fork-time list) skips the list.
+	let disabled = (vp.overlay.is_some() || k.root.builtins_disabled(store)?)
+		&& matches!(
+			state::record(store, vp, Key::Misc(MiscKey::DisabledBuiltins))?,
+			Some(Record::Words(w)) if w.iter().any(|w| w == name)
+		);
 	if disabled {
 		return Ok(None);
 	}

@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 30;
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -505,7 +505,7 @@ impl Shell {
 			}
 		})?;
 		for ov in self.procs.iter().filter_map(|p| p.overlay.as_ref()) {
-			for rec in ov.records.values().flatten() {
+			for rec in ov.function_records() {
 				if let Record::Func { unit, .. } = rec {
 					funcs.push(*unit);
 				}

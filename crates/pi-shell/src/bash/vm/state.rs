@@ -1,15 +1,16 @@
 //! Shell state as one virtual process sees it: its function-local scopes,
-//! then its subshell overlay, then the root state in the [`StateStore`].
+//! then its subshell overlay and fork snapshot, or the root [`StateStore`].
 //!
 //! The store is the root state: reads go to it and every
 //! write is applied to it when the engine makes it. The root vproc's scopes
 //! are store records too ([`Key::Scope`], [`Key::Local`]); a subshell vproc
 //! keeps its own (`Vproc::scopes`) and its overlay, which reach the store
-//! only inside the `Frames` blob. The engine keeps only facts derived from
-//! the store ([`Root`]), kept exact by its own writes and dropped when the
-//! store's epoch says another writer changed it.
+//! only inside the `Frames` blob. [`Root`] caches derived facts and shares
+//! fork snapshots, refreshed from the store's changed records at the next
+//! fork. Its caches are dropped when the store's epoch changes; existing
+//! children keep their snapshots.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use bstr::{BStr, BString};
 use hashbrown::DefaultHashBuilder;
@@ -256,8 +257,130 @@ pub struct Overlay {
 	pub vars:       VarMap,
 	/// Other records (functions, aliases, options, misc) written or removed.
 	pub records:    HashMap<KeyBuf, Option<Record>, DefaultHashBuilder>,
-	/// The subshell's positional parameters, when they differ.
-	pub positional: Option<Vec<BString>>,
+	/// Positional parameters pinned at the fork, then replaced by `set --`.
+	pub positional: Option<Box<[BString]>>,
+	/// Root bindings at the fork, shared by children until a root write.
+	snapshot:       Option<ForkSnapshot>,
+}
+
+/// Only shell bindings are inherited, not the root's jobs or local scopes.
+const FORK_TABLES: &[Table] = &[
+	Table::Var,
+	Table::Func,
+	Table::Alias,
+	Table::Opt,
+	Table::Trap,
+	Table::DirStack,
+	Table::CmdHash,
+	Table::Misc,
+	Table::ZshOpt,
+	Table::ZshAlias,
+];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ForkBindings {
+	vars:    HashMap<BString, Record, DefaultHashBuilder>,
+	records: HashMap<KeyBuf, Option<Record>, DefaultHashBuilder>,
+}
+
+/// A fork owns its bindings even when the root cache is invalidated.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ForkSnapshot(Arc<ForkBindings>);
+
+impl Serialize for ForkSnapshot {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		self.0.serialize(serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for ForkSnapshot {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		ForkBindings::deserialize(deserializer).map(|bindings| Self(Arc::new(bindings)))
+	}
+}
+
+impl ForkBindings {
+	fn put(&mut self, key: Key<'_>, record: Option<&Record>) {
+		if let Key::Var(name) = key {
+			match record {
+				Some(record) => {
+					self.vars.insert(name.into(), record.clone());
+				},
+				None => {
+					self.vars.remove(&name[..]);
+				},
+			}
+		} else {
+			match record {
+				Some(record) => {
+					self.records.insert(key.to_buf(), Some(record.clone()));
+				},
+				None => {
+					self.records.remove(&key.to_buf());
+				},
+			}
+		}
+	}
+}
+
+impl Overlay {
+	/// Function records referenced by either level of this fork's state.
+	pub(super) fn function_records(&self) -> impl Iterator<Item = &Record> {
+		self
+			.records
+			.values()
+			.chain(self.snapshot.iter().flat_map(|snapshot| snapshot.0.records.values()))
+			.flatten()
+			.filter(|record| matches!(record, Record::Func { .. }))
+	}
+
+	/// Fork the parent's overlay without recopying unchanged root globals.
+	pub(super) fn fork(
+		root: &mut Root,
+		store: &mut dyn StateStore,
+		parent: &Vproc,
+	) -> Result<Self, StoreError> {
+		let mut overlay = parent.overlay.clone().unwrap_or_default();
+		if overlay.snapshot.is_none() {
+			overlay.snapshot = Some(root.fork_snapshot(store)?);
+		}
+		if overlay.positional.is_none() {
+			overlay.positional = Some(root_positional(store)?.into());
+		}
+		Ok(overlay)
+	}
+
+	fn global<'a>(
+		&'a self,
+		store: &'a mut dyn StateStore,
+		name: &[u8],
+	) -> Result<Option<&'a Var>, StoreError> {
+		match &self.snapshot {
+			Some(snapshot) => match snapshot.0.vars.get(name) {
+				Some(Record::Var(var)) => Ok(Some(var)),
+				Some(_) => Err(StoreError::Shape { table: Table::Var }),
+				None => Ok(None),
+			},
+			None => global(store, name),
+		}
+	}
+
+	fn record<'a>(
+		&'a self,
+		store: &'a mut dyn StateStore,
+		key: Key<'_>,
+	) -> Result<Option<&'a Record>, StoreError> {
+		let owned = key.to_buf();
+		if let Some(entry) = self.records.get(&owned) {
+			return Ok(entry.as_ref());
+		}
+		if let Some(snapshot) = &self.snapshot
+			&& FORK_TABLES.contains(&key.table())
+		{
+			return Ok(snapshot.0.records.get(&owned).and_then(Option::as_ref));
+		}
+		store.get(key)
+	}
 }
 
 /// A function's local scope, or the temporary environment of a builtin
@@ -293,10 +416,14 @@ impl Random {
 /// the engine's own writes (every root write goes through [`Root::write`],
 /// [`Root::set_var`] or [`Root::set_record`]) and rebuilt from the store
 /// by [`Root::invalidate`] when the store's epoch says another writer
-/// changed it. Holds no store data.
+/// changed it. The fork cache is refreshed lazily from changed records.
 #[derive(Debug, Default)]
 pub struct Root {
 	epoch:             u64,
+	/// Shared by forked children; updated only at the next fork. Once a
+	/// synchronous substitution exits, updating this cache needs no map copy.
+	fork_snapshot:     Option<ForkSnapshot>,
+	fork_dirty:        hashbrown::HashSet<KeyBuf>,
 	/// Root scopes in the store: [`Key::Scope`] `0..depth`. Only the engine
 	/// pushes and pops them; recounted on invalidation.
 	depth:             u32,
@@ -525,6 +652,8 @@ impl Root {
 	/// the derived facts and rebuild the scope facts from the store.
 	pub fn invalidate(&mut self, store: &mut dyn StateStore, epoch: u64) {
 		self.epoch = epoch;
+		self.fork_snapshot = None;
+		self.fork_dirty.clear();
 		self.opts_known = 0;
 		self.zopts_known = ZshOpts::default();
 		self.builtins_disabled = None;
@@ -558,9 +687,44 @@ impl Root {
 	/// ([`Self::fail`]).
 	pub fn write(&mut self, store: &mut dyn StateStore, change: Change<'_>) {
 		self.note(&change);
+		if self.fork_snapshot.is_some() {
+			let key = match &change {
+				Change::Put(key, _)
+				| Change::Del(key)
+				| Change::SetScalar(key, _)
+				| Change::AppendScalar(key, _)
+				| Change::SetElem(key, ..)
+				| Change::AppendElem(key, ..)
+				| Change::InsertElem(key, ..)
+				| Change::DelElem(key, _) => *key,
+			};
+			if FORK_TABLES.contains(&key.table()) {
+				self.fork_dirty.insert(key.to_buf());
+			}
+		}
 		if let Err(err) = store.apply(change) {
 			self.fail(err);
 		}
+	}
+
+	fn fork_snapshot(&mut self, store: &mut dyn StateStore) -> Result<ForkSnapshot, StoreError> {
+		if let Some(snapshot) = &mut self.fork_snapshot {
+			if !self.fork_dirty.is_empty() {
+				let bindings = Arc::make_mut(&mut snapshot.0);
+				for key in &self.fork_dirty {
+					bindings.put(key.as_key(), store.get(key.as_key())?);
+				}
+				self.fork_dirty.clear();
+			}
+			return Ok(snapshot.clone());
+		}
+		let mut bindings = ForkBindings::default();
+		for &table in FORK_TABLES {
+			store.scan(table, &mut |key, rec| bindings.put(key, Some(rec)))?;
+		}
+		let snapshot = ForkSnapshot(Arc::new(bindings));
+		self.fork_snapshot = Some(snapshot.clone());
+		Ok(snapshot)
 	}
 
 	/// Keep the scope masks and the nameref flag exact for `change`
@@ -1009,7 +1173,10 @@ fn var_at<'a>(
 			.as_ref()
 			.and_then(|ov| ov.vars.get(name))
 			.and_then(Option::as_ref),
-		At::Global => global(store, name)?,
+		At::Global => match &vp.overlay {
+			Some(ov) => ov.global(store, name)?,
+			None => global(store, name)?,
+		},
 	})
 }
 
@@ -1219,7 +1386,10 @@ pub fn locale_token(
 			.any(|n| !matches!(root_binding(root, store, n), Ok(None)))
 	} else {
 		vp.scopes.iter().any(|s| bound(&s.vars))
-			|| vp.overlay.as_ref().is_some_and(|ov| bound(&ov.vars))
+			|| vp
+				.overlay
+				.as_ref()
+				.is_some_and(|ov| ov.snapshot.is_some() || bound(&ov.vars))
 	};
 	(!in_vp).then_some(root.locale_gen)
 }
@@ -1624,7 +1794,7 @@ pub fn edit_seen(
 	}
 	if let Some(ov) = vp.overlay.as_mut() {
 		if !ov.vars.contains_key(name) {
-			let shadowed = global(store, name)?.cloned();
+			let shadowed = ov.global(store, name)?.cloned();
 			ov.vars.insert(BString::from(name), shadowed);
 		}
 		return Ok(match ov.vars.get_mut(name).and_then(Option::as_mut) {
@@ -1796,12 +1966,8 @@ pub fn record<'a>(
 	vp: &'a Vproc,
 	key: Key<'_>,
 ) -> Result<Option<&'a Record>, StoreError> {
-	let record = match vp
-		.overlay
-		.as_ref()
-		.and_then(|ov| ov.records.get(&key.to_buf()))
-	{
-		Some(entry) => entry.as_ref(),
+	let record = match &vp.overlay {
+		Some(ov) => ov.record(store, key)?,
 		None => store.get(key)?,
 	};
 	// Caught signals are reset in a subshell, while ignored signals remain
@@ -2081,10 +2247,8 @@ pub fn option(
 	vp: &Vproc,
 	opt: OptId,
 ) -> Result<bool, StoreError> {
-	if let Some(ov) = &vp.overlay
-		&& let Some(entry) = ov.records.get(&KeyBuf::Opt(opt))
-	{
-		return Ok(opt_value(opt, entry.as_ref()));
+	if let Some(ov) = &vp.overlay {
+		return Ok(opt_value(opt, ov.record(store, Key::Opt(opt))?));
 	}
 	root.option(store, opt)
 }
@@ -2103,10 +2267,8 @@ pub fn zsh_option(
 	if let Some((twin, inverted)) = opt.env_twin() {
 		return Ok(option(root, store, vp, twin)? != inverted);
 	}
-	if let Some(ov) = &vp.overlay
-		&& let Some(entry) = ov.records.get(&KeyBuf::ZshOpt(opt))
-	{
-		return Ok(zsh_opt_value(opt, entry.as_ref()));
+	if let Some(ov) = &vp.overlay {
+		return Ok(zsh_opt_value(opt, ov.record(store, Key::ZshOpt(opt))?));
 	}
 	root.zsh_option(store, opt)
 }
@@ -2273,7 +2435,7 @@ pub fn exported(
 			}
 		}
 	}
-	store.scan(Table::Var, &mut |key, rec| {
+	scan_base(store, vp, Table::Var, &mut |key, rec| {
 		if let (Key::Var(name), Record::Var(v)) = (key, rec) {
 			let name: &[u8] = name;
 			if !seen.contains(name) {
@@ -2348,7 +2510,7 @@ pub fn exported_funcs(
 			push(out, name.as_slice(), rec);
 		}
 	}
-	store.scan(Table::Func, &mut |key, rec| {
+	scan_base(store, vp, Table::Func, &mut |key, rec| {
 		if let Key::Func(name) = key {
 			let name: &[u8] = name;
 			if !seen.contains(name) {
@@ -2356,6 +2518,35 @@ pub fn exported_funcs(
 			}
 		}
 	})
+}
+
+/// Read only the fork's root bindings, including absence, before applying
+/// the child's overlay and scopes.
+fn scan_base(
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	table: Table,
+	f: &mut dyn FnMut(Key<'_>, &Record),
+) -> Result<(), StoreError> {
+	if let Some(snapshot) = vp.overlay.as_ref().and_then(|ov| ov.snapshot.as_ref())
+		&& FORK_TABLES.contains(&table)
+	{
+		if table == Table::Var {
+			for (name, record) in &snapshot.0.vars {
+				f(var_key(name), record);
+			}
+		} else {
+			for (key, record) in &snapshot.0.records {
+				if key.as_key().table() == table
+					&& let Some(record) = record
+				{
+					f(key.as_key(), record);
+				}
+			}
+		}
+		return Ok(());
+	}
+	store.scan(table, f)
 }
 
 /// The scan behind [`scan`] and [`scan_declared`]. A declared-but-unset
@@ -2370,7 +2561,7 @@ fn scan_vars(
 	invisible_hides: bool,
 ) -> Result<Vec<(KeyBuf, Record)>, StoreError> {
 	let mut all: std::collections::BTreeMap<KeyBuf, Record> = std::collections::BTreeMap::new();
-	store.scan(table, &mut |k, r| {
+	scan_base(store, vp, table, &mut |k, r| {
 		all.insert(k.to_buf(), r.clone());
 	})?;
 	if let Some(ov) = &vp.overlay {
@@ -2502,7 +2693,7 @@ pub fn set_positional(
 	} else if let Some(scope) = vp.scopes.iter_mut().rev().find(|s| s.positional.is_some()) {
 		scope.positional = Some(params);
 	} else if let Some(ov) = &mut vp.overlay {
-		ov.positional = Some(params);
+		ov.positional = Some(params.into_boxed_slice());
 	}
 }
 
