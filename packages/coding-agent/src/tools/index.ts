@@ -38,7 +38,7 @@ import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
-import type { InheritedContextSecrets } from "../task/inherited-context";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
@@ -525,7 +525,7 @@ export interface ToolSession {
 	 * The session's provider secret encoder (absent while redaction is off). An inherited task tail is
 	 * cut on encoded text, so no secret is split at the cut, then decoded for the child's own boundary.
 	 */
-	providerSecrets?: InheritedContextSecrets;
+	providerSecrets?: SecretObfuscator;
 	/** The Spotlight experiment's handle on this session; present only while `spotlight.experiment.enabled`. */
 	spotlight?: SpotlightSession;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */

@@ -262,7 +262,7 @@ import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-
 import { CacheWarmer } from "./session/cache-warmer";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
-import { InheritedContextFrames } from "./task/inherited-context";
+import { InheritedContextFrames, restoreEvictedFrames } from "./task/inherited-context";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { createSpeculativeToolExecutionConfig } from "./speculation/host";
 import { closeAllConnections } from "./ssh/connection-manager";
@@ -4728,11 +4728,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
 				transformed = capArchiveFrameBytes(transformed, transformModel);
 				// Before inline snapcompact: its planner counts these frames against the image budget.
+				const unframed = transformed;
 				transformed = await inheritedContextFrames.transform(
 					transformed,
 					transformModel,
 					cfgImagesBlockImages.get(settings),
+					cfgSnapcompactShape.get(settings),
 				);
+				const framed = transformed;
 				transformed = await snapcompactInline.transform(transformed, transformModel);
 				transformed = clampProviderContextImages(transformed, transformModel);
 				transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
@@ -4744,7 +4747,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Byte budget after decoration: URL/file-referenced images carry no inline bytes.
 				transformed = clampProviderContextImageBytes(transformed, transformModel);
 				// A clamp that dropped inherited frames would leave the child neither frames nor the tail.
-				transformed = inheritedContextFrames.restoreEvicted(transformed);
+				transformed = restoreEvictedFrames(transformed, unframed, framed);
 				// Keep per-request volatility out of the system prompt: the date/cwd
 				// reminder rides on the first user turn so open-weight providers keep
 				// their tool-schema prefix cache (#7404).

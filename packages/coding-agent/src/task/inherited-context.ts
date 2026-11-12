@@ -21,6 +21,8 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import inheritedContextTemplate from "../prompts/system/subagent-inherited-context.md" with { type: "text" };
+import { obfuscateMessages } from "../secrets/message-transform";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import { PLACEHOLDER_RE } from "../secrets/placeholder";
 
 /** Tail size measured in the inheritance experiment: two frames of the 1568px dense shape. */
@@ -32,12 +34,6 @@ export const INHERITED_CONTEXT_MAX_IDENTIFIERS = 120;
 const IDENTIFIER_MAX_CHARS = 240;
 /** A tail cut mid-line advances to the next line start when one is this close. */
 const LINE_SNAP_CHARS = 400;
-
-/** The session's secret encoder, as {@link buildInheritedContext} uses it. */
-export interface InheritedContextSecrets {
-	obfuscate(text: string): string;
-	deobfuscate(text: string): string;
-}
 
 /** Parent tail and its identifiers: plain data, safe to structured-clone into a worker. */
 export interface InheritedContext {
@@ -121,7 +117,7 @@ const SECRET_RECUT_ATTEMPTS = 8;
  * the cut; the re-cut then moves past the placeholder where the fresh pass first disagrees.
  * `undefined` when no re-cut converges (fail closed).
  */
-function decodeForChild(encodedTail: string, secrets: InheritedContextSecrets): string | undefined {
+function decodeForChild(encodedTail: string, secrets: SecretObfuscator): string | undefined {
 	let tail = encodedTail;
 	for (let attempt = 0; attempt < SECRET_RECUT_ATTEMPTS && tail; attempt++) {
 		const text = secrets.deobfuscate(tail);
@@ -138,24 +134,31 @@ function decodeForChild(encodedTail: string, secrets: InheritedContextSecrets): 
 
 /**
  * Serialize the parent's live context (thinking excluded) and keep the tail and its identifiers.
- * With `secrets`, the tail is cut on encoded text (a secret at the cut is dropped whole, never
- * split) and decoded afterwards ({@link decodeForChild}), for the child's own provider boundary to
- * encode with placeholders it can decode. `undefined` when the parent has no conversation text yet.
+ * With `secrets`, the messages are encoded block by block before serialization, as the provider
+ * boundary encodes them, so the serializer's truncation and JSON escaping never see a raw secret;
+ * the tail is cut on that encoded text (a secret at the cut is dropped whole, never split) and
+ * decoded afterwards ({@link decodeForChild}), for the child's own provider boundary to encode with
+ * placeholders it can decode. `undefined` when the parent has no conversation text yet, or when the
+ * decoded tail would not re-encode (fail closed).
  */
 export function buildInheritedContext(
 	messages: readonly Message[],
-	secrets: InheritedContextSecrets | undefined,
+	secrets: SecretObfuscator | undefined,
 ): InheritedContext | undefined {
-	// Encode the whole conversation, as the provider boundary does: a pre-encode slice would cut a
-	// secret (or the context its rule needs) at its start, and redaction can shrink the slice until
-	// that raw fragment lands inside the tail.
-	// Plain tool output: dim markers mean something only to the rasterizer, and the text turn sends them as-is.
-	const raw = snapcompact.serializeConversation([...messages], { includeThinking: false, dimToolResults: false });
-	const encoded = (secrets ? secrets.obfuscate(raw) : raw).trim();
+	const source = secrets ? obfuscateMessages(secrets, [...messages]) : [...messages];
+	// The whole conversation, not a slice: a pre-encode slice would cut a secret (or the context its
+	// rule needs) at its start. Plain tool output: dim markers mean something only to the rasterizer,
+	// and the text turn sends them as-is.
+	const serialized = snapcompact.serializeConversation(source, { includeThinking: false, dimToolResults: false });
+	// A second pass for rules that span blocks the per-block pass saw apart.
+	const encoded = (secrets ? secrets.obfuscate(serialized) : serialized).trim();
 	if (!encoded) return undefined;
 	const tail = tailText(encoded, INHERITED_CONTEXT_CHARS);
 	const text = secrets ? decodeForChild(tail, secrets) : tail;
-	if (!text?.trim()) return undefined;
+	if (!text?.trim()) {
+		logger.warn("task: inherited context dropped; its secrets would not re-encode at any tail cut");
+		return undefined;
+	}
 	// Identifiers come from the encoded text with its placeholders blanked: a pattern can match part of a
 	// secret (a UUID's hex runs) that no whole-value rule would encode again in the persisted sidecar.
 	const identifiers = extractIdentifiers(secrets ? secrets.obfuscate(text).replace(PLACEHOLDER_RE, " ") : text);
@@ -170,7 +173,7 @@ export function buildInheritedContext(
  */
 export function encodedInheritedContext(
 	context: InheritedContext,
-	secrets: InheritedContextSecrets | undefined,
+	secrets: SecretObfuscator | undefined,
 ): InheritedContext {
 	if (!secrets) return context;
 	const text = secrets.obfuscate(context.text);
@@ -197,6 +200,9 @@ export function inheritedContextMessage(context: InheritedContext): InheritedCon
 	};
 }
 
+/** The `snapcompact.shape` setting: a named frame shape, or `auto` to resolve one per model. */
+export type ShapeSetting = snapcompact.ShapeVariantName | "auto";
+
 /** Most re-cuts while fitting the tail into {@link INHERITED_CONTEXT_MAX_FRAMES} frames. */
 const FIT_ATTEMPTS = 6;
 
@@ -206,10 +212,14 @@ const FIT_ATTEMPTS = 6;
  * geometry, the CJK grid), so the cut follows the shape instead of keeping the last frames of an
  * overflowing render, which would drop text the sidecar still lists.
  */
-function fitTail(text: string, model: Model): { text: string; shape: snapcompact.Shape; frames: number } | undefined {
+function fitTail(
+	text: string,
+	model: Model,
+	variant: ShapeSetting,
+): { text: string; shape: snapcompact.Shape; frames: number } | undefined {
 	let fitted = text;
 	for (let attempt = 0; attempt < FIT_ATTEMPTS && fitted; attempt++) {
-		const shape = snapcompact.resolveShapeForText(fitted, model);
+		const shape = snapcompact.resolveShapeForText(fitted, model, variant);
 		const frames = snapcompact.frames(fitted, { shape });
 		if (frames <= INHERITED_CONTEXT_MAX_FRAMES) return { text: fitted, shape, frames };
 		// Proportional cut with a margin: line snapping and wrapping make capacity uneven.
@@ -243,55 +253,43 @@ function isInheritedContextTurn(message: Message): message is UserMessage & { co
  * only ever draw encoded text, and before snapcompact's inline transform, whose planner then
  * counts these frames and whose system-prompt frames land in front of this turn. Keeps the text
  * turn when the frames would push the request past the provider image count budget, and
- * {@link restoreEvicted} puts it back when a later clamp (the inline-image byte budget, which
- * evicts oldest first) drops any frame; a switch between frames and text rewrites the first
+ * {@link restoreEvictedFrames} puts it back when a later clamp (the inline-image byte budget,
+ * which evicts oldest first) drops any frame; a switch between frames and text rewrites the first
  * turn, which costs one prompt-cache miss. Holds the last render, so a session re-sends
- * identical bytes (prompt caches stay warm) without re-rasterizing. One instance per
- * conversation: it remembers the turn it swapped in the request it is transforming.
+ * identical bytes (prompt caches stay warm) without re-rasterizing.
  */
 export class InheritedContextFrames {
 	#last?: { key: string; content: (TextContent | ImageContent)[] };
-	#swapped?: { text: UserMessage; frames: number };
 
-	async transform(context: Context, model: Model, blockImages: boolean): Promise<Context> {
-		this.#swapped = undefined;
+	/** `context` itself when the turn stays text. */
+	async transform(
+		context: Context,
+		model: Model,
+		blockImages: boolean,
+		shape: ShapeSetting = "auto",
+	): Promise<Context> {
 		if (blockImages || !sendsImageInputOnWire(model)) return context;
 		const index = context.messages.findIndex(isInheritedContextTurn);
 		if (index === -1) return context;
 		const message = context.messages[index] as UserMessage & { content: TextContent[] };
 		const room = snapcompact.providerImageBudget(model) - imageCount(context.messages);
-		const content = await this.#render(message.content[1]!.text, model, room);
+		const content = await this.#render(message.content[1]!.text, model, shape, room);
 		if (!content) return context;
-		this.#swapped = { text: message, frames: content.length - 1 };
 		const messages = context.messages.slice();
 		messages[index] = { ...message, content };
 		return { ...context, messages };
 	}
 
-	/**
-	 * After the provider's image clamps: when they dropped any of the frames {@link transform} swapped
-	 * in, send the text turn instead, so the child keeps the tail rather than a preamble without it.
-	 */
-	restoreEvicted(context: Context): Context {
-		const swapped = this.#swapped;
-		this.#swapped = undefined;
-		if (!swapped) return context;
-		const index = context.messages.findIndex(message => message.role === "user" && message.inheritedContext === true);
-		if (index === -1) return context;
-		const content = context.messages[index]!.content;
-		const frames = Array.isArray(content) ? content.filter(block => block.type === "image").length : 0;
-		if (frames >= swapped.frames) return context;
-		logger.debug("task: inherited context frames evicted by the image byte budget; sending text");
-		const messages = context.messages.slice();
-		messages[index] = swapped.text;
-		return { ...context, messages };
-	}
-
-	async #render(tail: string, model: Model, room: number): Promise<(TextContent | ImageContent)[] | undefined> {
-		// The fit depends only on the tail and the model's shape inputs; reuse it before re-wrapping ~28k chars.
-		const key = `${model.provider}\0${model.id}\0${tail}`;
+	async #render(
+		tail: string,
+		model: Model,
+		shape: ShapeSetting,
+		room: number,
+	): Promise<(TextContent | ImageContent)[] | undefined> {
+		// The fit depends only on the tail, the shape setting, and the model; reuse it before re-wrapping ~28k chars.
+		const key = `${model.provider}\0${model.id}\0${shape}\0${tail}`;
 		if (this.#last?.key === key) return this.#last.content.length - 1 > room ? undefined : this.#last.content;
-		const fit = fitTail(tail, model);
+		const fit = fitTail(tail, model, shape);
 		if (!fit || fit.frames > room) return undefined;
 		let frames: ImageContent[];
 		try {
@@ -311,4 +309,24 @@ export class InheritedContextFrames {
 		this.#last = { key, content };
 		return content;
 	}
+}
+
+/**
+ * After the provider's image clamps: when they dropped any frame {@link InheritedContextFrames}
+ * swapped into `framed` (its result for `unframed`), send the text turn instead, so the child
+ * keeps the tail rather than a preamble without it. Stateless, so overlapping requests on one
+ * transform (side requests, compaction) cannot mix up each other's turns.
+ */
+export function restoreEvictedFrames(context: Context, unframed: Context, framed: Context): Context {
+	if (framed === unframed) return context;
+	const textTurn = unframed.messages.find(isInheritedContextTurn);
+	const framedTurn = framed.messages.find(message => message.role === "user" && message.inheritedContext === true);
+	const index = context.messages.findIndex(message => message.role === "user" && message.inheritedContext === true);
+	if (!textTurn || !framedTurn || index === -1) return context;
+	const sentFrames = imageCount([context.messages[index]!]);
+	if (sentFrames >= imageCount([framedTurn])) return context;
+	logger.debug("task: inherited context frames evicted by the image byte budget; sending text");
+	const messages = context.messages.slice();
+	messages[index] = textTurn;
+	return { ...context, messages };
 }

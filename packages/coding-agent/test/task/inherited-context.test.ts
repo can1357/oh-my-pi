@@ -15,6 +15,7 @@ import {
 	InheritedContextFrames,
 	type InheritedContext,
 	inheritedContextMessage,
+	restoreEvictedFrames,
 } from "@oh-my-pi/pi-coding-agent/task/inherited-context";
 
 const HASH = "40cf59cf8a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293c17051";
@@ -151,6 +152,40 @@ describe("buildInheritedContext", () => {
 		expect(context!.identifiers.some(token => secret.includes(token) || token.includes("$$"))).toBe(false);
 	});
 
+	it("encodes secrets before the serializer truncates or escapes them", () => {
+		// A tool result over the serializer's limit keeps a head and a tail; this secret straddles the head cut.
+		const cut = ["fixture", "secret", "straddling", "the", "head", "cut", "x"].join("-");
+		// Tool-call arguments are JSON-escaped; this plain secret contains a quote and a backslash.
+		const escaped = ['pa"ss', "word-fixture-only"].join("\\");
+		const entries = [
+			{ type: "plain" as const, content: cut },
+			{ type: "plain" as const, content: escaped },
+		];
+		const output = `${"o".repeat(1_185)}${cut}${"p".repeat(4_000)}`;
+		const messages = [
+			userMessage("run the build"),
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: `login ${escaped}` } }],
+				timestamp: 0,
+			} as unknown as Message,
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "bash",
+				content: [{ type: "text", text: output }],
+				isError: false,
+				timestamp: 0,
+			} as Message,
+		];
+		const context = buildInheritedContext(messages, new SecretObfuscator(entries));
+		expect(context).toBeDefined();
+		const sent = new SecretObfuscator(entries).obfuscate(context!.text);
+		expect(sent).not.toContain(cut.slice(0, 15));
+		expect(sent).not.toContain(JSON.stringify(escaped).slice(1, -1));
+		expect(sent).not.toContain("word-fixture-only");
+	});
+
 	it("sends tool output without the rasterizer's dim markers", () => {
 		const toolResult = {
 			role: "toolResult",
@@ -261,14 +296,14 @@ describe("inherited context turn", () => {
 		// What the oldest-first byte clamp leaves of the turn: the preamble and an omission stub.
 		const clamped = (turn!.content as { type: string }[]).filter(block => block.type === "text");
 		const evicted: Context = { messages: [{ ...turn!, content: clamped } as Message, ...sent.messages.slice(1)] };
-		const restored = frames.restoreEvicted(evicted);
+		const restored = restoreEvictedFrames(evicted, built, sent);
 		expect(restored.messages[0]).toBe(built.messages[0]);
 		expect(restored.messages[1]).toBe(evicted.messages[1]);
 	});
 
 	it("keeps its frames when no clamp touched them", async () => {
-		const frames = new InheritedContextFrames();
-		const sent = await frames.transform(childContext(context), visionModel(["text", "image"]), false);
-		expect(frames.restoreEvicted(sent)).toBe(sent);
+		const built = childContext(context);
+		const sent = await new InheritedContextFrames().transform(built, visionModel(["text", "image"]), false);
+		expect(restoreEvictedFrames(sent, built, sent)).toBe(sent);
 	});
 });
