@@ -15,12 +15,12 @@ use super::{
 		self, BARE_BODY_AUTO_PIPED_WARNING, BARE_RANGE_AUTO_PUT_WARNING, COLON_ON_REGISTER_PUT,
 		COLONLESS_PUT_TAKES_NO_BODY, COLONLESS_SPAN_PUT, CUT_COLON_IGNORED_WARNING,
 		CUT_TAKES_NO_BODY, DIFF_OLD_ROWS_IGNORED_WARNING, EMPTY_INSERT, EMPTY_PUT_AUTO_CUT_WARNING,
-		MINUS_BULLET_AUTO_PIPED_WARNING, MINUS_ROW_REJECTED, MOVE_TAKES_NO_BODY,
+		MALFORMED_OP_HEADER, MINUS_BULLET_AUTO_PIPED_WARNING, MINUS_ROW_REJECTED, MOVE_TAKES_NO_BODY,
 		READ_METADATA_IGNORED_WARNING, REGISTER_PUT_TAKES_NO_BODY, REM_TAKES_NO_BODY,
 		REPLACE_PAIR_COALESCED_WARNING, SNAPSHOT_ROWS_AUTO_PUT_WARNING,
 	},
 	prefixes::{is_read_metadata_line, strip_one_leading_hashline_prefix},
-	tokenizer::{BlockTarget, Token, Tokenizer, is_hunk_header_text},
+	tokenizer::{BlockTarget, Token, Tokenizer, is_hunk_header_text, is_malformed_op_header},
 	types::{Anchor, BlockMode, BlockSpan, Cursor, Edit, FileOp, ParsedRange, PasteTarget},
 };
 use crate::error::EditError;
@@ -105,6 +105,11 @@ pub struct Executor {
 	terminated:               bool,
 	skippable_comments:       Vec<(u32, String)>,
 	recovered_snapshot_lines: HashSet<u32>,
+	/// Malformed op header seen on the most recent row. A later row makes it
+	/// final (error); ending a streaming parse on it drops it as an incomplete
+	/// trailing header (`PUT`, `PUT >`, a half-quoted `MV`); an authoritative
+	/// end rejects it.
+	deferred_malformed:       Option<ParseFailure>,
 }
 
 impl Default for Executor {
@@ -125,6 +130,7 @@ impl Executor {
 			terminated:               false,
 			skippable_comments:       Vec::new(),
 			recovered_snapshot_lines: HashSet::new(),
+			deferred_malformed:       None,
 		}
 	}
 
@@ -165,6 +171,9 @@ impl Executor {
 	fn feed(&mut self, token: Token) -> Result<(), ParseFailure> {
 		if self.terminated {
 			return Ok(());
+		}
+		if let Some(error) = self.deferred_malformed.take() {
+			return Err(error);
 		}
 		match token {
 			Token::EnvelopeBegin { .. } => self.consume_comments(),
@@ -243,6 +252,10 @@ impl Executor {
 
 	fn finish(mut self, streaming: bool) -> Result<Parsed, ParseFailure> {
 		self.consume_comments()?;
+		let deferred = self.deferred_malformed.take();
+		if !streaming && let Some(error) = deferred {
+			return Err(error);
+		}
 		if streaming {
 			let flush = self
 				.pending
@@ -329,6 +342,23 @@ impl Executor {
 			}
 			if let Some(message) = bodyless_message(&pending.target, pending.had_colon) {
 				return fail_at(line_num, message);
+			}
+			// A malformed op header (grievance 558: `PUT 351*=357`) names an op
+			// keyword but parses as no target. Absorbing it here would splice the
+			// row and its body verbatim into the file; body rows start with `+`.
+			// Only this absorption path changes: with no hunk open the row already
+			// fails with the legacy "no preceding hunk header" error, which the
+			// legacy parity fixtures pin byte-for-byte.
+			// The rejection is deferred one row: a streamed call may end on a
+			// half-typed header, which `finish(streaming)` must discard rather
+			// than error on and hide the valid edits before it.
+			if is_malformed_op_header(text) {
+				self.deferred_malformed = fail_at::<()>(
+					line_num,
+					&format!("{} Got {}.", MALFORMED_OP_HEADER, messages::preview_row(text)),
+				)
+				.err();
+				return Ok(());
 			}
 			let minus = text.trim_start().starts_with('-');
 			if !minus {

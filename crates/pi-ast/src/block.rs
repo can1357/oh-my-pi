@@ -52,6 +52,168 @@ fn first_content_column(code: &str, row: usize) -> Option<usize> {
 	None
 }
 
+/// Should an unrecognized language fall back to brace matching? QML has no
+/// tree-sitter grammar here, but its blocks are brace groups. Any other
+/// unrecognized language keeps resolving to nothing.
+fn brace_fallback_for(lang: Option<&str>, path: Option<&str>) -> bool {
+	// A blank hint counts as omitted, exactly as in `resolve_language`.
+	if let Some(lang) = lang.map(str::trim).filter(|lang| !lang.is_empty()) {
+		return lang.eq_ignore_ascii_case("qml");
+	}
+	path
+		.and_then(|path| std::path::Path::new(path.trim()).extension())
+		.and_then(|ext| ext.to_str())
+		.is_some_and(|ext| ext.eq_ignore_ascii_case("qml"))
+}
+
+/// Brace-matching fallback for brace languages tree-sitter has no grammar for
+/// (QML, for one). Resolves the brace group opened on `line`: the first
+/// unmatched `{` on that line through its matching `}`. A line whose first
+/// structural brace is a closer — a continuation like `} else {` or a lone
+/// `}` — resolves to nothing, mirroring the tree-sitter path's "no block
+/// begins here" verdict. Braces inside string literals and comments are
+/// skipped so they never open or close a group; so are regular-expression
+/// literals (`/}/`, `/[{]/`), recognised by the token before the `/` (an
+/// operator or opener rather than an operand, which would make it a division).
+fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
+	if line == 0 {
+		return None;
+	}
+	let target = (line - 1) as usize;
+	let bytes = code.as_bytes();
+	let mut row = 0usize;
+	let mut opener = false;
+	let mut depth = 0usize;
+	let mut string_delim = 0u8;
+	let mut escaped = false;
+	let mut line_comment = false;
+	let mut block_comment = false;
+	let mut regex = false;
+	let mut regex_class = false;
+	// Last non-whitespace byte seen outside comments, used to tell a regex
+	// literal from a division.
+	let mut prev = 0u8;
+	let mut i = 0usize;
+	while i < bytes.len() {
+		let byte = bytes[i];
+		let next = bytes.get(i + 1).copied().unwrap_or(0);
+		if byte == b'\n' {
+			row += 1;
+			line_comment = false;
+			// A regex literal never spans lines; a stray `/` ends the guess.
+			regex = false;
+			regex_class = false;
+			escaped = false;
+			i += 1;
+			continue;
+		}
+		if line_comment {
+			i += 1;
+			continue;
+		}
+		if block_comment {
+			if byte == b'*' && next == b'/' {
+				block_comment = false;
+				i += 2;
+			} else {
+				i += 1;
+			}
+			continue;
+		}
+		if regex {
+			if escaped {
+				escaped = false;
+			} else if byte == b'\\' {
+				escaped = true;
+			} else if byte == b'[' {
+				regex_class = true;
+			} else if byte == b']' {
+				regex_class = false;
+			} else if byte == b'/' && !regex_class {
+				regex = false;
+				prev = b')';
+			}
+			i += 1;
+			continue;
+		}
+		if string_delim != 0 {
+			if escaped {
+				escaped = false;
+			} else if byte == b'\\' {
+				escaped = true;
+			} else if byte == string_delim {
+				string_delim = 0;
+			}
+			i += 1;
+			continue;
+		}
+		match byte {
+			b'/' if next == b'/' => {
+				line_comment = true;
+				i += 2;
+			},
+			b'/' if next == b'*' => {
+				block_comment = true;
+				i += 2;
+			},
+			b'/'
+				if matches!(
+					prev,
+					0 | b'('
+						| b','
+						| b'='
+						| b':'
+						| b'['
+						| b'!'
+						| b'&'
+						| b'|'
+						| b'?'
+						| b'{'
+						| b'}'
+						| b';'
+				) =>
+			{
+				regex = true;
+				i += 1;
+			},
+			// Backtick template literals are strings too, so a `}` inside one
+			// never closes a group.
+			b'"' | b'\'' | b'`' => {
+				string_delim = byte;
+				prev = byte;
+				i += 1;
+			},
+			b'{' if !opener && row == target => {
+				opener = true;
+				depth = 1;
+				i += 1;
+			},
+			b'{' if opener => {
+				depth += 1;
+				i += 1;
+			},
+			b'}' if opener => {
+				depth -= 1;
+				if depth == 0 {
+					return Some(BlockRange { start_line: line, end_line: row as u32 + 1 });
+				}
+				i += 1;
+			},
+			b'}' if row == target => return None,
+			_ => i += 1,
+		}
+		if !byte.is_ascii_whitespace()
+			&& !regex
+			&& string_delim == 0
+			&& !line_comment
+			&& !block_comment
+		{
+			prev = byte;
+		}
+	}
+	None
+}
+
 /// Resolve the block beginning on `options.line`.
 ///
 /// Returns `None` (a soft "no block here", surfaced as a hard error one layer
@@ -63,7 +225,14 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 		return Ok(None);
 	}
 	let Some(language) = resolve_language(lang.as_deref(), path.as_deref()) else {
-		return Ok(None);
+		// Languages with no tree-sitter grammar whose blocks are still brace
+		// groups (QML) resolve by matching; a truly unrecognized extension
+		// keeps resolving to nothing.
+		return if brace_fallback_for(lang.as_deref(), path.as_deref()) {
+			Ok(brace_block_span(&code, line))
+		} else {
+			Ok(None)
+		};
 	};
 	let row = (line - 1) as usize;
 	let Some(col) = first_content_column(&code, row) else {
@@ -1358,5 +1527,65 @@ mod tests {
 		// And the raw end line (the blank one) on its own.
 		assert_eq!(boundaries(code, "x.py", &[(5, 5)]), boundaries_unpruned(code, "x.py", &[(5, 5)]));
 		assert_prune_equivalent(code, "x.py");
+	}
+
+	#[test]
+	fn resolves_qml_brace_blocks_without_a_grammar() {
+		let code = "Item {\n    width: 100\n    function go() {\n        run();\n    }\n}\n";
+		assert_eq!(
+			resolve(code, "tst_maildetail.qml", 1),
+			Some(BlockRange { start_line: 1, end_line: 6 })
+		);
+		assert_eq!(
+			resolve(code, "tst_bundleexpand.qml", 3),
+			Some(BlockRange { start_line: 3, end_line: 5 })
+		);
+	}
+
+	#[test]
+	fn qml_closer_and_continuation_rows_resolve_to_nothing() {
+		let code = "Item {\n    width: 100\n}\n";
+		assert_eq!(resolve(code, "x.qml", 2), None);
+		assert_eq!(resolve(code, "x.qml", 3), None);
+	}
+
+	#[test]
+	fn qml_braces_inside_template_literals_do_not_close_blocks() {
+		let code = "Item {\n    property string value: `}`\n    property string open: \
+		            `{`\n}\nRectangle {\n}\n";
+		assert_eq!(resolve(code, "x.qml", 1), Some(BlockRange { start_line: 1, end_line: 4 }));
+	}
+
+	#[test]
+	fn qml_braces_inside_regex_literals_do_not_change_depth() {
+		let code = "Item {\n    property var close: /}/\n    property var open: /[{]\\//\n    \
+		            property real half: width / 2\n    onClicked: { x = /\\}/.test(s) \
+		            }\n}\nRectangle {\n}\n";
+		assert_eq!(resolve(code, "x.qml", 1), Some(BlockRange { start_line: 1, end_line: 6 }));
+		assert_eq!(resolve(code, "x.qml", 7), Some(BlockRange { start_line: 7, end_line: 8 }));
+	}
+
+	#[test]
+	fn blank_language_hint_falls_back_to_the_path() {
+		let code = "Item {\n    width: 100\n}\n";
+		let range = |lang: &str| {
+			block_range_at(BlockRangeOptions {
+				code: code.to_string(),
+				path: Some("x.qml".to_string()),
+				lang: Some(lang.to_string()),
+				line: 1,
+			})
+			.unwrap()
+		};
+		assert_eq!(range(""), Some(BlockRange { start_line: 1, end_line: 3 }));
+		assert_eq!(range("  "), Some(BlockRange { start_line: 1, end_line: 3 }));
+		assert_eq!(range("qml"), Some(BlockRange { start_line: 1, end_line: 3 }));
+		assert_eq!(range("nonsense"), None);
+	}
+
+	#[test]
+	fn keeps_typescript_blocks_on_the_tree_sitter_path() {
+		let code = "function go() {\n    run();\n}\n";
+		assert_eq!(resolve(code, "x.ts", 1), Some(BlockRange { start_line: 1, end_line: 3 }));
 	}
 }

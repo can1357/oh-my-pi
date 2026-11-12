@@ -272,11 +272,11 @@ impl EditStore {
 	pub fn record_seen_lines(&self, path: &Path, hash: &str, lines: &[u32]) {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
-		if let Some(version) = state
-			.histories
-			.get_mut(path)
-			.and_then(|h| h.versions.iter_mut().find(|v| v.snapshot.hash == hash))
-		{
+		if let Some(version) = state.histories.get_mut(path).and_then(|h| {
+			h.versions
+				.iter_mut()
+				.find(|v| v.snapshot.hash.eq_ignore_ascii_case(hash))
+		}) {
 			let previous_bytes = version.retained_bytes();
 			merge_seen(&mut version.snapshot, Some(lines));
 			let current_bytes = version.retained_bytes();
@@ -331,7 +331,7 @@ impl EditStore {
 			.get(path)?
 			.versions
 			.iter()
-			.find(|v| v.snapshot.hash == hash)
+			.find(|v| v.snapshot.hash.eq_ignore_ascii_case(hash))
 			.map(|v| v.snapshot.clone())
 	}
 
@@ -340,10 +340,12 @@ impl EditStore {
 	pub fn has_hash(&self, path: &Path, hash: &str) -> bool {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
-		state
-			.histories
-			.get(path)
-			.is_some_and(|history| history.versions.iter().any(|v| v.snapshot.hash == hash))
+		state.histories.get(path).is_some_and(|history| {
+			history
+				.versions
+				.iter()
+				.any(|v| v.snapshot.hash.eq_ignore_ascii_case(hash))
+		})
 	}
 
 	/// Return the version with exactly equal text and refresh path recency.
@@ -366,7 +368,7 @@ impl EditStore {
 			.histories
 			.values()
 			.flat_map(|h| h.versions.iter())
-			.filter(|v| v.snapshot.hash == hash)
+			.filter(|v| v.snapshot.hash.eq_ignore_ascii_case(hash))
 			.map(|v| v.snapshot.path.clone())
 			.collect()
 	}
@@ -771,5 +773,28 @@ mod tests {
 		let file = std::fs::File::create(&path).unwrap();
 		file.set_len(MAX_SNAPSHOT_FILE_BYTES + 1).unwrap();
 		assert!(EditStore::new().record_file(&path, None).is_none());
+	}
+	#[test]
+	fn fresh_tag_lookups_ignore_ascii_case() {
+		let store = EditStore::new();
+		let path = Path::new("fresh");
+		let tag = store.record(path, "hello\nworld\n", Some(&[1]));
+		assert!(!tag.is_empty());
+		let lower = tag.to_ascii_lowercase();
+		assert!(store.by_hash(path, &lower).is_some());
+		assert_eq!(store.paths_with_hash(&lower), vec![path.to_owned()]);
+		assert!(store.has_hash(path, &lower));
+		store.record_seen_lines(path, &lower, &[2]);
+		assert_eq!(
+			store
+				.by_hash(path, &tag)
+				.unwrap()
+				.seen_lines
+				.as_ref()
+				.map(|s| s.len()),
+			Some(2)
+		);
+		assert!(store.by_hash(path, "0000").is_none());
+		assert!(store.by_hash(Path::new("elsewhere"), &lower).is_none());
 	}
 }

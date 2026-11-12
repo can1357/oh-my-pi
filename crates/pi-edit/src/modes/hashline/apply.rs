@@ -31,6 +31,15 @@ use crate::{
 pub static STRUCTURAL_CLOSER_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*[)\]}]+[;,]?\s*$").expect("valid structural-closer regex"));
 
+/// A structural closer, ignoring a trailing comment (`} // bar`,
+/// `}; /* end */`).
+pub fn is_structural_closer(text: &str) -> bool {
+	static COMMENTED: LazyLock<Regex> = LazyLock::new(|| {
+		Regex::new(r"^\s*[)\]}]+[;,]?\s*(?://.*|/\*.*\*/)\s*$").expect("valid commented-closer regex")
+	});
+	STRUCTURAL_CLOSER_RE.is_match(text) || COMMENTED.is_match(text)
+}
+
 /// Behavior when an anonymous paste has no available cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyPaste {
@@ -1025,7 +1034,15 @@ fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<E
 			.copied()
 			.unwrap_or("");
 		let mut outward = None;
-		if has_content(anchor_text) && indent_deeper(leading_indent(anchor_text), &target) {
+		// An insert anchored on a structural closer stays at the gap the
+		// locator specified: sliding a shallower body would carry it past the
+		// closer of the construct containing the anchor — past a class closer
+		// for a member like `private:`, landing invalid code — and `PUT >N:`
+		// / `PUT >N*` on a closer promised exactly that gap.
+		if has_content(anchor_text)
+			&& !is_structural_closer(anchor_text)
+			&& indent_deeper(leading_indent(anchor_text), &target)
+		{
 			let mut landing = group.anchor;
 			let mut crossed = 0;
 			let mut blocked = false;
