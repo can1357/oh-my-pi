@@ -390,6 +390,7 @@ impl AxBackend for Win32Ax {
 			height: f64::from(rect.get_bottom()) - f64::from(rect.get_top()),
 		});
 		Ok(AxProps {
+			#[cfg(test)]
 			read_as_fingerprint: None,
 			role: normalize_role_uia(&native_role),
 			native_role,
