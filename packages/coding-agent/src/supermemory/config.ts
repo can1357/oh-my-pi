@@ -7,6 +7,7 @@
  * the user's transcripts. Tuning fields read the `supermemory.*` setting handles.
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { clamp } from "@oh-my-pi/pi-utils";
 import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 import type { Settings } from "../config/settings";
 import {
@@ -61,9 +62,9 @@ export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
 		scoping: cfgSupermemoryScoping.get(settings),
 		autoRecall: cfgSupermemoryAutoRecall.get(settings),
 		autoRetain: cfgSupermemoryAutoRetain.get(settings),
-		retainEveryNTurns: Math.floor(Math.min(100, Math.max(1, cfgSupermemoryRetainEveryNTurns.get(settings)))),
-		recallLimit: Math.floor(Math.min(50, Math.max(1, cfgSupermemoryRecallLimit.get(settings)))),
-		threshold: Math.min(1, Math.max(0, cfgSupermemoryThreshold.get(settings))),
+		retainEveryNTurns: Math.floor(clamp(cfgSupermemoryRetainEveryNTurns.get(settings), 1, 100)),
+		recallLimit: Math.floor(clamp(cfgSupermemoryRecallLimit.get(settings), 1, 50)),
+		threshold: clamp(cfgSupermemoryThreshold.get(settings), 0, 1),
 		searchMode: cfgSupermemorySearchMode.get(settings),
 	};
 }
