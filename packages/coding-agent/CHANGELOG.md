@@ -4,7 +4,7 @@
 
 ### Added
 
-- SDK embedders can run a fully started session in their own host: pass `runSessionHost` to `runRootCommand` and the launch keeps the normal startup (settings, auth, `--resume`/`--model`/`--tools`, extensions, MCP) with `--mode rpc-ui`'s protocol-host behavior, then hands over the session and its tool-UI setter instead of starting the TUI, print or RPC mode
+- SDK embedders can run a fully started session in their own host: pass `runSessionHost` to `runRootCommand` and the launch keeps the normal startup (settings, auth, `--resume`/`--model`/`--tools`, extensions, MCP) with `--mode rpc-ui`'s protocol-host behavior, then hands over the session and its tool-UI setter instead of starting the TUI, print or RPC mode ([#19075](https://github.com/can1357/oh-my-pi/pull/19075) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.20.0] - 2026-11-12
 
