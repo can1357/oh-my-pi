@@ -1,17 +1,18 @@
 //! The state-store seam: the shell's persistent state lives in host objects
 //! (for example JS objects in a host's heap).
 //!
-//! **The store is the state, not a copy of it.** Every table is authoritative
-//! in the store at all times: the engine keeps no copy of store data and
-//! writes each change through with [`StateStore::apply`] when it makes it.
+//! **The store remains authoritative for the root shell's state:** the engine
+//! writes each root change through with [`StateStore::apply`] when it makes it.
 //! Records: global variables (with their attributes and export flags), the
 //! root shell's function-local scopes and their variables, functions,
 //! aliases, options, traps, jobs, child processes, the directory stack,
 //! `hash` entries and the miscellaneous scalars (cwd, umask, `$?`, `$!`,
-//! `PIPESTATUS`, positional parameters, counters, …). Only execution
-//! position (frames, partial words, pipe bytes, subshell overlays, pending
-//! calls) stays in the engine and reaches the store as the `Frames` blob
-//! of [`Shell::externalize`](crate::bash::Shell::externalize).
+//! `PIPESTATUS`, positional parameters, counters, …). Execution position
+//! (frames, partial words, pipe bytes, pending calls) and subshell or
+//! background-child overlays stay in the engine; those overlays hold a
+//! copy-on-write fork-time view of inherited root bindings, carried by
+//! [`Shell::externalize`](crate::bash::Shell::externalize) in the `Frames`
+//! blob (format 31).
 //!
 //! Granularity: a record is written by the engine call that changes it,
 //! before that call returns. Most are written at the change; the root
@@ -53,8 +54,8 @@ use crate::bash::{
 /// docs for the contract; `crate::testkit::store_conformance` checks an
 /// implementation).
 pub trait StateStore {
-	/// Read one record, borrowed: the engine holds no copy of store data, so
-	/// reads must not allocate on a hit.
+	/// Read one record, borrowed from the authoritative store; reads must not
+	/// allocate on a hit.
 	///
 	/// # Errors
 	/// [`StoreError`] when the backend fails or a record cannot be decoded.
