@@ -5337,7 +5337,7 @@
 				"method",
 				"questions"
 			],
-			"description": "Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it."
+			"description": "Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."
 		},
 		"CancelUiRequest": {
 			"type": "object",
@@ -5584,7 +5584,7 @@
 				"id",
 				"selectedOptions"
 			],
-			"description": "Answer to one `ask` question: exact option labels, plus optional free text."
+			"description": "Answer to one `ui.askDialog` question: exact option labels, plus optional free text."
 		},
 		"ValueUiResponse": {
 			"type": "object",
@@ -5647,7 +5647,7 @@
 				"id",
 				"cancelled"
 			],
-			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers)."
+			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers)."
 		},
 		"AnswersUiResponse": {
 			"type": "object",

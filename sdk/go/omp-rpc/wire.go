@@ -5801,7 +5801,7 @@ func (v EditorUiRequest) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"editor"`, nil)
 }
 
-// Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.
+// Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.
 type AskUiRequest struct {
 	ID        string        `json:"id"`
 	Questions []AskQuestion `json:"questions"`
@@ -6115,7 +6115,7 @@ func (v *ExtensionUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
-// Answer to one `ask` question: exact option labels, plus optional free text.
+// Answer to one `ui.askDialog` question: exact option labels, plus optional free text.
 type AskAnswer struct {
 	ID              string   `json:"id"`
 	SelectedOptions []string `json:"selectedOptions"`
@@ -6195,7 +6195,7 @@ func (v ConfirmUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
-// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
+// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers).
 type CancelUiResponse struct {
 	ID       string `json:"id"`
 	TimedOut *bool  `json:"timedOut,omitempty"`
