@@ -77,6 +77,95 @@ export function isJudgmentApi(api: Api): api is JudgmentApi {
 	return Object.hasOwn(JUDGMENT_WIRES, api);
 }
 
+/** Request path each judgment API appends to its `baseUrl`; `{model}` stands for the wire model id. */
+export const JUDGMENT_API_PATHS = {
+	typesafe: "/v1/systemone",
+	"openrouter-decisions": "/decisions",
+	"workers-ai-systemone": "/{model}",
+	"openai-decisions": "/decisions",
+	"liquid-systemone": "/decisions/v1/systemone",
+	"nace-systemone": "/v1/systemone",
+} as const satisfies Record<JudgmentApi, string>;
+
+/** A native judge model declaration: the exact provider/model id and the endpoint its API posts to. */
+export interface NativeJudgeRouteDraft {
+	provider: string;
+	id: string;
+	api: JudgmentApi;
+	baseUrl: string;
+}
+
+/** Provider ids that would shadow object prototype keys or selector keywords. */
+const RESERVED_PROVIDER_IDS: Record<string, boolean> = {
+	default: true,
+	inherit: true,
+	prototype: true,
+	constructor: true,
+	tostring: true,
+	tolocalestring: true,
+	valueof: true,
+	hasownproperty: true,
+	isprototypeof: true,
+	propertyisenumerable: true,
+};
+
+/**
+ * Validate a provider namespace for a new native judge declaration: canonical lowercase, not reserved, and not a
+ * case variant of an `existing` provider (which would split one provider's credentials across two namespaces).
+ * @returns the trimmed id.
+ * @throws {Error} naming the problem.
+ */
+export function validateNativeJudgeProviderId(provider: string, existing: Iterable<string> = []): string {
+	const id = provider.trim();
+	if (!/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/.test(id)) {
+		throw new Error(
+			"Use a lowercase provider ID starting with a letter, with letters, digits, and single hyphens or underscores.",
+		);
+	}
+	if (Object.hasOwn(RESERVED_PROVIDER_IDS, id)) throw new Error("That provider ID is reserved.");
+	for (const other of existing) {
+		if (other !== id && other.toLowerCase() === id) {
+			throw new Error(`The provider ID differs from the existing provider "${other}" only by capitalization.`);
+		}
+	}
+	return id;
+}
+
+/**
+ * Validate the `baseUrl` of a native judge: an HTTP(S) root without credentials, query or fragment, to which
+ * {@link JUDGMENT_API_PATHS} appends the operation. Workers AI roots may keep the `<account>` placeholder.
+ * @returns the trimmed root without trailing slashes.
+ * @throws {Error} naming the problem.
+ */
+export function validateNativeJudgeEndpointRoot(api: JudgmentApi, baseUrl: string): string {
+	if (!isJudgmentApi(api)) throw new Error("Select a supported native judgment protocol.");
+	const endpoint = baseUrl.trim().replace(/\/+$/, "");
+	let parsed: URL;
+	try {
+		parsed = new URL(endpoint);
+	} catch {
+		throw new Error("Enter an absolute HTTP or HTTPS endpoint root.");
+	}
+	if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+		throw new Error("The endpoint root must use HTTP or HTTPS.");
+	}
+	if (parsed.username || parsed.password || endpoint.includes("?") || endpoint.includes("#")) {
+		throw new Error("The endpoint root must not contain credentials, a query, or a fragment.");
+	}
+	const pathname = parsed.pathname.replace(/\/+$/, "");
+	const templated = api === "workers-ai-systemone" ? pathname.replaceAll("%3Caccount%3E", "") : pathname;
+	if (/%3C|%3E|[{}]|%7B|%7D/i.test(templated) || /\s/.test(endpoint)) {
+		throw new Error("Enter an endpoint root, not a templated URL.");
+	}
+	if (
+		/\/(?:systemone|decisions)$/i.test(pathname) ||
+		(api === "workers-ai-systemone" && /\/ai\/run\/./i.test(pathname))
+	) {
+		throw new Error(`Enter the endpoint root; ${api} appends ${JUDGMENT_API_PATHS[api]} itself.`);
+	}
+	return endpoint;
+}
+
 /** Whether both the native protocol and catalog model support image input. */
 export function nativeJudgmentSupportsImages(model: Model): boolean {
 	return isJudgmentApi(model.api) && JUDGMENT_WIRES[model.api].images !== undefined && model.input.includes("image");

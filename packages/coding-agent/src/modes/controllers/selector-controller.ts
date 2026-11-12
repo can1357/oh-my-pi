@@ -2,12 +2,14 @@ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-p
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import { parseCloudflareCredential, serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import {
+	$env,
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
@@ -1132,6 +1134,38 @@ export class SelectorController {
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
+				},
+				onSaveNativeRoute: async (model, api, baseUrl) => {
+					const saved = await this.ctx.session.modelRegistry.saveNativeJudgeRoute(model, api, baseUrl);
+					this.ctx.showStatus(`Native judge route saved for ${saved.provider}/${saved.id}`);
+					return saved;
+				},
+				onCreateNativeJudgeRoute: async draft => {
+					const saved = await this.ctx.session.modelRegistry.createNativeJudgeRoute(draft);
+					this.ctx.showStatus(`Native judge model added: ${saved.provider}/${saved.id}`);
+					return saved;
+				},
+				onSaveNativeJudgeCredential: async (model, credential) => {
+					let key = credential.token.trim();
+					if (!key) return;
+					if (model.api === "workers-ai-systemone") {
+						const parsed = parseCloudflareCredential(key);
+						const accountId =
+							credential.accountId?.trim() || parsed?.accountId || $env.CLOUDFLARE_ACCOUNT_ID?.trim();
+						if (!parsed || !accountId) throw new Error("Workers AI needs a Cloudflare API token and account ID.");
+						key = serializeCloudflareCredential({ ...parsed, accountId });
+					}
+					try {
+						// Adds a credential; the provider's existing keys stay.
+						await this.ctx.session.modelRegistry.authStorage.credentials.upsert(model.provider, {
+							type: "api_key",
+							key,
+						});
+					} catch {
+						// Credential stores may echo the submitted secret in their errors.
+						throw new Error(`Storing the API key for ${model.provider} failed.`);
+					}
+					this.ctx.showStatus(`API key stored for ${model.provider}`);
 				},
 
 				onLoginRequest: providerId => {

@@ -20,6 +20,7 @@ import {
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 
 import { cfgCycleOrder, cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -149,6 +150,9 @@ function createHub(options: {
 			onCycleOrderChange: options.callbacks?.onCycleOrderChange,
 			onSavePreset: options.callbacks?.onSavePreset,
 			onSwitchPreset: options.callbacks?.onSwitchPreset,
+			onSaveNativeRoute: options.callbacks?.onSaveNativeRoute,
+			onCreateNativeJudgeRoute: options.callbacks?.onCreateNativeJudgeRoute,
+			onSaveNativeJudgeCredential: options.callbacks?.onSaveNativeJudgeCredential,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
 		},
@@ -1858,6 +1862,241 @@ describe("ModelHub", () => {
 
 			hub.handleInput("\n");
 			expect(onLoginRequest).toHaveBeenCalledWith("anthropic");
+		});
+	});
+
+	describe("native judge routes", () => {
+		const cx: DescribeContext = {
+			cols: 220,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		const CTRL_R = "\x12";
+		const CTRL_N = "\x0e";
+		const nativeJudge = (id: string, baseUrl = "https://native.example") =>
+			buildModel({ ...makeModel("fixture", id), api: "typesafe", kind: "judge", baseUrl });
+		const pickerProps = (hub: ModelHubComponent) => {
+			const root = hub.describe(cx);
+			if (root.k !== "picker" || !root.p) throw new Error("Expected the model picker");
+			return root.p;
+		};
+		const subtitle = (hub: ModelHubComponent) => JSON.stringify(pickerProps(hub).subtitle);
+		/** Roles → Kinds tab → Judge row → Enter: the Judge assignment picker. */
+		const pickJudge = (hub: ModelHubComponent) => {
+			hub.handleInput(UP);
+			hub.handleNativeEvent({ type: "action", key: "", act: "tab", value: "kind", mods: [] });
+			hub.handleNativeEvent({ type: "select", key: "", item: "role:judge" });
+			hub.handleInput("\n");
+		};
+		const type = (hub: ModelHubComponent, text: string) => {
+			for (const ch of text) hub.handleInput(ch);
+		};
+		const settle = async (result: unknown) => {
+			await result;
+			await Bun.sleep(0);
+		};
+
+		test("Ctrl+R declares a chat candidate's native protocol and root without assigning it", async () => {
+			const chat = makeModel("fixture", "chat-judge");
+			let models = [chat];
+			const save = vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeRoute"]>>(async (model, api, baseUrl) => {
+				const saved = buildModel({ ...model, api, kind: "judge", baseUrl: baseUrl.replace(/\/+$/, "") });
+				models = [saved];
+				return saved;
+			});
+			const { hub, onAssign } = createHub({ models: () => models, callbacks: { onSaveNativeRoute: save } });
+			pickJudge(hub);
+			hub.handleNativeEvent({ type: "select", key: "", item: "fixture/chat-judge" });
+			expect(subtitle(hub)).toContain("judges through prompts (ollama-chat)");
+			expect(pickerProps(hub).actions).toContainEqual(expect.objectContaining({ id: "nativeRoute" }));
+
+			hub.handleInput(CTRL_R);
+			expect(hub.describe(cx).k).toBe("overlay");
+			hub.handleInput(DOWN); // typesafe → openrouter-decisions
+			hub.handleInput("\n");
+			type(hub, "https://openrouter.ai/api/alpha/");
+			expect(normalize(hub.render(220))).toContain("POST https://openrouter.ai/api/alpha/decisions");
+			hub.handleInput("\n");
+			await settle(save.mock.results[0]?.value);
+
+			expect(save).toHaveBeenCalledWith(chat, "openrouter-decisions", "https://openrouter.ai/api/alpha/");
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(pickerProps(hub).selected).toBe("fixture/chat-judge");
+			expect(subtitle(hub)).toContain("judges natively · POST https://openrouter.ai/api/alpha/decisions");
+			hub.handleInput("\n");
+			expect(onAssign.mock.calls[0]?.[0]).toBe(models[0]);
+		});
+
+		test("a full operation URL is rejected in the form and never saved", () => {
+			const save = vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeRoute"]>>();
+			const { hub } = createHub({
+				models: [makeModel("fixture", "chat-judge")],
+				callbacks: { onSaveNativeRoute: save },
+			});
+			pickJudge(hub);
+			hub.handleInput(CTRL_R);
+			hub.handleInput("\n");
+			type(hub, "https://native.example/v1/systemone");
+			hub.handleInput("\n");
+			expect(normalize(hub.render(220))).toContain("typesafe appends /v1/systemone itself");
+			expect(save).not.toHaveBeenCalled();
+			hub.handleInput(ESC);
+			expect(hub.describe(cx).k).toBe("picker");
+		});
+
+		test("an invalid native route is flagged and cannot be picked; prompted and valid native judges can", () => {
+			const broken = nativeJudge("broken", "https://native.example/v1/systemone");
+			const { hub, onAssign } = createHub({ models: [broken, nativeJudge("good"), makeModel("fixture", "chat")] });
+			pickJudge(hub);
+			hub.handleNativeEvent({ type: "select", key: "", item: "fixture/broken" });
+			expect(subtitle(hub)).toContain("fixture/broken has an invalid native route");
+			expect(pickerProps(hub).actions?.find(action => action.id === "assign")?.disabled).toContain(
+				"invalid native route",
+			);
+			hub.handleInput("\n");
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(normalize(hub.render(220))).toContain("fixture/broken has an invalid native route");
+
+			hub.handleNativeEvent({ type: "select", key: "", item: "fixture/good" });
+			expect(subtitle(hub)).toContain("judges natively · POST https://native.example/v1/systemone");
+			hub.handleInput("\n");
+			expect(onAssign.mock.calls[0]?.[0]).toMatchObject({ id: "good" });
+		});
+
+		test("an assigned judge with an invalid route is marked on its Roles row", () => {
+			const settings = Settings.isolated({ modelRoles: { judge: "fixture/broken" } });
+			const { hub } = createHub({ models: [nativeJudge("broken", "https://native.example/decisions")], settings });
+			hub.handleInput(UP);
+			hub.handleInput(OPTION_RIGHT_MAC);
+			hub.handleInput(OPTION_RIGHT_MAC);
+			const row = hub
+				.render(220)
+				.map(line => stripVTControlCharacters(line))
+				.find(line => line.includes("JUDGE"));
+			expect(row).toContain("invalid native route");
+		});
+
+		for (const withKey of [false, true]) {
+			test(`Ctrl+N declares an uncataloged judge ${withKey ? "and stores its key " : ""}then selects it unassigned`, async () => {
+				const chat = makeModel("fixture", "chat");
+				let models = [chat];
+				const create = vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>(async draft => {
+					const saved = buildModel({
+						...makeModel(draft.provider, draft.id),
+						api: draft.api,
+						kind: "judge",
+						baseUrl: draft.baseUrl,
+					});
+					models = [chat, saved];
+					return saved;
+				});
+				const credentials = vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeJudgeCredential"]>>(async () => {});
+				const { hub, onAssign } = createHub({
+					models: () => models,
+					callbacks: { onCreateNativeJudgeRoute: create, onSaveNativeJudgeCredential: credentials },
+				});
+				pickJudge(hub);
+				hub.handleInput(CTRL_N);
+				type(hub, "new-judge");
+				hub.handleInput("\n");
+				type(hub, "@cf/nested/judge");
+				hub.handleInput("\n");
+				hub.handleInput(DOWN);
+				hub.handleInput(DOWN); // workers-ai-systemone
+				hub.handleInput("\n");
+				type(hub, "https://api.cloudflare.com/client/v4/accounts/<account>/ai/run");
+				expect(normalize(hub.render(220))).toContain("ai/run/@cf/nested/judge");
+				hub.handleInput("\n");
+				if (withKey) {
+					type(hub, "cf-token");
+					hub.handleInput("\n");
+					expect(normalize(hub.render(220))).toContain("Cloudflare account ID");
+					type(hub, "cf-account");
+				}
+				hub.handleInput("\n");
+				await settle(create.mock.results[0]?.value);
+				await Bun.sleep(0);
+
+				expect(create).toHaveBeenCalledWith({
+					provider: "new-judge",
+					id: "@cf/nested/judge",
+					api: "workers-ai-systemone",
+					baseUrl: "https://api.cloudflare.com/client/v4/accounts/<account>/ai/run",
+				});
+				if (withKey) {
+					expect(credentials).toHaveBeenCalledWith(models[1], { token: "cf-token", accountId: "cf-account" });
+				} else {
+					expect(credentials).not.toHaveBeenCalled();
+				}
+				expect(onAssign).not.toHaveBeenCalled();
+				expect(hub.describe(cx).k).toBe("picker");
+				expect(pickerProps(hub).selected).toBe("new-judge/@cf/nested/judge");
+			});
+		}
+
+		test("a failed key store keeps the form open and retries only the key", async () => {
+			let models = [makeModel("fixture", "chat")];
+			const create = vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>(async draft => {
+				const saved = buildModel({
+					...makeModel(draft.provider, draft.id),
+					api: draft.api,
+					kind: "judge",
+					baseUrl: draft.baseUrl,
+				});
+				models = [...models, saved];
+				return saved;
+			});
+			const credentials = vi
+				.fn<NonNullable<ModelHubCallbacks["onSaveNativeJudgeCredential"]>>()
+				.mockRejectedValueOnce(new Error("Storing the API key for new-judge failed."))
+				.mockResolvedValueOnce(undefined);
+			const { hub } = createHub({
+				models: () => models,
+				callbacks: { onCreateNativeJudgeRoute: create, onSaveNativeJudgeCredential: credentials },
+			});
+			pickJudge(hub);
+			hub.handleInput(CTRL_N);
+			for (const value of ["new-judge", "judge"]) {
+				type(hub, value);
+				hub.handleInput("\n");
+			}
+			hub.handleInput("\n"); // typesafe
+			type(hub, "https://native.example");
+			hub.handleInput("\n");
+			type(hub, "secret-key");
+			hub.handleInput("\n");
+			await settle(create.mock.results[0]?.value);
+			await Bun.sleep(0);
+			expect(hub.describe(cx).k).toBe("overlay");
+			expect(normalize(hub.render(220))).toContain("Storing the API key for new-judge failed.");
+
+			hub.handleInput("\n");
+			await Bun.sleep(0);
+			expect(create).toHaveBeenCalledTimes(1);
+			expect(credentials).toHaveBeenCalledTimes(2);
+			expect(pickerProps(hub).selected).toBe("new-judge/judge");
+		});
+
+		test("Ctrl+N is offered only for the Judge role, and Esc leaves everything untouched", () => {
+			const create = vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>();
+			const { hub, onAssign } = createHub({
+				models: [makeModel("fixture", "chat")],
+				callbacks: { onCreateNativeJudgeRoute: create },
+			});
+			hub.handleInput(UP);
+			hub.handleNativeEvent({ type: "select", key: "", item: "role:default" });
+			expect(pickerProps(hub).actions?.some(action => action.id === "nativeJudgeCreate")).toBe(false);
+			hub.handleNativeEvent({ type: "action", key: "", act: "tab", value: "kind", mods: [] });
+			hub.handleNativeEvent({ type: "select", key: "", item: "role:judge" });
+			hub.handleNativeEvent({ type: "action", key: "", act: "nativeJudgeCreate", mods: [] });
+			type(hub, "new-judge");
+			hub.handleInput("\n");
+			hub.handleInput(ESC);
+			expect(hub.describe(cx).k).toBe("picker");
+			expect(create).not.toHaveBeenCalled();
+			expect(onAssign).not.toHaveBeenCalled();
 		});
 	});
 });
