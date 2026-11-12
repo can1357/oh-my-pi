@@ -76,6 +76,8 @@ export class SecretValueSet extends Set<string> {
 	#heads = new Map<string, Set<string>>();
 	/** Bumped on every effective write when this set is part of an obfuscator's registry. */
 	readonly #revision: RegistryRevision | undefined;
+	/** Memoized {@link contentKey}; cleared by every effective write. */
+	#contentKey: string | undefined;
 
 	constructor(values?: Iterable<string>, revision?: RegistryRevision) {
 		// Populate after super(): `Set`'s iterable constructor would call `add`
@@ -85,9 +87,20 @@ export class SecretValueSet extends Set<string> {
 		if (values) for (const value of values) this.add(value);
 	}
 
+	/**
+	 * The members as one string, equal exactly when two sets hold the same
+	 * values. Lets the obfuscator reuse results computed against an equal set
+	 * from an earlier batch.
+	 */
+	get contentKey(): string {
+		this.#contentKey ??= JSON.stringify([...this].sort());
+		return this.#contentKey;
+	}
+
 	override add(value: string): this {
 		if (super.has(value)) return this;
 		super.add(value);
+		this.#contentKey = undefined;
 		this.#revision?.bump();
 		const normalized = sanitizeForCollisionCheck(value);
 		if (normalized.length === 0) return this;
@@ -109,6 +122,7 @@ export class SecretValueSet extends Set<string> {
 
 	override delete(value: string): boolean {
 		if (!super.delete(value)) return false;
+		this.#contentKey = undefined;
 		this.#revision?.bump();
 		const normalized = sanitizeForCollisionCheck(value);
 		if (normalized.length === 0) return true;
@@ -133,6 +147,7 @@ export class SecretValueSet extends Set<string> {
 	override clear(): void {
 		if (this.size === 0) return;
 		super.clear();
+		this.#contentKey = undefined;
 		this.#revision?.bump();
 		this.#normalized.clear();
 		this.#lengths.clear();

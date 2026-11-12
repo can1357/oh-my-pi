@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "macos", test))]
+use std::cell::RefCell;
 use std::{
 	collections::{HashMap, HashSet},
 	fmt::Write as _,
@@ -92,29 +94,32 @@ impl Hash for AxHandle {
 
 #[derive(Debug, Clone)]
 pub struct AxProps {
-	pub role:        String,
-	pub native_role: String,
-	pub title:       Option<String>,
-	pub value:       Option<String>,
-	pub description: Option<String>,
-	pub enabled:     bool,
-	pub focused:     bool,
-	pub bounds:      Option<AxBounds>,
-	pub actions:     Vec<String>,
-	pub child_count: u32,
+	pub role:           String,
+	pub native_role:    String,
+	pub title:          Option<String>,
+	pub value:          Option<String>,
+	pub description:    Option<String>,
+	pub enabled:        bool,
+	pub focused:        bool,
+	pub bounds:         Option<AxBounds>,
+	pub actions:        Vec<String>,
+	pub child_count:    u32,
 	/// Hash of the fields that tell the element apart in its window, compared
 	/// to name the one element left with them once the app has destroyed it;
 	/// `None` where the backend reads none or could not read them all.
-	pub identity:    Option<u64>,
+	pub identity:       Option<u64>,
 	/// The backend failed to read an identifying field or the children of an
 	/// element that is still there, so a read that met it cannot tell whether
 	/// an identity is unique in the window.
-	pub partial:     bool,
+	pub partial:        bool,
+	/// The backend answered the role and every field needed to choose the
+	/// displayed label. Unrelated identity fields may still be unanswered.
+	pub label_complete: bool,
 	/// Whether a row, cell, button or file icon reports itself selected.
-	pub selected:    bool,
+	pub selected:       bool,
 	/// A name the platform derives when the element has neither title nor
 	/// description, such as a window's close button.
-	pub role_name:   Option<String>,
+	pub role_name:      Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,6 +176,11 @@ struct Registered {
 	/// role or label gets a new ref.
 	fingerprint: u64,
 	proof:       Option<Proof>,
+	/// Whether an action through the ref is held to the label it was read
+	/// with ([`require_read_as`]): not when its role or chosen label was
+	/// unanswered, nor for a window, whose title names its document.
+	#[cfg(any(target_os = "macos", test))]
+	held:        bool,
 }
 
 pub struct AxRegistry {
@@ -231,10 +241,7 @@ impl AxRegistry {
 		props: &AxProps,
 		uniqueness: Uniqueness,
 	) -> String {
-		let mut hasher = DefaultHasher::new();
-		props.role.hash(&mut hasher);
-		label(props).hash(&mut hasher);
-		let fingerprint = hasher.finish();
+		let fingerprint = fingerprint(props);
 		let identified = handle.identified();
 		let known = if identified {
 			self
@@ -279,6 +286,8 @@ impl AxRegistry {
 			generation,
 			fingerprint,
 			proof,
+			#[cfg(any(target_os = "macos", test))]
+			held: props.label_complete && props.role != "window",
 		});
 		self.enforce_cap();
 		format!("e{id}")
@@ -304,6 +313,28 @@ impl AxRegistry {
 		self
 			.entry(reference)
 			.is_ok_and(|entry| entry.proof.is_some())
+	}
+
+	/// Holds the element action the current request makes on `reference` to
+	/// the role and label the ref was read with ([`require_read_as`]) until the
+	/// scope drops. `None` for a ref that no longer resolves or is not held
+	/// to its label.
+	#[cfg(any(target_os = "macos", test))]
+	pub(crate) fn expect_read_as(&self, reference: &str) -> Option<ReadAsScope> {
+		let fingerprint = self
+			.entry(reference)
+			.ok()
+			.filter(|entry| entry.held)?
+			.fingerprint;
+		READ_AS.with_borrow_mut(|read_as| {
+			*read_as = Some(ReadAs {
+				reference: reference.to_owned(),
+				fingerprint,
+				checked: false,
+				tripped: false,
+			});
+		});
+		Some(ReadAsScope(()))
 	}
 
 	/// Drops expired refs. An identity a newer ref took over keeps pointing at
@@ -348,6 +379,133 @@ impl AxRegistry {
 /// The number in an `eN` ref.
 fn ref_id(reference: &str) -> Option<u64> {
 	reference.strip_prefix('e')?.parse().ok()
+}
+
+/// The role and label a ref was read with, as [`AxRegistry::register`]
+/// compares them: an element read again with others gets a new ref.
+fn fingerprint(props: &AxProps) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	props.role.hash(&mut hasher);
+	label(props).hash(&mut hasher);
+	hasher.finish()
+}
+
+/// The ref the current request acts on, and what it was read as.
+#[cfg(any(target_os = "macos", test))]
+struct ReadAs {
+	reference:   String,
+	fingerprint: u64,
+	/// Whether a backend has checked the element it acts on, so the elements
+	/// the action goes on to touch (a menu's items) are not held to it.
+	checked:     bool,
+	/// Whether the element read otherwise when a backend checked it.
+	tripped:     bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+thread_local! {
+	/// Set by the worker thread for the one request it serves.
+	static READ_AS: RefCell<Option<ReadAs>> = const { RefCell::new(None) };
+}
+
+/// The current request's [`ReadAs`], cleared on drop.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct ReadAsScope(());
+
+#[cfg(any(target_os = "macos", test))]
+impl ReadAsScope {
+	/// Ends the scope: whether a backend refused the action because the
+	/// element read with another role or label.
+	pub(crate) fn finish(self) -> bool {
+		let tripped =
+			READ_AS.with_borrow(|read_as| read_as.as_ref().is_some_and(|read_as| read_as.tripped));
+		drop(self);
+		tripped
+	}
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for ReadAsScope {
+	fn drop(&mut self) {
+		READ_AS.with_borrow_mut(Option::take);
+	}
+}
+
+/// Whether the current request holds an element action to its ref, and
+/// whether the element was checked already.
+#[cfg(any(target_os = "macos", test))]
+fn read_as_state() -> Option<bool> {
+	READ_AS.with_borrow(|read_as| read_as.as_ref().map(|read_as| read_as.checked))
+}
+
+/// Compares the element `props` reads with the current request's ref: what
+/// it reads as now when that is another role or label. A read the app did
+/// not answer, or left the role or a field needed for its label unanswered,
+/// cannot tell, so it passes.
+#[cfg(any(target_os = "macos", test))]
+fn check_read_as(props: Option<&AxProps>) -> Option<String> {
+	READ_AS.with_borrow_mut(|read_as| {
+		let read_as = read_as.as_mut()?;
+		read_as.checked = true;
+		let props = props.filter(|props| props.label_complete)?;
+		if read_as.fingerprint == fingerprint(props) {
+			return None;
+		}
+		read_as.tripped = true;
+		let mut message = format!("{} now reads as {}", read_as.reference, props.role);
+		if let Some(label) = label(props) {
+			message.push(' ');
+			push_quoted_label(&mut message, label);
+		}
+		Some(message)
+	})
+}
+
+/// For a backend about to act on the element of the current request's ref,
+/// once it has read the user's front app: `StaleRef`, with nothing sent, when
+/// the element reads with another role or label than the ref was read with.
+/// An app can hand a control's element to another control: Contacts answers
+/// the element read as an address's "City" field as its "Street" field once
+/// the street is typed. `props` reads the element, `None` when the app did
+/// not answer; outside such a request, or once the request's element was
+/// checked, nothing is read.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn require_read_as(
+	props: impl FnOnce() -> CoreResult<Option<AxProps>>,
+) -> CoreResult<()> {
+	if read_as_state() != Some(false) {
+		return Ok(());
+	}
+	match check_read_as(props()?.as_ref()) {
+		None => Ok(()),
+		Some(message) => Err(DesktopError::stale_ref(format!(
+			"{message}, not with the role and label it was read with; nothing was sent"
+		))),
+	}
+}
+
+/// [`require_read_as`] for the read-back after a write to the checked
+/// element: a write it confirmed while it reads as another control may have
+/// gone to that one, so it is unconfirmed. A read that fails after the write,
+/// as when the app rebuilt the element, cannot tell: the write's own
+/// read-back stands.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn confirm_read_as(
+	props: impl FnOnce() -> CoreResult<Option<AxProps>>,
+) -> CoreResult<()> {
+	if read_as_state() != Some(true) {
+		return Ok(());
+	}
+	match check_read_as(props().ok().flatten().as_ref()) {
+		None => Ok(()),
+		Some(message) => Err(DesktopError::new(
+			ErrorCode::AxUnconfirmed,
+			format!(
+				"the text was written, but {message} after the write, so it may have gone to that \
+				 control: read the window before retrying"
+			),
+		)),
+	}
 }
 
 /// What an `ax()` line says about writing an element's value.
@@ -448,7 +606,11 @@ fn walk_raw(
 	state.visited += 1;
 	let (props, child_handles) = match backend.walk_node(&handle, state.bounds) {
 		Ok(node) => node,
-		Err(error) if depth > 0 => {
+		// An app that stops answering would make every node left wait it out,
+		// and every read after a cancel fails the same way.
+		Err(error)
+			if depth > 0 && !matches!(error.code, ErrorCode::Timeout | ErrorCode::Cancelled) =>
+		{
 			state.skipped = state.skipped.saturating_add(1);
 			if error.code == ErrorCode::StaleRef {
 				state.vanished = state.vanished.saturating_add(1);
@@ -646,7 +808,7 @@ pub(super) fn push_quoted_label(line: &mut String, text: &str) {
 	}
 }
 
-fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
+pub(super) fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
 	line.push('"');
 	for ch in text.chars().take(shown) {
 		match ch {
@@ -1174,6 +1336,45 @@ pub fn refind(
 	Ok(registry.resolve(&found).is_ok().then_some(found))
 }
 
+/// The one element of `window`, other than the one `reference` names, that
+/// reads with the role and label the ref was read with, registered under the
+/// ref's target: where the control went once the app handed the ref's
+/// element to another control ([`require_read_as`]), as Contacts' "City"
+/// field does when typing the street adds a button to its row. Unlike
+/// [`refind`] it needs no proof, so a copy in a part of the window this walk
+/// could not read stays unseen; the error says it is what this read found.
+/// `None` when zero or several elements match. The walk reads as far as
+/// `find()` does and stops with `Cancelled` once the operation is cancelled.
+pub fn find_read_as(
+	backend: &mut dyn AxBackend,
+	registry: &mut AxRegistry,
+	window: &DesktopWindow,
+	reference: &str,
+) -> CoreResult<Option<String>> {
+	let entry = registry.entry(reference)?;
+	let (read_as, handle, target) =
+		(entry.fingerprint, entry.handle.clone(), entry.target_key.clone());
+	control::check()?;
+	let root = backend.window_root(window)?;
+	let mut state = WalkState::new(FIND_MAX_NODES, FIND_MAX_DEPTH, WalkBounds::Skip).cancellable();
+	let tree = walk_raw(backend, root, 0, false, &mut state)?;
+	let mut matches = Vec::new();
+	let mut stack: Vec<_> = tree.into_iter().collect();
+	while let Some(node) = stack.pop() {
+		stack.extend(node.children);
+		// Identity-only failures do not hide a definite role/label match.
+		if node.handle != handle && node.props.label_complete && fingerprint(&node.props) == read_as {
+			matches.push((node.handle, node.props));
+		}
+	}
+	let Ok([(found, props)]) = <[_; 1]>::try_from(matches) else {
+		return Ok(None);
+	};
+	let generation = registry.current_generation(&target);
+	let found = registry.register(backend, &target, generation, found, &props, Uniqueness::Unknown);
+	Ok(registry.resolve(&found).is_ok().then_some(found))
+}
+
 /// An [`AxProps::identity`] hashed from `fields`, as a backend hashes its own.
 #[cfg(test)]
 pub(crate) fn test_identity(fields: impl Hash) -> u64 {
@@ -1188,10 +1389,14 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 
 /// Exact equality is the verdict: a field that shows a rewritten value has
 /// not been shown to hold what was sent (Contacts regroups a phone number in
-/// the field and stores none of it). The error names what the field reads so
-/// the next step needs no extra read, except in a secure field, whose text
-/// never enters an error.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+/// the field and stores none of it). The error never quotes the written text,
+/// which the caller already has and which may be a password the field's role
+/// does not reveal; it counts its characters and names what the field reads so
+/// the next step needs no extra read, with the written text replaced wherever
+/// the read-back repeats it (a field that appends to a password still holds the
+/// password). What a secure field reads, or a field that reads back as mask
+/// characters (Qt password fields on macOS report a plain text field), is
+/// described, never quoted.
 pub(crate) fn text_readback(
 	sent: &str,
 	expected: &str,
@@ -1202,35 +1407,56 @@ pub(crate) fn text_readback(
 	if actual == Some(expected) {
 		return Ok(());
 	}
-	if secure {
-		return Err(DesktopError::ax_failed(
-			"the secure text field's value could not be confirmed after the write; inspect the \
-			 target before writing again",
-		));
-	}
-	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
-	let Some(actual) = actual else {
-		return Err(DesktopError::ax_failed(format!(
-			"wrote {}, but the field's value could not be read back; inspect the target before \
-			 writing again",
-			quote(sent),
-		)));
+	let count = |text: &str| match text.chars().count() {
+		1 => "1 character".to_owned(),
+		count => format!("{count} characters"),
 	};
 	let whole = if sent == expected {
 		String::new()
 	} else {
-		format!(" instead of {}", quote(expected))
+		format!(" into a value that should now be {}", count(expected))
+	};
+	let reads = match actual {
+		None if secure => "the secure text field's value could not be confirmed".to_owned(),
+		None => "the field's value could not be read back".to_owned(),
+		Some(actual) => {
+			let reads = match actual {
+				"" => "the field now reads empty".to_owned(),
+				actual if masked(actual) => {
+					format!("the field now reads as a mask of {}", count(actual))
+				},
+				_ if secure => "the secure text field's value is not shown".to_owned(),
+				actual => {
+					let shown = if sent.is_empty() {
+						actual.to_owned()
+					} else {
+						actual.replace(sent, WRITTEN)
+					};
+					format!("the field now reads {:?}", truncate_chars(shown, SHOWN))
+				},
+			};
+			format!("{reads}. The app may have reformatted it or not taken it")
+		},
 	};
 	Err(DesktopError::ax_failed(format!(
-		"wrote {}; the field now reads {}{whole}. The app may have reformatted it or not taken it: \
-		 inspect the target before writing again",
-		quote(sent),
-		quote(actual),
+		"wrote {}{whole}, but {reads}; inspect the target before writing again",
+		count(sent),
 	)))
 }
 
+/// What a read-back shows in place of the written text.
+const WRITTEN: &str = "<the written text>";
+
+/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
+/// toolkits fall back on.
+pub(crate) fn masked(actual: &str) -> bool {
+	let mut chars = actual.chars();
+	chars.next().is_some_and(|first| {
+		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
+	})
+}
+
 /// `value` cut to `max` characters, the last one an ellipsis when cut.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn truncate_chars(value: String, max: usize) -> String {
 	if value.chars().count() <= max {
 		return value;
@@ -1424,6 +1650,10 @@ mod tests {
 		gone:           HashSet<u64>,
 		/// Nodes the app destroyed: every read of them is a stale ref.
 		destroyed:      HashSet<u64>,
+		/// Nodes in an app that has stopped answering.
+		unanswering:    HashSet<u64>,
+		/// Nodes whose read the host cancelled.
+		cancelled:      HashSet<u64>,
 		/// Bounds read by tree walks.
 		bounds_reads:   u32,
 		/// The window element, when not node 1.
@@ -1469,6 +1699,12 @@ mod tests {
 			let id = node(h);
 			if self.destroyed.contains(&id) {
 				return Err(DesktopError::stale_ref(format!("test node {id} was destroyed")));
+			}
+			if self.unanswering.contains(&id) {
+				return Err(DesktopError::timeout(format!("test node {id} did not answer")));
+			}
+			if self.cancelled.contains(&id) {
+				return Err(DesktopError::cancelled(format!("test node {id} read was cancelled")));
 			}
 			self
 				.props
@@ -1554,20 +1790,21 @@ mod tests {
 	}
 	fn p(role: &str, title: Option<&str>) -> AxProps {
 		AxProps {
-			role:        role.into(),
-			native_role: role.into(),
-			title:       title.map(str::to_string),
-			value:       None,
-			description: None,
-			enabled:     true,
-			focused:     false,
-			bounds:      None,
-			actions:     Vec::new(),
-			child_count: 0,
-			identity:    Some(test_identity((role, title))),
-			partial:     false,
-			selected:    false,
-			role_name:   None,
+			role:           role.into(),
+			native_role:    role.into(),
+			title:          title.map(str::to_string),
+			value:          None,
+			description:    None,
+			enabled:        true,
+			focused:        false,
+			bounds:         None,
+			actions:        Vec::new(),
+			child_count:    0,
+			identity:       Some(test_identity((role, title))),
+			partial:        false,
+			label_complete: true,
+			selected:       false,
+			role_name:      None,
 		}
 	}
 	fn window() -> DesktopWindow {
@@ -2698,6 +2935,25 @@ mod tests {
 		assert_eq!(nodes[0].title.as_deref(), Some("Ready"));
 	}
 	#[test]
+	fn an_app_that_stops_answering_fails_the_read_instead_of_skipping_each_node() {
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (3, p("button", Some("Ready")))].into(),
+			children: [(1, vec![2, 3])].into(),
+			unanswering: [2].into(),
+			..Default::default()
+		};
+		let error =
+			snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+				.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Timeout);
+		m.unanswering.clear();
+		m.cancelled.insert(2);
+		let error =
+			snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+				.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Cancelled);
+	}
+	#[test]
 	fn bounds_center_hit_test_is_global_and_frameless() {
 		let bounds = AxBounds { x: -420.0, y: 75.0, width: 80.0, height: 50.0 };
 		let mut hit = p("button", Some("Global"));
@@ -2779,21 +3035,27 @@ mod tests {
 		let error =
 			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxFailed);
-		assert!(error.message.contains(r#""555-789-0123""#), "{}", error.message);
+		assert!(error.message.contains("wrote 12 characters"), "{}", error.message);
+		assert!(!error.message.contains("555-789-0123"), "{}", error.message);
 		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
 		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
 	}
 
 	#[test]
-	fn inserted_readback_names_the_whole_value_it_expected() {
+	fn inserted_readback_counts_the_whole_value_it_expected() {
 		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxFailed);
-		for quoted in [r#""b""#, r#""ac""#, r#""abc""#] {
-			assert!(error.message.contains(quoted), "{quoted}: {}", error.message);
+		assert!(error.message.contains(r#""ac""#), "{}", error.message);
+		for counted in ["wrote 1 character ", "should now be 3 characters"] {
+			assert!(error.message.contains(counted), "{counted}: {}", error.message);
+		}
+		for quoted in [r#""b""#, r#""abc""#] {
+			assert!(!error.message.contains(quoted), "{quoted}: {}", error.message);
 		}
 		let unread = text_readback("b", "abc", None, false).unwrap_err();
 		assert_eq!(unread.code, ErrorCode::AxFailed);
-		assert!(unread.message.contains(r#""b""#), "{}", unread.message);
+		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
+		assert!(!unread.message.contains(r#""b""#), "{}", unread.message);
 	}
 
 	#[test]
@@ -2806,12 +3068,51 @@ mod tests {
 
 	#[test]
 	fn secure_readbacks_never_quote_the_text() {
-		for actual in [None, Some("••••"), Some("")] {
+		for actual in [None, Some("••••"), Some(""), Some("sk-hunter")] {
 			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
 			assert_eq!(error.code, ErrorCode::AxFailed);
-			assert!(!error.message.contains("hunter2"), "{}", error.message);
-			assert!(error.message.contains("secure"), "{}", error.message);
+			assert!(!error.message.contains("hunter"), "{}", error.message);
 		}
 		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
+	}
+
+	#[test]
+	fn a_field_that_reads_back_masked_never_quotes_the_text_whatever_its_role() {
+		// KeePassXC's Qt password field reports a plain text field and reads back
+		// bullets.
+		for (actual, mask) in
+			[("•••••••", "a mask of 7 characters."), ("*", "a mask of 1 character.")]
+		{
+			let error = text_readback("hunter2", "hunter2", Some(actual), false).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter2"), "{}", error.message);
+			assert!(!error.message.contains(actual), "{}", error.message);
+			assert!(error.message.contains(mask), "{}", error.message);
+		}
+	}
+
+	#[test]
+	fn a_plain_field_that_reads_back_empty_or_unreadable_never_quotes_the_text() {
+		// A password field whose role says plain text, read back as nothing.
+		for (actual, reads) in [(Some(""), "reads empty"), (None, "could not be read back")] {
+			let error = text_readback("hunter2", "hunter2", actual, false).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter2"), "{}", error.message);
+			assert!(error.message.contains("wrote 7 characters"), "{}", error.message);
+			assert!(error.message.contains(reads), "{}", error.message);
+		}
+	}
+
+	#[test]
+	fn a_read_back_that_repeats_the_written_text_hides_it() {
+		// A plain-role password field that appends to what it was given.
+		let error = text_readback("hunter2", "hunter2", Some("hunter2!"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(!error.message.contains("hunter2"), "{}", error.message);
+		assert!(error.message.contains(r#"reads "<the written text>!""#), "{}", error.message);
+		// Typed insertion: the whole value holds the inserted text twice.
+		let error =
+			text_readback("hunter2", "a hunter2", Some("a hunter2hunter2"), false).unwrap_err();
+		assert!(!error.message.contains("hunter2"), "{}", error.message);
 	}
 }

@@ -324,6 +324,52 @@ describe("advisor tool-call loop guard", () => {
 		expect(advisor.state.error).toBeUndefined();
 	});
 
+	it.each([
+		{ device: "mcp__peers_wait", exempt: "mcp__peers_wait", redirects: 0 },
+		{ device: "mcp__other_tool", exempt: "mcp__peers_wait", redirects: 1 },
+		{ device: "mcp__peers_wait", exempt: "write", redirects: 0 },
+	])("applies advisor exemption $exempt to writes to $device", ({ device, exempt, redirects }) => {
+		const messages: AgentMessage[] = [];
+		const guard = new AdvisorLoopGuard({
+			settings: Settings.isolated({
+				"model.toolCallLoopGuard.enabled": true,
+				"model.toolCallLoopGuard.threshold": 2,
+				"model.toolCallLoopGuard.exemptTools": [exempt],
+			}),
+			name: "test",
+			liveMessages: () => messages,
+			appendMessage: message => messages.push(message),
+			abort: () => {
+				throw new Error("Unexpected advisor abort");
+			},
+		});
+		for (let index = 0; index < 2; index++) {
+			guard.recordTurn(messages, {
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: `call-${index}`,
+							name: "write",
+							arguments: { path: `xd://${device}`, content: "{}" },
+						},
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test",
+					usage: zeroUsage,
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				toolResults: [],
+				willContinue: true,
+			});
+		}
+		expect(messages).toHaveLength(redirects);
+		if (redirects > 0) expect(JSON.stringify(messages[0])).toContain("tool_call_loop_detected");
+	});
+
 	it("starts repetition counting fresh after an advisor context reset", () => {
 		const settings = Settings.isolated({
 			"model.toolCallLoopGuard.enabled": true,

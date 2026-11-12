@@ -64,6 +64,18 @@ describe("SshProtocolHandler", () => {
 		await expect(handler.resolve(parseInternalUrl("ssh://user@icaro:22/x"))).rejects.toThrow(/user\/port overrides/);
 	});
 
+	it("passes user/port overrides through for a ~/.ssh/config alias", async () => {
+		mockHosts([{ _source: { ...SOURCE, provider: "ssh-config" }, name: "prod", host: "prod" }]);
+		const spy = mockReadBytes("x");
+		await handler.resolve(parseInternalUrl("ssh://root@prod:2222/x"));
+		expect(spy.mock.calls[0]?.[0]).toMatchObject({
+			name: "root@prod:2222",
+			host: "prod",
+			username: "root",
+			port: 2222,
+		});
+	});
+
 	it("treats an unconfigured authority as an opaque OpenSSH destination", async () => {
 		mockHosts();
 		const spy = mockReadBytes("data\n");

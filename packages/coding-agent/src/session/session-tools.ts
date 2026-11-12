@@ -72,6 +72,7 @@ import {
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
 import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
 import { matchModelPattern } from "../utils/model-patterns";
+import { resolveToolWireName } from "../utils/tool-wire-name";
 
 import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
@@ -915,7 +916,7 @@ export class SessionTools {
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		const bareName = stripXdUrlPrefix(name);
 		const enabled = new Set(this.getEnabledToolNames());
-		const named = this.#resolveToolWireName(bareName);
+		const named = resolveToolWireName(this.#toolRegistry, bareName);
 		// A registered name never falls through to an alias guess, even when disabled.
 		if (named) return enabled.has(named.name) ? this.#wrapToolForAcpPermission(named) : undefined;
 		const alias = resolveMCPToolAlias(bareName, candidate =>
@@ -931,24 +932,11 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			if (!tool || !isEvalBridgeToolCallable(tool)) continue;
 			names.add(name);
-			if (tool.customWireName && this.#resolveToolWireName(tool.customWireName) === tool) {
+			if (tool.customWireName && resolveToolWireName(this.#toolRegistry, tool.customWireName) === tool) {
 				names.add(tool.customWireName);
 			}
 		}
 		return [...names];
-	}
-
-	/** Exact registry names shadow wire aliases, including when the exact tool is disabled. */
-	#resolveToolWireName(name: string): AgentTool | undefined {
-		const exact = this.#toolRegistry.get(name);
-		if (exact) return exact;
-		let resolved: AgentTool | undefined;
-		for (const tool of this.#toolRegistry.values()) {
-			if (tool.customWireName !== name) continue;
-			if (resolved) return undefined;
-			resolved = tool;
-		}
-		return resolved;
 	}
 
 	/**
@@ -962,7 +950,7 @@ export class SessionTools {
 	 * tool with that name wins and the alias no longer counts as built-in.
 	 */
 	hasBuiltInTool(name: string): boolean {
-		const tool = this.#resolveToolWireName(name);
+		const tool = resolveToolWireName(this.#toolRegistry, name);
 		return tool !== undefined && this.#builtInToolNames.has(tool.name);
 	}
 
