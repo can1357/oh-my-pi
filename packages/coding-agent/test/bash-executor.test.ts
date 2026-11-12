@@ -349,6 +349,28 @@ describe("executeBash", () => {
 		expect((await run('echo "[$PI_BEFORE_CRASH]"')).output.trim()).toBe("[]");
 	});
 
+	it("keeps an in-flight replay's crash marker when another session's dispose drains state writes", async () => {
+		const stateDir = path.join(tempDir, "shell-state");
+		const sessionKey = `resume-drain-${path.basename(tempDir)}`;
+		const run = (command: string) => executeBash(command, { sessionKey, cwd: tempDir, timeout: 20_000, stateDir });
+		// Every command after the replay, its probe included, waits on the trap.
+		await run("trap 'sleep 1' DEBUG");
+		await drainShellStateWrites();
+		const [stateName] = fs.readdirSync(stateDir);
+		const marker = path.join(stateDir, `${stateName}.resuming`);
+		releaseShellSessions(sessionKey);
+		const resumed = run("true");
+		// The marker is written while the native replay is prepared, which exposes no event: poll the file.
+		for (let waited = 0; !fs.existsSync(marker) && waited < 5000; waited += 10) await Bun.sleep(10);
+		// A subagent finishing mid-replay: the replay could still crash the process.
+		await drainShellStateWrites();
+		expect(fs.existsSync(marker)).toBe(true);
+		expect((await resumed).exitCode).toBe(0);
+		await drainShellStateWrites();
+		expect(fs.existsSync(marker)).toBe(false);
+		releaseShellSessions(sessionKey);
+	});
+
 	it("drops a saved state whose replay breaks the shell", async () => {
 		const stateDir = path.join(tempDir, "shell-state");
 		const sessionKey = `resume-broken-${path.basename(tempDir)}`;

@@ -18,7 +18,7 @@ import {
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
-import { isEnoent, isPidAlive, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, isPidAlive, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -289,8 +289,8 @@ const stateFileWriters = new Map<string, WeakRef<Shell>>();
 const pendingShellSessions = new Map<string, Promise<Shell>>();
 /** Last pending write per state file, so writes land in command order. */
 const stateWrites = new Map<string, Promise<void>>();
-/** Markers of the replays running in this process ({@link resumeMarker}). */
-const resumeMarkers = new Set<string>();
+/** Replays running in this process, by marker ({@link resumeMarker}): how many share each one. */
+const resumeMarkers = new Map<string, number>();
 const brokenShellSessions = new Set<string>();
 const shellSessionQuarantines = new Map<string, Promise<unknown>>();
 /** Session keys with a command currently in flight on the persistent Shell. */
@@ -345,15 +345,9 @@ function trackAbortedShell(
 	});
 }
 
-/**
- * Wait for the shell-state writes still pending ({@link BashExecutorOptions.stateDir}) before exit,
- * and clear the markers of replays still running: an orderly exit is no crash.
- */
+/** Wait for the shell-state writes still pending ({@link BashExecutorOptions.stateDir}) before exit. */
 export async function drainShellStateWrites(): Promise<void> {
-	await Promise.all([
-		...stateWrites.values(),
-		...Array.from(resumeMarkers, marker => fs.rm(marker, { force: true }).catch(() => undefined)),
-	]);
+	await Promise.all(stateWrites.values());
 }
 
 /** Wait for an agent session's cancelled commands to finish native TERM→KILL escalation before exit. */
@@ -480,10 +474,45 @@ function shellStateFile(stateDir: string, kind: readonly string[]): string {
 
 /**
  * Present, holding the pid, while a process replays the saved state in `stateFile` on a new shell:
- * left by a process the replay crashed.
+ * left by a process the replay crashed. An orderly exit clears it ({@link clearResumeMarkersOnExit}).
  */
 function resumeMarker(stateFile: string): string {
 	return `${stateFile}.resuming`;
+}
+
+/** Cancels the exit hook that clears this process's resume markers, once registered. */
+let resumeMarkerExitHook: (() => void) | undefined;
+
+/**
+ * Remove the markers of replays still running when the process exits: only the process's own crash
+ * (or a fatal error the replay may have raised) leaves one behind.
+ */
+async function clearResumeMarkersOnExit(reason: postmortem.Reason): Promise<void> {
+	if (reason === postmortem.Reason.UNCAUGHT_EXCEPTION || reason === postmortem.Reason.UNHANDLED_REJECTION) return;
+	await Promise.all(Array.from(resumeMarkers.keys(), marker => fs.rm(marker, { force: true }).catch(() => undefined)));
+}
+
+/** Mark `stateFile` as replaying in this process (calls replaying it at once share one marker). */
+async function holdResumeMarker(stateFile: string): Promise<void> {
+	const marker = resumeMarker(stateFile);
+	const held = resumeMarkers.get(marker) ?? 0;
+	resumeMarkers.set(marker, held + 1);
+	resumeMarkerExitHook ??= postmortem.register("shell-state-resume-markers", clearResumeMarkersOnExit, {
+		exitOnly: true,
+	});
+	if (held === 0) await queueStateWrite(stateFile, () => Bun.write(marker, String(process.pid)));
+}
+
+/** End this process's replay of `stateFile`; the marker goes with the last one. */
+async function releaseResumeMarker(stateFile: string): Promise<void> {
+	const marker = resumeMarker(stateFile);
+	const held = (resumeMarkers.get(marker) ?? 1) - 1;
+	if (held > 0) {
+		resumeMarkers.set(marker, held);
+		return;
+	}
+	resumeMarkers.delete(marker);
+	await queueStateWrite(stateFile, () => fs.rm(marker, { force: true }));
 }
 
 /** Upper bound on a resumed shell's setup and replay; past it the state is taken to hang the shell. */
@@ -491,13 +520,14 @@ const STATE_RESUME_TIMEOUT_MS = 30_000;
 
 /**
  * A new shell for the session, resumed from `stateFile` when it holds a saved state. The state is
- * replayed here, by a no-op run before the caller's command: a state that breaks the shell (a
- * replay that fails, hangs or crashes the process) is deleted and the shell starts fresh, while
- * the caller's own command (a build that times out, a cancelled test run) never puts the state in
- * question. A state this build cannot resume (another version saved it, or it is damaged) is
- * logged and skipped. The caller's `signal` stops the replay (its setup may source a slow shell
- * config) without putting the state in question: the shell, whose session the cancelled setup
- * never finished, replays it again on its next run.
+ * replayed here, by a no-op run (`:`) before the caller's command, and deleted only when it is what
+ * broke the shell: the probe fails or hangs once the session's setup is done and the state applied,
+ * or a replay crashed the process. The session's setup (environment fallback, shell-config snapshot)
+ * failing, hanging or being cancelled by the caller's `signal` says nothing of the state: it is kept
+ * and the shell, whose session never started, sets up and replays again on its next run. The
+ * caller's own command (a build that times out, a cancelled test run) never puts the state in
+ * question either. A state this build cannot resume (another version saved it, or it is damaged) is
+ * logged and skipped.
  */
 async function createSessionShell(
 	shellOptions: ShellOptions,
@@ -533,29 +563,32 @@ async function createSessionShell(
 		logger.warn("Saved shell state not resumed", { stateFile, error: String(err) });
 		return new Shell(shellOptions);
 	}
-	try {
-		await Bun.write(marker, String(process.pid));
-		resumeMarkers.add(marker);
-	} catch (err) {
-		logger.warn("Failed to mark the shell state resuming", { stateFile, error: String(err) });
-	}
+	await holdResumeMarker(stateFile);
 	let failure: string | undefined;
+	// At the deadline, while the run still holds its session: `saveState()` is `null` until the
+	// session exists, its setup and the replay both finished. Past that, the probe itself hangs on the
+	// state (a trap, a `:` function); before it, the setup does.
+	const deadline = new AbortController();
+	let setupHung = false;
+	const timer = setTimeout(() => {
+		if (shell.saveState() === null) setupHung = true;
+		else failure = "timed out";
+		deadline.abort();
+	}, STATE_RESUME_TIMEOUT_MS);
+	const probeSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
 	try {
-		const result = await shell.run({ command: ":", timeoutMs: STATE_RESUME_TIMEOUT_MS, signal });
-		if (result.timedOut) failure = "timed out";
-		else if (result.exitCode !== 0 && !signal?.aborted) failure = `exit status ${result.exitCode}`;
+		const result = await shell.run({ command: ":", signal: probeSignal });
+		if (result.exitCode !== 0 && !probeSignal.aborted) failure = `exit status ${result.exitCode}`;
 	} catch (err) {
-		if (!signal?.aborted) failure = String(err);
+		// The session's setup failed (snapshot, environment): a fresh shell fails it the same way.
+		if (!probeSignal.aborted)
+			logger.warn("Shell setup failed; saved shell state kept", { stateFile, error: String(err) });
+	} finally {
+		clearTimeout(timer);
 	}
-	resumeMarkers.delete(marker);
-	if (failure === undefined) {
-		try {
-			await fs.rm(marker, { force: true });
-		} catch (err) {
-			logger.warn("Failed to clear the shell state marker", { stateFile, error: String(err) });
-		}
-		return shell;
-	}
+	if (setupHung) logger.warn("Shell setup timed out; saved shell state kept", { stateFile });
+	await releaseResumeMarker(stateFile);
+	if (failure === undefined) return shell;
 	logger.warn("Saved shell state dropped: replaying it broke the shell", { stateFile, error: failure });
 	void shell.abort().catch(() => undefined);
 	discardShellState(stateFile);
@@ -595,8 +628,8 @@ function discardShellState(stateFile: string): void {
 	});
 }
 
-/** Run `write` on `stateFile` after the ones queued before it, logging a failure. */
-function queueStateWrite(stateFile: string, write: () => Promise<unknown>): void {
+/** Run `write` on `stateFile` after the ones queued before it, logging a failure; settles when it has. */
+function queueStateWrite(stateFile: string, write: () => Promise<unknown>): Promise<void> {
 	const previous = stateWrites.get(stateFile) ?? Promise.resolve();
 	const done = previous.then(write).then(
 		() => undefined,
@@ -606,6 +639,7 @@ function queueStateWrite(stateFile: string, write: () => Promise<unknown>): void
 	void done.finally(() => {
 		if (stateWrites.get(stateFile) === done) stateWrites.delete(stateFile);
 	});
+	return done;
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {

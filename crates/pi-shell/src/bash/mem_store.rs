@@ -182,8 +182,8 @@ impl MemStore {
 
 	/// What `self`'s [`Self::process_state`] changed relative to `base`'s
 	/// (an earlier state of the same shell): records set or removed (the
-	/// command hash table aside), and the compiled bodies of the functions
-	/// it sets. Shared records cost nothing to
+	/// command hash table and `$_` aside), and the compiled bodies of the
+	/// functions it sets. Shared records cost nothing to
 	/// skip.
 	pub fn process_diff(&self, base: &Self) -> ProcessDiff {
 		let misc = PROCESS_MISC
@@ -193,7 +193,7 @@ impl MemStore {
 				(now != base.other.get(&Key::Misc(k))).then(|| (k, now.cloned()))
 			})
 			.collect();
-		let image = self.image.diff(&base.image).without_command_hash();
+		let image = self.image.diff(&base.image).without_process_local();
 		// The body of every function the diff sets, and no other: one
 		// `base` holds too (same text, same unit) is kept, as the base a
 		// replay lands on is a later setup's, which may no longer compile it;

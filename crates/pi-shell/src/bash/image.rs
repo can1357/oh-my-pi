@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bash::{
 	cow_map::{CowMap, WeakCowMap},
-	store::{Attrs, Key, KeyBuf, Record, Table, Var, VarValue},
+	store::{Attrs, Key, KeyBuf, MiscKey, Record, Table, Var, VarValue},
 };
 
 /// A host default whose lookup waits until a reader observes it
@@ -313,13 +313,15 @@ impl ImageDiff {
 		self.records.iter().filter_map(|(_, r)| r.as_ref())
 	}
 
-	/// Leave out the command hash table (`hash`): a cache of where `PATH`
-	/// found each command, which a later process (another `PATH`, tools
-	/// moved or upgraded) must not take over.
-	pub fn without_command_hash(mut self) -> Self {
+	/// Leave out what a later process must not take over: the command hash
+	/// table (`hash`, where `PATH` found each command: another `PATH`, tools
+	/// moved or upgraded) and `$_` (the last command's last argument, which
+	/// changes with every command and may be a token passed on a command
+	/// line).
+	pub fn without_process_local(mut self) -> Self {
 		self
 			.records
-			.retain(|(key, _)| !matches!(key, KeyBuf::CmdHash(_)));
+			.retain(|(key, _)| !matches!(key, KeyBuf::CmdHash(_) | KeyBuf::Misc(MiscKey::LastArg)));
 		self
 	}
 }
@@ -327,7 +329,6 @@ impl ImageDiff {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::bash::store::MiscKey;
 
 	fn scalar(v: &str) -> Record {
 		Record::Var(Var::scalar(v, Attrs::NONE))
