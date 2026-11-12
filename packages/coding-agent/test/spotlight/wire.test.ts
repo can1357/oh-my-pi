@@ -494,18 +494,45 @@ describe("spotlight raw reads and path lists", () => {
 		expect(entries(shaped.manager, SPOTLIGHT_ENTRY.shape)[0]?.stats).toMatchObject({ rawReads: 1 });
 	});
 
-	it("shapes each part of a path list once, under the list's call, and never the joined text again", async () => {
+	it("leaves a path list whole when a part is `:raw` or every part would be shown whole, journaling it once", async () => {
 		const { shaped, plain } = await sessions();
-		const targets = ["raw.py:raw;b.txt", "wide.ts:5-40;b.txt", "raw.py:raw,b.txt;wide.ts:1-10"];
+		for (const { session } of [shaped, plain]) await Bun.write(path.join(session.cwd, "wide.md"), WIDE);
+		const cases = [
+			["raw.py:raw;b.txt", "rawReads"],
+			["b.txt,raw.py;wide.ts:raw:1-10", "rawReads"],
+			["wide.ts:5-40;wide.md", "wholeReads"],
+		] as const;
 
-		for (const [index, target] of targets.entries()) {
+		for (const [index, [target]] of cases.entries()) {
 			const id = `list${index}`;
 			const text = resultText(await new ReadTool(shaped.session).execute(id, { path: target }));
 			expect(text).toBe(resultText(await new ReadTool(plain.session).execute(id, { path: target })));
 		}
-		// One journal entry per part, each under the call that read the list: the stats join entries to calls by id.
-		const ids = entries(shaped.manager, SPOTLIGHT_ENTRY.shape).map(entry => entry.toolCallId);
-		expect(ids).toEqual(["list0", "list0", "list1", "list1", "list2", "list2", "list2"]);
+		// One entry per call: the stats keep one row per call id.
+		const journal = entries(shaped.manager, SPOTLIGHT_ENTRY.shape);
+		expect(journal.map(entry => entry.toolCallId)).toEqual(["list0", "list1", "list2"]);
+		expect(journal.map((entry, index) => (entry.stats as Record<string, number>)[cases[index][1]])).toEqual([
+			1, 1, 1,
+		]);
+	});
+
+	it("shapes a path list once, as one call, and traces the cut on the list's result", async () => {
+		const { shaped, plain } = await sessions();
+
+		const result = await new ReadTool(shaped.session).execute("list", { path: "raw.py;b.txt" });
+		const plainText = resultText(await new ReadTool(plain.session).execute("list", { path: "raw.py;b.txt" }));
+
+		expect(resultText(result).length).toBeLessThan(plainText.length);
+		expect(spotlightDetails(result.details)?.steps).not.toEqual(["none"]);
+		expect(entries(shaped.manager, SPOTLIGHT_ENTRY.shape).map(entry => entry.toolCallId)).toEqual(["list"]);
+	});
+
+	it("does not collapse a list part against an earlier part of the same list", async () => {
+		const { shaped } = await sessions();
+
+		const text = resultText(await new ReadTool(shaped.session).execute("list", { path: "raw.py;raw.py" }));
+
+		expect(text).not.toContain("as shown before");
 	});
 });
 

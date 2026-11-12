@@ -23,6 +23,7 @@ import {
 	type CallContext,
 	type Scorer,
 	type ShapedLines,
+	type ShapedTool,
 	type ShapeInput,
 	type ShapeOutcome,
 	type ShapeSink,
@@ -131,12 +132,16 @@ const WHOLE_READ = /^(?:agent|local|skill|rule):\/\//i;
  * Whether a result is shown whole besides page-backs and `:raw` reads: a {@link WHOLE_READ} target, or a `read` of
  * Markdown or of line ranges that all end (`file.ts:120-180`, `:5+30`, `:1-10,40-60`, `:-30`): the agent named the
  * lines it wants, and cuts of them were mostly read back. An open-ended range (`:120`, `:120-`) pages the file and is
- * shaped.
+ * shaped. A `;`/`,` path list is shown whole when every part would be.
  */
 function isWholeRead(input: ShapeInput): boolean {
-	const target = input.path ?? "";
+	if (input.parts) return input.parts.length > 0 && input.parts.every(part => isWholeTarget(input.tool, part.path));
+	return isWholeTarget(input.tool, input.path ?? "");
+}
+
+function isWholeTarget(tool: ShapedTool, target: string): boolean {
 	if (WHOLE_READ.test(target)) return true;
-	if (input.tool !== "read") return false;
+	if (tool !== "read") return false;
 	const { path: file, sel } = splitPathAndSel(target.trim());
 	if (isMarkdownPath(file)) return true;
 	try {
@@ -708,7 +713,7 @@ export async function shapeResult(
 	// Another tool's command is its arguments as JSON, which may name an artifact in passing: its `path` decides.
 	const target = shapesItself(input.tool) ? (input.command ?? input.path) : input.path;
 	const pageBack = isPageBack(target ?? "");
-	const rawRead = !pageBack && input.raw === true;
+	const rawRead = !pageBack && (input.raw === true || input.parts?.some(part => part.raw) === true);
 	const wholeRead = !pageBack && !rawRead && isWholeRead(input);
 	const short =
 		!pageBack &&

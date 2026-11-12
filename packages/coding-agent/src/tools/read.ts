@@ -845,8 +845,6 @@ interface FilesystemReadOptions {
 	toolContext?: AgentToolContext;
 	/** Page a whole-file read as the plain result does, though the session shapes output (a held-out result). */
 	plainWindow?: boolean;
-	/** The read call; parts of a `;` list are read, and shaped, under it. */
-	toolCallId: string;
 }
 
 /**
@@ -913,15 +911,16 @@ const kSpotlightWindow = Symbol("read.spotlightWindow");
 const kSpotlightWide = Symbol("read.spotlightWide");
 
 /**
- * Marks a `;`/`,` path list's joined result: each part was read, and shaped, by its own {@link ReadTool.execute}
- * call, so the list is not shaped again. A second pass would collapse the parts' lines as already shown.
+ * A `;`/`,` path list's parts, on its joined result: each part's target and whether it was read with `:raw`. The
+ * parts are read unshaped and the list is shaped once, as one call; the shaper decides from these whether it is left
+ * whole. A nested list contributes its own parts.
  */
 const kSpotlightParts = Symbol("read.spotlightParts");
 
 interface ReadDetailsWithWindow extends ReadToolDetails {
 	[kSpotlightWindow]?: ShapeInput["read"];
 	[kSpotlightWide]?: true;
-	[kSpotlightParts]?: true;
+	[kSpotlightParts]?: ShapeInput["parts"];
 }
 
 /**
@@ -1358,22 +1357,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	async #tryReadDelimitedPaths(
-		toolCallId: string,
 		readPath: string,
 		signal: AbortSignal | undefined,
 		toolContext: AgentToolContext | undefined,
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
 		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
-		return parts ? this.#readDelimitedParts(toolCallId, parts, signal, toolContext) : null;
+		return parts ? this.#readDelimitedParts(parts, signal, toolContext) : null;
 	}
 
 	/**
-	 * Read each part as its own read under the list's call `toolCallId`, so each is shaped for that call's intent;
-	 * `toolContext` carries flags such as `rawImages` into every part.
+	 * Read each part as its own read, unshaped and paged as the plain result pages it: the caller shapes the joined
+	 * list once. `toolContext` carries flags such as `rawImages` into every part.
 	 */
 	async #readDelimitedParts(
-		toolCallId: string,
 		parts: string[],
 		signal: AbortSignal | undefined,
 		toolContext: AgentToolContext | undefined,
@@ -1383,6 +1380,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
 		const displayReadTargetLinks: Array<string | null> = [];
+		const shapeParts: NonNullable<ShapeInput["parts"]> = [];
 		let pendingText = notice;
 		const flushText = () => {
 			if (pendingText.length === 0) return;
@@ -1395,7 +1393,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		for (const part of parts) {
 			try {
-				const result = await this.execute(toolCallId, { path: part }, signal, undefined, toolContext);
+				const result = await this.#executeInner(
+					"read-delimited-part",
+					{ path: part },
+					signal,
+					undefined,
+					toolContext,
+					undefined,
+					undefined,
+					undefined,
+					true,
+				);
+				appendRepeatReadHint(this.session, part, result);
+				const partDetails: ReadDetailsWithWindow | undefined = result.details;
+				const nestedParts = partDetails?.[kSpotlightParts];
+				if (nestedParts) shapeParts.push(...nestedParts);
+				else shapeParts.push({ path: part, raw: partDetails?.raw === true });
 				const nestedTargets = result.details?.displayReadTargets;
 				if (nestedTargets?.length) {
 					const nestedLinks = result.details?.displayReadTargetLinks;
@@ -1431,7 +1444,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			notes,
 			displayReadTargets,
 			displayReadTargetLinks,
-			[kSpotlightParts]: true,
+			[kSpotlightParts]: shapeParts,
 		};
 		return toolResult<ReadToolDetails>(details).content(content).done();
 	}
@@ -1917,37 +1930,36 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (earlierEffects) await untilAborted(signal, earlierEffects);
 		const inner = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
 		const innerDetails: ReadDetailsWithWindow | undefined = inner.details;
-		const result = innerDetails?.[kSpotlightParts]
-			? inner
-			: await shapeToolResult(
-					this.session,
-					toolCallId,
-					{
-						tool: "read",
-						source: `read ${params.path}`,
-						path: params.path,
-						raw: innerDetails?.raw,
-						read: innerDetails?.[kSpotlightWindow],
-					},
-					inner,
-					signal,
-					{
-						plain: innerDetails?.[kSpotlightWide]
-							? () =>
-									this.#executeInner(
-										toolCallId,
-										params,
-										signal,
-										undefined,
-										toolContext,
-										undefined,
-										undefined,
-										undefined,
-										true,
-									)
-							: undefined,
-					},
-				);
+		const result = await shapeToolResult(
+			this.session,
+			toolCallId,
+			{
+				tool: "read",
+				source: `read ${params.path}`,
+				path: params.path,
+				raw: innerDetails?.raw,
+				parts: innerDetails?.[kSpotlightParts],
+				read: innerDetails?.[kSpotlightWindow],
+			},
+			inner,
+			signal,
+			{
+				plain: innerDetails?.[kSpotlightWide]
+					? () =>
+							this.#executeInner(
+								toolCallId,
+								params,
+								signal,
+								undefined,
+								toolContext,
+								undefined,
+								undefined,
+								undefined,
+								true,
+							)
+					: undefined,
+			},
+		);
 		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
@@ -1955,7 +1967,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	async #executeInner(
-		toolCallId: string,
+		_toolCallId: string,
 		params: ReadParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
@@ -1977,7 +1989,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			this.session.cwd,
 			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
 		);
-		if (mixedParts) return this.#readDelimitedParts(toolCallId, mixedParts, signal, toolContext);
+		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
 		// Filesystem-backed reads choose JSON versus image questions after resolving
 		// the literal file and sniffing its content, not from its final extension.
 		// A `local://`/`artifact://` URL is resolved by its handler first, so a question
@@ -2014,9 +2026,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
 		const internalRouter = InternalUrlRouter.instance();
 		const delimitedInternalResult = internalRouter.canResolve(readPath)
-			? await this.#tryReadDelimitedPaths(toolCallId, readPath, signal, toolContext, entry =>
-					internalRouter.canResolve(entry),
-				)
+			? await this.#tryReadDelimitedPaths(readPath, signal, toolContext, entry => internalRouter.canResolve(entry))
 			: null;
 		if (delimitedInternalResult) return delimitedInternalResult;
 
@@ -2081,7 +2091,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				lexicalAbsolutePath,
 				toolContext,
 				plainWindow,
-				toolCallId,
 			});
 		}
 		// A located URL reads its backing file through the filesystem pipeline (images, `:img`,
@@ -2093,7 +2102,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			signal,
 			toolContext,
 			plainWindow,
-			toolCallId,
 		});
 		const details: ReadToolDetails = result.details ?? {};
 		details.resolvedPath ??= located.path;
@@ -2143,7 +2151,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			lexicalAbsolutePath,
 			toolContext,
 			plainWindow,
-			toolCallId,
 		} = options;
 		let { question } = options;
 		const rawImages = toolContext?.rawImages === true;
@@ -2271,7 +2278,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// Only list admission treats that error as recoverable, after the
 			// literal/archive/SQLite paths above; a single filename keeps its error.
 			if (!located && readPath.includes(";") && (isNotFoundError(error) || hasFsCode(error, "ENAMETOOLONG"))) {
-				const delimitedResult = await this.#tryReadDelimitedPaths(toolCallId, readPath, signal, toolContext);
+				const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 				if (delimitedResult) return delimitedResult;
 			}
 			// A located file vanished after routing: the handler owns the canonical not-found error.
@@ -2317,7 +2324,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 
 				if (!recoveredApprovedPlan && !suffixResolution) {
-					const delimitedResult = await this.#tryReadDelimitedPaths(toolCallId, readPath, signal, toolContext);
+					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 					if (delimitedResult) return delimitedResult;
 					throw new ToolError(`Path '${localReadPath}' not found`);
 				}
