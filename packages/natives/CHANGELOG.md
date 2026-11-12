@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- A cancelled or timed-out `Shell.run` no longer ends the `&` jobs earlier runs left running, and the shell keeps its session (variables, working directory, jobs) for the next run; only what the cancelled run started is stopped
 - Fixed `grep()` so directly named files containing NUL bytes are searched as text, and directory or glob searches list skipped binary files whose content matches in `GrepResult.binaryMatches` ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `computer.apps.open` on macOS returning `window: null` for an HTML file with its own `<title>`, or a page's window still titled with the previous tab: it now returns the browser window once it shows the page, with the page's title, including without Accessibility permission or when AX window/subrole reads fail; a hidden file-extension display name no longer selects an unchanged unrelated window, and root folders retain immediate display-name matching ([#18743](https://github.com/can1357/oh-my-pi/pull/18743) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS `computer` tool typing into or pressing a different control than the ref named, and reporting success, once the app reused the control's element (Contacts put the city in the street field): the call now sends nothing and fails with `StaleRef`, naming the control that now reads as the ref did when there is one ([#18892](https://github.com/can1357/oh-my-pi/pull/18892) by [@will-bogusz](https://github.com/will-bogusz))
