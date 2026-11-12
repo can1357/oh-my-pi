@@ -620,7 +620,7 @@ describe("task progress rendering", () => {
 		// Completion swaps the glyph and settles the description from accent to the plain foreground color;
 		// the name keeps the agent's identity colour.
 		expect(row).toContain(
-			`${agentColored("DonePkg", theme.bold("DonePkg"))}${theme.fg("text", ":")} ${theme.fg("text", "List workspace packages")}`,
+			`${agentColored(theme, "DonePkg", theme.bold("DonePkg"))}${theme.fg("text", ":")} ${theme.fg("text", "List workspace packages")}`,
 		);
 		expect(row).not.toContain(theme.fg("accent", "List workspace packages"));
 
@@ -641,7 +641,7 @@ describe("task progress rendering", () => {
 			"DonePkg",
 		);
 		expect(resultRow).toContain(
-			`${agentColored("DonePkg", theme.bold("DonePkg"))}${theme.fg("text", ": List workspace packages")}`,
+			`${agentColored(theme, "DonePkg", theme.bold("DonePkg"))}${theme.fg("text", ": List workspace packages")}`,
 		);
 	});
 
@@ -663,7 +663,7 @@ describe("task progress rendering", () => {
 		);
 
 		expect(row).toContain(theme.fg("dim", "KeySettingsHotPaths"));
-		expect(row).not.toContain(agentColored("KeySettingsHotPaths", "KeySettingsHotPaths"));
+		expect(row).not.toContain(agentColored(theme, "KeySettingsHotPaths", "KeySettingsHotPaths"));
 	});
 
 	it("shows the dispatch glyph in the header while agents run, not a spinner", async () => {

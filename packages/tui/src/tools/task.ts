@@ -1130,7 +1130,7 @@ function renderAgentResult(
 			? fullDescription
 			: undefined;
 	const titleColor = success && !needsWarning ? "text" : "accent";
-	const name = agentColored(result.id, description ? theme.bold(displayId) : displayId);
+	const name = agentColored(theme, result.id, description ? theme.bold(displayId) : displayId);
 	const title = description ? `${name}${theme.fg(titleColor, `: ${description}`)}` : name;
 	let statusLine = `${indent}${icon} ${modelLead}${title}${badges}`;
 	statusLine += formatAgentStatRun(

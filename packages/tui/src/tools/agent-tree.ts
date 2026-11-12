@@ -123,7 +123,7 @@ export function renderAgentTreeRow(
 	const identity = task && live && options.frozen ? undefined : options.agentId;
 	let title: string;
 	if (identity !== undefined) {
-		const name = agentColored(identity, descriptionShown || !task ? theme.bold(id) : id);
+		const name = agentColored(theme, identity, descriptionShown || !task ? theme.bold(id) : id);
 		title = descriptionShown ? `${name}${theme.fg(nameColor, ":")} ${theme.fg(nameColor, description!)}` : name;
 	} else if (task && live && descriptionShown) {
 		title = `${theme.fg(nameColor, theme.bold(id))}${theme.fg(nameColor, ":")} ${theme.fg(nameColor, description!)}`;

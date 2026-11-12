@@ -8,7 +8,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import { agentColored } from "@oh-my-pi/pi-tui/overlays/agent-identity";
+import { agentColored, agentColorHex, agentPalette } from "@oh-my-pi/pi-tui/overlays/agent-identity";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -1150,7 +1150,39 @@ describe("Agent hub row ordering", () => {
 			const selected = selectedAgentId(hub)!;
 			const other = selected === "Scout" ? "Scout.Probe" : "Scout";
 			expect(renderedRosterHeaderLineRaw(hub, selected, 120)).toContain(theme.bold(theme.fg("accent", selected)));
-			expect(renderedRosterHeaderLineRaw(hub, other, 120)).toContain(theme.bold(agentColored(other, other)));
+			expect(renderedRosterHeaderLineRaw(hub, other, 120)).toContain(theme.bold(agentColored(theme, other, other)));
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("keeps each agent's arrival colour across re-renders and after an earlier agent ends", () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		// Arrival slots are process-wide, so these ids appear in no other test.
+		const [lead, tests, docs, bench] = ["ArrivalLead", "ArrivalTests", "ArrivalDocs", "ArrivalBench"] as const;
+		const agents = new AgentRegistry();
+		for (const id of [lead, tests, docs]) agents.register({ id, displayName: id, kind: "sub", session: null });
+		const palette = agentPalette(theme).subagents;
+		const slotOf = (id: string) => palette.indexOf(agentColorHex(theme, id));
+		const first = slotOf(lead);
+		expect([tests, docs].map(slotOf)).toEqual([(first + 1) % palette.length, (first + 2) % palette.length]);
+		const hub = makeHub(agents);
+
+		try {
+			const drawnInOwnColour = (id: string) =>
+				id === selectedAgentId(hub) ||
+				renderedRosterHeaderLineRaw(hub, id, 120).includes(theme.bold(agentColored(theme, id, id)));
+			expect([tests, docs].every(drawnInOwnColour)).toBe(true);
+
+			agents.unregister(lead);
+			agents.register({ id: bench, displayName: bench, kind: "sub", session: null });
+			vi.advanceTimersByTime(100);
+			expect([tests, docs, bench].map(slotOf)).toEqual([
+				(first + 1) % palette.length,
+				(first + 2) % palette.length,
+				(first + 3) % palette.length,
+			]);
+			expect([tests, docs, bench].every(drawnInOwnColour)).toBe(true);
 		} finally {
 			hub.dispose();
 		}
