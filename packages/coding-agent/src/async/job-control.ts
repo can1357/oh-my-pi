@@ -16,7 +16,7 @@ import {
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 import type { ToolSession } from "../tools";
@@ -167,7 +167,26 @@ interface TrackedJobLike {
 	agentOutputPublished?: boolean;
 }
 
-export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isAgentProgressSnapshot(value: unknown): value is AgentProgress {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.id === "string" &&
+		typeof value.agent === "string" &&
+		typeof value.task === "string" &&
+		Array.isArray(value.recentTools) &&
+		Array.isArray(value.recentOutput)
+	);
+}
+
+export function snapshotJobs(
+	session: ToolSession,
+	jobs: TrackedJobLike[],
+	options: { includeResults?: boolean } = {},
+): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
 		const current = session.asyncJobManager?.getJob(j.id);
@@ -180,11 +199,15 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let advisor = false;
 		let completionPercent: number | undefined;
 		let stage: string | undefined;
+		let progress: AgentProgress[] | undefined;
 		let requests: number | undefined;
 		let cost: number | undefined;
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
 		if (latest.type === "task") {
+			const progressValue = latest.latestDetails?.progress;
+			if (Array.isArray(progressValue)) progress = progressValue.filter(isAgentProgressSnapshot);
+			// A batch job's progress lists every spawn of the call, keyed by agent id.
 			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
 			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
 			if (progressRecord) {
@@ -240,10 +263,19 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(contextTokens !== undefined && running ? { contextTokens } : {}),
 			...(contextWindow !== undefined && running ? { contextWindow } : {}),
 			...(widget ? { widget } : {}),
-			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
-			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
-			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
-			...(!resultConsumed && latest.structured ? { structured: latest.structured } : {}),
+			...(progress && progress.length > 0 ? { progress } : {}),
+			...(!resultConsumed && options.includeResults !== false && latest.resultText
+				? { resultText: latest.resultText }
+				: {}),
+			...(!resultConsumed && options.includeResults !== false && latest.errorText
+				? { errorText: latest.errorText }
+				: {}),
+			...((options.includeResults === false || !resultConsumed) && latest.latestDetails?.meta
+				? { meta: latest.latestDetails.meta }
+				: {}),
+			...(!resultConsumed && options.includeResults !== false && latest.structured
+				? { structured: latest.structured }
+				: {}),
 			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.id } : {}),
 			...(latest.agentOutputPublished !== undefined ? { agentOutputPublished: latest.agentOutputPublished } : {}),
 		};

@@ -9,7 +9,8 @@ import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../../coding-agent/src/prompts/tools/task-summary.md" with { type: "text" };
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
-import { type CoordinationDetails, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import { type CoordinationDetails, type JobSnapshot, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
 import { decodeBench } from "./fixtures/job-widget-views";
 
 /** Every described node under `children`, depth first. */
@@ -21,7 +22,6 @@ function flatten(children: readonly NativeChild[] | undefined): NativeNode[] {
 function byRole(root: NativeChild | undefined, role: string): NativeNode | undefined {
 	return flatten(root ? [root] : []).find(node => node.p && Reflect.get(node.p, "role") === role);
 }
-
 function renderLines(resultText: string): string {
 	const result = {
 		content: [{ type: "text", text: "" }],
@@ -110,6 +110,101 @@ describe("job renderer task-result preview", () => {
 		const header = output.split("\n").find(line => line.includes("SpawnProbe"));
 		expect(header).toBeDefined();
 		expect(header!.match(/SpawnProbe/g)).toHaveLength(1);
+	});
+
+	describe("sole running task job streams inline", () => {
+		function runningTaskJob(id: string, label: string): JobSnapshot {
+			const progress: AgentProgress = {
+				index: 0,
+				id,
+				agent: "task",
+				agentSource: "project",
+				status: "running",
+				task: "Inspect the wait renderer",
+				description: "Inspect wait renderer",
+				lastIntent: "checking renderer state",
+				currentTool: "bash",
+				currentToolArgs: "bun test packages/tui/test/wait-render.test.ts",
+				recentTools: [{ tool: "read", args: "packages/tui/src/tools/wait.ts", endMs: Date.now() }],
+				recentOutput: ["opened wait.ts", "checking renderer"],
+				toolCount: 2,
+				requests: 1,
+				tokens: 500,
+				cost: 0.01,
+				durationMs: 361_000,
+				resolvedModelIdentity: "provider/model-x",
+			};
+			return {
+				id,
+				type: "task" as const,
+				status: "running" as const,
+				label,
+				durationMs: 361_000,
+				progress: [progress],
+			};
+		}
+
+		it("streams the sole running task job inline under the wait row", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: { op: "wait" as const, jobs: [runningTaskJob("LiveSmart", "worker LiveSmart")] },
+			};
+			const component = waitToolRenderer.renderResult(
+				result,
+				{ expanded: false, isPartial: true, spinnerFrame: 0 } as Parameters<
+					typeof waitToolRenderer.renderResult
+				>[1],
+				theme,
+			);
+			const output = Bun.stripANSI((component.render(140) as readonly string[]).join("\n"));
+			expect(output).toContain("waiting on 1 job");
+			expect(output).toContain("LiveSmart");
+			expect(output).toContain("checking renderer state");
+			expect(output).toContain("bash");
+			expect(output).toContain("checking renderer");
+		});
+
+		it("ends the inline stream when the sole task job settles", () => {
+			const settled = {
+				...runningTaskJob("LiveSmart", "worker LiveSmart"),
+				status: "completed" as const,
+				resultText: "final worker report",
+			};
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: { op: "wait" as const, jobs: [settled] },
+			};
+			const component = waitToolRenderer.renderResult(
+				result,
+				{ expanded: true, isPartial: false } as Parameters<typeof waitToolRenderer.renderResult>[1],
+				theme,
+			);
+			const output = Bun.stripANSI((component.render(140) as readonly string[]).join("\n"));
+			expect(output).toContain("final worker report");
+			expect(output).not.toContain("checking renderer state");
+			expect(output).not.toContain("checking renderer");
+		});
+
+		it("keeps the compact list for two running task jobs", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: {
+					op: "wait" as const,
+					jobs: [runningTaskJob("LiveSmart", "worker LiveSmart"), runningTaskJob("SchemaScout", "schema scout")],
+				},
+			};
+			const component = waitToolRenderer.renderResult(
+				result,
+				{ expanded: true, isPartial: true, spinnerFrame: 0 } as Parameters<typeof waitToolRenderer.renderResult>[1],
+				theme,
+			);
+			const output = Bun.stripANSI((component.render(140) as readonly string[]).join("\n"));
+			expect(output).toContain("waiting on 2 jobs");
+			expect(output).toContain("LiveSmart");
+			expect(output).toContain("SchemaScout");
+			expect(output).not.toContain("checking renderer state");
+			expect(output).not.toContain("checking renderer");
+		});
 	});
 
 	describe("live and sealed waiting snapshots", () => {
