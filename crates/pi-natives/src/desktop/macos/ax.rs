@@ -1872,30 +1872,42 @@ fn read_as_values(values: &NodeValues) -> CoreResult<Option<AxReadAs>> {
 	}
 }
 
-/// How far above a clicked element its table row can sit: a cell's text,
-/// the cell, the row.
-const ROW_DEPTH: usize = 2;
-
-/// The table row a click on `element` aims at: the element itself or its
-/// parent within [`ROW_DEPTH`], with the row's process. `None` for an
-/// element outside a row; `StaleRef` once the app destroyed the element.
+/// The nearest table row above an element, stopping at its window or the
+/// bounded ancestry limit. Descendants may be deeper than a cell's text.
 pub(super) fn aimed_row(
 	element: &AXUIElement,
 ) -> CoreResult<Option<(CFRetained<AXUIElement>, libc::pid_t)>> {
-	let mut current = element.retain();
-	for _ in 0..=ROW_DEPTH {
-		let role = copy_held_attribute(&current, "AXRole")?
-			.and_then(|value| value.downcast::<CFString>().ok());
-		if role.is_some_and(|role| role.to_string() == "AXRow") {
-			let pid = element_pid(&current)?;
-			return Ok(Some((current, pid)));
+	let row = ancestor_row(
+		element.retain(),
+		|current| {
+			Ok(copy_held_attribute(current, "AXRole")?
+				.and_then(|value| value.downcast::<CFString>().ok())
+				.map(|role| role.to_string()))
+		},
+		|current| {
+			Ok(copy_held_attribute(current, "AXParent")?
+				.and_then(|value| value.downcast::<AXUIElement>().ok()))
+		},
+	)?;
+	row.map(|row| element_pid(&row).map(|pid| (row, pid)))
+		.transpose()
+}
+
+fn ancestor_row<E>(
+	mut current: E,
+	role: impl Fn(&E) -> CoreResult<Option<String>>,
+	parent: impl Fn(&E) -> CoreResult<Option<E>>,
+) -> CoreResult<Option<E>> {
+	for _ in 0..MAX_ANCESTRY_DEPTH {
+		match role(&current)?.as_deref() {
+			Some("AXRow") => return Ok(Some(current)),
+			Some("AXWindow" | "AXApplication") => return Ok(None),
+			_ => {},
 		}
-		let Some(parent) = copy_held_attribute(&current, "AXParent")?
-			.and_then(|value| value.downcast::<AXUIElement>().ok())
-		else {
+		let Some(next) = parent(&current)? else {
 			return Ok(None);
 		};
-		current = parent;
+		current = next;
 	}
 	Ok(None)
 }
@@ -3601,6 +3613,41 @@ mod tests {
 		assert_eq!(nearest_matching(5, |element: &u32| *element == 9, parent), None);
 		// A parent that answers with the element itself ends at the bound.
 		assert_eq!(nearest_matching(5, |_: &u32| false, |element: &u32| Some(*element)), None);
+	}
+
+	#[test]
+	fn row_action_deep_descendant_finds_its_row() {
+		let roles = ["AXWindow", "AXRow", "AXCell", "AXLink", "AXStaticText"];
+		let row = super::ancestor_row(
+			4_usize,
+			|node| Ok(Some(roles[*node].into())),
+			|node| Ok(node.checked_sub(1)),
+		)
+		.unwrap();
+		assert_eq!(row, Some(1));
+		assert_eq!(
+			super::ancestor_row(
+				0_usize,
+				|node| Ok(Some(roles[*node].into())),
+				|_| panic!("must not walk beyond the window"),
+			)
+			.unwrap(),
+			None
+		);
+		let reads = Cell::new(0);
+		assert_eq!(
+			super::ancestor_row(
+				0,
+				|_| {
+					reads.set(reads.get() + 1);
+					Ok(Some("AXCell".into()))
+				},
+				|node| Ok(Some(*node)),
+			)
+			.unwrap(),
+			None
+		);
+		assert_eq!(reads.get(), super::MAX_ANCESTRY_DEPTH);
 	}
 
 	#[test]
