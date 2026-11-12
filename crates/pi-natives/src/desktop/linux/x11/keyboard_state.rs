@@ -110,7 +110,7 @@ impl<'a> NeutralKeyboard<'a> {
 			before.locked_group != 0,
 			0,
 			before.latched_mods,
-			before.latched_group != 0,
+			-before.latched_group,
 		)
 		.map_err(failed)?;
 		let after = State::read(conn).map_err(failed)?;
@@ -146,7 +146,7 @@ impl<'a> NeutralKeyboard<'a> {
 		if locks == 0 && !group {
 			return Ok(());
 		}
-		latch_lock(self.conn, locks, locks, group, before.locked_group, 0, false)
+		latch_lock(self.conn, locks, locks, group, before.locked_group, 0, 0)
 	}
 }
 
@@ -157,8 +157,8 @@ impl Drop for NeutralKeyboard<'_> {
 }
 
 /// One `LatchLockState`: sets the locks in `affect_locks` to `locks`, locks
-/// `group` when `lock_group`, and clears the latches in `clear_latches` and,
-/// with `clear_group_latch`, the group latch.
+/// `group` when `lock_group`, and clears the latches in `clear_latches`.
+/// The server adds `group_latch_delta` to the current group latch.
 fn latch_lock(
 	conn: &RustConnection,
 	affect_locks: u16,
@@ -166,7 +166,7 @@ fn latch_lock(
 	lock_group: bool,
 	group: u8,
 	clear_latches: u16,
-	clear_group_latch: bool,
+	group_latch_delta: i16,
 ) -> Result<(), String> {
 	conn
 		.xkb_latch_lock_state(
@@ -176,8 +176,8 @@ fn latch_lock(
 			lock_group,
 			xkb::Group::from(group),
 			ModMask::from(clear_latches),
-			clear_group_latch,
-			0,
+			group_latch_delta != 0,
+			group_latch_delta.cast_unsigned(),
 		)
 		.map_err(|error| error.to_string())?
 		.check()
