@@ -57,7 +57,6 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
-import { INHERITED_CONTEXT_MESSAGE_TYPE } from "../task/inherited-context";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
@@ -450,6 +449,9 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 
 /** Custom message type for hidden interrupted-thinking continuity context. */
 export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
+
+/** Custom message type of a task child's inherited parent tail (`task/inherited-context.ts`). */
+export const INHERITED_CONTEXT_MESSAGE_TYPE = "task-inherited-context";
 
 /** Custom message type for the transient checkpoint-active reminder. */
 export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";

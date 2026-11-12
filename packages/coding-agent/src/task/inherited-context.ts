@@ -22,9 +22,6 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import inheritedContextTemplate from "../prompts/system/subagent-inherited-context.md" with { type: "text" };
 
-/** Custom message type of the child's inherited-context turn. */
-export const INHERITED_CONTEXT_MESSAGE_TYPE = "task-inherited-context";
-
 /** Tail size measured in the inheritance experiment: two frames of the 1568px dense shape. */
 export const INHERITED_CONTEXT_CHARS = 27_832;
 /** Frames kept from the end of the rendered tail. */
@@ -66,6 +63,9 @@ const IDENTIFIER_PATTERNS: readonly RegExp[] = [
 	/(?<![\w-])--[A-Za-z][\w-]*(?:=[^\s"'`]+)?/g,
 	// Numbers with at least four digits, or decimals: counts, sizes, ports, scores.
 	/(?<![\w.])\d[\d,_]*(?:\.\d+)?(?![\w.]*\w)/g,
+	// Secret placeholders (`$$NAME_HASH:CASE$$`): drawn into frames once the child's boundary encodes,
+	// and only an exact copy decodes.
+	/\$\$\w+(?::\w+)?\$\$/g,
 ];
 
 function isIdentifier(token: string, patternIndex: number): boolean {
@@ -160,6 +160,21 @@ export function buildInheritedContext(
 	return { text, identifiers: extractIdentifiers(text) };
 }
 
+/**
+ * The tail under the parent's own placeholders, for a child whose secret rules can differ from the
+ * parent's: an isolated worktree lacks the project's untracked `.omp/secrets.yml`, so its boundary
+ * would send those secrets raw. Exact, because {@link decodeForChild} only returns text that
+ * re-encodes to the cut it came from. The child cannot decode these placeholders.
+ */
+export function encodedInheritedContext(
+	context: InheritedContext,
+	secrets: InheritedContextSecrets | undefined,
+): InheritedContext {
+	if (!secrets) return context;
+	const text = secrets.obfuscate(context.text);
+	return { text, identifiers: extractIdentifiers(text) };
+}
+
 function renderPreamble(frames: number, identifiers: readonly string[]): string {
 	return prompt.render(inheritedContextTemplate, { frames, identifiers });
 }
@@ -247,10 +262,11 @@ export class InheritedContextFrames {
 	}
 
 	async #render(tail: string, model: Model, room: number): Promise<(TextContent | ImageContent)[] | undefined> {
+		// The fit depends only on the tail and the model's shape inputs; reuse it before re-wrapping ~28k chars.
+		const key = `${model.provider}\0${model.id}\0${tail}`;
+		if (this.#last?.key === key) return this.#last.content.length - 1 > room ? undefined : this.#last.content;
 		const fit = fitTail(tail, model);
 		if (!fit || fit.frames > room) return undefined;
-		const key = `${JSON.stringify(fit.shape)}\n${fit.text}`;
-		if (this.#last?.key === key) return this.#last.content;
 		let frames: ImageContent[];
 		try {
 			frames = await snapcompact.renderMany(fit.text, { shape: fit.shape, maxFrames: INHERITED_CONTEXT_MAX_FRAMES });

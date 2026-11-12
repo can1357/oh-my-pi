@@ -89,7 +89,7 @@ import {
 	ovnfsCommand,
 	perCallModelEnabled,
 } from "./settings";
-import type { InheritedContext } from "./inherited-context";
+import { encodedInheritedContext, type InheritedContext } from "./inherited-context";
 import {
 	assertPerCallModelApproved,
 	parentModelGrantPattern,
@@ -796,6 +796,17 @@ function buildExecutorOptions(
 	const restrictToolNames = preparedSession !== undefined || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	const steps = request.steps?.length ? renderStepPrompts(request.steps, policy.structured) : undefined;
+	// Seance children read their own source session, and agents declaring `inheritContext: false`
+	// (reviewers, independent judges) stay blind to the parent's tail. An isolated child runs in a
+	// worktree whose secret rules can differ, so it gets the tail under the parent's placeholders.
+	const inheritsContext =
+		preparedSession === undefined && request.invocationKind === "task" && policy.agent.inheritContext !== false;
+	const childInheritedContext =
+		inheritsContext && request.inheritedContext
+			? request.isolation?.requested === true
+				? encodedInheritedContext(request.inheritedContext, session.providerSecrets)
+				: request.inheritedContext
+			: undefined;
 	return {
 		cwd: session.cwd,
 		costGate: session.costGate,
@@ -869,12 +880,7 @@ function buildExecutorOptions(
 		// Autoload runs after session start, outside the seance isolation options.
 		autoloadSkills: preparedSession ? undefined : autoloadSkills,
 		workspaceTree: session.workspaceTree,
-		// Seance children read their own source session, and agents declaring `inheritContext: false`
-		// (reviewers, independent judges) stay blind to the parent's tail.
-		inheritedContext:
-			preparedSession === undefined && request.invocationKind === "task" && policy.agent.inheritContext !== false
-				? request.inheritedContext
-				: undefined,
+		inheritedContext: childInheritedContext,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
 		// Root policy and module paths have separate jobs: the live policy drives

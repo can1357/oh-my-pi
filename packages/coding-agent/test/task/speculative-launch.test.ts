@@ -226,7 +226,7 @@ describe("task speculative launch", () => {
 		session.finalize({ toolCall, args: flagged });
 		const result = await tool.execute(toolCall.id, flagged);
 		// Beta did not launch ahead of Alpha: nothing ran speculatively, dispatch started both in order.
-		expect((await (adopt.mock.results[0]!.value as ReturnType<TaskLaunchSession["adopt"]>)).size).toBe(0);
+		expect((await (adopt.mock.results[0]!.value as Promise<Map<number, unknown>>)).size).toBe(0);
 		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
 		await spawn("Alpha").started.promise;
 		await spawn("Beta").started.promise;

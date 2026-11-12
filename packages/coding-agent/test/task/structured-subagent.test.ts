@@ -629,6 +629,30 @@ describe("structured subagent primitive", () => {
 		it("is withheld from eval agent() spawns", async () => {
 			expect(await dispatchedContext(AGENT, { invocationKind: "eval" })).toBeUndefined();
 		});
+
+		it("reaches an isolated child under the parent's placeholders", async () => {
+			mockDiscovery(AGENT);
+			const parent = session({ isolationEnabled: true });
+			parent.providerSecrets = {
+				obfuscate: (text: string) => text.replaceAll("40cf59cf8a", () => "$$BUILD_ab12:L$$"),
+				deobfuscate: (text: string) => text.replaceAll("$$BUILD_ab12:L$$", "40cf59cf8a"),
+			} as never;
+			let dispatched: executorModule.ExecutorOptions["inheritedContext"];
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
+				dispatched = baseOptions.inheritedContext;
+				// A failed run skips the merge, which needs a real repository.
+				return { ...result(), exitCode: 1, error: "agent failed" };
+			});
+			const settled = await runStructuredSubagent(
+				request({ session: parent, inheritedContext, isolation: { requested: true }, retainArtifacts: true }),
+			);
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+			expect(dispatched).toEqual({
+				text: "parent decided to ship build $$BUILD_ab12:L$$\n",
+				identifiers: ["$$BUILD_ab12:L$$"],
+			});
+		});
 	});
 
 	it.each([

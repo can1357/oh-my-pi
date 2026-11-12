@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { Context, Message, Model } from "@oh-my-pi/pi-ai";
-import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	type CustomMessage,
+	convertToLlm,
+	INHERITED_CONTEXT_MESSAGE_TYPE,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import {
@@ -8,7 +12,6 @@ import {
 	extractIdentifiers,
 	INHERITED_CONTEXT_CHARS,
 	INHERITED_CONTEXT_MAX_FRAMES,
-	INHERITED_CONTEXT_MESSAGE_TYPE,
 	InheritedContextFrames,
 	type InheritedContext,
 	inheritedContextMessage,
