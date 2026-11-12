@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { AsyncJobManager, type AsyncJobManagerApi } from "@oh-my-pi/pi-coding-agent/async";
 import type { AssistantMessage, Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -12,7 +12,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, PromptDroppedError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -159,7 +159,7 @@ describe("AgentSession aside delivery", () => {
 			const nextCall = Promise.withResolvers<void>();
 			const waitStarted = Promise.withResolvers<void>();
 			const job = Promise.withResolvers<string>();
-			const manager = new AsyncJobManager({});
+			const manager: AsyncJobManagerApi = new AsyncJobManager({});
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
 				"todo.enabled": false,
@@ -1194,9 +1194,13 @@ describe("AgentSession aside delivery", () => {
 			return images;
 		});
 		let asideSettled = false;
-		const asidePromise = session.sendUserMessage("GENERATION_RACE_ASIDE", { deliverAs: "aside" }).then(() => {
-			asideSettled = true;
-		});
+		const asidePromise = session.sendUserMessage("GENERATION_RACE_ASIDE", { deliverAs: "aside" }).then(
+			() => undefined,
+			(error: unknown) => {
+				asideSettled = true;
+				return error;
+			},
+		);
 		let newSessionPromise: Promise<boolean> | undefined;
 		try {
 			await normalizeStarted.promise;
@@ -1214,6 +1218,7 @@ describe("AgentSession aside delivery", () => {
 			releaseNormalize.resolve();
 			await setImmediate();
 			expect(asideSettled).toBe(true);
+			expect(await asidePromise).toBeInstanceOf(PromptDroppedError);
 			expect(session.isSessionTransitioning).toBe(true);
 			expect(ready).toBe(false);
 			expect(JSON.stringify(session.agent.state.messages)).not.toContain("GENERATION_RACE_ASIDE");

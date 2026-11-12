@@ -111,7 +111,7 @@ fn lowers_to_self(c: char) -> bool {
 /// Append one character's UTF-8 bytes.
 #[inline]
 fn push_char(c: char, out: &mut Vec<u8>) {
-	let mut buf = [0u8; 4];
+	let mut buf = [0u8; char::MAX_LEN_UTF8];
 	out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 }
 

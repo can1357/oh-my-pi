@@ -33,6 +33,7 @@ async function renderFullJobs(running: AsyncJobSnapshotItem[]): Promise<string[]
 		commandReportRows: () => 200,
 		viewSession: {
 			getAsyncJobTree: () => ({ running, recent: [], agents: [] }),
+			requestJobCaptions: () => {},
 		},
 	} as unknown as InteractiveModeContext;
 	await new CommandController(ctx).handleJobsCommand({ full: true });
@@ -324,7 +325,6 @@ describe("/jobs logs on a real terminal", () => {
 		mode = new InteractiveMode(
 			session,
 			"test",
-			undefined,
 			() => {},
 			undefined,
 			undefined,

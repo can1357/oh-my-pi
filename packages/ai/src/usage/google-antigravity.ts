@@ -1,5 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
@@ -85,6 +85,8 @@ interface AntigravityEndpointResult {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
+/** `UsageReport.metadata.quotaSource` of reports built from `retrieveUserQuotaSummary`. */
+const QUOTA_SUMMARY_SOURCE = "quota-summary";
 
 interface AntigravityWindowDescriptor {
 	id: string;
@@ -288,6 +290,7 @@ function getQuotaSummaryCounterKeys(
 ): string[] {
 	const bucketId = bucket.bucketId?.toLowerCase() ?? "";
 	const groupName = group?.displayName?.toLowerCase() ?? "";
+	if (bucketId.startsWith("gemini-argon-")) return ["google-argon"];
 	if (bucketId.startsWith("gemini-") || groupName.includes("gemini")) return ["google"];
 	if (
 		bucketId.startsWith("3p-") ||
@@ -362,8 +365,17 @@ function buildQuotaSummaryReport(
 		for (const counterKey of counterKeys) {
 			const counterName = getQuotaSummaryCounterName(counterKey);
 			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
+			// The API's bucket `displayName` is generic ("Weekly Limit Remaining"),
+			// so Argon's dedicated weekly bucket needs its own name to stay
+			// distinguishable from the shared Gemini weekly bucket in usage views.
 			const label =
-				sharedGroup !== undefined ? "Claude & GPT (shared)" : counterKey === "google" ? "Gemini" : counterName;
+				sharedGroup !== undefined
+					? "Claude & GPT (shared)"
+					: counterKey === "google"
+						? "Gemini"
+						: counterKey === "google-argon"
+							? "Gemini (Argon)"
+							: counterName;
 			limits.push({
 				id: `${params.provider}:${counterKey}:default:${bucket.bucketId ?? windowId}`,
 				label: label ?? group?.displayName ?? bucket.displayName ?? "Usage",
@@ -403,6 +415,7 @@ function buildQuotaSummaryReport(
 	const metadata: UsageReport["metadata"] = {
 		endpoint,
 		projectId: params.credential.projectId,
+		quotaSource: QUOTA_SUMMARY_SOURCE,
 	};
 	if (params.credential.email) metadata.email = params.credential.email;
 	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
@@ -430,7 +443,7 @@ async function fetchAntigravityEndpoint(
 				headers: {
 					Authorization: `Bearer ${request.accessToken}`,
 					"Content-Type": "application/json",
-					"User-Agent": getAntigravityUserAgent(),
+					...getAntigravityHeaders(),
 				},
 				body: JSON.stringify({ project: request.projectId }),
 				signal: request.signal,
@@ -649,7 +662,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 export const antigravityUsageProvider: UsageProvider = {
 	id: "google-antigravity",
-	cacheVersion: 2,
+	cacheVersion: 3,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
 };
@@ -665,8 +678,21 @@ function getAntigravityCounterLimits(report: UsageReport, counterKey: string): U
 }
 
 /**
+ * Limits gating Gemini 4 Argon. The quota summary meters Argon in its own
+ * `gemini-argon-*` bucket, separately from `gemini-weekly`, so a summary
+ * without that bucket leaves Argon unconstrained. Legacy model-catalog reports
+ * cannot tell the buckets apart and only offer the shared Google counter.
+ */
+function getAntigravityArgonLimits(report: UsageReport): UsageLimit[] {
+	const argonLimits = getAntigravityCounterLimits(report, "google-argon");
+	if (argonLimits.length > 0 || report.metadata?.quotaSource === QUOTA_SUMMARY_SOURCE) return argonLimits;
+	return getAntigravityCounterLimits(report, "google");
+}
+
+/**
  * Scope an Antigravity report to the active model's backend counter, falling
  * back to legacy default counters only when that backend has no limits.
+ * Gemini 4 Argon is scoped by {@link getAntigravityArgonLimits}.
  *
  * Exhaustion checks are only safe with a concrete backend counter. A no-model
  * credential lookup (for example image-provider discovery) must not turn one
@@ -678,6 +704,7 @@ export function scopeAntigravityLimitsForModel(
 ): UsageLimit[] {
 	const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 	if (!counterKey) return [];
+	if (counterKey === "google-argon") return getAntigravityArgonLimits(report);
 	const backendLimits = getAntigravityCounterLimits(report, counterKey);
 	if (backendLimits.length > 0) return backendLimits;
 	return getAntigravityCounterLimits(report, "default");
@@ -712,20 +739,25 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
-	// One scope per backend counter the report covers, judged by that
-	// counter's own windows. A 429 can carry a retry-after at the weekly reset
-	// while Google restores the quota days earlier; the next `/usage` fetch
-	// then lifts the block instead of the account idling until the clock runs out.
+	// One scope per backend counter, judged by the same limits ranking uses
+	// for it. A 429 can carry a retry-after at the weekly reset while Google
+	// restores the quota days earlier; the next `/usage` fetch then lifts the
+	// block instead of the account idling until the clock runs out.
 	healableBlockScopes(report) {
-		const counterKeys = new Set<string>();
+		const counterKeys = new Set<string>(["google-argon"]);
 		for (const limit of report.limits) {
 			const counterKey = limit.id.split(":")[1];
 			if (counterKey) counterKeys.add(counterKey.toLowerCase());
 		}
-		return [...counterKeys].map(counterKey => ({
-			blockScope: `counter:${counterKey}`,
-			limits: getAntigravityCounterLimits(report, counterKey),
-		}));
+		return [...counterKeys]
+			.map(counterKey => ({
+				blockScope: `counter:${counterKey}`,
+				limits:
+					counterKey === "google-argon"
+						? getAntigravityArgonLimits(report)
+						: getAntigravityCounterLimits(report, counterKey),
+			}))
+			.filter(scope => scope.limits.length > 0);
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo

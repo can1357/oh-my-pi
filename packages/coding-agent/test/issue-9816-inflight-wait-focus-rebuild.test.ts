@@ -246,6 +246,7 @@ function makeSession(
 		sessionManager: {
 			getCwd: () => process.cwd(),
 			getEntries: () => messages,
+			getConversationTip: () => undefined,
 		},
 	};
 
@@ -276,8 +277,7 @@ function makeSession(
 	};
 }
 
-function createFixture(main = makeSession([danglingWait], true)) {
-	const worker = makeSession([], false);
+function createFixture(main = makeSession([danglingWait], true), worker = makeSession([], false)) {
 	const registry = new AgentRegistry();
 	registry.register({
 		id: "Worker",
@@ -312,7 +312,7 @@ function createFixture(main = makeSession([danglingWait], true)) {
 		get: () => focus.target ?? main.session,
 	});
 	ctx.unsubscribe = main.session.subscribe(event => eventController.handleEvent(event));
-	return { ctx, focus, main };
+	return { ctx, focus, main, worker };
 }
 
 beforeAll(async () => {
@@ -445,6 +445,114 @@ describe("live Cursor focus recovery without another delta", () => {
 		timestamp: 2,
 	};
 
+	it("keeps post-tool text streaming when a live update races with focus restoration", async () => {
+		const settledResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "settled-grep",
+			toolName: "grep",
+			content: [{ type: "text", text: "SETTLED_DURING_SWITCH" }],
+			isError: false,
+			timestamp: 2,
+		};
+		const liveMessage: AssistantMessage = {
+			...paused,
+			content: [
+				{ type: "thinking", thinking: "PAUSED_REASONING" },
+				{ type: "toolCall", id: "settled-grep", name: "grep", arguments: { pattern: "settled" } },
+				{ type: "toolCall", id: "paused-grep", name: "grep", arguments: { pattern: "sample" } },
+				{ type: "text", text: "LAST_VISIBLE_TEXT" },
+			],
+		};
+		const main = makeSession([], true);
+		main.setLiveAssistant(liveMessage, []);
+		const { ctx, focus } = createFixture(main);
+		try {
+			await focus.focusAgent("Worker");
+			const renderInitialMessages = ctx.renderInitialMessages.bind(ctx);
+			// Emitted mid-rebuild; delivery is queued behind it, so it is awaited only afterwards.
+			// `settled-grep` both starts and finishes before the switch ends (its buffered result is
+			// consumed by `restoreAssistant` ahead of its queued `tool_execution_start`).
+			let racing: Promise<unknown> = Promise.resolve();
+			ctx.renderInitialMessages = async options => {
+				await renderInitialMessages(options);
+				main.setLiveAssistant(liveMessage, [settledResult]);
+				racing = Promise.all([
+					main.emit({
+						type: "message_update",
+						message: liveMessage,
+						assistantMessageEvent: {
+							type: "text_delta",
+							contentIndex: 3,
+							delta: "LAST_VISIBLE_TEXT",
+							partial: liveMessage,
+						},
+					}),
+					main.emit({
+						type: "tool_execution_start",
+						toolCallId: "settled-grep",
+						toolName: "grep",
+						args: { pattern: "settled" },
+						intent: undefined,
+					}),
+					main.emit({
+						type: "tool_execution_end",
+						toolCallId: "settled-grep",
+						toolName: "grep",
+						result: { content: settledResult.content, details: {} },
+						isError: false,
+					}),
+					main.emit({
+						type: "tool_execution_start",
+						toolCallId: "paused-grep",
+						toolName: "grep",
+						args: { pattern: "sample" },
+						intent: undefined,
+					}),
+				]);
+			};
+			await focus.unfocus();
+			await racing;
+
+			const continued: AssistantMessage = {
+				...liveMessage,
+				content: [...liveMessage.content.slice(0, 3), { type: "text", text: "LAST_VISIBLE_TEXT AFTER_FOCUS" }],
+			};
+			await main.emit({
+				type: "message_update",
+				message: continued,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 3, delta: " AFTER_FOCUS", partial: continued },
+			});
+			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered()).toContain("AFTER_FOCUS");
+			expect(rendered().match(/SETTLED_DURING_SWITCH/g)).toHaveLength(1);
+			expect(ctx.pendingTools.has("settled-grep")).toBe(false);
+			expect(ctx.pendingTools.has("paused-grep")).toBe(true);
+
+			await main.emit({
+				type: "tool_execution_end",
+				toolCallId: "paused-grep",
+				toolName: "grep",
+				result: { content: result.content, details: {} },
+				isError: false,
+			});
+			await main.emit({ type: "message_end", message: continued });
+			const final = rendered();
+			expect(final.match(/AFTER_FOCUS/g)).toHaveLength(1);
+			expect(final.match(/SETTLED_DURING_SWITCH/g)).toHaveLength(1);
+			expect(final.match(/COMPLETED_MATCH/g)).toHaveLength(1);
+			expect(final.indexOf("PAUSED_REASONING")).toBeGreaterThanOrEqual(0);
+			expect(final.indexOf("PAUSED_REASONING")).toBeLessThan(final.indexOf("SETTLED_DURING_SWITCH"));
+			expect(final.indexOf("SETTLED_DURING_SWITCH")).toBeLessThan(final.indexOf("COMPLETED_MATCH"));
+			expect(final.indexOf("COMPLETED_MATCH")).toBeLessThan(final.indexOf("LAST_VISIBLE_TEXT AFTER_FOCUS"));
+			expect(ctx.pendingTools.size).toBe(0);
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
 	it("restores the paused assistant and completed card before any later event", async () => {
 		const main = makeSession([], true);
 		main.setLiveAssistant(paused, [result]);
@@ -481,5 +589,651 @@ describe("live Cursor focus recovery without another delta", () => {
 		await focus.unfocus();
 		expect(Bun.stripANSI(ctx.chatContainer.render(120).join("\n"))).toContain("COMPLETED_MATCH");
 		expect(ctx.pendingTools.size).toBe(0);
+	});
+
+	it("serializes focused assistant-end link resolution ahead of the next turn and drops queued events on detach", async () => {
+		const mainLive: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "MAIN_ACTIVE_STREAM" }],
+			timestamp: 10,
+		};
+		const main = makeSession([], true);
+		main.setLiveAssistant(mainLive, []);
+		const worker = makeSession([], true);
+		const { ctx, focus } = createFixture(main, worker);
+		ctx.settings = Settings.isolated({ "display.smoothStreaming": false });
+		const firstAssistant: AssistantMessage = {
+			...paused,
+			content: [
+				{ type: "text", text: "FIRST_LINK_TEXT [guide](guide.md)" },
+				{ type: "toolCall", id: "paused-grep", name: "grep", arguments: { pattern: "sample" } },
+			],
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const secondAssistant: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "SECOND_LIVE_TEXT [next](next.md)" }],
+			timestamp: 3,
+		};
+		const continuedSecond: AssistantMessage = {
+			...secondAssistant,
+			content: [{ type: "text", text: "SECOND_LIVE_TEXT [next](next.md) CONTINUED" }],
+		};
+		const thirdAssistant: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "STALE_THIRD_WORKER_TEXT" }],
+			timestamp: 4,
+		};
+		let linkStarted = Promise.withResolvers<void>();
+		let linkGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+		ctx.resolveAssistantMessageLinkHrefs = async () => {
+			linkStarted.resolve();
+			return linkGate.promise;
+		};
+		try {
+			await focus.focusAgent("Worker");
+
+			const firstEnd = worker.emit({ type: "message_end", message: firstAssistant });
+			await linkStarted.promise;
+
+			const toolStart = worker.emit({
+				type: "tool_execution_start",
+				toolCallId: "paused-grep",
+				toolName: "grep",
+				args: { pattern: "sample" },
+				intent: undefined,
+			});
+			const toolEnd = worker.emit({
+				type: "tool_execution_end",
+				toolCallId: "paused-grep",
+				toolName: "grep",
+				result: { content: result.content, details: {} },
+				isError: false,
+			});
+			const secondStart = worker.emit({ type: "message_start", message: secondAssistant });
+			const secondUpdate = worker.emit({
+				type: "message_update",
+				message: secondAssistant,
+				assistantMessageEvent: {
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "SECOND_LIVE_TEXT [next](next.md)",
+					partial: secondAssistant,
+				},
+			});
+
+			linkGate.resolve(new Map([["guide.md", "file:///tmp/guide.md"]]));
+			await Promise.all([firstEnd, toolStart, toolEnd, secondStart, secondUpdate]);
+
+			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered()).toContain("FIRST_LINK_TEXT");
+			expect(rendered()).toContain("COMPLETED_MATCH");
+			expect(rendered()).toContain("SECOND_LIVE_TEXT");
+			expect(ctx.streamingMessage).toBe(secondAssistant);
+
+			await worker.emit({
+				type: "message_update",
+				message: continuedSecond,
+				assistantMessageEvent: {
+					type: "text_delta",
+					contentIndex: 0,
+					delta: " CONTINUED",
+					partial: continuedSecond,
+				},
+			});
+			expect(rendered().match(/SECOND_LIVE_TEXT/g)).toHaveLength(1);
+			expect(rendered()).toContain("CONTINUED");
+			expect(ctx.streamingMessage).toBe(continuedSecond);
+
+			linkStarted = Promise.withResolvers<void>();
+			linkGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+			const secondEnd = worker.emit({ type: "message_end", message: continuedSecond });
+			await linkStarted.promise;
+			const thirdStart = worker.emit({ type: "message_start", message: thirdAssistant });
+			const thirdUpdate = worker.emit({
+				type: "message_update",
+				message: thirdAssistant,
+				assistantMessageEvent: {
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "STALE_THIRD_WORKER_TEXT",
+					partial: thirdAssistant,
+				},
+			});
+
+			const returning = focus.unfocus();
+			linkGate.resolve(new Map());
+			await Promise.all([returning, secondEnd, thirdStart, thirdUpdate]);
+
+			expect(rendered()).toContain("MAIN_ACTIVE_STREAM");
+			expect(rendered()).not.toContain("SECOND_LIVE_TEXT");
+			expect(rendered()).not.toContain("STALE_THIRD_WORKER_TEXT");
+			expect(ctx.streamingMessage).toBe(mainLive);
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
+	it("does not duplicate a message that arrives during attachment behind a slow link check", async () => {
+		const arrivalMessage = {
+			role: "user",
+			content: [{ type: "text", text: "ARRIVAL_DURING_ATTACH" }],
+			timestamp: 5,
+		} as unknown as AgentMessage;
+		const main = makeSession([arrivalMessage], false);
+		const worker = makeSession([], true);
+		const { ctx, focus } = createFixture(main, worker);
+		ctx.settings = Settings.isolated({ "display.smoothStreaming": false });
+		const workerAssistant: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "WORKER_LINK [x](x.md)" }],
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const linkStarted = Promise.withResolvers<void>();
+		const linkGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+		ctx.resolveAssistantMessageLinkHrefs = async () => {
+			linkStarted.resolve();
+			return linkGate.promise;
+		};
+		try {
+			await focus.focusAgent("Worker");
+			await worker.emit({ type: "message_start", message: workerAssistant });
+			const stuckEnd = worker.emit({ type: "message_end", message: workerAssistant });
+			await linkStarted.promise;
+
+			const renderInitialMessages = ctx.renderInitialMessages.bind(ctx);
+			const mainRenderDone = Promise.withResolvers<void>();
+			ctx.renderInitialMessages = async options => {
+				await renderInitialMessages(options);
+				mainRenderDone.resolve();
+			};
+
+			const returning = focus.unfocus();
+			const arrival = main.emit({ type: "message_start", message: arrivalMessage });
+			// Let attachment run as far as it can while the link check is held: the
+			// uncoordinated path completes the rebuild (painting the arrival from the
+			// snapshot) while its event is still queued; the coordinated path waits.
+			await Promise.race([
+				mainRenderDone.promise,
+				(async () => {
+					for (let i = 0; i < 50; i++) await Promise.resolve();
+				})(),
+			]);
+			linkGate.resolve(new Map());
+			await Promise.all([returning, arrival, stuckEnd]);
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered.match(/ARRIVAL_DURING_ATTACH/g)).toHaveLength(1);
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
+	/** Focus `Worker`, then hold its finished reply's link check so the switch back to `main` queues behind it. */
+	async function focusBehindHeldLinkCheck(main: SessionStub) {
+		const worker = makeSession([], true);
+		const fixture = createFixture(main, worker);
+		fixture.ctx.settings = Settings.isolated({ "display.smoothStreaming": false });
+		const workerAssistant: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "WORKER_LINK [x](x.md)" }],
+			timestamp: 1,
+		};
+		const linkStarted = Promise.withResolvers<void>();
+		const linkGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+		fixture.ctx.resolveAssistantMessageLinkHrefs = async () => {
+			linkStarted.resolve();
+			return linkGate.promise;
+		};
+		await fixture.focus.focusAgent("Worker");
+		await worker.emit({ type: "message_start", message: workerAssistant });
+		const stuckEnd = worker.emit({ type: "message_end", message: workerAssistant });
+		await linkStarted.promise;
+		const dispose = () => {
+			fixture.focus.dispose();
+			fixture.ctx.unsubscribe?.();
+			fixture.ctx.eventController.dispose();
+			for (const component of fixture.ctx.pendingTools.values()) component.seal();
+		};
+		return { ...fixture, stuckEnd, release: () => linkGate.resolve(new Map()), dispose };
+	}
+
+	it("draws messages that arrive after the switch queued its rebuild once, replayed or not", async () => {
+		const earlier: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "EARLIER_REPLY [b](b.md)" }],
+			timestamp: 2,
+		};
+		const arrivedReply: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "ARRIVED_REPLY [a](a.md)" }],
+			timestamp: 4,
+		};
+		const replayed = {
+			role: "user",
+			content: [{ type: "text", text: "REPLAYED_ARRIVAL" }],
+			timestamp: 5,
+		} as unknown as AgentMessage;
+		const liveOnly = {
+			role: "user",
+			content: [{ type: "text", text: "LIVE_ONLY_ARRIVAL" }],
+			timestamp: 6,
+		} as unknown as AgentMessage;
+		const mainMessages: AgentMessage[] = [earlier];
+		const main = makeSession(mainMessages, false);
+		const { ctx, focus, stuckEnd, release, dispose } = await focusBehindHeldLinkCheck(main);
+		// The arrived reply's own link check (it alone asks for just `a.md`; the rebuild resolves every
+		// replayed link at once) finishes only after the rebuild commits, so whatever is queued behind
+		// that check is delivered after the commit.
+		const committed = Promise.withResolvers<void>();
+		const renderInitialMessages = ctx.renderInitialMessages.bind(ctx);
+		ctx.renderInitialMessages = async options => {
+			await renderInitialMessages(options);
+			committed.resolve();
+		};
+		ctx.resolveAssistantMessageLinkHrefs = async hrefs => {
+			if (hrefs.length === 1 && hrefs[0] === "a.md") await committed.promise;
+			return new Map();
+		};
+		try {
+			const returning = focus.unfocus();
+			// Let the switch queue its own work behind the held link check before anything arrives.
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			// The reply and one prompt are persisted before the rebuild reads the transcript; one never is.
+			mainMessages.push(arrivedReply, replayed);
+			const arrivals = [arrivedReply, replayed, liveOnly].flatMap(message => [
+				main.emit({ type: "message_start", message }),
+				main.emit({ type: "message_end", message }),
+			]);
+			release();
+			await Promise.all([returning, stuckEnd, ...arrivals]);
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered.match(/ARRIVED_REPLY/g)).toHaveLength(1);
+			expect(rendered.match(/REPLAYED_ARRIVAL/g)).toHaveLength(1);
+			expect(rendered.match(/LIVE_ONLY_ARRIVAL/g)).toHaveLength(1);
+		} finally {
+			dispose();
+		}
+	});
+
+	it("keeps a reply that starts during the switch attached to the rebuilt transcript", async () => {
+		const reply: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "REPLY_DURING_SWITCH" }],
+			timestamp: 7,
+		};
+		const continued: AssistantMessage = {
+			...reply,
+			content: [{ type: "text", text: "REPLY_DURING_SWITCH AND_AFTER" }],
+		};
+		const main = makeSession([], true);
+		const { ctx, focus, stuckEnd, release, dispose } = await focusBehindHeldLinkCheck(main);
+		try {
+			const returning = focus.unfocus();
+			main.setLiveAssistant(reply, []);
+			const started = [
+				main.emit({ type: "message_start", message: reply }),
+				main.emit({
+					type: "message_update",
+					message: reply,
+					assistantMessageEvent: {
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "REPLY_DURING_SWITCH",
+						partial: reply,
+					},
+				}),
+			];
+			release();
+			await Promise.all([returning, stuckEnd, ...started]);
+
+			main.setLiveAssistant(continued, []);
+			await main.emit({
+				type: "message_update",
+				message: continued,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " AND_AFTER", partial: continued },
+			});
+			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered()).toContain("AND_AFTER");
+			await main.emit({ type: "message_end", message: continued });
+			expect(rendered().match(/REPLY_DURING_SWITCH/g)).toHaveLength(1);
+			expect(rendered()).toContain("AND_AFTER");
+		} finally {
+			dispose();
+		}
+	});
+
+	it("draws an extension message persisted during the switch once, though its rebuilt copy is a new object", async () => {
+		const note = {
+			role: "custom",
+			customType: "ext-note",
+			content: "EXT_DURING_SWITCH",
+			display: true,
+			timestamp: 8,
+		} as unknown as AgentMessage;
+		const mainMessages: AgentMessage[] = [];
+		const main = makeSession(mainMessages, false);
+		const { ctx, focus, stuckEnd, release, dispose } = await focusBehindHeldLinkCheck(main);
+		try {
+			const returning = focus.unfocus();
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			// The session persists an idle display message before emitting it; the rebuild reads it back
+			// from its entry as a new object.
+			mainMessages.push({ ...note });
+			const arrivals = [
+				main.emit({ type: "message_start", message: note }),
+				main.emit({ type: "message_end", message: note }),
+			];
+			release();
+			await Promise.all([returning, stuckEnd, ...arrivals]);
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered.match(/EXT_DURING_SWITCH/g)).toHaveLength(1);
+		} finally {
+			dispose();
+		}
+	});
+
+	it("draws a tool that finishes during the switch once, and still shows a retry after switching back", async () => {
+		const call: AssistantMessage = {
+			...paused,
+			content: [{ type: "toolCall", id: "switch-grep", name: "grep", arguments: { pattern: "TOOL_DURING_SWITCH" } }],
+			stopReason: "toolUse",
+			timestamp: 9,
+		};
+		const finished: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "switch-grep",
+			toolName: "grep",
+			content: [{ type: "text", text: "SWITCH_MATCH" }],
+			isError: true,
+			timestamp: 10,
+		};
+		const mainMessages: AgentMessage[] = [call];
+		const main = makeSession(mainMessages, true);
+		const { ctx, focus, stuckEnd, release, dispose } = await focusBehindHeldLinkCheck(main);
+		try {
+			const returning = focus.unfocus();
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			// The tool runs and its result is persisted before the rebuild reads the transcript.
+			mainMessages.push(finished);
+			const tool = { toolCallId: "switch-grep", toolName: "grep" };
+			const arrivals = [
+				main.emit({ type: "tool_execution_start", ...tool, args: { pattern: "TOOL_DURING_SWITCH" } }),
+				main.emit({ type: "tool_execution_end", ...tool, result: { content: finished.content }, isError: true }),
+				main.emit({ type: "message_start", message: finished }),
+				main.emit({ type: "message_end", message: finished }),
+			];
+			release();
+			await Promise.all([returning, stuckEnd, ...arrivals]);
+
+			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered().match(/TOOL_DURING_SWITCH/g)).toHaveLength(1);
+
+			// F5 retry after switching back re-runs the same toolCallId.
+			await main.emit({ type: "agent_start" });
+			await main.emit({ type: "tool_execution_start", ...tool, args: { pattern: "TOOL_DURING_SWITCH" } });
+			expect(ctx.pendingTools.has("switch-grep")).toBe(true);
+			await main.emit({
+				type: "tool_execution_update",
+				...tool,
+				args: { pattern: "TOOL_DURING_SWITCH" },
+				partialResult: { content: [{ type: "text", text: "RETRY_PROGRESS" }] },
+			});
+			expect(rendered()).toContain("RETRY_PROGRESS");
+			await main.emit({
+				type: "tool_execution_end",
+				...tool,
+				result: { content: [{ type: "text", text: "RETRY_MATCH" }] },
+				isError: false,
+			});
+			expect(ctx.pendingTools.has("switch-grep")).toBe(false);
+			expect(rendered()).toContain("RETRY_MATCH");
+		} finally {
+			dispose();
+		}
+	});
+
+	it("draws an older reply that ends after the transcript is read before restoring the newer live reply", async () => {
+		const older: AssistantMessage = { ...paused, content: [{ type: "text", text: "OLDER_REPLY" }], timestamp: 11 };
+		const newer: AssistantMessage = { ...paused, content: [{ type: "text", text: "NEWER_REPLY" }], timestamp: 12 };
+		const continued: AssistantMessage = { ...newer, content: [{ type: "text", text: "NEWER_REPLY AND_AFTER" }] };
+		const main = makeSession([], true);
+		main.setLiveAssistant(older, []);
+		const { ctx, focus, stuckEnd, release, dispose } = await focusBehindHeldLinkCheck(main);
+		// Right after the rebuild reads the transcript, the older reply ends and the newer one starts.
+		const stub = main.session as unknown as { buildTranscriptSessionContext: () => SessionContext };
+		const read = stub.buildTranscriptSessionContext.bind(stub);
+		let raced: Promise<unknown> | undefined;
+		stub.buildTranscriptSessionContext = () => {
+			const context = read();
+			raced ??= Promise.resolve().then(() => {
+				const ended = main.emit({ type: "message_end", message: older });
+				main.setLiveAssistant(newer, []);
+				return Promise.all([ended, main.emit({ type: "message_start", message: newer })]);
+			});
+			return context;
+		};
+		try {
+			const returning = focus.unfocus();
+			release();
+			await Promise.all([returning, stuckEnd]);
+			await raced;
+			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			// Before the newer reply sends anything else, both are on screen, the older one first.
+			const switched = rendered();
+			expect(switched.match(/OLDER_REPLY/g)).toHaveLength(1);
+			expect(switched.match(/NEWER_REPLY/g)).toHaveLength(1);
+			expect(switched.indexOf("OLDER_REPLY")).toBeLessThan(switched.indexOf("NEWER_REPLY"));
+
+			main.setLiveAssistant(continued, []);
+			await main.emit({
+				type: "message_update",
+				message: continued,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " AND_AFTER", partial: continued },
+			});
+			await main.emit({ type: "message_end", message: continued });
+			expect(rendered().match(/OLDER_REPLY/g)).toHaveLength(1);
+			expect(rendered().match(/NEWER_REPLY/g)).toHaveLength(1);
+			expect(rendered()).toContain("AND_AFTER");
+		} finally {
+			dispose();
+		}
+	});
+	it("drops a tool-calling message update whose link check finishes after a focus switch", async () => {
+		const mainPrompt = {
+			role: "user",
+			content: [{ type: "text", text: "MAIN_AFTER_SWITCH" }],
+			timestamp: 20,
+		} as unknown as AgentMessage;
+		const main = makeSession([mainPrompt], false);
+		const worker = makeSession([], true);
+		const { ctx, focus } = createFixture(main, worker);
+		ctx.settings = Settings.isolated({ "display.smoothStreaming": false });
+		const started: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "WORKER_HEAD [h](head.md)" }],
+			timestamp: 21,
+		};
+		const toolUpdate: AssistantMessage = {
+			...paused,
+			content: [
+				{ type: "text", text: "WORKER_HEAD [h](head.md)" },
+				{ type: "toolCall", id: "stale-grep", name: "grep", arguments: { pattern: "STALE_TOOL" } },
+			],
+			timestamp: 21,
+		};
+		const linkStarted = Promise.withResolvers<void>();
+		const linkGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+		ctx.resolveAssistantMessageLinkHrefs = async () => {
+			linkStarted.resolve();
+			return linkGate.promise;
+		};
+		try {
+			await focus.focusAgent("Worker");
+			await worker.emit({ type: "message_start", message: started });
+			// The update's first tool call makes `syncAssistantMessage` await link
+			// resolution before finalizing the streaming block.
+			const stuckUpdate = worker.emit({
+				type: "message_update",
+				message: toolUpdate,
+				assistantMessageEvent: {
+					type: "toolcall_end",
+					contentIndex: 1,
+					toolCall: { type: "toolCall", id: "stale-grep", name: "grep", arguments: { pattern: "STALE_TOOL" } },
+					partial: toolUpdate,
+				},
+			});
+			await linkStarted.promise;
+
+			// The switch resets the streaming state synchronously, then queues its
+			// rebuild behind this in-flight update.
+			const returning = focus.unfocus();
+			linkGate.resolve(new Map());
+			await Promise.all([returning, stuckUpdate]);
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered).toContain("MAIN_AFTER_SWITCH");
+			expect(rendered).not.toContain("WORKER_HEAD");
+			expect(rendered).not.toContain("STALE_TOOL");
+			expect(ctx.pendingTools.has("stale-grep")).toBe(false);
+			expect(ctx.streamingMessage).toBeUndefined();
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
+	it("drops a post-tool segment whose link check finishes after a focus switch", async () => {
+		const mainPrompt = {
+			role: "user",
+			content: [{ type: "text", text: "MAIN_SEGMENT_HOME" }],
+			timestamp: 22,
+		} as unknown as AgentMessage;
+		const main = makeSession([mainPrompt], false);
+		const worker = makeSession([], true);
+		const { ctx, focus } = createFixture(main, worker);
+		ctx.settings = Settings.isolated({ "display.smoothStreaming": false });
+		const started: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "WORKER_SEG_HEAD [h](head.md)" }],
+			timestamp: 23,
+		};
+		const toolUpdate: AssistantMessage = {
+			...paused,
+			content: [
+				{ type: "text", text: "WORKER_SEG_HEAD [h](head.md)" },
+				{ type: "toolCall", id: "seg-grep-1", name: "grep", arguments: { pattern: "SEG_ONE" } },
+				{ type: "text", text: "STALE_SEGMENT [s](segment.md)" },
+				{ type: "toolCall", id: "seg-grep-2", name: "grep", arguments: { pattern: "SEG_TWO" } },
+			],
+			timestamp: 23,
+		};
+		const segmentStarted = Promise.withResolvers<void>();
+		const segmentGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+		ctx.resolveAssistantMessageLinkHrefs = async hrefs => {
+			// Only the closed post-tool segment's own link check is held; the
+			// before-tools check ahead of it resolves immediately.
+			if (hrefs.includes("segment.md")) {
+				segmentStarted.resolve();
+				return segmentGate.promise;
+			}
+			return new Map();
+		};
+		try {
+			await focus.focusAgent("Worker");
+			await worker.emit({ type: "message_start", message: started });
+			const stuckUpdate = worker.emit({
+				type: "message_update",
+				message: toolUpdate,
+				assistantMessageEvent: {
+					type: "toolcall_end",
+					contentIndex: 3,
+					toolCall: { type: "toolCall", id: "seg-grep-2", name: "grep", arguments: { pattern: "SEG_TWO" } },
+					partial: toolUpdate,
+				},
+			});
+			await segmentStarted.promise;
+
+			const returning = focus.unfocus();
+			segmentGate.resolve(new Map());
+			await Promise.all([returning, stuckUpdate]);
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered).toContain("MAIN_SEGMENT_HOME");
+			expect(rendered).not.toContain("STALE_SEGMENT");
+			expect(ctx.pendingTools.has("seg-grep-1")).toBe(false);
+			expect(ctx.pendingTools.has("seg-grep-2")).toBe(false);
+			expect(ctx.streamingMessage).toBeUndefined();
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
+	it("draws a later message that only collides with a replayed one on its timestamp key", async () => {
+		const firstNote = {
+			role: "custom",
+			customType: "ext-note",
+			content: "FIRST_NOTE",
+			display: true,
+			timestamp: 30,
+		} as unknown as AgentMessage;
+		const firstPrompt = {
+			role: "user",
+			content: [{ type: "text", text: "FIRST_PROMPT" }],
+			timestamp: 31,
+		} as unknown as AgentMessage;
+		const main = makeSession([firstNote, firstPrompt], false);
+		const worker = makeSession([], false);
+		const { ctx, focus } = createFixture(main, worker);
+		try {
+			await focus.focusAgent("Worker");
+			await focus.unfocus();
+
+			// Same custom type and timestamp as the replayed note, and same
+			// timestamp/attribution as the replayed prompt — the cheap identity
+			// keys collide, but these are different messages.
+			const secondNote = {
+				role: "custom",
+				customType: "ext-note",
+				content: "SECOND_NOTE",
+				display: true,
+				timestamp: 30,
+			} as unknown as AgentMessage;
+			const secondPrompt = {
+				role: "user",
+				content: [{ type: "text", text: "SECOND_PROMPT" }],
+				timestamp: 31,
+			} as unknown as AgentMessage;
+			for (const message of [secondNote, secondPrompt]) {
+				await main.emit({ type: "message_start", message });
+				await main.emit({ type: "message_end", message });
+			}
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered.match(/FIRST_NOTE/g)).toHaveLength(1);
+			expect(rendered.match(/SECOND_NOTE/g)).toHaveLength(1);
+			expect(rendered.match(/FIRST_PROMPT/g)).toHaveLength(1);
+			expect(rendered.match(/SECOND_PROMPT/g)).toHaveLength(1);
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
 	});
 });

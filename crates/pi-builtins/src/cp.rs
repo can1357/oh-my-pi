@@ -20,7 +20,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use pi_vfs::{
@@ -40,7 +39,7 @@ use uucore::{
 
 use crate::{
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
-	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno},
 	progress::stderr_draw_target,
 };
 
@@ -400,11 +399,6 @@ impl Utility for Cp {
 	}
 }
 
-/// Creates the `cp` builtin registration.
-pub(crate) fn cp_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Cp, SE>()
-}
-
 /// Writes `<utility>: <message>` to stderr, named after the running utility
 /// because `mv` copies between filesystems through this engine too. Exit
 /// status is decided by the caller: status 0 records nothing.
@@ -762,8 +756,7 @@ fn cp_main(matches: &ArgMatches, host: &mut Host) -> CopyResult<()> {
 
 	let paths: Vec<PathBuf> = matches
 		.get_many::<OsString>(options::PATHS)
-		.map(|values| values.map(PathBuf::from).collect())
-		.unwrap_or_default();
+		.map_or_default(|values| values.map(PathBuf::from).collect());
 
 	let (sources, target) = parse_path_args(paths, &options)?;
 	if let Some(dir) = &options.target_dir {
@@ -1480,7 +1473,7 @@ fn construct_dest_path(
 		TargetType::Directory => {
 			if options.parents {
 				join_path(target, &parents_relative(source))
-			} else if source == Path::new(".") && target_is_dir {
+			} else if source == "." && target_is_dir {
 				// Copying `.` into an existing directory copies its contents.
 				target.to_path_buf()
 			} else {
@@ -1600,7 +1593,7 @@ impl OverwriteMode {
 				let prompt = interactive_prompt(host, path, clobber);
 				let _ = write!(host.stderr, "{}: {prompt} ", Cp::NAME);
 				let _ = host.stderr.flush();
-				if read_yes(host) { Ok(()) } else { Err(CpError::Skipped(true)) }
+				read_yes(host).ok_or(CpError::Skipped(true))
 			},
 			Self::Clobber(_) => Ok(()),
 		}
@@ -2191,7 +2184,7 @@ fn print_verbose_output(
 fn dest_in_working_directory(host: &Host, dest: &Path) -> bool {
 	match parent_path(dest) {
 		None => true,
-		Some(parent) if parent.as_os_str().is_empty() || parent == Path::new(".") => true,
+		Some(parent) if parent.is_empty() || parent == "." => true,
 		Some(parent) => host
 			.fs()
 			.same_file(host.resolve(parent), host.resolve("."))
@@ -3176,7 +3169,7 @@ fn copy_directory(
 	// a -> d/a
 	// a/b -> d/a/b
 	let target: PathBuf = match parent_path(root) {
-		Some(parent) if options.parents && !parent.as_os_str().is_empty() => {
+		Some(parent) if options.parents && !parent.is_empty() => {
 			make_parent_dirs(host, state, root, &join_path(target, &parents_relative(root)), options)?;
 			join_path(target, &parents_relative(parent))
 		},
@@ -3195,7 +3188,7 @@ fn copy_directory(
 			)));
 		},
 		Ok(_) if !options.no_target_dir => {
-			if root == Path::new(".") || root.as_os_str().as_encoded_bytes().ends_with(b"/.") {
+			if root == "." || root.as_os_str().as_encoded_bytes().ends_with(b"/.") {
 				child_path(&target, std::ffi::OsStr::new("."))
 			} else {
 				match file_name(root) {
@@ -3488,7 +3481,7 @@ mod linux {
 
 		match result {
 			-1 => Ok((false, size, blocks)), // No data found or end of file
-			_ if result >= 0 => Ok((true, size, blocks)), // Data found
+			0.. => Ok((true, size, blocks)), // Data found
 			_ => Err(error),
 		}
 	}

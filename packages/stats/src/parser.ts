@@ -5,6 +5,7 @@ import {
 	type AssistantMessage,
 	coerceServiceTierByFamily,
 	getPremiumServiceTierRequests,
+	type MessageAttribution,
 	parseServiceTier,
 	resolveModelServiceTier,
 	type ServiceTierByFamily,
@@ -26,6 +27,13 @@ import type {
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
+import {
+	emptySpotlightRows,
+	emptySpotlightState,
+	SpotlightCollector,
+	type SpotlightParseRows,
+	type SpotlightParserState,
+} from "./spotlight-ingest";
 import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
@@ -128,11 +136,16 @@ function extractUserText(content: unknown): string {
 }
 
 /**
- * Build user-message stats from an entry. Returns null for empty/synthetic content.
+ * Build user-message stats from an entry. Returns null for empty, synthetic, or agent-attributed content.
  */
 function extractUserStats(sessionFile: string, folder: string, entry: SessionMessageEntry): UserMessageStats | null {
-	const msg = entry.message as { role: "user"; content?: unknown; synthetic?: boolean };
-	if (msg.role !== "user" || msg.synthetic) return null;
+	const msg = entry.message as {
+		role: "user";
+		content?: unknown;
+		synthetic?: boolean;
+		attribution?: MessageAttribution;
+	};
+	if (msg.role !== "user" || msg.synthetic || msg.attribution === "agent") return null;
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);
@@ -416,6 +429,13 @@ function sanitizeToolName(name: string): string | null {
 	return candidate.length > 0 ? candidate : null;
 }
 
+/** A call the agent loop skipped carries a synthetic `executed: false` result: it never ran, so it is no tool error. */
+function isToolExecutionError(message: { isError?: unknown; details?: unknown }): boolean {
+	if (message.isError !== true) return false;
+	const details = message.details as { __synthetic?: unknown; executed?: unknown } | null | undefined;
+	return !(details?.__synthetic === true && details.executed === false);
+}
+
 /**
  * Build the result linkage for a `toolResult` entry: text characters fed back
  * into context plus the error flag, keyed to the originating call.
@@ -435,7 +455,7 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
-		isError: msg.isError === true,
+		isError: isToolExecutionError(msg),
 	};
 }
 
@@ -483,23 +503,26 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	return entries;
 }
 
-function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier and the Spotlight state. */
+function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+		else spotlight.visit(entry);
 	});
 	return currentServiceTier;
 }
 export interface SessionParserState {
 	version: 1;
 	offset: number;
-	dev: number;
 	ino: number;
 	birthtimeMs: number;
 	size: number;
 	mtimeMs: number;
 	checkpoint: string;
 	serviceTier: ServiceTierByFamily | null;
+	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
+	spotlight?: SpotlightParserState;
 }
 
 export interface ParseSessionResult {
@@ -508,6 +531,7 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	spotlight: SpotlightParseRows;
 	newOffset: number;
 	parserState?: SessionParserState;
 	reset?: boolean;
@@ -528,8 +552,13 @@ async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8
 	return bytes.subarray(0, read);
 }
 
+/**
+ * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
+ * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
+ * `birthtimeMs` (plus size/mtime at call sites) identify the file.
+ */
 export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
-	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
 }
 
 /** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
@@ -553,9 +582,13 @@ export async function parseSessionFile(
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
+	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
+	const callsById = new Map<string, ToolCallStats>();
+	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
+		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			return;
@@ -567,7 +600,13 @@ export async function parseSessionFile(
 		}
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
-			if (link) toolResults.push(link);
+			if (!link) return;
+			toolResults.push(link);
+			const call = callsById.get(link.toolCallId);
+			if (call && call.resultChars === undefined) {
+				call.resultChars = link.resultChars;
+				call.isError = link.isError;
+			}
 			return;
 		}
 		if (isModelUsage(entry)) {
@@ -578,7 +617,10 @@ export async function parseSessionFile(
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
+				toolCalls.push(call);
+				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
+			}
 			// Persist links even when the user entry was ingested in an earlier tail read.
 			const parentId = entry.parentId;
 			const msg = entry.message;
@@ -615,9 +657,14 @@ export async function parseSessionFile(
 			start = reset || replay ? 0 : Math.max(0, fromOffset);
 			const readStart = resume ? start : 0;
 			bytes = await file.slice(readStart, info.size).bytes();
-			currentServiceTier = resume
-				? (state?.serviceTier ?? undefined)
-				: scanLastServiceTier(bytes.subarray(0, start));
+			if (resume) {
+				currentServiceTier = state?.serviceTier ?? undefined;
+				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+			} else {
+				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix);
+				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
+			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
 			const newOffset = start + read;
 			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
@@ -631,10 +678,19 @@ export async function parseSessionFile(
 		}
 	} catch (err) {
 		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				toolResults: [],
+				spotlight: emptySpotlightRows(),
+				newOffset: fromOffset,
+			};
 		throw err;
 	}
 
+	await spotlight.finish();
 	const newOffset = start + read;
 	return {
 		stats,
@@ -642,18 +698,19 @@ export async function parseSessionFile(
 		userLinks,
 		toolCalls,
 		toolResults,
+		spotlight: spotlight.rows,
 		newOffset,
 		reset,
 		parserState: {
 			version: 1,
 			offset: newOffset,
-			dev: info.dev,
 			ino: info.ino,
 			birthtimeMs: info.birthtimeMs,
 			size: info.size,
 			mtimeMs: info.mtimeMs,
 			checkpoint,
 			serviceTier: currentServiceTier ?? null,
+			spotlight: spotlight.state,
 		},
 	};
 }

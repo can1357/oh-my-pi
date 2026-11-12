@@ -7,6 +7,8 @@ import * as agentCore from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { __resetProfileSnapshotForTests, getAgentDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
+import { resolveRoleChain, resolveRoleSelection } from "../src/config/model-resolver";
+import { cfgDisabledProviders } from "../src/config/model-settings";
 import { Settings } from "../src/config/settings";
 import {
 	createSkillDescriptionCompressor,
@@ -17,6 +19,7 @@ import {
 } from "../src/extensibility/skill-descriptions";
 import type { Skill } from "../src/extensibility/skills";
 import type { AuthStorage } from "../src/session/auth-storage";
+import { CostCapError, type CostGateApi } from "../src/session/cost-gate";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const ENV_KEYS = ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR", "XDG_DATA_HOME"] as const;
@@ -25,7 +28,6 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 	"skill description cache under XDG",
 	() => {
 		let tempRoot = "";
-		let configDir = "";
 		let agentDir = "";
 		let xdgData = "";
 		let originalAgentDir = "";
@@ -36,12 +38,15 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 			originalEnv = {};
 			for (const key of ENV_KEYS) originalEnv[key] = process.env[key];
 			tempRoot = path.join(os.tmpdir(), "omp-skill-descriptions-xdg", Snowflake.next());
-			configDir = `.omp-skill-xdg-${Snowflake.next()}`;
-			agentDir = path.join(os.homedir(), configDir, "agent");
+			// The legacy database lives under the default agent dir, which resolves from
+			// `os.homedir()`; a temp home keeps the suite off the real (possibly read-only) HOME.
+			const home = path.join(tempRoot, "home");
+			spyOn(os, "homedir").mockReturnValue(home);
+			agentDir = path.join(home, ".omp", "agent");
 			xdgData = path.join(tempRoot, "data");
 			await fs.promises.mkdir(path.join(xdgData, "omp"), { recursive: true });
 			await fs.promises.mkdir(agentDir, { recursive: true });
-			process.env.PI_CONFIG_DIR = configDir;
+			process.env.PI_CONFIG_DIR = ".omp";
 			delete process.env.PI_CODING_AGENT_DIR;
 			__resetProfileSnapshotForTests();
 		});
@@ -55,7 +60,6 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 			}
 			setAgentDir(originalAgentDir);
 			await fs.promises.rm(tempRoot, { recursive: true, force: true });
-			await fs.promises.rm(path.join(os.homedir(), configDir), { recursive: true, force: true });
 		});
 
 		it("adopts a legacy database, including uncheckpointed WAL rows, when XDG relocates it", () => {
@@ -161,7 +165,6 @@ describe("skill description failure caching and shutdown", () => {
 	}
 
 	it.each([
-		["more than 12 words", "one two three four five six seven eight nine ten eleven twelve thirteen"],
 		["more than 160 characters", "x".repeat(161)],
 		["multiple lines", "Use for migrations.\nCheck rollout safety."],
 	])("does not ask the same model again after an answer with %s", async (_reason, answer) => {
@@ -177,6 +180,17 @@ describe("skill description failure caching and shutdown", () => {
 		expect(second.render([entry])[0].description).toBe(preview);
 		await second.waitForPending();
 		expect(retry).toHaveBeenCalledTimes(0);
+	});
+
+	it("stores an answer past the prompt's 12-word target when it fits the character budget", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const entry = skill();
+		const answer =
+			"Use for planning, reviewing, or rolling back multi-service data migrations; not for schema-only changes.";
+		const catalog = new SkillDescriptionCatalog({ store, compress: fast(async () => answer) });
+		catalog.render([entry]);
+		await catalog.waitForPending();
+		expect(new SkillDescriptionCatalog({ store }).render([entry])[0].description).toBe(answer);
 	});
 
 	it("asks a newly selected model after the previous model's answer was unusable", async () => {
@@ -263,6 +277,42 @@ describe("skill description failure caching and shutdown", () => {
 		expect(new SkillDescriptionCatalog({ store }).render([edited])[0].description).toBe(compressed);
 	});
 
+	it("resolves the compression model once for every skill a render leaves uncached", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const entries = Array.from({ length: 5 }, (_, index) => skill(`migrations-${index}`));
+		const first = new SkillDescriptionCatalog({ store, compress: fast(async () => "Bad\nanswer") });
+		first.render(entries);
+		await first.waitForPending();
+
+		const modelKey = vi.fn(() => "test/fast");
+		const retry = vi.fn(async () => compressed);
+		const second = new SkillDescriptionCatalog({ store, compress: { modelKey, compress: retry } });
+		second.render(entries);
+		await second.waitForPending();
+		expect(modelKey).toHaveBeenCalledTimes(1);
+		expect(retry).toHaveBeenCalledTimes(0);
+	});
+
+	it("holds deferred compression until started, then compresses later renders immediately", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const held = skill("held");
+		const later = skill("later");
+		const modelKey = vi.fn(() => "test/fast");
+		const compress = vi.fn<SkillDescriptionCompressor["compress"]>(async () => compressed);
+		const catalog = new SkillDescriptionCatalog({ store, compress: { modelKey, compress }, deferCompression: true });
+		catalog.render([held]);
+		await catalog.waitForPending();
+		expect(modelKey).toHaveBeenCalledTimes(0);
+		expect(compress).toHaveBeenCalledTimes(0);
+
+		catalog.startCompression();
+		await catalog.waitForPending();
+		catalog.render([later]);
+		await catalog.waitForPending();
+		expect(compress.mock.calls.map(([name]) => name)).toEqual(["held", "later"]);
+		expect(storedDescriptions(store.path)).toEqual([compressed, compressed]);
+	});
+
 	it("waits for an in-flight compression before closing so its row survives reopening", async () => {
 		const store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
 		const started = Promise.withResolvers<void>();
@@ -337,4 +387,197 @@ describe("skill description failure caching and shutdown", () => {
 		expect(elapsed).toBeLessThan(5_000);
 		expect(storedDescriptions(store.path)).toEqual([]);
 	}, 6_000);
+});
+
+describe("previewSkillDescription", () => {
+	it("keeps the budget for CJK text whose only space comes early (#17070)", () => {
+		const description = `用户点名 ASD-STE100、${"简化技术英语或讲人话时使用；".repeat(10)}`;
+		expect(previewSkillDescription(description)).toBe(`${description.slice(0, 99)}…`);
+	});
+
+	it("cuts English text at the last word boundary within the budget", () => {
+		const description = `Use this skill ${"when editing files ".repeat(10)}`;
+		expect(previewSkillDescription(description)).toBe(`Use this skill ${"when editing files ".repeat(4)}when…`);
+	});
+});
+
+describe("skill description compressor model selection", () => {
+	const authStorages: AuthStorage[] = [];
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		for (const storage of authStorages.splice(0)) storage.close();
+	});
+
+	function fixture(modelRoles: Record<string, string>) {
+		const authStorage = createInMemoryAuthStorage();
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const settings = Settings.isolated({ modelRoles });
+		const registry = new ModelRegistry(
+			authStorage,
+			path.join(os.tmpdir(), `omp-skill-models-${Snowflake.next()}.yml`),
+			{
+				settings,
+			},
+		);
+		return { registry, settings, authStorage, compressor: createSkillDescriptionCompressor(registry, settings) };
+	}
+
+	it("does not materialize unrelated catalogs for the first exact role selection", () => {
+		const { registry, compressor } = fixture({ default: "anthropic/claude-opus-4-5" });
+		const all = spyOn(registry, "getAvailable").mockImplementation(() => {
+			throw new Error("Unrelated catalogs must stay lazy");
+		});
+		const scoped = spyOn(registry, "getAvailableForProviders");
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+		expect(scoped).toHaveBeenCalledWith(new Set(["anthropic"]));
+		expect(all).not.toHaveBeenCalled();
+	});
+
+	it("keeps complete selector and fallback precedence when a scoped exact match misses", () => {
+		const { registry, settings, compressor } = fixture({});
+		registry.registerProvider("skill-custom", {
+			baseUrl: "https://example.invalid/v1",
+			api: "openai-completions",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "anthropic/claude-opus-4-5:high",
+					name: "Literal suffix",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				},
+			],
+		});
+		for (const selector of [
+			"anthropic/claude-opus-4-5:high",
+			"missing-provider/missing,anthropic/claude-haiku-4-5",
+			"claude-haiku-4-5",
+			"skill-custom/anthropic/claude-opus-4-5:high",
+			"missing-provider/missing",
+		]) {
+			settings.setModelRole("smol", selector);
+			const available = registry.getAvailable();
+			const expected =
+				resolveRoleChain("smol", settings, available)[0]?.model ??
+				resolveRoleSelection(["tiny"], settings, available)?.model;
+			expect(compressor.modelKey()).toBe(expected ? `${expected.provider}/${expected.id}` : undefined);
+		}
+		settings.setModelRole("smol", "anthropic/claude-opus-4-5:high");
+		expect(compressor.modelKey()).toBe("skill-custom/anthropic/claude-opus-4-5:high");
+	});
+
+	it("observes live role, disabled-provider and runtime catalog changes after a scoped lookup", () => {
+		const { registry, settings, compressor } = fixture({ smol: "anthropic/claude-haiku-4-5" });
+		expect(compressor.modelKey()).toBe("anthropic/claude-haiku-4-5");
+		settings.setModelRole("smol", "anthropic/claude-opus-4-5");
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+		cfgDisabledProviders.set(settings, ["anthropic"]);
+		const available = registry.getAvailable();
+		const expected =
+			resolveRoleChain("smol", settings, available)[0]?.model ??
+			resolveRoleSelection(["tiny"], settings, available)?.model;
+		expect(compressor.modelKey()).toBe(expected ? `${expected.provider}/${expected.id}` : undefined);
+		cfgDisabledProviders.set(settings, []);
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+
+		settings.setModelRole("smol", "skill-runtime/first");
+		const register = (id: string) =>
+			registry.registerProvider("skill-runtime", {
+				baseUrl: "https://example.invalid/v1",
+				api: "openai-completions",
+				apiKey: "test-key",
+				models: [
+					{
+						id,
+						name: id,
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 8192,
+						maxTokens: 1024,
+					},
+				],
+			});
+		register("first");
+		expect(compressor.modelKey()).toBe("skill-runtime/first");
+		register("second");
+		settings.setModelRole("smol", "skill-runtime/second");
+		expect(compressor.modelKey()).toBe("skill-runtime/second");
+	});
+
+	it("uses the configured default for an unset smol role instead of the built-in smol chain", () => {
+		expect(fixture({ default: "anthropic/claude-opus-4-5" }).compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+	});
+
+	it("prefers a configured smol role over the configured default", () => {
+		expect(
+			fixture({ default: "anthropic/claude-opus-4-5", smol: "anthropic/claude-haiku-4-5" }).compressor.modelKey(),
+		).toBe("anthropic/claude-haiku-4-5");
+	});
+});
+
+describe("skill description compressor cost gate", () => {
+	const authStorages: AuthStorage[] = [];
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		for (const storage of authStorages.splice(0)) storage.close();
+	});
+
+	it("ends at the first provider attempt refused after admission, without transport retries", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStorages.push(authStorage);
+		const settings = Settings.isolated({ modelRoles: { smol: "skill-gate/probe" } });
+		const registry = new ModelRegistry(
+			authStorage,
+			path.join(os.tmpdir(), `omp-skill-models-${Snowflake.next()}.yml`),
+			{ settings },
+		);
+		registry.registerProvider("skill-gate", {
+			baseUrl: "https://provider.invalid/v1",
+			api: "openai-completions",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "probe",
+					name: "Probe",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				},
+			],
+		});
+		const sent = spyOn(globalThis, "fetch").mockRejectedValue(new Error("network refused by test"));
+		let checks = 0;
+		// Another request reaches the cap between this request's admission and its HTTP attempt.
+		const gate: CostGateApi = {
+			spent: 1,
+			capped: true,
+			onCapChange: () => () => {},
+			admit: () => {},
+			check: () => {
+				checks++;
+				return { spent: 1, cap: 1, message: "Cost cap reached" };
+			},
+			record: () => {},
+			meter: stream => stream,
+		};
+		const compressor = createSkillDescriptionCompressor(registry, settings, { getCostGate: () => gate });
+
+		const started = Date.now();
+		const error = await compressor.compress("migrations", "Plan migrations.", "Compress this.").catch(e => e);
+
+		expect(error).toBeInstanceOf(CostCapError);
+		expect(checks).toBe(1);
+		expect(sent).not.toHaveBeenCalled();
+		expect(Date.now() - started).toBeLessThan(400);
+	});
 });

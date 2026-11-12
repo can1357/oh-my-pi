@@ -58,12 +58,13 @@ export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
 
 /**
  * How hard agent prompts push subagent delegation for a model lineage
- * (`delegation-bias` axis). `eager` is the unassigned default: the prompt
- * actively pushes fan-out. `restrained` keeps fan-out for genuinely parallel
- * slices but forbids reflexive scouts and single-agent babysitting. `gated`
- * forbids subagents unless the user or a skill asks.
+ * (`delegation-bias` axis). `eager` actively pushes fan-out. `balanced`, the
+ * unassigned default, neither pushes nor restricts fan-out beyond a light
+ * nudge to explore unfamiliar code with a scout. `restrained` keeps fan-out
+ * for genuinely parallel slices but forbids reflexive scouts and single-agent
+ * babysitting. `gated` forbids subagents unless the user or a skill asks.
  */
-export const DELEGATION_BIASES = ["eager", "restrained", "gated"] as const;
+export const DELEGATION_BIASES = ["eager", "balanced", "restrained", "gated"] as const;
 const THINKING_MODES = [
 	"effort",
 	"budget",
@@ -109,6 +110,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"preserved",
 		"interleaved",
 	]),
+	"completions-allow-missing-thinking": wire("completionsAllowMissingThinking", ["request"]),
 	"anthropic-thinking": wire("anthropicThinking", ["request"], "scalar", [
 		"adaptive",
 		"adaptive-summarized",
@@ -119,12 +121,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"openai-platform-header": wire("openaiPlatformHeader", ["request"]),
 	"responses-cache-retention": wire("responsesCacheRetention", ["request"]),
 	"responses-verbosity": wire("responsesVerbosity", ["request"], "scalar", ["low"]),
-	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority"]),
+	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority", "ultrafast"]),
 	"responses-parallel-tool-calls": wire("responsesParallelToolCalls", ["request"]),
 	"responses-safety-identifier": wire("responsesSafetyIdentifier", ["request"]),
 	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),
 	"routing-session-lock": wire("routingSessionLock", ["request"]),
 	"google-thinking": wire("googleThinking", ["request"], "scalar", ["level", "level-medium"]),
+	"google-omit-sampling": wire("googleOmitSampling", ["request"]),
+	"google-pin-max-output-tokens": wire("googlePinMaxOutputTokens", ["request"]),
+	"google-native-replay": wire("googleNativeReplay", ["request"]),
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),
@@ -144,7 +149,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
-	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id"]),
+	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id", "x-session-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
 	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
 	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
@@ -206,6 +211,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
 	"store-responses": wire("storeResponses", ["openai-responses"]),
+	"tool-name-prefix": wire("toolNamePrefix", ["openai-responses"], "scalar", ["_"]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -248,6 +254,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	]),
 	"effort-beta": wire("effortBeta", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
+	"extended-cache-ttl-beta": wire("extendedCacheTtlBeta", ["anthropic"]),
 	"fast-mode": wire("fastMode", ["anthropic"]),
 	"first-party-provider": wire("firstPartyProvider", ["anthropic"]),
 	"honors-claude-code-beta-kill-switch": wire("honorsClaudeCodeBetaKillSwitch", ["anthropic"]),
@@ -257,6 +264,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
+	"requires-thinking-presence": wire("requiresThinkingPresence", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
 	"strip-thinking-history": wire("stripThinkingHistory", ["openai", "anthropic", "ollama"]),
@@ -268,6 +276,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
 	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic", "bedrock"]),
+	"supports-message-threads": wire("supportsMessageThreads", ["anthropic"]),
 	"supports-between-tools-thinking": wire("supportsBetweenToolsThinking", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic", "bedrock"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
@@ -280,6 +289,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
+	"temperature-floor": wire("temperatureFloor", ["devin"]),
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
@@ -294,6 +304,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [
 		"google",
 	]),
+	"base64-skip-thought-signature": wire("base64SkipThoughtSignature", ["google"]),
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──
@@ -315,11 +326,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
 	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
 	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic", "bedrock", "devin", "google"]),
-	"thinking-loop-guard": wire("thinkingLoopGuard", [...OAI, "anthropic", "google"], "scalar", [
-		"gemini",
-		"deepseek",
-		"xai",
-	]),
 
 	// ── thinking control surface ──
 	"thinking-default-level": { key: "defaultLevel", set: "thinking", shape: "scalar", values: EFFORTS },
@@ -341,6 +347,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-unverified": { key: "unverified", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
+	"supports-websockets": { key: "supportsWebsockets", set: "catalog", shape: "scalar", values: [true, false] },
 	"apply-patch-tool-type": {
 		key: "applyPatchToolType",
 		set: "catalog",
@@ -454,6 +461,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["output", "signature"],
 	},
+	/**
+	 * Stream loop guard for the model line, on every host and API (read
+	 * through `loopGuardLevel` in pi-ai `utils/thinking-loop`). `semantic`
+	 * adds near-duplicate and stalled-wording paragraph detection to the
+	 * exact repeated-cycle check; `off` disables the guard. Unassigned: exact
+	 * repeated cycles only.
+	 */
+	"thinking-loop-guard": {
+		key: "thinkingLoopGuard",
+		set: "catalog",
+		shape: "scalar",
+		values: ["off", "semantic"],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
@@ -467,6 +487,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
+	/**
+	 * Revision suffix the host appends to the model's id (Vertex `@default`): a
+	 * `provider/id` selector written without it names this model exactly.
+	 * Unassigned: the id has no implied revision and must be written in full.
+	 */
+	"selector-revision-suffix": { key: "selectorRevisionSuffix", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
 	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
@@ -494,8 +520,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	/**
-	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps the newest user message's
-	 * and newest tool result's images past `inline-image-byte-budget` while they alone fit this limit.
+	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps images within what the
+	 * request's other bytes leave of it, and keeps the newest user message's and newest tool result's images past
+	 * `inline-image-byte-budget` while they fit that room.
 	 */
 	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
 	/**
@@ -544,12 +571,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
 	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },
-	/** Most output tokens the host serves: a larger reported `maxTokens` is lowered to it; an unknown one stays unknown. */
+	/** Most output tokens the host serves: a larger reported `maxTokens` (and Antigravity per-SKU `maxOutputTokens`) is lowered to it; an unknown one stays unknown. */
 	"max-tokens-ceiling": { key: "maxTokensCeiling", set: "catalog", shape: "scalar" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
-	"task-sibling-prompt-cache": {
-		key: "taskSiblingPromptCache",
+	/**
+	 * The lane rewards routing related requests — Task siblings, forks, explicit
+	 * `--prompt-cache-key` callers — under one shared prompt-cache key instead of
+	 * each conversation's own identity. Unassigned: per-conversation routing.
+	 */
+	"shared-prompt-cache": {
+		key: "sharedPromptCache",
 		set: "catalog",
 		shape: "scalar",
 		values: [true, false],
@@ -650,7 +682,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"region-limits-eu": { key: "regionLimitsEu", set: "catalog", shape: "object" },
 	/**
 	 * Subscription credit rates: `input` is the per-token credit weight shown
-	 * as the model's multiplier; `output` and `cache-read` multiply it.
+	 * as the model's multiplier; `output` and `cache-read` multiply it. An
+	 * `effective-rates` block of dated cards overwrites them from each card's
+	 * `effective-from`, as on `cost-patch`.
 	 */
 	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
 	/**

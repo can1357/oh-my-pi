@@ -12,8 +12,7 @@ import { getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils
 import { getConfigDirs } from "../../config";
 
 import { execCommand } from "../../exec/exec";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+import { getCodingAgentApi } from "../host-api";
 import * as typebox from "../legacy-typebox";
 import { GreenCommand } from "./bundled/ci-green";
 import { AnnotateCommand } from "./bundled/annotate";
@@ -199,7 +198,9 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 		typebox,
 		arktype,
 		zod,
-		pi: PiCodingAgent,
+		get pi() {
+			return getCodingAgentApi();
+		},
 	};
 
 	// 1. Load bundled commands first (lowest priority - can be overridden)

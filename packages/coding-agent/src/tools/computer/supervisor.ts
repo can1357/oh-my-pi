@@ -6,6 +6,12 @@ import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import {
+	type ApprovalContextSource,
+	type ApprovalPolicy,
+	resolveApproval,
+	resolveApprovalFromContext,
+} from "../approval";
 import type { ToolSession } from "../index";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -32,6 +38,15 @@ const SMOKE_TIMEOUT_MS = 5_000;
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
 
+/**
+ * The user's `tools.approval["computer.control"]` policy. The approval mode never decides it: the default `yolo`
+ * would hand the user's foreground to every headless run, so without an explicit entry the user is asked.
+ */
+function controlPolicy(context: ApprovalContextSource): ApprovalPolicy {
+	const { userPolicies } = resolveApprovalFromContext(context);
+	return resolveApproval({ name: "computer.control", approval: "exec" }, undefined, "always-ask", userPolicies).policy;
+}
+
 /** Runs desktop scripts and owns their persistent worker session. */
 export interface ComputerController {
 	run(
@@ -52,6 +67,12 @@ export interface ComputerController {
 	/** The user's message acknowledges every Escape stop so far, lifting the refusal they set. */
 	resumeAfterEscape?(): void;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
+	/**
+	 * Ends the desktop session the model sees (`computer.close()`): its handles, frames, refs and control go, the
+	 * user's Escape stops stay, and the next call opens a new session.
+	 */
+	reset(): Promise<void>;
+	/** Ends the controller for good when its agent session is disposed; later calls fail. */
 	close(): Promise<void>;
 }
 
@@ -387,8 +408,13 @@ export class ComputerSupervisor implements ComputerController {
 		else pending.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			const context = pending.context ?? this.#session.getToolContext?.();
+			const policy = controlPolicy(context ?? { settings: this.#session.settings });
 			let verdict: ControlVerdict;
-			if (!context?.ui || context.hasUI === false) {
+			if (policy === "allow") {
+				verdict = "approved";
+			} else if (policy === "deny") {
+				verdict = "denied";
+			} else if (!context?.ui || context.hasUI === false) {
 				verdict = "no-ui";
 			} else if (message.timeoutMs <= 0) {
 				// The run has no time left to wait in; a prompt would close before anyone could answer it.
@@ -557,6 +583,11 @@ export class ComputerSupervisor implements ComputerController {
 		await worker?.terminate().catch(() => undefined);
 	}
 
+	async reset(): Promise<void> {
+		if (this.#closed) return;
+		await this.#shutdown();
+	}
+
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
@@ -567,6 +598,11 @@ export class ComputerSupervisor implements ComputerController {
 				// An addon without the Escape exports kept no count to drop; the worker must still close.
 			}
 		}
+		await this.#shutdown();
+	}
+
+	/** Asks the worker to close its native session, then terminates it; a later `#start()` spawns a new one. */
+	async #shutdown(): Promise<void> {
 		const worker = this.#worker;
 		if (!worker) return;
 		const closed = Promise.withResolvers<void>();
@@ -580,7 +616,8 @@ export class ComputerSupervisor implements ComputerController {
 			// Forced termination below is the bounded close fallback.
 		} finally {
 			unsubscribe();
-			await this.#terminate(new ToolError("Computer session closed"));
+			// A crash while closing already terminated this worker; a call since may have started its successor.
+			if (this.#worker === worker) await this.#terminate(new ToolError("Computer session closed"));
 		}
 	}
 }

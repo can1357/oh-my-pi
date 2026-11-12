@@ -1,20 +1,29 @@
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
-import { fileHyperlink, renderStatusLine, renderTreeList } from "../render";
+import { renderStatusLine, renderTreeList } from "../render";
 import {
 	appendParseErrorsBulletList,
 	createCachedComponent,
 	fitHeaderedRows,
 	formatCount,
-	formatEmptyMessage,
-	formatErrorMessage,
+	formatErrorDetail,
 	formatParseErrorsCountLabel,
 	PREVIEW_LIMITS,
 	toPathList,
 } from "../render/render-utils";
-import { classifyGroupedLines, describeGroupedOutput, groupLineIndicesByBlank } from "./grouped-file-output";
+import {
+	classifyGroupedLines,
+	createCodeFrameStyler,
+	createGroupedRowStyler,
+	describeGroupedOutput,
+	fitGroupsToBudget,
+	formatScopedSubject,
+	groupedLinkTargets,
+	groupLineIndicesByBlank,
+	groupsByFile,
+	isMatchRow,
+} from "./grouped-file-output";
 import { code, compact, node, span } from "../native/describe";
 import type { NativeChild } from "../native/node";
 import { errorText, noteText, resultText, toolHead } from "./native-view";
@@ -51,6 +60,19 @@ interface AstGrepRenderArgs {
 	/** Legacy pre-`path` argument name; kept so historical transcripts still render a scope. */
 	paths?: string[];
 	skip?: number;
+	/** Language the search parsed the files as; highlighting follows it over the file extension. */
+	lang?: string;
+}
+
+/** Header subject, `pattern in scope`: the result's display scope, or the call's requested paths. */
+function astGrepSubject(
+	pattern: string | undefined,
+	args: AstGrepRenderArgs | undefined,
+	uiTheme: Theme,
+	scopePath?: string,
+): string | undefined {
+	const scope = scopePath || toPathList(args?.path ?? args?.paths).join(", ") || undefined;
+	return formatScopedSubject(pattern || undefined, scope, uiTheme);
 }
 
 const COLLAPSED_MATCH_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
@@ -60,11 +82,8 @@ export const astGrepToolRenderer = {
 	inline: true,
 	renderCall(args: AstGrepRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const meta: string[] = [];
-		const scopePaths = toPathList(args.path ?? args.paths);
-		if (scopePaths.length) meta.push(`in ${scopePaths.join(", ")}`);
 		if (args.skip !== undefined && args.skip > 0) meta.push(`skip:${args.skip}`);
-
-		const description = args.pat ?? "?";
+		const description = astGrepSubject(args.pat || "?", args, uiTheme);
 		const text = renderStatusLine({ icon: "pending", title: "AST Grep", description, meta }, uiTheme);
 		return new Text(text, 0, 0);
 	},
@@ -76,10 +95,12 @@ export const astGrepToolRenderer = {
 		args?: AstGrepRenderArgs,
 	): Component {
 		const details = result.details;
+		const description = astGrepSubject(args?.pat, args, uiTheme, details?.scopePath);
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 0, 0);
+			const header = renderStatusLine({ icon: "error", title: "AST Grep", description }, uiTheme);
+			return new Text(`${header}\n${formatErrorDetail(errorText, uiTheme)}`, 0, 0);
 		}
 
 		const matchCount = details?.matchCount ?? 0;
@@ -88,12 +109,10 @@ export const astGrepToolRenderer = {
 		const limitReached = details?.limitReached ?? false;
 
 		if (matchCount === 0) {
-			const description = args?.pat;
-			const meta = ["0 matches"];
-			if (details?.scopePath) meta.push(`in ${details.scopePath}`);
+			const meta = [uiTheme.fg("warning", "0 matches")];
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
 			const header = renderStatusLine({ icon: "warning", title: "AST Grep", description, meta }, uiTheme);
-			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
+			const lines = [header];
 			if (details?.parseErrors?.length) {
 				lines.push(uiTheme.fg("warning", "Query may be mis-scoped; narrow `path` before concluding absence"));
 				appendParseErrorsBulletList(lines, details.parseErrors, uiTheme, details.parseErrorsTotal);
@@ -101,12 +120,8 @@ export const astGrepToolRenderer = {
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
-		const summaryParts = [formatCount("match", matchCount), formatCount("file", fileCount)];
-		const meta = [...summaryParts];
-		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
-		meta.push(`searched ${filesSearched}`);
+		const meta = [formatCount("match", matchCount), formatCount("file", fileCount), `searched ${filesSearched}`];
 		if (limitReached) meta.push(uiTheme.fg("warning", "limit reached"));
-		const description = args?.pat;
 		const header = renderStatusLine(
 			{
 				...(limitReached
@@ -121,63 +136,24 @@ export const astGrepToolRenderer = {
 
 		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
 		const allLines = textContent.split("\n");
-		// Resolve hyperlinks over the whole output so nested directory headers
-		// reconstruct across the blank-line groups the tree list collapses by.
+		// Classify the whole output so nested directory headers resolve across blank-line groups.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		// The displayed lines are sanitized, but OSC 8 destinations must retain the
-		// original path bytes. Only substitute targets for headers already linked
-		// by the sanitized output; never let raw text create additional links.
-		const rawDetails = options.renderContext?.rawDetails;
-		const rawContent =
-			isRecord(rawDetails) && typeof rawDetails.displayContent === "string" ? rawDetails.displayContent : undefined;
-		const rawLines = rawContent?.split("\n");
-		const rawCwd = isRecord(rawDetails) && typeof rawDetails.cwd === "string" ? rawDetails.cwd : undefined;
-		const rawSearchPath =
-			isRecord(rawDetails) && typeof rawDetails.searchPath === "string" ? rawDetails.searchPath : undefined;
-		const rawContexts =
-			rawContent !== undefined && rawLines?.length === allLines.length && sanitizeText(rawContent) === textContent
-				? classifyGroupedLines(rawLines, rawCwd ?? rawSearchPath, rawSearchPath)
-				: undefined;
-		// Style lazily: the collapsed tree list only renders the first few groups,
-		// so a large result never styles/hyperlinks rows nobody sees.
-		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
-		const styleLine = (index: number): string => {
-			const cached = styledLines[index];
-			if (cached !== undefined) return cached;
-			const line = allLines[index]!;
-			const ctx = contexts[index]!;
-			const rawContext = rawContexts?.[index];
-			const target =
-				ctx.headerPath && rawContext?.kind === ctx.kind && rawContext.depth === ctx.depth
-					? (rawContext.headerPath ?? ctx.headerPath)
-					: ctx.headerPath;
-			let styled: string;
-			if (ctx.kind === "dir") {
-				const accent = uiTheme.fg("accent", line);
-				styled = target ? fileHyperlink(target, accent) : accent;
-			} else if (ctx.kind === "file") {
-				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				styled = target ? fileHyperlink(target, tinted) : tinted;
-			} else {
-				styled = uiTheme.fg(line.startsWith("  meta:") ? "dim" : "toolOutput", line);
-			}
-			styledLines[index] = styled;
-			return styled;
-		};
-		const matchGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+		const styleCodeFrame = createCodeFrameStyler(allLines, contexts, "toolOutput", uiTheme, args?.lang);
+		const styleLine = createGroupedRowStyler(allLines, contexts, uiTheme, {
+			linkTarget: groupedLinkTargets(contexts, textContent, details, options.renderContext?.rawDetails),
+			styleBody: index => {
+				const line = allLines[index]!;
+				return styleCodeFrame(index) ?? uiTheme.fg(line.startsWith("  meta:") ? "dim" : "toolOutput", line);
+			},
+			linkLines: true,
+		});
+		const matchGroups = groupsByFile(groupLineIndicesByBlank(allLines), contexts).filter(indices => {
 			const first = allLines[indices[0]!]!;
 			return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
 		});
-		// Line offset at which each group starts. A collapsed tree list stops at the
-		// first group that overflows its line budget, so groups starting at or past
-		// the budget are never shown — hand it same-length placeholders instead of
-		// styling them (renderTreeList only needs their line counts).
-		const groupStarts: number[] = [];
-		let groupStart = 0;
-		for (const group of matchGroups) {
-			groupStarts.push(groupStart);
-			groupStart += group.length;
-		}
+		// Collapsed previews drop the per-match `meta:` capture rows; a match keeps all its rows,
+		// since only its first carries the `*` mark.
+		const compactGroups = matchGroups.map(group => group.filter(index => !allLines[index]!.startsWith("  meta:")));
 
 		const extraLines: string[] = [];
 		if (limitReached) {
@@ -192,18 +168,13 @@ export const astGrepToolRenderer = {
 		return createCachedComponent(
 			() => options.expanded,
 			width => {
+				const { shown, summary } = fitGroupsToBudget(
+					options.expanded ? matchGroups : compactGroups,
+					options.expanded ? Number.POSITIVE_INFINITY : COLLAPSED_MATCH_LIMIT,
+					{ isUnit: index => isMatchRow(allLines[index]!), unit: "match", total: matchCount },
+				);
 				const matchLines = renderTreeList(
-					{
-						items: matchGroups,
-						expanded: options.expanded,
-						maxCollapsed: matchGroups.length,
-						maxCollapsedLines: COLLAPSED_MATCH_LIMIT,
-						itemType: "match",
-						renderItem: (group, context) =>
-							!options.expanded && groupStarts[context.index]! >= COLLAPSED_MATCH_LIMIT
-								? Array.from({ length: group.length }, () => "")
-								: group.map(styleLine),
-					},
+					{ items: shown, trailingSummary: summary, renderItem: group => group.map(styleLine) },
 					uiTheme,
 				);
 				return fitHeaderedRows(header, [...matchLines, ...extraLines], width);
@@ -226,8 +197,10 @@ export const astGrepToolRenderer = {
 		const details = result.details;
 		const pattern = span(args?.pat ?? "?", "code");
 		if (result.isError) {
+			// A failed search keeps the scope it ran in, as the terminal card does.
+			const scope = details?.scopePath || toPathList(args?.path ?? args?.paths).join(", ");
 			return {
-				head: toolHead("AST Grep", pattern),
+				head: toolHead("AST Grep", pattern, ...compact([scope && `in ${scope}`])),
 				tone: "error",
 				body: [errorText(resultText(result) || "Unknown error")],
 			};
@@ -250,22 +223,23 @@ export const astGrepToolRenderer = {
 					)
 				: undefined;
 		if (matchCount === 0) {
-			const meta = ["0 matches"];
-			if (details?.scopePath) meta.push(`in ${details.scopePath}`);
+			const meta = compact([details?.scopePath && `in ${details.scopePath}`, "0 matches"]);
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
 			return {
 				head: toolHead("AST Grep", pattern, ...meta),
 				tone: "warning",
 				body: compact<NativeChild>([
-					noteText("No matches found"),
 					parseErrors.length > 0 &&
 						noteText("Query may be mis-scoped; narrow `path` before concluding absence", "warning"),
 					parseNote,
 				]),
 			};
 		}
-		const meta = [formatCount("match", matchCount), formatCount("file", details?.fileCount ?? 0)];
-		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
+		const meta = compact([
+			details?.scopePath && `in ${details.scopePath}`,
+			formatCount("match", matchCount),
+			formatCount("file", details?.fileCount ?? 0),
+		]);
 		meta.push(`searched ${filesSearched}`);
 		const head = toolHead("AST Grep", pattern, ...meta);
 		if (limitReached) head.push(span(" limit reached", "warning"));

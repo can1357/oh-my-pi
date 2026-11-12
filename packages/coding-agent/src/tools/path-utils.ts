@@ -4,11 +4,11 @@ import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import {
+	expandTilde,
 	hasFsCode,
 	isEnoent,
 	isEnotdir,
@@ -104,17 +104,7 @@ function stripFileUrl(filePath: string): string {
 	}
 }
 
-export function expandTilde(filePath: string, home?: string): string {
-	const h = home ?? os.homedir();
-	if (filePath === "~") return h;
-	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
-		return h + filePath.slice(1);
-	}
-	if (filePath.startsWith("~")) {
-		return path.join(h, filePath.slice(1));
-	}
-	return filePath;
-}
+export { expandTilde };
 
 export function expandPath(filePath: string): string {
 	// Some models intermittently prefix an otherwise-valid path with a stray
@@ -327,19 +317,28 @@ function isInternalUrlPath(filePath: string): boolean {
  *
  * A bare root slash is treated as a workspace-root alias for tool inputs. Users
  * often pass `/` to mean “search from here”, and letting tools escape to the
- * filesystem root is almost never what they intended.
+ * filesystem root is almost never what they intended. A shell `cd` target is
+ * not a tool input: use {@link resolveShellDirectory}.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, true);
+}
+
+/**
+ * Resolve a directory a shell command named (`cd <path>`), relative to `cwd`.
+ *
+ * Same expansion as {@link resolveToCwd}, except a bare root (`/`, `//`, `///`)
+ * is the filesystem root. Explicit tool path inputs keep the workspace alias.
+ */
+export function resolveShellDirectory(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, false);
+}
+
+function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boolean): string {
 	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
-
 	assertNotInternalUrl(expanded, filePath);
-
-	if (/^\/+$/.test(expanded)) {
-		return cwd;
-	}
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
+	if (aliasWorkspaceRoot && /^\/+$/.test(expanded)) return cwd;
+	if (path.isAbsolute(expanded)) return expanded;
 	return path.resolve(cwd, expanded);
 }
 
@@ -699,12 +698,25 @@ async function tryDelimitedPathSplit(
  * string. Existing paths are kept intact, so real filenames containing spaces,
  * commas, or semicolons win over delimiter recovery.
  */
+/** A `!glob` exclusion part of a path list, which search tools take beside URLs. */
+function isExclusionPart(part: string): boolean {
+	return part.length > 1 && part.startsWith("!") && !part.includes("://");
+}
+
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
 	options: {
 		splitter?: PathEntrySplitter;
 		routedUrlPredicate?: (entry: string) => boolean;
+		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
+		exclusionParts?: boolean;
+		/**
+		 * Split a `;` list that starts with an internal URL and also names existing
+		 * local paths (`artifact://1;notes.txt`). Search tools opt in. Rewrite tools
+		 * leave this off so a `;` inside one internal URL cannot select an extra file.
+		 */
+		mixedLocalPaths?: boolean;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -712,16 +724,36 @@ export async function splitDelimitedPathEntry(
 	const splitter = options.splitter ?? parseSearchPath;
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts?.every(options.routedUrlPredicate) ? parts : null;
+		const routed = options.routedUrlPredicate;
+		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
+			? parts
+			: null;
+	}
+	if (options.mixedLocalPaths === true && isInternalUrlPath(normalizedEntry)) {
+		// Before the all-internal branch, which keeps the whole string when any
+		// part is not itself an internal URL. `splitMixedUrlPathList` declines
+		// unless every non-URL part is an existing literal path, so a URL whose
+		// own path contains `;` (`local://report;`) stays one resource.
+		const mixed = await splitMixedUrlPathList(
+			normalizedEntry,
+			cwd,
+			part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)),
+		);
+		if (mixed && mixed.length > 1) return mixed;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
 		// several resources: the router resolves one URI per entry, so the list
 		// must split before dispatch (issue #14091). Split only when every part
-		// is itself an internal URL — a URL whose own path contains `;` stays
-		// whole, and a single URL ending in `;` (`local://report;`) names one resource.
+		// is itself an internal URL or a `!glob` exclusion (`local://notes;!*.test.ts`)
+		// — a URL whose own path contains `;` stays whole, and a single URL ending
+		// in `;` (`local://report;`) names one resource.
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts && parts.length > 1 && parts.every(part => isInternalUrlPath(part)) ? parts : null;
+		return parts &&
+			parts.length > 1 &&
+			parts.every(part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)))
+			? parts
+			: null;
 	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
@@ -786,7 +818,7 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter } = {},
+	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean; mixedLocalPaths?: boolean } = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {
@@ -807,6 +839,8 @@ export interface ParsedFindPattern {
 	basePath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	/** A trailing separator restricts glob matches to directories. */
+	directoryOnly?: boolean;
 }
 
 export interface ResolvedSearchTarget {
@@ -827,6 +861,7 @@ export interface ResolvedFindTarget {
 	basePath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	directoryOnly?: boolean;
 }
 
 export interface ResolvedMultiFindPattern {
@@ -923,6 +958,12 @@ export async function parseSearchPathPreferringLiteral(filePath: string, cwd: st
 	}
 }
 
+function globFindPattern(basePath: string, globPattern: string): ParsedFindPattern {
+	return globPattern.endsWith("/")
+		? { basePath, globPattern: globPattern.replace(/\/+$/, ""), hasGlob: true, directoryOnly: true }
+		: { basePath, globPattern, hasGlob: true };
+}
+
 // Parse a find pattern into a base directory path and a glob pattern.
 // Examples:
 //   src/app/**/\*.tsx -> { basePath: "src/app", globPattern: "**/*.tsx", hasGlob: true }
@@ -937,7 +978,7 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 		// A URL names its root explicitly, so its glob stays anchored there like `dir/*`.
 		return urlPath.glob === undefined
 			? { basePath: urlPath.basePath, globPattern: "**/*", hasGlob: false }
-			: { basePath: urlPath.basePath, globPattern: urlPath.glob, hasGlob: true };
+			: globFindPattern(urlPath.basePath, urlPath.glob);
 	}
 	const normalizedPattern = normalizePathSeparators(pattern);
 	const segments = normalizedPattern.split("/");
@@ -949,18 +990,10 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 
 	if (firstGlobIndex === 0) {
 		const needsRecursive = !normalizedPattern.startsWith("**/");
-		return {
-			basePath: ".",
-			globPattern: needsRecursive ? `**/${normalizedPattern}` : normalizedPattern,
-			hasGlob: true,
-		};
+		return globFindPattern(".", needsRecursive ? `**/${normalizedPattern}` : normalizedPattern);
 	}
 
-	return {
-		basePath: segments.slice(0, firstGlobIndex).join("/"),
-		globPattern: segments.slice(firstGlobIndex).join("/"),
-		hasGlob: true,
-	};
+	return globFindPattern(segments.slice(0, firstGlobIndex).join("/"), segments.slice(firstGlobIndex).join("/"));
 }
 
 export function combineSearchGlobs(prefixGlob?: string, suffixGlob?: string): string | undefined {
@@ -1147,6 +1180,7 @@ async function resolveFindPatternItems(
 			basePath: resolveSearchBase(parsedPattern.basePath, cwd),
 			globPattern: parsedPattern.globPattern,
 			hasGlob: parsedPattern.hasGlob,
+			directoryOnly: parsedPattern.directoryOnly,
 		};
 	});
 

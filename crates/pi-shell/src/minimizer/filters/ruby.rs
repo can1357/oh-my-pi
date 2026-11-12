@@ -1,5 +1,7 @@
 //! Ruby test and lint output filters.
 
+use std::fmt::NumBuffer;
+
 use super::lint;
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -383,7 +385,7 @@ fn push_json_location(out: &mut String, map: &serde_json::Map<String, serde_json
 		let mut location = path.to_string();
 		if let Some(line) = first_json_u64(map, &["line_number", "line"]) {
 			location.push(':');
-			location.push_str(&line.to_string());
+			location.push_str(line.format_into(&mut NumBuffer::new()));
 		}
 		primitives::push_line(out, &location);
 	}

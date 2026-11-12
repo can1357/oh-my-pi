@@ -221,11 +221,8 @@ mod imp {
 			},
 			Ok(output) => {
 				let stderr = String::from_utf8_lossy(&output.stderr);
-				if stderr_is_unavailable(&stderr) {
-					Ok(())
-				} else {
-					Err(IsoError::other(format!("zfs get origin {clone}: {}", stderr.trim())))
-				}
+				stderr_is_unavailable(&stderr)
+					.ok_or_else(|| IsoError::other(format!("zfs get origin {clone}: {}", stderr.trim())))
 			},
 			Err(err) if err.kind() == io::ErrorKind::NotFound => {
 				Err(IsoError::unavailable("zfs CLI is unavailable"))

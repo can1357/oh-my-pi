@@ -28,7 +28,8 @@ import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
-import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
+import { notifyWorkspaceWatchedFiles } from "../lsp/client";
+import { FileChangeType } from "../lsp/types";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
@@ -41,11 +42,6 @@ import {
 	isPermissionDeniedError,
 	writeFileWithFallback,
 } from "../tools/file-write-fallback";
-import {
-	invalidateFsScanAfterDelete,
-	invalidateFsScanAfterRename,
-	invalidateFsScanAfterWrite,
-} from "../tools/fs-cache-invalidation";
 import { outputMeta, resolveOutputMaxColumns } from "../tools/output-meta";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { DEFAULT_MAX_COLUMN } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -80,6 +76,7 @@ import {
 import {
 	cfgLspDiagnosticsDeduplicate,
 	cfgLspDiagnosticsOnEdit,
+	cfgLspEnabled,
 	cfgLspFormatOnWrite,
 	cfgLspRequestTimeout,
 } from "../lsp/settings";
@@ -175,7 +172,7 @@ export function resolveEditToolDescription(
 
 /** Builds the LSP writethrough from the current `lsp.*` settings; called per write so changes apply immediately. */
 function createEditWritethrough(session: ToolSession): WritethroughCallback {
-	const enableLsp = session.enableLsp ?? true;
+	const enableLsp = (session.enableLsp ?? true) && cfgLspEnabled.get(session.settings);
 	const enableDiagnostics = enableLsp && cfgLspDiagnosticsOnEdit.get(session.settings);
 	const enableFormat = enableLsp && cfgLspFormatOnWrite.get(session.settings);
 	const deduplicate = enableDiagnostics && cfgLspDiagnosticsDeduplicate.get(session.settings);
@@ -384,7 +381,10 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get mode(): EditMode {
-		return this.#editMode ?? resolveEditMode(this.session);
+		if (this.#editMode) return this.#editMode;
+		const mode = resolveEditMode(this.session);
+		// `edit.mode: none` unregisters this tool on the next built-in reconcile; until then keep a valid schema.
+		return mode === "none" ? "replace" : mode;
 	}
 
 	get description(): string {
@@ -565,7 +565,11 @@ export class EditTool implements AgentTool<TInput> {
 		}
 
 		if (outcome.isError) {
-			return { content: [{ type: "text", text: outcome.text }], isError: true };
+			return {
+				content: [{ type: "text", text: outcome.text }],
+				details: { diff: "", errorKind: outcome.errorKind },
+				isError: true,
+			};
 		}
 
 		const details = aggregateDetails(outcome.files, this.mode);
@@ -709,7 +713,6 @@ export class EditTool implements AgentTool<TInput> {
 					signal,
 				);
 			}
-			invalidateFsScanAfterDelete(request.path);
 			this.session.bumpFileMutationVersion?.(request.path);
 			const diagnostics =
 				request.flushLsp && request.lspBatchId
@@ -744,7 +747,6 @@ export class EditTool implements AgentTool<TInput> {
 					signal,
 				);
 			}
-			invalidateFsScanAfterRename(request.path, request.moveTo);
 			this.session.bumpFileMutationVersion?.(request.path);
 			this.session.bumpFileMutationVersion?.(request.moveTo);
 			const diagnostics =
@@ -818,7 +820,6 @@ export class EditTool implements AgentTool<TInput> {
 			}
 		}
 
-		invalidateFsScanAfterWrite(request.path);
 		if (!began) this.session.bumpFileMutationVersion?.(request.path);
 		return {
 			written: diagnostics.finalContent,

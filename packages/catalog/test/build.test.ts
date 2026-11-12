@@ -571,6 +571,19 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 });
 
+describe("Morph worker affinity", () => {
+	// Morph is reached only through custom providers, so the base URL alone identifies it.
+	it.each([
+		["openai-completions", completionsSpec],
+		["openai-responses", responsesSpec],
+	] as const)("sends x-session-id only to Morph over %s", (_api, spec) => {
+		const morph = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://api.morphllm.com/v1" }));
+		const other = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://llm.example.com/v1" }));
+		expect(morph.compat.promptCacheSessionHeader).toBe("x-session-id");
+		expect(other.compat.promptCacheSessionHeader).toBeUndefined();
+	});
+});
+
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "firepass" })).compat.wireModelIdMode).toBe("firepass");
@@ -657,10 +670,17 @@ describe("openai-completions wire-quirk compat detection", () => {
 			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4-flash", input: ["text", "image"] }))
 				.compat.stripImageInput,
 		).toBe(true);
-		// The lineage glob covers dated SKUs, not just the bare id.
+		// The lineage carve-out covers dated SKUs, not just the bare id.
 		expect(
 			resolveModelPolicy(
 				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-0731", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Hosts that spell the release with a hyphen (Mistral's live roster:
+		// `deepseek-v4-1-flash-1017`) serve the same multimodal weights (#18405).
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "mistral", id: "deepseek-v4-1-flash-1017", input: ["text", "image"] }),
 			).compat.stripImageInput,
 		).toBe(false);
 		// A V4.1 id that also carries a `vision` token matches both exceptions at
@@ -1992,6 +2012,47 @@ describe("model cache materialized round trip", () => {
 			expect(recovered.models.map(model => model.id)).toEqual([recoveredModel.id]);
 			expect(recovered.stale).toBe(false);
 			expect(fetches).toBe(2);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("keeps a header-bearing cached catalog after a failed refresh so the next launch refetches it (#18227)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-header-failed-refresh-"));
+		const dbPath = path.join(tempDir, "models.db");
+		// Live headers with no static source: the cache omits them and the row's
+		// model cannot be restored offline.
+		const model = completionsSpec({
+			id: "tenant-model",
+			provider: "header-failed-refresh-test",
+			headers: { "X-Tenant": "tenant-a" },
+		});
+		let fetches = 0;
+		let fail = false;
+		const options = {
+			providerId: "header-failed-refresh-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => 1_000_000,
+			fetchDynamicModels: async () => {
+				fetches++;
+				return fail ? null : [model];
+			},
+		};
+		try {
+			const populated = await resolveProviderModels(options, "online");
+			expect(populated.models.map(candidate => candidate.id)).toEqual([model.id]);
+
+			fail = true;
+			await resolveProviderModels(options, "online");
+			expect(fetches).toBe(2);
+
+			// The clock does not advance: a rewritten empty snapshot would read back
+			// fresh and skip this fetch, hiding the model until the backoff expires.
+			fail = false;
+			const recovered = await resolveProviderModels(options, "online-if-uncached");
+			expect(recovered.models.map(candidate => candidate.id)).toEqual([model.id]);
+			expect(fetches).toBe(3);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

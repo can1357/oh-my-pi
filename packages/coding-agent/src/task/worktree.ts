@@ -9,8 +9,9 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
+import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
 import { withRepoLock } from "../utils/repo-lock";
-import { writeIsolationOwner } from "./isolation-ownership";
+import { needsNativeTeardown, writeIsolationOwner, writeRetainedBackend } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -360,35 +361,10 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
 }
 
-function unquoteGitDiffPath(rawPath: string): string {
-	let value = rawPath;
-	if (value.startsWith('"') && value.endsWith('"')) {
-		try {
-			value = JSON.parse(value) as string;
-		} catch {
-			value = value.slice(1, -1);
-		}
-	}
-	return value.replace(/^[ab]\//, "");
-}
-
-function parseDiffGitLinePaths(line: string): string[] {
-	if (!line.startsWith("diff --git ")) return [];
-	const rest = line.slice("diff --git ".length);
-	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
-	const parts = quoted ? [quoted[1], quoted[2]] : rest.split(" ");
-	if (parts.length < 2) return [];
-	const paths = parts
-		.slice(0, 2)
-		.map(unquoteGitDiffPath)
-		.filter(file => file && file !== "/dev/null");
-	return [...new Set(paths)];
-}
-
 function patchTouchedFiles(patch: string): string[] {
 	const files = new Set<string>();
-	for (const line of patch.split("\n")) {
-		for (const file of parseDiffGitLinePaths(line)) files.add(file);
+	for (const section of splitPatchSections(patch)) {
+		for (const file of patchSectionPaths(section)) files.add(file);
 	}
 	return [...files];
 }
@@ -601,10 +577,15 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-function getTaskIsolationSegment(repoRoot: string, id: string): string {
+/**
+ * Deterministic task-isolation dir of one run (`repoRoot` + agent id) under the
+ * worktrees dir: it holds the owner marker and either the native `m` mount or
+ * the record of an ovnfs checkout (see `./ovnfs`).
+ */
+export function taskIsolationBaseDir(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
+	return getWorktreeDir(`${TASK_ISOLATION_DIR_PREFIX}${digest}`);
 }
 
 /**
@@ -652,7 +633,7 @@ export async function ensureIsolation(
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
-	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
+	const baseDir = taskIsolationBaseDir(repoRoot, id);
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
@@ -697,23 +678,36 @@ export async function ensureIsolation(
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
 
-/** Tear down a handle returned by {@link ensureIsolation}. */
+/**
+ * Tear down a handle returned by {@link ensureIsolation}. When native teardown fails for a mount or
+ * subvolume backend, the workspace is kept with a retained-backend sidecar (recursive `rm` would
+ * traverse the live mount); `omp worktree clear` retries the teardown later.
+ */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	const baseDir = path.dirname(handle.mergedDir);
 	try {
-		try {
-			await natives.isoStop(handle.backend, handle.mergedDir);
-		} catch (err) {
-			logger.warn("isolation backend stop failed during cleanup", {
-				backend: handle.backend,
-				mergedDir: handle.mergedDir,
-				error: err instanceof Error ? err.message : String(err),
-			});
+		await natives.isoStop(handle.backend, handle.mergedDir);
+	} catch (err) {
+		const retain = needsNativeTeardown(handle.backend);
+		logger.warn("isolation backend stop failed during cleanup", {
+			backend: handle.backend,
+			mergedDir: handle.mergedDir,
+			error: err instanceof Error ? err.message : String(err),
+			retained: retain,
+		});
+		if (retain) {
+			try {
+				await writeRetainedBackend(baseDir, handle.backend);
+			} catch (writeErr) {
+				logger.warn("retained-backend record write failed; unmount the workspace manually", {
+					mergedDir: handle.mergedDir,
+					error: writeErr instanceof Error ? writeErr.message : String(writeErr),
+				});
+			}
+			return;
 		}
-	} finally {
-		// baseDir is the parent of the merged directory
-		const baseDir = path.dirname(handle.mergedDir);
-		await fs.rm(baseDir, { recursive: true, force: true });
 	}
+	await fs.rm(baseDir, { recursive: true, force: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -756,8 +750,9 @@ function collectWipPatches(wip: BaselineWipContext | undefined): string[] {
 
 /** Keep only the `diff --git` sections of `patch` that touch one of `files`. */
 function filterPatchFiles(patch: string, files: ReadonlySet<string>): string {
-	const sections = patch.split(/^(?=diff --git )/m);
-	return sections.filter(section => parseDiffGitLinePaths(section.split("\n", 1)[0]).some(f => files.has(f))).join("");
+	return splitPatchSections(patch)
+		.filter(section => patchSectionPaths(section).some(file => files.has(file)))
+		.join("");
 }
 
 /**
@@ -951,7 +946,9 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
  * If the agent did not commit, the captured delta is collapsed onto a single
  * branch commit with an AI-generated (or fallback) message.
  *
- * Returns `null` when no root or nested changes exist.
+ * Returns `null` when no root or nested changes exist. `delta` is the run's
+ * change set when the caller already read it (as {@link captureDeltaPatch}
+ * would); otherwise it is captured here.
  */
 export async function commitToBranch(
 	isolationDir: string,
@@ -959,13 +956,14 @@ export async function commitToBranch(
 	taskId: string,
 	description: string | undefined,
 	commitMessage?: (diff: string) => Promise<string | null>,
+	delta?: DeltaPatchResult,
 ): Promise<CommitToBranchResult | null> {
 	const baselineSha = baseline.root.headCommit;
 	const isolationRepo = vcs.requireGit(isolationDir);
 	const isolationHead = (await isolationRepo.headSha()) ?? "";
 	const agentCommitted = isolationHead !== "" && isolationHead !== baselineSha;
 
-	const { rootPatch, nestedPatches } = await captureDeltaPatch(isolationDir, baseline);
+	const { rootPatch, nestedPatches } = delta ?? (await captureDeltaPatch(isolationDir, baseline));
 	if (!rootPatch.trim() && nestedPatches.length === 0) return null;
 	if (!rootPatch.trim()) return { rootPatch, nestedPatches };
 

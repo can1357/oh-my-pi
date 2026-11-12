@@ -329,8 +329,9 @@ export abstract class Derived<T> {
 
 /**
  * Deep equality of setting values that, unlike `Bun.deepEquals`, also compares the key order of
- * plain objects: record order carries precedence (`edit.modelVariants` takes the first match), so a
- * reorder is a change. Values other than plain objects and arrays compare with `Bun.deepEquals`.
+ * plain objects: record order breaks ties between equal-length model patterns (`edit.modelVariants`,
+ * `systemPromptTemplates`), so a reorder is a change. Values other than plain objects and arrays
+ * compare with `Bun.deepEquals`.
  */
 export function settingValuesEqual(a: unknown, b: unknown): boolean {
 	if (Object.is(a, b)) return true;
@@ -451,8 +452,9 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 }
 
 /**
- * Handle for one registered setting. Reads resolve, in precedence order: the definition's
- * environment variable, runtime override, `--config` overlay, project, global, then the default.
+ * Handle for one registered setting. Reads resolve, in precedence order: runtime override (CLI
+ * flags, session-only writes, SDK overrides), the definition's environment variable, `--config`
+ * overlay, project, global, then the default.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -524,11 +526,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.#envParsed;
 	}
 
-	/** Env value that currently takes effect in `scope`: a fallback env yields to a configured layer. */
+	/**
+	 * Env value that currently takes effect in `scope`: a runtime override (a CLI flag, a session-only
+	 * write) outranks it, and a fallback env also yields to every configured layer.
+	 */
 	#effectiveEnv(scope: ScopeLike): T | undefined {
 		const value = this.envValue();
-		if (value === undefined || !this.envFallback) return value;
+		if (value === undefined) return undefined;
 		const settings = settingsOf(scope);
+		if (!this.envFallback) return settings.hasRuntimeOverride(this) ? undefined : value;
 		if (this.envFallback === true) return settings.isConfigured(this) ? undefined : value;
 		const configured = settings.rawValue(this);
 		return configured === undefined || (typeof configured === "string" && configured.trim() === "")

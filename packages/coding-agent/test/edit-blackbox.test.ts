@@ -95,6 +95,22 @@ describe("edit parse-regression blackbox", () => {
 		expect(text).not.toMatch(/no longer parses/);
 	});
 
+	test("does not warn when tree-sitter misreads valid Markdown", async () => {
+		const table = "| case | before | after |\n|---|---|---|\n| a | 1 | 2 |\n";
+		await Bun.write(path.join(tempDir, "notes.md"), table);
+
+		const result = await new EditTool(session, "replace").execute("markdown", {
+			path: "notes.md",
+			old_string: "| a | 1 | 2 |",
+			new_string: "| a | 1 | 2 |\n| b |||",
+		});
+
+		expect(await Bun.file(path.join(tempDir, "notes.md")).text()).toBe(`${table}| b |||\n`);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		expect(text).not.toMatch(/no longer parses/);
+		expect(await Bun.file(logPath).exists()).toBe(false);
+	});
+
 	test("appends valid-to-invalid transitions from every edit variant", async () => {
 		await fs.appendFile(logPath, '{"seed":true}\n');
 		const expected: Array<{

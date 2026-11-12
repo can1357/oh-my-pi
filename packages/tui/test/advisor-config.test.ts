@@ -204,6 +204,25 @@ describe("advisor sync backlog picker", () => {
 		expect(saved?.advisors).toEqual([{ name: "default", maxNotesPerUpdate: 2 }]);
 	});
 
+	it("preserves a real default advisor carrying only scope or includeReasoning on save", async () => {
+		for (const entry of [
+			{ name: "default", scope: "subagent" as const },
+			{ name: "default", includeReasoning: false },
+			{ name: "default", scope: "subagent" as const, includeReasoning: false },
+		]) {
+			let saved: WatchdogConfigDoc | undefined;
+			const overlay = buildOverlay({ advisors: [entry] }, doc => {
+				saved = structuredClone(doc);
+			});
+
+			for (let i = 0; i < 4; i++) overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			await Promise.resolve();
+
+			expect(saved?.advisors).toEqual([entry]);
+		}
+	});
+
 	it("surfaces the newly active file's warnings on scope switch, and only there", async () => {
 		const warnings: string[] = [];
 		let pendingLoad: Promise<WatchdogConfigDoc> | undefined;

@@ -39,6 +39,7 @@ import {
 	type ToolChoice,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
+import { $otelEnv } from "@oh-my-pi/pi-utils";
 import {
 	type Attributes,
 	type AttributeValue,
@@ -51,7 +52,6 @@ import {
 } from "@opentelemetry/api";
 import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
 import type { AgentTool } from "./types";
-import { EventLoopKeepalive } from "./utils/yield";
 
 /** Default tracer name. Override via {@link AgentTelemetryConfig.tracerName}. */
 export const DEFAULT_TRACER_NAME = "@oh-my-pi/pi-agent-core";
@@ -454,7 +454,7 @@ export function resolveTelemetry(
 let contentCaptureEnvCache: ResolvedTelemetryContentCapture | undefined;
 function readContentCaptureEnv(): ResolvedTelemetryContentCapture {
 	if (contentCaptureEnvCache !== undefined) return contentCaptureEnvCache;
-	const raw = process.env[CONTENT_CAPTURE_ENV];
+	const raw = $otelEnv(CONTENT_CAPTURE_ENV);
 	if (!raw) {
 		contentCaptureEnvCache = "none";
 		return "none";
@@ -1687,7 +1687,7 @@ export interface JudgmentTelemetryOptions {
 	readonly provider: string;
 	/** Requested model id. */
 	readonly model: string;
-	/** Model that answered, when the provider resolves an alias (`jev-latest` → `jev-1.13.0`). */
+	/** Model that answered, when the provider resolves an alias (`jev-latest` → `jev-1.14.0`). */
 	readonly responseModel?: string;
 	/** Caller-level reason the judgment ran; stamped as {@link OmpGenAIAttr.JudgmentPurpose}. */
 	readonly purpose: string;
@@ -1837,16 +1837,9 @@ export interface InstrumentedChatSpanOptions {
 export async function instrumentedCompleteSimple<TApi extends Api>(
 	model: Model<TApi>,
 	ctx: Context,
-	options: SimpleStreamOptions,
+	options: SimpleStreamOptions & { onAttempt?: (message: AssistantMessage) => void },
 	span: InstrumentedChatSpanOptions,
 ): Promise<AssistantMessage> {
-	// Oneshot LLM calls (handoff, compaction/branch summaries) run outside the
-	// agent `#runLoop`, which is where the EventLoopKeepalive normally lives.
-	// Without it, Bun's JSC loop stops servicing timers while parked on the
-	// long-lived completion promise, freezing any host spinner (e.g. the
-	// `/handoff` Loader) until an unrelated I/O event (a terminal resize)
-	// pokes the loop. Keep the loop healthy for the duration of the call.
-	using _keepalive = new EventLoopKeepalive();
 	const { telemetry, parent, oneshotKind } = span;
 	const stepNumber = span.stepNumber ?? -1;
 	const reasoning = options.reasoning;

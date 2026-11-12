@@ -32,6 +32,10 @@ export interface JobsPanelJob {
 	readonly type: string;
 	readonly status: "running" | "completed" | "failed" | "cancelled";
 	readonly label: string;
+	/** What the job is for, in the model's words; rows and the detail lead with it over a command `label`. */
+	readonly intent?: string;
+	/** One line on what a command does and when it ends, from the cheap model; the detail shows it under the intent. */
+	readonly caption?: string;
 	readonly startTime: number;
 	readonly endTime?: number;
 	/** Registry id of the agent that owns the job. */
@@ -176,6 +180,12 @@ export class JobsSheet implements Component {
 	#outputView: { id: string; output: string; frozen: boolean; lines: readonly string[] } | undefined;
 	/** The selected job's capture as display rows, keyed by job + text: unchanged output is never split again. */
 	#capture: { id: string; output: string; lines: readonly string[] } | undefined;
+	/**
+	 * The selected job as last seen: its row, detail and the subagents placing
+	 * it. The session evicts settled jobs on its own clock; while the user keeps
+	 * one selected it stays listed with its last output, until they select another.
+	 */
+	#held: { job: JobsPanelJob; detail: JobsPanelDetail | undefined; agents: readonly JobTreeAgent[] } | undefined;
 
 	constructor(source: JobsSheetSource) {
 		this.#source = source;
@@ -183,16 +193,17 @@ export class JobsSheet implements Component {
 
 	describe(_cx: DescribeContext): NativeNode {
 		const { rows, jobs, selected, cancellable } = this.#current();
-		const detail = selected && this.#source.inspect(selected.id);
+		const detail = selected && this.#inspect(selected.id);
 		const now = Date.now();
 		// Elapsed nodes tick on their own; list values and the output pane redraw
-		// when a job starts, settles, leaves or moves in the tree, its process
-		// changes, its output grows, or (while one runs) once a second.
+		// when a job starts, settles, leaves or moves in the tree, gets its
+		// caption (it can land after the job settles), its process changes, its
+		// output grows, or (while one runs) once a second.
 		const key = [
 			rows
 				.map(
 					entry =>
-						`${jobTreeGuide(entry, theme)}${entry.kind === "job" ? `${entry.job.id}:${entry.job.status}` : entry.agent.id}`,
+						`${jobTreeGuide(entry, theme)}${entry.kind === "job" ? `${entry.job.id}:${entry.job.status}:${entry.job.caption ?? ""}` : entry.agent.id}`,
 				)
 				.join(","),
 			selected?.id,
@@ -258,7 +269,8 @@ export class JobsSheet implements Component {
 			lines.push(this.#treeLine(rows[index]!, selected, now, safeWidth));
 		}
 		const left = Math.max(0, body - (window.end - window.start));
-		const detail = this.#source.inspect(selected.id);
+		// The held job outlives its eviction from the snapshot, so read its detail through #inspect.
+		const detail = this.#inspect(selected.id);
 		const reserve = Math.min(left, OUTPUT_RESERVE_ROWS);
 		const metadata = this.#metadataLines(selected, detail, safeWidth, Math.max(0, Math.floor((left - reserve) / 2)));
 		lines.push(...metadata);
@@ -310,11 +322,30 @@ export class JobsSheet implements Component {
 		selected: JobsPanelJob | undefined;
 		cancellable: boolean;
 	} {
-		const { running, recent, rootId, agents } = this.#source.load();
-		const rows = buildJobTree([...running, ...recent], agents ?? [], rootId);
+		const snapshot = this.#source.load();
+		const { running, rootId } = snapshot;
+		let { recent, agents = [] } = snapshot;
+		// A settled job the session evicted stays listed while it is selected.
+		const held = this.#held?.job.id === this.#selectedId ? this.#held : undefined;
+		const evicted =
+			held !== undefined &&
+			held.job.status !== "running" &&
+			!running.some(job => job.id === held.job.id) &&
+			!recent.some(job => job.id === held.job.id);
+		if (evicted) {
+			recent = [...recent, held.job];
+			const known = new Set(agents.map(agent => agent.id));
+			agents = [...agents, ...held.agents.filter(agent => !known.has(agent.id))];
+		}
+		const rows = buildJobTree([...running, ...recent], agents, rootId);
 		const jobs = rows.flatMap(entry => (entry.kind === "job" ? [entry.job] : []));
 		const selected = jobs.find(job => job.id === this.#selectedId) ?? jobs[0];
 		this.#selectedId = selected?.id;
+		if (!selected) this.#held = undefined;
+		else if (!evicted) {
+			const detail = held?.job.id === selected.id ? held.detail : undefined;
+			this.#held = { job: selected, detail, agents: snapshot.agents ?? [] };
+		}
 		const owned = selected?.ownerId === undefined || selected.ownerId === rootId;
 		return { rows, jobs, selected, cancellable: this.#source.cancel !== undefined && owned };
 	}
@@ -326,7 +357,16 @@ export class JobsSheet implements Component {
 		return Math.max(1, Math.trunc(rows));
 	}
 
-	/** One tree row: job id next to the cursor, then status, type, age, agent and label — all single-line safe. */
+	/** The job's detail from the source, else the last one seen while it was held. */
+	#inspect(id: string): JobsPanelDetail | undefined {
+		const detail = this.#source.inspect(id);
+		const held = this.#held?.job.id === id ? this.#held : undefined;
+		if (!held) return detail;
+		if (detail) held.detail = detail;
+		return held.detail;
+	}
+
+	/** One tree row: job id next to the cursor, then status, type, age, agent and what the job is for, single-line safe. */
 	#treeLine(entry: JobTreeRow<JobsPanelJob>, selected: JobsPanelJob, nowMs: number, width: number): string {
 		const guide = jobTreeGuide(entry, theme);
 		if (entry.kind === "agent") {
@@ -337,14 +377,18 @@ export class JobsSheet implements Component {
 		const age = formatDuration(jobAge(job, nowMs));
 		const agent = entry.agent && entry.agent.id !== job.label ? `${sanitizeDisplaySingleLine(entry.agent.id)}: ` : "";
 		const id = sanitizeDisplaySingleLine(job.id);
-		const label = collapseCommand(sanitizeText(job.label));
+		// The intent is model-written: strip terminal controls, flatten it to one
+		// row and shorten home paths like the command; the label stands in without one.
+		const title = sanitizeDisplaySingleLine(
+			shortenEmbeddedPaths(collapseCommand(sanitizeText(job.intent ?? job.label))),
+		);
 		return truncateToWidth(
-			`${cursor} ${guide}${id} ${job.status}  ${sanitizeDisplaySingleLine(job.type)} ${age}  ${agent}${label}`,
+			`${cursor} ${guide}${id} ${job.status}  ${sanitizeDisplaySingleLine(job.type)} ${age}  ${agent}${title}`,
 			width,
 		);
 	}
 
-	/** Optional metadata shares the space left after reserving output rows. */
+	/** Optional metadata shares the space left after reserving output rows: caption, command, facts and widget. */
 	#metadataLines(
 		job: JobsPanelJob,
 		detail: JobsPanelDetail | undefined,
@@ -353,6 +397,23 @@ export class JobsSheet implements Component {
 	): readonly string[] {
 		if (budget <= 0) return [];
 		const lines: string[] = [];
+		// The caption is model-written: strip terminal controls and wrap it within
+		// the rows metadata has, so it never pushes the reserved newest output off.
+		if (job.caption) {
+			const captionRows = wrapTextWithAnsi(
+				shortenEmbeddedPaths(replaceTabs(sanitizeText(job.caption))),
+				Math.max(1, width - 3),
+			);
+			const shown = Math.min(captionRows.length, budget);
+			for (const line of captionRows.slice(0, shown)) {
+				lines.push(truncateToWidth(`   ${fgOrPlain("muted", line)}`, width));
+			}
+			const hidden = captionRows.length - shown;
+			if (hidden > 0 && lines.length < budget) {
+				lines.push(truncateToWidth(`   … ${hidden} more caption lines`, width));
+			}
+		}
+		if (lines.length >= budget) return lines;
 		// Rows show the cut label; the selected job's command wraps here,
 		// bounded so a long script never pushes the facts and output off the sheet.
 		const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
@@ -377,7 +438,7 @@ export class JobsSheet implements Component {
 			detail?.artifactId && `artifact://${sanitizeDisplaySingleLine(detail.artifactId)}`,
 		]);
 		if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
-		if (lines.length >= budget || !detail?.widget) return lines;
+		if (lines.length >= budget || !detail?.widget || !widgetHasData(detail.widget)) return lines;
 		for (const line of renderJobWidgetLines(detail.widget, Math.max(0, width - 3), theme)) {
 			if (lines.length >= budget) break;
 			lines.push(truncateToWidth(`   ${line}`, width));
@@ -494,6 +555,11 @@ function jobAge(job: JobsPanelJob, nowMs: number): number {
 	return Math.max(0, (job.endTime ?? nowMs) - job.startTime);
 }
 
+/** Whether a widget draws more than its title: one without data only repeats the job's heading. */
+function widgetHasData(widget: JobWidgetView): boolean {
+	return widget.blocks.length > 0 || widget.headline !== undefined || Boolean(widget.stage);
+}
+
 /**
  * A job's captured output as display rows: ANSI and control characters are
  * stripped (the capture is untrusted), the trailing newline removed and each
@@ -530,8 +596,9 @@ function describeJobList(rows: readonly JobTreeRow<JobsPanelJob>[], selected: Jo
 
 /**
  * One list row: the type icon tinted by status, the tree connector, the
- * subagent a task job runs, the one-line label (a process job's command in
- * mono, a task's work in prose) and how long it ran.
+ * subagent a task job runs, the one-line label (what the job is for when the
+ * model said, else a process job's command in mono or a task's work in prose)
+ * and how long it ran.
  */
 function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide: string, nowMs: number): NativeNode {
 	const status = STATUS_LABEL[job.status];
@@ -540,13 +607,17 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 		label: compact([
 			guide !== "" && span(guide, "mono dim"),
 			agentName !== undefined && agentName !== job.label && span(`${agentName} `, "strong"),
-			job.type === "task" ? span(job.label) : span(collapseCommand(job.label), "mono"),
+			job.intent
+				? span(job.intent)
+				: job.type === "task"
+					? span(job.label)
+					: span(collapseCommand(job.label), "mono"),
 		]),
 		value: [span(age, "mono")],
 		icon: TYPE_ICON[job.type] ?? "job",
 		tone: STATUS_TONE[job.status],
-		title: `${job.label}\n${status} · ${job.type} · ${job.id}`,
-		aria: `${job.label}, ${status.toLowerCase()}, ${age}`,
+		title: `${job.intent ? `${job.intent}\n` : ""}${job.caption ? `${job.caption}\n` : ""}${job.label}\n${status} · ${job.type} · ${job.id}`,
+		aria: `${job.intent ?? job.label}, ${status.toLowerCase()}, ${age}`,
 	});
 }
 
@@ -579,8 +650,9 @@ function describeEmpty(): NativeNode {
 
 /**
  * The selected job: a status line (pill, live elapsed, type · id, Cancel job
- * when `cancellable`), its task or full command, facts and the output pane (or
- * its empty state).
+ * when `cancellable`), what it is for, what its command does (the cheap
+ * model's caption), its full command, facts, its widget
+ * when it has data to draw and the output pane (or its empty state).
  */
 function describeDetail(
 	job: JobsPanelJob,
@@ -592,6 +664,7 @@ function describeDetail(
 	const exit = detail?.exitCode;
 	const age = Math.round(jobAge(job, nowMs));
 	const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+	const title = job.intent ?? (command ? undefined : job.label);
 	const pids = detail?.pids ?? [];
 	const facts = compact([
 		job.agentId ? { k: "Agent", v: [span(job.agentId, "mono")] } : undefined,
@@ -621,11 +694,15 @@ function describeDetail(
 			]),
 			{ role: "omp.jobs.status", gap: "sm", align: "center" },
 		),
+		title ? text(title, { role: "omp.jobs.title", wrap: "word" }) : undefined,
+		job.caption ? text([span(job.caption, "muted")], { role: "omp.jobs.caption", wrap: "word" }) : undefined,
 		command
 			? code(command, { lang: "bash", wrap: true, preview: { lines: 4 }, role: "omp.jobs.command" })
-			: text(job.label, { role: "omp.jobs.title", wrap: "word" }),
+			: undefined,
 		facts.length > 0 && node("kv", { items: facts, role: "omp.jobs.facts" }),
-		detail?.widget && node("col", { role: "omp.jobs.widget" }, [describeJobWidget(detail.widget)], "widget"),
+		detail?.widget &&
+			widgetHasData(detail.widget) &&
+			node("col", { role: "omp.jobs.widget" }, [describeJobWidget(detail.widget)], "widget"),
 		node(
 			"col",
 			{ role: "omp.jobs.out", gap: "sm" },

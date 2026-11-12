@@ -4,10 +4,14 @@
 //! hit-test, and text-shaping logic is exercised by the host test suite on
 //! every platform.
 
+use crate::desktop::keys::KeyName;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventKind {
 	MouseClick,
 	MouseMove,
+	/// A press, moves with the button held, and a release.
+	MouseDrag,
 	MouseScroll,
 	Keystroke,
 	KeyCombo,
@@ -19,6 +23,7 @@ impl EventKind {
 		match self {
 			Self::MouseClick => "mouse_click",
 			Self::MouseMove => "mouse_move",
+			Self::MouseDrag => "mouse_drag",
 			Self::MouseScroll => "mouse_scroll",
 			Self::Keystroke => "keystroke",
 			Self::KeyCombo => "key_combo",
@@ -103,9 +108,15 @@ pub fn would_be_silently_dropped(
 	target: TargetTraits<'_>,
 	kind: EventKind,
 ) -> Option<&'static str> {
-	use EventKind::{KeyCombo, Keystroke, MouseClick, MouseMove, MouseScroll, TextInput};
+	use EventKind::{KeyCombo, Keystroke, MouseClick, MouseDrag, MouseMove, MouseScroll, TextInput};
 
 	let class = target.class;
+	// A drag posts a press, moves and a release. Tk never sees the press (its
+	// line below); any other toolkit takes or drops a drag with its moves: a
+	// GTK canvas paints a posted drag although its buttons ignore posted clicks.
+	if kind == MouseDrag && !is_tk_class(class) {
+		return would_be_silently_dropped(target, MouseMove);
+	}
 	if is_chromium_class(class) {
 		return Some("Chromium requires input originating from the system input queue");
 	}
@@ -132,7 +143,9 @@ pub fn would_be_silently_dropped(
 			"WPF ignores posted pointer and text input, and posted keys unless it owns the foreground",
 		);
 	}
-	if is_tk_class(class) && matches!(kind, MouseClick | Keystroke | KeyCombo | TextInput) {
+	if is_tk_class(class)
+		&& matches!(kind, MouseClick | MouseDrag | Keystroke | KeyCombo | TextInput)
+	{
 		return Some("Tk reads button and key state from GetKeyState, which posted input never sets");
 	}
 	if is_gtk_class(class) && matches!(kind, MouseClick) {
@@ -155,6 +168,25 @@ pub fn text_input_unsupported(class: &str, arm64: bool) -> Option<&'static str> 
 		"native console host on Windows ARM64 accepts synthesized text without delivering it; drive \
 		 the console through a process or PTY instead",
 	)
+}
+
+/// Why background input holding a modifier never arrives as sent, given each
+/// held key and the modifiers its keyboard layout adds to type it
+/// (`VkKeyScan`'s high byte: 1 Shift, 2 Ctrl, 4 Alt). Apps read Ctrl, Alt,
+/// Shift and the Windows key from their thread's key state when they handle a
+/// key or click (`TranslateMessage`, `TranslateAccelerator`, `WinForms`
+/// `ModifierKeys`, Qt), and a posted message never sets it: a posted `ctrl+s`
+/// types "s", and a posted ctrl-click is a plain click.
+pub fn posted_modifiers_dropped(
+	keys: impl IntoIterator<Item = (KeyName, u8)>,
+) -> Option<&'static str> {
+	keys
+		.into_iter()
+		.any(|(key, implicit)| key.is_modifier() || implicit != 0)
+		.then_some(
+			"apps read Ctrl, Alt, Shift and the Windows key from key state that posted input never \
+			 sets, so the keys or click would arrive without them",
+		)
 }
 
 /// Names the non-client region of a `WM_NCHITTEST` result where a posted drag
@@ -206,9 +238,78 @@ pub fn text_units(text: &str) -> impl Iterator<Item = TextUnit> + '_ {
 	})
 }
 
+/// Observed facts about a possible modal dialog opened by a menu command.
+#[derive(Clone, Copy, Debug)]
+pub struct ModalPopup {
+	/// Opaque window identity used to exclude windows present before dispatch.
+	pub id:              usize,
+	/// Whether the target directly owns this window.
+	pub owned_by_target: bool,
+	/// Whether this window belongs to the target's process and thread.
+	pub same_thread:     bool,
+	/// Whether this window accepts input.
+	pub enabled:         bool,
+	/// Whether this window is visible.
+	pub visible:         bool,
+	/// Whether this window answered the bounded responsiveness probe.
+	pub responsive:      bool,
+}
+
+impl ModalPopup {
+	/// Whether this new window is eligible for a modal responsiveness probe.
+	pub fn is_candidate(&self, before: &[usize]) -> bool {
+		!before.contains(&self.id)
+			&& self.owned_by_target
+			&& self.same_thread
+			&& self.enabled
+			&& self.visible
+	}
+}
+
+/// A completed send wins; otherwise confirmation needs a disabled owner and
+/// a new owned, same-thread, visible, enabled, responsive dialog.
+/// A missing `before` snapshot cannot confirm a timed-out send.
+pub fn command_completed(
+	sent: bool,
+	owner_enabled: bool,
+	before: Option<&[usize]>,
+	popups: impl IntoIterator<Item = ModalPopup>,
+) -> bool {
+	if sent {
+		return true;
+	}
+	let Some(before) = before else {
+		return false;
+	};
+	!owner_enabled
+		&& popups
+			.into_iter()
+			.any(|popup| popup.is_candidate(before) && popup.responsive)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn posted_input_holding_a_modifier_is_refused() {
+		let refused =
+			|keys: &[(KeyName, u8)]| posted_modifiers_dropped(keys.iter().copied()).is_some();
+		// ctrl+a, alt+f, a shift-click and the Windows key
+		assert!(refused(&[(KeyName::Ctrl, 0), (KeyName::Char('a'), 0)]));
+		assert!(refused(&[(KeyName::Alt, 0), (KeyName::Char('f'), 0)]));
+		assert!(refused(&[(KeyName::Shift, 0)]));
+		assert!(refused(&[(KeyName::Meta, 0)]));
+		// "?" on US, which the layout types with Shift, and "@" on German, with
+		// AltGr (Ctrl+Alt). `parse_key` lowercases letters, so "A" arrives as "a"
+		// and posts plainly.
+		assert!(refused(&[(KeyName::Char('?'), 1)]));
+		assert!(refused(&[(KeyName::Char('@'), 6)]));
+		// Unmodified keys and clicks still post.
+		assert!(!refused(&[(KeyName::Char('a'), 0)]));
+		assert!(!refused(&[(KeyName::Enter, 0), (KeyName::Tab, 0)]));
+		assert!(!refused(&[]));
+	}
 
 	#[test]
 	fn recognizes_real_classes_and_rejects_lookalikes() {
@@ -281,6 +382,17 @@ mod tests {
 		assert_matrix(background("HwndWrapperApp;;abc]"), [false; 6]);
 		assert_matrix(background("TkTopLevelish"), [false; 6]);
 		assert_matrix(background("XSALFRAME"), [false; 6]);
+	}
+
+	#[test]
+	fn drags_follow_their_moves_except_on_tk_which_never_sees_the_press() {
+		let drag = |target| would_be_silently_dropped(target, EventKind::MouseDrag).is_some();
+		// Tk accepts posted moves but tracks the held button through GetKeyState.
+		assert!(drag(background("TkTopLevel.1")));
+		// GTK buttons ignore posted clicks, yet a GTK canvas paints a posted
+		// drag.
+		assert!(!drag(background("gdkSurfaceToplevel")));
+		assert!(drag(background("HwndWrapper[App;;abc]")));
 	}
 
 	#[test]
@@ -363,5 +475,54 @@ mod tests {
 		assert_eq!(units("\r\r\n\n"), [Enter, Enter, Enter]);
 		assert_eq!(units("\n\r"), [Enter, Enter]);
 		assert_eq!(units("é\t"), [Char('é'), Char('\t')]);
+	}
+
+	const DIALOG: ModalPopup = ModalPopup {
+		id:              2,
+		owned_by_target: true,
+		same_thread:     true,
+		enabled:         true,
+		visible:         true,
+		responsive:      true,
+	};
+
+	#[test]
+	fn modal_command_timeout_is_confirmed_by_new_responsive_dialog() {
+		let popups = [ModalPopup { id: 1, ..DIALOG }, DIALOG];
+		assert!(command_completed(false, false, Some(&[1]), popups));
+	}
+
+	#[test]
+	fn timeout_without_new_modal_evidence_stays_unconfirmed() {
+		assert!(!command_completed(false, false, Some(&[1]), []));
+		assert!(!command_completed(false, false, None, [DIALOG]));
+		assert!(!command_completed(false, true, Some(&[1]), [DIALOG]));
+		assert!(!command_completed(false, false, Some(&[1, 2]), [DIALOG]));
+		for popup in [
+			ModalPopup { owned_by_target: false, ..DIALOG },
+			ModalPopup { same_thread: false, ..DIALOG },
+			ModalPopup { enabled: false, ..DIALOG },
+			ModalPopup { visible: false, ..DIALOG },
+			ModalPopup { responsive: false, ..DIALOG },
+		] {
+			assert!(!command_completed(false, false, Some(&[1]), [popup]));
+		}
+	}
+
+	#[test]
+	fn modal_confirmation_stops_probing_after_first_responsive_dialog() {
+		let mut probes = 0;
+		let popups = [DIALOG, ModalPopup { id: 3, ..DIALOG }]
+			.into_iter()
+			.inspect(|_| {
+				probes += 1;
+			});
+		assert!(command_completed(false, false, Some(&[1]), popups));
+		assert_eq!(probes, 1);
+	}
+
+	#[test]
+	fn completed_command_needs_no_dialog() {
+		assert!(command_completed(true, true, None, []));
 	}
 }

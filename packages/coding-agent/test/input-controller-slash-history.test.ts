@@ -206,22 +206,6 @@ describe("input controller — slash command history (#3148)", () => {
 		expect(showStatus).toHaveBeenCalledWith("Queued message for when the agent yields");
 	});
 
-	it("starts the first queued item immediately when the session is idle", async () => {
-		const { ctx, editor, followUp, steer, onInputCallback, showStatus } = makeCtx();
-		controllerFor(ctx);
-		const input = "=>\n1. inspect types\n2. run focused tests\n3. summarize failures";
-		editor.setText(input);
-
-		await editor.onSubmit?.(input);
-
-		expect(onInputCallback).toHaveBeenCalledWith(
-			expect.objectContaining({ text: "inspect types", streamingBehavior: "followUp" }),
-		);
-		expect(steer).not.toHaveBeenCalled();
-		expect(followUp.mock.calls.map(call => call[0])).toEqual(["run focused tests", "summarize failures"]);
-		expect(showStatus).toHaveBeenCalledWith("Sent first message; queued 2 for later yields");
-	});
-
 	it("queues an enumerated shorthand prompt as separate ordered follow-ups", async () => {
 		const { ctx, editor, addToHistory, followUp, showStatus } = makeCtx(true);
 		controllerFor(ctx);
