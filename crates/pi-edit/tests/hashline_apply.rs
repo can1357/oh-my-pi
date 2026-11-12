@@ -216,6 +216,58 @@ fn drops_duplicated_leading_and_trailing_boundary_lines_around_a_range_replaceme
 	);
 }
 
+/// A body whose echo drop would leave its range unchanged means the literal
+/// edit, a new copy of the neighbour: dropping it turned the edit into a no-op
+/// reported as a repair. Covers each side of the echo, an annotation echo on a
+/// one-row range, and a literal result that no longer parses, which the syntax
+/// repair must not turn back into the no-op.
+#[test]
+fn keeps_a_boundary_repeat_when_dropping_it_would_be_a_no_op() {
+	// (path, file, start, end, body, expected)
+	type Case<'a> = (&'a str, &'a str, u32, u32, &'a [&'a str], &'a str);
+	let text = "alpha\nbeta\ngamma\nomega";
+	let cases: [Case; 5] = [
+		("x.txt", text, 2, 3, &["alpha", "beta", "gamma"], "alpha\nalpha\nbeta\ngamma\nomega"),
+		("x.txt", text, 2, 3, &["beta", "gamma", "omega"], "alpha\nbeta\ngamma\nomega\nomega"),
+		(
+			"x.txt",
+			text,
+			2,
+			3,
+			&["alpha", "beta", "gamma", "omega"],
+			"alpha\nalpha\nbeta\ngamma\nomega\nomega",
+		),
+		(
+			"t.rs",
+			"#[test]\nfn a() {}\n",
+			2,
+			2,
+			&["#[test]", "fn a() {}"],
+			"#[test]\n#[test]\nfn a() {}\n",
+		),
+		(
+			"f.ts",
+			"function f() {\n  a();\n  b();\n}\n",
+			2,
+			3,
+			&["function f() {", "  a();", "  b();"],
+			"function f() {\nfunction f() {\n  a();\n  b();\n}\n",
+		),
+	];
+	for (path, file, start, end, body, expected) in cases {
+		let result = apply(file, &replacement(start, end, body, 1), Some(path));
+		assert_eq!(result.text, expected, "{path}: {body:?}");
+		assert!(
+			result
+				.warnings
+				.iter()
+				.all(|warning| !warning.contains("Auto-repaired")),
+			"{path}: {:?}",
+			result.warnings
+		);
+	}
+}
+
 #[test]
 fn rejects_a_leading_keeper_echo_when_the_payload_cannot_fill_the_widened_range() {
 	let file = "{\n    auto* handle = payloadFor<PyThreadHandle>(self);\n    if (!handle)\n        \
