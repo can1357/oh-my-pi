@@ -44,6 +44,16 @@ const RegisterOptions = type({
 	}).array(),
 });
 
+/** `InitializeParams` that ask the server to hand watching to the client. */
+const AdvertisesWatching = type({
+	capabilities: { workspace: { didChangeWatchedFiles: { dynamicRegistration: "true" } } },
+});
+
+/** Whether `initialize` params advertise `workspace/didChangeWatchedFiles` dynamic registration. */
+export function advertisesWatchedFiles(initializeParams: unknown): boolean {
+	return !(AdvertisesWatching(initializeParams) instanceof type.errors);
+}
+
 /** One watcher of a registration: a glob relative to `base`. */
 interface WatchSpec {
 	base: string;
@@ -71,12 +81,27 @@ interface PendingChange {
 }
 
 interface Watch {
+	/** Set by `close`; callbacks the watcher had already queued are ignored. */
+	closed: boolean;
 	close(): void;
 	/** When the last change from this watch was seen; lost changes are looked for since then. */
 	seenAt: number;
 	/** Earliest change time still to rescan for; set while losses wait behind a running rescan. */
 	lostSince?: number;
 	rescanning: boolean;
+}
+
+function newWatch(stop: () => void): Watch {
+	const watch: Watch = {
+		closed: false,
+		close: () => {
+			watch.closed = true;
+			stop();
+		},
+		seenAt: Date.now(),
+		rescanning: false,
+	};
+	return watch;
 }
 
 function foldCase(p: string): string {
@@ -115,12 +140,36 @@ function compileWatchers(registerOptions: unknown, roots: readonly string[]): Wa
 	});
 }
 
-function isDirectory(target: string): boolean {
+async function isDirectory(target: string): Promise<boolean> {
 	try {
-		return fs.statSync(target).isDirectory();
+		return (await fs.promises.stat(target)).isDirectory();
 	} catch {
 		return false;
 	}
+}
+
+/** `isDirectory` that stats each path once. */
+function cachedIsDirectory(): (target: string) => Promise<boolean> {
+	const known = new Map<string, Promise<boolean>>();
+	return target => {
+		let result = known.get(target);
+		if (!result) {
+			result = isDirectory(target);
+			known.set(target, result);
+		}
+		return result;
+	};
+}
+
+/** `base` if it is a directory, else its nearest ancestor that is. */
+async function nearestDirectory(base: string, isDir: (target: string) => Promise<boolean>): Promise<string> {
+	let dir = base;
+	while (!(await isDir(dir))) {
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return dir;
 }
 
 /**
@@ -143,6 +192,11 @@ export class WatchedFilesForwarder {
 	#flushDeadline?: NodeJS.Timeout;
 	#resyncTimer?: NodeJS.Timeout;
 	#closed = false;
+	/** The running sync passes; a request during them runs one more pass before it settles. */
+	#syncRun?: Promise<void>;
+	#syncAgain = false;
+	/** Spec bases that did not exist at the last sync pass. */
+	#missing = new Set<string>();
 	/** Batches go out one after another, so a later batch's disk state never precedes an earlier one's. */
 	#delivery: Promise<void> = Promise.resolve();
 
@@ -151,25 +205,25 @@ export class WatchedFilesForwarder {
 		this.#send = options.send;
 	}
 
-	/** Start watching for one `workspace/didChangeWatchedFiles` registration. */
-	register(id: string, registerOptions: unknown): void {
-		if (this.#closed) return;
+	/** Start watching for one `workspace/didChangeWatchedFiles` registration; settles once watched. */
+	register(id: string, registerOptions: unknown): Promise<void> {
+		if (this.#closed) return Promise.resolve();
 		this.#registrations.set(id, registerOptions);
-		this.refresh();
+		return this.refresh();
 	}
 
 	/** Stop watching for a registration; unknown ids (other capabilities) are ignored. */
-	unregister(id: string): void {
-		if (this.#closed || !this.#registrations.delete(id)) return;
-		this.refresh();
+	unregister(id: string): Promise<void> {
+		if (this.#closed || !this.#registrations.delete(id)) return Promise.resolve();
+		return this.refresh();
 	}
 
-	/** Recompile every registration, e.g. after the workspace folders changed. */
-	refresh(): void {
-		if (this.#closed) return;
+	/** Recompile every registration, e.g. after the workspace folders changed; settles once watched. */
+	refresh(): Promise<void> {
+		if (this.#closed) return Promise.resolve();
 		const roots = this.#roots();
 		this.#specs = [...this.#registrations.values()].flatMap(options => compileWatchers(options, roots));
-		this.#sync();
+		return this.#sync();
 	}
 
 	/** Stop every watcher and drop changes not yet sent. */
@@ -186,24 +240,54 @@ export class WatchedFilesForwarder {
 	}
 
 	/**
-	 * Bring the open watchers in line with the specs as the tree exists now. An
-	 * existing base is watched itself, recursively when its glob is deep; a
-	 * missing one through its nearest existing ancestor, non-recursively, until
-	 * it appears (a recursive watch there could cover a whole drive).
+	 * Bring the watchers in line with the specs, one pass at a time (stats are
+	 * asynchronous: on network drives each is a round trip). A request during a
+	 * pass runs one more; the promise settles when no pass is left.
 	 */
-	#sync(): void {
+	#sync(): Promise<void> {
+		if (this.#syncRun) {
+			this.#syncAgain = true;
+			return this.#syncRun;
+		}
+		this.#syncRun = (async () => {
+			do {
+				this.#syncAgain = false;
+				await this.#syncOnce().catch(error => {
+					logger.debug("LSP watched-files sync failed", { error: String(error) });
+				});
+			} while (this.#syncAgain && !this.#closed);
+			this.#syncRun = undefined;
+		})();
+		return this.#syncRun;
+	}
+
+	/**
+	 * Watch the specs as the tree exists now. An existing base is watched itself,
+	 * recursively when its glob is deep; a missing one through its nearest
+	 * existing ancestor, non-recursively, until it appears (a recursive watch
+	 * there could cover a whole drive). Each path is stat'ed once per pass.
+	 */
+	async #syncOnce(): Promise<void> {
+		const specs = this.#specs;
+		const isDir = cachedIsDirectory();
+		const resolved = await Promise.all(
+			specs.map(async ({ base, deep }) => ({ base, deep, dir: await nearestDirectory(base, isDir) })),
+		);
+		if (specs !== this.#specs) this.#syncAgain = true;
+		if (this.#closed || specs !== this.#specs) return;
+
 		const recursive = new Set<string>();
 		const flat = new Set<string>();
-		for (const { base, deep } of this.#specs) {
-			let dir = base;
-			while (!isDirectory(dir)) {
-				const parent = path.dirname(dir);
-				if (parent === dir) break;
-				dir = parent;
-			}
+		/** Missing base → the ancestor it waits on. */
+		const missing = new Map<string, string>();
+		const appeared = new Map<string, boolean>();
+		for (const { base, deep, dir } of resolved) {
+			if (dir !== base) missing.set(base, dir);
+			else if (this.#missing.has(base)) appeared.set(base, deep || appeared.get(base) === true);
 			if (dir === base && deep) recursive.add(dir);
 			else flat.add(dir);
 		}
+		this.#missing = new Set(missing.keys());
 		// Shortest first, so a directory listed twice (in different case) keeps one watch.
 		const kept: string[] = [];
 		const covered = (dir: string) => kept.some(outer => relativeWithin(outer, dir) !== undefined);
@@ -224,16 +308,34 @@ export class WatchedFilesForwarder {
 		for (const [key, target] of wanted) {
 			if (!this.#watches.has(key) && !this.#failed.has(key)) this.#open(key, target.dir, target.recursive);
 		}
+		// A base that appeared since the last pass was watched only through an
+		// ancestor until now; report what was created in it meanwhile.
+		for (const [base, deep] of appeared) {
+			void this.#rescan(base, deep, 0).catch(error => {
+				logger.debug("LSP watched-files rescan failed", { dir: base, error: String(error) });
+			});
+		}
+		// A directory created between this pass's stats and the waiting watch
+		// opening raised no event; look once more now that the watch is up.
+		const recheck = cachedIsDirectory();
+		const moved = await Promise.all(
+			[...missing].map(async ([base, dir]) => (await nearestDirectory(base, recheck)) !== dir),
+		);
+		if (moved.includes(true)) this.#syncAgain = true;
 	}
 
 	#open(key: string, dir: string, recursive: boolean): void {
 		const fail = (error: unknown) => {
+			logger.warn("LSP watched-files watcher failed; changes below it go unreported", { dir, error: String(error) });
 			// A watch that fails on a directory that still exists stays off while it
 			// is wanted, so a failing watch cannot become a re-arm loop; one whose
 			// directory went away is resolved again by the resync.
-			if (isDirectory(dir)) this.#failed.add(key);
-			logger.warn("LSP watched-files watcher failed; changes below it go unreported", { dir, error: String(error) });
-			this.#scheduleResync();
+			this.#failed.add(key);
+			void isDirectory(dir).then(exists => {
+				if (this.#closed) return;
+				if (!exists) this.#failed.delete(key);
+				this.#scheduleResync();
+			});
 		};
 		const ended = (watch: Watch, error: unknown) => {
 			watch.close();
@@ -252,9 +354,9 @@ export class WatchedFilesForwarder {
 	}
 
 	#openNative(dir: string, recursive: boolean, ended: (error: unknown) => void): Watch {
-		const watch: Watch = { close: () => watcher.close(), seenAt: Date.now(), rescanning: false };
+		const watch = newWatch(() => watcher.close());
 		const watcher = DirectoryWatcher.start(dir, recursive, (error: Error | null, batch: DirectoryChanges) => {
-			if (this.#closed) return;
+			if (this.#closed || watch.closed) return;
 			if (error) return ended(error);
 			if (batch.overflow) return this.#lost(watch, dir, recursive);
 			watch.seenAt = Date.now();
@@ -275,7 +377,7 @@ export class WatchedFilesForwarder {
 
 	#openFsWatch(dir: string, recursive: boolean, ended: (error: unknown) => void): Watch {
 		const watcher = fs.watch(dir, { recursive, persistent: false }, (eventType, filename) => {
-			if (this.#closed) return;
+			if (this.#closed || watch.closed) return;
 			// A missing name means the watcher lost changes.
 			if (filename === null) return this.#lost(watch, dir, recursive);
 			watch.seenAt = Date.now();
@@ -284,7 +386,7 @@ export class WatchedFilesForwarder {
 			this.#scheduleResync();
 			this.#record(target, undefined, undefined);
 		});
-		const watch: Watch = { close: () => watcher.close(), seenAt: Date.now(), rescanning: false };
+		const watch = newWatch(() => watcher.close());
 		watcher.on("error", ended);
 		return watch;
 	}
@@ -333,7 +435,7 @@ export class WatchedFilesForwarder {
 	#scheduleResync(): void {
 		this.#resyncTimer ??= setTimeout(() => {
 			this.#resyncTimer = undefined;
-			if (!this.#closed) this.#sync();
+			if (!this.#closed) void this.#sync();
 		}, RESYNC_MS);
 	}
 

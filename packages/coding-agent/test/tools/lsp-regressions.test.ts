@@ -4564,10 +4564,10 @@ describe("lsp regressions", () => {
 			}
 		});
 
-		it("watches the files a server registers and reports changes made outside omp", async () => {
+		it("watches the files a watchFiles server registers and reports changes made outside omp", async () => {
 			const { tempDir, sessionRoot } = await makeCheckouts("@omp-lsp-watched-files-");
 			try {
-				const { server } = useServer({});
+				const { server } = useServer({}, undefined, { watchFiles: true });
 				await references(new LspTool(makeLspSession(sessionRoot)), path.join(sessionRoot, "src", "target.py"));
 				const initialize = await server.waitFor(message => message.method === "initialize");
 				expect(initialize.params).toMatchObject({
@@ -4591,6 +4591,24 @@ describe("lsp regressions", () => {
 					},
 				});
 				await server.waitFor(message => message.id === 9101 && message.method === undefined);
+
+				// The watch is armed shortly after the registration is acknowledged; wait until a
+				// probe file is reported, then check the exact notification for a fresh file.
+				const deadline = Date.now() + 5_000;
+				for (let attempt = 0; ; attempt++) {
+					const probe = path.join(sessionRoot, "src", `probe-${attempt}.py`);
+					await Bun.write(probe, "");
+					const seen = await server
+						.waitFor(
+							message =>
+								message.method === "workspace/didChangeWatchedFiles" &&
+								JSON.stringify(message.params).includes(fileToUri(probe)),
+							300,
+						)
+						.catch(() => undefined);
+					if (seen) break;
+					if (Date.now() > deadline) throw new Error("the watch never reported a probe file");
+				}
 
 				// Written behind the client's back, as a shell command or another editor would.
 				const created = path.join(sessionRoot, "src", "created.py");

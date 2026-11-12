@@ -79,7 +79,8 @@ impl DirectoryWatcher {
 		}
 	}
 
-	/// Stop watching; no callback runs after this returns.
+	/// Stop watching and join the reader thread. Batches or an error it queued
+	/// before stopping may still reach the callback afterwards; ignore them.
 	#[napi]
 	#[allow(clippy::missing_const_for_fn, reason = "napi macro is incompatible with const fn")]
 	pub fn close(&mut self) {

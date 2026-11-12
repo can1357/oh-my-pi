@@ -360,6 +360,11 @@ export interface ServerConfig {
 	 * configured external formatter wins for file types a type-checker also claims.
 	 */
 	isLinter?: boolean;
+	/**
+	 * Advertise `workspace/didChangeWatchedFiles` dynamic registration, so the
+	 * server hands file watching to omp instead of running its own watcher.
+	 */
+	watchFiles?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */
 	resolvedCommand?: string;
 	/**

@@ -297,9 +297,7 @@ describe("LspMuxServer", () => {
 		expect((await state(second.client)).workspaceFolders).toEqual([]);
 	}, 10_000);
 
-	it("watches the files a shared server registers and reports their changes to it", async () => {
-		const { client } = await link();
-		await initialize(client);
+	async function registerTsWatcher(client: MuxTestClient): Promise<void> {
 		await client.request("test/serverRequest", {
 			method: "client/registerCapability",
 			params: {
@@ -312,18 +310,39 @@ describe("LspMuxServer", () => {
 				],
 			},
 		});
+	}
 
-		const created = path.join(tmpDir, "created.ts");
-		await Bun.write(created, "export {};\n");
-		const expected = { uri: fileToUri(created), type: FileChangeType.Created };
-		// Filesystem events arrive on the OS's schedule; poll the server's record until they do.
+	it("watches the files a shared server registers when the client asked it to hand watching over", async () => {
+		const { client } = await link();
+		await client.request("initialize", {
+			...initializeParams(),
+			capabilities: { workspace: { didChangeWatchedFiles: { dynamicRegistration: true } } },
+		});
+		client.notify("initialized", {});
+		await registerTsWatcher(client);
+
+		// The watch opens shortly after the registration; write new files until one is reported.
+		const written = new Set<string>();
 		const deadline = Date.now() + 5_000;
-		let changes = (await state(client)).watchedFileChanges;
-		while (!changes.some(change => change.uri === expected.uri && change.type === expected.type)) {
-			if (Date.now() > deadline) throw new Error(`no ${JSON.stringify(expected)} among ${JSON.stringify(changes)}`);
-			await Bun.sleep(50);
-			changes = (await state(client)).watchedFileChanges;
+		for (let attempt = 0; ; attempt++) {
+			const created = path.join(tmpDir, `created-${attempt}.ts`);
+			await Bun.write(created, "export {};\n");
+			written.add(fileToUri(created));
+			await Bun.sleep(200);
+			const { watchedFileChanges } = await state(client);
+			if (watchedFileChanges.some(change => change.type === FileChangeType.Created && written.has(change.uri)))
+				break;
+			if (Date.now() > deadline) throw new Error(`no Created among ${JSON.stringify(watchedFileChanges)}`);
 		}
-		expect(changes).toContainEqual(expected);
+	}, 10_000);
+
+	it("leaves watching to a shared server whose client did not ask it to hand watching over", async () => {
+		const { client } = await link();
+		await initialize(client);
+		await registerTsWatcher(client);
+
+		await Bun.write(path.join(tmpDir, "created.ts"), "export {};\n");
+		await Bun.sleep(600);
+		expect((await state(client)).watchedFileChanges).toEqual([]);
 	}, 10_000);
 });

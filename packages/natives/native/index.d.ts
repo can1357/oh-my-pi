@@ -196,7 +196,10 @@ export declare class DirectoryWatcher {
    * be opened or watched; on platforms other than Windows, always.
    */
   static start(dir: string, recursive: boolean, callback: (err: null | Error, changes: DirectoryChanges) => void): DirectoryWatcher
-  /** Stop watching; no callback runs after this returns. */
+  /**
+   * Stop watching and join the reader thread. Batches or an error it queued
+   * before stopping may still reach the callback afterwards; ignore them.
+   */
   close(): void
 }
 

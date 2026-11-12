@@ -359,13 +359,6 @@ const CLIENT_CAPABILITIES = {
 		},
 		configuration: true,
 		workspaceFolders: true,
-		// The client watches files for the server (see watched-files.ts); a server's
-		// own watcher can fail in ways the client cannot contain (tsgo re-arms in a
-		// tight loop on SMB drives).
-		didChangeWatchedFiles: {
-			dynamicRegistration: true,
-			relativePatternSupport: true,
-		},
 		symbol: {
 			dynamicRegistration: false,
 			symbolKind: {
@@ -381,6 +374,20 @@ const CLIENT_CAPABILITIES = {
 			willDelete: false,
 			didDelete: false,
 		},
+	},
+};
+
+/**
+ * Capabilities for servers configured with `watchFiles`: the client watches the
+ * files they register (see watched-files.ts) instead of their own watcher,
+ * which can fail in ways the client cannot contain (tsgo re-arms in a tight
+ * loop on SMB drives, and does not watch at all on Linux).
+ */
+const WATCHING_CLIENT_CAPABILITIES = {
+	...CLIENT_CAPABILITIES,
+	workspace: {
+		...CLIENT_CAPABILITIES.workspace,
+		didChangeWatchedFiles: { dynamicRegistration: true, relativePatternSupport: true },
 	},
 };
 
@@ -791,7 +798,7 @@ async function addWorkspaceFolders(
 		undoLoad();
 		throw err;
 	}
-	client.watchedFiles?.refresh();
+	void client.watchedFiles?.refresh();
 	rustAnalyzerReadyClients.delete(client);
 }
 
@@ -963,11 +970,12 @@ interface DynamicCapabilityParams {
 }
 
 /**
- * The watcher of a server this client spawned. A mux-shared server's watcher
- * belongs to the mux, which outlives and is shared by every attached client.
+ * The watcher of a server this client spawned and asked to hand watching over
+ * (`watchFiles`). A mux-shared server's watcher belongs to the mux, which
+ * outlives and is shared by every attached client.
  */
 function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
-	if (client.proc.sharedMux) return undefined;
+	if (client.proc.sharedMux || !client.config.watchFiles) return undefined;
 	client.watchedFiles ??= new WatchedFilesForwarder({
 		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
 		send: changes =>
@@ -994,7 +1002,7 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 			if (typeof registration.id === "string" && typeof registration.method === "string") {
 				registrations.set(registration.id, registration.method);
 				if (registration.method === WATCHED_FILES_METHOD) {
-					ownWatchedFiles(client)?.register(registration.id, registration.registerOptions);
+					void ownWatchedFiles(client)?.register(registration.id, registration.registerOptions);
 				}
 			}
 		}
@@ -1008,7 +1016,7 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 	for (const registration of unregistrations) {
 		if (typeof registration.id === "string") {
 			registrations.delete(registration.id);
-			client.watchedFiles?.unregister(registration.id);
+			void client.watchedFiles?.unregister(registration.id);
 		}
 	}
 }
@@ -1524,7 +1532,7 @@ export async function getOrCreateClient(
 					processId: process.pid,
 					rootUri: fileToUri(cwd),
 					rootPath: cwd,
-					capabilities: CLIENT_CAPABILITIES,
+					capabilities: client.config.watchFiles ? WATCHING_CLIENT_CAPABILITIES : CLIENT_CAPABILITIES,
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
