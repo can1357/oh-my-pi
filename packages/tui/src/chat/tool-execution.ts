@@ -461,6 +461,7 @@ export class ToolExecutionComponent extends Container {
 	// Memoized #getTextOutput(), keyed by every input it reads: the result
 	// (versioned by #resultVersion), #showImages, and the image protocol.
 	#textOutput = "";
+	#textOutputTrimmed: string | undefined;
 	#textOutputKey: string | undefined;
 	#tool?: AgentTool;
 	#renderer?: ToolRenderer;
@@ -551,7 +552,7 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
-		shellPresentation?: ShellVizPresentation;
+		readonly shellPresentation?: ShellVizPresentation;
 		shellTrace?: ShellTrace;
 		shellReplayEpoch?: number;
 		/** Live: read at render time, so a ticking spinner advances it. */
@@ -575,6 +576,10 @@ export class ToolExecutionComponent extends Container {
 		super();
 		Object.defineProperty(this.#renderState, "elapsedMs", {
 			get: () => this.#elapsedMs(this.#nativeStatus()),
+			enumerable: true,
+		});
+		Object.defineProperty(this.#renderState, "shellPresentation", {
+			get: () => (this.#toolName === "bash" ? this.#getShellPresentation() : undefined),
 			enumerable: true,
 		});
 		ensureThemeSync();
@@ -1637,6 +1642,18 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	override releaseRenderCaches(): void {
+		super.releaseRenderCaches();
+		this.#textOutput = "";
+		this.#textOutputTrimmed = undefined;
+		this.#textOutputKey = undefined;
+		this.#shellPresentation = undefined;
+		this.#shellPresentationKey = undefined;
+		this.#shellPendingTrace = undefined;
+		this.#shellPendingScript = undefined;
+		this.#lateDiagnosticsBlock?.block.releaseRenderCaches();
+	}
+
 	#updateDisplay(): void {
 		// `TERMINAL.imageProtocol` is resolved by an async capability probe during
 		// TUI startup, so a result rendered before it lands must re-shape once it
@@ -2186,22 +2203,25 @@ export class ToolExecutionComponent extends Container {
 			context.rawDetails = this.#rawDetails;
 		}
 		if (this.#toolName === "bash") {
-			this.#renderState.shellPresentation = this.#getShellPresentation();
 			this.#renderState.shellTrace = this.#shellTrace;
 			this.#renderState.shellReplayEpoch = this.#shellReplayEpoch;
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.
 			if (this.#result) {
 				// Pass raw output and expanded state - renderer handles width-aware truncation
-				const output = this.#getTextOutput().trimEnd();
-				context.output = output;
+				Object.defineProperty(context, "output", {
+					get: () => this.#getTrimmedTextOutput(),
+					enumerable: true,
+				});
 			}
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
-			const output = this.#getTextOutput().trimEnd();
-			context.output = output;
+			Object.defineProperty(context, "output", {
+				get: () => this.#getTrimmedTextOutput(),
+				enumerable: true,
+			});
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
@@ -2277,7 +2297,14 @@ export class ToolExecutionComponent extends Container {
 
 		this.#textOutputKey = key;
 		this.#textOutput = output;
+		this.#textOutputTrimmed = undefined;
 		return output;
+	}
+
+	#getTrimmedTextOutput(): string {
+		const output = this.#getTextOutput();
+		this.#textOutputTrimmed ??= output.trimEnd();
+		return this.#textOutputTrimmed;
 	}
 
 	/** Re-tint (only when the tint changed) and reformat the generic #contentText card. */

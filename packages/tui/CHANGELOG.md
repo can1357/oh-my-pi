@@ -15,6 +15,10 @@
 - Native history search now exposes forward/backward scope cycling and refreshes its scope title, query highlights and rows even when sources reuse result arrays ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed rapid successive Escape keys on Windows failing to reach interrupt and backtracking handlers when the console host relays them as text records ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- GitHub Actions watch cards show current-step progress and expand with Ctrl+O to reveal ordered step states and durations in ANSI and native Tern views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
@@ -22,6 +26,10 @@
 - Added the Sofya label for `sofya` web search results ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+
+### Changed
+
+- Retired tool cards release their cached sanitized output strings, shell presentations, and width-formatted card rows on transcript commit while regenerating them on demand during resize replay ([#18820](https://github.com/can1357/oh-my-pi/pull/18820) by [@iliaal](https://github.com/iliaal))
 
 ### Fixed
 

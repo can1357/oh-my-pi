@@ -7,7 +7,13 @@
 - Added `history.scope` (`session` | `cwd` | `repo` | `global`, default `global`) to scope what the `Up` arrow recalls to a conversation, a folder or a repository, and `history.searchScope` (default `global`) for what `Ctrl+R` opens on, with `Tab`/`Shift+Tab` changing scope inside the history panel ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Prompt history scope now follows the session, not just `/move`: `/wt` and resuming a session recorded in another directory re-point the workspace, so `cwd` — and `repo` across unrelated repositories — can read empty right after the switch. Nothing is lost, only out of scope ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Added `HistoryStorage.getRecentOrThrow()` for callers that need to retry read failures; scope-bound editor history uses it without changing the editor's `getRecent()` interface ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Added the `systemPromptTemplates` setting: map model-selector substrings to Handlebars template files (start from the bundled `system-prompt.md`) to replace the system prompt for matching models; the prompt re-renders when you switch models, and a missing, empty, or malformed template falls back to the bundled prompt with a warning ([#17835](https://github.com/can1357/oh-my-pi/pull/17835) by [@DeprecatedLuke](https://github.com/DeprecatedLuke))
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+- GitHub Actions watches now show per-step progress, states, and durations, with Ctrl+O expansion and native Tern Surface Protocol views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Changed
+
+- `edit.modelVariants` now picks the longest matching model pattern instead of the first, so a specific key like `openai/gpt-5` wins over `gpt` whatever the config order ([#17835](https://github.com/can1357/oh-my-pi/pull/17835) by [@DeprecatedLuke](https://github.com/DeprecatedLuke))
 
 ### Changed
 
@@ -35,6 +41,9 @@
 - Fixed queued prompts and attachments disappearing when compaction or a session change cancels credential lookup beside a newer draft; cancellation recovery no longer clears a newer submission's UI ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed ovnfs searches ignoring cancellation while waiting for the daemon handshake, without cancelling other callers sharing the connection ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
+- An extension provider with an `oauth.modifyModels` hook no longer loads the whole model catalog at registration while that provider has no login ([#18821](https://github.com/can1357/oh-my-pi/pull/18821) by [@iliaal](https://github.com/iliaal))
+- Resuming an old session (`--resume`, `/resume`) no longer reads every later session's transcript in its directory to look for a continuation ([#18952](https://github.com/can1357/oh-my-pi/pull/18952) by [@iliaal](https://github.com/iliaal))
+- Saving each session entry no longer blocks the UI for several milliseconds on Windows, where on-access scanning delayed the two re-opens of the session file that every write performed ([#18819](https://github.com/can1357/oh-my-pi/pull/18819))
 
 ## [18.18.9] - 2026-11-11
 
