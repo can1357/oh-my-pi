@@ -35,6 +35,7 @@ import taskCoordinationAdvisoryTemplate from "../prompts/tools/task-coordination
 import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" with { type: "text" };
 import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
+import taskInheritContextDroppedTemplate from "../prompts/tools/task-inherit-context-dropped.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { hasWaitTool } from "../tools/wait";
@@ -964,18 +965,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/**
 	 * The parent's conversation tail per item, captured once when the call dispatches (before any
 	 * concurrency wait or job start, so a queued child sees the context its brief was written in).
-	 * Only flagged items whose agent does not opt out (`inheritContext: false`) get it.
+	 * Only flagged items whose agent does not opt out (`inheritContext: false`) get it; `dropped` lists
+	 * the indices of those that wanted it but got none (no conversation text, or the capture failed closed).
 	 */
 	#captureInheritedContexts(
 		spawns: readonly TaskParams[],
 		policies: readonly { agent: { inheritContext?: boolean } }[],
-	): (InheritedContext | undefined)[] {
+	): { contexts: (InheritedContext | undefined)[]; dropped: number[] } {
 		const wants = spawns.map(
 			(spawn, index) => this.#wantsInheritedContext(spawn) && policies[index]!.agent.inheritContext !== false,
 		);
-		if (!wants.includes(true)) return spawns.map(() => undefined);
+		if (!wants.includes(true)) return { contexts: spawns.map(() => undefined), dropped: [] };
 		const context = buildInheritedContext(this.session.getContextMessages?.() ?? [], this.session.providerSecrets);
-		return wants.map(want => (want ? context : undefined));
+		return {
+			contexts: wants.map(want => (want ? context : undefined)),
+			dropped: context ? [] : wants.flatMap((want, index) => (want ? [index] : [])),
+		};
 	}
 
 	#seanceSchemaFields() {
@@ -1204,7 +1209,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
-		const inheritedContexts = this.#captureInheritedContexts(normalizedSpawnParams, policies);
+		const { contexts: inheritedContexts, dropped: droppedContexts } = this.#captureInheritedContexts(
+			normalizedSpawnParams,
+			policies,
+		);
+		// The parent was told a flagged child starts with its conversation; say so when one did not.
+		const inheritanceNote =
+			droppedContexts.length > 0
+				? prompt
+						.render(taskInheritContextDroppedTemplate, {
+							names: `Task ${droppedContexts.map(index => spawnItems[index]!.name?.trim() || `#${index + 1}`).join(", ")}`,
+							plural: droppedContexts.length > 1,
+						})
+						.trim()
+				: undefined;
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -1236,19 +1254,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (asyncEnabled && !this.session.asyncJobManager) {
 				logger.warn("task: no AsyncJobManager registered; falling back to sync execution");
 			}
-			const advisory = this.session.suppressSpawnAdvisory
-				? undefined
-				: composeSpawnAdvisory({
-						agents: resolvedAgents,
-						items: asyncItems,
-						depthCapacity,
-						ircEnabled,
-						willRunAsync: false,
-						scoutAvailable: isScoutSpawnable(
-							cfgTaskDisabledAgents.get(this.session.settings),
-							this.session.getSessionSpawns?.() ?? "*",
-						),
-					});
+			const advisory =
+				[
+					inheritanceNote,
+					this.session.suppressSpawnAdvisory
+						? undefined
+						: composeSpawnAdvisory({
+								agents: resolvedAgents,
+								items: asyncItems,
+								depthCapacity,
+								ircEnabled,
+								willRunAsync: false,
+								scoutAvailable: isScoutSpawnable(
+									cfgTaskDisabledAgents.get(this.session.settings),
+									this.session.getSessionSpawns?.() ?? "*",
+								),
+							}),
+				]
+					.filter(Boolean)
+					.join("\n\n") || undefined;
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
@@ -1278,19 +1302,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Coordination only makes sense for spawns that keep running after this
 		// call returns (the async subset). Blocking items have already completed
 		// by then, so a "coordinate while they run" hint would misfire.
-		const advisory = this.session.suppressSpawnAdvisory
-			? undefined
-			: composeSpawnAdvisory({
-					agents: resolvedAgents,
-					items: asyncItems,
-					depthCapacity,
-					ircEnabled,
-					willRunAsync: asyncItems.length > 0,
-					scoutAvailable: isScoutSpawnable(
-						cfgTaskDisabledAgents.get(this.session.settings),
-						this.session.getSessionSpawns?.() ?? "*",
-					),
-				});
+		const advisory =
+			[
+				inheritanceNote,
+				this.session.suppressSpawnAdvisory
+					? undefined
+					: composeSpawnAdvisory({
+							agents: resolvedAgents,
+							items: asyncItems,
+							depthCapacity,
+							ircEnabled,
+							willRunAsync: asyncItems.length > 0,
+							scoutAvailable: isScoutSpawnable(
+								cfgTaskDisabledAgents.get(this.session.settings),
+								this.session.getSessionSpawns?.() ?? "*",
+							),
+						}),
+			]
+				.filter(Boolean)
+				.join("\n\n") || undefined;
 		// Returns a fresh result (copied content array, copied text part) rather
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.

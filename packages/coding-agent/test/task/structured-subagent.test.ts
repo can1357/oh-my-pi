@@ -15,6 +15,7 @@ import {
 	setDisabledProviders,
 } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -687,6 +688,45 @@ describe("structured subagent primitive", () => {
 			} as TaskParams);
 			expect(dispatched).toHaveLength(1);
 			expect(dispatched[0]?.inheritedContext?.text.includes("PLUM-7731") ?? false).toBe(inherits);
+		},
+	);
+	it.each([false, true])(
+		"tells the parent which flagged children started without its conversation (async=%p)",
+		async asyncEnabled => {
+			mockDiscovery();
+			vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+			const manager = asyncEnabled ? new AsyncJobManager({ onJobComplete: () => {} }) : undefined;
+			const run = async (messages: unknown[]) => {
+				const parent = {
+					...session({
+						settings: Settings.isolated({ "task.inheritContext": true, "async.enabled": asyncEnabled }),
+					}),
+					asyncJobManager: manager,
+					// A fact, not a nudge: it must survive the advisory opt-out.
+					suppressSpawnAdvisory: true,
+					getContextMessages: () => messages,
+				} as unknown as ToolSession;
+				const tool = await TaskTool.create(parent);
+				const executed = await tool.execute("tc-inherit", {
+					context: "Shared background.",
+					tasks: [
+						{ agent: "worker", name: "Flagged", task: "Report.", solutionSpace: "one fix", inheritContext: true },
+						{ agent: "worker", name: "Plain", task: "Report.", solutionSpace: "one fix" },
+					],
+				} as TaskParams);
+				await Promise.all(["Flagged", "Plain"].map(id => manager?.getJob(id)?.promise));
+				return executed.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+			};
+			try {
+				const dropped = await run([]);
+				expect(dropped).toContain("Task Flagged started without your conversation");
+				expect(dropped).not.toContain("Plain started without");
+				expect(await run([{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }])).not.toContain(
+					"started without your conversation",
+				);
+			} finally {
+				await manager?.dispose({ timeoutMs: 1000 });
+			}
 		},
 	);
 	it("does not treat a spawn handle as the HUD description", async () => {
