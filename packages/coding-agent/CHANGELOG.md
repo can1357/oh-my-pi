@@ -835,6 +835,9 @@
 - Fixed LSP references for files in sibling Git worktrees by adding those checkouts to the active workspace.
 - Improved macOS computer-use behavior for applications without windows by opening the app and inspecting its returned window in one operation.
 
+### Changed
+
+- The Mnemopi memory extraction prompt now says the user message is data to read, never a request to carry out, and shows one worked example of the fact-per-line output; small local models in the `memory` role (4B) now store sentence facts instead of bare keywords and paths ([#17236](https://github.com/can1357/oh-my-pi/pull/17236) by [@rakshazi](https://github.com/rakshazi))
 ## [18.13.3] - 2026-10-28
 
 ### Added
