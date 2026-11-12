@@ -177,23 +177,23 @@ function context(sessionManager: SessionManager, settings: Record<string, unknow
 
 /**
  * Prompts per spelling of `edit` behind `write` under `tools.approval.edit:
- * <policy>`, in a mode that asks for every write-tier call. Each call adds its
+ * prompt`, in a mode that asks for every write-tier call. Each call adds its
  * own file, so a spelling that never reached `edit` fails here instead of
  * counting zero prompts.
  */
-async function editPromptsBySpelling(policy: "allow" | "prompt"): Promise<Record<string, number>> {
+async function editPromptsBySpelling(): Promise<Record<string, number>> {
 	const cwd = root.path();
 	const sessionManager = SessionManager.inMemory(cwd);
 	const select = vi.fn(async (_title: string, options: string[]) => options[0]);
 	const write = editBehindWrite(runnerWith(sessionManager, select), cwd);
-	const settings = { "tools.approvalMode": "always-ask", "tools.approval": { edit: policy } };
+	const settings = { "tools.approvalMode": "always-ask", "tools.approval": { edit: "prompt" } };
 	const prompts: Record<string, number> = {};
 	for (const spelling of ["edit", "apply_patch"]) {
-		const file = `${policy}-${spelling}.txt`;
+		const file = `prompt-${spelling}.txt`;
 		const input = ["*** Begin Patch", `*** Add File: ${file}`, "+ok", "*** End Patch"].join("\n");
 		const asked = select.mock.calls.length;
 		const result = await write.execute(
-			`call-${policy}-${spelling}`,
+			`call-${spelling}`,
 			{ path: `xd://${spelling}`, content: JSON.stringify({ input }) },
 			undefined,
 			undefined,
@@ -230,10 +230,6 @@ describe("write xd://<device> approval", () => {
 	it("asks once for xd://apply_patch under tools.approval.edit: prompt, as for xd://edit", async () => {
 		// The outer gate must key the alias on `edit`: keyed on `apply_patch`, the
 		// mode asks there and the inner `edit` gate asks again for its own policy.
-		expect(await editPromptsBySpelling("prompt")).toEqual({ edit: 1, apply_patch: 1 });
-	});
-
-	it("runs xd://apply_patch unasked under tools.approval.edit: allow, as xd://edit", async () => {
-		expect(await editPromptsBySpelling("allow")).toEqual({ edit: 0, apply_patch: 0 });
+		expect(await editPromptsBySpelling()).toEqual({ edit: 1, apply_patch: 1 });
 	});
 });

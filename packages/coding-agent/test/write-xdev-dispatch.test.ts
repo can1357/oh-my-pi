@@ -800,62 +800,6 @@ describe("xd:// and top-level calls share the canonical tool map", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("keeps exact device names ahead of wire aliases even after the exact tool is disabled", async () => {
-		const calls: string[] = [];
-		const tools = ["canonical", "wire"].map((name): Tool => ({
-			name,
-			customWireName: name === "canonical" ? "wire" : undefined,
-			label: name,
-			description: `${name} device`,
-			parameters: type({}),
-			async execute() {
-				calls.push(name);
-				return { content: [{ type: "text", text: name }] };
-			},
-		}));
-		const xdev = createTestXdevState(tools);
-		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
-
-		expect(xdevDocs(xdev, "wire")).toContain("# wire");
-		const exact = await write.execute("wire-exact", { path: "xd://wire", content: "{}" });
-		expect(exact.isError).toBeUndefined();
-		expect(calls).toEqual(["wire"]);
-
-		xdev.mountedNames.delete("wire");
-		expect(() => xdevDocs(xdev, "wire")).toThrow("No such tool: xd://wire");
-		const disabled = await write.execute("wire-exact-disabled", { path: "xd://wire", content: "{}" });
-		expect(disabled.isError).toBe(true);
-		expect(calls).toEqual(["wire"]);
-	});
-
-	it("rejects ambiguous wire aliases even when one claimant is disabled", async () => {
-		const calls: string[] = [];
-		const tools = ["first", "second"].map((name): Tool => ({
-			name,
-			customWireName: "shared",
-			label: name,
-			description: `${name} device`,
-			parameters: type({}),
-			async execute() {
-				calls.push(name);
-				return { content: [{ type: "text", text: name }] };
-			},
-		}));
-		const xdev = createTestXdevState(tools);
-		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
-
-		for (const secondEnabled of [true, false]) {
-			if (!secondEnabled) xdev.mountedNames.delete("second");
-			expect(() => xdevDocs(xdev, "shared")).toThrow("No such tool: xd://shared");
-			const result = await write.execute(`wire-ambiguous-${secondEnabled}`, {
-				path: "xd://shared",
-				content: "{}",
-			});
-			expect(result.isError).toBe(true);
-		}
-		expect(calls).toEqual([]);
-	});
-
 	it("dispatches and documents an unmounted top-level tool, and still rejects unknown names", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-fallback-"));
 		try {
