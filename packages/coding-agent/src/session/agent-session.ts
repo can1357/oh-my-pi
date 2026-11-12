@@ -221,7 +221,7 @@ import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
-	obfuscateProviderContext,
+	learnFromPlaintext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
@@ -411,7 +411,6 @@ import {
 	CHECKPOINT_ACTIVE_REMINDER_TYPE,
 	type CustomMessage,
 	type CustomMessagePayload,
-	convertToLlm,
 	dedupeEphemeralReply,
 	demoteInterruptedThinking,
 	didSessionMessagesChange,
@@ -2649,7 +2648,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return thunks;
 		});
-		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
+		// The session owns the obfuscator, so its default conversion encodes too.
+		this.#convertToLlm = config.convertToLlm ?? (messages => this.#convertToLlmForSideRequest(messages));
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -2730,6 +2730,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#recordModelCallSystemPrompt(prompt);
 		});
 		this.#obfuscator = config.obfuscator;
+		this.#learnSessionSecrets();
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -3529,6 +3530,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Install the obfuscator built after a live `secrets.enabled` switch-on. */
 	setObfuscator(obfuscator: SecretObfuscator | undefined): void {
 		this.#obfuscator = obfuscator;
+		this.#learnSessionSecrets();
+	}
+
+	/**
+	 * Mint the placeholders of every secret in the session file, every entry
+	 * and branch, so placeholders whose plaintext was compacted out of the
+	 * context still restore at tool execution and in the display. Runs when an
+	 * obfuscator meets a session file; live content is minted as it is sent.
+	 */
+	#learnSessionSecrets(): void {
+		if (this.#obfuscator) learnFromPlaintext(this.#obfuscator, this.sessionManager.getEntries());
 	}
 
 	/** Whether a TTSR abort is pending (stream was aborted to inject rules) */
@@ -4786,11 +4798,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				? this.#queueMessageEndPersistence(event.message, eventPromptGeneration)
 				: undefined;
 
-		// Deobfuscate assistant message content for display emission — the LLM echoes back
-		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
-		// values. The original event.message stays obfuscated so the persistence path below
-		// writes `$$HASH$$` tokens to the session file; convertToLlm re-obfuscates outbound
-		// traffic on the next turn. Walks text, thinking, and toolCall arguments/intent.
+		// Deobfuscate assistant message content for display emission — the model writes
+		// placeholders, but listeners (TUI, extensions, exporters) must see real values.
+		// The original event.message keeps its placeholder form: persisted and replayed
+		// byte-identical. Walks text, thinking, and toolCall arguments/intent.
 		let displayEvent: AgentEvent = event;
 		const obfuscator = this.#obfuscator;
 		if (obfuscator && event.type === "message_end" && event.message.role === "assistant") {
@@ -13774,11 +13785,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				`Model ${modelDescription} cannot support tools: false with historical tool calls. Omit tools: false or start from tool-free history.`,
 			);
 		}
-		// Apply after context transforms, without mutating a potentially shared context.
-		const context = obfuscateProviderContext(
-			this.#obfuscator,
-			args.tools === false ? { ...sideContext, tools: [] } : sideContext,
-		);
+		// Messages were encoded when converted; copy so a shared context is never mutated.
+		const context = args.tools === false ? { ...sideContext, tools: [] } : sideContext;
 		if (
 			args.maxContextBytes !== undefined &&
 			Buffer.byteLength(JSON.stringify(context), "utf8") > args.maxContextBytes
@@ -14160,6 +14168,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
 			await this.sessionManager.setSessionFile(sessionPath);
+			this.#learnSessionSecrets();
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
@@ -15062,12 +15071,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
 		}
 
-		// Update agent state — build display context to populate agent messages.
+		// Update agent state from the stored context: the agent replays what the
+		// model wrote in placeholder form, never a display copy.
 		const stateContext = this.sessionManager.buildSessionContext({
 			maxFrameDataBytes: frameDataBytesBudget(this.model),
 			model: this.model,
 		});
-		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
+		const displayContext = this.#withEvalStateContext(stateContext);
 		this.replaceMessagesFromSessionContext(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });

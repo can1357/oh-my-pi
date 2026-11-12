@@ -2,7 +2,6 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	AnthropicCompactionPayload,
 	AssistantMessage,
-	Context,
 	ImageContent,
 	Message,
 	ProviderPayload,
@@ -10,30 +9,58 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
-import type { JsonValue, SecretObfuscator } from "./obfuscator";
-import { collectJsonRegexSecretValues, forEachJsonString, mapJsonStrings } from "./placeholder-scan";
-import { SecretValueSet } from "./placeholder";
+import { type JsonValue, mapJsonStrings } from "./json-strings";
+import type { SecretObfuscator } from "./obfuscator";
+
+// Encoding is idempotent: placeholder-shaped tokens are opaque, so text the
+// model wrote from placeholders encodes to itself and replays byte-identical.
+// Everything outbound is encoded, whatever its role; only content that still
+// holds plaintext (written while redaction was off, or before a secret was
+// configured) changes, and a signature over changed content is dropped.
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Display restore (inbound, persisted/provider → local display)
+// Display restore (stored placeholders → local display)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Restore secret placeholders for local display. Only message kinds the model
- * itself authored from obfuscated context carry placeholders — assistant
- * content and the LLM-written branch/compaction summaries. User, developer, and
- * tool-result messages are persisted with their literal text, so operator-authored
- * placeholder-shaped text must survive untouched; those roles are never walked.
+ * The session context for display, with the model's placeholders restored.
+ * The placeholder map is first rebuilt from the plaintext in the same context,
+ * so placeholders the model wrote in an earlier process restore too. Only a
+ * display copy is restored: the agent replays the stored context as written.
  */
 export function deobfuscateSessionContext(
 	sessionContext: SessionContext,
 	obfuscator: SecretObfuscator | undefined,
 ): SessionContext {
 	if (!obfuscator?.hasSecrets()) return sessionContext;
+	learnFromPlaintext(obfuscator, sessionContext.messages);
 	const messages = deobfuscateAgentMessages(obfuscator, sessionContext.messages);
 	return messages === sessionContext.messages ? sessionContext : { ...sessionContext, messages };
 }
 
+/** Mint the placeholders for every secret in the strings of `values`: messages or whole session entries (see `SecretObfuscator.learn`). */
+export function learnFromPlaintext(obfuscator: SecretObfuscator, values: readonly unknown[]): void {
+	const texts: string[] = [];
+	for (const value of values) collectTexts(value, texts);
+	if (texts.length === 0) return;
+	obfuscator.batch(() => {
+		obfuscator.prescan(texts);
+		obfuscator.learn(texts);
+	});
+}
+
+/** Every string under `value`, skipping image payloads. */
+function collectTexts(value: unknown, texts: string[]): void {
+	if (typeof value === "string") {
+		texts.push(value);
+	} else if (Array.isArray(value)) {
+		for (const item of value) collectTexts(item, texts);
+	} else if (isRecord(value) && value.type !== "image") {
+		for (const item of Object.values(value)) collectTexts(item, texts);
+	}
+}
+
+/** Display copies of `messages` with the model's placeholders restored. */
 export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages: AgentMessage[]): AgentMessage[] {
 	const deob = (text: string): string => obfuscator.deobfuscate(text);
 	let changed = false;
@@ -68,30 +95,29 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 	return changed ? result : messages;
 }
 
-/**
- * Restore placeholders in assistant content: visible text and tool-call
- * arguments/intent/rawBlock. Thinking and signatures are opaque
- * provider-replay/hidden-reasoning data and pass through byte-identical.
- */
-export function deobfuscateAssistantContent(
-	obfuscator: SecretObfuscator,
+/** Apply `transform` to assistant text, thinking, and tool-call arguments/intent/rawBlock. */
+function mapAssistantContent(
 	content: AssistantMessage["content"],
+	transform: (text: string) => string,
 ): AssistantMessage["content"] {
-	if (!obfuscator.hasSecrets()) return content;
-	const deob = (text: string): string => obfuscator.deobfuscate(text);
 	let changed = false;
 	const result = content.map((block): AssistantMessage["content"][number] => {
 		if (block.type === "text") {
-			const text = deob(block.text);
+			const text = transform(block.text);
 			if (text === block.text) return block;
 			changed = true;
 			return { ...block, text };
 		}
-
+		if (block.type === "thinking") {
+			const thinking = transform(block.thinking);
+			if (thinking === block.thinking) return block;
+			changed = true;
+			return { ...block, thinking };
+		}
 		if (block.type === "toolCall") {
-			const args = deobfuscateToolArguments(obfuscator, block.arguments);
-			const intent = block.intent === undefined ? undefined : deob(block.intent);
-			const rawBlock = block.rawBlock === undefined ? undefined : deob(block.rawBlock);
+			const args = mapJsonStrings(block.arguments as JsonValue, transform) as Record<string, unknown>;
+			const intent = block.intent === undefined ? undefined : transform(block.intent);
+			const rawBlock = block.rawBlock === undefined ? undefined : transform(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
 			return { ...block, arguments: args, intent, rawBlock };
@@ -101,9 +127,43 @@ export function deobfuscateAssistantContent(
 	return changed ? result : content;
 }
 
+/** Restore placeholders in assistant content for display. */
+export function deobfuscateAssistantContent(
+	obfuscator: SecretObfuscator,
+	content: AssistantMessage["content"],
+): AssistantMessage["content"] {
+	if (!obfuscator.hasSecrets()) return content;
+	return mapAssistantContent(content, text => obfuscator.deobfuscate(text));
+}
+
 /**
- * Restore placeholders in model-authored argument values. Argument keys name
- * tool parameters and must remain unchanged.
+ * Encode assistant content. Placeholder-form blocks pass through by reference.
+ * A block that changes held plaintext and loses the signature bound to it: a
+ * thinking block its `thinkingSignature`, and a tool call whose arguments
+ * changed its Gemini `thoughtSignature`, an attestation over the call it rides
+ * on (https://ai.google.dev/gemini-api/docs/thought-signatures). `intent` and
+ * `rawBlock` are harness-side and keep it.
+ */
+function obfuscateAssistantContent(
+	obfuscator: SecretObfuscator,
+	content: AssistantMessage["content"],
+): AssistantMessage["content"] {
+	const encoded = mapAssistantContent(content, text => obfuscator.obfuscate(text));
+	if (encoded === content) return content;
+	return encoded.map((block, index): AssistantMessage["content"][number] => {
+		const original = content[index]!;
+		if (block === original) return block;
+		if (block.type === "thinking") return { ...block, thinkingSignature: undefined };
+		if (block.type === "toolCall" && original.type === "toolCall" && block.arguments !== original.arguments) {
+			return { ...block, thoughtSignature: undefined };
+		}
+		return block;
+	});
+}
+
+/**
+ * Restore placeholders in model-authored argument values, where a tool runs
+ * them. Argument keys name tool parameters and must remain unchanged.
  */
 export function deobfuscateToolArguments(
 	obfuscator: SecretObfuscator,
@@ -111,23 +171,6 @@ export function deobfuscateToolArguments(
 ): Record<string, unknown> {
 	if (!obfuscator.hasSecrets()) return args;
 	return mapJsonStrings(args as JsonValue, s => obfuscator.deobfuscate(s)) as Record<string, unknown>;
-}
-
-/** Redact secrets inside a tool call's arguments (same JSON-walk exception as {@link deobfuscateToolArguments}). */
-export function obfuscateToolArguments(
-	obfuscator: SecretObfuscator,
-	args: Record<string, unknown>,
-	sharedRegexSecretValues?: ReadonlySet<string>,
-): Record<string, unknown> {
-	if (!obfuscator.hasSecrets()) return args;
-	// `batch()` joins an outer batch when one is already open.
-	return obfuscator.batch(() => {
-		const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
-		return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<
-			string,
-			unknown
-		>;
-	});
 }
 
 /** Copy native replay containers only when a provider-visible plaintext field changes. */
@@ -434,7 +477,7 @@ function mapNativeReplayItem(value: unknown, transform: (text: string) => string
 	}
 }
 
-/** Visit every native-replay plaintext field the redaction pass rewrites. */
+/** Visit every native-replay plaintext field encoding rewrites. */
 function forEachNativeReplayText(
 	message: { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
 	visit: (text: string) => void,
@@ -456,27 +499,19 @@ function forEachNativeReplayText(
 	}
 }
 
-/** Collect native plaintext before any replay fields lose regex values through redaction. */
-export function collectNativeReplayRegexSecretValues(
-	obfuscator: SecretObfuscator,
-	message: { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
-	values: Set<string>,
-): void {
-	if (!obfuscator.hasSecrets()) return;
-	forEachNativeReplayText(message, text => {
-		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
-	});
-}
-
-/** Re-obfuscate native replay and its next-compaction source with one collision set. */
+/**
+ * Encode native replay and its next-compaction source. These are protocol
+ * slots the harness assembles from history, so their plaintext slots are
+ * encoded whatever role carries them; placeholders already there stay.
+ */
 export function obfuscateNativeReplay<
 	T extends { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
->(obfuscator: SecretObfuscator, message: T, sharedRegexSecretValues: ReadonlySet<string>): T {
-	if (!obfuscator.hasSecrets()) return message;
+>(obfuscator: SecretObfuscator, message: T): T {
+	if (!obfuscator.obfuscates()) return message;
 	const payload = message.providerPayload;
 	const remote = message.preserveData?.openaiRemoteCompaction;
 	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return message;
-	const transform = (text: string): string => obfuscator.obfuscate(text, sharedRegexSecretValues);
+	const transform = (text: string): string => obfuscator.obfuscate(text);
 	const mapItem = (item: unknown): unknown => mapNativeReplayItem(item, transform);
 	const items = payload?.type === "openaiResponsesHistory" ? mapNativeArray(payload.items, mapItem) : undefined;
 	const providerPayload =
@@ -511,21 +546,18 @@ export function obfuscateNativeReplay<
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Outbound obfuscation (local → provider)
+// Outbound encoding (local → provider)
 // ═══════════════════════════════════════════════════════════════════════════
 
-type UserFacingMessage = Extract<Message, { role: "user" | "developer" | "toolResult" }>;
-
-/** Obfuscate `text` blocks of a content array; image and other blocks pass through. */
+/** Encode `text` blocks of a content array; image and other blocks pass through. */
 function obfuscateTextBlocks(
 	obfuscator: SecretObfuscator,
 	content: (TextContent | ImageContent)[],
-	sharedRegexSecretValues?: ReadonlySet<string>,
 ): (TextContent | ImageContent)[] {
 	let changed = false;
 	const result = content.map((block): TextContent | ImageContent => {
 		if (block.type !== "text") return block;
-		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
+		const text = obfuscator.obfuscate(block.text);
 		if (text === block.text) return block;
 		changed = true;
 		return { ...block, text };
@@ -550,61 +582,11 @@ function deobfuscateTextBlocks(
 }
 
 /**
- * Re-obfuscate assistant content before it returns to a provider after session
- * restoration, removing friendly prefixes made unsafe by this batch. A changed
- * thinking block loses its byte-bound replay signature, and so does a tool call
- * whose arguments changed: the Gemini `thoughtSignature` is an encrypted
- * attestation over the function call it rides on, so replaying obfuscated
- * arguments under a signature issued for the raw ones pairs a valid signature
- * with a payload it does not cover. `intent` and `rawBlock` are harness-side
- * fields the signed part never carries, so they keep it.
- * https://ai.google.dev/gemini-api/docs/thought-signatures
- */
-function obfuscateAssistantContentForReplay(
-	obfuscator: SecretObfuscator,
-	content: AssistantMessage["content"],
-	sharedRegexSecretValues: ReadonlySet<string>,
-): AssistantMessage["content"] {
-	const obfuscate = (text: string): string =>
-		obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(
-			obfuscator.obfuscate(text, sharedRegexSecretValues),
-			sharedRegexSecretValues,
-		);
-	let changed = false;
-	const result = content.map((block): AssistantMessage["content"][number] => {
-		if (block.type === "text") {
-			const text = obfuscate(block.text);
-			if (text === block.text) return block;
-			changed = true;
-			return { ...block, text };
-		}
-		if (block.type === "thinking") {
-			const thinking = obfuscate(block.thinking);
-			if (thinking === block.thinking) return block;
-			changed = true;
-			return { ...block, thinking, thinkingSignature: undefined };
-		}
-		if (block.type === "toolCall") {
-			const args = mapJsonStrings(block.arguments as JsonValue, obfuscate) as Record<string, unknown>;
-			const intent = block.intent === undefined ? undefined : obfuscate(block.intent);
-			const rawBlock = block.rawBlock === undefined ? undefined : obfuscate(block.rawBlock);
-			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
-			changed = true;
-			return args === block.arguments
-				? { ...block, intent, rawBlock }
-				: { ...block, arguments: args, intent, rawBlock, thoughtSignature: undefined };
-		}
-		return block;
-	});
-	return changed ? result : content;
-}
-
-/**
  * Harness file metadata riding on a natively-replayed compaction summary.
- * The provider converter emits it beside the verbatim block's retained tail, so it must pass
- * the same outbound boundary as the summary text it was split from. The
- * verbatim block content itself stays untouched: it must match the opaque
- * provider state replayed beside it.
+ * The provider converter emits it beside the verbatim block's retained tail,
+ * so it is encoded like other harness plaintext. The verbatim block content
+ * itself stays untouched: it must match the opaque provider state replayed
+ * beside it.
  */
 function anthropicCompactionPayload(message: Message): AnthropicCompactionPayload | undefined {
 	if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") return undefined;
@@ -612,21 +594,14 @@ function anthropicCompactionPayload(message: Message): AnthropicCompactionPayloa
 	return payload?.type === "anthropicCompaction" ? payload : undefined;
 }
 
-function anthropicCompactionFilesText(message: Message): string | undefined {
-	const filesText = anthropicCompactionPayload(message)?.filesText;
-	return typeof filesText === "string" && filesText.length > 0 ? filesText : undefined;
-}
-
 function obfuscateAnthropicCompactionFiles(
 	obfuscator: SecretObfuscator,
 	payload: AnthropicCompactionPayload,
-	sharedRegexSecretValues: SecretValueSet,
 ): AnthropicCompactionPayload {
-	const filesText =
-		payload.filesText === undefined ? undefined : obfuscator.obfuscate(payload.filesText, sharedRegexSecretValues);
+	const filesText = payload.filesText === undefined ? undefined : obfuscator.obfuscate(payload.filesText);
 	let retainedChanged = false;
 	const retainedFiles = payload.retainedFiles?.map(files => {
-		const text = obfuscator.obfuscate(files.text, sharedRegexSecretValues);
+		const text = obfuscator.obfuscate(files.text);
 		if (text === files.text) return files;
 		retainedChanged = true;
 		return { ...files, text };
@@ -635,130 +610,63 @@ function obfuscateAnthropicCompactionFiles(
 	return { ...payload, filesText, retainedFiles };
 }
 
-/** Visit every text of `message` the redaction pass scans, in the order it scans them. */
-function forEachOutboundText(message: Message, visit: (text: string) => void): void {
-	// File metadata replayed beside a native compaction block carries the
-	// same harness paths as the summary text, so its regex-secret values
-	// join the shared set.
-	const compactionFiles = anthropicCompactionFilesText(message);
-	if (compactionFiles !== undefined) visit(compactionFiles);
-	for (const files of anthropicCompactionPayload(message)?.retainedFiles ?? []) visit(files.text);
-	if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
-		forEachNativeReplayText(message, visit);
-	}
+/** Visit every text of `message` encoding rewrites. */
+function forEachPlaintext(message: Message, visit: (text: string) => void): void {
+	const compaction = anthropicCompactionPayload(message);
+	if (compaction?.filesText) visit(compaction.filesText);
+	for (const files of compaction?.retainedFiles ?? []) visit(files.text);
+	if (message.role !== "toolResult") forEachNativeReplayText(message, visit);
 	if (message.role === "assistant") {
-		for (const block of message.content) {
-			if (block.type === "text") visit(block.text);
-			else if (block.type === "thinking") visit(block.thinking);
-			else if (block.type === "toolCall") {
-				forEachJsonString(block.arguments as JsonValue, visit);
-				if (block.intent !== undefined) visit(block.intent);
-				if (block.rawBlock !== undefined) visit(block.rawBlock);
-			}
-		}
+		mapAssistantContent(message.content, text => {
+			visit(text);
+			return text;
+		});
 		return;
 	}
-	if (
-		message.role !== "user" &&
-		message.role !== "toolResult" &&
-		!(message.role === "developer" && message.attribution === "user")
-	) {
+	if (typeof message.content === "string") {
+		visit(message.content);
 		return;
 	}
-	const target = message as UserFacingMessage;
-	if (typeof target.content === "string") {
-		visit(target.content);
-		return;
-	}
-	for (const block of target.content) {
+	for (const block of message.content) {
 		if (block.type === "text") visit(block.text);
 	}
 }
 
 /**
- * The request-wide regex values of `messages`. Every text is first scanned in
- * one native call (see `SecretObfuscator.prescan`), so the collection here and
- * the redaction after it ask about each text without another one.
- */
-function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): SecretValueSet {
-	const texts: string[] = [];
-	for (const message of messages) forEachOutboundText(message, text => texts.push(text));
-	obfuscator.prescan(texts);
-	const values = new SecretValueSet();
-	for (const text of texts) {
-		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
-	}
-	return values;
-}
-
-/**
- * Redact secrets from outbound messages. User messages, tool results, and
- * user-authored developer messages (e.g. `@file` mentions) are obfuscated.
- * Assistant replay content is re-obfuscated too, because session restoration
- * expands keyed placeholders locally before the next provider request. Inline
- * image bytes are never walked.
+ * Encode outbound messages, every role. Placeholder-form text is unchanged,
+ * so the model's own messages normally pass through by reference and keep
+ * their signatures and cache prefix. Native replay slots and compaction file
+ * metadata are encoded too; inline image bytes are never walked. Runs on the
+ * way to a provider (the agent's `convertToLlm`).
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
-	return obfuscator.batch(() => obfuscateMessageBatch(obfuscator, messages));
-}
-
-function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
-	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
-	let changed = false;
-	const result = messages.map((message): Message => {
-		let current = message;
-		const compactionPayload = anthropicCompactionPayload(current);
-		if (compactionPayload !== undefined) {
-			const providerPayload = obfuscateAnthropicCompactionFiles(
-				obfuscator,
-				compactionPayload,
-				sharedRegexSecretValues,
-			);
-			if (providerPayload !== compactionPayload) {
-				current = { ...current, providerPayload } as Message;
-				changed = true;
+	return obfuscator.batch(() => {
+		const texts: string[] = [];
+		for (const message of messages) forEachPlaintext(message, text => texts.push(text));
+		obfuscator.prescan(texts);
+		let changed = false;
+		const result = messages.map((message): Message => {
+			let current = message;
+			const compaction = anthropicCompactionPayload(current);
+			if (compaction !== undefined) {
+				const providerPayload = obfuscateAnthropicCompactionFiles(obfuscator, compaction);
+				if (providerPayload !== compaction) current = { ...current, providerPayload } as Message;
 			}
-		}
-		if (current.role === "user" || current.role === "developer" || current.role === "assistant") {
-			const replay = obfuscateNativeReplay(obfuscator, current, sharedRegexSecretValues);
-			if (replay !== current) {
-				changed = true;
-				current = replay;
+			if (current.role !== "toolResult") current = obfuscateNativeReplay(obfuscator, current);
+			if (current.role === "assistant") {
+				const content = obfuscateAssistantContent(obfuscator, current.content);
+				if (content !== current.content) current = { ...current, content };
+			} else if (typeof current.content === "string") {
+				const content = obfuscator.obfuscate(current.content);
+				if (content !== current.content) current = { ...current, content } as Message;
+			} else {
+				const content = obfuscateTextBlocks(obfuscator, current.content);
+				if (content !== current.content) current = { ...current, content } as Message;
 			}
-		}
-		if (
-			current.role !== "user" &&
-			current.role !== "toolResult" &&
-			!(current.role === "developer" && current.attribution === "user")
-		) {
-			if (current.role !== "assistant") return current;
-			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
-			if (content === current.content) return current;
-			changed = true;
-			return { ...current, content };
-		}
-		const target = current as UserFacingMessage;
-		if (typeof target.content === "string") {
-			const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
-			if (content === target.content) return current;
-			changed = true;
-			return { ...target, content } as Message;
-		}
-		const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
-		if (content === target.content) return current;
-		changed = true;
-		return { ...target, content } as Message;
+			if (current !== message) changed = true;
+			return current;
+		});
+		return changed ? result : messages;
 	});
-	return changed ? result : messages;
-}
-
-/**
- * Redact outbound provider context. Only conversation messages are rewritten;
- * the static system prompt and tool schemas pass through unchanged.
- */
-export function obfuscateProviderContext(obfuscator: SecretObfuscator | undefined, context: Context): Context {
-	if (!obfuscator?.obfuscates()) return context;
-	const messages = obfuscateMessages(obfuscator, context.messages);
-	return messages === context.messages ? context : { ...context, messages };
 }

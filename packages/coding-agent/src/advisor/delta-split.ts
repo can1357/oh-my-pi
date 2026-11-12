@@ -29,19 +29,15 @@ import { formatSessionHistoryMarkdown, type ToolIOTransform } from "../session/s
  * SecretObfuscator instance is structurally assignable.
  */
 export interface AdvisorObfuscator {
-	obfuscate(text: string, sharedRegexSecretValues?: ReadonlySet<string>): string;
-	redactionPrefixEnd?(text: string, limit: number, sharedRegexSecretValues?: ReadonlySet<string>): number;
+	obfuscate(text: string): string;
+	redactionPrefixEnd?(text: string, limit: number): number;
 }
 
-/** The advisor's tool-I/O redaction, sharing one batch's regex secret values. */
-export function advisorToolIOTransform(
-	obfuscator: AdvisorObfuscator,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): ToolIOTransform {
-	const transform: ToolIOTransform = text => obfuscator.obfuscate(text, sharedRegexSecretValues);
+/** The advisor's tool-I/O redaction. */
+export function advisorToolIOTransform(obfuscator: AdvisorObfuscator): ToolIOTransform {
+	const transform: ToolIOTransform = text => obfuscator.obfuscate(text);
 	if (obfuscator.redactionPrefixEnd) {
-		transform.redactionPrefixEnd = (text, limit) =>
-			obfuscator.redactionPrefixEnd!(text, limit, sharedRegexSecretValues);
+		transform.redactionPrefixEnd = (text, limit) => obfuscator.redactionPrefixEnd!(text, limit);
 	}
 	return transform;
 }
@@ -59,7 +55,6 @@ export interface RenderAdvisorDeltaChunksOptions {
 	wip: boolean;
 	includeThinking: boolean;
 	obfuscator?: AdvisorObfuscator;
-	advisorRegexSecretValues: ReadonlySet<string>;
 }
 
 export function renderAdvisorDeltaChunks(
@@ -82,9 +77,7 @@ export function renderAdvisorDeltaChunks(
 			toolResultIndex: resultsByCallId,
 			consumedToolCallIds: consumed,
 			watchedRoleState,
-			transformExpandedToolIO: opts.obfuscator
-				? advisorToolIOTransform(opts.obfuscator, opts.advisorRegexSecretValues)
-				: undefined,
+			transformExpandedToolIO: opts.obfuscator ? advisorToolIOTransform(opts.obfuscator) : undefined,
 		});
 
 	const heading = "### Session update";
@@ -99,10 +92,8 @@ export function renderAdvisorDeltaChunks(
 	if (chunks.length === 0) return null;
 	if (opts.obfuscator) {
 		const fullText = chunks.map(chunk => chunk.content[0].text).join("\n");
-		const individuallyObfuscated = chunks.map(chunk =>
-			opts.obfuscator!.obfuscate(chunk.content[0].text, opts.advisorRegexSecretValues),
-		);
-		if (opts.obfuscator.obfuscate(fullText, opts.advisorRegexSecretValues) !== individuallyObfuscated.join("\n")) {
+		const individuallyObfuscated = chunks.map(chunk => opts.obfuscator!.obfuscate(chunk.content[0].text));
+		if (opts.obfuscator.obfuscate(fullText) !== individuallyObfuscated.join("\n")) {
 			return null;
 		}
 		for (let i = 0; i < chunks.length; i++) chunks[i].content[0].text = individuallyObfuscated[i];

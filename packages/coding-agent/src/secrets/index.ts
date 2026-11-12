@@ -6,8 +6,7 @@ import { YAML } from "bun";
 import { type SecretEntry, SecretObfuscator } from "./obfuscator";
 import { CREDENTIAL_PATTERNS } from "./patterns";
 import { sanitizeSecretFriendlyName, secretEntriesNeedPlaceholderKey } from "./placeholder";
-import { compileSecretRegex, type SecretPattern } from "./regex";
-import { regexHasUnresolvableShortMatchFallback } from "./replacement";
+import { compileSecretRegex } from "./regex";
 
 const PLACEHOLDER_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
 const cachedPlaceholderKeys = new Map<string, string>();
@@ -149,12 +148,7 @@ async function readPlaceholderKeyFile(keyPath: string, retry: boolean): Promise<
 
 type RawSecretEntry = Omit<SecretEntry, "friendlyName"> & { friendlyName?: unknown };
 
-export {
-	deobfuscateSessionContext,
-	deobfuscateToolArguments,
-	obfuscateMessages,
-	obfuscateProviderContext,
-} from "./message-transform";
+export { deobfuscateSessionContext, deobfuscateToolArguments, obfuscateMessages } from "./message-transform";
 export { type SecretEntry, SecretObfuscator } from "./obfuscator";
 export * from "./patterns";
 export { secretEntriesNeedPlaceholderKey, secretEntryNeedsPlaceholderKey } from "./placeholder";
@@ -373,21 +367,12 @@ function validateEntry(entry: unknown, filePath: string, index: number): entry i
 		return false;
 	}
 	if (e.type === "regex") {
-		let regex: SecretPattern;
 		try {
-			regex = compileSecretRegex(e.content as string, e.flags as string | undefined);
+			compileSecretRegex(e.content as string, e.flags as string | undefined);
 		} catch (error) {
 			throw new Error(
 				`${filePath}: secrets.yml[${index}] is not a valid secret rule (${error instanceof Error ? error.message : String(error)}). Rules are Rust regex patterns: lookarounds and backreferences are unsupported; mark the part to redact with (?P<secret>...).`,
 			);
-		}
-		const mode = (e.mode as "obfuscate" | "replace" | undefined) ?? "obfuscate";
-		if (mode === "replace" && e.replacement === undefined && regexHasUnresolvableShortMatchFallback(regex)) {
-			logger.warn(
-				`secrets.yml[${index}]: regex matches every 1-2 character candidate with no custom replacement, so a match can never be redacted distinctly from itself`,
-				{ path: filePath, pattern: e.content },
-			);
-			return false;
 		}
 	}
 	return true;
