@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed Gemini CLI and Antigravity merging reply text around a thought signature, dropping signatures at the start of a reply or after a tool call, and placing a thought ahead of reply text that streamed before it ([#18942](https://github.com/can1357/oh-my-pi/pull/18942) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed a corrupt AWS event-stream frame length (Amazon Bedrock, Kiro) making the decoder wait for and buffer the bogus length instead of failing the stream (adapted from [@noita-player](https://github.com/noita-player)'s downstream work)
 
 ## [18.18.9] - 2026-11-11
 

@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { crc32, decodeEventStream, decodeMessage } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import {
+	crc32,
+	decodeEventStream,
+	decodeMessage,
+	MAX_HEADERS_LEN,
+	MAX_MESSAGE_LEN,
+} from "@oh-my-pi/pi-ai/providers/aws-eventstream";
 
 // ---- Frame builder (mirrors @smithy/eventstream-codec but in-process so the
 // test owns the bytes). The decoder is the production code; we encode here for
@@ -155,5 +162,89 @@ describe("aws-eventstream", () => {
 		const frame = encodeFrame({ ":event-type": "x" }, new TextEncoder().encode("{}"));
 		frame[frame.length - 1] ^= 0xff;
 		expect(() => decodeMessage(frame)).toThrow(/message CRC/);
+	});
+
+	/** A 12-byte prelude declaring `total` and `headersLen`, with a valid prelude CRC. */
+	function prelude(total: number, headersLen: number): Uint8Array {
+		const out = new Uint8Array(12);
+		const view = new DataView(out.buffer);
+		view.setUint32(0, total, false);
+		view.setUint32(4, headersLen, false);
+		view.setUint32(8, crc32(out.subarray(0, 8)), false);
+		return out;
+	}
+
+	/** A frame with caller-supplied raw header-block bytes and valid CRCs. */
+	function rawFrame(headers: Uint8Array, payload: Uint8Array): Uint8Array {
+		const total = 16 + headers.length + payload.length;
+		const out = new Uint8Array(total);
+		out.set(prelude(total, headers.length));
+		out.set(headers, 12);
+		out.set(payload, 12 + headers.length);
+		new DataView(out.buffer).setUint32(total - 4, crc32(out.subarray(0, total - 4)), false);
+		return out;
+	}
+
+	async function frameError(promise: Promise<unknown>): Promise<AIError.EventStreamFrameError> {
+		const error = await promise.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		if (!(error instanceof AIError.EventStreamFrameError)) throw new Error(`expected frame error, got ${error}`);
+		return error;
+	}
+
+	const oversized = prelude(MAX_MESSAGE_LEN + 1, 0);
+	const badCrc = prelude(MAX_MESSAGE_LEN, 0);
+	badCrc[11] ^= 0xff;
+	test.each([
+		["an oversized total length", [oversized], "exceeds maximum"],
+		["an oversized total split mid-prelude", [oversized.subarray(0, 5), oversized.subarray(5)], "exceeds maximum"],
+		["a corrupt prelude CRC", [badCrc], "prelude CRC"],
+		["headers longer than the message", [prelude(64, 64)], "exceeds message length"],
+		["headers over the cap", [prelude(16 + MAX_HEADERS_LEN + 1, MAX_HEADERS_LEN + 1)], "exceeds maximum"],
+	])("rejects %s before buffering the body", async (_, head, message) => {
+		let pulls = 0;
+		// Up to 8 MiB of filler follows the prelude; a bounded decoder never pulls it.
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (pulls < head.length) controller.enqueue(head[pulls]);
+				else if (pulls < head.length + 128) controller.enqueue(new Uint8Array(64 * 1024));
+				else controller.close();
+				pulls += 1;
+			},
+		});
+		const error = await frameError(collect(stream));
+		expect(error.kind).toBe("malformed");
+		expect(error.message).toContain(message);
+		expect(pulls).toBe(head.length);
+	});
+
+	test.each([
+		["name", new Uint8Array([3, 0x61]), new Uint8Array(0)],
+		// The payload after a short header block must not be read as header bytes.
+		["string value", new Uint8Array([1, 0x78, 7, 0, 4, 0x61]), new TextEncoder().encode("bcd")],
+	])("a header %s read past the header block raises a frame error", (field, headers, payload) => {
+		expect(() => decodeMessage(rawFrame(headers, payload))).toThrow(`header ${field} overruns`);
+	});
+
+	test("decodes a header-only frame with an empty payload split across chunks", async () => {
+		const headers = { ":message-type": "error", ":error-code": "InternalFailure" };
+		const frame = encodeFrame(headers, new Uint8Array(0));
+		expect(await collect(streamFrom([frame.subarray(0, 20), frame.subarray(20)]))).toEqual([{ headers, text: "" }]);
+	});
+
+	test("reassembles frames fed one byte at a time without clobbering yielded payloads", async () => {
+		const a = encodeFrame({ ":event-type": "a" }, new TextEncoder().encode("first"));
+		const b = encodeFrame({ ":event-type": "b" }, new TextEncoder().encode("second"));
+		const bytes = [...a, ...b].map(byte => new Uint8Array([byte]));
+		const payloads: Uint8Array[] = [];
+		for await (const msg of decodeEventStream(streamFrom(bytes))) payloads.push(msg.payload);
+		expect(payloads.map(p => new TextDecoder().decode(p))).toEqual(["first", "second"]);
+	});
+
+	test.each([6, 12, 20])("a body cut at byte %d raises a truncated frame error", async cut => {
+		const frame = encodeFrame({ ":event-type": "x" }, new TextEncoder().encode("{}"));
+		expect((await frameError(collect(streamFrom([frame.subarray(0, cut)])))).kind).toBe("truncated");
 	});
 });
