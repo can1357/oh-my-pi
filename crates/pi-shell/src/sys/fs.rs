@@ -17,7 +17,7 @@
 //! Windows specifics: `test -x` holds for directories, files with a
 //! `PATHEXT` extension and files starting with `#!`; process substitution
 //! uses a named pipe `\\.\pipe\obash-<pid>-<n>` (`\\.\pipe\LOCAL\…` in an
-//! AppContainer; a regular temp file when the engine asks for
+//! `AppContainer`; a regular temp file when the engine asks for
 //! [`TempPurpose::HereDoc`], e.g. for a consumer that must seek).
 
 use std::{

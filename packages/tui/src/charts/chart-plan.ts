@@ -462,6 +462,12 @@ export type ChartAnnotation =
 const BEFORE =
 	/\b(?:before|old|baseline|base|main|master|prev|previous|original|orig|cold|was|from|v1|stock|default|unpatched|without)\b/i;
 const AFTER = /\b(?:after|new|patched|optimi[sz]ed|fixed|warm|now|to|v2|with|proposed|branch|pr|ours)\b/i;
+/** {@link BEFORE} and {@link AFTER} words that only name a condition, never join words inside a name. */
+const STRONG_BEFORE =
+	/\b(?:before|old|baseline|base|main|master|prev|previous|original|orig|cold|v1|stock|default|unpatched)\b/i;
+const STRONG_AFTER = /\b(?:after|new|patched|optimi[sz]ed|fixed|warm|now|v2|proposed|branch|pr|ours)\b/i;
+/** Condition words that also join words inside a name (`Runs with ≥10`, `p50 to p99`). */
+const WEAK_CONDITION = /^(?:was|from|without|to|with)$/i;
 const DELTA = /(?:Δ|delta|change|diff|improvement|speedup|reduction|savings|saved|gain|regression|% chg)/i;
 /** Aggregate columns that restate the others; dropped when enough same-unit series remain. */
 const AGGREGATE = /^(?:total|sum|cumulative|cum\.?|running total|avg|average|mean)\b/i;
@@ -474,9 +480,9 @@ const MONTH = /^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
 /** Distinct series colors (`c1`…`c6`): the most segments a stacked bar tells apart. */
 const SERIES_COLORS = 6;
 /** Most panels a small-multiples grid stays legible with. */
-const MAX_PANELS = 6;
+export const MAX_PANELS = 6;
 /** Most lines one line chart keeps apart. */
-const MAX_LINES = 6;
+export const MAX_LINES = 6;
 /** Fewest rows a line joins: three points draw a bend, not a trend. */
 const MIN_LINE_ROWS = 4;
 /** Fewest points a scatter needs before their cloud can show a relationship. */
@@ -1535,10 +1541,7 @@ export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | u
 					? againstBaseline(table, plan, columns)
 					: undefined;
 	const factors = factored && changeChart(table, plan, namers, group, factored);
-	// Measured against a rival rather than a before state ({@link leadingColumn}): gaps, not moves.
-	const [reference, ...others] = factored ?? [];
-	const rival = reference !== undefined && !others.every(other => isTransition(reference.header, other.header));
-	if (factors) return rival ? { ...factors, rival } : factors;
+	if (factors) return factors;
 	// Signed changes rank from the largest gain to the largest loss unless the rows run in an order of their own.
 	const signed =
 		plan.kind === "diverging" &&
@@ -2867,7 +2870,19 @@ export function isConditionPair(first: string, second: string): boolean {
  * without such words (`xutf | std`, `Q5_K_M | Q4_K_M`) has no direction: peers.
  */
 export function isTransition(first: string, second: string): boolean {
-	return (BEFORE.test(first) && !BEFORE.test(second)) || (AFTER.test(second) && !AFTER.test(first));
+	const before = BEFORE.test(first) && !BEFORE.test(second);
+	const after = AFTER.test(second) && !AFTER.test(first);
+	if (!before && !after) return false;
+	if ((before && STRONG_BEFORE.test(first)) || (after && STRONG_AFTER.test(second))) return true;
+	// `with`, `to`, `from` also join words inside a name (`Runs with ≥10`): they mark a condition only
+	// between headers naming one subject (`build without cache | build with cache`).
+	const subject = (header: string) =>
+		header
+			.toLowerCase()
+			.split(/[^a-z0-9.]+/)
+			.filter(word => word && !WEAK_CONDITION.test(word));
+	const words = subject(second);
+	return subject(first).some(word => words.includes(word));
 }
 
 /** Most stages a slope chart runs through; more read as a line over the columns. */
@@ -4464,6 +4479,7 @@ function changeChart(
 		plan.polarity?.[column.index] ?? plan.polarity?.[before.index];
 	let pairs: { name: string; polarity?: Polarity; at: (row: number) => ChartPoint | undefined }[];
 	let against: string;
+	let rival = false;
 	if (baselines) {
 		// Metric pairs: each series against its own before column, the legend naming the before condition.
 		pairs = columns.map((column, at) => ({
@@ -4487,6 +4503,8 @@ function changeChart(
 			at: row => changePoint(baseline.cells[row], column.cells[row]),
 		}));
 		against = baseline.header;
+		// Measured against a rival rather than a before state ({@link leadingColumn}): gaps, not moves.
+		rival = !compared.every(column => isTransition(baseline.header, column.header));
 	} else {
 		pairs = [{ name: to, polarity: improves(baseline), at: row => arrowChange(baseline.cells[row]) }];
 		against = from;
@@ -4516,6 +4534,7 @@ function changeChart(
 		caption: skipped.length ? `Not plotted: ${skipped.join(", ")}` : undefined,
 		axis: naming.axis,
 		baseline: against,
+		rival: rival || undefined,
 		categoryPolarity: kept.map(row => plan.rowPolarity?.[row]),
 	};
 	return withMeaning(table, plan, spec, kept);
@@ -4622,8 +4641,12 @@ function nestNames(names: readonly string[]): ChartGroup[] | undefined {
 		let valid = true;
 		for (const name of names) {
 			const at = name.indexOf(separator);
-			const head = at >= MIN_NEST_HEAD ? name.slice(0, at) : undefined;
-			const member = head === undefined ? "" : name.slice(at + separator.length).trim();
+			const split = at >= MIN_NEST_HEAD ? name.slice(at + separator.length).trim() : "";
+			// A head ending in punctuation splits better at it (`Jev, 15 answers`), and a leading number
+			// belongs to the name before it (`EmbeddingGemma 2 embedding`, `Jev 15 + layer 14`).
+			const torn = /[,;:(]$/.test(name.slice(0, at)) || /^\d/.test(split);
+			const head = split && !torn ? name.slice(0, at) : undefined;
+			const member = head === undefined ? "" : split;
 			const last = runs.at(-1);
 			if (head !== undefined && member && last?.head === head) {
 				last.members.push(member);

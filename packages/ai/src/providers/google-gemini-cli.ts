@@ -27,7 +27,6 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TextContent,
-	ThinkingContent,
 	ToolCall,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
@@ -46,6 +45,7 @@ import {
 	convertMessages,
 	convertTools,
 	EMPTY_STREAM_BASE_DELAY_MS,
+	GoogleTextBlocks,
 	type GoogleThinkingLevel,
 	hasMeaningfulGoogleContent,
 	isThinkingPart,
@@ -54,10 +54,8 @@ import {
 	mapStopReasonString,
 	mapToolChoice,
 	nextToolCallId,
-	pushBlockEndEvent,
 	pushToolCallEvents,
 	retainThoughtSignature,
-	startTextOrThinkingBlock,
 } from "./google-shared";
 
 /**
@@ -686,72 +684,25 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				// response id into the next request's last_execution_id.
 				lastResponseId = undefined;
 
-				let currentBlock: TextContent | ThinkingContent | null = null;
+				const textBlocks = new GoogleTextBlocks(output, stream, "verbatim", ensureStarted);
 				const blocks = output.content;
 				const blockIndex = () => blocks.length - 1;
 				const visibleTextHealing = new StreamMarkupHealing({ pattern: "thinking" });
 
+				// Reply text passes two holding stages before it reaches `textBlocks`: the
+				// planning-leak buffer (flash models) and markup healing. Anything that ends
+				// a run of reply text must settle both first, or the next block lands ahead
+				// of text that streamed before it.
 				let isBuffering = false;
 				let textBuffer = "";
 				let bufferedTextSignature: string | undefined;
 				let strippedPlanningLeak = false;
 
-				const endCurrentBlock = (): void => {
-					if (!currentBlock) return;
-					pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
-					currentBlock = null;
-				};
-
-				const startTextBlock = (): TextContent => {
-					let block = currentBlock;
-					if (block?.type !== "text") {
-						endCurrentBlock();
-						block = startTextOrThinkingBlock(false, output, stream, ensureStarted);
-						currentBlock = block;
-					}
-					return block;
-				};
-
-				const startThinkingBlock = (): ThinkingContent => {
-					let block = currentBlock;
-					if (block?.type !== "thinking") {
-						endCurrentBlock();
-						block = startTextOrThinkingBlock(true, output, stream, ensureStarted);
-						currentBlock = block;
-					}
-					return block;
-				};
-
-				const emitVisibleText = (delta: string, thoughtSignature?: string): void => {
-					if (!delta) return;
-					const block = startTextBlock();
-					block.text += delta;
-					block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta,
-						partial: output,
-					});
-				};
-
-				const emitVisibleThinking = (delta: string): void => {
-					if (!delta) return;
-					const block = startThinkingBlock();
-					block.thinking += delta;
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta,
-						partial: output,
-					});
-				};
-
 				const emitHealingEvent = (event: StreamMarkupHealingEvent, thoughtSignature?: string): void => {
 					if (event.type === "text") {
-						emitVisibleText(event.text, thoughtSignature);
+						if (event.text) textBlocks.appendText(event.text, thoughtSignature);
 					} else if (event.type === "thinking") {
-						emitVisibleThinking(event.thinking);
+						if (event.thinking) textBlocks.appendThinking(event.thinking);
 					}
 				};
 
@@ -761,20 +712,35 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 				};
 
-				const flushVisibleText = (thoughtSignature?: string): void => {
+				const flushVisibleText = (): void => {
 					for (const event of visibleTextHealing.flushEvents()) {
-						emitHealingEvent(event, thoughtSignature);
+						emitHealingEvent(event);
 					}
 				};
 
-				const retainCurrentBlockThoughtSignature = (thoughtSignature: string): void => {
-					const block = currentBlock;
-					if (!block) return;
-					if (block.type === "thinking") {
-						block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, thoughtSignature);
-					} else {
-						block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
+				// Lands all held reply text; the signature the buffered text carried signs where it landed.
+				const settleVisibleText = (): void => {
+					const signature = bufferedTextSignature;
+					if (isBuffering) {
+						const buffered = consumePlanningBuffer(textBuffer, toolNames, true);
+						isBuffering = false;
+						textBuffer = "";
+						bufferedTextSignature = undefined;
+						if (buffered.kind === "leak") strippedPlanningLeak = true;
+						if (buffered.kind !== "incomplete") feedVisibleText(buffered.visibleText);
 					}
+					flushVisibleText();
+					if (signature) textBlocks.sign(signature, false);
+				};
+
+				// An unmarked signature-only part signs the reply text before it, which may still be held.
+				const signVisibleText = (thoughtSignature: string): void => {
+					if (isBuffering) {
+						bufferedTextSignature = retainThoughtSignature(bufferedTextSignature, thoughtSignature);
+						return;
+					}
+					flushVisibleText();
+					textBlocks.sign(thoughtSignature, false);
 				};
 
 				const responseAbortController = new AbortController();
@@ -830,58 +796,48 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const candidate = responseData.candidates?.[0];
 					if (candidate?.content?.parts) {
 						for (const part of candidate.content.parts) {
-							if (part.text !== undefined && part.text !== "") {
-								const isThinking = isThinkingPart(part);
-								if (isThinking) {
-									flushVisibleText();
-									const block = startThinkingBlock();
-									block.thinking += part.text;
-									block.thinkingSignature = retainThoughtSignature(
-										block.thinkingSignature,
-										part.thoughtSignature,
-									);
-									stream.push({
-										type: "thinking_delta",
-										contentIndex: blockIndex(),
-										delta: part.text,
-										partial: output,
-									});
+							const { text, thoughtSignature } = part;
+							// A signature-only part carries no text, only a `thoughtSignature`.
+							const signatureOnly = text === "" && !part.functionCall ? thoughtSignature : undefined;
+							if (isThinkingPart(part)) {
+								if (text || signatureOnly) {
+									settleVisibleText();
+									textBlocks.push(part);
+								}
+							} else if (text) {
+								if (isBuffering) {
+									textBuffer += text;
+									bufferedTextSignature = retainThoughtSignature(bufferedTextSignature, thoughtSignature);
+								} else if (isFlashLeakModel && text.trimStart().startsWith("{")) {
+									isBuffering = true;
+									textBuffer = text;
+									bufferedTextSignature = thoughtSignature;
 								} else {
-									if (isBuffering) {
-										textBuffer += part.text;
-										bufferedTextSignature = retainThoughtSignature(
-											bufferedTextSignature,
-											part.thoughtSignature,
-										);
-									} else if (isFlashLeakModel && part.text.trimStart().startsWith("{")) {
-										isBuffering = true;
-										textBuffer = part.text;
-										bufferedTextSignature = part.thoughtSignature;
-									} else {
-										feedVisibleText(part.text, part.thoughtSignature);
-									}
+									feedVisibleText(text, thoughtSignature);
+								}
 
-									if (isBuffering) {
-										const buffered = consumePlanningBuffer(textBuffer, toolNames);
-										if (buffered.kind !== "incomplete") {
-											if (buffered.kind === "leak") strippedPlanningLeak = true;
-											const visibleSignature = bufferedTextSignature;
-											isBuffering = false;
-											textBuffer = "";
-											bufferedTextSignature = undefined;
-											feedVisibleText(buffered.visibleText, visibleSignature);
-										}
+								if (isBuffering) {
+									const buffered = consumePlanningBuffer(textBuffer, toolNames);
+									if (buffered.kind !== "incomplete") {
+										if (buffered.kind === "leak") strippedPlanningLeak = true;
+										const visibleSignature = bufferedTextSignature;
+										isBuffering = false;
+										textBuffer = "";
+										bufferedTextSignature = undefined;
+										feedVisibleText(buffered.visibleText, visibleSignature);
 									}
 								}
-							} else if (part.text === "" && part.thoughtSignature && !part.functionCall) {
-								retainCurrentBlockThoughtSignature(part.thoughtSignature);
+							} else if (signatureOnly) {
+								signVisibleText(signatureOnly);
 							}
 
 							if (part.functionCall) {
+								// Text still buffered here is the planning leak that precedes the call.
 								flushVisibleText();
-								endCurrentBlock();
+								textBlocks.close();
 								isBuffering = false;
 								textBuffer = "";
+								bufferedTextSignature = undefined;
 								const providedId = part.functionCall.id;
 								const needsNewId =
 									!providedId || output.content.some(b => b.type === "toolCall" && b.id === providedId);
@@ -923,20 +879,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 				}
 
-				if (isBuffering && textBuffer !== "") {
-					const buffered = consumePlanningBuffer(textBuffer, toolNames, true);
-
-					if (buffered.kind !== "incomplete") {
-						if (buffered.kind === "leak") strippedPlanningLeak = true;
-						feedVisibleText(buffered.visibleText, bufferedTextSignature);
-					}
-					bufferedTextSignature = undefined;
-					isBuffering = false;
-					textBuffer = "";
-				}
-
-				flushVisibleText(bufferedTextSignature);
-				endCurrentBlock();
+				settleVisibleText();
+				textBlocks.close();
 
 				return {
 					meaningful: hasMeaningfulGoogleContent(output),

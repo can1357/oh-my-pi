@@ -118,7 +118,7 @@ import {
 } from "./queries";
 import { DownloadManager, type BrowserDownload } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
-import { applyIgnoreHttpsErrors } from "./open-options";
+import { applyInsecure } from "./open-options";
 import {
 	BrowserNetworkManager,
 	type HarContentPolicy,
@@ -1562,7 +1562,7 @@ export class WorkerCore {
 	#emulation?: BrowserEmulationController;
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
 	#webmcp?: WebMcpController;
-	/** Session holding `ignore_https_errors`; Chromium drops the override once it detaches. */
+	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
 	readonly #recording = new RecordingController();
 	/** Set once the core stops for good: by {@link terminate}, or by a close. */
@@ -1831,7 +1831,7 @@ export class WorkerCore {
 			await installVitalsObservers(this.#page);
 			await installCancelledReleaseGuard(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
-			if (payload.ignoreHttpsErrors) this.#certificateOverride = await applyIgnoreHttpsErrors(this.#page);
+			if (payload.insecure) this.#certificateOverride = await applyInsecure(this.#page);
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);

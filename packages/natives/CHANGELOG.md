@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added `shellBuiltins(sessionEnv?)` to list commands provided by the embedded shell, including process controls and utilities.
+- Expanded the embedded shell with `awk`, `tar`, `shasum`, `md5`, `strings`, and `lsof` across Linux, macOS, and Windows. Destructive utilities can be disabled with `PI_DISABLE_UUTILS_DESTRUCTIVE`; when disabled, `tar` is delegated to the system.
+
+### Fixed
+
+- Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
+
+## [18.18.9] - 2026-11-11
+
 ### Added
 
 - `OMP_APPLEFM_DISABLE=1` builds without the Apple Foundation Models bridge and never probes Xcode or the Command Line Tools; it cannot be combined with `OMP_APPLEFM_SWIFTC` ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))

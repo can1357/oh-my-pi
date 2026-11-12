@@ -1013,6 +1013,41 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(getProviderModels(registry, "projecting-provider")).toEqual([]);
 	});
 
+	test("a provider lookup reflects another provider's catalog modifier once its OAuth login lands", async () => {
+		const config: ProviderConfigInput = {
+			api: "custom-gated-api",
+			baseUrl: "https://example.invalid/",
+			streamSimple,
+			models: [baseModel],
+			oauth: {
+				name: "Gated OAuth",
+				login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+				refreshToken: async credentials => credentials,
+				getApiKey: credentials => credentials.access,
+				modifyModels: models =>
+					models.map(model =>
+						model.provider === "anthropic" ? { ...model, name: `${model.name} (gated)` } : model,
+					),
+			},
+		};
+		registry.registerProvider("gated-provider", config, "ext://oauth");
+		const anthropicNames = () => registry.getProviderModels("anthropic").map(model => model.name);
+
+		// Without credentials the hook cannot run, so the lookup stays provider-scoped and untouched.
+		expect(anthropicNames().length).toBeGreaterThan(0);
+		expect(anthropicNames().some(name => name.endsWith(" (gated)"))).toBe(false);
+
+		await authStorage.credentials.set("gated-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		// The login flow refreshes only the authenticated provider; anthropic's lookup must still see the hook.
+		await registry.refreshProvider("gated-provider", "offline");
+		expect(anthropicNames().every(name => name.endsWith(" (gated)"))).toBe(true);
+	});
+
 	test("oauth.modifyModels output is materialized through buildModel", async () => {
 		await authStorage.credentials.set("materializing-provider", {
 			type: "oauth",

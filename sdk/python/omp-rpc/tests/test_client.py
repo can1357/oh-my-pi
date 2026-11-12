@@ -1217,13 +1217,10 @@ class RpcClientTests(unittest.TestCase):
             & {event.type for event in turn.events}
         )
 
-    def test_set_todos_accepts_blocked_tasks(self) -> None:
+    def test_set_todos_rejects_unknown_status(self) -> None:
         with self.make_client() as client:
-            phases = client.set_todos(
-                [{"content": "Ship", "status": "blocked", "blocker": "waiting on review"}]
-            )
-        task = phases[0].tasks[0]
-        self.assertEqual((task.status, task.blocker), ("blocked", "waiting on review"))
+            with self.assertRaises(RpcError):
+                client.set_todos([{"content": "Ship", "status": "blocked"}])
 
     def test_predict_word_outlasts_request_timeout(self) -> None:
         with self.make_client(request_timeout=0.3) as client:
