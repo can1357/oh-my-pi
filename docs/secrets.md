@@ -1,6 +1,6 @@
 # Secret Obfuscation
 
-Redacts sensitive values (API keys, tokens, passwords) in conversation messages sent to LLM providers. When enabled, configured secrets and built-in credential-shaped token patterns are replaced in supported message and replay text fields. Static system prompts, static tool definitions, and binary payloads are not redacted by this subsystem. Reversible placeholders are restored in model-authored tool arguments before execution and when local session context is rebuilt for display or resume.
+Redacts sensitive values (API keys, tokens, passwords) in conversation messages sent to LLM providers, including agent-authored developer notices and online title requests. When enabled, configured secrets and built-in credential-shaped token patterns are replaced in supported message and replay text fields. Static system prompts, static tool definitions, and binary payloads are not redacted by this subsystem. Reversible placeholders are restored in model-authored tool arguments before execution and when local session context is rebuilt for display or resume.
 
 ## Enabling
 
@@ -19,9 +19,11 @@ secrets:
    - Built-in reversible regexes for common credential shapes that appear only in session content or tool results: GitHub, GitLab, OpenAI, and Anthropic tokens, AWS access keys, Google API keys, Slack tokens, npm tokens, Stripe secret and restricted keys and webhook secrets, Hugging Face tokens, SendGrid keys, JWTs, Bearer header tokens, and PEM private key blocks
    - Passwords embedded in connection-URL environment values — any variable holding a `scheme://user:password@host`-style value (for example `DATABASE_URL`) has its password registered regardless of the variable name when it is at least 8 characters long. Both raw and percent-decoded forms are collected when they meet that limit.
 
-2. Provider-visible text has matching values replaced with deterministic placeholders such as `$$3P8W5JH1TK2Q$$`, `$$3P8W5JH1TK2Q:L$$`, or `$$GITHUBTOKEN_3P8W5JH1TK2Q:L$$`.
+2. Provider-visible conversation text, including background-job notices and online title inputs, has matching values replaced with deterministic placeholders such as `$$3P8W5JH1TK2Q$$`, `$$3P8W5JH1TK2Q:L$$`, or `$$GITHUBTOKEN_3P8W5JH1TK2Q:L$$`.
 
 3. Live model-authored tool arguments are deep-walked and placeholders are restored before the tool executes. Session context restores placeholders for local display/resume and re-obfuscates it before provider replay. Replace-mode substitutions are one-way and are not restored.
+
+With Hide Secrets enabled, bash execution traces are available live but omitted from the session file: traces contain expanded commands and opaque native syntax data that cannot be safely redacted. A resumed session cannot replay those trace visualizations. Existing session files written before enabling Hide Secrets are not rewritten.
 
 Two modes control what happens to each secret:
 

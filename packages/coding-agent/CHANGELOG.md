@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Hide Secrets leaking saved values through background-job notices, online title requests, and advisors after enabling it mid-session; executed bash traces are no longer persisted while it is enabled ([#18967](https://github.com/can1357/oh-my-pi/issues/18967)).
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes

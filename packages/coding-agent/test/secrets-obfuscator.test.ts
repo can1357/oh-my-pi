@@ -364,7 +364,7 @@ describe("SecretObfuscator regex behavior", () => {
 		expect(obfuscated.tools?.[0]?.parameters).toBe(parameters);
 	});
 
-	it("redacts user-facing messages and assistant replay content", () => {
+	it("redacts provider-visible developer notices regardless of attribution", () => {
 		const secret = "SUPER_SECRET_TOKEN_12345";
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
 		const userMsg: Message = { role: "user", content: `user says ${secret}`, timestamp: 1 };
@@ -373,6 +373,12 @@ describe("SecretObfuscator regex behavior", () => {
 			role: "developer",
 			content: `<file>${secret}</file>`,
 			attribution: "user",
+			timestamp: 1,
+		};
+		const jobNotice: Message = {
+			role: "developer",
+			content: [{ type: "text", text: `Background job (curl -H Authorization:${secret}) has completed.` }],
+			attribution: "agent",
 			timestamp: 1,
 		};
 		const assistantMsg: Message = {
@@ -413,17 +419,15 @@ describe("SecretObfuscator regex behavior", () => {
 			userMsg,
 			systemDeveloperMsg,
 			fileMentionMsg,
+			jobNotice,
 			assistantMsg,
 			toolResultMsg,
 		]);
 
-		// User-facing content and assistant replay fields are redacted.
-		expect(JSON.stringify(obfuscated[0])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[2])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[3])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[4])).not.toContain(secret);
-		// System developer reminders remain untouched.
-		expect(obfuscated[1]).toBe(systemDeveloperMsg);
+		// The job notice is authored by the agent but can quote executed commands.
+		for (const message of obfuscated) expect(JSON.stringify(message)).not.toContain(secret);
+		expect(JSON.stringify(obfuscated[3])).toContain("$$");
+		expect(obfuscator.deobfuscate(JSON.stringify(obfuscated[3]))).toContain(secret);
 	});
 
 	it("obfuscates file metadata on a replayed compaction payload but keeps the block verbatim", () => {

@@ -5,6 +5,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
 import {
@@ -76,6 +77,59 @@ describe("title generator", () => {
 		expect(options?.disableReasoning).toBe(true);
 		const messages = completeSimpleMock.mock.calls[0]?.[1].messages;
 		expect(messages?.map(message => message.role)).toEqual(["user"]);
+	});
+
+	it("redacts saved secrets in online title requests without changing local title input", async () => {
+		const secret = "saved-title-secret-value";
+		const input = `Investigate the resolver with ${secret}`;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }], "title-test-key");
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Resolver Investigation</title>" }],
+		} as never);
+		const title = await generateSessionTitle(
+			input,
+			createRegistry(model),
+			createSettings(model),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			obfuscator,
+		);
+		expect(title).toBe("Resolver Investigation");
+		const request = completeSimpleMock.mock.calls[0]?.[1];
+		const user = request?.messages[0];
+		expect(user?.role).toBe("user");
+		if (user?.role !== "user" || typeof user.content !== "string") throw new Error("Expected title user text");
+		expect(user.content).not.toContain(secret);
+		expect(user.content).toContain("Investigate the resolver");
+		expect(obfuscator.deobfuscate(user.content)).toContain(secret);
+
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const generateMock = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("Local Resolver Title");
+		expect(
+			await generateSessionTitle(
+				input,
+				createRegistry(localModel),
+				createSettings(localModel),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				obfuscator,
+			),
+		).toBe("Local Resolver Title");
+		expect(generateMock).toHaveBeenCalledWith(localModel.id, input);
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("selects an available local-inference model from the tiny role", async () => {

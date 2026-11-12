@@ -2218,6 +2218,29 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain(secret);
 		});
 
+		it("uses secrets enabled after the advisor runtime was built", async () => {
+			const secret = "ADVISOR_LIVE_SECRET_123";
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const active: { current?: SecretObfuscator } = {};
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const messages: AgentMessage[] = [{ role: "user", content: `token ${secret}`, timestamp: 1 }];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				get obfuscator() {
+					return active.current;
+				},
+			};
+			const runtime = new AdvisorRuntime(makeAgent(promptInputs), host);
+			active.current = obfuscator;
+
+			runtime.onTurnEnd();
+			await Promise.resolve();
+
+			expect(promptInputs).toHaveLength(1);
+			expect(promptText(promptInputs[0])).not.toContain(secret);
+			expect(promptText(promptInputs[0])).toContain(obfuscator.obfuscate(secret));
+		});
+
 		it("drops a tool call's replay signature when it rewrites the call arguments", async () => {
 			const secret = "ADVISOR_SIGNED_ARG_SECRET_123";
 			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);

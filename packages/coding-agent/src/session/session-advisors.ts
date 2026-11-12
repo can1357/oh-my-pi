@@ -1623,10 +1623,13 @@ export class SessionAdvisors {
 					? Promise.all([this.#advisorRecorderClosed, this.#advisorCostSnapshotBarrier])
 					: this.#advisorRecorderClosed,
 			);
+			const host = this.#host;
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
-				obfuscator: this.#host.obfuscator(),
+				get obfuscator() {
+					return host.obfuscator();
+				},
 				includeReasoning: descriptor.config.includeReasoning,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {

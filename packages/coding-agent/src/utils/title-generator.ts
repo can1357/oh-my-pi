@@ -26,6 +26,8 @@ import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
+import type { SecretObfuscator } from "../secrets/obfuscator";
+import { obfuscateMessages } from "../secrets/message-transform";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
@@ -202,6 +204,8 @@ export type TitleUsageReporter = (message: AssistantMessage) => void;
  *   OAuth credential should seed an isolated title-request session.
  * @param onUsage Optional reporter for every title attempt the provider billed,
  *   so the caller can record its usage on the session's cost ledger.
+ * @param obfuscator Optional session secret obfuscator for online provider messages;
+ *   local inference still receives the original text.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -214,6 +218,7 @@ export async function generateSessionTitle(
 	signal?: AbortSignal,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageReporter,
+	obfuscator?: SecretObfuscator,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -243,6 +248,7 @@ export async function generateSessionTitle(
 			titleSystemPrompt,
 			credentialSourceSessionId,
 			onUsage,
+			obfuscator,
 		);
 	}
 
@@ -283,6 +289,7 @@ export async function generateSessionTitle(
 	}
 }
 
+/** Request an online title with this session's saved secrets redacted from the user input. */
 export async function generateTitleOnline(
 	firstMessage: string,
 	registry: ModelRegistry,
@@ -294,6 +301,7 @@ export async function generateTitleOnline(
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageReporter,
+	obfuscator?: SecretObfuscator,
 ): Promise<string | null> {
 	const models = getTitleModels(registry, settings, currentModel);
 	if (models.length === 0) {
@@ -310,6 +318,7 @@ export async function generateTitleOnline(
 		customSystemPrompt,
 		credentialSourceSessionId,
 		onUsage,
+		obfuscator,
 	);
 }
 
@@ -323,6 +332,7 @@ async function generateTitleOnlineWithModels(
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageReporter,
+	obfuscator?: SecretObfuscator,
 ): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
@@ -382,7 +392,8 @@ async function generateTitleOnlineWithModels(
 			const maxTokens = TITLE_MAX_TOKENS;
 			logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
-			const messages: Message[] = [{ role: "user", content: userMessage, timestamp: Date.now() }];
+			const rawMessages: Message[] = [{ role: "user", content: userMessage, timestamp: Date.now() }];
+			const messages = obfuscator?.obfuscates() ? obfuscateMessages(obfuscator, rawMessages) : rawMessages;
 			if (model.supportsAssistantPrefill) messages.push(titlePrefill(model));
 
 			const response = await retryTransientCompletion(

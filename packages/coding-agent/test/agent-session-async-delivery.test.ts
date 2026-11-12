@@ -22,6 +22,7 @@ import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/lau
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
@@ -731,6 +732,56 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(batch?.content).toContain(`── Job ${taskId} (Find &lt;/system-notice> race) ──`);
 		expect(batch?.details?.jobs.map(job => job.label)).toEqual([bash.label, task.label]);
 		await manager.dispose();
+	});
+
+	it("keeps restored bash command secrets out of persisted completion notices", async () => {
+		const secret = "sdk-secret-token-123456";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const command = `curl -H 'Authorization: ${secret}' https://example.invalid`;
+		const jobId = manager.register("bash", command, async () => ({ text: "done" }), {
+			process: { command, cwd: "/tmp", pids: () => [] },
+		});
+		const job = manager.getJob(jobId)!;
+		await job.promise;
+		const notice = buildAsyncResultBatchMessage(
+			[{ jobId, result: "done", job, durationMs: 10, epoch: 0 }],
+			obfuscator,
+		);
+		if (!notice) throw new Error("Expected a background-job notice");
+		using dir = TempDir.createSync("@pi-async-secret-notice-");
+		const transcript = SessionManager.create(dir.path(), dir.path());
+		try {
+			transcript.appendMessage({ role: "user", content: "Run the command", timestamp: 1 });
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled model");
+			transcript.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "Starting background job" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 2,
+			});
+			transcript.appendMessage(notice);
+			await transcript.flush();
+			const stored = await Bun.file(transcript.getSessionFile()!).text();
+			expect(stored).not.toContain(secret);
+			expect(stored).toContain("$$");
+			expect(JSON.stringify(notice)).not.toContain(secret);
+		} finally {
+			await transcript.close();
+			await manager.dispose();
+		}
 	});
 
 	it("quotes a /tan job's user request and drops the resume instruction", async () => {

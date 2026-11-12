@@ -10,6 +10,7 @@
  */
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { escapeHarnessTags } from "./harness-tags";
@@ -121,7 +122,11 @@ function commandIdentity(command: string): string {
 	return `${oneLine.slice(0, keep)}…${oneLine.slice(-keep)}`;
 }
 
-export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
+/** Format a completion notice; scrub executed command labels before persisting when Hide Secrets is active. */
+export function buildAsyncResultBatchMessage(
+	entries: AsyncResultEntry[],
+	obfuscator?: SecretObfuscator,
+): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
 		const structured = entry.job?.structured;
@@ -143,7 +148,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		// A bash job is named by its whole command: its label truncates the tail, so parallel jobs
 		// that share a prefix would otherwise read the same in the notice that delivers them.
 		const command = entry.job?.type === "bash" ? entry.job.process?.command : undefined;
-		const headerLabel = command === undefined ? entry.job?.label : commandIdentity(command);
+		const label = entry.job?.label;
+		const safeCommand = command === undefined ? undefined : (obfuscator?.obfuscate(command) ?? command);
+		const safeLabel = label === undefined ? undefined : (obfuscator?.obfuscate(label) ?? label);
+		const headerLabel = safeCommand === undefined ? safeLabel : commandIdentity(safeCommand);
 		return {
 			jobId: entry.jobId,
 			agentUrlId,
@@ -153,7 +161,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			type: entry.job?.type,
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
-			label: entry.job?.label,
+			label: safeLabel,
 			headerLabel: headerLabel ? escapeHarnessTags(headerLabel) : undefined,
 			request: entry.job?.request === undefined ? undefined : escapeHarnessTags(entry.job.request),
 			namedByCommand: command !== undefined,

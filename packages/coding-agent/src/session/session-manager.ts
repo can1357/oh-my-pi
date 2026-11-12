@@ -945,6 +945,8 @@ export class SessionManager {
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
 	readonly #blobs: BlobStore;
+	/** Live Hide Secrets setting; checked for each JSONL serialization. */
+	#hideSecretsForPersistence: () => boolean = () => false;
 
 	#sessionId = "";
 	/**
@@ -1079,6 +1081,11 @@ export class SessionManager {
 		this.#blobs = new BlobStore(getBlobsDir());
 
 		if (persist && sessionDir) this.#storage.ensureDirSync(this.#sessionDir);
+	}
+
+	/** Supply the owning session's Hide Secrets setting before writing tool results. */
+	setHideSecretsForPersistence(enabled: () => boolean): void {
+		this.#hideSecretsForPersistence = enabled;
 	}
 
 	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
@@ -1577,7 +1584,7 @@ export class SessionManager {
 	}
 
 	#lineFor(entry: FileEntry): string {
-		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
+		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs, this.#hideSecretsForPersistence())) ?? "null"}\n`;
 	}
 	#recordDurableAppend(line: string): void {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");

@@ -2180,6 +2180,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		this.settings = config.settings;
+		this.sessionManager.setHideSecretsForPersistence(() => cfgSecretsEnabled.get(this.settings));
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
@@ -2788,7 +2789,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			);
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
-				build: buildAsyncResultBatchMessage,
+				build: entries => buildAsyncResultBatchMessage(entries, this.#obfuscator),
 			});
 		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
@@ -6441,7 +6442,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		done: PromiseWithResolvers<void>,
 		fromOutside: boolean,
 	): Promise<void> {
-		while (turn.nested.size > 0) await Promise.allSettled([...turn.nested]);
+		while (turn.nested.size > 0) await Promise.allSettled(turn.nested);
 		turn.released = true;
 		if (fromOutside) this.#queuedSessionTransitions--;
 		done.resolve();
@@ -11990,6 +11991,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					costGate.record(message.usage.cost.total);
 					this.#reportTitleUsage(usageOwner, message);
 				},
+				this.#obfuscator,
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;

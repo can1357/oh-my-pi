@@ -132,6 +132,46 @@ describe("SessionManager JSONL software-crash durability", () => {
 		]);
 	});
 
+	it("keeps the live bash trace but omits raw trace payloads from JSONL with Hide Secrets enabled", () => {
+		const cwd = makeTempDir("@pi-secret-trace-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file path");
+		let hideSecrets = true;
+		manager.setHideSecretsForPersistence(() => hideSecrets);
+		manager.appendMessage(assistantMessage("start"));
+
+		const secret = "configured-secret-script";
+		const trace = {
+			v: 1,
+			seq: 1,
+			t_ns: 0,
+			script: `echo ${secret}`,
+			units: [
+				{
+					line: 1,
+					source: [...Buffer.from(secret)],
+					nodes: [{ k: "simple", lo: 0, hi: 1, state: "ok", argv: [secret] }],
+				},
+			],
+			history: [{ seq: 1, t_ns: 0, kind: "CmdExpanded", argv: [secret], assigns: [["TOKEN", secret]] }],
+		};
+		const result = { ...toolResultMessage("call-1", "bash", "done"), details: { trace, exitCode: 0 } };
+		manager.appendMessage(result);
+		const stored = readJsonl(sessionFile).at(-1)?.message as { details?: Record<string, unknown> };
+		expect(fs.readFileSync(sessionFile, "utf8")).not.toContain(secret);
+		expect(stored.details).toEqual({ exitCode: 0 });
+		const live = manager.getBranch().at(-1);
+		expect(live?.type === "message" && live.message.role === "toolResult" && live.message.details).toEqual(
+			result.details,
+		);
+
+		hideSecrets = false;
+		manager.appendMessage({ ...toolResultMessage("call-2", "bash", "done"), details: { trace } });
+		const unhidden = readJsonl(sessionFile).at(-1)?.message as { details?: Record<string, unknown> };
+		expect(unhidden.details?.trace).toEqual(trace);
+	});
+
 	it("reopens post-checkpoint user/assistant/tool events after a crash-equivalent snapshot", async () => {
 		const cwd = makeTempDir("@pi-crash-reopen-cwd-");
 		const sessionDir = path.join(cwd, "sessions");

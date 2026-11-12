@@ -566,8 +566,26 @@ function stripSpilledMcpStructuredContent(entry: FileEntry): FileEntry {
 	return { ...entry, message: { ...entry.message, details: persistedDetails } };
 }
 
-export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
-	const projected = stripSpilledMcpStructuredContent(stripReplayedReasoningSignatures(entry));
+/**
+ * Shell traces contain raw source, expanded argv/env, output, and opaque native
+ * syntax bytes. Keep the live message intact; omit the trace only on disk.
+ */
+function stripBashTrace(entry: FileEntry): FileEntry {
+	if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "bash") {
+		return entry;
+	}
+	const details = entry.message.details;
+	if (!isRecord(details) || !Object.hasOwn(details, "trace")) return entry;
+	const persistedDetails = { ...details };
+	delete persistedDetails.trace;
+	return { ...entry, message: { ...entry.message, details: persistedDetails } };
+}
+
+/** Project an entry for JSONL storage; omit opaque bash traces when Hide Secrets is enabled. */
+export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore, hideSecrets = false): FileEntry {
+	const projected = stripSpilledMcpStructuredContent(
+		stripReplayedReasoningSignatures(hideSecrets ? stripBashTrace(entry) : entry),
+	);
 	try {
 		return truncateForPersistence(projected, blobStore) as FileEntry;
 	} catch (error) {
