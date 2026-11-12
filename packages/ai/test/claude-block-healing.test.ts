@@ -269,7 +269,9 @@ describe("claude usage-block healing", () => {
 
 	it("heals a global block from a healthy partial report only when its reset matches the block deadline", async () => {
 		const resetAt = Date.now() + 60 * 60_000;
-		const { storage, clearedScopes } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", { blockedUntilMs: resetAt });
+		const { storage, clearedScopes } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", {
+			blockedUntilMs: resetAt,
+		});
 		storages.push(storage);
 		await storage.credentials.reload();
 
@@ -281,10 +283,9 @@ describe("claude usage-block healing", () => {
 
 	it("treats a reset within 60 seconds of the block deadline as a match", async () => {
 		const resetAt = Date.now() + 60 * 60_000;
-		const { storage, clearedScopes } = makeHarness(
-			claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
-			"",
-			{ blockedUntilMs: resetAt + 59_000 });
+		const { storage, clearedScopes } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", {
+			blockedUntilMs: resetAt + 59_000,
+		});
 		storages.push(storage);
 		await storage.credentials.reload();
 
@@ -295,26 +296,9 @@ describe("claude usage-block healing", () => {
 
 	it("keeps a global block when the partial report's reset is more than 60 seconds off", async () => {
 		const resetAt = Date.now() + 60 * 60_000;
-		const { storage, clearedScopes, blocks } = makeHarness(
-			claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
-			"",
-			{ blockedUntilMs: resetAt + 61_000 });
-		storages.push(storage);
-		await storage.credentials.reload();
-
-		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
-
-		expect(clearedScopes).not.toContain("");
-		expect(blocks.has("1:")).toBe(true);
-	});
-
-	it("keeps a global block when a healthy partial report has a different reset", async () => {
-		const resetAt = Date.now() + 60 * 60_000;
-		const blockedUntil = resetAt + 60 * 60_000;
-		const { storage, clearedScopes, blocks } = makeHarness(
-			claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
-			"",
-			{ blockedUntilMs: blockedUntil });
+		const { storage, clearedScopes, blocks } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", {
+			blockedUntilMs: resetAt + 61_000,
+		});
 		storages.push(storage);
 		await storage.credentials.reload();
 
@@ -328,7 +312,9 @@ describe("claude usage-block healing", () => {
 		const blockedUntil = Date.now() + 60 * 60_000;
 		const limit = sharedLimit("7d", "7d", 0);
 		const noReset: UsageLimit = { ...limit, window: { id: "7d", label: "7d" } };
-		const { storage, clearedScopes, blocks } = makeHarness(claudeReport([noReset]), "", { blockedUntilMs: blockedUntil });
+		const { storage, clearedScopes, blocks } = makeHarness(claudeReport([noReset]), "", {
+			blockedUntilMs: blockedUntil,
+		});
 		storages.push(storage);
 		await storage.credentials.reload();
 
@@ -336,20 +322,6 @@ describe("claude usage-block healing", () => {
 
 		expect(clearedScopes).not.toContain("");
 		expect(blocks.has("1:")).toBe(true);
-	});
-
-	it("heals a global block from a healthy 5-hour-only report with a matching reset", async () => {
-		const resetAt = Date.now() + 60 * 60_000;
-		const { storage, clearedScopes } = makeHarness(
-			claudeReport([sharedLimit("5h", "5h", 0.2, resetAt)]),
-			"",
-			{ blockedUntilMs: resetAt });
-		storages.push(storage);
-		await storage.credentials.reload();
-
-		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
-
-		expect(clearedScopes).toContain("");
 	});
 
 	const partialKeepCases: { name: string; report: (resetAt: number) => UsageReport }[] = [

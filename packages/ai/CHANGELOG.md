@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Claude accounts staying blocked after recovery when `/usage` reports only one shared usage window ([#19090](https://github.com/can1357/oh-my-pi/pull/19090) by [@jeffscottward](https://github.com/jeffscottward))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

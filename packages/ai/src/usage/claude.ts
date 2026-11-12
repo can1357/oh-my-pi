@@ -999,6 +999,12 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
+		// Model-family rows still gate the account-wide scope alongside shared windows.
+		const globalScope = {
+			blockScope: "",
+			limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
+			healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
+		};
 		// The endpoint returns a report as soon as one window parses, and a tier
 		// 429 can be caused by a shared wall. A payload missing a shared gate
 		// leaves the block's cause unknown. One exception: a report exposing a
@@ -1010,16 +1016,8 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		// window holds; the next 429 restores it.
 		if (!claudeReportCoversSharedGates(report)) {
 			if (sharedLimits.length !== 1) return [];
-			return [
-				{
-					blockScope: "",
-					// Model-family rows still gate the account-wide scope; only shared
-					// windows are matched against the block deadline.
-					limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
-					healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
-					resetMatchRequired: true,
-				},
-			];
+			// Only shared windows are matched against the block deadline.
+			return [{ ...globalScope, resetMatchRequired: true }];
 		}
 		const tiers = new Set<string>();
 		for (const limit of report.limits) {
@@ -1027,11 +1025,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			if (tier === "fable" || tier === "mythos") tiers.add(tier);
 		}
 		return [
-			{
-				blockScope: "",
-				limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
-				healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
-			},
+			globalScope,
 			...[...tiers].map(tier => ({
 				blockScope: `tier:${tier}`,
 				limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
