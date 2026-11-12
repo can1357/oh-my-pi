@@ -345,7 +345,9 @@ describe("LspMuxServer", () => {
 		const client = await watchingClient();
 		const own = path.join(tmpDir, "own.ts");
 		await Bun.write(own, "export {};\n");
-		client.notify("workspace/didChangeWatchedFiles", { changes: [{ uri: fileToUri(own), type: FileChangeType.Created }] });
+		client.notify("workspace/didChangeWatchedFiles", {
+			changes: [{ uri: fileToUri(own), type: FileChangeType.Created }],
+		});
 		// A later outside write proves the watcher has flushed past the client's own write.
 		const marker = path.join(tmpDir, "marker.ts");
 		await Bun.write(marker, "export {};\n");

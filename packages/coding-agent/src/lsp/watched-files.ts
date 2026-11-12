@@ -418,7 +418,11 @@ export class WatchedFilesForwarder {
 	}
 
 	/** The native watch is registered at once; `armed` settles when it reports changes or has failed. */
-	#openNative(dir: string, recursive: boolean, ended: (error: unknown) => void): { watch: Watch; armed: Promise<void> } {
+	#openNative(
+		dir: string,
+		recursive: boolean,
+		ended: (error: unknown) => void,
+	): { watch: Watch; armed: Promise<void> } {
 		let watcher: DirectoryWatcher | undefined;
 		const watch = newWatch(() => watcher?.close());
 		const armed = DirectoryWatcher.start(dir, recursive, (error: Error | null, batch: DirectoryChanges) => {
