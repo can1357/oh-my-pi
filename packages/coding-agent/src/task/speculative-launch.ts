@@ -191,16 +191,8 @@ export class BatchArgsScanner {
 export interface TaskLauncher {
 	/** Per-spawn params of a batch call (or streamed prefix), or undefined when it fails validation. */
 	spawns(args: unknown): TaskParams[] | undefined;
-	/**
-	 * Preflight and start one spawn. `"dispatch"` leaves this item to dispatch while later items
-	 * still start early; undefined refuses it and halts speculation for the rest of the call.
-	 */
-	start(
-		toolCallId: string,
-		spawn: TaskParams,
-		index: number,
-		signal: AbortSignal,
-	): Promise<SpawnRun | "dispatch" | undefined>;
+	/** Preflight and start one spawn; undefined when it may not start early. */
+	start(toolCallId: string, spawn: TaskParams, index: number, signal: AbortSignal): Promise<SpawnRun | undefined>;
 }
 
 export interface TaskLaunchSessionOptions {
@@ -337,13 +329,12 @@ export class TaskLaunchSession implements ToolSpeculationStreamSession {
 			this.#halted = true;
 			return;
 		}
-		let run: SpawnRun | "dispatch" | undefined;
+		let run: SpawnRun | undefined;
 		try {
 			run = await launcher.start(toolCall.id, spawn, index, this.#controller.signal);
 		} catch {
 			run = undefined;
 		}
-		if (run === "dispatch") return;
 		if (!run) {
 			this.#halted = true;
 			return;

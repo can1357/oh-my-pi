@@ -2732,7 +2732,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
 			getContextMessages: () => convertToLlm(session?.messages ?? []),
-			providerSecrets: obfuscator,
+			// A getter: `obfuscator` is rebuilt when secret hiding is switched on mid-session.
+			get providerSecrets() {
+				return obfuscator;
+			},
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),

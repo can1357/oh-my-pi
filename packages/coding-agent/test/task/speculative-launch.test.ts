@@ -9,8 +9,8 @@
  *    launched, aborts every speculative agent.
  * 4. The host only authorizes launches under auto-allow approval with no
  *    extension lifecycle handlers.
- * 5. An `inheritContext` item waits for dispatch (the parent's streaming turn
- *    is not in its context yet) without halting later items.
+ * 5. An `inheritContext` item halts speculation (the parent's streaming turn
+ *    is not in its context yet), so dispatch starts every item in order.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolCall, SpeculativeOperationSink } from "@oh-my-pi/pi-agent-core";
@@ -212,7 +212,7 @@ describe("task speculative launch", () => {
 		expect(manager.getJob("Beta")!.status).toBe("completed");
 	});
 
-	it("leaves an inheritContext item to dispatch while later items still start early", async () => {
+	it("halts speculation at an inheritContext item, so dispatch starts the call's items in order", async () => {
 		const { tool, manager, session } = await openSession({ "task.inheritContext": true });
 		const flagged = {
 			context: "ctx",
@@ -221,13 +221,15 @@ describe("task speculative launch", () => {
 				{ name: "Beta", agent: "task", task: "Do B." },
 			],
 		};
+		const adopt = vi.spyOn(session, "adopt");
 		session.update(toolCall, JSON.stringify(flagged));
-		await spawn("Beta").started.promise;
-		expect(startedIds.has("Alpha")).toBe(false);
-
 		session.finalize({ toolCall, args: flagged });
-		await tool.execute(toolCall.id, flagged);
+		const result = await tool.execute(toolCall.id, flagged);
+		// Beta did not launch ahead of Alpha: nothing ran speculatively, dispatch started both in order.
+		expect((await (adopt.mock.results[0]!.value as ReturnType<TaskLaunchSession["adopt"]>)).size).toBe(0);
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
 		await spawn("Alpha").started.promise;
+		await spawn("Beta").started.promise;
 		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(2);
 		spawn("Alpha").release.resolve();
 		spawn("Beta").release.resolve();

@@ -1054,11 +1054,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawn: TaskParams,
 		index: number,
 		signal: AbortSignal,
-	): Promise<SpawnRun | "dispatch" | undefined> {
+	): Promise<SpawnRun | undefined> {
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
 		// The parent's still-streaming turn (usually the reason for the spawn) is not in its context
-		// yet, so a flagged item waits for dispatch; later items still start early.
-		if (this.#wantsInheritedContext(spawn)) return "dispatch";
+		// yet. Refusing halts speculation for the later items too, so ids and permits stay in order.
+		if (this.#wantsInheritedContext(spawn)) return undefined;
 		let blocking: boolean;
 		try {
 			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;

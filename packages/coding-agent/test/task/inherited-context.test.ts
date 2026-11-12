@@ -110,6 +110,20 @@ describe("buildInheritedContext", () => {
 		expect(context!.text.includes(secret) || !context!.text.includes(secret.slice(-20))).toBe(true);
 		expect(buildInheritedContext([userMessage(line)], undefined)!.text.startsWith(secret.slice(-20))).toBe(true);
 	});
+
+	it("never hands the child a secret whose rule lost its context at the cut", () => {
+		const token = "fixture".repeat(4);
+		const entries = [{ type: "regex" as const, content: "(?<=\\bBearer )[A-Za-z0-9._~+/=-]{20,}" }];
+		const parent = new SecretObfuscator(entries);
+		const placeholderChars = parent.obfuscate(`Bearer ${token}`).length - "Bearer ".length;
+		// One long line; each suffix size lands the encoded cut inside "Bearer ", which the lookbehind needs.
+		for (let into = 1; into <= "Bearer ".length; into++) {
+			const suffix = "y".repeat(INHERITED_CONTEXT_CHARS - placeholderChars - into);
+			const line = `${"x".repeat(2_000)} Bearer ${token}${suffix}`;
+			const context = buildInheritedContext([userMessage(line)], parent);
+			expect(new SecretObfuscator(entries).obfuscate(context?.text ?? "")).not.toContain(token);
+		}
+	});
 });
 
 /** The child's provider context for an inherited tail, built the way the session builds it. */

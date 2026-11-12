@@ -117,11 +117,35 @@ function tailText(text: string, chars: number): string {
 	return lineStart !== -1 && lineStart - start < LINE_SNAP_CHARS ? text.slice(lineStart + 1) : text.slice(start);
 }
 
+/** Most re-cuts while making a decoded tail re-encode on its own; past this, nothing is inherited. */
+const SECRET_RECUT_ATTEMPTS = 8;
+
+/**
+ * Decode an encoded tail into text whose secrets a fresh pass of the same rules encodes again,
+ * as the child's boundary will. A rule that needs context (a `Bearer ` lookbehind) can lose it at
+ * the cut; the re-cut then moves past the placeholder where the fresh pass first disagrees.
+ * `undefined` when no re-cut converges (fail closed).
+ */
+function decodeForChild(encodedTail: string, secrets: InheritedContextSecrets): string | undefined {
+	let tail = encodedTail;
+	for (let attempt = 0; attempt < SECRET_RECUT_ATTEMPTS && tail; attempt++) {
+		const text = secrets.deobfuscate(tail);
+		const recheck = secrets.obfuscate(text);
+		if (recheck === tail) return text;
+		let at = 0;
+		while (at < tail.length && tail[at] === recheck[at]) at++;
+		const close = tail.indexOf("$$", tail.startsWith("$$", at) ? at + 2 : at);
+		if (close === -1) return undefined;
+		tail = tail.slice(close + 2);
+	}
+	return undefined;
+}
+
 /**
  * Serialize the parent's live context (thinking excluded) and keep the tail and its identifiers.
  * With `secrets`, the tail is cut on encoded text (a secret at the cut is dropped whole, never
- * split) and decoded afterwards, for the child's own provider boundary to encode with placeholders
- * it can decode. `undefined` when the parent has no conversation text yet.
+ * split) and decoded afterwards ({@link decodeForChild}), for the child's own provider boundary to
+ * encode with placeholders it can decode. `undefined` when the parent has no conversation text yet.
  */
 export function buildInheritedContext(
 	messages: readonly Message[],
@@ -131,7 +155,8 @@ export function buildInheritedContext(
 	const encoded = (secrets ? secrets.obfuscate(raw) : raw).trim();
 	if (!encoded) return undefined;
 	const tail = tailText(encoded, INHERITED_CONTEXT_CHARS);
-	const text = secrets ? secrets.deobfuscate(tail) : tail;
+	const text = secrets ? decodeForChild(tail, secrets) : tail;
+	if (!text?.trim()) return undefined;
 	return { text, identifiers: extractIdentifiers(text) };
 }
 
@@ -201,7 +226,8 @@ function isInheritedContextTurn(message: Message): message is UserMessage & { co
  * only ever draw encoded text, and before snapcompact's inline transform, whose planner then
  * counts these frames and whose system-prompt frames land in front of this turn. Keeps the text
  * turn when the frames would push the request past the provider image budget, where the
- * oldest-first image clamp would drop them first. Holds the last render, so a session re-sends
+ * oldest-first image clamp would drop them first; a switch between frames and text rewrites the
+ * first turn, which costs one prompt-cache miss. Holds the last render, so a session re-sends
  * identical bytes (prompt caches stay warm) without re-rasterizing.
  */
 export class InheritedContextFrames {
