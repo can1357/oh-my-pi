@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
 import {
+	bucketChildKeyName,
 	directChildKeyName,
 	SessionWriteConflictError,
 	type SessionStorage,
@@ -32,6 +33,19 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/**
+	 * The head `prefixBytes` of every `path` in one batch, when the backend can
+	 * answer a set of files with one query. Absent rows are simply absent from
+	 * the map. Optional: {@link IndexedSessionStorage.readTextPrefixes} falls
+	 * back to per-file {@link readSlices} without it.
+	 */
+	readPrefixes?(paths: readonly string[], prefixBytes: number): Promise<Map<string, string>>;
+	/**
+	 * Whether the stored content holds an assistant `message` record, decided
+	 * where the content lives so it never crosses the wire. Optional:
+	 * {@link IndexedSessionStorage.hasAssistantTurn} falls back to a full read.
+	 */
+	hasAssistantTurn?(path: string): Promise<boolean>;
 	/**
 	 * Replace content, atomically rejecting when the shared backend's current
 	 * UTF-8 byte length differs from `expectedSize`.
@@ -111,6 +125,21 @@ function uniquePaths(paths: readonly string[]): string[] {
 	}
 	return out;
 }
+/**
+ * True for a complete `message` record line whose role is `assistant`. JSON
+ * escapes quotes inside strings, so a bare `"assistant"` can only be a key or
+ * value: other lines skip the parse. Malformed or partial lines are false.
+ */
+function isAssistantMessageLine(line: string): boolean {
+	if (!line.includes('"assistant"')) return false;
+	try {
+		const record = JSON.parse(line) as { type?: unknown; message?: { role?: unknown } };
+		return record.type === "message" && record.message?.role === "assistant";
+	} catch {
+		return false;
+	}
+}
+
 function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined {
 	if (!entry.titleUpdatedAt) return undefined;
 	return { title: entry.title, source: entry.titleSource, updatedAt: entry.titleUpdatedAt };
@@ -268,9 +297,11 @@ export class IndexedSessionStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		const resolvedDir = path.resolve(dir);
 		const out: string[] = [];
+		const isBucketPattern = pattern.startsWith("*/");
+		const leafPattern = isBucketPattern ? pattern.slice(2) : pattern;
 		for (const key of this.#index.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
-			if (name === undefined || !matchesGlob(name, pattern)) continue;
+			const name = isBucketPattern ? bucketChildKeyName(resolvedDir, key) : directChildKeyName(resolvedDir, key);
+			if (name === undefined || !matchesGlob(name, leafPattern)) continue;
 			out.push(key);
 		}
 		return out;
@@ -286,6 +317,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.#awaitPath(path);
 		const content = await this.#backend.readFull(path);
 		if (content === null) throw enoent(path);
+		this.#adoptObservedSize(path, byteLength(content));
 		const title = titleUpdateForIndex(entry);
 		return title ? overlayTitleSlotContent(content, title) : content;
 	}
@@ -300,6 +332,64 @@ export class IndexedSessionStorage implements SessionStorage {
 		const [prefix, suffix] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
 		const title = titleUpdateForIndex(entry);
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
+	}
+	/**
+	 * Batched head read: every `paths` the index knows, in one backend round
+	 * trip when it offers {@link SessionStorageBackend.readPrefixes}, one slice
+	 * read per file when it does not. Each path's queued writes are awaited
+	 * first, so the batch sees exactly what a per-file read would. Deliberately
+	 * without the title-slot overlay a per-file read applies: callers match ids
+	 * and links from the raw header, and the files that match are re-read
+	 * through `readTextSlices` for full parity.
+	 */
+	async readTextPrefixes(paths: readonly string[], prefixBytes: number): Promise<Map<string, string>> {
+		const prefixLimit = normalizeByteLimit(prefixBytes);
+		const present = [...new Set(paths)].filter(path => this.#index.has(path));
+		if (prefixLimit === 0 || present.length === 0) return new Map();
+		await Promise.all(present.map(path => this.#awaitPath(path)));
+		const batch = this.#backend.readPrefixes;
+		if (!batch) {
+			const prefixes = new Map<string, string>();
+			for (const path of present) {
+				try {
+					const [prefix] = await this.#backend.readSlices(path, prefixLimit, 0);
+					prefixes.set(path, prefix);
+				} catch {
+					// A row that vanished mid-batch reads as missing.
+				}
+			}
+			return prefixes;
+		}
+		return batch.call(this.#backend, present, prefixLimit);
+	}
+
+	/**
+	 * Stored display title for `path`, answered from the warmed index with no
+	 * content read. Absent when the file is unknown or has no title.
+	 */
+	getSessionTitleSync(path: string): string | undefined {
+		return this.#index.get(path)?.title ?? undefined;
+	}
+
+	/**
+	 * Whether `path` holds an assistant message record. Delegated to the backend
+	 * when it can decide in place (after the path's queued writes settle, so the
+	 * verdict covers them), so a multi-megabyte transcript is not downloaded to
+	 * look for one role marker; otherwise one line scan over the full content.
+	 */
+	async hasAssistantTurn(path: string): Promise<boolean> {
+		const inPlace = this.#backend.hasAssistantTurn;
+		if (!inPlace) {
+			let found = false;
+			await this.scanLines(path, line => {
+				found = isAssistantMessageLine(line);
+				return found;
+			});
+			return found;
+		}
+		if (!this.#index.has(path)) throw enoent(path);
+		await this.#awaitPath(path);
+		return inPlace.call(this.#backend, path);
 	}
 
 	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
@@ -505,6 +595,18 @@ export class IndexedSessionStorage implements SessionStorage {
 		} else {
 			this.#index.delete(path);
 		}
+	}
+
+	/**
+	 * A read just observed `size` bytes on the backend. With no publish of
+	 * this process pending on `path`, that is the durable size: adopt it, so a
+	 * row another process rewrote is size-checked against what the backend
+	 * holds instead of a local view that no publish of ours can ever match.
+	 */
+	#adoptObservedSize(path: string, size: number): void {
+		if (this.#pendingFrames.has(path) || this.#pathPending.has(path)) return;
+		const current = this.#index.get(path);
+		if (current && current.size !== size) this.#index.set(path, { ...current, size });
 	}
 
 	#setIndex(
