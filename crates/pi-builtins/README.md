@@ -6,7 +6,8 @@ itself:
 1. **In-process command-line utilities** — `cat`, `grep`/`rg`, `ast-grep`/`sg`,
    `sed`, `ls`, `find`, `sort`, `jq`, `fd`, `diff`, `xargs`, the moreutils set,
    and ~50 more. One module per command, in `src/<command>.rs`.
-2. **Process builtins** — `ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`.
+2. **Process builtins** — `ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`,
+   `lsof`.
 
 They exist so the shell never has to fork: a long-lived embedded
 shell resolves these names itself, on every platform, whether or not the host
@@ -47,7 +48,8 @@ The adapter (`run_utility`/`run_async_utility`) handles, once for all of them:
 descriptor paths (`diff <(a) <(b)`), `--help`/`--version` on stdout with status
 0, usage errors on stderr, execution on a blocking thread, cancellation,
 emulated SIGPIPE, and panic containment. The process builtins (`ps`, `top`,
-`sleep`, `pgrep`, `pkill`, `pidwait`) are async bodies over a `ProcContext`.
+`sleep`, `pgrep`, `pkill`, `pidwait`, `lsof`) are async bodies over a
+`ProcContext`.
 
 ## Running extras
 
@@ -66,5 +68,5 @@ $ cargo nextest run -p pi-builtins --no-default-features --features util.sed
 ## Licensing
 
 MIT throughout, but the ported utilities carry upstream notices — uutils
-coreutils, uutils findutils, uutils sed, jaq, sd, and rust-utf8. See `LICENSE`, which
+coreutils, uutils findutils, uutils sed, jaq, sd, rust-utf8, GoAWK, and libproc-rs. See `LICENSE`, which
 reproduces each in full and lists which commands it covers.

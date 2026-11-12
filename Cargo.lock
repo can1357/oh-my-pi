@@ -470,7 +470,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bf601cccedfffec598ec2db1f9d6745885458bccc0e8916d7023f017c94b3d0"
 dependencies = [
  "atspi-common",
- "atspi-connection",
  "atspi-proxies",
  "zbus",
 ]
@@ -489,18 +488,6 @@ dependencies = [
  "zbus-lockstep-macros",
  "zbus_names",
  "zvariant",
-]
-
-[[package]]
-name = "atspi-connection"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fab8e4f574f5a7d3af280b38eff25fb6f47a537dac9ae39ce152f52b19fb10b"
-dependencies = [
- "atspi-common",
- "atspi-proxies",
- "futures-lite",
- "zbus",
 ]
 
 [[package]]
@@ -815,6 +802,15 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
 
 [[package]]
 name = "calendrical_calculations"
@@ -1619,7 +1615,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -3944,12 +3940,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hifijson"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "242402749acf71e6f32f5857598b7002c4058a4e3c3b22b4c7d51cab9aea754e"
-
-[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4604,7 +4594,6 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jaq-core"
 version = "3.1.1"
 dependencies = [
- "arbitrary",
  "dyn-clone",
  "once_cell",
  "typed-arena",
@@ -4613,13 +4602,10 @@ dependencies = [
 [[package]]
 name = "jaq-json"
 version = "2.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4be2f53207ffb1313a2d2ad819cfa8bfaa7936cb85a110eda10fd5da822cec94"
 dependencies = [
  "bstr",
  "bytes",
  "foldhash 0.1.5",
- "hifijson",
  "indexmap",
  "jaq-core",
  "jaq-std",
@@ -4632,18 +4618,12 @@ dependencies = [
 [[package]]
 name = "jaq-std"
 version = "3.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f90e485abfd3189510c996e77be55056a51038b0fa5805e6c97b5dcf0d9ab55"
 dependencies = [
- "aho-corasick",
- "base64 0.22.1",
  "bstr",
  "jaq-core",
  "jiff",
  "libm",
- "log",
- "regex-bites",
- "urlencoding",
+ "onig",
 ]
 
 [[package]]
@@ -4870,6 +4850,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32f454fd6831a29c0e827ed075bca2a15be201bd57f4168f0fd1041124eab17e"
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5075,6 +5061,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 dependencies = [
  "twox-hash",
+]
+
+[[package]]
+name = "lzma-rust2"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890"
+dependencies = [
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -6248,7 +6243,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6290,7 +6285,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6299,6 +6294,7 @@ dependencies = [
  "base64 0.23.1",
  "bigdecimal",
  "bstr",
+ "bzip2",
  "chrono",
  "clap",
  "dns-lookup",
@@ -6330,6 +6326,7 @@ dependencies = [
  "libc",
  "lscolors",
  "lz4_flex",
+ "lzma-rust2",
  "md-5 0.10.6",
  "md4",
  "memchr",
@@ -6350,6 +6347,7 @@ dependencies = [
  "rand 0.10.3",
  "rayon",
  "regex",
+ "regex-automata",
  "rustc-hash",
  "rustix 1.1.5",
  "self_cell",
@@ -6357,6 +6355,8 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "smallvec",
+ "stacker",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6371,11 +6371,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.18.8"
+version = "18.19.0"
 
 [[package]]
 name = "pi-edit"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6394,7 +6394,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6406,7 +6406,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6500,7 +6500,7 @@ dependencies = [
 
 [[package]]
 name = "pi-predict"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6518,7 +6518,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6556,7 +6556,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "futures",
  "gix",
@@ -6572,7 +6572,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vfs"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6585,7 +6585,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "bytes",
  "flume",
@@ -6599,7 +6599,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.18.8"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "flume",
@@ -7258,12 +7258,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex-bites"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6a15a2fa0bfda9361941c45550896ae87b15cc6c8c939ea350079670332e211"
-
-[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7906,6 +7900,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "stacker"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "707f49d46706bacf8a2b00d51dace3f9de527c13eec3778f570c411f89e69967"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "psm",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8123,6 +8130,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8135,7 +8152,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
@@ -8981,12 +8998,6 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
-
-[[package]]
-name = "urlencoding"
-version = "2.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usvg"

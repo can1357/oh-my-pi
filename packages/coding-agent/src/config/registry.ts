@@ -329,8 +329,9 @@ export abstract class Derived<T> {
 
 /**
  * Deep equality of setting values that, unlike `Bun.deepEquals`, also compares the key order of
- * plain objects: record order carries precedence (`edit.modelVariants` takes the first match), so a
- * reorder is a change. Values other than plain objects and arrays compare with `Bun.deepEquals`.
+ * plain objects: record order breaks ties between equal-length model patterns (`edit.modelVariants`,
+ * `systemPromptTemplates`), so a reorder is a change. Values other than plain objects and arrays
+ * compare with `Bun.deepEquals`.
  */
 export function settingValuesEqual(a: unknown, b: unknown): boolean {
 	if (Object.is(a, b)) return true;

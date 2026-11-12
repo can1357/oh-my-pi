@@ -19,13 +19,15 @@ members = [
    "crates/vendor/cfg_aliases",
    "crates/vendor/grep-searcher",
    "crates/vendor/jaq-core",
+   "crates/vendor/jaq-json",
+   "crates/vendor/jaq-std",
    "crates/vendor/napi",
    "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "18.18.8"
+version = "18.19.0"
 edition = "2024"
 rust-version = "1.101"
 license = "MIT"
@@ -41,9 +43,12 @@ cfg_aliases = { path = "crates/vendor/cfg_aliases" }
 # or a whole slice; the vendored copy adds the chunk-fed `search_push` (see its
 # README.md).
 grep-searcher = { path = "crates/vendor/grep-searcher" }
-# jaq-core 3.1.1 has no way to interrupt an iterator before its next output;
-# the vendored copy polls cancellation inside filter evaluation.
+# jaq-core 3.1.1, jaq-json 2.0.3 and jaq-std 3.0.3 back pi's `jq` builtin. The
+# vendored copies poll cancellation inside filter evaluation and follow jq
+# 1.8's semantics where jaq's differ (see each crate's README.md).
 jaq-core = { path = "crates/vendor/jaq-core" }
+jaq-json = { path = "crates/vendor/jaq-json" }
+jaq-std = { path = "crates/vendor/jaq-std" }
 # napi 3.13.0 pins every `bun test --isolate` realm through per-thread handles
 # of never-torn-down envs; the vendored copy releases them (see its README.md).
 napi = { path = "crates/vendor/napi" }

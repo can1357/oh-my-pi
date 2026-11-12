@@ -1188,12 +1188,15 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 				const converted = convertMessageToLlm(wrapSteeringUserMessage(m));
 				return converted ? [converted] : [];
 			}
-			if (isUserInvokedSkillPrompt(m)) {
+			// A user-invoked skill is the user's own turn. An agent message is a user turn
+			// authored by that agent: never tool output, never developer or system authority.
+			const ircIncoming = m.customType === "irc:incoming";
+			if (ircIncoming || isUserInvokedSkillPrompt(m)) {
 				return [
 					{
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
-						attribution: "user",
+						attribution: ircIncoming ? "agent" : "user",
 						timestamp: m.timestamp,
 					},
 				];

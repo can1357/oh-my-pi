@@ -13,7 +13,7 @@ function session(settings: Record<string, unknown> = {}): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
-		settings: Settings.isolated({ "browser.relay": false, ...settings }),
+		settings: Settings.isolated({ "browser.webkit": false, "browser.relay": false, ...settings }),
 	};
 }
 
@@ -39,9 +39,7 @@ describe("resolveBrowserKind with Tern", () => {
 	});
 
 	it("keeps explicit app options, the relay and browser.cdpUrl ahead of Tern", () => {
-		expect(
-			resolveBrowserKind({ action: "open", app: { cdp_url: "http://127.0.0.1:9222" } }, session(), TERN_ENV),
-		).toEqual({
+		expect(resolveBrowserKind({ action: "open", app: "http://127.0.0.1:9222" }, session(), TERN_ENV)).toEqual({
 			kind: "connected",
 			cdpUrl: "http://127.0.0.1:9222",
 		});
@@ -55,28 +53,28 @@ describe("resolveBrowserKind with Tern", () => {
 		expect(resolveBrowserKind({ action: "open", headed: false }, session(), cmuxEnv)).toEqual(TERN);
 	});
 
-	it("skips Tern for app.tern:false and the setting, falling through to cmux", () => {
-		expect(resolveBrowserKind({ action: "open", app: { tern: false } }, session(), cmuxEnv).kind).toBe("cmux");
+	it('skips Tern for app: "own" and the setting, falling through to cmux only for the setting', () => {
+		expect(resolveBrowserKind({ action: "open", app: "own" }, session(), cmuxEnv).kind).toBe("headless");
 		expect(resolveBrowserKind({ action: "open" }, session({ "browser.tern": false }), cmuxEnv).kind).toBe("cmux");
 	});
 
-	it("app.target adopts in Tern even with the browser.tern setting off, unless app.tern:false", () => {
+	it('target adopts in Tern even with the browser.tern setting off, unless app: "own"', () => {
 		const settings = session({ "browser.tern": false });
-		expect(resolveBrowserKind({ action: "open", app: { target: "github" } }, settings, cmuxEnv)).toEqual(TERN);
-		expect(
-			resolveBrowserKind({ action: "open", app: { target: "github", tern: false } }, settings, cmuxEnv).kind,
-		).toBe("cmux");
+		expect(resolveBrowserKind({ action: "open", target: "github" }, settings, cmuxEnv)).toEqual(TERN);
+		expect(resolveBrowserKind({ action: "open", target: "github", app: "own" }, settings, cmuxEnv).kind).toBe(
+			"headless",
+		);
 	});
 
-	it("app.tern:true forces Tern over settings and errors outside Tern", () => {
+	it('app: "tern" forces Tern over settings and errors outside Tern', () => {
 		expect(
 			resolveBrowserKind(
-				{ action: "open", app: { tern: true } },
+				{ action: "open", app: "tern" },
 				session({ "browser.tern": false, "browser.cdpUrl": "http://127.0.0.1:9333" }),
 				TERN_ENV,
 			),
 		).toEqual(TERN);
-		expect(() => resolveBrowserKind({ action: "open", app: { tern: true } }, session(), {})).toThrow(
+		expect(() => resolveBrowserKind({ action: "open", app: "tern" }, session(), {})).toThrow(
 			/requires running inside a Tern pane/,
 		);
 	});
@@ -110,8 +108,8 @@ describe("resolveBrowserKind in a terminal another omp owns", () => {
 
 	it("still uses Tern or cmux when the open or the env asks for it", () => {
 		const env = { ...paneEnv, ...otherOwner };
-		expect(resolveBrowserKind({ action: "open", app: { tern: true } }, session(), env)).toEqual(TERN);
-		expect(resolveBrowserKind({ action: "open", app: { target: "github" } }, session(), env)).toEqual(TERN);
+		expect(resolveBrowserKind({ action: "open", app: "tern" }, session(), env)).toEqual(TERN);
+		expect(resolveBrowserKind({ action: "open", target: "github" }, session(), env)).toEqual(TERN);
 		expect(resolveBrowserKind({ action: "open" }, session(), { ...env, PI_BROWSER_TERN: "1" })).toEqual(TERN);
 		expect(
 			resolveBrowserKind({ action: "open" }, session(), {

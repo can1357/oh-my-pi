@@ -124,11 +124,11 @@ type ActivityScope = "all" | "agent" | "subtree";
 type HubViewMode = "roster" | "tree";
 /** The roster's status scopes: what a phone filters agents by. */
 type StatusScope = "all" | "running" | "done" | "parked";
-const STATUS_SCOPES: readonly { id: StatusScope; label: string; status?: AgentRecordLike["status"] }[] = [
-	{ id: "all", label: "All" },
-	{ id: "running", label: "Running", status: "running" },
-	{ id: "done", label: "Done", status: "idle" },
-	{ id: "parked", label: "Parked", status: "parked" },
+const STATUS_SCOPES: readonly { id: StatusScope; label: string; icon: string; status?: AgentRecordLike["status"] }[] = [
+	{ id: "all", label: "All", icon: "list" },
+	{ id: "running", label: "Running", icon: "play", status: "running" },
+	{ id: "done", label: "Done", icon: "check", status: "idle" },
+	{ id: "parked", label: "Parked", icon: "pause", status: "parked" },
 ];
 
 const SECTION_TABS = [
@@ -984,11 +984,12 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	/** The status scopes with their counts over the whole session. */
-	#statusScopes(): { id: string; label: string; count: number }[] {
+	#statusScopes(): TspPickerScope[] {
 		const refs = this.#sessionRefs();
 		return STATUS_SCOPES.map(scope => ({
 			id: scope.id,
 			label: scope.label,
+			icon: scope.icon,
 			count: scope.status ? refs.filter(ref => ref.status === scope.status).length : refs.length,
 		}));
 	}
