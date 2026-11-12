@@ -882,7 +882,6 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
-- Fixed `find` on a single named file: it now searches the whole file instead of a sketch of it, and reports an error instead of "no hits" when the file is too large to search in full ([#16027](https://github.com/can1357/oh-my-pi/issues/16027), [#16114](https://github.com/can1357/oh-my-pi/pull/16114) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
