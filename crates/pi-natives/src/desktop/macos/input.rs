@@ -1676,23 +1676,29 @@ pub(super) fn aim_at_element(element: &AXUIElement) -> CoreResult<Aimed> {
 /// [`aim_at_element`]'s check for each press of `event`: `StaleRef` before
 /// the first press, with nothing sent, and `InputFailed` before a later one,
 /// once earlier presses went out, when another row is under the point.
-fn aimed_row_check(event: &PointerEvent) -> impl Fn() -> CoreResult<()> + use<> {
+fn aimed_row_check(event: &PointerEvent) -> impl Fn(bool) -> CoreResult<()> + use<> {
 	let point = match *event {
 		PointerEvent::Click { x, y, .. } => Some((x, y)),
 		_ => None,
 	};
+	row_press_check(move || {
+		point.is_none_or(|(x, y)| {
+			AIMED.with_borrow(|aimed| {
+				aimed
+					.as_ref()
+					.is_none_or(|(row, pid)| ax::row_at(row, *pid, x, y))
+			})
+		})
+	})
+}
+
+fn row_press_check(lands: impl Fn() -> bool) -> impl Fn(bool) -> CoreResult<()> {
 	let pressed = Cell::new(false);
-	move || {
-		let Some((x, y)) = point else {
-			return Ok(());
-		};
-		let later = pressed.replace(true);
-		let lands = AIMED.with_borrow(|aimed| {
-			aimed
-				.as_ref()
-				.is_none_or(|(row, pid)| ax::row_at(row, *pid, x, y))
-		});
+	move |target_press| {
+		let lands = lands();
+		let later = pressed.get();
 		if lands {
+			pressed.set(later || target_press);
 			return Ok(());
 		}
 		Err(if later {
@@ -2469,7 +2475,7 @@ fn background_gesture(
 	let rows = aimed_row_check(&event);
 	let before_post = || {
 		rechecks()?;
-		rows()
+		rows(true)
 	};
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, modifiers } => {
@@ -2480,12 +2486,15 @@ fn background_gesture(
 				window,
 				(x, y, count),
 				modifier_flags(modifiers),
-				before_post,
+				|target_press| {
+					rechecks()?;
+					rows(target_press)
+				},
 				skylight::post_routed,
 			)
 		},
 		PointerEvent::Click { x, y, button, count, modifiers } => {
-			before_post()?;
+			rechecks()?;
 			background_button_click(
 				source,
 				to,
@@ -3035,7 +3044,7 @@ fn background_left_click(
 	window: &DesktopWindow,
 	(x, y, count): (f64, f64, u32),
 	flags: CGEventFlags,
-	before_press: impl Fn() -> CoreResult<()>,
+	before_press: impl Fn(bool) -> CoreResult<()>,
 	post_event: impl Fn(libc::pid_t, &CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let target = CGPoint::new(x, y);
@@ -3067,7 +3076,7 @@ fn background_left_click(
 	let unmodified = CGEventFlags::empty();
 	post(CGEventType::MouseMoved, target, local, 2, 0, flags)?;
 	control::wait(Duration::from_millis(15))?;
-	before_press()?;
+	before_press(false)?;
 	post(CGEventType::LeftMouseDown, offscreen, offscreen, 1, 1, unmodified)?;
 	let result = control::wait(Duration::from_millis(1));
 	let release =
@@ -3076,7 +3085,7 @@ fn background_left_click(
 	control::wait(Duration::from_millis(100))?;
 	let count = count.max(1);
 	for click_state in 1..=count {
-		before_press()?;
+		before_press(true)?;
 		post(CGEventType::LeftMouseDown, target, local, 3, i64::from(click_state), flags)?;
 		let result = control::sent_gap_wait(Duration::from_millis(1), click_state == count);
 		let release = control::cleanup(|| {
@@ -4203,12 +4212,8 @@ fn foreground_pointer(
 							skylight::require_front_window(pid, wid)
 						})
 					},
-					(event, None) => {
-						aimed_row_check(&event)()?;
-						global_pointer(source, event)
-					},
+					(event, None) => global_pointer(source, event),
 					(event, Some(path)) => {
-						aimed_row_check(&event)()?;
 						let before = capture::menu_windows(pid).ok_or_else(|| {
 							DesktopError::input_failed(format!(
 								"cannot list the open menus of window {} ({}), so no menu item could be \
@@ -4488,35 +4493,21 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 					)?;
 					control::wait(Duration::from_millis(12))?;
 				}
-				let count = count.max(1);
-				for click_state in 1..=count {
-					post_global_mouse(
-						source,
-						down,
-						cg_button,
-						point,
-						i64::from(click_state),
-						number,
-						flags,
-					)?;
-					let result = control::sent_gap_wait(PRESS_GAP, click_state == count);
-					let release = control::cleanup(|| {
+				global_click_presses(
+					count,
+					aimed_row_check(&PointerEvent::Click { x, y, button, count, modifiers }),
+					|pressed, click_state| {
 						post_global_mouse(
 							source,
-							up,
+							if pressed { down } else { up },
 							cg_button,
 							point,
-							i64::from(click_state),
+							click_state,
 							number,
 							flags,
 						)
-					});
-					skylight::after_cleanup(result, release)?;
-					if click_state < count {
-						control::wait(MULTI_CLICK_GAP)?;
-					}
-				}
-				Ok(())
+					},
+				)
 			});
 			result.inspect(|()| control::settle(POINTER_SETTLE))
 		},
@@ -4558,6 +4549,16 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 		// The desktop root has no window to stay inside; approach from the left.
 		PointerEvent::Scroll { x, y, dx, dy } => global_scroll(source, x, y, dx, dy, -1.0, || Ok(())),
 	}
+}
+
+/// Recheck the aimed row immediately before every takeover press, retaining
+/// the release of each press that already went out.
+fn global_click_presses(
+	count: u32,
+	before_press: impl Fn(bool) -> CoreResult<()>,
+	post: impl Fn(bool, i64) -> CoreResult<()>,
+) -> CoreResult<()> {
+	button_presses(count, || before_press(true), post)
 }
 
 /// HID wheel scroll at `(x, y)` with the real pointer primed there from the
@@ -6343,7 +6344,7 @@ mod tests {
 		let front = std::cell::Cell::new(Some(9));
 		let posted = std::cell::RefCell::new(Vec::new());
 		let before_press =
-			|| recheck_background(true, 7581, 554, || front.get(), || false, || Ok(()));
+			|_| recheck_background(true, 7581, 554, || front.get(), || false, || Ok(()));
 		let post = |_, event: &CGEvent| {
 			let kind = CGEvent::r#type(Some(event));
 			if matches!(kind, CGEventType::LeftMouseUp) {
@@ -7464,7 +7465,7 @@ mod tests {
 			&window,
 			(10.0, 10.0, 2),
 			CGEventFlags::empty(),
-			|| Ok(()),
+			|_| Ok(()),
 			|_, event: &CGEvent| {
 				// SAFETY: `event` is a live CGEvent.
 				let stamp =
@@ -8133,6 +8134,56 @@ mod tests {
 		assert!(!lands(&[(22, false), (21, false), (2, true), (1, true)]));
 		// A point outside any row lands as it would without the check.
 		assert!(lands(&[(30, false), (31, false)]));
+	}
+
+	#[test]
+	fn row_action_takeover_rechecks_each_press() {
+		let lands = Cell::new(true);
+		let posted = std::cell::RefCell::new(Vec::new());
+		let error = global_click_presses(2, row_press_check(|| lands.get()), |pressed, state| {
+			posted.borrow_mut().push((pressed, state));
+			if !pressed {
+				lands.set(false);
+			}
+			Ok(())
+		})
+		.unwrap_err();
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::InputFailed);
+		assert_eq!(*posted.borrow(), [(true, 1), (false, 1)]);
+	}
+
+	#[test]
+	fn row_action_primer_does_not_count_as_a_target_press() {
+		let source = source().expect("event source");
+		let window = background_window("Electron");
+		let lands = Cell::new(true);
+		let rows = row_press_check(|| lands.get());
+		let posted = std::cell::RefCell::new(Vec::new());
+		let error = background_left_click(
+			&source,
+			7,
+			42,
+			&window,
+			(10.0, 10.0, 1),
+			CGEventFlags::empty(),
+			rows,
+			|_, event| {
+				let kind = CGEvent::r#type(Some(event));
+				posted.borrow_mut().push(kind);
+				if kind == CGEventType::LeftMouseUp {
+					lands.set(false);
+				}
+				Ok(())
+			},
+		)
+		.unwrap_err();
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::StaleRef);
+		assert!(error.message.contains("nothing was sent"));
+		assert_eq!(*posted.borrow(), [
+			CGEventType::MouseMoved,
+			CGEventType::LeftMouseDown,
+			CGEventType::LeftMouseUp,
+		]);
 	}
 
 	#[test]
