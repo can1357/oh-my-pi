@@ -1429,6 +1429,9 @@ export class UiHelpers {
 		if (message.text.startsWith("/")) return false;
 		if (guest.readOnly) {
 			this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+			// Same recovery as a refused admission: the entry returns to the
+			// editor instead of vanishing with its attachments.
+			onNotAdmitted(message);
 			this.#parkLoopOnLocalConsume(message.text, false);
 		} else {
 			if (!guest.sendPrompt(message.text, message.images)) {
