@@ -947,6 +947,26 @@ describe("model thinking derivation", () => {
 		}
 	});
 
+	it("grants per-message effort on Bedrock Runtime's Messages route to Opus 5.5 only", () => {
+		const runtime = (id: string) => createModel({ id, api: "anthropic-messages", provider: "amazon-bedrock" });
+
+		expect(runtime("eu.anthropic.claude-opus-5-5").compat.supportsPerMessageEffort).toBe(true);
+		// Bedrock answers these with 400 `messages.N.output_config: Extra inputs are not permitted`.
+		for (const id of ["eu.anthropic.claude-opus-5", "eu.anthropic.claude-opus-4-8", "eu.anthropic.claude-sonnet-5"]) {
+			expect(runtime(id).compat.supportsPerMessageEffort).toBe(false);
+		}
+		// Accepts the control, but 400s on a replayed `max` control once thinking is switched off.
+		expect(runtime("eu.anthropic.claude-sonnet-5-5").compat.supportsPerMessageEffort).toBe(false);
+		// A later revision stays off until it is verified on this route.
+		expect(runtime("eu.anthropic.claude-opus-5-6").compat.supportsPerMessageEffort).toBe(false);
+		const mantle = createModel({
+			id: "anthropic.claude-opus-5-5",
+			api: "anthropic-messages",
+			provider: "bedrock-mantle",
+		});
+		expect(mantle.compat.supportsPerMessageEffort).toBe(false);
+	});
+
 	it("uses Bedrock Fable 5.1's five supported effort levels", () => {
 		const ids = [
 			"global.anthropic.claude-fable-5-1",

@@ -16,6 +16,19 @@ const MODEL = buildModel({
 	contextWindow: 1_000_000,
 	maxTokens: 128_000,
 });
+/** Bedrock Runtime's `/anthropic` route: an API-key request, no Claude Code shaping. */
+const BEDROCK_OPUS = buildModel({
+	id: "eu.anthropic.claude-opus-5-5",
+	name: "eu.anthropic.claude-opus-5-5",
+	api: "anthropic-messages",
+	provider: "amazon-bedrock",
+	baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com/anthropic",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1_000_000,
+	maxTokens: 128_000,
+});
 
 type WireMessage = { role: string; content: unknown; output_config?: { effort?: string } };
 type Payload = {
@@ -28,13 +41,17 @@ let clock = 1;
 function user(text: string, steering?: boolean): Message {
 	return { role: "user", content: [{ type: "text", text }], attribution: "user", steering, timestamp: clock++ };
 }
-function assistant(content: AssistantMessage["content"], stopReason: AssistantMessage["stopReason"]): AssistantMessage {
+function assistant(
+	content: AssistantMessage["content"],
+	stopReason: AssistantMessage["stopReason"],
+	model = MODEL,
+): AssistantMessage {
 	return {
 		role: "assistant",
 		content,
 		api: "anthropic-messages",
-		provider: "anthropic",
-		model: MODEL.id,
+		provider: model.provider,
+		model: model.id,
 		usage: {
 			input: 0,
 			output: 0,
@@ -47,13 +64,14 @@ function assistant(content: AssistantMessage["content"], stopReason: AssistantMe
 		timestamp: clock++,
 	};
 }
-function reply(text: string): AssistantMessage {
+function reply(text: string, model = MODEL): AssistantMessage {
 	return assistant(
 		[
 			{ type: "thinking", thinking: `thinking about ${text}`, thinkingSignature: `sig-${text}` },
 			{ type: "text", text },
 		],
 		"stop",
+		model,
 	);
 }
 function tool(name: string): NonNullable<Context["tools"]>[number] {
@@ -69,13 +87,20 @@ type Turn = { payload: Payload; message: AssistantMessage };
 async function capture(
 	messages: Message[],
 	reasoning: Effort,
-	options: { sessionId?: string; tools?: Context["tools"]; inactiveTools?: Context["tools"] } = {},
+	options: {
+		sessionId?: string;
+		tools?: Context["tools"];
+		inactiveTools?: Context["tools"];
+		model?: typeof MODEL;
+	} = {},
 ): Promise<Turn> {
+	const model = options.model ?? MODEL;
+	const isOAuth = model.provider === "anthropic";
 	let payload: Payload | undefined;
 	const controller = new AbortController();
 	controller.abort();
 	const message = await streamAnthropic(
-		MODEL,
+		model,
 		{
 			systemPrompt: ["Stable system prompt."],
 			messages,
@@ -83,8 +108,8 @@ async function capture(
 			inactiveTools: options.inactiveTools,
 		},
 		{
-			apiKey: "sk-ant-oat-test",
-			isOAuth: true,
+			apiKey: isOAuth ? "sk-ant-oat-test" : "bedrock-api-key",
+			isOAuth,
 			signal: controller.signal,
 			thinkingEnabled: true,
 			reasoning,
@@ -272,5 +297,28 @@ describe("Anthropic controls derived from the transcript", () => {
 		);
 		expectCacheStableContinuation(steered.payload, next.payload);
 		expectValidSystemPlacement(next.payload);
+	});
+
+	it("carries an effort change on Bedrock Runtime's Messages route as a per-message control", async () => {
+		const options = { model: BEDROCK_OPUS };
+		const turn0 = [user("start")];
+		const first = await capture(turn0, Effort.High, options);
+		const turn1 = [...turn0, answering(reply("ready", BEDROCK_OPUS), first), user("continue")];
+		const changed = await capture(turn1, Effort.Low, options);
+
+		expect(changed.payload.output_config?.effort).toBe("high");
+		expect(
+			changed.payload.messages.flatMap(message =>
+				message.output_config ? [[message.role, message.output_config.effort]] : [],
+			),
+		).toEqual([["system", "low"]]);
+		expectCacheStableContinuation(first.payload, changed.payload);
+
+		const next = await capture(
+			[...turn1, answering(reply("done", BEDROCK_OPUS), changed), user("again")],
+			Effort.Low,
+			options,
+		);
+		expectCacheStableContinuation(changed.payload, next.payload);
 	});
 });

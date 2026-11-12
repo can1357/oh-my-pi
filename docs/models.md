@@ -1202,6 +1202,10 @@ On-demand compaction still needs a model line the catalog grants it to (`amazon-
 `bedrock-mantle`, `anthropic`, or `google-vertex` provider ids); an arbitrary proxy provider id does
 not acquire that capability just from `bedrockMessagesApi`.
 
+Claude Opus 5.5 on the `amazon-bedrock` Messages route takes a mid-session thinking-level change as a
+per-message effort control, which keeps the prompt cache. Converse can only resend the level as a
+top-level field, which rewrites the cached conversation once it holds thinking blocks.
+
 ### Strict tool schemas (`disableStrictTools`)
 
 Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`. `bash` is left out: strict decoding fixes property order, so once a call has written `async`, the `timeout` declared before it can no longer be emitted.
