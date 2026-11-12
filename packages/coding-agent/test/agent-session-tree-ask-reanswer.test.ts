@@ -407,7 +407,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 	it("(i) deobfuscates recovered ask arguments when secret obfuscation is active", async () => {
 		// The recovery path must mirror the live tool path's
 		// `transformToolCallArguments`: persisted `ask` toolCall arguments may
-		// hold `$$HASH$$` placeholders in place of real secrets, and must be
+		// hold `$$wordWordWordWord$$` placeholders in place of real secrets, and must be
 		// deobfuscated before validation — otherwise the reopened form shows
 		// the raw placeholder instead of the original question text
 		// (chatgpt-codex review on #5895).
