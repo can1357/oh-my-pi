@@ -2176,6 +2176,8 @@ const fn takeover_key(key: Option<UserKey>, same_app: bool) -> Result<Option<u32
 	}
 }
 
+/// The input a takeover brings `wid` forward for: only a pointer refusal names
+/// the background route to a window attached under the focused one.
 #[derive(Clone, Copy)]
 pub(super) enum ForegroundInput {
 	Keys,
