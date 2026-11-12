@@ -776,6 +776,9 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.live.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleLiveCommand());
 		}
+		for (const key of this.ctx.keybindings.getKeys("app.restart")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.restart());
+		}
 		// Push-to-talk uses its own binding, separate from the STT toggle.
 		this.ctx.editor.spaceHold.keys = this.ctx.keybindings.getKeys("app.stt.pushToTalk");
 		this.ctx.editor.spaceHold.handler = this.ctx.dictationSpaceHold(this.ctx.editor);

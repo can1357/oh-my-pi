@@ -111,6 +111,7 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
+- Added the `app.restart` keybinding action, unbound by default, which restarts omp like `/restart`; bind it in `keybindings.yml` (for example `app.restart: Alt+Shift+R`) to restart a session with one key ([#10585](https://github.com/can1357/oh-my-pi/issues/10585))
 
 ## [18.19.0] - 2026-11-12
 
