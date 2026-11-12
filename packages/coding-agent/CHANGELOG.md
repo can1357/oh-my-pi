@@ -15,7 +15,7 @@
 ### Added
 
 - `ssh://` host listing, `ssh://` autocomplete and `/ssh list` now include the `Host` aliases from `~/.ssh/config` and `/etc/ssh/ssh_config` (following `Include`); `ssh.json` entries win on a name clash
-- `/models` → Roles → Judge can declare native judge routes: `Ctrl+R` sets a model's judgment protocol and endpoint root, and `Ctrl+N` adds a model the catalog does not list, writing only its `providers.<provider>.models[]` row in models.yml (under a file lock, other fields kept) and storing an optional API key in the credential store; nothing is assigned until you pick the model. A models.yml provider whose models are all judgment-API models with their own `baseUrl` no longer needs a provider `baseUrl` or `apiKey`; see [docs/models.md](https://github.com/can1357/oh-my-pi/blob/main/docs/models.md#native-judge-routes-in-models)
+- `/models` → Roles → Judge can declare native judge routes: `Ctrl+R` sets a model's judgment protocol and endpoint root, and `Ctrl+N` adds a model the catalog does not list, writing only its `providers.<provider>.models[]` row in models.yml (under a file lock, other fields kept) and storing an optional API key in the credential store (only when no higher-precedence key, such as models.yml `apiKey` or the provider's environment variable, already applies; the form names that source instead); nothing is assigned until you pick the model. A models.yml provider whose models are all judgment-API models with their own `baseUrl` no longer needs a provider `baseUrl` or `apiKey`; see [docs/models.md](https://github.com/can1357/oh-my-pi/blob/main/docs/models.md#native-judge-routes-in-models) ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

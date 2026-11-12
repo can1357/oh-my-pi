@@ -153,6 +153,7 @@ function createHub(options: {
 			onSaveNativeRoute: options.callbacks?.onSaveNativeRoute,
 			onCreateNativeJudgeRoute: options.callbacks?.onCreateNativeJudgeRoute,
 			onSaveNativeJudgeCredential: options.callbacks?.onSaveNativeJudgeCredential,
+			nativeJudgeKeySource: options.callbacks?.nativeJudgeKeySource,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
 		},
@@ -2077,6 +2078,99 @@ describe("ModelHub", () => {
 			expect(create).toHaveBeenCalledTimes(1);
 			expect(credentials).toHaveBeenCalledTimes(2);
 			expect(pickerProps(hub).selected).toBe("new-judge/judge");
+		});
+
+		test("Ctrl+N names a key source that outranks a stored key and asks for no key", async () => {
+			let models = [makeModel("fixture", "chat")];
+			const create = vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>(async draft => {
+				const saved = buildModel({
+					...makeModel(draft.provider, draft.id),
+					api: draft.api,
+					kind: "judge",
+					baseUrl: draft.baseUrl,
+				});
+				models = [...models, saved];
+				return saved;
+			});
+			const credentials = vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeJudgeCredential"]>>(async () => {});
+			const keySource = vi.fn((provider: string) =>
+				provider === "openai" ? "the OPENAI_API_KEY environment variable" : undefined,
+			);
+			const { hub, onAssign } = createHub({
+				models: () => models,
+				callbacks: {
+					onCreateNativeJudgeRoute: create,
+					onSaveNativeJudgeCredential: credentials,
+					nativeJudgeKeySource: keySource,
+				},
+			});
+			pickJudge(hub);
+			hub.handleInput(CTRL_N);
+			for (const value of ["openai", "judge"]) {
+				type(hub, value);
+				hub.handleInput("\n");
+			}
+			hub.handleInput("\n"); // typesafe
+			type(hub, "https://native.example");
+			hub.handleInput("\n");
+			const form = normalize(hub.render(220));
+			expect(form).toContain("Requests to openai authenticate with the OPENAI_API_KEY environment variable");
+			expect(form).not.toContain("Provider API key (optional)");
+			hub.handleInput("\n");
+			await settle(create.mock.results[0]?.value);
+			await Bun.sleep(0);
+
+			expect(keySource).toHaveBeenCalledWith("openai");
+			expect(create).toHaveBeenCalledTimes(1);
+			expect(credentials).not.toHaveBeenCalled();
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(pickerProps(hub).selected).toBe("openai/judge");
+		});
+
+		test("Ctrl+N still asks for the optional key when a stored key would be used", () => {
+			const { hub } = createHub({
+				models: [makeModel("fixture", "chat")],
+				callbacks: {
+					onCreateNativeJudgeRoute: vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>(),
+					nativeJudgeKeySource: () => undefined,
+				},
+			});
+			pickJudge(hub);
+			hub.handleInput(CTRL_N);
+			for (const value of ["new-judge", "judge"]) {
+				type(hub, value);
+				hub.handleInput("\n");
+			}
+			hub.handleInput("\n"); // typesafe
+			type(hub, "https://native.example");
+			hub.handleInput("\n");
+			expect(normalize(hub.render(220))).toContain("Provider API key (optional)");
+		});
+
+		test("judge status rows and the route editor title sanitize tabs and control characters in ids", () => {
+			const hostile = nativeJudge("bad\tid\x1b[31mred");
+			const broken = nativeJudge("broken\tid\x1b[31mred", "https://native.example/v1/systemone");
+			const { hub } = createHub({
+				models: [hostile, broken],
+				callbacks: { onSaveNativeRoute: vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeRoute"]>>() },
+			});
+			pickJudge(hub);
+			hub.handleNativeEvent({ type: "select", key: "", item: `${hostile.provider}/${hostile.id}` });
+			const status = subtitle(hub);
+			expect(status).toContain("fixture/bad   idred judges natively");
+			expect(status).not.toMatch(/\\t|\\u001b/);
+
+			hub.handleNativeEvent({ type: "select", key: "", item: `${broken.provider}/${broken.id}` });
+			const statusRow = hub.render(220).find(line => line.includes("invalid native route")) ?? "";
+			expect(stripVTControlCharacters(statusRow)).toContain("fixture/broken   idred has an invalid native route");
+			expect(statusRow).not.toContain("\t");
+			expect(statusRow).not.toContain("\x1b[31mred");
+
+			hub.handleInput(CTRL_R);
+			const title = hub.render(220).find(line => line.includes("Judge native route")) ?? "";
+			expect(stripVTControlCharacters(title)).toContain("Judge native route · fixture/broken   idred");
+			expect(title).not.toContain("\t");
+			expect(title).not.toContain("\x1b[31mred");
 		});
 
 		test("Ctrl+N is offered only for the Judge role, and Esc leaves everything untouched", () => {

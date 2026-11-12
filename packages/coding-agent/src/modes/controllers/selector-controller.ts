@@ -1,6 +1,6 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import { parseCloudflareCredential, serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -194,6 +194,36 @@ interface OpenMenu {
 /** Return input to the current editor-slot owner after a fullscreen overlay closes. */
 export function focusActiveEditorArea(ctx: InteractiveModeContext): void {
 	ctx.ui.setFocus(ctx.editorContainer.children[0] ?? ctx.editor);
+}
+
+/**
+ * The key a provider's requests use ahead of a newly stored API key, described for display, or `undefined`
+ * when a stored key would be used. Mirrors the auth precedence: `--api-key`, models.yml `apiKey`, OAuth,
+ * a key stored by `/login`, and the provider's environment variable all outrank a plain stored key.
+ */
+function nativeJudgeKeySource(authStorage: AuthStorage, provider: string): string | undefined {
+	const source = authStorage.keys.source(provider);
+	switch (source?.kind) {
+		case "runtime":
+			return "the --api-key flag";
+		case "config":
+			return `the apiKey configured for ${provider} in models.yml`;
+		case "oauth":
+			return `the OAuth login for ${provider}`;
+		case "env":
+			return source.envVar ? `the ${source.envVar} environment variable` : `the environment key for ${provider}`;
+		case "api_key":
+			return authStorage.credentials
+				.list(provider)
+				.some(
+					row =>
+						row.disabledCause === null && row.credential.type === "api_key" && row.credential.source === "login",
+				)
+				? `the key stored by /login for ${provider}`
+				: undefined;
+		default:
+			return undefined;
+	}
 }
 
 export class SelectorController {
@@ -1148,6 +1178,11 @@ export class SelectorController {
 				onSaveNativeJudgeCredential: async (model, credential) => {
 					let key = credential.token.trim();
 					if (!key) return;
+					const authStorage = this.ctx.session.modelRegistry.authStorage;
+					const keySource = nativeJudgeKeySource(authStorage, model.provider);
+					if (keySource) {
+						throw new Error(`${model.provider} requests use ${keySource}; a stored key would be ignored.`);
+					}
 					if (model.api === "workers-ai-systemone") {
 						const parsed = parseCloudflareCredential(key);
 						const accountId =
@@ -1157,7 +1192,7 @@ export class SelectorController {
 					}
 					try {
 						// Adds a credential; the provider's existing keys stay.
-						await this.ctx.session.modelRegistry.authStorage.credentials.upsert(model.provider, {
+						await authStorage.credentials.upsert(model.provider, {
 							type: "api_key",
 							key,
 						});
@@ -1167,6 +1202,8 @@ export class SelectorController {
 					}
 					this.ctx.showStatus(`API key stored for ${model.provider}`);
 				},
+				nativeJudgeKeySource: provider =>
+					nativeJudgeKeySource(this.ctx.session.modelRegistry.authStorage, provider),
 
 				onLoginRequest: providerId => {
 					done();

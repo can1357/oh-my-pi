@@ -218,4 +218,38 @@ describe("SelectorController model hub writes", () => {
 		);
 		expect(failure?.message).toBe("Storing the API key for cloudflare-workers-ai failed.");
 	});
+
+	it("names the key that outranks a stored one and refuses to store a key that would be ignored", async () => {
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const { controller } = start(settings, model("claude-sonnet-4-5"));
+		const callbacks = openModelHub(controller);
+		const keySource = callbacks.nativeJudgeKeySource!;
+		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+		try {
+			Bun.env.OPENAI_API_KEY = "env-key";
+			authStorage.keys.setConfig("config-native", "config-key");
+			await authStorage.credentials.upsert("login-native", { type: "api_key", key: "login-key", source: "login" });
+			await authStorage.credentials.upsert("stored-native", { type: "api_key", key: "stored-key" });
+
+			expect(keySource("anthropic")).toBe("the --api-key flag");
+			expect(keySource("config-native")).toBe("the apiKey configured for config-native in models.yml");
+			expect(keySource("openai")).toBe("the OPENAI_API_KEY environment variable");
+			expect(keySource("login-native")).toBe("the key stored by /login for login-native");
+			// Only a plain stored key (or none) lets a newly stored key take part.
+			expect(keySource("stored-native")).toBeUndefined();
+			expect(keySource("new-native")).toBeUndefined();
+
+			const failure = await callbacks.onSaveNativeJudgeCredential!(model("claude-sonnet-4-5"), {
+				token: "ignored-key",
+			}).then(
+				() => undefined,
+				(error: Error) => error,
+			);
+			expect(failure?.message).toBe("anthropic requests use the --api-key flag; a stored key would be ignored.");
+			expect(authStorage.credentials.list("anthropic")).toEqual([]);
+		} finally {
+			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+		}
+	});
 });

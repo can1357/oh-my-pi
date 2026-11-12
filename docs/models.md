@@ -336,7 +336,7 @@ Open `/models` → **Roles** → **Judge** to declare native judge routes withou
 
 The root must be an absolute HTTP(S) URL without credentials, a query, a fragment, or the protocol's own path; only Workers AI keeps the `<account>` placeholder, filled from the credential's account ID or `CLOUDFLARE_ACCOUNT_ID`. Nothing is probed.
 
-Both actions write only `providers.<provider>.models[]` in the active models config (`models.yml`, `models.yaml`, or a configured JSON file), under a file lock, preserving every other field: `Ctrl+R` sets `api` and `baseUrl` on the model's row (adding `{ id, api, baseUrl }` when it has none, and retargeting an `api` the model's `modelOverrides` entry sets), `Ctrl+N` appends `{ id, api, baseUrl }`. A bundled model keeps its other metadata, including its wire `requestModelId`. Neither action assigns a role, changes a fallback chain or the active model; the saved model is selected in the Judge picker and `Enter` assigns it. The optional `Ctrl+N` key is stored in the credential store, never in models.yml, next to any keys the provider already has; for Workers AI a plain token also asks for the account ID. Without a usable key the model is declared but not selectable. Re-entering an identical `Ctrl+N` declaration only reloads it, so it can be repeated to add a key later.
+Both actions write only `providers.<provider>.models[]` in the active models config (`models.yml`, `models.yaml`, or a configured JSON file), under a file lock, preserving every other field: `Ctrl+R` sets `api` and `baseUrl` on the model's row (adding `{ id, api, baseUrl }` when it has none, and retargeting an `api` the model's `modelOverrides` entry sets), `Ctrl+N` appends `{ id, api, baseUrl }`. A bundled model keeps its other metadata, including its wire `requestModelId`. Neither action assigns a role, changes a fallback chain or the active model; the saved model is selected in the Judge picker and `Enter` assigns it. The optional `Ctrl+N` key is stored in the credential store, never in models.yml, next to any keys the provider already has; for Workers AI a plain token also asks for the account ID. A route under an existing provider shares that provider's key precedence: when a key that outranks a stored one already applies (`--api-key`, the provider's models.yml `apiKey`, an OAuth or `/login` credential, or the provider's environment variable), the form names that source and asks for no key. A new provider ID has no environment variable, so its key must come from the credential store. Without a usable key the model is declared but not selectable. Re-entering an identical `Ctrl+N` declaration only reloads it, so it can be repeated to add a key later.
 
 ### Allowed auth/discovery values
 
@@ -356,7 +356,7 @@ Both actions write only `providers.<provider>.models[]` in the active models con
 Required:
 
 - `baseUrl`, unless every model is a judgment-API model with its own `baseUrl`
-- `apiKey` unless `auth: none` or `auth: oauth`, or every model is a judgment-API model with its own `baseUrl` (the key then resolves from the credential store or environment, as for a built-in provider)
+- `apiKey` unless `auth: none` or `auth: oauth`, or every model is a judgment-API model with its own `baseUrl` (the key then comes from the credential store; under a built-in provider ID, that provider's usual environment variable also works, but a new provider ID has no environment variable)
 - `api` at provider level or each model
 
 ### Override-only provider (`models` missing or empty)

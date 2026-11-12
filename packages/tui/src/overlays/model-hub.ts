@@ -251,6 +251,11 @@ export interface ModelHubCallbacks {
 	onCreateNativeJudgeRoute?: (draft: NativeJudgeRouteDraft) => Promise<Model>;
 	/** Store an API key (with a Cloudflare account ID for Workers AI) for a model created with Ctrl+N. */
 	onSaveNativeJudgeCredential?: (model: Model, credential: { token: string; accountId?: string }) => Promise<void>;
+	/**
+	 * The key source a provider's requests use ahead of a stored API key (models.yml `apiKey`, an environment
+	 * variable, a login), described for display; `undefined` when a key stored by Ctrl+N would be used.
+	 */
+	nativeJudgeKeySource?: (provider: string) => string | undefined;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
 	/** Returns the rebuilt `--models` scope for the hub to list; `undefined` keeps the current one. */
@@ -1372,18 +1377,24 @@ export class ModelHubComponent implements Component {
 	 * native route (error), else how the model judges — natively at its endpoint, or through prompts.
 	 */
 	#judgeStatus(): { text: string; error: boolean } | undefined {
-		if (this.#judgeNotice) return { text: this.#judgeNotice, error: true };
+		if (this.#judgeNotice) return { text: sanitizeDisplayWarning(this.#judgeNotice), error: true };
 		const model = this.#nativeRouteTarget()?.model;
 		if (!model) return undefined;
 		const error = nativeJudgeRouteError(model);
-		if (error) return { text: error, error: true };
+		if (error) return { text: sanitizeDisplayWarning(error), error: true };
 		const selector = `${model.provider}/${model.id}`;
 		if (isJudgmentApi(model.api)) {
 			const path = JUDGMENT_API_PATHS[model.api].replace("{model}", model.requestModelId ?? model.id);
-			return { text: `${selector} judges natively · POST ${model.baseUrl}${path}`, error: false };
+			return {
+				text: sanitizeDisplayWarning(`${selector} judges natively · POST ${model.baseUrl}${path}`),
+				error: false,
+			};
 		}
 		const declare = this.#callbacks.onSaveNativeRoute ? " · Ctrl+R declares a native route" : "";
-		return { text: `${selector} judges through prompts (${model.api})${declare}`, error: false };
+		return {
+			text: sanitizeDisplayWarning(`${selector} judges through prompts (${model.api})${declare}`),
+			error: false,
+		};
 	}
 
 	/** Refuse a Judge pick whose native route cannot post anywhere; chat models (prompted judges) pass. */
@@ -1411,7 +1422,7 @@ export class ModelHubComponent implements Component {
 		if (!item || !this.#callbacks.onSaveNativeRoute) return;
 		const field = new SelectFormField({
 			theme: formTheme,
-			label: `Native protocol · ${item.selector}`,
+			label: `Native protocol · ${sanitizeDisplayWarning(item.selector)}`,
 			description: `Current API: ${item.model.api}. Choose the judgment protocol the endpoint speaks. This edits only the model's models.yml entry: role assignments, fallbacks and provider credentials stay as they are.`,
 			items: NATIVE_PROTOCOL_ITEMS,
 			currentValue: isJudgmentApi(item.model.api) ? item.model.api : undefined,
@@ -1436,7 +1447,7 @@ export class ModelHubComponent implements Component {
 		const preview = new Text("", 0, 0);
 		const field = new TextFormField({
 			theme: formTheme,
-			label: `Native API base URL · ${editor.item.selector}`,
+			label: `Native API base URL · ${sanitizeDisplayWarning(editor.item.selector)}`,
 			description: `${NATIVE_PROTOCOL_LABELS[api]} appends ${JUDGMENT_API_PATHS[api]}; enter the root before it. A chat endpoint is not converted.${NATIVE_PROTOCOL_HELP[api] ?? ""}`,
 			initialValue: isJudgmentApi(editor.item.model.api) ? editor.item.model.baseUrl : undefined,
 			empty: "reject",
@@ -1554,10 +1565,31 @@ export class ModelHubComponent implements Component {
 				description = `${api ? `${NATIVE_PROTOCOL_LABELS[api]} appends ${JUDGMENT_API_PATHS[api]}; enter the root before it.` : ""}${api ? (NATIVE_PROTOCOL_HELP[api] ?? "") : ""}`;
 				editor.preview = new Text("", 0, 0);
 				break;
-			case "token":
+			case "token": {
+				const keySource = editor.draft.provider && this.#callbacks.nativeJudgeKeySource?.(editor.draft.provider);
+				if (keySource) {
+					// A stored key would be ignored: say which key requests use instead of accepting one.
+					const source = sanitizeDisplayWarning(keySource);
+					const field = new SelectFormField({
+						theme: formTheme,
+						label: "Provider API key",
+						description: `Requests to ${sanitizeDisplayWarning(editor.draft.provider ?? "")} authenticate with ${source}, which takes precedence over a stored key, so no key is asked here.`,
+						items: [{ value: "save", label: "Save model", description: `uses ${source}` }],
+						selectTheme: getSelectListTheme(),
+						hint: `${editorKey("tui.select.confirm")} save model · ${editorKey("tui.select.cancel")} cancel`,
+						onSubmit: () => this.#saveNativeJudgeCreate(editor),
+						onCancel: () => this.#closeNativeRoute(),
+						requestRender: () => this.#requestRender(),
+					});
+					field.focused = true;
+					editor.token = undefined;
+					editor.field = field;
+					this.#requestRender();
+					return;
+				}
 				label = "Provider API key (optional)";
 				description =
-					"Masked. Stored in the credential store, never in models.yml, alongside any keys the provider already has. Leave blank to use an existing stored or environment key; without one the model stays unavailable.";
+					"Masked. Stored in the credential store, never in models.yml, alongside any keys the provider already has. Leave blank to use a key already stored for this provider; without one the model stays unavailable.";
 				if (api === "workers-ai-systemone") {
 					description +=
 						" Workers AI also needs the Cloudflare account ID, asked next unless the credential carries it.";
@@ -1565,6 +1597,7 @@ export class ModelHubComponent implements Component {
 				secret = true;
 				empty = "submit";
 				break;
+			}
 			case "accountId":
 				label = "Cloudflare account ID";
 				description = "Stored with the key as one Cloudflare credential.";
@@ -3019,7 +3052,7 @@ export class ModelHubComponent implements Component {
 			const title =
 				this.#nativeRouteEditor.kind === "create"
 					? "Add native judge model"
-					: `Judge native route · ${this.#nativeRouteEditor.item.selector}`;
+					: `Judge native route · ${sanitizeDisplayWarning(this.#nativeRouteEditor.item.selector)}`;
 			return truncateToWidth(theme.fg("accent", ` ${title}`), width);
 		}
 		const judge = this.#judgeStatus();

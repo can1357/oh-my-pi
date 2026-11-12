@@ -74,7 +74,8 @@ export function validateProviderConfiguration(
 		}
 	} else {
 		// A models.yml list of native judges that each name their own endpoint needs no provider-wide
-		// `baseUrl`, and resolves its key like a built-in provider (stored credential, then environment).
+		// `baseUrl`; its key comes from the credential store (or, under a built-in provider ID, that provider's own
+		// environment variable). A new namespace has no environment variable of its own.
 		const nativeOnly =
 			mode === "models-config" &&
 			models.every(model => {
