@@ -12,9 +12,10 @@ import {
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { THINKING_BINDING_CONTROLS_BETA } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
-import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { Api, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { anthropicChunks, completionsChunks } from "./helpers/factory-droid";
 
@@ -164,6 +165,7 @@ describe("auth-gateway scoped clients", () => {
 								"OpenAI-Project": "outer-project",
 								"chatgpt-account-id": "outer-account",
 								"x-stainless-proof": "outer-marker",
+								"anthropic-beta": THINKING_BINDING_CONTROLS_BETA,
 							},
 							body: JSON.stringify(
 								route === "/v1/pi/stream"
@@ -205,14 +207,14 @@ describe("auth-gateway scoped clients", () => {
 								outerNeutral: null,
 							});
 						} else if (route === "/v1/pi/stream") {
-							for (const [name, value] of Object.entries(callerHeaders)) {
-								expect(headers.get(name)).toBe(value);
-							}
+							expect(headers.get("openai-organization")).toBe("caller-org");
+							expect(headers.get("x-proof-neutral")).toBe("caller-marker");
 						}
 						for (const [name, value] of [
 							["openai-project", "outer-project"],
 							["chatgpt-account-id", "outer-account"],
 							["x-stainless-proof", "outer-marker"],
+							["anthropic-beta", THINKING_BINDING_CONTROLS_BETA],
 						]) {
 							expect(headers.get(name)).toBe(token === CI_TOKEN ? null : value);
 						}
@@ -224,7 +226,7 @@ describe("auth-gateway scoped clients", () => {
 		},
 	);
 
-	it("drops a scoped caller's anthropic-user-profile-id on /v1/messages and keeps it for the gateway token", async () => {
+	it("drops a scoped caller's anthropic-user-profile-id on /v1/messages but encodes its stream like the gateway token's", async () => {
 		const received: Headers[] = [];
 		const upstream = Bun.serve({
 			hostname: "127.0.0.1",
@@ -253,6 +255,7 @@ describe("auth-gateway scoped clients", () => {
 				maxTokens: 128,
 			});
 			const handle = boot([model], [CI_CLIENT]);
+			const seen: Array<{ profile: string | null; frames: unknown[] }> = [];
 			for (const token of [CI_TOKEN, GATEWAY_TOKEN]) {
 				const response = await fetch(`${handle.url}/v1/messages`, {
 					method: "POST",
@@ -260,22 +263,68 @@ describe("auth-gateway scoped clients", () => {
 						Authorization: `Bearer ${token}`,
 						"Content-Type": "application/json",
 						"anthropic-user-profile-id": "caller-profile",
+						"anthropic-beta": THINKING_BINDING_CONTROLS_BETA,
 					},
 					body: JSON.stringify({
 						model: "mock/granted",
 						max_tokens: 128,
+						stream: true,
 						messages: [{ role: "user", content: "hi" }],
 					}),
 				});
 				expect(response.status).toBe(200);
-				expect(await response.text()).toContain("ok");
+				const frames = (await response.text())
+					.split("\n")
+					.filter(line => line.startsWith("data: "))
+					.map(line => JSON.parse(line.slice("data: ".length)) as { type: string; message?: { id?: string } })
+					.filter(frame => frame.type !== "ping");
+				// Each response mints its own message id.
+				for (const frame of frames) if (frame.message) frame.message.id = "msg";
 				expect(received).toHaveLength(1);
-				const profile = received.pop()!.get("anthropic-user-profile-id");
-				expect(profile).toBe(token === CI_TOKEN ? null : "caller-profile");
+				seen.push({ profile: received.pop()!.get("anthropic-user-profile-id"), frames });
 			}
+			const [scoped, unscoped] = seen;
+			expect([scoped.profile, unscoped.profile]).toEqual([null, "caller-profile"]);
+			// The caller's binding-controls beta still shapes its response.
+			expect(scoped.frames[0]).toMatchObject({ type: "message_start", message: { input_transformations: [] } });
+			expect(scoped.frames).toEqual(unscoped.frames);
 		} finally {
 			upstream.stop(true);
 		}
+	});
+
+	it("keeps a scoped caller's model options on /v1/pi/stream and drops its attribution and billing options", async () => {
+		const granted = createMockModel({ provider: "mock", id: "granted", handler: { content: ["ok"] } });
+		const handle = boot([granted], [CI_CLIENT]);
+		const callerOptions = {
+			userProfileId: "caller-profile",
+			initiatorOverride: "agent",
+			serviceTier: "priority",
+			temperature: 0.5,
+		} satisfies SimpleStreamOptions;
+		for (const token of [CI_TOKEN, GATEWAY_TOKEN]) {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "mock/granted",
+					context: { messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+					options: callerOptions,
+					stream: false,
+				}),
+			});
+			expect(response.status).toBe(200);
+		}
+		const received = granted.calls.map(({ options }) => ({
+			userProfileId: options?.userProfileId,
+			initiatorOverride: options?.initiatorOverride,
+			serviceTier: options?.serviceTier,
+			temperature: options?.temperature,
+		}));
+		expect(received).toEqual([
+			{ userProfileId: undefined, initiatorOverride: undefined, serviceTier: undefined, temperature: 0.5 },
+			callerOptions,
+		]);
 	});
 
 	it("serves a client only from its bound account, never a sibling account or API key", async () => {
