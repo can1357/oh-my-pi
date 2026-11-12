@@ -1,11 +1,12 @@
 // Nace serves the Drex decision models under `/v1`.
 auth "nace" {
 	name "Nace"
-	env "NACE_API_KEY"
+	env "NACE_API_KEY" "DREX_API_KEY"
 	login "api-key" {
 		auth-url "https://console.nace.ai/dashboard/api-keys"
 		instructions "Create an API key under API Keys in the Nace console."
 		prompt "Paste your Nace API key" placeholder="nace_sk_..."
-		validate "models-endpoint" label="Nace" url="https://console.nace.ai/v1/models"
+		// NACE_BASE_URL is an origin without `/v1` (requests append `/v1/systemone`).
+		validate "models-endpoint" label="Nace" url="https://console.nace.ai/v1/models" base-url-env="NACE_BASE_URL" base-url-path="/v1/models"
 	}
 }

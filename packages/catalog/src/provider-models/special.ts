@@ -9,7 +9,8 @@ import {
 	factoryDroidSeedModels,
 	fetchFactoryDroidModels,
 } from "../discovery/factory-droid";
-import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
+import { fetchSystemOneModels, NACE_DEFAULT_BASE_URL } from "../discovery/systemone";
+import { TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -423,20 +424,68 @@ export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemo
 	};
 }
 
-/** Nace Drex judges: the authored Drex rows. */
-export function naceModelManagerOptions(): ModelManagerOptions<"nace-systemone"> {
-	return {
-		providerId: "nace",
-		cacheProviderId: resolveModelCacheProviderId("nace"),
-		staticModels: seedModels<"nace-systemone">("nace"),
-	};
-}
-
-/** Credentials and endpoint overrides for the TypeSafe catalog manager. */
-export interface TypeSafeModelManagerConfig {
+/** Credentials and endpoint overrides for System One judge catalog managers. */
+export interface SystemOneModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+}
+
+/** Credentials and endpoint overrides for the Nace catalog manager. */
+export type NaceModelManagerConfig = SystemOneModelManagerConfig;
+
+/** Credentials and endpoint overrides for the TypeSafe catalog manager. */
+export type TypeSafeModelManagerConfig = SystemOneModelManagerConfig;
+
+function systemOneJudgeModelManagerOptions<TApi extends "typesafe" | "nace-systemone">(params: {
+	api: TApi;
+	providerId: "typesafe" | "nace";
+	defaultBaseUrl: string;
+	baseUrlEnv: string;
+	config?: SystemOneModelManagerConfig;
+}): ModelManagerOptions<TApi> {
+	const { api, providerId, defaultBaseUrl, baseUrlEnv, config = {} } = params;
+	const { apiKey } = config;
+	const envBaseUrl = Bun.env[baseUrlEnv]?.trim();
+	const baseUrl = (config.baseUrl ?? (envBaseUrl || defaultBaseUrl)).replace(/\/+$/, "");
+	const staticModels = seedModels<TApi>(providerId).map(model => ({ ...model, baseUrl }));
+	return {
+		providerId,
+		cacheProviderId: resolveModelCacheProviderId(providerId),
+		staticModels,
+		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
+		...(apiKey
+			? {
+					fetchDynamicModels: async () => {
+						const discovered = await fetchSystemOneModels({
+							api,
+							provider: providerId,
+							defaultBaseUrl,
+							apiKey,
+							baseUrl,
+							fetch: config.fetch,
+						});
+						if (!discovered) return discovered;
+						const listed = new Set(discovered.map(model => model.id));
+						return [...discovered, ...staticModels.filter(model => !listed.has(model.id))];
+					},
+				}
+			: undefined),
+	};
+}
+
+/**
+ * Nace Drex judges: discover account-visible judge models while keeping the
+ * authored Drex seed rows so pinned/versioned and alias ids remain routable.
+ */
+export function naceModelManagerOptions(config: NaceModelManagerConfig = {}): ModelManagerOptions<"nace-systemone"> {
+	return systemOneJudgeModelManagerOptions({
+		api: "nace-systemone",
+		providerId: "nace",
+		defaultBaseUrl: NACE_DEFAULT_BASE_URL,
+		baseUrlEnv: "NACE_BASE_URL",
+		config,
+	});
 }
 
 /**
@@ -446,26 +495,13 @@ export interface TypeSafeModelManagerConfig {
  * pruning them as `dynamicModelsAuthoritative` otherwise would.
  */
 export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig = {}): ModelManagerOptions<"typesafe"> {
-	const { apiKey } = config;
-	const envBaseUrl = Bun.env.TYPESAFE_BASE_URL?.trim();
-	const baseUrl = (config.baseUrl ?? (envBaseUrl || TYPESAFE_DEFAULT_BASE_URL)).replace(/\/+$/, "");
-	const staticModels = seedModels<"typesafe">("typesafe").map(model => ({ ...model, baseUrl }));
-	return {
+	return systemOneJudgeModelManagerOptions({
+		api: "typesafe",
 		providerId: "typesafe",
-		cacheProviderId: resolveModelCacheProviderId("typesafe"),
-		staticModels,
-		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
-		...(apiKey
-			? {
-					fetchDynamicModels: async () => {
-						const discovered = await fetchTypeSafeModels({ apiKey, baseUrl, fetch: config.fetch });
-						if (!discovered) return discovered;
-						const listed = new Set(discovered.map(model => model.id));
-						return [...discovered, ...staticModels.filter(model => !listed.has(model.id))];
-					},
-				}
-			: undefined),
-	};
+		defaultBaseUrl: TYPESAFE_DEFAULT_BASE_URL,
+		baseUrlEnv: "TYPESAFE_BASE_URL",
+		config,
+	});
 }
 // ---------------------------------------------------------------------------
 // Zai
