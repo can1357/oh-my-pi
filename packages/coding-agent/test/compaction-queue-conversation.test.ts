@@ -284,6 +284,17 @@ describe("compaction queue conversation ownership", () => {
 		}
 	});
 
+	it("restores repeated Alt+Up dequeues in submission order", async () => {
+		const h = await harness();
+		h.helpers.queueCompactionMessage("older queued", "followUp");
+		h.helpers.queueCompactionMessage("newer queued", "followUp");
+		h.editor.setText("current draft");
+		h.input.handleDequeue();
+		h.input.handleDequeue();
+		expect(h.ctx.compactionQueuedMessages).toEqual([]);
+		expect(h.editor.getExpandedText()).toBe("older queued\n\nnewer queued\n\ncurrent draft");
+	});
+
 	it("merges three overlapping restores and a controller-path restore in submission order", async () => {
 		const h = await harness();
 		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];

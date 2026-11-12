@@ -1385,7 +1385,9 @@ export class UiHelpers {
 		if (this.ctx.compactionQueuedMessages.length === 0) {
 			this.ctx.compactionQueueOrigin = conversationPosition(this.ctx.sessionManager);
 		}
-		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
+		const entry = { text, mode, images: queuedImages } as CompactionQueuedMessage;
+		queuedEntryRank(entry);
+		this.ctx.compactionQueuedMessages.push(entry);
 		// Queuing bypasses normal slash recording. Keep room keys and auth codes out of history.
 		const historyText = options?.historyRecorded || shouldSkipHistory(text) ? undefined : text;
 		if (options?.preserveDraft) {

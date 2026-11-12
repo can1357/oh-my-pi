@@ -1964,9 +1964,11 @@ export class InputController {
 		}
 		const compaction = this.ctx.compactionQueuedMessages;
 		if (compaction.length > 0) {
+			// Return the entry itself: its first-seen rank keeps repeated dequeues
+			// in submission order through the shared restore chronology.
 			const last = compaction[compaction.length - 1];
 			this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
-			return { text: last.text, images: last.images };
+			return last;
 		}
 		if (yieldCompaction) {
 			this.ctx.yieldCompaction = undefined;
@@ -2114,11 +2116,13 @@ export class InputController {
 				this.ctx.compactionQueueOrigin = conversationPosition(this.ctx.sessionManager);
 			}
 			for (let index = 0; index < messages.length; index++) {
-				this.ctx.compactionQueuedMessages.push({
+				const entry = {
 					text: messages[index] ?? "",
-					mode: "followUp",
+					mode: "followUp" as const,
 					images: index === 0 ? images : undefined,
-				});
+				};
+				queuedEntryRank(entry);
+				this.ctx.compactionQueuedMessages.push(entry);
 			}
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showStatus(
