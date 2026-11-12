@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `write` handing back a tag whose edits applied at any line number: the written lines are now numbered in the write result, so the model anchors on the line numbers it just saw, and an anchor the write did not display is rejected like an unread line ([#15666](https://github.com/can1357/oh-my-pi/issues/15666), [#16455](https://github.com/can1357/oh-my-pi/pull/16455) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ### Breaking Changes
 
@@ -428,7 +432,6 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
-- Fixed `write` handing back a tag whose edits applied at any line number: the written lines are now numbered in the write result, so the model anchors on the line numbers it just saw, and an anchor the write did not display is rejected like an unread line ([#15666](https://github.com/can1357/oh-my-pi/issues/15666), [#16455](https://github.com/can1357/oh-my-pi/pull/16455) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
