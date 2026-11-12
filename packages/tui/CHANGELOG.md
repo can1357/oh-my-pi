@@ -2,20 +2,23 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
 ### Added
 
-- GitHub Actions watch cards show current-step progress and expand with Ctrl+O to reveal ordered step states and durations in ANSI and native Tern views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-### Removed
-
-- `TodoStatus` no longer includes `blocked`, `TodoItem` no longer has `blocker`, and `TodoOperation` no longer includes `block` and `unblock`
+- GitHub Actions watch cards now show current-step progress and can be expanded with Ctrl+O to display ordered step states and durations in ANSI and native Tern views.
 
 ### Fixed
 
-- Table charts of factors against a rival column (`omp | ksh93 | bash`) are titled as gaps to it (`18× more vs omp`) rather than as improvements or regressions, however the chart was picked
-- In Tern, an edit's diff no longer opens with stray one-line hunks of far-off lines (the section heading or closing brace around the change), so a collapsed edit shows the change itself; lines after a second, distant change in the same edit carry their real line numbers
-- Table charts no longer read `with`, `to` or `from` inside a column name (`Runs with ≥10`) as a before/after condition, which turned unrelated columns into factors of each other
-- Chart row names keep a number with the name before it (`EmbeddingGemma 2`, `Jev 15`) instead of nesting them under a bare `EmbeddingGemma` or `Jev,`
-- `read` accepts a line list written with colons as range dashes (`file.ts:20:40,85:100`) and shows it as one row, instead of failing with a `Path 'file.ts:20:40,85' not found` error split across rows
+- Fixed comparison charts mislabeling gaps against a rival column as improvements or regressions.
+- Fixed Tern edit diffs showing unrelated one-line hunks and incorrect line numbers around distant changes.
+- Fixed table charts incorrectly interpreting words such as “with,” “to,” and “from” in column names as comparison conditions.
+- Fixed chart row names containing trailing numbers, such as “EmbeddingGemma 2” and “Jev 15,” being split or incorrectly nested.
+- Fixed `read` rejecting colon-separated line ranges and displaying a single requested range as multiple rows.
+
+### Removed
+
+- Removed the `blocked` status from `TodoStatus`, the `blocker` field from `TodoItem`, and the `block`/`unblock` operations from `TodoOperation`.
 
 ## [18.18.9] - 2026-11-11
 
@@ -24,10 +27,6 @@
 - Added the Sofya label for `sofya` web search results ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
-
-### Changed
-
-- Retired tool cards release their cached sanitized output strings, shell presentations, and width-formatted card rows on transcript commit while regenerating them on demand during resize replay ([#18820](https://github.com/can1357/oh-my-pi/pull/18820) by [@iliaal](https://github.com/iliaal))
 
 ### Fixed
 
@@ -2577,18 +2576,4 @@
 
 - Fixed tmux/screen/zellij rewind/branch (`requestRender(true, { clearScrollback: true })`) permanently anchoring the input box to the pane top and overlaying scrollback after a streamed reply had grown past the viewport. `#emitFullPaint` only reset `#scrollbackHighWater` inside the `clearScrollback` branch and otherwise raised it monotonically, so inside multiplexers (where `\x1b[3J` is a no-op and `clearScrollback` is forced off) the streaming peak survived the rewind; on the next frame `#planLiveRegionPinnedRender` saw the stale high-water and anchored `renderViewportTop` past the actual content, repainting every visible row blank and parking the cursor at screen row 0 for the rest of the session. A full repaint with `clearViewport: true` re-emits the entire transcript from row 0, so `#scrollbackHighWater` is now assigned (not max-clamped) to the natural push count regardless of whether ED 3 was issued ([#2130](https://github.com/can1357/oh-my-pi/issues/2130)).
 
-## [15.10.5] - 2026-06-08
-
-### Added
-
-- Added `atomicTokenPattern` to `Editor`: when set to a global regex matching placeholder tokens such as `[Image #1, 800x600]` or `[Paste #2, +30 lines]`, a single backspace or forward-delete landing anywhere on a token removes the whole token instead of corrupting it into stray text.
-
-### Changed
-
-- Changed the large-paste placeholder label from `[paste #N +X lines]`/`[paste #N Y chars]` to `[Paste #N, +X lines]`/`[Paste #N, Y chars]`.
-
-### Fixed
-
-- Fixed pasting large text lagging the prompt for hundreds of milliseconds before the `[paste #N …]` placeholder appeared. `StdinBuffer` assembled bracketed pastes by re-concatenating and re-scanning the entire accumulated buffer on every incoming stdin chunk (`#pasteBuffer += chunk; indexOf(END)`), which is O(n²) in the paste size and dominates when the terminal/PTY delivers the paste in many small reads (SSH, tmux, slow hosts) — a 1 MB paste at 1 KB chunks cost ~33 ms and 5 MB ~740 ms. Chunks are now collected in an array and joined once when the end marker arrives, with a short overlap tail carried across chunk boundaries so a marker split between two reads is still detected without rescanning, making assembly O(n) (~1 ms for 5 MB). The `Editor` paste cleaner also dropped its `split("").filter().join("")` per-code-unit array allocation in favor of a single control-character regex pass (~20× faster on large pastes).
-
-Older entries are archived in [packages/tui/CHANGELOG.md@b81a844b520a](https://github.com/can1357/oh-my-pi/blob/b81a844b520af43d1d190a99fcdc8928e242b315/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@7049d1b1afeb](https://github.com/can1357/oh-my-pi/blob/7049d1b1afeb8e421e7f9fba5c1dcebd7c382232/packages/tui/CHANGELOG.md).

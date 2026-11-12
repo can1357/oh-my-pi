@@ -5,12 +5,17 @@
 ### Added
 
 - `ShellRunResult` carries `endedByExit`: true when `exit` or an armed `set -e` cut the run short with commands still left to run (whatever followed the abort did not run); a trailing `exit` at the end of the input, which ends the run where the input's end would have, is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
-- Added `shellBuiltins(sessionEnv?)`: the commands the embedded shell adds to bash's builtins (`timeout`, `nohup`, process builtins, utilities), sorted, after its `PI_DISABLE_*` switches
-- Added `awk`, `tar`, `shasum`, `md5` and `strings` builtins and an `lsof` process builtin (Linux, macOS, Windows) to the embedded shell; `PI_DISABLE_UUTILS_DESTRUCTIVE` also hands `tar` to the system
+
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added `shellBuiltins(sessionEnv?)` to list commands provided by the embedded shell, including process controls and utilities.
+- Expanded the embedded shell with `awk`, `tar`, `shasum`, `md5`, `strings`, and `lsof` across Linux, macOS, and Windows. Destructive utilities can be disabled with `PI_DISABLE_UUTILS_DESTRUCTIVE`; when disabled, `tar` is delegated to the system.
 
 ### Fixed
 
-- Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success
+- Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
 
 ## [18.18.9] - 2026-11-11
 
