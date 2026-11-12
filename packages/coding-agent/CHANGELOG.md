@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed omp's run status dropping out mid-run on OSC 7501 terminals where omp draws its transcript as text, such as Rex, iTerm2 3.7.5 and Tern with "Native program surfaces" off: each redraw of a user message (a resize, a tool starting, a todo reminder) cleared the `working` or waiting status, and Rex posted a "done" notification for every one. On terminals that confirm OSC 7501, user messages now leave out their OSC 133 prompt marks until the run settles ([#17307](https://github.com/can1357/oh-my-pi/issues/17307))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
