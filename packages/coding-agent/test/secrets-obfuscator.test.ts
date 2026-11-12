@@ -3266,6 +3266,23 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 		expect(JSON.stringify(obfuscateMessages(obfuscator, obfuscated))).toEqual(serialized);
 	});
 
+	it("re-redacts a message sent in an earlier request once a later request reveals the value its friendly prefix spells", () => {
+		// Results are reused across requests; the reuse must follow the batch's shared
+		// regex values, not just the text, or request 1's friendly label would be
+		// replayed after request 2 shows it spells a secret.
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+			{ type: "regex", content: "tok_[a-z0-9]+" },
+		]);
+		const first: Message = { role: "user", content: "first message carries OTHERSECRET", timestamp: 1 };
+		const reveal: Message = { role: "user", content: "later message reveals tok_abc123", timestamp: 2 };
+
+		expect(JSON.stringify(obfuscateMessages(obfuscator, [first]))).toContain("TOKABC123_");
+		const serialized = JSON.stringify(obfuscateMessages(obfuscator, [first, reveal]));
+		expect(serialized).not.toContain("TOKABC123_");
+		expect(serialized).not.toContain("OTHERSECRET");
+	});
+
 	it("includes assistant replay content in the batch regex collision pre-scan", () => {
 		const obfuscator = new SecretObfuscator([
 			{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
