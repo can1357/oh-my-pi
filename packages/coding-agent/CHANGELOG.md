@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed shell background jobs (`&`) and subshells in the `bash` tool so they keep the variables, positional parameters (`$1`, `$@`), functions, and shell options present when they start, instead of seeing later changes made in the parent shell ([#18990](https://github.com/can1357/oh-my-pi/pull/18990) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
