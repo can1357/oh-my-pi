@@ -216,6 +216,30 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("openai", modelId)?.supportsComputerUse).toBe(true);
 	});
 
+	test("fixed runtime models use provider transport before and after refresh", async () => {
+		const provider = "runtime-gateway";
+		const modelId = "gateway-model";
+		const gatewayUrl = "https://gateway.example.com/v1";
+		registry.registerProvider(
+			provider,
+			{
+				baseUrl: gatewayUrl,
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				transport: "pi-native",
+				models: [{ ...baseModel, id: modelId }],
+			},
+			"ext://runtime",
+		);
+
+		expect(registry.find(provider, modelId)).toMatchObject({
+			baseUrl: gatewayUrl,
+			transport: "pi-native",
+		});
+		await registry.refresh("offline");
+		expect(registry.find(provider, modelId)?.transport).toBe("pi-native");
+	});
+
 	test("config.models re-registration rebuilds inferred capability after a saved transport override", () => {
 		const providerName = "openai";
 		const modelId = "gpt-5.4";
