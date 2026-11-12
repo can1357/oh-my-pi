@@ -20,6 +20,7 @@
 - Directory-scoped prompt recall no longer scans every stored prompt on each history keypress ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
 ### Fixed
+- Fixed compaction-queue drains to a read-only collab link dropping the queued prompt and its attachments: refused entries return to the editor beside newer drafts, in submission order ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
 - Fixed Hindsight outbox delivery observing partially published retain calls, batch items arriving out of order when file timestamps tie, and expired quarantine files surviving drains without new rejections ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed session-scoped prompt history using the main conversation while a subagent was focused. Persistent writes, Up-arrow recall and newly opened Ctrl+R searches now use the focused conversation's persistent identity, including worker-hosted agents. Delayed submissions retain their original conversation and project without leaking into another conversation's recall list; canceled drafts remain shared and nonpersistent ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
