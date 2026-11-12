@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-utils/file-lock";
 import { type FsError, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils/loop-phase";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
@@ -698,34 +699,48 @@ export function probeSessionLeases(sessionIds: readonly string[]): SessionLeaseR
 /** Approximate size (UTF-16 units synchronously, bytes through a sink) buffered per staging-file write when streaming a body. */
 const LINE_STREAM_CHUNK = 1 << 20;
 
-/** Write `lines` to a new file at `target` in bounded chunks, never holding their full concatenation. */
+/**
+ * Write `lines` to a new file at `target` in bounded chunks, never holding their full concatenation.
+ * Runs as the `session.rewrite` loop phase.
+ */
 function writeLinesToFileSync(target: string, lines: readonly string[]): void {
-	const fd = fs.openSync(target, "w");
-	try {
-		let chunk = "";
-		for (const line of lines) {
-			chunk += line;
-			if (chunk.length < LINE_STREAM_CHUNK) continue;
-			fs.writeFileSync(fd, chunk);
-			chunk = "";
+	withLoopPhase("session.rewrite", () => {
+		const fd = fs.openSync(target, "w");
+		try {
+			let chunk = "";
+			for (const line of lines) {
+				chunk += line;
+				if (chunk.length < LINE_STREAM_CHUNK) continue;
+				fs.writeFileSync(fd, chunk);
+				chunk = "";
+			}
+			if (chunk.length > 0) fs.writeFileSync(fd, chunk);
+		} finally {
+			fs.closeSync(fd);
 		}
-		if (chunk.length > 0) fs.writeFileSync(fd, chunk);
-	} finally {
-		fs.closeSync(fd);
-	}
+	});
 }
 
 /**
  * Async {@link writeLinesToFileSync} through a buffered Bun file sink.
  * `target` must be a fresh path: a sink does not truncate an existing file.
+ * A file sink flushes synchronously once its buffer fills, so each run of
+ * writes between backpressure waits is a `session.rewrite` loop phase.
  */
 async function writeLinesToFile(target: string, lines: readonly string[]): Promise<void> {
 	const sink = Bun.file(target).writer({ highWaterMark: LINE_STREAM_CHUNK });
 	try {
-		for (const line of lines) {
+		let next = 0;
+		while (next < lines.length) {
+			let written: number | Promise<number> = 0;
+			pushLoopPhase("session.rewrite");
+			try {
+				while (next < lines.length && typeof written === "number") written = sink.write(lines[next++]);
+			} finally {
+				popLoopPhase();
+			}
 			// Backpressured writes can reject after end() has otherwise completed.
 			// Do not publish a partial transcript before every write is confirmed.
-			const written = sink.write(line);
 			if (typeof written !== "number") await written;
 		}
 	} catch (err) {
