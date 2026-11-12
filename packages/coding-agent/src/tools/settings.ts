@@ -586,11 +586,12 @@ export const cfgFindHitThreshold = register({
 	normalize: raw => (raw === undefined || raw === null ? raw : parseProbability("find.hitThreshold", raw)),
 });
 
-/** A probability from 0 to 1, given as a number or numeric text; throws on anything else. */
+/**
+ * A probability from 0 to 1. Only a number passes: a loaded config layer is not normalized, and the
+ * registry reads any non-number there as the default, so quoted text must fail here instead.
+ */
 function parseProbability(id: string, raw: unknown): number {
-	const text = typeof raw === "number" ? undefined : String(raw).trim();
-	const value = text === undefined ? (raw as number) : text === "" ? Number.NaN : Number(text);
-	if (Number.isFinite(value) && value >= 0 && value <= 1) return value;
+	if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw;
 	throw new Error(`Invalid ${id}: expected a number from 0 to 1, got ${Bun.inspect(raw)}.`);
 }
 

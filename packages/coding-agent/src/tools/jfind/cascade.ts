@@ -432,7 +432,8 @@ class Cascade {
 			const plan = files[f]!;
 			this.stats.filesRead++;
 			this.stats.fileBytes += entry.bytes;
-			if (entry.score < threshold) continue;
+			// A hit needs positive evidence whatever the cutoff: τ 0 must not admit files scored 0 or left unanswered.
+			if (entry.score <= 0 || entry.score < threshold) continue;
 			hits.push({
 				rel: entries[plan.node]!.rel,
 				nameScore: nameScore[plan.node],
