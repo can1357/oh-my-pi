@@ -848,7 +848,7 @@ describe("wait", () => {
 			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 
-		test("a broadcast from the agent asked answers the wait", async () => {
+		test("a broadcast from the agent asked interrupts the wait but leaves the question owed", async () => {
 			const { child } = registerParentAndChild();
 			await ask();
 			const waiting = childWait();
