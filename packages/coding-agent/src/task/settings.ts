@@ -310,16 +310,17 @@ export const cfgTaskBatch = register({
 	},
 });
 
-export const cfgTaskFile = register({
-	id: "task.file",
+export const cfgTaskSteps = register({
+	id: "task.steps",
+	protocolDefault: ["rpc", "acp"],
 	type: "boolean",
 	default: false,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "Task Instructions from Files",
+		label: "Sequential Task Steps",
 		description:
-			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+			"Spawns take ordered `steps` instead of one `task`: the subagent gets the first step, then each next one once it finishes the previous; past 4 steps, earlier messages carry two or more. The last step's result is the task's result.",
 	},
 });
 

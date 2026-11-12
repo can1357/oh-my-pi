@@ -6,6 +6,11 @@
 
 - Added `initGit` to initialize a checkout through the native VCS API without spawning Git from callers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- Added `shellBuiltins(sessionEnv?)`: the commands the embedded shell adds to bash's builtins (`timeout`, `nohup`, process builtins, utilities), sorted, after its `PI_DISABLE_*` switches
+- Added `awk`, `tar`, `shasum`, `md5` and `strings` builtins and an `lsof` process builtin (Linux, macOS, Windows) to the embedded shell; `PI_DISABLE_UUTILS_DESTRUCTIVE` also hands `tar` to the system
+
 ### Fixed
 
 - Preserved ordinary file and directory types for non-name-surrogate Windows reparse points, including cloud placeholders, when native path stats follow links ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).

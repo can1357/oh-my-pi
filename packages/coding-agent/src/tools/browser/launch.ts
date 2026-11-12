@@ -400,24 +400,41 @@ export async function ensureSignInChromiumExecutable(): Promise<string | undefin
 	}
 }
 
+/**
+ * Whether launching managed Chromium would first download Chrome for Testing,
+ * as {@link ensureChromiumExecutable} decides: no `PUPPETEER_EXECUTABLE_PATH`,
+ * no usable system Chrome where one is preferred (every platform but macOS),
+ * and no Chrome for Testing under ~/.omp/puppeteer yet.
+ */
+export async function chromiumNeedsDownload(): Promise<boolean> {
+	if (process.env.PUPPETEER_EXECUTABLE_PATH) return false;
+	if (process.platform !== "darwin" && (await resolveSystemChromium())) return false;
+	const managed = await managedChromiumLocation();
+	return managed !== undefined && !fs.existsSync(managed.executablePath);
+}
+
+/** Where this host's Chrome for Testing build lives under ~/.omp/puppeteer; undefined when platform detection fails. */
+async function managedChromiumLocation() {
+	const browsers = await loadBrowsers();
+	const platform = browsers.detectBrowserPlatform();
+	if (!platform) return undefined;
+	const cacheDir = getPuppeteerDir();
+	const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
+	const buildId = PUPPETEER_REVISIONS.chrome;
+	const executablePath = browsers.computeExecutablePath({ buildId, cacheDir, platform });
+	return { browsers, platform, cacheDir, buildId, executablePath };
+}
+
 let managedChromiumPromise: Promise<string | undefined> | undefined;
 /** Chrome for Testing under ~/.omp/puppeteer, downloaded on first use; undefined when platform detection fails. */
 function ensureManagedChromium(): Promise<string | undefined> {
 	managedChromiumPromise ??= (async () => {
-		const browsers = await loadBrowsers();
-		const platform = browsers.detectBrowserPlatform();
-		if (!platform) {
+		const managed = await managedChromiumLocation();
+		if (!managed) {
 			logger.warn("Could not detect browser platform; relying on puppeteer default resolution");
 			return undefined;
 		}
-		const cacheDir = getPuppeteerDir();
-		const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
-		const buildId = PUPPETEER_REVISIONS.chrome;
-		const executablePath = browsers.computeExecutablePath({
-			buildId,
-			cacheDir,
-			platform,
-		});
+		const { browsers, platform, cacheDir, buildId, executablePath } = managed;
 		if (fs.existsSync(executablePath)) return executablePath;
 
 		logger.warn("Downloading Chromium for puppeteer (first browser use)", {
@@ -595,9 +612,7 @@ async function resolveSystemChromium(): Promise<string | undefined> {
 /** Per-process launch features controlled by browser.open options. */
 export interface HeadlessLaunchFeatures {
 	/** Trust invalid HTTPS certificates in this Chromium process. */
-	ignoreHttpsErrors?: boolean;
-	/** Permit file: documents to read other local files. */
-	allowFileAccess?: boolean;
+	insecure?: boolean;
 }
 
 /** Options shared by headless Chromium consumers. */
@@ -636,13 +651,13 @@ export function buildHeadlessLaunchArgs(
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
 		DISABLE_AUTOMATION_CONTROLLED_ARG,
+		"--allow-file-access-from-files",
 		"--hide-scrollbars",
 		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
 		...RENDERER_PRIORITY_ARGS,
 	];
-	if (features.ignoreHttpsErrors) launchArgs.push("--ignore-certificate-errors");
-	if (features.allowFileAccess) launchArgs.push("--allow-file-access-from-files");
+	if (features.insecure) launchArgs.push("--ignore-certificate-errors");
 	const proxy = process.env.PUPPETEER_PROXY;
 	if (proxy) {
 		launchArgs.push(`--proxy-server=${proxy}`);
@@ -672,8 +687,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	};
 	const puppeteer = await loadPuppeteer();
 	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
-		ignoreHttpsErrors: opts.ignoreHttpsErrors,
-		allowFileAccess: opts.allowFileAccess,
+		insecure: opts.insecure,
 	});
 	for (const arg of opts.args ?? []) {
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);

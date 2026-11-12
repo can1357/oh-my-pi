@@ -7,8 +7,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { applyBinaryPatch } from "@oh-my-pi/pi-natives";
 import {
 	$which,
@@ -33,7 +31,15 @@ import {
 	unsupportedProxyMessage,
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
-import { type BuildAnswer, type BuildPatch, type Fetch, fetchBuild, type UpdateChannel } from "./build-service";
+import {
+	BUILD_DOWNLOAD_TIMEOUT_MS,
+	type BuildAnswer,
+	type BuildPatch,
+	downloadBuildFile,
+	type Fetch,
+	fetchBuild,
+	type UpdateChannel,
+} from "./build-service";
 import {
 	DEFAULT_NPM_REGISTRY,
 	loadNpmRegistryResolver,
@@ -49,7 +55,6 @@ const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
 const NIX_STORE_DIR = "/nix/store";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
-const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
@@ -193,81 +198,6 @@ export function shouldForceBinaryUpdate(
 ): boolean {
 	if (release.dist !== undefined) return release.dist === "binary";
 	return majorVersion(release.version) > majorVersion(currentVersion);
-}
-
-export interface VerifiedBinaryDownloadOptions {
-	url: string;
-	targetPath: string;
-	expectedSize: number;
-	expectedDigest: string;
-	fetchImpl?: Fetch;
-	/** Bytes received so far, after each chunk. */
-	onProgress?: (received: number) => void;
-}
-
-/**
- * Download a file and verify its build-service-reported size and SHA-256
- * digest (`sha256:<hex>`), leaving it executable. Nothing is left at
- * `targetPath` when the download fails or does not match.
- */
-export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
-	const fetchImpl = options.fetchImpl ?? fetch;
-	await unlinkIfExists(options.targetPath);
-
-	let response: Response;
-	try {
-		response = await fetchImpl(options.url, {
-			redirect: "follow",
-			signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS),
-		});
-	} catch (err) {
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
-		}
-		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
-		throw err;
-	}
-	if (!response.ok || !response.body) {
-		throw new Error(`Download failed: ${response.statusText}`);
-	}
-
-	const hash = new Bun.SHA256();
-	let size = 0;
-	const verifier = new Transform({
-		transform(chunk, _encoding, callback) {
-			size += chunk.byteLength;
-			if (size > options.expectedSize) {
-				callback(
-					new Error(
-						`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received at least ${size}`,
-					),
-				);
-				return;
-			}
-			hash.update(chunk);
-			options.onProgress?.(size);
-			callback(null, chunk);
-		},
-	});
-
-	try {
-		await pipeline(response.body, verifier, fs.createWriteStream(options.targetPath, { mode: 0o600 }));
-		const digest = `sha256:${hash.digest("hex")}`;
-		if (size !== options.expectedSize) {
-			throw new Error(`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received ${size}`);
-		}
-		if (digest !== options.expectedDigest) {
-			throw new Error(`Downloaded binary digest mismatch: expected ${options.expectedDigest}, received ${digest}`);
-		}
-		await fs.promises.chmod(options.targetPath, 0o755);
-	} catch (err) {
-		await unlinkIfExists(options.targetPath);
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
-		}
-		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
-		throw err;
-	}
 }
 
 /** Result from running the installed binary and parsing its reported version. */
@@ -1314,7 +1244,7 @@ export async function sweepStaleUpdateArtifacts(targetPath: string): Promise<voi
 			} catch {
 				continue;
 			}
-			if (now - mtimeMs < BINARY_DOWNLOAD_TIMEOUT_MS) continue;
+			if (now - mtimeMs < BUILD_DOWNLOAD_TIMEOUT_MS) continue;
 		}
 		await removeBackupBestEffort(full);
 	}
@@ -1885,11 +1815,11 @@ async function installFromPatch(
 	const from = patch.fromVersion ? ` from ${patch.fromVersion}` : "";
 	console.log(chalk.dim(`Downloading patch${from} (${formatBytes(patch.size)})…`));
 	try {
-		await downloadVerifiedBinary({
+		await downloadBuildFile({
 			url: patch.url,
 			targetPath: paths.patchPath,
-			expectedSize: patch.size,
-			expectedDigest: `sha256:${patch.sha256}`,
+			size: patch.size,
+			sha256: patch.sha256,
 			fetchImpl: options.fetchImpl,
 			onProgress: received =>
 				options.onProgress?.({ phase: "downloading", version: build.version, received, total: patch.size }),
@@ -1931,15 +1861,16 @@ async function downloadBuild(
 ): Promise<void> {
 	if (build.patch && (await installFromPatch(build, build.patch, paths, options))) return;
 	console.log(chalk.dim(`Downloading ${build.file.name} (${formatBytes(build.file.size)})…`));
-	await downloadVerifiedBinary({
+	await downloadBuildFile({
 		url: build.download,
 		targetPath: paths.tempPath,
-		expectedSize: build.file.size,
-		expectedDigest: `sha256:${build.file.sha256}`,
+		size: build.file.size,
+		sha256: build.file.sha256,
 		fetchImpl: options.fetchImpl,
 		onProgress: received =>
 			options.onProgress?.({ phase: "downloading", version: build.version, received, total: build.file.size }),
 	});
+	await fs.promises.chmod(paths.tempPath, 0o755);
 	console.log(chalk.dim(`Verified sha256:${build.file.sha256}`));
 }
 

@@ -1556,7 +1556,7 @@ describe("computer worker round trips", () => {
 			if (locked) {
 				expect(result.content[0]).toMatchObject({
 					type: "text",
-					text: expect.stringMatching(/^Note: when this run ended the screen is locked\. /),
+					text: expect.stringMatching(/^Note: when this run ended the screen is locked\.\s/),
 				});
 			} else {
 				expect(notes).toEqual([]);
@@ -1580,7 +1580,7 @@ describe("computer worker round trips", () => {
 			if (result.ok) return;
 			const [first, ...rest] = result.error.message.split("\n");
 			expect(first).toBe("verification failed");
-			if (locked) expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+			if (locked) expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\.\s/);
 			else expect(rest).toEqual([]);
 		}
 	});
@@ -1596,7 +1596,7 @@ describe("computer worker round trips", () => {
 		);
 		const [note] = result.content;
 		const text = note?.type === "text" ? note.text : "";
-		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\. /);
+		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\.\s/);
 		expect(text).toContain("Nothing on that display can be captured or clicked until it wakes.");
 		expect(text).toContain("`computer.display`");
 	});
@@ -1630,7 +1630,7 @@ describe("computer worker round trips", () => {
 		if (result.ok) return;
 		const [first, ...rest] = result.error.message.split("\n");
 		expect(first).toBe("Computer code execution timed out after 50ms");
-		expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+		expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\.\s/);
 		expect(native.blockingReads).toBe(0);
 	});
 

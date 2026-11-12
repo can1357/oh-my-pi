@@ -274,7 +274,8 @@ describe("proc:// background jobs", () => {
 	});
 
 	it("advertises stdin and modes as service-only while kill remains available for jobs and agents", async () => {
-		const help = new InternalUrlRouter()
+		const router = new InternalUrlRouter();
+		const help = router
 			.describe({
 				skillUriAccess: false,
 				ruleCount: 0,
@@ -283,11 +284,14 @@ describe("proc:// background jobs", () => {
 				outReplies: false,
 				subagent: false,
 			})
-			.find(line => line.startsWith("`proc://`"));
-		expect(help).toMatch(/stdin[^;]*services.only/);
-		expect(help).toMatch(/\/mode[^;]*services.only/);
+			.find(line => line.startsWith("proc://"));
 		expect(help).toMatch(/\/kill[^;]*jobs, agents, and services/);
-		expect(help).toContain("named service");
+		// Service controls live in the on-demand reference (`xd://read/urls`), never unqualified in the always-on line.
+		expect(help).not.toContain("stdin");
+		const reference = router.reference().find(line => line.startsWith("proc://"));
+		expect(reference).toMatch(/stdin[^;]*services.only/);
+		expect(reference).toMatch(/\/mode[^;]*services.only/);
+		expect(reference).toContain("named service");
 
 		const protocol = new ProcProtocolHandler();
 		const session = toolSession(process.cwd(), undefined, { launch: false });

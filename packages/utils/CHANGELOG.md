@@ -6,6 +6,11 @@
 
 - Added `pathIdentityKey()` to group filesystem aliases without merging distinct-case directories on case-sensitive filesystems. It follows symlinks/junctions through device/inode identity and falls back to a case-preserving resolved path when identity is unavailable; existing path-spelling and containment normalization is unchanged ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- Added `getWebKitHostPath()`, where the WebKit browser engine's host executable is installed (`~/.o2/lib/abkit/ABHost`, `ABHost.exe` on Windows; shared with Tern)
+- Exported `BROWSER_ARCHIVE_LIMITS` from `@oh-my-pi/pi-utils/browsers`: the extraction ceilings for trusted browser engine archives
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
@@ -13,6 +18,9 @@
 - Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Added `prompt.closeCodeFence`: closes a code fence a text leaves open, by the same rule `prompt.format` uses ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Added `getTestTempDir(prefix)` for per-user temporary test directories ([#18811](https://github.com/can1357/oh-my-pi/pull/18811) by [@iliaal](https://github.com/iliaal))
+### Added
+
+- Added `getWebKitHostPath()`, where the WebKit browser engine's host executable is installed (`~/.o2/lib/abkit/ABHost`, `ABHost.exe` on Windows; shared with Tern)
 
 ## [18.18.8] - 2026-11-11
 
