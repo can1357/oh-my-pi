@@ -804,17 +804,40 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 	None
 }
 
-/// The window id of `element` when it is itself one of `pid`'s `AXWindows`
-/// though not an `AXWindow`, as Finder's inline rename field is: such an
-/// element has no window above it and stands for its own.
+/// The window id of the nearest of `element` and its ancestors that is one of
+/// `pid`'s `AXWindows`, whatever its role. Finder's inline rename field
+/// is such an element itself and stands for its own window. A suggestion list
+/// that pops up under a text field is a window whose listed element is a
+/// scroll area with the application as its parent, so its rows reach no
+/// `AXWindow` and sit below that element. [`find_window`] resolves the same
+/// window id to the same listed element, so an element is owned by the window
+/// whose `ax()` shows it.
 fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
 	let app = probe_application(pid)?;
 	let windows = copy_elements(&app, "AXWindows").ok()?;
-	windows
-		.iter()
-		.any(|window| **window == *element)
-		.then(|| window_id(element))
-		.flatten()
+	let listed = nearest_matching(
+		element.retain(),
+		|current| windows.iter().any(|window| **window == **current),
+		|current| copy_element(current, "AXParent"),
+	)?;
+	window_id(&listed)
+}
+
+/// The first of `element` and its ancestors, read with `parent` for at most
+/// [`MAX_ANCESTRY_DEPTH`] levels, that `is_match` accepts.
+fn nearest_matching<E>(
+	element: E,
+	is_match: impl Fn(&E) -> bool,
+	parent: impl Fn(&E) -> Option<E>,
+) -> Option<E> {
+	let mut current = element;
+	for _ in 0..MAX_ANCESTRY_DEPTH {
+		if is_match(&current) {
+			return Some(current);
+		}
+		current = parent(&current)?;
+	}
+	None
 }
 
 /// An element that stands for its own `WindowServer` window but is absent
@@ -3246,6 +3269,22 @@ mod tests {
 			frame_matches: true,
 		}];
 		assert!(select_attached(&candidates, 57).is_err());
+	}
+
+	#[test]
+	fn an_element_belongs_to_the_nearest_listed_window_above_it() {
+		use super::nearest_matching;
+
+		// A suggestion list's text: statictext 5 > cell 4 > row 3 > table 2 >
+		// scroll area 1, listed in `AXWindows` > application 0.
+		let parent = |element: &u32| element.checked_sub(1);
+		let listed = |element: &u32| *element == 1;
+		assert_eq!(nearest_matching(5, listed, parent), Some(1));
+		// An element listed itself, as Finder's rename field is.
+		assert_eq!(nearest_matching(1, listed, parent), Some(1));
+		assert_eq!(nearest_matching(5, |element: &u32| *element == 9, parent), None);
+		// A parent that answers with the element itself ends at the bound.
+		assert_eq!(nearest_matching(5, |_: &u32| false, |element: &u32| Some(*element)), None);
 	}
 
 	#[test]
