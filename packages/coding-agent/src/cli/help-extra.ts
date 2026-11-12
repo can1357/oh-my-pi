@@ -98,8 +98,8 @@ ${renderBuiltinTools("default")}
   ${chalk.dim("# Optional (off by default; enable in settings)")}
 ${renderBuiltinTools("optional")}
 
-  Browser and computer use run inside eval: toggle with the browser.enabled and
-  computer.enabled (default off) settings.
+  Browser and computer use run inside eval: toggle with the browser.enabled
+  (default on) and computer.enabled (default off) settings.
 
 ${chalk.bold("Plugin Options:")}
   --plugin-dir <path>        Load plugin from directory (repeatable)
