@@ -1360,11 +1360,11 @@ fn labelled_props(
 }
 
 struct ElementLabels {
-	native_role: String,
-	title:       Option<String>,
-	description: Option<String>,
-	role_name:   Option<String>,
-	complete:    bool,
+	native_role:   String,
+	title:         Option<String>,
+	description:   Option<String>,
+	role_name:     Option<String>,
+	complete:      bool,
 	has_own_label: bool,
 }
 
@@ -1408,8 +1408,14 @@ fn own_props(
 	child_count: usize,
 	read_bounds: WalkBounds,
 ) -> CoreResult<(AxProps, bool)> {
-	let ElementLabels { native_role, title, description, role_name, complete: label_complete, has_own_label } =
-		element_labels(values)?;
+	let ElementLabels {
+		native_role,
+		title,
+		description,
+		role_name,
+		complete: label_complete,
+		has_own_label,
+	} = element_labels(values)?;
 	let read = |index| values.get(index).ok().flatten();
 	let boolean = |index| {
 		read(index)
