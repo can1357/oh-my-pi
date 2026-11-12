@@ -17,7 +17,7 @@ BrowserTab, every helper awaited:
 navigation: url title goto back forward reload pushState
 inspection: observe({selector?, compact?, viewportOnly?, includeAll?}) ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?}) a11y extract(format?, {selector?, outline?, filter?}) text html value attr count box styles isVisible isEnabled isChecked
 capture: screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?}) diffScreenshot(baselinePath, {threshold?, output?}) pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})
-interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type fill press keyDown keyUp mouseMove mouseDown mouseUp clickAt wheel scroll drag highlight scrollIntoView select uploadFile
+interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type(selector, text) fill(selector, text) press(key, {selector?}) keyDown keyUp mouseMove mouseDown mouseUp clickAt(x, y) wheel scroll(dx, dy) drag(from, to) highlight scrollIntoView select(selector, …values) uploadFile(selector, …paths)
 waiting: waitFor waitForSelector waitForUrl waitForText
 frames: frames() → frame tree; frame(selectorOrNameOrUrl) → handle with click fill type press text html value attr count isVisible ariaSnapshot evaluate waitFor waitForSelector screenshot
 dialogs: dialog handleDialog setDialogs
@@ -31,7 +31,7 @@ recording: recordStart(path, options?) recordStop recordRestart(path, options?) 
 vitals, React: vitals reactEnable reactTree reactInspect reactRenders reactSuspense
 network: route unroute routes requests request clearRequests harStart harStop allowedDomains
 WebMCP (experimental, Chromium only): webmcpList webmcpInvoke webmcpEvents
-execution: evaluate run(fnOrCode, {args?, timeout?})
+execution: evaluate(fnOrExpression) run(fnOrCode, {args?, timeout?})
 elements: id(n) ref("e5") → BrowserElement with click dblclick check uncheck highlight type fill press hover focus select uploadFile scrollIntoView boundingBox isVisible isHidden text html value attr styles isEnabled isChecked evaluate
 close()
 
