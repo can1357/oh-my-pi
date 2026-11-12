@@ -2,6 +2,16 @@ import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Page, WaitForOptions } from "puppeteer-core";
 import { puppeteerTimeoutError } from "./launch";
 
+/** Whether `requested` is the address `current` already shows (`https://a.test` is `https://a.test/`). */
+export function sameAddress(requested: string, current: string): boolean {
+	if (requested === current) return true;
+	try {
+		return new URL(requested).href === new URL(current).href;
+	} catch {
+		return false;
+	}
+}
+
 declare module "puppeteer-core" {
 	interface Frame {
 		/** CDP lifecycle events the frame's current document has reached (`@internal` upstream, stripped from published types). */

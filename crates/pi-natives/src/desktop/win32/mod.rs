@@ -9,6 +9,12 @@ mod geometry;
 mod input;
 #[cfg(target_os = "windows")]
 mod menus;
+#[cfg(any(target_os = "windows", test))]
+mod session;
+#[cfg(target_os = "windows")]
+pub(super) use session::screen_state;
+#[cfg(any(target_os = "windows", test))]
+mod value_write;
 #[cfg(target_os = "windows")]
 mod window;
 
@@ -35,7 +41,8 @@ use super::frame::FrameGeometry;
 use super::keys::KeyName;
 #[cfg(target_os = "windows")]
 use super::types::{
-	CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+	CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, ScreenState,
+	Target,
 };
 
 #[cfg(target_os = "windows")]
@@ -62,6 +69,7 @@ impl Backend for Win32Backend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let display_count =
 			capture::displays().map_or(0, |displays| displays.len().min(u32::MAX as usize) as u32);
+		let screen = self.screen_state(None);
 		DesktopCapabilities {
 			backend: "win32".to_string(),
 			display_server: Some("win32".to_string()),
@@ -75,6 +83,8 @@ impl Backend for Win32Backend {
 			held_input: true,
 			spaces: false,
 			global_escape: true,
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: if display_count > 0 {
 				"granted"
 			} else {
@@ -84,9 +94,13 @@ impl Backend for Win32Backend {
 			input_permission: "granted".to_string(),
 			ax_permission: "granted".to_string(),
 			display_count,
-			screen_locked: false,
-			display_asleep: false,
+			screen_locked: screen.locked,
+			display_asleep: screen.display_asleep,
 		}
+	}
+
+	fn screen_state(&mut self, _: Option<&DisplaySelector>) -> ScreenState {
+		session::screen_state(&self.display)
 	}
 
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
@@ -145,8 +159,9 @@ impl Backend for Win32Backend {
 	/// leaving the window's focus and the foreground alone: UI Automation's
 	/// `SetFocus` would bring the window to the front, taking the user's
 	/// keyboard. A windowless element (WPF, `WinUI`, web content) has no
-	/// window to post to, so background input refuses. Takeover focuses the
-	/// element and types through the foreground route.
+	/// window to post to, so background input refuses. Takeover saves the
+	/// user's foreground window, brings the target forward, and only then
+	/// focuses the element and types through the foreground route.
 	fn element_input(
 		&mut self,
 		element: &AxHandle,
@@ -169,14 +184,7 @@ impl Backend for Win32Backend {
 				input::element_background(&id, own, input)?;
 			},
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-				let target = Target::Window(id);
-				self.ax.focus(element)?;
-				match input {
-					ElementInput::Text(text) => input::type_text(&target, text, mode)?,
-					ElementInput::Chord(keys) => {
-						input::key_chord(&mut self.global_input, &target, keys, mode)?;
-					},
-				}
+				input::element_foreground(&id, input, || self.ax.focus(element))?;
 			},
 		}
 		Ok(ElementDelivery::Delivered)
@@ -219,5 +227,170 @@ impl Backend for Win32Backend {
 
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
 		Some(&mut self.ax)
+	}
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+	use std::{
+		io::{BufRead, BufReader, Write},
+		process::{Child, Command, Stdio},
+		time::Duration,
+	};
+
+	use windows_sys::Win32::{
+		Foundation::HWND,
+		UI::WindowsAndMessaging::{
+			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetForegroundWindow, GetMessageW, MSG,
+			SendMessageW, SetForegroundWindow, TranslateMessage, WM_GETTEXT, WS_OVERLAPPEDWINDOW,
+			WS_VISIBLE,
+		},
+	};
+
+	use super::*;
+	use crate::desktop::control::CancellationSource;
+
+	fn wide(text: &str) -> Vec<u16> {
+		text.encode_utf16().chain(Some(0)).collect()
+	}
+
+	const USER: &str = "omp test: user window";
+	const TARGET: &str = "omp test: takeover target";
+	/// Set for the copy of this test binary that hosts the windows.
+	const HOST: &str = "OMP_TAKEOVER_TEST_WINDOWS";
+
+	/// Two top-level edit windows in another process, as another app's would
+	/// be: the user's window and the takeover target. `windows()` leaves out
+	/// this process's own windows, so a copy of this test binary running
+	/// `takeover_test_windows` opens them and pumps their messages until it is
+	/// killed. Their text is their title, which `windows()` needs to list them.
+	struct Windows {
+		user:   HWND,
+		target: HWND,
+		host:   Child,
+	}
+
+	impl Windows {
+		fn open() -> Self {
+			let mut host = Command::new(std::env::current_exe().unwrap())
+				.args([
+					"--ignored",
+					"--exact",
+					"desktop::win32::tests::takeover_test_windows",
+					"--nocapture",
+				])
+				.env(HOST, "1")
+				.stdout(Stdio::piped())
+				.spawn()
+				.unwrap();
+			let line = BufReader::new(host.stdout.take().unwrap())
+				.lines()
+				.map_while(Result::ok)
+				.find(|line| line.starts_with("windows "))
+				.expect("the window host printed its windows");
+			let mut handles = line
+				.split(' ')
+				.skip(1)
+				.map(|handle| handle.parse::<usize>().unwrap());
+			let (user, target) = (handles.next().unwrap(), handles.next().unwrap());
+			Self { user: user as HWND, target: target as HWND, host }
+		}
+
+		fn text(window: HWND) -> String {
+			let mut buffer = [0u16; 256];
+			// SAFETY: `buffer` holds the length WM_GETTEXT is told.
+			let length =
+				unsafe { SendMessageW(window, WM_GETTEXT, buffer.len(), buffer.as_mut_ptr() as isize) };
+			String::from_utf16_lossy(&buffer[..length as usize])
+		}
+	}
+
+	impl Drop for Windows {
+		fn drop(&mut self) {
+			let _ = self.host.kill();
+			let _ = self.host.wait();
+		}
+	}
+
+	/// The window host `Windows::open` starts: opens both windows, prints their
+	/// handles and pumps their messages until it is killed. Run any other way,
+	/// it returns at once.
+	#[test]
+	#[ignore = "the window host of element_takeover_hands_the_foreground_back_to_the_users_window"]
+	fn takeover_test_windows() {
+		if std::env::var_os(HOST).is_none() {
+			return;
+		}
+		let create = |title: &str| {
+			let (class, text) = (wide("EDIT"), wide(title));
+			// SAFETY: both strings are NUL-terminated and outlive the call;
+			// EDIT is a system class, so no instance handle is needed.
+			unsafe {
+				CreateWindowExW(
+					0,
+					class.as_ptr(),
+					text.as_ptr(),
+					WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+					CW_USEDEFAULT,
+					CW_USEDEFAULT,
+					400,
+					300,
+					std::ptr::null_mut(),
+					std::ptr::null_mut(),
+					std::ptr::null_mut(),
+					std::ptr::null(),
+				)
+			}
+		};
+		let (user, target) = (create(USER), create(TARGET));
+		assert!(!user.is_null() && !target.is_null());
+		println!("windows {} {}", user as usize, target as usize);
+		std::io::stdout().flush().unwrap();
+		// SAFETY: `message` is writable for each call.
+		unsafe {
+			let mut message: MSG = std::mem::zeroed();
+			while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+				TranslateMessage(&message);
+				DispatchMessageW(&message);
+			}
+		}
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn element_takeover_hands_the_foreground_back_to_the_users_window() {
+		let windows = Windows::open();
+		let mut backend = Win32Backend::new(DisplaySelector::Active).unwrap();
+		let target = backend
+			.windows()
+			.unwrap()
+			.into_iter()
+			.find(|window| window.id == (windows.target as usize).to_string())
+			.expect("the target window is listed");
+		let element = backend.ax.window_root(&target).unwrap();
+		let token = CancellationSource::default().token();
+		for input in [
+			ElementInput::Text("typed".to_string()),
+			ElementInput::Chord(vec![KeyName::Home]),
+			ElementInput::Text("x".to_string()),
+		] {
+			// SAFETY: a window handle this test created.
+			unsafe { SetForegroundWindow(windows.user) };
+			assert!(
+				window::wait_for_foreground(windows.user, Duration::from_secs(2)).unwrap(),
+				"this process cannot take the foreground; run it from a focused terminal"
+			);
+			backend
+				.element_input(&element, &input, DeliveryMode::ForegroundReturnFocus, &token)
+				.unwrap();
+			// SAFETY: no preconditions.
+			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
+		}
+		// Whether focusing an edit selects its text is the control's business;
+		// the keys reached the target and nothing reached the user's window.
+		let typed = Windows::text(windows.target);
+		assert!(typed != TARGET && typed.contains('x'), "target text {typed:?}");
+		assert_eq!(Windows::text(windows.user), USER);
 	}
 }

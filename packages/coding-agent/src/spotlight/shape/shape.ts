@@ -62,7 +62,7 @@ import {
  */
 export const SHAPE_PROBE: string = shapeProbe.trimEnd();
 
-/** The system-prompt paragraph telling the agent how shaped output reads (read narrowly, batch calls). */
+/** The system prompt's Tool I/O notice on how shaped output reads (read narrowly, batch calls). */
 export const SHAPE_RULE: string = shapeRule.trim();
 
 let tokenizer: Tokenizer | undefined;

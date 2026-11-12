@@ -3,6 +3,14 @@
  * reports, plus navigation responses from Tern's `response` events, bounded
  * like the Chromium log. Bodies of fetch/XHR responses stay in the page until
  * asked for; navigation bodies are not observable.
+ *
+ * A server that lists `network` in its welcome (omp's WebKit host) reports
+ * every resource load itself, as `request` / `response` / `requestFinished` /
+ * `requestFailed` events. Those are then the log's only source for loads that
+ * reach the network: of what a capture script reports, only the requests it
+ * answered itself (a fulfilling or aborting route, offline emulation) are
+ * recorded, since the engine never saw them. Natively observed loads have no
+ * body store.
  */
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
@@ -32,8 +40,10 @@ import type { TernRouteRule } from "./page-capture";
 
 /** One logged request; `pageId` addresses its body in the page that made it. */
 export interface TernRequestEntry extends NetworkRequestRecord {
-	/** The capture script's id (`<document>:<n>`), absent for navigations. */
+	/** The capture script's id (`<document>:<n>`), absent for navigations and natively observed loads. */
 	pageId?: string;
+	/** The server's id of a natively observed load (unique per block). */
+	nativeId?: number;
 	/** Frame path of the document that made it (null: the main frame). */
 	frame?: string | null;
 	/** Order in which its response (or failure) arrived; absent while in flight. */
@@ -66,6 +76,46 @@ function headerRecord(value: unknown): Record<string, string> {
 	return out;
 }
 
+/** Puppeteer resource types by the request's `Sec-Fetch-Dest`. */
+const TYPE_BY_FETCH_DEST: Record<string, string> = {
+	document: "document",
+	iframe: "subdocument",
+	frame: "subdocument",
+	style: "stylesheet",
+	script: "script",
+	image: "image",
+	font: "font",
+	audio: "media",
+	video: "media",
+	track: "texttrack",
+	manifest: "manifest",
+	empty: "fetch",
+};
+
+/**
+ * The Puppeteer resource type of a natively observed load. The engine names
+ * none: the main document is known, the rest is read off the request's
+ * `Sec-Fetch-Dest`, else off the response's MIME type. `fetch` also stands for
+ * XHR, which the engine does not tell apart.
+ */
+function nativeResourceType(main: boolean, requestHeaders: Record<string, string>, mime: string | undefined): string {
+	if (main) return "document";
+	const byDest = TYPE_BY_FETCH_DEST[requestHeaders["sec-fetch-dest"] ?? ""];
+	if (byDest) return byDest;
+	const type = mime?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+	if (type === "text/html" || type === "application/xhtml+xml") return "subdocument";
+	if (type === "text/css") return "stylesheet";
+	if (type.endsWith("javascript") || type.endsWith("ecmascript")) return "script";
+	if (type.startsWith("image/")) return "image";
+	if (type.startsWith("font/") || type.includes("font-")) return "font";
+	if (type.startsWith("audio/") || type.startsWith("video/")) return "media";
+	if (type === "application/json" || type.endsWith("+json")) return "fetch";
+	return "other";
+}
+
+/** Capture-script requests remembered until their answer says whether the engine saw them, at most this many. */
+const HELD_PAGE_REQUESTS = 512;
+
 /** Resource types the page-world capture can route. */
 const ROUTABLE_TYPES: Record<string, true> = { fetch: true, xhr: true };
 
@@ -75,12 +125,40 @@ function num(value: unknown): number | undefined {
 
 /** Request log, routes and HAR recording of one Tern tab. */
 export class TernNetworkLog {
+	/** The backend's display name in errors (`Tern`, `WebKit`). */
+	readonly #product: string;
 	readonly #records: TernRequestEntry[] = [];
 	readonly #byPageId = new Map<string, TernRequestEntry>();
+	/** Whether the server reports loads itself ({@link ingestNative}). */
+	readonly #native: boolean;
+	readonly #byNativeId = new Map<number, TernRequestEntry>();
+	/** Natively observed loads still running, by server id. */
+	readonly #nativeInflight = new Set<number>();
+	/** Capture-script `request` messages whose answer has not arrived, by page id (native servers only). */
+	readonly #heldPageRequests = new Map<string, Record<string, unknown>>();
 	readonly #routes: StoredRoute[] = [];
 	#nextSeq = 1;
 	#settled = 0;
 	#har: { content: HarContentPolicy; startSeq: number } | undefined;
+
+	/** `native`: the server lists `network`, so its events, not a capture script, are the log's source. */
+	constructor(product: string, native = false) {
+		this.#product = product;
+		this.#native = native;
+	}
+
+	/** Natively observed loads that have neither finished nor failed. */
+	get inflight(): number {
+		return this.#nativeInflight.size;
+	}
+
+	/**
+	 * Forget which native loads are running: a new document replaced the one
+	 * that made them, or the server dropped events (their ends may be among them).
+	 */
+	forgetInflight(): void {
+		this.#nativeInflight.clear();
+	}
 
 	/** Sequence the next record gets (a cursor for "requests after now"). */
 	get cursor(): number {
@@ -92,8 +170,116 @@ export class TernNetworkLog {
 		return this.#settled;
 	}
 
-	/** Record a capture-script network message (`kind` = request/response/requestfailed). */
-	ingestPageMessage(message: Record<string, unknown>): void {
+	/**
+	 * Record a capture-script network message (`kind` = request/response/requestfailed).
+	 * Returns whether it entered the log: on a native server only a request the
+	 * capture answered itself (`local`) does, once that answer arrives.
+	 */
+	ingestPageMessage(message: Record<string, unknown>): boolean {
+		if (!this.#native) {
+			this.#recordPageMessage(message);
+			return true;
+		}
+		const id = typeof message.id === "string" ? message.id : undefined;
+		if (!id) return false;
+		if (message.kind === "request") {
+			this.#heldPageRequests.set(id, message);
+			if (this.#heldPageRequests.size > HELD_PAGE_REQUESTS) {
+				this.#heldPageRequests.delete(this.#heldPageRequests.keys().next().value!);
+			}
+			return false;
+		}
+		const request = this.#heldPageRequests.get(id);
+		this.#heldPageRequests.delete(id);
+		if (!request || message.local !== true) return false;
+		this.#recordPageMessage(request);
+		this.#recordPageMessage(message);
+		return true;
+	}
+
+	/**
+	 * Record one native network event (`request`, `response` with an `id`,
+	 * `requestFinished`, `requestFailed`) of a server that lists `network`.
+	 * Returns the record when the event is its failure.
+	 */
+	ingestNative(event: Record<string, unknown>): TernRequestEntry | undefined {
+		const id = num(event.id);
+		if (id === undefined) return undefined;
+		const ts = num(event.ts) ?? Date.now();
+		// A load whose `request` event was lost to the server's event ring still gets a record.
+		const entryFor = (): TernRequestEntry =>
+			this.#byNativeId.get(id) ??
+			this.#push({
+				nativeId: id,
+				ts,
+				method: "GET",
+				url: typeof event.url === "string" ? event.url : "",
+				resourceType: nativeResourceType(event.main === true, {}, undefined),
+				requestHeaders: {},
+				sizes: { requestBody: 0 },
+			});
+		switch (event.type) {
+			case "request": {
+				const headers = headerRecord(event.headers);
+				const method = typeof event.method === "string" ? event.method.toUpperCase() : "GET";
+				const url = typeof event.url === "string" ? event.url : "";
+				const known = this.#byNativeId.get(id);
+				if (known) {
+					// The same load asking again: a redirect.
+					known.url = url;
+					known.method = method;
+					known.requestHeaders = headers;
+				} else {
+					this.#push({
+						nativeId: id,
+						ts,
+						method,
+						url,
+						resourceType: nativeResourceType(event.main === true, headers, undefined),
+						requestHeaders: headers,
+						sizes: { requestBody: 0 },
+					});
+				}
+				this.#nativeInflight.add(id);
+				return undefined;
+			}
+			case "response": {
+				const entry = entryFor();
+				const headers = headerRecord(event.headers);
+				const mime = typeof event.mime === "string" && event.mime ? event.mime : undefined;
+				if (mime && !headers["content-type"]) headers["content-type"] = mime;
+				entry.status = num(event.status) ?? 0;
+				entry.ok = entry.status >= 200 && entry.status < 300;
+				entry.responseHeaders = headers;
+				if (typeof event.url === "string" && event.url) entry.url = event.url;
+				if (entry.resourceType === "other" || event.main === true) {
+					entry.resourceType = nativeResourceType(event.main === true, entry.requestHeaders, mime);
+				}
+				entry.settledSeq ??= ++this.#settled;
+				return undefined;
+			}
+			case "requestFinished": {
+				const entry = this.#byNativeId.get(id);
+				this.#nativeInflight.delete(id);
+				if (!entry) return undefined;
+				const length = num(event.length);
+				if (length !== undefined) entry.sizes.responseBody = length;
+				// Only a server that stamps its events gives a duration: omp reads them in batches.
+				if (num(event.ts) !== undefined) entry.durationMs = Math.max(0, ts - entry.ts);
+				return undefined;
+			}
+			case "requestFailed": {
+				const entry = entryFor();
+				this.#nativeInflight.delete(id);
+				entry.failureText = typeof event.error === "string" && event.error ? event.error : "request failed";
+				entry.settledSeq ??= ++this.#settled;
+				return entry;
+			}
+		}
+		return undefined;
+	}
+
+	#recordPageMessage(message: Record<string, unknown>): void {
 		const id = typeof message.id === "string" ? message.id : undefined;
 		const ts = num(message.ts) ?? Date.now();
 		switch (message.kind) {
@@ -221,6 +407,7 @@ export class TernNetworkLog {
 	clear(): void {
 		this.#records.length = 0;
 		this.#byPageId.clear();
+		this.#byNativeId.clear();
 	}
 
 	/** Begin a HAR recording of subsequent records. */
@@ -255,7 +442,7 @@ export class TernNetworkLog {
 		const unroutable = types?.filter(type => !ROUTABLE_TYPES[type]) ?? [];
 		if (unroutable.length > 0) {
 			throw new ToolError(
-				`tab.route() is not supported on the Tern browser backend for resourceType ${unroutable.join(", ")}: only the page's fetch and xhr requests can be routed`,
+				`tab.route() is not supported on the ${this.#product} browser backend for resourceType ${unroutable.join(", ")}: only the page's fetch and xhr requests can be routed`,
 			);
 		}
 		const rule: TernRouteRule = {
@@ -302,9 +489,11 @@ export class TernNetworkLog {
 		const record: TernRequestEntry = { ...entry, id: `request-${seq}`, seq };
 		this.#records.push(record);
 		if (record.pageId) this.#byPageId.set(record.pageId, record);
+		if (record.nativeId !== undefined) this.#byNativeId.set(record.nativeId, record);
 		while (this.#records.length > REQUEST_LOG_LIMIT) {
 			const removed = this.#records.shift();
 			if (removed?.pageId) this.#byPageId.delete(removed.pageId);
+			if (removed?.nativeId !== undefined) this.#byNativeId.delete(removed.nativeId);
 		}
 		return record;
 	}

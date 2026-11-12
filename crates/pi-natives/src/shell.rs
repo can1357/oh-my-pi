@@ -156,6 +156,22 @@ pub fn get_windows_short_path(path: String) -> String {
 	}
 }
 
+/// The commands the embedded shell adds to bash's own builtins, sorted.
+///
+/// For a session started with `sessionEnv` over this process's environment,
+/// whose `PI_DISABLE_*` switches gate them. omp's bash tool lists them to the
+/// model.
+#[napi(ts_args_type = "sessionEnv?: Record<string, string>")]
+pub fn shell_builtins(session_env: Option<Object<'_>>) -> Vec<&'static str> {
+	let var = |name: &str| {
+		session_env
+			.as_ref()
+			.and_then(|env| env.get::<String>(name).ok().flatten())
+			.or_else(|| std::env::var(name).ok())
+	};
+	pi_shell::tools::builtins(|name| pi_shell::git::flag_on(var(name).as_deref()))
+}
+
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

@@ -88,7 +88,9 @@ describe("browser open — requested timeout bounds the whole acquisition (#6365
 	it("rejects with a timeout ToolError when browser acquisition stays pending past the deadline", async () => {
 		vi.useFakeTimers();
 		const connectGate = Promise.withResolvers<void>();
+		const connectEntered = Promise.withResolvers<void>();
 		spyOn(CmuxSocketClient.prototype, "connect").mockImplementation(async () => {
+			connectEntered.resolve();
 			await connectGate.promise;
 		});
 		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
@@ -103,7 +105,9 @@ describe("browser open — requested timeout bounds the whole acquisition (#6365
 		// The requested 1s deadline elapses while `acquireBrowser` is still
 		// blocked on the (never-resolving) socket connect. Bun's fake timers fire
 		// `AbortSignal.timeout` synchronously on advance; awaiting `settled` below
-		// flushes the rejection.
+		// flushes the rejection. The deadline starts only once pre-open setup
+		// (engine/Chromium installs) settles, so advance after the connect began.
+		await connectEntered.promise;
 		vi.advanceTimersByTime(1000);
 
 		const outcome = await settled;
@@ -207,9 +211,12 @@ describe("browser open — caller cancellation rolls back the fresh browser (#63
 describe("browser open — an abandoned browser acquisition does not hold up the next one", () => {
 	it("starts a fresh connect for the next open instead of waiting out a timed-out one", async () => {
 		const stalledConnect = Promise.withResolvers<void>();
+		const stalledEntered = Promise.withResolvers<void>();
 		let connects = 0;
 		spyOn(CmuxSocketClient.prototype, "connect").mockImplementation(async () => {
-			if (++connects === 1) await stalledConnect.promise;
+			if (++connects !== 1) return;
+			stalledEntered.resolve();
+			await stalledConnect.promise;
 		});
 		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
@@ -220,6 +227,7 @@ describe("browser open — an abandoned browser acquisition does not hold up the
 
 		vi.useFakeTimers();
 		const first = rejectionOf(invokeBrowser({ action: "open", name: "retry", timeout: 1 }));
+		await stalledEntered.promise;
 		vi.advanceTimersByTime(1000);
 		expect(await first).toBeInstanceOf(ToolError);
 		vi.useRealTimers();
@@ -352,7 +360,7 @@ describe("browser open — failed spawned-app acquisition reaps its owned proces
 			invokeBrowser({
 				action: "open",
 				name: "failed-open",
-				app: { path: "/tmp/chrome-headless-shell" },
+				app: "/tmp/chrome-headless-shell",
 				timeout: 1,
 			}),
 		).rejects.toBeInstanceOf(ToolError);
@@ -461,7 +469,7 @@ describe("browser open — a cancel during the relay extension read", () => {
 		return surfaces;
 	}
 
-	const relayOpen = { action: "open", name: "relay-read", app: { relay: true }, timeout: 30 };
+	const relayOpen = { action: "open", name: "relay-read", app: "relay", timeout: 30 };
 
 	it("opens no tab", async () => {
 		const surfaces = relayOpensOnCmux();
