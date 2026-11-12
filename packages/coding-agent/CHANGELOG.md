@@ -266,6 +266,10 @@
 - `lsp.formatOnWrite` no longer re-indents 2/4-space files at 1 space per level when they contain JSDoc/block comments or one-off odd indents, and no longer converts tab-indented files that open with a JSDoc block to spaces ([#18544](https://github.com/can1357/oh-my-pi/issues/18544))
 - Isolated task sandboxes now finish cleanup after a SIGHUP or other signal even when releasing them takes longer than the agent shutdown grace period ([#18519](https://github.com/can1357/oh-my-pi/issues/18519)).
 
+### Added
+
+- ACP clients can negotiate `_omp/subagents` with `clientCapabilities._meta["omp/subagents"]: true` to receive sequenced full child-lifecycle snapshots, including detached task completions that arrive after the parent turn ends; clients without the capability receive none ([#18593](https://github.com/can1357/oh-my-pi/pull/18593) by [@aciDrums7](https://github.com/aciDrums7)).
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
