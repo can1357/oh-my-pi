@@ -515,6 +515,30 @@ describe("spotlight raw reads and path lists", () => {
 		expect(windows?.map(window => window.path)).toEqual(["raw.py", undefined, "wide.ts", "b.txt"]);
 	});
 
+	it("keeps the trace's line map on the lines the model saw when a part carries a repeat-read hint", async () => {
+		const { shaped } = await sessions();
+		const tool = new ReadTool(shaped.session);
+		for (const id of ["l1", "l2"]) await tool.execute(id, { path: "b.txt;raw.py" });
+
+		// The third identical read of `b.txt` gets the loop hint, between it and `raw.py`.
+		const result = await tool.execute("l3", { path: "b.txt;raw.py" });
+		const model = resultText(result).split("\n");
+		const original = spotlightDetails(result.details)?.original;
+
+		expect(resultText(result)).toContain("You have received this identical output 3 times");
+		const files: Record<string, string[]> = { "b.txt": ["b"], "raw.py": SOURCE.split("\n") };
+		const lines = (original?.windows ?? []).flatMap(window =>
+			files[window.path ?? ""].slice(window.start - 1, window.start - 1 + window.lines),
+		);
+		const map = original?.map ?? [];
+		expect(map.length).toBe(model.length);
+		// A shown line maps to its original line; a gap marker to the run it hides.
+		map.forEach((entry, k) => {
+			if (typeof entry === "number") expect(model[k]).toContain(lines[entry - 1]);
+			else if (entry) expect(model[k]).toContain("… [");
+		});
+	});
+
 	it("leaves a path list no part of which is cut as its parts read, with no original", async () => {
 		const { shaped, plain } = await sessions();
 		for (const { session } of [shaped, plain]) await Bun.write(path.join(session.cwd, "wide.md"), WIDE);

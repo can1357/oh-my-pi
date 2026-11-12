@@ -270,7 +270,8 @@ describe("Spotlight list reads", () => {
 				"SELECT file, reread FROM spotlight_needs WHERE tool_call_id = ?",
 			)
 			.get(list);
-		expect(need?.file).toBe(path.resolve("/repo", "a.py"));
+		// `a.py` was shown whole: only `b.py`, the window shaping cut, collects needs.
+		expect(need?.file).toBe(path.resolve("/repo", "b.py"));
 		expect(JSON.parse(need?.reread ?? "null")).toEqual([[35, 40]]);
 	});
 });

@@ -243,24 +243,28 @@ interface SheetText {
 	reduced: readonly string[];
 }
 
-/** One window as the sheet shows it: its 0-based original lines `from` to `end` (exclusive), within the view cap. */
+/**
+ * One window as the sheet shows it: its 0-based original lines `from` to `end` (exclusive), within the view cap, of
+ * the `lines` it has.
+ */
 interface Section {
 	window: SpotlightWindow;
 	from: number;
 	end: number;
+	lines: number;
 }
 
-/** The original's windows with lines in view; the last runs to the view's end, as the windows cover the original. */
-function sections(original: SpotlightOriginal, shown: number): Section[] {
+/**
+ * The original's windows, `shown` of its `total` lines in view; the last runs to the original's end, as the windows
+ * cover it. A window past the view keeps its section, empty.
+ */
+function sections(original: SpotlightOriginal, shown: number, total: number): Section[] {
 	const windows = originalWindows(original);
-	const out: Section[] = [];
-	for (let w = 0; w < windows.length; w++) {
-		const window = windows[w];
+	return windows.map((window, w) => {
 		const from = Math.max(0, window.at);
-		const end = w === windows.length - 1 ? shown : Math.min(window.at + window.lines, shown);
-		if (end > from) out.push({ window, from, end });
-	}
-	return out;
+		const full = w === windows.length - 1 ? Math.max(total, from) : window.at + window.lines;
+		return { window, from, end: Math.max(from, Math.min(full, shown)), lines: full - from };
+	});
 }
 
 /** The model-facing marker standing for 0-based original lines `from..to`: the one `map` pair covering them all. */
@@ -398,22 +402,31 @@ function windowCode(sheet: SheetText, section: Section): NativeNode {
 }
 
 /**
- * A window of several (role `omp.spotlight.window`): its head (role `omp.spotlight.head`, the file it shows and its
- * ranking's budget and cutoff, when it has either) over its code.
+ * A window of several (role `omp.spotlight.window`): its head (role `omp.spotlight.head`: the file it shows, how much
+ * of it the view cap left (role `omp.spotlight.clip`), and its ranking's budget and cutoff, when it has any) over its
+ * code, absent when the cap left none of it.
  */
 function windowSection(sheet: SheetText, section: Section): NativeNode {
 	const { path, rank } = section.window;
+	const shown = section.end - section.from;
+	const clip =
+		shown === 0
+			? `not shown: past the first ${count(SPOTLIGHT_VIEW_LINES)} lines`
+			: shown < section.lines
+				? `${count(shown)} of ${count(section.lines)} lines shown`
+				: undefined;
 	const head =
-		(path !== undefined || rank) &&
+		(path !== undefined || clip !== undefined || rank) &&
 		row(
 			compact([
 				path !== undefined && text([span(path, "mono")]),
+				clip !== undefined && text([span(clip, "muted")], { role: "omp.spotlight.clip" }),
 				node("spacer", { grow: 1 }),
 				rank && text([span(rankFacts(rank), "muted")], { role: "omp.spotlight.budget" }),
 			]),
 			{ gap: "md", align: "baseline", role: "omp.spotlight.head" },
 		);
-	return col(compact([head, windowCode(sheet, section)]), { gap: "xs", role: "omp.spotlight.window" });
+	return col(compact([head, shown > 0 && windowCode(sheet, section)]), { gap: "xs", role: "omp.spotlight.window" });
 }
 
 /**
@@ -511,8 +524,10 @@ export class SpotlightSheet implements Component {
 		const legends = [...new Set(compact(windows.map(window => window.rank && rankLabel(window.rank))))];
 		this.#body = compact([
 			summary(original, single ? windows[0].rank : undefined, lines.length, all.length),
-			...sections(original, lines.length).map(section =>
-				single ? windowCode(sheet, section) : windowSection(sheet, section),
+			...sections(original, lines.length, all.length).map(section =>
+				single
+					? section.end > section.from && windowCode(sheet, section)
+					: windowSection(sheet, section),
 			),
 			shapingNotes(sheet, spotlight.holdout === true || spotlight.gated === true),
 			actionBar([...legends.map(rankLegend), null, actionButton("Close", "close", { keys: "escape" })]),

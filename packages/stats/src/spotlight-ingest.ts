@@ -42,8 +42,8 @@ export interface SpotlightOpenRead {
 	/** First file line of the window and its line count. */
 	start: number;
 	lines: number;
-	/** 0-based position of the window's first line in the original; states persisted before windows lack it (0). */
-	at: number;
+	/** 0-based position of the window's first line in the original; absent (0) in states persisted before windows. */
+	at?: number;
 	/** `original.url`: the session artifact holding the original text. */
 	url: string | null;
 }
@@ -141,6 +141,11 @@ export interface SpotlightWindowFacts {
 	at: number;
 	/** Hidden absolute line ranges (numbered from {@link start}), inclusive: the window minus the kept ranges. */
 	hidden: [number, number][];
+	/**
+	 * A list read's part read its file whole (no line selector): a tail of the file lies in it. Always false for a single
+	 * window, whose call target tells.
+	 */
+	wholeFile: boolean;
 }
 
 export interface SpotlightOriginalFacts {
@@ -555,10 +560,10 @@ function parseKept(value: unknown): [number, number][] {
 	return out;
 }
 
-/** A window's kept runs, 1-based within it: the original's runs clipped to positions `at + 1 … at + lines`. */
-function windowKept(kept: readonly [number, number][], at: number, lines: number): [number, number][] {
+/** Ranges of 1-based original positions clipped to a window (`at + 1 … at + lines`), renumbered 1-based within it. */
+export function windowRanges(ranges: readonly [number, number][], at: number, lines: number): [number, number][] {
 	const out: [number, number][] = [];
-	for (const [a, b] of kept) {
+	for (const [a, b] of ranges) {
 		const from = Math.max(a - at, 1);
 		const to = Math.min(b - at, lines);
 		if (from <= to) out.push([from, to]);
@@ -583,7 +588,9 @@ function parseWindows(
 			start,
 			lines: count,
 			at,
-			hidden: hiddenRanges(start, count, windowKept(kept, at, count)),
+			hidden: hiddenRanges(start, count, windowRanges(kept, at, count)),
+			// A single window's call target tells whether it is whole (the aggregator reads it there).
+			wholeFile: !own && window.wholeFile === true,
 		};
 	});
 }
@@ -796,8 +803,7 @@ export class SpotlightCollector {
 	constructor(sessionFile: string, folder: string, state: SpotlightParserState, record = true) {
 		this.#sessionFile = sessionFile;
 		this.#folder = folder;
-		// States persisted before windows have no `at`: their reads are whole originals.
-		this.state = { ...state, open: (state.open ?? []).map(read => ({ ...read, at: read.at ?? 0 })) };
+		this.state = { ...state, open: (state.open ?? []).map(read => ({ ...read })) };
 		this.#record = record;
 	}
 
@@ -818,13 +824,14 @@ export class SpotlightCollector {
 			const original = await text;
 			if (!original) continue;
 			const row = this.#need(read);
+			const at = read.at ?? 0;
 			// A list read's original joins several windows: a Find block lies in its own window's lines.
-			const lines = original.slice(read.at, read.at + read.lines);
+			const lines = original.slice(at, at + read.lines);
 			for (const block of blocks) {
 				const spans = locateFind(lines, block.lines);
 				// Without `all` the edit needs exactly one match; more is a Find this text cannot place.
 				const located = block.all ? spans : spans.length === 1 ? spans : [];
-				for (const [a, b] of located) row.edit.push([a + read.at, Math.min(b, read.lines) + read.at]);
+				for (const [a, b] of located) row.edit.push([a + at, Math.min(b, read.lines) + at]);
 			}
 			row.edit = mergeRanges(row.edit);
 		}
@@ -856,15 +863,16 @@ export class SpotlightCollector {
 	}
 
 	/**
-	 * Start collecting for a shaped read whose result just landed, one open read per window showing a file; each stops
-	 * an earlier read's window of the same file.
+	 * Start collecting for a shaped read whose result just landed, one open read per window showing a file that shaping
+	 * cut (hid lines of, or would have: a held-out window's would-be cut); a window shown unchanged was never ranked.
+	 * Each stops an earlier read's window of the same file.
 	 */
 	#openRead(row: SpotlightShapeRow): void {
 		const original = row.original;
 		if (row.tool !== "read" || !original) return;
 		if ((this.state.open ?? []).some(read => read.toolCallId === row.toolCallId)) return;
 		for (const window of original.windows) {
-			if (!window.path || window.lines <= 0) continue;
+			if (!window.path || window.lines <= 0 || window.hidden.length === 0) continue;
 			const file = resolveReadPath(window.path, this.state.cwd);
 			for (const read of this.state.open ?? []) {
 				if (read.file === file && read.toolCallId !== row.toolCallId) this.#close(read);
@@ -898,8 +906,9 @@ export class SpotlightCollector {
 				}
 				if (!this.#record) continue;
 				// Positions in the whole original: the window's own, past the windows before it.
+				const at = read.at ?? 0;
 				const end = read.start + read.lines - 1;
-				const offset = read.at - read.start + 1;
+				const offset = at - read.start + 1;
 				const positions: [number, number][] = [];
 				for (const [a, b] of ranges) {
 					const from = Math.max(a, read.start);
@@ -908,7 +917,7 @@ export class SpotlightCollector {
 				}
 				// The last N lines are known only when the original reaches the file's end: a whole-file read's does.
 				if (selection.tail !== null && read.start === 1)
-					positions.push([Math.max(1, read.lines - selection.tail + 1) + read.at, read.lines + read.at]);
+					positions.push([Math.max(1, read.lines - selection.tail + 1) + at, read.lines + at]);
 				const row = this.#need(read);
 				row.reread = mergeRanges([...row.reread, ...positions]);
 			}

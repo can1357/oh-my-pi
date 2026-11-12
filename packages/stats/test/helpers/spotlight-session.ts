@@ -34,7 +34,7 @@ export interface OriginalSpec {
 	/** Spotlight's per-line heat (`0`–`9`, `-` unscored); default none. */
 	heat?: string;
 	/** A `;`/`,` list read's windows (`start`/`path` then left at 1/absent). */
-	windows?: { at: number; lines: number; start: number; path?: string }[];
+	windows?: { at: number; lines: number; start: number; path?: string; wholeFile?: true }[];
 }
 
 /** What the experiment did to one result. */

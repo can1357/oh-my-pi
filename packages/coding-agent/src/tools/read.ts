@@ -937,13 +937,15 @@ interface ReadList {
 
 /**
  * The content of `list` with each part's result as `resultOf` gives it, and the layout of its joined text: the
- * list's notes and the blank lines between entries are literal text, each part with text is a slot (its index in
- * `parts`). Entries' texts join with a blank line into one text block until an image ends it; a nested list's entries
- * join as the outer list's. A part's text is placed whole where its first text block was, its images after it.
+ * list's notes, the blank lines between entries and each part's repeat-read hint (`hints`, after its text) are
+ * literal text, each part with text is a slot (its index in `parts`). Entries' texts join with a blank line into one
+ * text block until an image ends it; a nested list's entries join as the outer list's. A part's text is placed whole
+ * where its first text block was, its images after it.
  */
 function joinReadList(
 	list: ReadList,
 	resultOf: (part: ShapePart<ReadToolDetails>) => AgentToolResult<ReadToolDetails>,
+	hints?: ReadonlyMap<ShapePart<ReadToolDetails>, string>,
 ): { content: Array<TextContent | ImageContent>; layout: (string | number)[]; parts: ShapePart<ReadToolDetails>[] } {
 	const content: Array<TextContent | ImageContent> = [];
 	const layout: (string | number)[] = [];
@@ -981,6 +983,11 @@ function joinReadList(
 				if (texts.length) {
 					parts.push(entry.part);
 					append(parts.length - 1, texts.map(item => item.text).join("\n"));
+					const hint = hints?.get(entry.part);
+					if (hint) {
+						pendingText += `\n\n${hint}`;
+						block.push(`\n\n${hint}`);
+					}
 				}
 				for (const item of result.content) {
 					if (item.type === "text") continue;
@@ -1026,6 +1033,17 @@ interface SessionWithRepeatReadTracker extends ToolSession {
  * does. Tracking is per session and resets whenever the output changes.
  */
 function appendRepeatReadHint(session: ToolSession, path: string, result: AgentToolResult<ReadToolDetails>): void {
+	const notice = repeatReadNotice(session, path, result);
+	const block = result.content.find(entry => entry.type === "text");
+	if (notice && block) block.text = appendReadNotice(block.text, notice, (result.details ??= {}), "\n\n");
+}
+
+/** Counts `result` as a read of `path`; the loop-breaking hint when it repeats identical output often enough. */
+function repeatReadNotice(
+	session: ToolSession,
+	path: string,
+	result: AgentToolResult<ReadToolDetails>,
+): string | undefined {
 	const block = result.content?.find(entry => entry.type === "text");
 	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
 
@@ -1052,8 +1070,7 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	entry.count++;
 	if (entry.count < REPEAT_READ_HINT_THRESHOLD) return;
 	const next = acceptsLineSelector(path) ? "use a narrower selector (path:A-B), or proceed" : "proceed";
-	const notice = `[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — ${next} with the edit.]`;
-	block.text = appendReadNotice(block.text, notice, (result.details ??= {}), "\n\n");
+	return `[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — ${next} with the edit.]`;
 }
 
 /**
@@ -2030,7 +2047,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 	/**
 	 * A `;`/`,` path list's parts shaped as blocks of one call (each part file-aware: its window, `:raw` or bounded
-	 * range decides for it), each with its repeat-read hint, joined again; the list carries the call's one trace.
+	 * range decides for it), joined again with each part's repeat-read hint after it; the list carries the call's one
+	 * trace. A hint is literal text of the list, outside the part it follows, so the trace's map counts its lines.
 	 */
 	async #shapeList(
 		toolCallId: string,
@@ -2039,18 +2057,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		list: ReadList,
 		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const { layout, parts } = joinReadList(list, part => part.result);
+		const read = joinReadList(list, part => part.result);
+		const hints = new Map<ShapePart<ReadToolDetails>, string>();
+		for (const part of read.parts) {
+			const notice = repeatReadNotice(this.session, part.request.path ?? "", part.result);
+			// A raw part's notice goes to notes, not its bytes (`appendReadNotice`); a list keeps no part's notes.
+			if (notice && !part.request.raw) hints.set(part, notice);
+		}
+		const layout = read.layout.flatMap(piece => {
+			const hint = typeof piece === "number" ? hints.get(read.parts[piece]) : undefined;
+			return hint ? [piece, `\n\n${hint}`] : [piece];
+		});
 		const shaped = await shapeToolParts(
 			this.session,
 			toolCallId,
 			{ tool: "read", source: `read ${params.path}` },
 			layout,
-			parts,
+			read.parts,
 			signal,
 		);
-		const results = new Map(parts.map((part, i) => [part, shaped.results[i]]));
-		for (const [part, result] of results) appendRepeatReadHint(this.session, part.request.path ?? "", result);
-		const { content } = joinReadList(list, part => results.get(part) ?? part.result);
+		const results = new Map(read.parts.map((part, i) => [part, shaped.results[i]]));
+		const { content } = joinReadList(list, part => results.get(part) ?? part.result, hints);
 		const details = shaped.spotlight ? { ...inner.details, spotlight: shaped.spotlight } : inner.details;
 		return { ...inner, content, details };
 	}

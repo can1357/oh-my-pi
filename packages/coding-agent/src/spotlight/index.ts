@@ -311,6 +311,7 @@ async function originalOf(
 			start: read?.firstLine ?? 1,
 			...(read ? { path: read.path } : {}),
 			...(trace.rank ? { rank: trace.rank } : {}),
+			...(read && !read.selected ? { wholeFile: true as const } : {}),
 		});
 		heat += encodeHeat(trace.scores).padEnd(lines, "-");
 		kept.push(...trace.kept);

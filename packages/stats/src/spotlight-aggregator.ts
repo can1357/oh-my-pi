@@ -331,18 +331,28 @@ function rangeList(value: unknown): [number, number][] {
 	);
 }
 
-/** The `windows` column: a list read's windows; null for a single-window original (or a malformed value). */
+/** The `windows` column: a list read's windows; null for a single-window original (or a value with none valid). */
 function parseWindowsColumn(json: string | null): SpotlightWindowFacts[] | null {
 	if (!json) return null;
 	try {
 		const value: unknown = JSON.parse(json);
 		if (!Array.isArray(value)) return null;
-		return value.flatMap((window: unknown): SpotlightWindowFacts[] => {
+		const windows = value.flatMap((window: unknown): SpotlightWindowFacts[] => {
 			if (typeof window !== "object" || window === null) return [];
-			const { path, start, lines, at, hidden } = window as Record<string, unknown>;
+			const { path, start, lines, at, hidden, wholeFile } = window as Record<string, unknown>;
 			if (typeof start !== "number" || typeof lines !== "number" || typeof at !== "number") return [];
-			return [{ path: typeof path === "string" ? path : null, start, lines, at, hidden: rangeList(hidden) }];
+			return [
+				{
+					path: typeof path === "string" ? path : null,
+					start,
+					lines,
+					at,
+					hidden: rangeList(hidden),
+					wholeFile: wholeFile === true,
+				},
+			];
 		});
+		return windows.length > 0 ? windows : null;
 	} catch {
 		return null;
 	}
@@ -374,7 +384,16 @@ function toResult(row: ResultRow): Result {
 		parseWindowsColumn(row.windows) ??
 		(row.lines === null
 			? []
-			: [{ path: row.path, start: row.start_line ?? 1, lines: row.lines, at: 0, hidden: parseRanges(row.hidden) }]);
+			: [
+					{
+						path: row.path,
+						start: row.start_line ?? 1,
+						lines: row.lines,
+						at: 0,
+						hidden: parseRanges(row.hidden),
+						wholeFile: false,
+					},
+				]);
 	const steps = parseSteps(row.steps);
 	// A cut wider than plain pi did not apply: the model got plain's text, as for a result shaping kept.
 	const capped = row.capped_tokens !== null || steps.at(-1) === "plain-cap";
@@ -656,7 +675,7 @@ export class EditLog {
  */
 function rereads(call: Call, source: Call, analysis: SessionAnalysis, recovery = false): boolean {
 	const windows = source.result?.windows ?? [];
-	// A list read's target (`a.py;b.txt`) is no one path: only its windows name its files.
+	// A list read's target (`a.py;b.txt`) is no one path: only its windows name its files and tell which are whole.
 	const sourceSelection = windows.length > 1 ? null : parseReadSelection(source.target);
 	const selection = parseReadSelection(call.target);
 	const file = resolveReadPath(selection.path, analysis.cwd);
@@ -667,16 +686,20 @@ function rereads(call: Call, source: Call, analysis: SessionAnalysis, recovery =
 		if (!sourcePath || file !== resolveReadPath(sourcePath, analysis.cwd)) return false;
 		if (analysis.edits.between(source.seq, call.seq, file)) return false;
 		if (later === null) return true;
+		const wholeFile = sourceSelection ? selectedLines(sourceSelection) === null : window?.wholeFile === true;
 		if (recovery) {
 			if (!window) return false;
 			const end = window.start + window.lines - 1;
+			// A list part's tail is known only when it read its file whole.
 			const ranges: [number, number][] =
-				selection.tail === null ? later : [...later, [end - selection.tail + 1, end]];
+				selection.tail !== null && (sourceSelection !== null || wholeFile)
+					? [...later, [end - selection.tail + 1, end]]
+					: later;
 			return overlaps(ranges, window.hidden);
 		}
-		// A tail read lands somewhere unknown in a windowed read.
-		const span = sourceSelection ? selectedLines(sourceSelection) : [];
-		if (span === null) return true;
+		// A whole-file read overlaps any later selection; a tail read lands somewhere unknown in a windowed read.
+		if (wholeFile) return true;
+		const span = sourceSelection ? (selectedLines(sourceSelection) ?? []) : [];
 		const own: [number, number][] =
 			window && window.lines > 0 ? [[window.start, window.start + window.lines - 1]] : span;
 		return overlaps(later, own);

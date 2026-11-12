@@ -746,4 +746,38 @@ describe("spotlight notice", () => {
 		expect(within(notes, "text").map(words)).toEqual(["notes the model saw", "[a.py: 2 of 3 lines kept]"]);
 		expect(h.errors).toEqual([]);
 	});
+
+	it("says in a window's own head when the view cap cuts it short or leaves it out", async () => {
+		const sizes = [4_998, 10, 5];
+		const original = Array.from({ length: 5_013 }, (_, i) => `const v${i} = ${i};`).join("\n");
+		const multi: SpotlightDetails = {
+			...SAVED,
+			tool: "read",
+			original: {
+				url: "artifact://12",
+				lines: 5_013,
+				start: 1,
+				windows: [
+					{ at: 0, lines: sizes[0], start: 1, path: "a.ts" },
+					{ at: 4_998, lines: sizes[1], start: 1, path: "b.ts" },
+					{ at: 5_008, lines: sizes[2], start: 1, path: "c.ts" },
+				],
+				heat: "",
+				kept: [[1, 5_013]],
+			},
+		};
+		await openSheet(multi, original, original);
+		const h = harness!;
+		const overlay = h.find(node => node.k === "overlay");
+		const sections = within(overlay, "col").filter(node => prop(node, "role") === "omp.spotlight.window");
+		expect(sections).toHaveLength(3);
+		const heads = sections.map(section =>
+			within(section, "row")
+				.filter(node => prop(node, "role") === "omp.spotlight.head")
+				.flatMap(head => within(head, "text").map(words)),
+		);
+		expect(heads).toEqual([["a.ts"], ["b.ts", "2 of 10 lines shown"], ["c.ts", "not shown: past the first 5,000 lines"]]);
+		expect(sections.map(section => within(section, "code").length)).toEqual([1, 1, 0]);
+		expect(h.errors).toEqual([]);
+	});
 });

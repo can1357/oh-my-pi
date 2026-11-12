@@ -29,6 +29,8 @@ export interface SpotlightWindow {
 	path?: string;
 	/** How the step that cut its lines by rank chose them, positions relative to the window; absent when none did. */
 	rank?: SpotlightRank;
+	/** The part read its file with no line selector (a whole-file read): a tail of the file lies in it. */
+	wholeFile?: true;
 }
 
 /** The original of a result whose text shaping changed. */
@@ -72,9 +74,12 @@ export interface SpotlightOriginal {
 	shapedUrl?: string;
 }
 
-/** The windows an original is made of: its {@link SpotlightOriginal.windows}, else the one window it is. */
+/**
+ * The windows an original is made of: its {@link SpotlightOriginal.windows}, else (also for an empty or malformed
+ * value) the one window it is.
+ */
 export function originalWindows(original: SpotlightOriginal): SpotlightWindow[] {
-	if (original.windows) return original.windows;
+	if (Array.isArray(original.windows) && original.windows.length > 0) return original.windows;
 	return [
 		{
 			at: 0,
