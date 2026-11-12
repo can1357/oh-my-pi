@@ -6,7 +6,7 @@ import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { describeShimmer, type ShimmerPalette, shimmerEnabled } from "../theme/shimmer";
-import { sharedSpinnerFrame, spinnerAnimated, spinnerInterval, spinnerTickDelay } from "../spinner-clock";
+import { spinnerAnimated, spinnerInterval, spinnerTickDelay } from "../spinner-clock";
 import type { TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
@@ -103,6 +103,7 @@ export type LoaderMessageColorFn = ColorFn & {
 export class Loader extends Text {
 	#frames = DEFAULT_SPINNER_FRAMES;
 	#currentFrame = 0;
+	#currentTick = 0;
 	#intervalId?: NodeJS.Timeout;
 	#ui: TUI | null = null;
 	#layoutSource?: readonly string[];
@@ -298,7 +299,9 @@ export class Loader extends Text {
 	}
 
 	start() {
-		this.#currentFrame = sharedSpinnerFrame(this.#frames.length);
+		const interval = spinnerInterval();
+		this.#currentTick = interval > 0 ? Math.floor(Date.now() / interval) : 0;
+		this.#currentFrame = this.#currentTick % this.#frames.length;
 		this.#syncText();
 		this.#requestPaint();
 		// The TSP terminal animates the described spinner; nothing to repaint.
@@ -370,9 +373,16 @@ export class Loader extends Text {
 				return;
 			}
 			const startedAt = performance.now();
-			// The glyph is the shared clock's, so every spinner on screen shows the same frame.
-			const frame = sharedSpinnerFrame(this.#frames.length);
-			const advanced = frame !== this.#currentFrame;
+			// A one-frame spinner (or a whole cycle skipped under backpressure)
+			// still refreshes a live label once per shared clock period.
+			const interval = spinnerInterval();
+			const tick = interval > 0 ? Math.floor(Date.now() / interval) : 0;
+			const frame = tick % this.#frames.length;
+			const advanced =
+				frame !== this.#currentFrame ||
+				(tick !== this.#currentTick &&
+					(this.messageColorFn.animated === true || typeof this.message === "function"));
+			this.#currentTick = tick;
 			this.#currentFrame = frame;
 			// A static spinner still re-reads a dynamic message (countdown, elapsed) on its 1 s tick.
 			const animated = spinnerAnimated();
