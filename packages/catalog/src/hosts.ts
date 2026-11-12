@@ -50,7 +50,7 @@ export const KNOWN_HOSTS = {
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
 	xai: { providers: ["xai", "xai-oauth"], urlMarkers: ["api.x.ai"] },
-	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai"] },
+	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai", "/publishers/mistralai/"] },
 	together: { providers: ["together"], urlMarkers: ["api.together.xyz"] },
 	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
 	/** URL-only on purpose: the `fireworks`/`firepass` providers route per-model and not every model is Fireworks-shaped. */

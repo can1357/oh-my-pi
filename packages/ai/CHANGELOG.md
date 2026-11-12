@@ -6,6 +6,10 @@
 
 - Added the `nace-systemone` judgment API for Nace's Drex decision models, which sends images as Drex's top-level `images` data URLs and replaces the base64 image, audio, video and PDF data URLs that Drex rejects in judged text with a description ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
 
+### Fixed
+
+- Fixed Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) sending the Anthropic wire shape on the `publishers/mistralai` raw-predict endpoint: the Anthropic body transform now applies only to `/publishers/anthropic/` URLs, the `/chat/completions` suffix is stripped for raw-predict endpoints, and bearer auth covers `openai-completions` raw-predict models ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

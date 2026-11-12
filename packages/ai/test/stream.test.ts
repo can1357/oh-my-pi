@@ -8,7 +8,7 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { complete, stream } from "@oh-my-pi/pi-ai/stream";
-import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type { Api, AssistantMessage, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $which } from "@oh-my-pi/pi-utils";
@@ -849,11 +849,54 @@ describe("Generate E2E Tests", () => {
 				delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
 				Bun.env.APPDATA = absentAdcHome;
 
+				// Replay one tool call issued by another model: a long
+				// OpenAI-style id must be clamped to 9 alphanumerics, the tool
+				// result must carry its name, and `max_tokens` (not
+				// `max_completion_tokens`) must be sent with no `store`.
+				const priorAssistant: AssistantMessage = {
+					role: "assistant",
+					api: "openai-completions",
+					provider: "openai",
+					model: "gpt-4o",
+					content: [
+						{
+							type: "toolCall",
+							id: "call_abcdefghijklmnopqrstuvwxyz",
+							name: "math_operation",
+							arguments: { a: 1, b: 2, operation: "add" },
+						},
+					],
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				};
 				const events = stream(
 					model,
-					{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
+					{
+						messages: [
+							{ role: "user", content: "Hello", timestamp: Date.now() },
+							priorAssistant,
+							{
+								role: "toolResult",
+								toolCallId: "call_abcdefghijklmnopqrstuvwxyz",
+								toolName: "math_operation",
+								content: [{ type: "text", text: "3" }],
+								isError: false,
+								timestamp: Date.now(),
+							},
+							{ role: "user", content: "Thanks", timestamp: Date.now() },
+						],
+					},
 					{
 						apiKey: "<authenticated>",
+						maxTokens: 100,
 						fetch: async (input, init) => {
 							const url = input instanceof Request ? input.url : input.toString();
 							if (
@@ -888,8 +931,32 @@ describe("Generate E2E Tests", () => {
 				expect(request.authorization).toBe("Bearer vertex-token");
 				// OpenAI-shaped body: the Anthropic transform must not strip
 				// `model` or inject `anthropic_version` on partner publishers.
-				expect((request.body as Record<string, unknown>).model).toBe("mistral-small-2503");
-				expect((request.body as Record<string, unknown>).anthropic_version).toBeUndefined();
+				const body = request.body as Record<string, unknown>;
+				expect(body.model).toBe("mistral-small-2503");
+				expect(body.anthropic_version).toBeUndefined();
+				// Mistral wire shape: `max_tokens`, no `store`, clamped ids.
+				expect(body.max_tokens).toBe(100);
+				expect(body.max_completion_tokens).toBeUndefined();
+				expect(body.store).toBeUndefined();
+				const wireMessages = body.messages as Array<Record<string, unknown>>;
+				const assistantMsg = wireMessages.find(
+					msg => msg.role === "assistant" && Array.isArray(msg.tool_calls),
+				) as unknown as {
+					tool_calls: Array<{ id: string; function: { name: string; arguments: string } }>;
+				};
+				expect(assistantMsg.tool_calls).toHaveLength(1);
+				expect(assistantMsg.tool_calls[0]?.id).toBe("callabcde");
+				expect(assistantMsg.tool_calls[0]?.function.name).toBe("math_operation");
+				const toolMsg = wireMessages.find(msg => msg.role === "tool") as unknown as {
+					tool_call_id: string;
+					name: string;
+				};
+				expect(toolMsg.tool_call_id).toBe("callabcde");
+				expect(toolMsg.name).toBe("math_operation");
+				// A synthetic bridge assistant follows the tool result: Mistral
+				// rejects user turns directly after tool results.
+				const toolIndex = wireMessages.findIndex(msg => msg.role === "tool");
+				expect((wireMessages[toolIndex + 1] as Record<string, unknown>).role).toBe("assistant");
 			} finally {
 				__resetVertexTokenCache();
 				homedirSpy.mockRestore();
