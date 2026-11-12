@@ -372,7 +372,7 @@ export function planXdevPromptDocs(
 export function renderXdevPromptDocs(docs: XdevPromptDocs, listedElsewhere?: ReadonlySet<string>): string {
 	const lines: string[] = [];
 	for (const [name, summary] of docs.catalog) {
-		if (!listedElsewhere?.has(name)) lines.push(`- ${XD_URL_PREFIX}${name} — ${summary}`);
+		if (!listedElsewhere?.has(name)) lines.push(`- ${name} — ${summary}`);
 	}
 	if (lines.length === 0) return docs.sections.join("\n\n");
 	const catalogSection = [
