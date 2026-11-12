@@ -134,6 +134,8 @@ export interface BenchCommandArgs {
 		prompt?: string;
 		/** Service-tier setting value (`none` omits); overrides the configured `serviceTier` setting. */
 		serviceTier?: string;
+		/** One-based OAuth account position for each selected provider. */
+		account?: number;
 		json?: boolean;
 		par?: number;
 		/** Benchmark workload: a challenge kind (default `chat`), or `mix` to rotate through every kind. */
@@ -737,6 +739,9 @@ async function runBenchRequest(
 		if (message.stopReason === "error" || message.errorMessage) {
 			return { ok: false, error: message.errorMessage ?? "request failed" };
 		}
+		if (options.serviceTier === "priority" && message.disabledFeatures?.includes("priority")) {
+			return { ok: false, error: "Provider rejected priority service; request fell back to standard speed" };
+		}
 		const rawDuration = message.duration ?? now() - startedAt;
 		const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
 		const rawTtft = message.ttft ?? (firstTokenAt === undefined ? durationMs : firstTokenAt - startedAt);
@@ -1159,6 +1164,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		else writeStdout(`${text}\n`);
 	};
 
+	if (command.flags.account !== undefined) normalizePositiveInteger("account", command.flags.account, 1);
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	const settings = runtime.settings ?? Settings.isolated({});
 	const streamFn: StreamSimpleFn = (model, context, options) =>
@@ -1202,7 +1208,32 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			// This matches the old sequential break behavior exactly and avoids launching/printing
 			// multiple failures.
 			const testSessionId = randomSessionId();
-			const preflightKey = await runtime.modelRegistry.getApiKey(model, testSessionId);
+			let selectedResolver: ApiKeyResolver | undefined;
+			if (command.flags.account !== undefined) {
+				const oauth = runtime.oauth;
+				if (!oauth) throw new Error("OAuth account selection is unavailable");
+				const accounts = oauth.accounts(model.provider);
+				const account = accounts[command.flags.account - 1];
+				if (!account) {
+					throw new Error(
+						`Invalid --account ${command.flags.account}: provider "${model.provider}" has ${accounts.length} OAuth account(s)`,
+					);
+				}
+				selectedResolver = async ({ error, lastChance }) => {
+					if (lastChance) return undefined;
+					const result = await oauth.accessById(model.provider, account.credentialId, {
+						forceRefresh: error !== undefined,
+					});
+					if (!result?.ok)
+						throw new Error(
+							`Could not get token for account ${command.flags.account} of "${model.provider}": ${result?.error ?? "no OAuth credential available"}`,
+						);
+					return result.accessToken;
+				};
+			}
+			const preflightKey = selectedResolver
+				? await selectedResolver({ error: undefined, lastChance: false })
+				: await runtime.modelRegistry.getApiKey(model, testSessionId);
 			if (!preflightKey) {
 				const failure: BenchRunFailure = {
 					ok: false,
@@ -1237,7 +1268,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						// Provider-session state is still recreated by runBenchRequest and
 						// stateful Responses chaining is disabled below.
 						const credentialAffinitySessionId = pairIndex === 0 ? testSessionId : randomSessionId();
-						const credentialResolver = runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
+						const credentialResolver =
+							selectedResolver ?? runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
 						const coldResult = await runBenchRequest(
 							model,
 							{
@@ -1340,7 +1372,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						...(await runBenchRequest(
 							model,
 							{
-								apiKey: runtime.modelRegistry.resolver(model, sessionId),
+								apiKey: selectedResolver ?? runtime.modelRegistry.resolver(model, sessionId),
 								sessionId,
 								messages: challenge.messages,
 								maxTokens: challenge.maxTokens,

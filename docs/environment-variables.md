@@ -470,6 +470,7 @@ Small typed decisions the app makes about its own state (the `auto` thinking-lev
 | `OPENAI_API_KEY`         | Also authenticates the OpenAI Decisions judge `openai/gpt-6-luna-decisions` (GPT-6 Luna over `POST /v1/decisions`); assign it to the `judge` role to use it                                                                                                 |
 | `CLOUDFLARE_API_TOKEN`   | Authenticates the Cloudflare Workers AI Clef judges (`cloudflare-workers-ai/@cf/cloudflare/clef`, `.../clef-flash`) with `CLOUDFLARE_ACCOUNT_ID`; alternatively use `/login cloudflare-workers-ai`                                                          |
 | `LIQUID_API_KEY`         | Authenticates the Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`); alternatively use `/login liquid`                                                                                                                                                    |
+| `NACE_API_KEY`           | Authenticates the Nace Drex judges (`nace/drex-max-v1.1`, `nace/drex-max-finance`, `nace/drex-v2.0`); alternatively use `/login nace`                                                                                                                       |
 | `TYPESAFE_DEFAULT_MODEL` | Standalone `pi-ai` TypeSafe client default when its caller does not pass a model (default `jev-latest`). The coding-agent app passes the model selected by the `judge` role, so this variable does not override app role selection or discovered model IDs. |
 
 ---

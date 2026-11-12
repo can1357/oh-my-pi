@@ -100,10 +100,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser screenshots of background tabs", (
 			await releaseTab(name);
 		});
 		await acquireTab(name, handle, { target: "agent-tab", timeoutMs: 30_000 });
+		// Attaching emulates focus, which macOS Chromium reports as `visible` and Linux as `hidden`;
+		// either way the capture itself must leave it as it was.
+		const agentVisibility = await visibility(agentPage);
 
 		expect(await repaintAndCapture(name, "#00ff00")).toEqual([0, 255, 0]);
 		expect(await visibility(userPage)).toBe("visible");
-		expect(await visibility(agentPage)).toBe("hidden");
+		expect(await visibility(agentPage)).toBe(agentVisibility);
 	}, 45_000);
 
 	it("captures the adopted tab after the user switched away from it", async () => {

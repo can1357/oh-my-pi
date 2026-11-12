@@ -548,7 +548,7 @@ impl Theft {
 
 /// Whether secure keyboard entry is on: a password field or a terminal with
 /// secure keyboard entry has the keyboard.
-fn secure_entry() -> bool {
+pub(super) fn secure_entry() -> bool {
 	// SAFETY: a read-only query of the system keyboard state.
 	unsafe { IsSecureEventInputEnabled() != 0 }
 }

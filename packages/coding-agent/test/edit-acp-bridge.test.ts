@@ -133,7 +133,9 @@ describe("EditTool ACP write routing", () => {
 		expect(persisted).toBe("function f() {\n\treturn 2;\n}\n");
 		expect((result.details as EditToolDetails).newText).toBe(persisted);
 		expect(text).toContain("Warnings:");
-		expect(text).toMatch(/reformatted it on save/);
+		expect(text).toMatch(/reformatted on write/);
+		expect(text).toContain("2:\treturn 2;");
+		expect(text).not.toContain("    return 2;");
 		expect(text).toContain(`#${hashlineFileHash(persisted)}]`);
 	});
 
@@ -147,7 +149,7 @@ describe("EditTool ACP write routing", () => {
 		const result = await new EditTool(createSession(tmpDir, { bridge }), "hashline").execute("hashline", { input });
 
 		expect(result.isError).not.toBe(true);
-		expect(resultText(result)).not.toMatch(/reformatted it on save/);
+		expect(resultText(result)).not.toMatch(/reformatted on write/);
 		expect((result.details as EditToolDetails).newText).toBe("hello\nearth\n");
 	});
 });

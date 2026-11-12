@@ -37,6 +37,8 @@ close()
 selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… placeholder/… testid/… alt/… title/… role/<role>[name="…"] (append " exact" inside the role name filter for exact matching)
 ```
 
+  - `console({level?, since?, limit?, clear?})` and `errors({since?, limit?, clear?})` return `{entries, nextSeq, dropped}`, not a list: read its `entries` field (`r.entries` in JavaScript, `r["entries"]` in Python), and pass `nextSeq` as `since` to read only later entries.
+
 - `targets` resolves the browser like `open` (pass the same `app`, e.g. `"relay"`) and lists pages `target` can adopt:
   - a Tern window's browser blocks (`tab`: the omp tab holding one), or
   - the relay's Chrome pages (`shown`: the active tab).

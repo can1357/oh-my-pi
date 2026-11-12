@@ -168,9 +168,9 @@ export function hasWaitTool(session: ToolSession): boolean {
  * reaches the caller as a user turn right after it (see `handOffMail`).
  * Broadcast legs and progress notes ask the caller nothing, so they never end
  * a wait and inject as asides once it returns; the exception is a broadcast
- * from an agent a reply wait asked, which answers it (see
- * `IrcBus.unansweredSends`). A progress note leaves its sender's reply owed,
- * so the reply wait goes on.
+ * from an agent a reply wait asked, which interrupts it without settling the
+ * question (see `IrcBus.unansweredSends`). A progress note leaves its sender's
+ * reply owed, so the reply wait goes on.
  */
 export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetails> {
 	readonly name = "wait";
