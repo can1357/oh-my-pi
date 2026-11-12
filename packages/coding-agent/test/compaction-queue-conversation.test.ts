@@ -262,7 +262,9 @@ describe("compaction queue conversation ownership", () => {
 
 		expect(h.ctx.session).toBe(h.session);
 		expect(h.manager.getSessionId()).not.toBe(oldId);
-		expect(newSession).toHaveBeenCalledTimes(1);
+		// The session-transition queue re-enters the public method once per
+		// logical operation; exactly one /new dispatch means exactly two hops.
+		expect(newSession).toHaveBeenCalledTimes(2);
 		expect(showError.mock.calls).toEqual([]);
 		expect(prompt).not.toHaveBeenCalled();
 		expect(h.ctx.compactionQueuedMessages).toEqual([]);
@@ -271,7 +273,7 @@ describe("compaction queue conversation ownership", () => {
 		expect(h.editor.pendingImageLinks[0]).toBe("local://newer.png");
 		expect(JSON.stringify(h.manager.getEntries())).not.toContain("old conversation question");
 		await h.helpers.flushCompactionQueue({ willRetry: false });
-		expect(newSession).toHaveBeenCalledTimes(1);
+		expect(newSession).toHaveBeenCalledTimes(2);
 	});
 
 	it.each([false, true])(
@@ -639,6 +641,34 @@ describe("compaction queue conversation ownership", () => {
 			}
 		},
 	);
+
+	it("returns a drained queue entry refused by a read-only guest to the editor", async () => {
+		const h = await harness();
+		// Plaintext queued while no guest exists; the /join that creates a
+		// read-only view-link guest drains first, so delivery faces readOnly.
+		h.editor.pendingImages = [originalImage];
+		h.editor.pendingImageLinks = ["local://submitted.png"];
+		h.editor.imageLinks = h.editor.pendingImageLinks;
+		h.helpers.queueCompactionMessage("read-only guest [Image #1]", "followUp", [originalImage]);
+		const sendPrompt = vi.fn(() => true);
+		h.ctx.collabGuest = { readOnly: true, sendPrompt } as unknown as typeof h.ctx.collabGuest;
+		try {
+			h.editor.pendingImages = [newerImage];
+			h.editor.pendingImageLinks = ["local://current.png"];
+			h.editor.imageLinks = h.editor.pendingImageLinks;
+			h.editor.setText("current [Image #1]");
+			await h.helpers.flushCompactionQueue({ willRetry: false });
+			expect(sendPrompt).not.toHaveBeenCalled();
+			expect(h.ctx.compactionQueuedMessages).toEqual([]);
+			expect(h.editor.getExpandedText()).toBe("read-only guest [Image #2]\n\ncurrent [Image #1]");
+			expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
+			// Restored links are re-materialized lazily: the draft keeps its own.
+			expect(h.editor.pendingImageLinks[0]).toBe("local://current.png");
+			expect(h.editor.pendingImageLinks.length).toBe(2);
+		} finally {
+			h.ctx.collabGuest = undefined;
+		}
+	});
 
 	it.each(["join", "leave"] as const)(
 		"recovers direct and queued guest input once throughout real %s restoration",
