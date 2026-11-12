@@ -214,12 +214,19 @@ export class RateLimits implements LimitsApi {
 				};
 	}
 
-	/** Whether any sibling is unblocked under the scopes selection reads; else the earliest unblock. */
+	/**
+	 * Whether any sibling is unblocked under the scopes selection reads; else the
+	 * earliest unblock. A sibling held by a model-policy block was refused the
+	 * requested model: its short expiry only schedules a re-check, so it adds no
+	 * unblock time a caller could usefully wait for.
+	 */
 	#siblingAvailability(
 		provider: string,
 		routing: CredentialBlockRouting,
 		siblings: readonly { credential: AuthCredential; index: number }[],
 	): { free: boolean; retryAtMs?: number } {
+		const modelPolicyScope = modelAccountPolicyBlockScope(routing.rankingContext.modelId);
+		const recoverableScopes = routing.siblingBlockScopes.filter(scope => scope !== modelPolicyScope);
 		let retryAtMs: number | undefined;
 		for (const sibling of siblings) {
 			// Sibling availability must use the same scope set selection reads, or
@@ -231,6 +238,13 @@ export class RateLimits implements LimitsApi {
 				routing.siblingBlockScopes,
 			);
 			if (siblingBlockedUntil === undefined) return { free: true };
+			const recoverableBlockedUntil = this.#deps.blocks.blockedUntil(
+				provider,
+				routing.providerKey,
+				sibling.index,
+				recoverableScopes,
+			);
+			if (recoverableBlockedUntil !== siblingBlockedUntil) continue;
 			if (retryAtMs === undefined || siblingBlockedUntil < retryAtMs) retryAtMs = siblingBlockedUntil;
 		}
 		return { free: false, retryAtMs };
