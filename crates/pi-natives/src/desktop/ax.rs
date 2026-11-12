@@ -1191,9 +1191,11 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 /// the field and stores none of it). The error never quotes the written text,
 /// which the caller already has and which may be a password the field's role
 /// does not reveal; it counts its characters and names what the field reads so
-/// the next step needs no extra read. What a secure field reads, or a field
-/// that reads back as mask characters (Qt password fields on macOS report a
-/// plain text field), is described, never quoted.
+/// the next step needs no extra read, with the written text replaced wherever
+/// the read-back repeats it (a field that appends to a password still holds the
+/// password). What a secure field reads, or a field that reads back as mask
+/// characters (Qt password fields on macOS report a plain text field), is
+/// described, never quoted.
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn text_readback(
 	sent: &str,
@@ -1225,7 +1227,12 @@ pub(crate) fn text_readback(
 				},
 				_ if secure => "the secure text field's value is not shown".to_owned(),
 				actual => {
-					format!("the field now reads {:?}", truncate_chars(actual.to_owned(), SHOWN))
+					let shown = if sent.is_empty() {
+						actual.to_owned()
+					} else {
+						actual.replace(sent, WRITTEN)
+					};
+					format!("the field now reads {:?}", truncate_chars(shown, SHOWN))
 				},
 			};
 			format!("{reads}. The app may have reformatted it or not taken it")
@@ -1236,6 +1243,10 @@ pub(crate) fn text_readback(
 		count(sent),
 	)))
 }
+
+/// What a read-back shows in place of the written text.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+const WRITTEN: &str = "<the written text>";
 
 /// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
 /// toolkits fall back on.
@@ -2867,5 +2878,18 @@ mod tests {
 			assert!(error.message.contains("wrote 7 characters"), "{}", error.message);
 			assert!(error.message.contains(reads), "{}", error.message);
 		}
+	}
+
+	#[test]
+	fn a_read_back_that_repeats_the_written_text_hides_it() {
+		// A plain-role password field that appends to what it was given.
+		let error = text_readback("hunter2", "hunter2", Some("hunter2!"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(!error.message.contains("hunter2"), "{}", error.message);
+		assert!(error.message.contains(r#"reads "<the written text>!""#), "{}", error.message);
+		// Typed insertion: the whole value holds the inserted text twice.
+		let error =
+			text_readback("hunter2", "a hunter2", Some("a hunter2hunter2"), false).unwrap_err();
+		assert!(!error.message.contains("hunter2"), "{}", error.message);
 	}
 }

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `setValue` and typed accessibility insertion on macOS and Linux quoting the written text in `AxFailed` when the field read back something else, which put passwords into the error for password fields that report a plain text role (KeePassXC's Qt field); the error now gives how many characters were written and what the field reads, described as masked when it reads back as mask characters ([#18989](https://github.com/can1357/oh-my-pi/pull/18989) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `setValue` errors on macOS and Linux repeating the written text, which could expose a password typed into a field that did not report itself as a password field ([#18989](https://github.com/can1357/oh-my-pi/pull/18989) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.19.0] - 2026-11-12
 
