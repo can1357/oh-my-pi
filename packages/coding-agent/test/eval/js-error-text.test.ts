@@ -147,9 +147,12 @@ console.log(formatCellError(${JSON.stringify(stack)}, { filename: "js-cell-1.js"
 });
 
 describe("formatCellError", () => {
-	const source = { filename: "js-cell-1d89.js", cwd: "/home/me/project", ompRoot: "/opt/omp/node_modules" };
+	// Stack frames carry the platform's own paths, so the fixtures build them the same way.
+	const at = (...parts: string[]) => path.join(path.sep, ...parts);
+	const source = { filename: "js-cell-1d89.js", cwd: at("home/me/project"), ompRoot: at("opt/omp/node_modules") };
 
 	it("hides engine, compiled-omp, prelude and install-tree frames and keeps everything else", () => {
+		const helper = `    at helper (${at("home/me/project/lib/helper.ts")}:3:9)`;
 		const stack = [
 			"TypeError: x is not a function",
 			"1 | foo()",
@@ -161,18 +164,18 @@ describe("formatCellError", () => {
 			"    at eval (unknown)",
 			"    at processTicksAndRejections (node:internal/process/task_queues:105:5)",
 			"    at open ([eval-prelude:browser]:262:24)",
-			"    at run (/opt/omp (copy)/node_modules/@oh-my-pi/pi-coding-agent/src/eval/js/shared/runtime.ts:556:14)",
-			"    at helper (/home/me/project/lib/helper.ts:3:9)",
+			`    at run (${at("opt/omp (copy)/node_modules/@oh-my-pi/pi-coding-agent/src/eval/js/shared/runtime.ts")}:556:14)`,
+			helper,
 			"    at <anonymous> (:0:43)",
 			"    at browser.call (js-cell-1d89.js)",
 		].join("\n");
-		expect(formatCellError(stack, { ...source, ompRoot: "/opt/omp (copy)/node_modules" })).toBe(
+		expect(formatCellError(stack, { ...source, ompRoot: at("opt/omp (copy)/node_modules") })).toBe(
 			[
 				"TypeError: x is not a function",
 				"1 | foo()",
 				"    ^",
 				"    at <anonymous> (browser-run-15c8.js:2:43)",
-				"    at helper (/home/me/project/lib/helper.ts:3:9)",
+				helper,
 				"    at <anonymous> (:0:43)",
 				"    at browser.call (js-cell-1d89.js)",
 				"    (7 omp frames hidden; catch the error and print e.stack to see them)",
@@ -181,43 +184,46 @@ describe("formatCellError", () => {
 	});
 
 	it("keeps code under a working directory inside omp's tree and hides the rest of the tree", () => {
+		const mine = `    at mine (${at("opt/omp/node_modules/my-project/a.ts")}:1:2)`;
 		const stack = [
 			"Error: x",
-			"    at mine (/opt/omp/node_modules/my-project/a.ts:1:2)",
-			"    at theirs (/opt/omp/node_modules/puppeteer-core/lib/b.js:3:4)",
+			mine,
+			`    at theirs (${at("opt/omp/node_modules/puppeteer-core/lib/b.js")}:3:4)`,
 		].join("\n");
-		expect(formatCellError(stack, { ...source, cwd: "/opt/omp/node_modules/my-project" })).toBe(
-			["Error: x", "    at mine (/opt/omp/node_modules/my-project/a.ts:1:2)", "    (1 omp frame hidden)"].join("\n"),
+		expect(formatCellError(stack, { ...source, cwd: at("opt/omp/node_modules/my-project") })).toBe(
+			["Error: x", mine, "    (1 omp frame hidden)"].join("\n"),
 		);
 	});
 
 	it("keeps project dependency frames when omp shares the project's node_modules", () => {
+		const parse = `at parse (${at("proj/node_modules/zod/lib/x.js")}:1:2)`;
 		const stack = [
 			"Error: x",
-			"    at parse (/proj/node_modules/zod/lib/x.js:1:2)",
+			`    ${parse}`,
 			"    at run (js-cell-1d89.js:1:2)",
 			"    at map (native:1:11)",
-			"    at execute (/proj/node_modules/@oh-my-pi/pi-coding-agent/src/eval/js/executor.ts:1:2)",
+			`    at execute (${at("proj/node_modules/@oh-my-pi/pi-coding-agent/src/eval/js/executor.ts")}:1:2)`,
 		].join("\n");
-		const output = formatCellError(stack, { ...source, cwd: "/proj", ompRoot: "/proj/node_modules" });
-		expect(output).toContain("at parse (/proj/node_modules/zod/lib/x.js:1:2)");
+		const output = formatCellError(stack, { ...source, cwd: at("proj"), ompRoot: at("proj/node_modules") });
+		expect(output).toContain(parse);
 		expect(output).toContain("at run (js-cell-1d89.js:1:2)");
-		expect(output).not.toContain("@oh-my-pi/pi-coding-agent");
+		expect(output).not.toContain("pi-coding-agent");
 		expect(output).toContain("(2 omp frames hidden;");
 	});
 
 	it("hides a global install below the working directory rather than treating it as project-local", () => {
+		const helper = `at helper (${at("home/me/project/lib.ts")}:1:2)`;
 		const stack = [
 			"Error: x",
-			"    at helper (/home/me/project/lib.ts:1:2)",
-			"    at run (/home/me/.bun/install/global/node_modules/puppeteer-core/lib/b.js:3:4)",
+			`    ${helper}`,
+			`    at run (${at("home/me/.bun/install/global/node_modules/puppeteer-core/lib/b.js")}:3:4)`,
 		].join("\n");
 		const output = formatCellError(stack, {
 			...source,
-			cwd: "/home/me",
-			ompRoot: "/home/me/.bun/install/global/node_modules",
+			cwd: at("home/me"),
+			ompRoot: at("home/me/.bun/install/global/node_modules"),
 		});
-		expect(output).toContain("at helper (/home/me/project/lib.ts:1:2)");
+		expect(output).toContain(helper);
 		expect(output).not.toContain("puppeteer-core");
 		expect(output).toContain("(1 omp frame hidden)");
 	});
