@@ -1,5 +1,5 @@
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
-export type JsonRecord = { [key: string]: JsonValue | undefined };
+type JsonRecord = { [key: string]: JsonValue | undefined };
 
 /** Deep-walk an object, transforming all string values. */
 export function deepWalkStrings<T>(obj: T, transform: (s: string) => string): T {
@@ -32,23 +32,6 @@ export function deepWalkStrings<T>(obj: T, transform: (s: string) => string): T 
 function isPlainRecord(obj: object): obj is Record<string, unknown> {
 	const prototype = Object.getPrototypeOf(obj);
 	return prototype === Object.prototype || prototype === null;
-}
-
-/** Visit every string value in JSON data, keys excluded. */
-export function forEachJsonString(value: JsonValue, visit: (text: string) => void): void {
-	if (typeof value === "string") {
-		visit(value);
-		return;
-	}
-	if (Array.isArray(value)) {
-		for (const child of value) forEachJsonString(child, visit);
-		return;
-	}
-	if (value !== null && typeof value === "object") {
-		for (const child of Object.values(value)) {
-			if (child !== undefined) forEachJsonString(child, visit);
-		}
-	}
 }
 
 /**

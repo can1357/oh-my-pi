@@ -108,4 +108,47 @@ describe("session codec", () => {
 		expect(outbound[0]).toBe(reply);
 		expect(outbound[1]).toEqual({ role: "user", content: `now use ${placeholder}`, timestamp: 3 });
 	});
+
+	it("replays a placeholder whose plaintext left the session byte-identical under a broad rule", () => {
+		const earlier = new SecretObfuscator([{ type: "plain", content: "hunter2-database-pass" }], KEY);
+		const placeholder = earlier.obfuscate("hunter2-database-pass");
+		// A fresh process that never saw the plaintext, with a rule that matches long words.
+		const fresh = new SecretObfuscator([{ type: "regex", content: "[A-Za-z]{12,}" }], KEY);
+		const reply = assistant(`stored ${placeholder}`, `thought ${placeholder}`);
+
+		expect(obfuscateMessages(fresh, [reply])[0]).toBe(reply);
+	});
+
+	it("encodes plaintext the model wrote while redaction was off and drops the signatures bound to it", () => {
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: "hunter2-database-pass" }], KEY);
+		const placeholder = obfuscator.obfuscate("hunter2-database-pass");
+		const reply: AssistantMessage = {
+			...assistant("done", "the password is hunter2-database-pass"),
+			content: [
+				{ type: "thinking", thinking: "the password is hunter2-database-pass", thinkingSignature: "sig-a" },
+				{ type: "text", text: "done" },
+				{
+					type: "toolCall",
+					id: "call_1",
+					name: "bash",
+					arguments: { command: "login hunter2-database-pass" },
+					thoughtSignature: "sig-b",
+				},
+			],
+		};
+
+		const [sent] = obfuscateMessages(obfuscator, [reply]);
+
+		expect((sent as AssistantMessage).content).toEqual([
+			{ type: "thinking", thinking: `the password is ${placeholder}`, thinkingSignature: undefined },
+			reply.content[1],
+			{
+				type: "toolCall",
+				id: "call_1",
+				name: "bash",
+				arguments: { command: `login ${placeholder}` },
+				thoughtSignature: undefined,
+			},
+		]);
+	});
 });

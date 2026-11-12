@@ -19,9 +19,9 @@ secrets:
    - Built-in reversible regexes for common credential shapes that appear only in session content or tool results: GitHub, GitLab, OpenAI, and Anthropic tokens, AWS access keys, Google API keys, Slack tokens, npm tokens, Stripe secret and restricted keys and webhook secrets, Hugging Face tokens, SendGrid keys, JWTs, Bearer header tokens, and PEM private key blocks
    - Passwords embedded in connection-URL environment values — any variable holding a `scheme://user:password@host`-style value (for example `DATABASE_URL`) has its password registered regardless of the variable name when it is at least 8 characters long. Both raw and percent-decoded forms are collected when they meet that limit.
 
-2. Content that enters from outside the model (user messages, tool results, developer and injected messages, native replay plaintext, compaction file lists) is encoded once on its way to the provider: matching values become deterministic placeholders such as `$$correctHorseStapleBattery$$` or `$$GitHubToken_correctHorseStapleBattery$$`.
+2. Everything sent to the provider (messages of every role, native replay plaintext, compaction file lists) is encoded on its way out: matching values become deterministic placeholders such as `$$correctHorseStapleBattery$$` or `$$GitHubToken_correctHorseStapleBattery$$`. Encoding is idempotent, since placeholder-shaped tokens are never re-encoded.
 
-3. What the model writes (assistant text, thinking, tool calls, and branch/compaction summaries) already holds placeholders. It is stored and replayed exactly as written, so thinking and tool-call signatures and prompt caches stay valid. Placeholders are restored only where values are used or shown: before a tool executes, in the transcript display, and in exports. Replace-mode substitutions are one-way and are not restored.
+3. What the model writes from placeholders (assistant text, thinking, tool calls, and branch/compaction summaries) is stored as written and encodes to itself, so it replays byte-identical and thinking/tool-call signatures and prompt caches stay valid. Model output that still holds a value (written while redaction was off, or before the secret was configured) is encoded on replay, and the signature bound to the changed block is dropped. Placeholders are restored only where values are used or shown: before a tool executes, in the transcript display, and in exports. Replace-mode substitutions are one-way and are not restored.
 
 Two modes control what happens to each secret:
 
@@ -90,7 +90,7 @@ Encrypted replay and unknown protocol variants remain opaque.
 
 The words are drawn from the BIP-39 English list by an HMAC of the exact secret under a private per-install key (stored at `~/.omp/agent/secret-placeholder.key`, or `$XDG_STATE_HOME/omp/secret-placeholder.key` on XDG-enabled installs, never sent to a model). Four words carry 44 bits; the rare collision between two secrets is resolved by drawing more words. The key prevents a transcript reader from dictionary-hashing a placeholder back to its secret, and keeps a secret's placeholder the same across sessions. No placeholder map is persisted: on resume the map is rebuilt from the plaintext in the session. If the key cannot be persisted on the lazy built-in-token path, the session warns and uses a process-ephemeral key; obfuscation remains reversible within that process but placeholders are not stable across restarts.
 
-Placeholders in the earlier `$$HASH:CASE$$` format are no longer recognized: sessions written before this format keep them as literal text, and the model sees the secret's new placeholder.
+Placeholders in the earlier `$$HASH:CASE$$` format are no longer recognized. In sessions written before this format they stay literal text: the transcript shows them as tokens, and a tool call the model copies one into receives the token, not the value. Start a new session, or ask the model to use the secret's current placeholder.
 
 `friendlyName` on regex entries labels the configured regex entry, not the matched value. Keep regex labels broad enough to be true for every match.
 

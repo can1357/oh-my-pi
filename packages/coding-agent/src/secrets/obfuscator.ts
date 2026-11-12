@@ -50,14 +50,25 @@ interface Span {
 const NO_CANDIDATES: ReadonlySet<CompiledRegexEntry> = new Set();
 
 /**
+ * Ranges of placeholder-shaped tokens in `text`. Every one is opaque, minted
+ * here or not, so encoding is idempotent: placeholder-form text, including a
+ * placeholder whose plaintext has left the session, encodes to itself.
+ */
+function placeholderRanges(text: string): Array<readonly [number, number]> {
+	if (!text.includes("$$")) return [];
+	const ranges: Array<readonly [number, number]> = [];
+	for (const match of text.matchAll(PLACEHOLDER_RE)) ranges.push([match.index, match.index + match[0].length]);
+	return ranges;
+}
+
+/**
  * Encodes local plaintext for a provider and decodes provider text back.
  *
- * `obfuscate` runs once on content that enters the model's context from
- * outside it (user input, tool output, injected text): configured literals
- * and regex-rule matches become placeholders (`$$Name_correctHorseStapleBattery$$`,
- * reversible) or one-way replacements. Text the model wrote is already in
- * placeholder form and is never encoded again. `deobfuscate` turns
- * placeholders back into secrets where a value is used locally (tool
+ * `obfuscate` turns configured literals and regex-rule matches into
+ * placeholders (`$$Name_correctHorseStapleBattery$$`, reversible) or one-way
+ * replacements. It is idempotent: placeholder-shaped tokens are opaque, so
+ * text the model wrote from placeholders encodes to itself. `deobfuscate`
+ * turns placeholders back into secrets where a value is used locally (tool
  * execution, display). The only state is the placeholder map, which every
  * encode (or {@link learn}) of the plaintext rebuilds; placeholders are a
  * keyed digest of the secret, so they are the same in every session.
@@ -257,7 +268,7 @@ export class SecretObfuscator {
 		}
 		let out = "";
 		let cursor = 0;
-		for (const [start, end] of native.literal ? this.#knownPlaceholderRanges(text) : []) {
+		for (const [start, end] of native.literal ? placeholderRanges(text) : []) {
 			out += this.#encodeSegment(text.slice(cursor, start), native, emit) + text.slice(start, end);
 			cursor = end;
 		}
@@ -341,21 +352,11 @@ export class SecretObfuscator {
 				ranges.push([offset + span.start, offset + span.end]);
 			}
 		};
-		for (const [start, end] of native.literal ? this.#knownPlaceholderRanges(text) : []) {
+		for (const [start, end] of native.literal ? placeholderRanges(text) : []) {
 			add(text.slice(cursor, start), cursor);
 			cursor = end;
 		}
 		add(text.slice(cursor), cursor);
-		return ranges;
-	}
-
-	/** Ranges of placeholders in `text` this instance minted. */
-	#knownPlaceholderRanges(text: string): Array<readonly [number, number]> {
-		if (!text.includes("$$")) return [];
-		const ranges: Array<readonly [number, number]> = [];
-		for (const match of text.matchAll(PLACEHOLDER_RE)) {
-			if (this.#secretByWords.has(match[2]!)) ranges.push([match.index, match.index + match[0].length]);
-		}
 		return ranges;
 	}
 

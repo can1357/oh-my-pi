@@ -1712,9 +1712,9 @@ function obfuscateDetails(
 }
 
 /**
- * Encode the plaintext of a message the advisor renders. Model-authored
- * messages (assistant turns, summaries) are already in placeholder form and
- * pass through.
+ * Encode the fields of a primary-context message before previews are cut from
+ * them, so a cut never splits a secret. Other roles pass through: the rendered
+ * update is encoded whole (see `renderAdvisorDeltaChunks`).
  */
 function obfuscateAdvisorMessage(obfuscator: SecretObfuscator, message: AgentMessage): AgentMessage {
 	switch (message.role) {

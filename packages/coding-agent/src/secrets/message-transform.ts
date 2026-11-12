@@ -12,16 +12,11 @@ import type { SessionContext } from "../session/session-context";
 import { type JsonValue, mapJsonStrings } from "./json-strings";
 import type { SecretObfuscator } from "./obfuscator";
 
-// Provenance decides encoding. What the model wrote — assistant messages and
-// the branch and compaction summaries it authored — only ever saw placeholders,
-// so it is stored and replayed in placeholder form and never encoded again.
-// Everything else entered the context from outside the model as plaintext:
-// it is encoded on its way to the provider and stored as it arrived.
-
-/** Whether `message` was written by the model, and so holds placeholders rather than plaintext secrets. */
-function isModelAuthored(message: AgentMessage): boolean {
-	return message.role === "assistant" || message.role === "branchSummary" || message.role === "compactionSummary";
-}
+// Encoding is idempotent: placeholder-shaped tokens are opaque, so text the
+// model wrote from placeholders encodes to itself and replays byte-identical.
+// Everything outbound is encoded, whatever its role; only content that still
+// holds plaintext (written while redaction was off, or before a secret was
+// configured) changes, and a signature over changed content is dropped.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Display restore (stored placeholders → local display)
@@ -43,12 +38,10 @@ export function deobfuscateSessionContext(
 	return messages === sessionContext.messages ? sessionContext : { ...sessionContext, messages };
 }
 
-/** Mint the placeholders for every secret in the plaintext of `messages` (see `SecretObfuscator.learn`). */
+/** Mint the placeholders for every secret in `messages` (see `SecretObfuscator.learn`). */
 export function learnFromPlaintext(obfuscator: SecretObfuscator, messages: readonly AgentMessage[]): void {
 	const texts: string[] = [];
-	for (const message of messages) {
-		if (!isModelAuthored(message)) collectTexts(message, texts);
-	}
+	for (const message of messages) collectTexts(message, texts);
 	if (texts.length === 0) return;
 	obfuscator.batch(() => {
 		obfuscator.prescan(texts);
@@ -144,16 +137,28 @@ export function deobfuscateAssistantContent(
 }
 
 /**
- * Encode assistant content that did not come from the model in placeholder
- * form, such as caller-supplied side history built from displayed replies.
- * Placeholder-form text passes through unchanged.
+ * Encode assistant content. Placeholder-form blocks pass through by reference.
+ * A block that changes held plaintext and loses the signature bound to it: a
+ * thinking block its `thinkingSignature`, and a tool call whose arguments
+ * changed its Gemini `thoughtSignature`, an attestation over the call it rides
+ * on (https://ai.google.dev/gemini-api/docs/thought-signatures). `intent` and
+ * `rawBlock` are harness-side and keep it.
  */
-export function obfuscateAssistantContent(
+function obfuscateAssistantContent(
 	obfuscator: SecretObfuscator,
 	content: AssistantMessage["content"],
 ): AssistantMessage["content"] {
-	if (!obfuscator.obfuscates()) return content;
-	return mapAssistantContent(content, text => obfuscator.obfuscate(text));
+	const encoded = mapAssistantContent(content, text => obfuscator.obfuscate(text));
+	if (encoded === content) return content;
+	return encoded.map((block, index): AssistantMessage["content"][number] => {
+		const original = content[index]!;
+		if (block === original) return block;
+		if (block.type === "thinking") return { ...block, thinkingSignature: undefined };
+		if (block.type === "toolCall" && original.type === "toolCall" && block.arguments !== original.arguments) {
+			return { ...block, thoughtSignature: undefined };
+		}
+		return block;
+	});
 }
 
 /**
@@ -611,7 +616,13 @@ function forEachPlaintext(message: Message, visit: (text: string) => void): void
 	if (compaction?.filesText) visit(compaction.filesText);
 	for (const files of compaction?.retainedFiles ?? []) visit(files.text);
 	if (message.role !== "toolResult") forEachNativeReplayText(message, visit);
-	if (message.role === "assistant") return;
+	if (message.role === "assistant") {
+		mapAssistantContent(message.content, text => {
+			visit(text);
+			return text;
+		});
+		return;
+	}
 	if (typeof message.content === "string") {
 		visit(message.content);
 		return;
@@ -622,13 +633,11 @@ function forEachPlaintext(message: Message, visit: (text: string) => void): void
 }
 
 /**
- * Encode outbound messages. User, developer, and tool-result content entered
- * from outside the model and is encoded; assistant content is the model's own
- * placeholder-form output and passes through byte-identical, so its thinking
- * and tool-call signatures stay valid. Native replay slots and compaction file
- * metadata are encoded for every role. Inline image bytes are never walked.
- * Runs once per message on its way to a provider (the agent's `convertToLlm`);
- * its output is never encoded again.
+ * Encode outbound messages, every role. Placeholder-form text is unchanged,
+ * so the model's own messages normally pass through by reference and keep
+ * their signatures and cache prefix. Native replay slots and compaction file
+ * metadata are encoded too; inline image bytes are never walked. Runs on the
+ * way to a provider (the agent's `convertToLlm`).
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
@@ -645,14 +654,15 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 				if (providerPayload !== compaction) current = { ...current, providerPayload } as Message;
 			}
 			if (current.role !== "toolResult") current = obfuscateNativeReplay(obfuscator, current);
-			if (current.role !== "assistant") {
-				if (typeof current.content === "string") {
-					const content = obfuscator.obfuscate(current.content);
-					if (content !== current.content) current = { ...current, content } as Message;
-				} else {
-					const content = obfuscateTextBlocks(obfuscator, current.content);
-					if (content !== current.content) current = { ...current, content } as Message;
-				}
+			if (current.role === "assistant") {
+				const content = obfuscateAssistantContent(obfuscator, current.content);
+				if (content !== current.content) current = { ...current, content };
+			} else if (typeof current.content === "string") {
+				const content = obfuscator.obfuscate(current.content);
+				if (content !== current.content) current = { ...current, content } as Message;
+			} else {
+				const content = obfuscateTextBlocks(obfuscator, current.content);
+				if (content !== current.content) current = { ...current, content } as Message;
 			}
 			if (current !== message) changed = true;
 			return current;

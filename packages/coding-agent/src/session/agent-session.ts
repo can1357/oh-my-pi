@@ -221,7 +221,6 @@ import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
-	obfuscateAssistantContent,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
@@ -13903,20 +13902,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
-	/**
-	 * Caller-supplied history is outside input whatever its roles (/btw rebuilds
-	 * replies from displayed text), so its assistant content is encoded here;
-	 * the other roles are encoded by the session's conversion.
-	 */
 	async #prepareSideHistory(history: readonly Message[], signal?: AbortSignal): Promise<AgentMessage[]> {
 		const prepared: AgentMessage[] = [];
-		const obfuscator = this.#obfuscator;
 		for (const message of history) {
-			let normalized = await this.#normalizeAgentMessageImages(message);
-			if (obfuscator && normalized.role === "assistant") {
-				const content = obfuscateAssistantContent(obfuscator, normalized.content);
-				if (content !== normalized.content) normalized = { ...normalized, content };
-			}
+			const normalized = await this.#normalizeAgentMessageImages(message);
 			const images =
 				normalized.role === "user" && Array.isArray(normalized.content)
 					? normalized.content.filter((part): part is ImageContent => part.type === "image")

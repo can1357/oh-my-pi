@@ -302,7 +302,7 @@ describe("SecretObfuscator regex behavior", () => {
 		expect(deobfuscateToolArguments(obfuscator, obfuscated)).toEqual(original);
 	});
 
-	it("encodes what entered from outside the model and passes the model's own messages through", () => {
+	it("encodes plaintext in every outbound role", () => {
 		const secret = "SUPER_SECRET_TOKEN_12345";
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
 		const userMsg: Message = { role: "user", content: `user says ${secret}`, timestamp: 1 };
@@ -355,13 +355,9 @@ describe("SecretObfuscator regex behavior", () => {
 			toolResultMsg,
 		]);
 
-		// User, developer (system reminders included), file mentions and tool results are encoded.
-		expect(JSON.stringify(obfuscated[0])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[1])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[2])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[4])).not.toContain(secret);
-		// The assistant message is the model's own placeholder-form output: replayed byte-identical.
-		expect(obfuscated[3]).toBe(assistantMsg);
+		// User, developer (system reminders included), file mentions, tool results, and assistant
+		// content the model wrote from plaintext (redaction was off) are all encoded.
+		for (const message of obfuscated) expect(JSON.stringify(message)).not.toContain(secret);
 	});
 
 	it("obfuscates file metadata on a replayed compaction payload but keeps the block verbatim", () => {
