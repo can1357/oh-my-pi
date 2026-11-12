@@ -8,6 +8,7 @@ use std::{
 	ffi::{OsStr, OsString},
 	fmt::{Display, Formatter},
 	io::{self, BufReader, Read, Write},
+	sync::atomic::{AtomicBool, Ordering},
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, builder::ValueParser};
@@ -413,6 +414,40 @@ pub(crate) fn run(
 			1
 		},
 	}
+}
+
+/// Feeds `reader` to `consume` chunk by chunk until EOF; fails with
+/// `Interrupted` once `cancel` is raised.
+pub(crate) fn read_chunks(
+	reader: &mut dyn Read,
+	cancel: &AtomicBool,
+	mut consume: impl FnMut(&[u8]),
+) -> io::Result<()> {
+	let mut buffer = vec![0; READ_BUFFER_SIZE];
+	loop {
+		if cancel.load(Ordering::Relaxed) {
+			return Err(io::ErrorKind::Interrupted.into());
+		}
+		match reader.read(&mut buffer) {
+			Ok(0) => return Ok(()),
+			Ok(read) => consume(&buffer[..read]),
+			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+			Err(error) => return Err(error),
+		}
+	}
+}
+
+/// Finishes `digest` and renders the result as lowercase hexadecimal.
+pub(crate) fn finish_hex(digest: &mut dyn sum::Digest) -> String {
+	const DIGITS: &[u8; 16] = b"0123456789abcdef";
+	let mut bytes = vec![0; digest.output_bytes()];
+	digest.hash_finalize(&mut bytes);
+	let mut hex = String::with_capacity(bytes.len() * 2);
+	for byte in bytes {
+		hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
+		hex.push(char::from(DIGITS[usize::from(byte & 0xf)]));
+	}
+	hex
 }
 
 /// Parsed `cksum` invocation.

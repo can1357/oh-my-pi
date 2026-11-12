@@ -10,7 +10,6 @@
 
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
@@ -334,29 +333,15 @@ async function askFieldByField(
 // Tool Class
 // =============================================================================
 
-const EXAMPLE_FORM = `<form>
-  <p>Sessions live in memory and are lost on restart.</p>
-  <fieldset>
-    <legend>Session store</legend>
-    <label><input type="radio" name="store" value="sqlite" checked> SQLite: one file, no new service</label>
-    <label><input type="radio" name="store" value="redis"> Redis: shared across instances, needs ops</label>
-  </fieldset>
-  <label>Session lifetime (days) <input type="number" name="ttl_days" value="30" min="1"></label>
-</form>`;
-
 /** Asks the user to fill in one HTML form and returns the submitted form data. */
 export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly name = "ask";
 	readonly approval = "read" as const;
 	readonly label = "Ask";
 	readonly summary = "Ask the user to fill in a form";
-	readonly description: string;
 	readonly parameters = askSchema;
 	readonly strict = true;
 
-	readonly examples: readonly ToolExample<typeof askSchema.infer>[] = [
-		{ caption: "Choice with context and a number", call: { html: EXAMPLE_FORM } },
-	];
 	// Run alone in its tool batch. The interactive dialog is a single shared UI
 	// surface (`ExtensionUiController` has no queue and overwrites the active
 	// dialog on each call), so two concurrent `ask` calls would clobber each
@@ -365,9 +350,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly concurrency = "exclusive";
 	readonly loadMode = "discoverable";
 
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(askDescription);
-	}
+	constructor(private readonly session: ToolSession) {}
+
+	readonly description = prompt.render(askDescription);
 
 	static createIf(session: ToolSession): AskTool | null {
 		return (session.canPromptUser ?? session.hasUI) || session.advertiseHeadlessAsk ? new AskTool(session) : null;

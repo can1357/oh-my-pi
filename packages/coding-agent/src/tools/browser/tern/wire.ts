@@ -1,5 +1,7 @@
 /**
- * Client for the Tern session daemon: a Unix socket speaking Tern's JSON
+ * Client for the Tern session daemon: a byte stream (the daemon's Unix socket,
+ * or any other {@link TernTransport}: omp's own WebKit host answers the same
+ * protocol over its standard streams) speaking Tern's JSON
  * script protocol (`crates/tern/src/daemon/json.rs` in the stencil
  * repository), frames of a `u32` LE length then one UTF-8 JSON object. omp
  * greets with `{"hello":{}}` and waits for `{"welcome":{"ops":[…]}}`, whose
@@ -38,14 +40,17 @@ export type TernErrorKind =
 	| "timeout"
 	| "protocol";
 
-/** A failed Tern request or connection, carrying the protocol's error kind. */
+/**
+ * A failed request or connection of the Tern protocol, carrying the protocol's
+ * error kind. Its `name` stays `ToolError`: page-run code can print it, and
+ * omp's WebKit host raises these too, so it must not name Tern.
+ */
 export class TernError extends ToolError {
 	/** Why it failed (the protocol's `error.kind`, or the client's own). */
 	readonly kind: TernErrorKind;
 
 	constructor(kind: TernErrorKind, message: string) {
 		super(message);
-		this.name = "TernError";
 		this.kind = kind;
 	}
 }
@@ -83,19 +88,22 @@ export type TernReply =
 	| { type: TernChannel; id: number; answer: unknown }
 	| { type: "other" };
 
-/** Decode one reply payload. Throws a `protocol` error when it is not a JSON object or its answer has no id. */
-export function decodeTernReply(payload: Uint8Array): TernReply {
+/**
+ * Decode one reply payload. Throws a `protocol` error when it is not a JSON
+ * object or its answer has no id; `product` names the sender in it.
+ */
+export function decodeTernReply(payload: Uint8Array, product = "Tern"): TernReply {
 	let reply: unknown;
 	try {
 		reply = JSON.parse(UTF8_DECODER.decode(payload));
 	} catch (error) {
 		throw new TernError(
 			"protocol",
-			`Tern sent a frame that is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+			`${product} sent a frame that is not JSON: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
 	if (!reply || typeof reply !== "object" || Array.isArray(reply)) {
-		throw new TernError("protocol", "Tern sent a frame that is not a JSON object");
+		throw new TernError("protocol", `${product} sent a frame that is not a JSON object`);
 	}
 	if ("welcome" in reply) {
 		const welcome = reply.welcome;
@@ -108,7 +116,7 @@ export function decodeTernReply(payload: Uint8Array): TernReply {
 	const channel = "browser" in reply ? "browser" : "fork" in reply ? "fork" : undefined;
 	if (!channel) return { type: "other" };
 	const id = "id" in reply ? reply.id : undefined;
-	if (typeof id !== "number") throw new TernError("protocol", `Tern sent a ${channel} answer without an id`);
+	if (typeof id !== "number") throw new TernError("protocol", `${product} sent a ${channel} answer without an id`);
 	return { type: channel, id, answer: (reply as Record<string, unknown>)[channel] };
 }
 
@@ -122,6 +130,12 @@ export class TernFrameReader {
 	/** Bytes of `#chunks[0]` already consumed. */
 	#head = 0;
 	#buffered = 0;
+	readonly #product: string;
+
+	/** `product` names the sender in the error for an oversized frame. */
+	constructor(product = "Tern") {
+		this.#product = product;
+	}
 
 	/** Append `chunk` and return every complete payload it finished. */
 	push(chunk: Uint8Array): Uint8Array[] {
@@ -134,7 +148,7 @@ export class TernFrameReader {
 			const header = this.#peek(4);
 			const length = new DataView(header.buffer, header.byteOffset, 4).getUint32(0, true);
 			if (length > MAX_FRAME_BYTES) {
-				throw new TernError("protocol", `Tern sent a ${length}-byte frame (limit ${MAX_FRAME_BYTES})`);
+				throw new TernError("protocol", `${this.#product} sent a ${length}-byte frame (limit ${MAX_FRAME_BYTES})`);
 			}
 			if (this.#buffered < 4 + length) break;
 			this.#take(4);
@@ -224,21 +238,91 @@ interface PendingOp {
 	onLateAnswer?: (value: unknown) => void;
 }
 
+/** What a {@link TernTransport} reports to the client that started it. */
+export interface TernTransportEvents {
+	/** The stream takes writes: the client greets now. */
+	open(): void;
+	/** Bytes from the peer. */
+	data(chunk: Uint8Array): void;
+	/** The stream is gone: `reason` says what failed, none when the peer just closed it. Later calls are ignored. */
+	close(reason?: string): void;
+}
+
+/**
+ * The byte stream a {@link TernSocketClient} speaks frames over. The client
+ * owns framing, the greeting, correlation and error kinds; a transport only
+ * moves bytes and says when the stream is gone.
+ */
+export interface TernTransport {
+	/**
+	 * The backend's display name, one word: `Tern` for the daemon, `WebKit` for
+	 * omp's own host. Every message a user or the model reads names the backend
+	 * by it (`WebKit browser open failed (…)`), in the client and in the tab driver.
+	 */
+	readonly product: string;
+	/** The peer as errors name it, after "the": `Tern daemon at /run/tern.sock`. */
+	readonly peer: string;
+	/** Why a peer may hang up before greeting, appended to that error. */
+	readonly greetingHint?: string;
+	/** Open the stream. Called once; a throw is a failed connection. */
+	start(events: TernTransportEvents): void;
+	/** Send one frame. A throw is a dropped connection. */
+	write(frame: Uint8Array): void;
+	/** Drop the stream. */
+	close(): void;
+}
+
+/** The Tern daemon's Unix socket. */
+class TernSocketTransport implements TernTransport {
+	readonly product = "Tern";
+	readonly peer: string;
+	readonly greetingHint = "a Tern without omp's JSON protocol cannot read its hello (update Tern)";
+	readonly #socketPath: string;
+	#socket: net.Socket | undefined;
+
+	constructor(socketPath: string) {
+		this.#socketPath = socketPath;
+		this.peer = `Tern daemon at ${socketPath}`;
+	}
+
+	start(events: TernTransportEvents): void {
+		const socket = net.createConnection({ path: this.#socketPath });
+		this.#socket = socket;
+		socket.on("connect", () => events.open());
+		socket.on("data", chunk => events.data(typeof chunk === "string" ? Buffer.from(chunk) : chunk));
+		socket.on("error", error => events.close(error.message));
+		socket.on("close", () => events.close());
+	}
+
+	write(frame: Uint8Array): void {
+		if (!this.#socket) throw new Error("the socket is closed");
+		this.#socket.write(frame);
+	}
+
+	close(): void {
+		this.#socket?.destroy();
+		this.#socket = undefined;
+	}
+}
+
 /** Abandoned ops whose late answers are still of interest, at most this many. */
 const ABANDONED_LIMIT = 256;
 
-/** The answer's `ok` result; its `error` (or a malformed answer) throws a {@link TernError}. */
-function answerOf(label: string, answer: unknown): unknown {
+/** The answer's `ok` result; its `error` (or a malformed answer) throws a {@link TernError} naming `product`. */
+function answerOf(product: string, label: string, answer: unknown): unknown {
 	if (answer && typeof answer === "object") {
 		if ("ok" in answer) return answer.ok;
 		if ("error" in answer && answer.error && typeof answer.error === "object") {
 			const error = answer.error;
 			const kind = "kind" in error && typeof error.kind === "string" ? error.kind : "failed";
 			const message = "message" in error && typeof error.message === "string" ? error.message : "failed";
-			throw new TernError(PROTOCOL_ERROR_KINDS[kind] ?? "failed", `Tern ${label} failed (${kind}): ${message}`);
+			throw new TernError(
+				PROTOCOL_ERROR_KINDS[kind] ?? "failed",
+				`${product} ${label} failed (${kind}): ${message}`,
+			);
 		}
 	}
-	throw new TernError("protocol", `Tern answered ${label} without "ok" or "error"`);
+	throw new TernError("protocol", `${product} answered ${label} without "ok" or "error"`);
 }
 
 /** The protocol's `error.kind` values by name. */
@@ -254,14 +338,14 @@ const PROTOCOL_ERROR_KINDS: Record<string, TernErrorKind> = {
 };
 
 /**
- * One connection to the Tern daemon. `connect` greets and waits for the
+ * One connection to the Tern daemon (or to a host speaking its protocol over
+ * another {@link TernTransport}). `connect` greets and waits for the
  * welcome; `request` sends one browser op and `fork` one fork, each resolving
  * its `ok` result (rejecting with a {@link TernError}). Requests run
  * concurrently; closing rejects everything pending.
  */
 export class TernSocketClient {
-	readonly #socketPath: string;
-	#socket: net.Socket | undefined;
+	readonly #transport: TernTransport;
 	#connecting: Promise<void> | undefined;
 	#welcomed = false;
 	#ops: ReadonlySet<string> = new Set();
@@ -270,16 +354,18 @@ export class TernSocketClient {
 	#nextId = 1;
 	readonly #pending = new Map<number, PendingOp>();
 	readonly #abandoned = new Map<number, { label: string; onLateAnswer: (value: unknown) => void }>();
-	readonly #reader = new TernFrameReader();
+	readonly #reader: TernFrameReader;
 	#greeting: { resolve(): void; reject(error: unknown): void } | undefined;
 
-	constructor(opts: { socketPath: string }) {
-		this.#socketPath = opts.socketPath;
+	/** `socketPath` is the Tern daemon's Unix socket; `transport` is any other stream speaking the protocol. */
+	constructor(opts: { socketPath: string } | { transport: TernTransport }) {
+		this.#transport = "transport" in opts ? opts.transport : new TernSocketTransport(opts.socketPath);
+		this.#reader = new TernFrameReader(this.#transport.product);
 	}
 
-	/** The daemon socket this client talks to. */
-	get socketPath(): string {
-		return this.#socketPath;
+	/** The backend's display name ({@link TernTransport.product}). */
+	get product(): string {
+		return this.#transport.product;
 	}
 
 	/** Whether the connection is up and welcomed. */
@@ -292,9 +378,9 @@ export class TernSocketClient {
 		return this.#ops.has(op);
 	}
 
-	/** Open the socket and greet; resolves once the daemon welcomed omp. */
+	/** Open the stream and greet; resolves once the peer welcomed omp. */
 	async connect(): Promise<void> {
-		if (this.#closed) throw this.#closeError ?? new TernError("closed", "Tern connection closed");
+		if (this.#closed) throw this.#closeError ?? new TernError("closed", `${this.product} connection closed`);
 		if (this.#welcomed) return;
 		this.#connecting ??= this.#open();
 		try {
@@ -313,7 +399,9 @@ export class TernSocketClient {
 	async fork(request: TernForkRequest, opts: TernRequestOptions = {}): Promise<number> {
 		const result = await this.#send("fork", request, "fork", opts);
 		const block = result && typeof result === "object" && "block" in result ? result.block : undefined;
-		if (typeof block !== "number") throw new TernError("protocol", 'Tern answered fork without a "block"');
+		if (typeof block !== "number") {
+			throw new TernError("protocol", `${this.product} answered fork without a "block"`);
+		}
 		return block;
 	}
 
@@ -321,8 +409,7 @@ export class TernSocketClient {
 		opts.signal?.throwIfAborted();
 		await this.connect();
 		opts.signal?.throwIfAborted();
-		const socket = this.#socket;
-		if (!socket || this.#closed) throw this.#closeError ?? new TernError("closed", "Tern connection closed");
+		if (this.#closed) throw this.#closeError ?? new TernError("closed", `${this.product} connection closed`);
 		const id = this.#nextId++;
 		let frameBytes: Uint8Array;
 		try {
@@ -330,7 +417,7 @@ export class TernSocketClient {
 		} catch (error) {
 			throw new TernError(
 				"invalid",
-				`Tern ${label} has arguments that are not JSON: ${error instanceof Error ? error.message : String(error)}`,
+				`${this.product} ${label} has arguments that are not JSON: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 		const timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -339,7 +426,7 @@ export class TernSocketClient {
 			this.#abandon(id, opts.signal?.reason ?? new DOMException("Aborted", "AbortError"));
 		};
 		const timer = setTimeout(() => {
-			this.#abandon(id, new TernError("timeout", `Tern ${label} timed out after ${timeoutMs}ms`));
+			this.#abandon(id, new TernError("timeout", `${this.product} ${label} timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
 		timer.unref();
 		this.#pending.set(id, {
@@ -353,13 +440,13 @@ export class TernSocketClient {
 		});
 		opts.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
-			socket.write(frameBytes);
+			this.#transport.write(frameBytes);
 		} catch (error) {
 			this.#settle(
 				id,
 				new TernError(
 					"closed",
-					`Tern connection failed: ${error instanceof Error ? error.message : String(error)}`,
+					`${this.product} connection failed: ${error instanceof Error ? error.message : String(error)}`,
 				),
 			);
 		}
@@ -368,37 +455,49 @@ export class TernSocketClient {
 
 	/** Close the connection; every pending op rejects. */
 	close(): void {
-		this.#fail(new TernError("closed", "Tern connection closed"));
+		this.#fail(new TernError("closed", `${this.product} connection closed`));
 	}
 
 	async #open(): Promise<void> {
-		const socket = net.createConnection({ path: this.#socketPath });
-		this.#socket = socket;
+		const transport = this.#transport;
 		const greeting = Promise.withResolvers<void>();
 		this.#greeting = greeting;
 		const timer = setTimeout(() => {
-			this.#fail(new TernError("connect", `Tern daemon at ${this.#socketPath} did not answer the greeting in time`));
+			this.#fail(new TernError("connect", `The ${transport.peer} did not answer the greeting in time`));
 		}, CONNECT_TIMEOUT_MS);
 		timer.unref();
-		socket.on("connect", () => socket.write(encodeTernFrame({ hello: {} })));
-		socket.on("data", chunk => this.#onData(typeof chunk === "string" ? Buffer.from(chunk) : chunk));
-		socket.on("error", error => {
-			this.#fail(
-				this.#welcomed
-					? new TernError("closed", `Tern connection failed: ${error.message}`)
-					: new TernError("connect", `Cannot reach the Tern daemon at ${this.#socketPath}: ${error.message}`),
-			);
-		});
-		socket.on("close", () => {
-			this.#fail(
-				this.#welcomed
-					? new TernError("closed", "Tern daemon closed the connection")
-					: new TernError(
-							"connect",
-							`Tern daemon at ${this.#socketPath} closed the connection before greeting: a Tern without omp's JSON protocol cannot read its hello (update Tern)`,
-						),
-			);
-		});
+		// A stream that drops before the welcome never connected (`connect`); after it, the connection dropped (`closed`).
+		const dropped = (reason: string | undefined): TernError => {
+			if (this.#welcomed) {
+				return new TernError(
+					"closed",
+					reason
+						? `Connection to the ${transport.peer} failed: ${reason}`
+						: `The ${transport.peer} closed the connection`,
+				);
+			}
+			if (reason) return new TernError("connect", `Cannot reach the ${transport.peer}: ${reason}`);
+			const hint = transport.greetingHint ? `: ${transport.greetingHint}` : "";
+			return new TernError("connect", `The ${transport.peer} closed the connection before greeting${hint}`);
+		};
+		try {
+			transport.start({
+				open: () => {
+					if (this.#closed) return;
+					try {
+						transport.write(encodeTernFrame({ hello: {} }));
+					} catch (error) {
+						this.#fail(dropped(error instanceof Error ? error.message : String(error)));
+					}
+				},
+				data: chunk => {
+					if (!this.#closed) this.#onData(chunk);
+				},
+				close: reason => this.#fail(dropped(reason)),
+			});
+		} catch (error) {
+			this.#fail(dropped(error instanceof Error ? error.message : String(error)));
+		}
 		try {
 			await greeting.promise;
 		} finally {
@@ -418,7 +517,7 @@ export class TernSocketClient {
 		for (const payload of payloads) {
 			let reply: TernReply;
 			try {
-				reply = decodeTernReply(payload);
+				reply = decodeTernReply(payload, this.product);
 			} catch (error) {
 				this.#fail(error instanceof TernError ? error : new TernError("protocol", String(error)));
 				return;
@@ -439,13 +538,13 @@ export class TernSocketClient {
 					if (pending.channel !== reply.type) {
 						this.#settle(
 							reply.id,
-							new TernError("protocol", `Tern answered ${pending.label} with a ${reply.type} answer`),
+							new TernError("protocol", `${this.product} answered ${pending.label} with a ${reply.type} answer`),
 						);
 						break;
 					}
 					let value: unknown;
 					try {
-						value = answerOf(pending.label, reply.answer);
+						value = answerOf(this.product, pending.label, reply.answer);
 					} catch (error) {
 						this.#settle(reply.id, error);
 						break;
@@ -489,7 +588,7 @@ export class TernSocketClient {
 		this.#abandoned.delete(id);
 		let value: unknown;
 		try {
-			value = answerOf(abandoned.label, answer);
+			value = answerOf(this.product, abandoned.label, answer);
 		} catch {
 			return;
 		}
@@ -504,7 +603,6 @@ export class TernSocketClient {
 		this.#greeting?.reject(error);
 		// Settling deletes the entry; a Map's iteration skips deleted entries safely.
 		for (const id of this.#pending.keys()) this.#settle(id, error);
-		this.#socket?.destroy();
-		this.#socket = undefined;
+		this.#transport.close();
 	}
 }

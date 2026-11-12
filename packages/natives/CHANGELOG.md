@@ -2,9 +2,16 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added `shellBuiltins(sessionEnv?)` to list commands provided by the embedded shell, including process controls and utilities.
+- Expanded the embedded shell with `awk`, `tar`, `shasum`, `md5`, `strings`, and `lsof` across Linux, macOS, and Windows. Destructive utilities can be disabled with `PI_DISABLE_UUTILS_DESTRUCTIVE`; when disabled, `tar` is delegated to the system.
+
 ### Fixed
 
-- Fixed macOS typing into Chrome's address bar (or any field of a Chromium-based app) followed by Return reloading the current page instead of opening the typed text: the text now goes in as keys, and `setValue` on those fields throws `AxFailed` pointing to `el.type` instead of reporting success
+- Fixed macOS text entry in Chrome and other Chromium-based applications so typing followed by Return opens the entered text instead of reloading the current page.
 
 ## [18.18.9] - 2026-11-11
 

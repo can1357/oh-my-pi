@@ -817,6 +817,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
+
+[[package]]
 name = "calendrical_calculations"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4854,6 +4863,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32f454fd6831a29c0e827ed075bca2a15be201bd57f4168f0fd1041124eab17e"
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5059,6 +5074,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 dependencies = [
  "twox-hash",
+]
+
+[[package]]
+name = "lzma-rust2"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890"
+dependencies = [
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -6232,7 +6256,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6274,7 +6298,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6283,6 +6307,7 @@ dependencies = [
  "base64 0.23.1",
  "bigdecimal",
  "bstr",
+ "bzip2",
  "chrono",
  "clap",
  "dns-lookup",
@@ -6314,6 +6339,7 @@ dependencies = [
  "libc",
  "lscolors",
  "lz4_flex",
+ "lzma-rust2",
  "md-5 0.10.6",
  "md4",
  "memchr",
@@ -6334,6 +6360,7 @@ dependencies = [
  "rand 0.10.3",
  "rayon",
  "regex",
+ "regex-automata",
  "rustc-hash",
  "rustix 1.1.5",
  "self_cell",
@@ -6342,6 +6369,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "stacker",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6356,11 +6384,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.18.9"
+version = "18.19.0"
 
 [[package]]
 name = "pi-edit"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6379,7 +6407,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6391,7 +6419,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6485,7 +6513,7 @@ dependencies = [
 
 [[package]]
 name = "pi-predict"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6503,7 +6531,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6541,7 +6569,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "futures",
  "gix",
@@ -6557,7 +6585,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vfs"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6570,7 +6598,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "bytes",
  "flume",
@@ -6584,7 +6612,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.18.9"
+version = "18.19.0"
 dependencies = [
  "async-trait",
  "flume",
@@ -8112,6 +8140,16 @@ dependencies = [
  "pkg-config",
  "toml",
  "version-compare",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]
