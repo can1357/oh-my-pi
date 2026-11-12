@@ -1048,6 +1048,7 @@ async fn write_text(
 	name: &UniqueName<'static>,
 	object: &ObjectRefOwned,
 	value: &str,
+	emptied: &mut bool,
 ) -> CoreResult<()> {
 	let editable = atspi::proxy::editable_text::EditableTextProxy::builder(connection)
 		.destination(name.clone())
@@ -1079,20 +1080,17 @@ async fn write_text(
 		if replace("").await?.as_deref() != Some("") {
 			return text_readback(value, value, None, true);
 		}
-		let emptied = |mut error: DesktopError| {
-			error
-				.message
-				.push_str(". setValue emptied the field before this write, so it may now be empty");
-			error
-		};
-		let rewritten = replace(value).await.map_err(emptied)?;
+		// Keep the confirmed clear outside the request future so dropping the
+		// rewrite on timeout or cancellation does not lose the warning.
+		*emptied = true;
+		let rewritten = replace(value).await?;
 		if rewritten
 			.as_deref()
 			.is_some_and(|actual| masks(actual, value))
 		{
 			return Ok(());
 		}
-		return text_readback(value, value, None, true).map_err(emptied);
+		return text_readback(value, value, None, true);
 	}
 	// A role that cannot be read counts as a password field's, so what such a
 	// field reads never enters an error.
@@ -1102,6 +1100,15 @@ async fn write_text(
 		.ok()
 		.is_none_or(|role| role == Role::PasswordText);
 	text_readback(value, value, actual.as_deref(), secure)
+}
+
+fn text_write_error(mut error: DesktopError, emptied: bool) -> DesktopError {
+	if emptied {
+		error
+			.message
+			.push_str(". setValue emptied the field before this write, so it may now be empty");
+	}
+	error
 }
 
 /// Whether `actual` masks `value`: one mask character per character, or per
@@ -1411,6 +1418,7 @@ impl AxBackend for AtSpiAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let object = Self::object(h).clone();
+		let mut emptied = false;
 		self
 			.request(async {
 				let name = object
@@ -1426,7 +1434,15 @@ impl AxBackend for AtSpiAx {
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI interfaces: {err}")))?;
 				if interfaces.contains(atspi::Interface::EditableText) {
-					return write_text(&self.connection, &accessible, &name, &object, value).await;
+					return write_text(
+						&self.connection,
+						&accessible,
+						&name,
+						&object,
+						value,
+						&mut emptied,
+					)
+					.await;
 				}
 				if !interfaces.contains(atspi::Interface::Value) {
 					return Err(DesktopError::ax_failed(
@@ -1452,6 +1468,7 @@ impl AxBackend for AtSpiAx {
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))
 			})
 			.map_err(unconfirmed)
+			.map_err(|error| text_write_error(error, emptied))
 	}
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
@@ -1924,7 +1941,12 @@ mod tests {
 				let object = ObjectRefOwned::from_static_str_unchecked(PEER, path);
 				let name = object.name().unwrap().clone();
 				let accessible = object.as_accessible_proxy(&client).await.unwrap();
-				results.push(write_text(&client, &accessible, &name, &object, "new ä€😀").await);
+				let mut emptied = false;
+				results.push(
+					write_text(&client, &accessible, &name, &object, "new ä€😀", &mut emptied)
+						.await
+						.map_err(|error| text_write_error(error, emptied)),
+				);
 			}
 			drop(server);
 			results
@@ -1935,7 +1957,9 @@ mod tests {
 				(Verdict::Ok, Ok(())) => {},
 				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
 				(Verdict::Hidden, Err(err))
-					if !err.message.contains("new") && !err.message.contains(r#""old""#) => {},
+					if !err.message.contains("new")
+						&& !err.message.contains(r#""old""#)
+						&& !err.message.contains("emptied") => {},
 				(Verdict::Emptied, Err(err))
 					if err.message.contains("emptied") && !err.message.contains("new") => {},
 				(_, result) => panic!("{path}: {result:?}"),
@@ -2895,6 +2919,109 @@ mod tests {
 			let error =
 				control::with_token_for_test(&source.token(), || ax.props(&element)).unwrap_err();
 			assert_eq!(error.code, ErrorCode::Cancelled);
+		}
+
+		#[test]
+		fn interrupted_masked_text_write_warns_if_the_field_may_be_empty() {
+			use std::sync::{Arc, Mutex};
+
+			struct Accessible([&'static str; 2]);
+			#[interface(name = "org.a11y.atspi.Accessible")]
+			impl Accessible {
+				fn get_interfaces(&self) -> &[&str] {
+					&self.0
+				}
+			}
+
+			struct Text(Arc<Mutex<String>>);
+			#[interface(name = "org.a11y.atspi.Text")]
+			impl Text {
+				#[zbus(property)]
+				fn character_count(&self) -> i32 {
+					self.0.lock().unwrap().chars().count() as i32
+				}
+
+				fn get_text(&self, start_offset: i32, end_offset: i32) -> String {
+					std::iter::repeat_n('●', self.0.lock().unwrap().chars().count())
+						.skip(start_offset as usize)
+						.take((end_offset - start_offset) as usize)
+						.collect()
+				}
+			}
+
+			struct Editable {
+				text:    Arc<Mutex<String>>,
+				count:   Mutex<usize>,
+				stop_at: usize,
+				cancel:  Option<control::CancellationSource>,
+			}
+			#[interface(name = "org.a11y.atspi.EditableText")]
+			impl Editable {
+				async fn set_text_contents(&self, text: String) -> bool {
+					let count = {
+						let mut count = self.count.lock().unwrap();
+						*count += 1;
+						*count
+					};
+					if count == self.stop_at {
+						if let Some(cancel) = &self.cancel {
+							cancel.cancel();
+						}
+						return std::future::pending().await;
+					}
+					*self.text.lock().unwrap() = text;
+					true
+				}
+			}
+
+			// Before any clear, during the clear, and during the rewrite.
+			for stop_at in 1..=3 {
+				for cancelled in [false, true] {
+					let source = control::CancellationSource::default();
+					let text = Arc::new(Mutex::new("old secret".to_owned()));
+					let (mut ax, _server) = backend(HUNG_CALL_TIMEOUT, |server| {
+						server
+							.serve_at(
+								"/password",
+								Accessible(["org.a11y.atspi.EditableText", "org.a11y.atspi.Text"]),
+							)
+							.unwrap()
+							.serve_at("/password", Text(text.clone()))
+							.unwrap()
+							.serve_at("/password", Editable {
+								text: text.clone(),
+								count: Mutex::new(0),
+								stop_at,
+								cancel: cancelled.then(|| source.clone()),
+							})
+							.unwrap()
+					});
+					let element =
+						AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/password"));
+					let error = control::with_token_for_test(&source.token(), || {
+						ax.set_value(&element, "new secret")
+					})
+					.unwrap_err();
+					assert_eq!(
+						error.code,
+						if cancelled {
+							ErrorCode::Cancelled
+						} else {
+							ErrorCode::Timeout
+						}
+					);
+					assert_eq!(
+						error.message.contains("may now be empty"),
+						stop_at == 3,
+						"stop_at={stop_at}, cancelled={cancelled}: {error:?}"
+					);
+					assert!(!error.message.contains("old secret"));
+					assert!(!error.message.contains("new secret"));
+					if stop_at == 3 {
+						assert!(text.lock().unwrap().is_empty());
+					}
+				}
+			}
 		}
 
 		/// A desktop of two applications: one that answers nothing on bus
