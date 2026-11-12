@@ -69,7 +69,7 @@ import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { enforcePlanModeWrite, resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
 import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
-import { enforceWriteRootsAbsolute, resolveWriteTargetAbsolute } from "./write-roots-guard";
+import { enforceWriteRoots, enforceWriteRootsAbsolute, resolveWriteTargetAbsolute } from "./write-roots-guard";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
 import {
@@ -1132,6 +1132,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await enforcePlanModeWrite(this.session, path, { op: "create", signal });
 			const absolutePath = await resolvePlanPath(this.session, path, signal);
 			await enforceWriteRootsAbsolute(this.session, absolutePath, { authored: path, signal });
+			// The absolute path above is lexically normalized, but the filesystem
+			// resolves `..` after symlinks — check the authored form too, or a
+			// `link/../outside` write passes the check and lands outside it.
+			await enforceWriteRoots(this.session, [path], signal);
 			// A located URL write keeps its URL identity in progress, results, and the hashline header.
 			const displayPath = target ? path : formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const batchRequest = getLspBatchRequest(context?.toolCall);

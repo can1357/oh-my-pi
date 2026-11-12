@@ -38,24 +38,42 @@ export function writeRoots(session: ToolSession): readonly string[] | undefined 
 
 /** Where a write to `absolutePath` physically lands (see module docs). */
 async function canonicalWriteTarget(absolutePath: string): Promise<string | undefined> {
+	// Walk the authored components in order, mirroring kernel resolution: a
+	// symlink is followed the moment it is met, so a later `..` climbs from
+	// the link's target — not from the authored parent. Normalizing with
+	// `path.resolve` first would delete `link/..` before `link` resolves and
+	// check the wrong directory.
+	const parts = absolutePath.split(path.sep).filter(part => part !== "" && part !== ".");
+	let resolved: string = path.sep;
 	const tail: string[] = [];
-	for (let current = absolutePath; ; current = path.dirname(current)) {
+	for (const part of parts) {
+		if (part === "..") {
+			if (tail.length > 0) tail.pop();
+			else resolved = path.dirname(resolved);
+			continue;
+		}
+		if (tail.length > 0) {
+			tail.push(part);
+			continue;
+		}
+		const candidate = path.join(resolved, part);
 		try {
-			return path.join(await fs.realpath(current), ...tail);
+			resolved = await fs.realpath(candidate);
+			continue;
 		} catch (error) {
 			if (!isEnoent(error)) return undefined;
 		}
 		try {
-			await fs.lstat(current);
+			await fs.lstat(candidate);
 			// Exists but unresolvable (dangling symlink): the write would
 			// follow it somewhere this cannot name — refuse outright.
 			return undefined;
 		} catch (error) {
 			if (!isEnoent(error)) return undefined;
 		}
-		if (path.dirname(current) === current) return undefined;
-		tail.unshift(path.basename(current));
+		tail.push(part);
 	}
+	return path.join(resolved, ...tail);
 }
 
 /** True when `absolutePath` is `root` or under it (both canonicalized). */
@@ -137,7 +155,11 @@ export async function resolveWriteTargetAbsolute(
 			return undefined;
 		}
 	}
-	return resolveToCwd(normalized, session.cwd);
+	// Join without collapsing: `path.resolve` would delete `link/..` before the
+	// link resolves, checking the wrong directory. `canonicalWriteTarget`
+	// walks the authored components with kernel semantics instead.
+	if (path.isAbsolute(normalized)) return normalized;
+	return `${session.cwd}${path.sep}${normalized}`;
 }
 
 /**
@@ -160,7 +182,7 @@ export async function enforceWriteRoots(
 		signal?.throwIfAborted();
 		const absolute = await resolveWriteTargetAbsolute(session, authored, signal);
 		if (absolute === undefined) continue;
-		const target = await canonicalWriteTarget(path.resolve(absolute));
+		const target = await canonicalWriteTarget(absolute);
 		if (target !== undefined && canonicalRoots.some(root => isWithinRoot(target, root))) continue;
 		throw new ToolError(refusalMessage(authored, canonicalRoots));
 	}

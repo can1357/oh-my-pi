@@ -23,6 +23,7 @@ import {
 import type { ToolSession } from "./index";
 import { formatPathRelativeToCwd } from "./path-utils";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
+import { enforceWriteRootsAbsolute } from "./write-roots-guard";
 
 /** Raw `conflict://<N>[/<scope>]` content for the shared read selector pipeline. */
 export interface ConflictRegionRead {
@@ -146,6 +147,7 @@ async function resolveConflict(
 	if (!(await fs.exists(absolutePath))) {
 		throw new ToolError(`Conflict #${entry.id} target '${entry.displayPath}' no longer exists.`);
 	}
+	await enforceWriteRootsAbsolute(session, absolutePath, { authored: `conflict://${entry.id}`, signal });
 
 	const expanded = expandContentTokens(replacementContent, entry);
 	// `Bun.file().text()` drops a leading UTF-8 BOM; decode verbatim so the write keeps it.
@@ -371,6 +373,16 @@ async function resolveAllConflicts(
 				displayPath: sample.displayPath,
 				count: fileEntries.length,
 				error: "file no longer exists",
+			});
+			continue;
+		}
+		try {
+			await enforceWriteRootsAbsolute(session, absolutePath, { authored: "conflict://*", signal });
+		} catch (error) {
+			failedFiles.push({
+				displayPath: sample.displayPath,
+				count: fileEntries.length,
+				error: error instanceof Error ? error.message : String(error),
 			});
 			continue;
 		}

@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -288,17 +289,6 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				},
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
-			// Opt-in `tools.writeRoots` confinement, scope-level fail-fast: a scope rooted
-			// outside every root is refused before the dry run. Per-file enforcement below
-			// (and again at apply time) covers symlink escapes under an inside scope.
-			if (writeRoots(this.session) !== undefined) {
-				const scopePaths =
-					multiTargets !== undefined ? multiTargets.map(target => target.basePath) : [resolvedSearchPath];
-				for (const scopePathEntry of scopePaths) {
-					if (InternalUrlRouter.instance().canHandle(scopePathEntry)) continue;
-					await enforceWriteRootsAbsolute(this.session, scopePathEntry, { authored: scopePathEntry });
-				}
-			}
 
 			// Dry run, so a re-run after installing missing grammars cannot double-apply.
 			const result = await rerunWithGrammars(() =>
@@ -486,7 +476,25 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								await enforceWriteRootsAbsolute(this.session, backing, { authored: relativePath });
 							}
 						}
-						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+						// Constrain the apply run to the preview's verified file set: the
+						// dry run's glob would otherwise re-discover files added after the
+						// preview (or newly outside narrowed roots) and rewrite them
+						// unchecked. Each verified file runs as its own directory-plus-
+						// exact-basename target — a file path as basePath would rebase
+						// the native basename result into a doubled path. Unconfined runs
+						const confined = writeRoots(this.session) !== undefined;
+						const applyTargets = confined
+							? fileList.map(relativePath => {
+									const absolute = resolveSearchResultPath(resolvedSearchPath, relativePath);
+									return {
+										basePath: path.dirname(absolute),
+										// Exact-name glob (metachars bracketed, mirroring
+										// `escapeGlobMetachars` in path-utils).
+										glob: path.basename(absolute).replace(/[*?[{]/g, "[$&]"),
+									};
+								})
+							: multiTargets;
+						const applyResult = await runAstEditOnce(applyTargets, resolvedSearchPath, confined ? undefined : globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: false,
 							maxFiles,
