@@ -5,7 +5,7 @@
 ### Added
 
 - Added the `nace-systemone` judgment API for Nace's Drex decision models, which sends images as Drex's top-level `images` data URLs and replaces the base64 image, audio, video and PDF data URLs that Drex rejects in judged text with a description ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
-- Added `JUDGMENT_API_PATHS` (the request path each judgment API appends to its `baseUrl`), `validateNativeJudgeEndpointRoot` and `validateNativeJudgeProviderId` to `judgment/native`, for tools that declare native judge models ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
+- Added `JUDGMENT_PROTOCOLS` and `judgmentProtocol` (each judgment API's label, request path and root help, taken from its wire definition), `JUDGMENT_API_PATHS` (derived from them), `catalogJudgmentApis` and `nativeJudgeRootDefault` (default endpoint roots from the model, the catalog seed or the provider's chat root), `validateNativeJudgeEndpointRoot` and `validateNativeJudgeProviderId` to `judgment/native`, for tools that declare native judge models ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.19.0] - 2026-11-12
 

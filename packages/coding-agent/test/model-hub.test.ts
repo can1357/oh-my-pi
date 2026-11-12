@@ -2094,7 +2094,7 @@ describe("ModelHub", () => {
 			});
 			const credentials = vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeJudgeCredential"]>>(async () => {});
 			const keySource = vi.fn((provider: string) =>
-				provider === "openai" ? "the OPENAI_API_KEY environment variable" : undefined,
+				provider === "gateway" ? "the GATEWAY_API_KEY environment variable" : undefined,
 			);
 			const { hub, onAssign } = createHub({
 				models: () => models,
@@ -2106,7 +2106,7 @@ describe("ModelHub", () => {
 			});
 			pickJudge(hub);
 			hub.handleInput(CTRL_N);
-			for (const value of ["openai", "judge"]) {
+			for (const value of ["gateway", "judge"]) {
 				type(hub, value);
 				hub.handleInput("\n");
 			}
@@ -2114,17 +2114,17 @@ describe("ModelHub", () => {
 			type(hub, "https://native.example");
 			hub.handleInput("\n");
 			const form = normalize(hub.render(220));
-			expect(form).toContain("Requests to openai authenticate with the OPENAI_API_KEY environment variable");
+			expect(form).toContain("Requests to gateway authenticate with the GATEWAY_API_KEY environment variable");
 			expect(form).not.toContain("Provider API key (optional)");
 			hub.handleInput("\n");
 			await settle(create.mock.results[0]?.value);
 			await Bun.sleep(0);
 
-			expect(keySource).toHaveBeenCalledWith("openai");
+			expect(keySource).toHaveBeenCalledWith("gateway");
 			expect(create).toHaveBeenCalledTimes(1);
 			expect(credentials).not.toHaveBeenCalled();
 			expect(onAssign).not.toHaveBeenCalled();
-			expect(pickerProps(hub).selected).toBe("openai/judge");
+			expect(pickerProps(hub).selected).toBe("gateway/judge");
 		});
 
 		test("Ctrl+N still asks for the optional key when a stored key would be used", () => {
@@ -2171,6 +2171,96 @@ describe("ModelHub", () => {
 			expect(stripVTControlCharacters(title)).toContain("Judge native route · fixture/broken   idred");
 			expect(title).not.toContain("\t");
 			expect(title).not.toContain("\x1b[31mred");
+		});
+
+		test("Ctrl+R preselects a provider's catalog protocol and prefills its catalog root", async () => {
+			const chat = makeModel("openrouter", "some-chat");
+			const save = vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeRoute"]>>(async (model, api, baseUrl) =>
+				buildModel({ ...model, api, kind: "judge", baseUrl }),
+			);
+			const { hub } = createHub({ models: [chat], callbacks: { onSaveNativeRoute: save } });
+			pickJudge(hub);
+			hub.handleNativeEvent({ type: "select", key: "", item: "openrouter/some-chat" });
+			hub.handleInput(CTRL_R);
+			hub.handleInput("\n"); // the preselected openrouter-decisions
+			const form = normalize(hub.render(220));
+			expect(form).toContain("POST https://openrouter.ai/api/alpha/decisions");
+			expect(form).toContain("Prefilled from the catalog's OpenRouter Decisions root for openrouter");
+			hub.handleInput("\n");
+			await settle(save.mock.results[0]?.value);
+			expect(save).toHaveBeenCalledWith(chat, "openrouter-decisions", "https://openrouter.ai/api/alpha");
+		});
+
+		test("Ctrl+R prefills OpenAI Decisions from the provider's chat root", () => {
+			const chat = buildModel({
+				...makeModel("gateway", "chat"),
+				api: "openai-completions",
+				baseUrl: "https://gateway.example/v1",
+			});
+			const { hub } = createHub({
+				models: [chat],
+				callbacks: { onSaveNativeRoute: vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeRoute"]>>() },
+			});
+			pickJudge(hub);
+			hub.handleNativeEvent({ type: "select", key: "", item: "gateway/chat" });
+			hub.handleInput(CTRL_R);
+			// No catalog protocol for this provider, so nothing is preselected: move to openai-decisions.
+			for (let step = 0; step < 3; step++) hub.handleInput(DOWN);
+			hub.handleInput("\n");
+			const form = normalize(hub.render(220));
+			expect(form).toContain("POST https://gateway.example/v1/decisions");
+			expect(form).toContain("Prefilled from gateway's chat endpoint (gateway/chat)");
+		});
+
+		test("Ctrl+N under a catalog provider preselects its protocol and prefills its root", async () => {
+			let models = [makeModel("fixture", "chat")];
+			const create = vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>(async draft => {
+				const saved = buildModel({
+					...makeModel(draft.provider, draft.id),
+					api: draft.api,
+					kind: "judge",
+					baseUrl: draft.baseUrl,
+				});
+				models = [...models, saved];
+				return saved;
+			});
+			const { hub } = createHub({ models: () => models, callbacks: { onCreateNativeJudgeRoute: create } });
+			pickJudge(hub);
+			hub.handleInput(CTRL_N);
+			for (const value of ["liquid", "d1-new"]) {
+				type(hub, value);
+				hub.handleInput("\n");
+			}
+			hub.handleInput("\n"); // the preselected liquid-systemone
+			expect(normalize(hub.render(220))).toContain("POST https://api.liquid.ai/decisions/v1/systemone");
+			hub.handleInput("\n"); // accept the root
+			hub.handleInput("\n"); // no key
+			await settle(create.mock.results[0]?.value);
+			expect(create).toHaveBeenCalledWith({
+				provider: "liquid",
+				id: "d1-new",
+				api: "liquid-systemone",
+				baseUrl: "https://api.liquid.ai",
+			});
+		});
+
+		test("Ctrl+N under a new namespace preselects nothing and asks for the root", () => {
+			const { hub } = createHub({
+				models: [makeModel("fixture", "chat")],
+				callbacks: {
+					onCreateNativeJudgeRoute: vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>(),
+				},
+			});
+			pickJudge(hub);
+			hub.handleInput(CTRL_N);
+			for (const value of ["brand-new", "judge"]) {
+				type(hub, value);
+				hub.handleInput("\n");
+			}
+			hub.handleInput("\n"); // the first protocol, typesafe
+			const form = normalize(hub.render(220));
+			expect(form).toContain("POST <base URL>/v1/systemone");
+			expect(form).not.toContain("Prefilled from");
 		});
 
 		test("Ctrl+N is offered only for the Judge role, and Esc leaves everything untouched", () => {

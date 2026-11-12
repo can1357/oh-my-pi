@@ -5,8 +5,7 @@
 ### Added
 
 - The Spotlight sheet of a `;`/`,` path `read` shows each part as its own section, numbered from its file's lines with its own ranking ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
-- Added native judge route editing to the model hub's Judge role: `Ctrl+R` declares the highlighted model's judgment protocol and endpoint root with a live request-URL preview, `Ctrl+N` adds an uncataloged native judge (optionally storing its API key), and the status line says whether a Judge model judges natively, through prompts, or has an invalid native route, which also blocks picking it
-- Added native judge route editing to the model hub's Judge role: `Ctrl+R` declares the highlighted model's judgment protocol and endpoint root with a live request-URL preview, `Ctrl+N` adds an uncataloged native judge (optionally storing its API key), and the status line says whether a Judge model judges natively, through prompts, or has an invalid native route, which also blocks picking it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
+- Added native judge route editing to the model hub's Judge role: `Ctrl+R` declares the highlighted model's judgment protocol and endpoint root with a live request-URL preview (the protocol is preselected and the root prefilled from the model, the catalog or the provider's chat root), `Ctrl+N` adds an uncataloged native judge (optionally storing its API key), and the status line says whether a Judge model judges natively, through prompts, or has an invalid native route, which also blocks picking it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

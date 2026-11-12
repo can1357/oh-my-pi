@@ -25,6 +25,7 @@ import {
 	resolveJudgmentImageInput,
 } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { resolveJudgmentQuestionsMax } from "@oh-my-pi/pi-catalog/compat/judgment-questions";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
@@ -77,15 +78,83 @@ export function isJudgmentApi(api: Api): api is JudgmentApi {
 	return Object.hasOwn(JUDGMENT_WIRES, api);
 }
 
+/** A judgment API as a user picks it: its display label, the path it appends, and help for its endpoint root. */
+export interface JudgmentProtocol {
+	api: JudgmentApi;
+	label: string;
+	path: string;
+	rootHelp?: string;
+}
+
+/** Every judgment API, in {@link JUDGMENT_WIRES} order; adding a wire there is all it takes to list it. */
+export const JUDGMENT_PROTOCOLS: readonly JudgmentProtocol[] = (Object.keys(JUDGMENT_WIRES) as JudgmentApi[]).map(api =>
+	judgmentProtocol(api),
+);
+
 /** Request path each judgment API appends to its `baseUrl`; `{model}` stands for the wire model id. */
-export const JUDGMENT_API_PATHS = {
-	typesafe: "/v1/systemone",
-	"openrouter-decisions": "/decisions",
-	"workers-ai-systemone": "/{model}",
-	"openai-decisions": "/decisions",
-	"liquid-systemone": "/decisions/v1/systemone",
-	"nace-systemone": "/v1/systemone",
-} as const satisfies Record<JudgmentApi, string>;
+export const JUDGMENT_API_PATHS = Object.fromEntries(
+	JUDGMENT_PROTOCOLS.map(protocol => [protocol.api, protocol.path]),
+) as Readonly<Record<JudgmentApi, string>>;
+
+/** The protocol entry for one judgment API. */
+export function judgmentProtocol(api: JudgmentApi): JudgmentProtocol {
+	const { label, path, rootHelp } = JUDGMENT_WIRES[api];
+	return rootHelp === undefined ? { api, label, path } : { api, label, path, rootHelp };
+}
+
+/** The judgment APIs the catalog seeds `provider` with, in seed order. */
+export function catalogJudgmentApis(provider: string): JudgmentApi[] {
+	const apis = new Set<JudgmentApi>();
+	for (const row of seedModels(provider)) if (isJudgmentApi(row.api)) apis.add(row.api);
+	return [...apis];
+}
+
+/** A default endpoint root for a native judge, and where it came from. */
+export interface NativeJudgeRootDefault {
+	baseUrl: string;
+	/** `model`: the model's own route; `catalog`: the provider's catalog seed; `chat`: the provider's chat root. */
+	source: "model" | "catalog" | "chat";
+	/** For `chat`, the model whose `baseUrl` supplied the root. */
+	from?: Model;
+}
+
+/**
+ * The endpoint root to propose for `api` under `provider`: the model's own root when it already speaks `api`,
+ * else the catalog's seed root for that provider and protocol, else — for protocols on an OpenAI-compatible
+ * root — the `baseUrl` of one of the provider's OpenAI-compatible chat models (`model` first, then `models`).
+ * Only roots {@link validateNativeJudgeEndpointRoot} accepts are proposed.
+ */
+export function nativeJudgeRootDefault(
+	api: JudgmentApi,
+	provider: string,
+	models: readonly Model[],
+	model?: Model,
+): NativeJudgeRootDefault | undefined {
+	const valid = (baseUrl: string | undefined): string | undefined => {
+		if (!baseUrl) return undefined;
+		try {
+			return validateNativeJudgeEndpointRoot(api, baseUrl);
+		} catch {
+			return undefined;
+		}
+	};
+	if (model?.api === api) {
+		const baseUrl = valid(model.baseUrl);
+		if (baseUrl) return { baseUrl, source: "model" };
+	}
+	for (const row of seedModels(provider)) {
+		const baseUrl = row.api === api ? valid(row.baseUrl) : undefined;
+		if (baseUrl) return { baseUrl, source: "catalog" };
+	}
+	if (!JUDGMENT_WIRES[api].chatRoot) return undefined;
+	for (const candidate of model ? [model, ...models] : models) {
+		if (candidate.provider !== provider) continue;
+		if (candidate.api !== "openai-completions" && candidate.api !== "openai-responses") continue;
+		const baseUrl = valid(candidate.baseUrl);
+		if (baseUrl) return { baseUrl, source: "chat", from: candidate };
+	}
+	return undefined;
+}
 
 /** A native judge model declaration: the exact provider/model id and the endpoint its API posts to. */
 export interface NativeJudgeRouteDraft {

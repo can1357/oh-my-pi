@@ -22,9 +22,14 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
 import {
+	catalogJudgmentApis,
 	isJudgmentApi,
 	JUDGMENT_API_PATHS,
+	JUDGMENT_PROTOCOLS,
 	type JudgmentApi,
+	judgmentProtocol,
+	type NativeJudgeRootDefault,
+	nativeJudgeRootDefault,
 	type NativeJudgeRouteDraft,
 	validateNativeJudgeEndpointRoot,
 	validateNativeJudgeProviderId,
@@ -141,27 +146,36 @@ interface NativeJudgeCreateEditor {
 	saved?: Model;
 }
 
-const NATIVE_PROTOCOL_LABELS: Record<JudgmentApi, string> = {
-	typesafe: "TypeSafe SystemOne",
-	"openrouter-decisions": "OpenRouter Decisions",
-	"openai-decisions": "OpenAI Decisions",
-	"workers-ai-systemone": "Workers AI SystemOne",
-	"liquid-systemone": "Liquid SystemOne",
-	"nace-systemone": "Nace SystemOne",
-};
-
-const NATIVE_PROTOCOL_ITEMS = (Object.keys(JUDGMENT_API_PATHS) as JudgmentApi[]).map(api => ({
-	value: api,
-	label: NATIVE_PROTOCOL_LABELS[api],
-	description: `${api} · POST <base URL>${JUDGMENT_API_PATHS[api]}`,
+const NATIVE_PROTOCOL_ITEMS = JUDGMENT_PROTOCOLS.map(protocol => ({
+	value: protocol.api,
+	label: protocol.label,
+	description: `${protocol.api} · POST <base URL>${protocol.path}`,
 }));
 
-/** Where each protocol's public root lives, when it is not the provider's obvious API root. */
-const NATIVE_PROTOCOL_HELP: Partial<Record<JudgmentApi, string>> = {
-	"openrouter-decisions": " OpenRouter's root is https://openrouter.ai/api/alpha.",
-	"workers-ai-systemone":
-		" Cloudflare's root is https://api.cloudflare.com/client/v4/accounts/<account>/ai/run; <account> comes from the credential's account ID or CLOUDFLARE_ACCOUNT_ID.",
-};
+/** The protocol to preselect: the model's own judgment API, else the provider's only catalog judgment API. */
+function preselectedJudgmentApi(provider: string, model?: Model): JudgmentApi | undefined {
+	if (model && isJudgmentApi(model.api)) return model.api;
+	const apis = catalogJudgmentApis(provider);
+	return apis.length === 1 ? apis[0] : undefined;
+}
+
+/** Base URL field text: what the protocol appends, where the prefilled root came from, and the protocol's help. */
+function nativeRootDescription(api: JudgmentApi, provider: string, root: NativeJudgeRootDefault | undefined): string {
+	const protocol = judgmentProtocol(api);
+	let description = `${protocol.label} appends ${protocol.path}; enter the root before it.`;
+	if (root) {
+		const name = sanitizeDisplayWarning(provider);
+		const source =
+			root.source === "model"
+				? "the model's current route"
+				: root.source === "catalog"
+					? `the catalog's ${protocol.label} root for ${name}`
+					: `${name}'s chat endpoint${root.from ? ` (${sanitizeDisplayWarning(`${root.from.provider}/${root.from.id}`)})` : ""}`;
+		description += ` Prefilled from ${source}; Enter accepts it.`;
+	}
+	if (protocol.rootHelp) description += ` ${protocol.rootHelp}`;
+	return description;
+}
 
 function nativeBaseUrlError(api: JudgmentApi, baseUrl: string): string | undefined {
 	try {
@@ -1425,7 +1439,7 @@ export class ModelHubComponent implements Component {
 			label: `Native protocol · ${sanitizeDisplayWarning(item.selector)}`,
 			description: `Current API: ${item.model.api}. Choose the judgment protocol the endpoint speaks. This edits only the model's models.yml entry: role assignments, fallbacks and provider credentials stay as they are.`,
 			items: NATIVE_PROTOCOL_ITEMS,
-			currentValue: isJudgmentApi(item.model.api) ? item.model.api : undefined,
+			currentValue: preselectedJudgmentApi(item.provider, item.model),
 			selectTheme: getSelectListTheme(),
 			hint: `${editorKey("tui.select.confirm")} continue · ${editorKey("tui.select.cancel")} cancel`,
 			onSubmit: value => {
@@ -1445,11 +1459,14 @@ export class ModelHubComponent implements Component {
 
 	#openNativeEndpoint(editor: NativeRouteEditor, api: JudgmentApi): void {
 		const preview = new Text("", 0, 0);
+		const { model } = editor.item;
+		const root = nativeJudgeRootDefault(api, model.provider, this.#registry.getAll("all"), model);
 		const field = new TextFormField({
 			theme: formTheme,
 			label: `Native API base URL · ${sanitizeDisplayWarning(editor.item.selector)}`,
-			description: `${NATIVE_PROTOCOL_LABELS[api]} appends ${JUDGMENT_API_PATHS[api]}; enter the root before it. A chat endpoint is not converted.${NATIVE_PROTOCOL_HELP[api] ?? ""}`,
-			initialValue: isJudgmentApi(editor.item.model.api) ? editor.item.model.baseUrl : undefined,
+			description: nativeRootDescription(api, model.provider, root),
+			// An existing native root that no longer validates is still offered, so it can be fixed in place.
+			initialValue: root?.baseUrl ?? (isJudgmentApi(model.api) ? model.baseUrl : undefined),
 			empty: "reject",
 			validate: value => nativeBaseUrlError(api, value),
 			summary: [preview],
@@ -1533,7 +1550,7 @@ export class ModelHubComponent implements Component {
 				description:
 					"Choose the judgment protocol the endpoint speaks. Nothing is probed, and no role or fallback is assigned.",
 				items: NATIVE_PROTOCOL_ITEMS,
-				currentValue: editor.draft.api,
+				currentValue: editor.draft.api ?? preselectedJudgmentApi(editor.draft.provider ?? ""),
 				selectTheme: getSelectListTheme(),
 				hint: `${editorKey("tui.select.confirm")} continue · ${editorKey("tui.select.cancel")} cancel`,
 				onSubmit: value => {
@@ -1554,17 +1571,23 @@ export class ModelHubComponent implements Component {
 		let description: string;
 		let secret = false;
 		let empty: "reject" | "submit" = "reject";
+		let initialValue: string | undefined;
 		switch (step) {
 			case "id":
 				label = "Model ID";
 				description =
 					"The exact model ID the endpoint serves, nested paths included (e.g. @cf/cloudflare/clef). It is sent verbatim.";
+				initialValue = editor.draft.id;
 				break;
-			case "baseUrl":
+			case "baseUrl": {
 				label = "Native API base URL";
-				description = `${api ? `${NATIVE_PROTOCOL_LABELS[api]} appends ${JUDGMENT_API_PATHS[api]}; enter the root before it.` : ""}${api ? (NATIVE_PROTOCOL_HELP[api] ?? "") : ""}`;
+				const provider = editor.draft.provider ?? "";
+				const root = api ? nativeJudgeRootDefault(api, provider, this.#registry.getAll("all")) : undefined;
+				description = api ? nativeRootDescription(api, provider, root) : "";
+				initialValue = editor.draft.baseUrl ?? root?.baseUrl;
 				editor.preview = new Text("", 0, 0);
 				break;
+			}
 			case "token": {
 				const keySource = editor.draft.provider && this.#callbacks.nativeJudgeKeySource?.(editor.draft.provider);
 				if (keySource) {
@@ -1609,7 +1632,7 @@ export class ModelHubComponent implements Component {
 			theme: formTheme,
 			label,
 			description,
-			initialValue: step === "id" ? editor.draft.id : step === "baseUrl" ? editor.draft.baseUrl : undefined,
+			initialValue,
 			empty,
 			secret,
 			validate: value => {
