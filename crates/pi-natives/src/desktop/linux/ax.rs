@@ -7,7 +7,7 @@ use atspi::{
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_atspi, text_readback},
+	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masked, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	error::{CoreResult, DesktopError},
 	types::DesktopWindow,
@@ -916,24 +916,14 @@ async fn write_text(
 		}
 		return text_readback(value, value, None, true).map_err(emptied);
 	}
-	// A role that cannot be read counts as a password field's, so no password
-	// enters an error.
-	let secure = actual.as_deref().is_some_and(masked)
-		|| accessible
-			.get_role()
-			.await
-			.ok()
-			.is_none_or(|role| role == Role::PasswordText);
+	// A role that cannot be read counts as a password field's, so what such a
+	// field reads never enters an error.
+	let secure = accessible
+		.get_role()
+		.await
+		.ok()
+		.is_none_or(|role| role == Role::PasswordText);
 	text_readback(value, value, actual.as_deref(), secure)
-}
-
-/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
-/// toolkits fall back on.
-fn masked(actual: &str) -> bool {
-	let mut chars = actual.chars();
-	chars.next().is_some_and(|first| {
-		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
-	})
 }
 
 /// Whether `actual` masks `value`: one mask character per character, or per
@@ -1007,37 +997,43 @@ const fn top_level_role(role: Role, child_of_application: bool) -> bool {
 	}
 }
 
+/// Machine names that activate an element, compared by [`folds_to`]: GTK
+/// (`click`, `activate`), Qt (`Toggle`), Chromium and Electron (`click`,
+/// `open`, `jump`, `clickAncestor`, and `doDefault` on elements without a
+/// verb), and `do default` / `do-default` from other ATK bridges. `press`
+/// itself matches before these are tried.
+const ACTIVATIONS: [&str; 8] =
+	["click", "clickancestor", "activate", "invoke", "toggle", "open", "jump", "dodefault"];
+
+/// Chromium's, Firefox's and `LibreOffice`'s activation of menu items,
+/// options and tabs, taken only when an element has none of [`ACTIVATIONS`]:
+/// a GTK colour swatch lists `select` (set the selected flag) before
+/// `activate`.
+const SELECT: &str = "select";
+
+/// Whether `name` is `safe`, ignoring case and the spaces, hyphens and
+/// underscores toolkits spell action names with.
+fn folds_to(name: &str, safe: &str) -> bool {
+	name
+		.bytes()
+		.filter(|byte| !matches!(byte, b' ' | b'-' | b'_'))
+		.map(|byte| byte.to_ascii_lowercase())
+		.eq(safe.bytes())
+}
+
 /// Generic press means activation, not action zero (GTK4 text views put
 /// `buffer.delete-line` there). Explicit advertised actions remain available.
 fn action_index<'a>(
-	mut actions: impl Iterator<Item = &'a str> + Clone,
+	actions: impl Iterator<Item = &'a str> + Clone,
 	requested: &str,
 ) -> Option<usize> {
-	actions
-		.clone()
-		.position(|name| name.eq_ignore_ascii_case(requested))
-		.or_else(|| {
-			requested
-				.eq_ignore_ascii_case("press")
-				.then(|| {
-					actions.position(|name| {
-						[
-							"click",
-							"clickAncestor",
-							"activate",
-							"invoke",
-							"toggle",
-							"open",
-							"jump",
-							"do default",
-							"do-default",
-						]
-						.iter()
-						.any(|safe| name.eq_ignore_ascii_case(safe))
-					})
-				})
-				.flatten()
-		})
+	let position = |matches: &dyn Fn(&str) -> bool| actions.clone().position(matches);
+	position(&|name| name.eq_ignore_ascii_case(requested)).or_else(|| {
+		requested.eq_ignore_ascii_case("press").then(|| {
+			position(&|name| ACTIVATIONS.iter().any(|safe| folds_to(name, safe)))
+				.or_else(|| position(&|name| folds_to(name, SELECT)))
+		})?
+	})
 }
 
 /// The most actions read of one element: the count comes from the app.
@@ -1510,6 +1506,28 @@ mod tests {
 		assert_eq!(action_index(std::iter::empty(), "press"), None);
 	}
 
+	/// Machine names in order, as the GTK 3, GTK 4, Qt 5, Qt 6 and Chromium
+	/// 156 matrix fixtures on Ubuntu 22.04 list them (the colour swatch as GTK
+	/// declares it), with the action `action_index` resolves a generic press to.
+	#[test]
+	fn generic_press_takes_each_toolkits_activation() {
+		let cases: [(&str, &[&str], Option<usize>); 10] = [
+			("GTK 4 label", &["clipboard.copy", "link.open", "menu.popup"], None),
+			("Qt slider", &["SetFocus", "Increase", "Decrease"], None),
+			("Qt menu bar item", &["ShowMenu"], None),
+			("Chromium ARIA menu item", &["select", "showContextMenu"], Some(0)),
+			("Chromium tab", &["doDefault", "showContextMenu"], Some(0)),
+			("Chromium section", &["clickAncestor", "showContextMenu"], Some(0)),
+			("GTK colour swatch", &["select", "activate", "customize"], Some(1)),
+			("spaced spelling", &["Do Default"], Some(0)),
+			("hyphenated spelling", &["do-default"], Some(0)),
+			("context menu only", &["showContextMenu"], None),
+		];
+		for (widget, actions, expected) in cases {
+			assert_eq!(action_index(actions.iter().copied(), "press"), expected, "{widget}");
+		}
+	}
+
 	#[test]
 	fn a_text_write_the_app_ignores_fails() {
 		use std::sync::{Arc, Mutex};
@@ -1600,7 +1618,7 @@ mod tests {
 			}
 		}
 
-		/// An error naming what the field reads, one that names no text, or one
+		/// An error naming what the field reads, one that quotes no text, or one
 		/// saying the field was emptied.
 		enum Verdict {
 			Ok,
@@ -1706,7 +1724,7 @@ mod tests {
 				(Verdict::Ok, Ok(())) => {},
 				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
 				(Verdict::Hidden, Err(err))
-					if err.message.contains("secure") && !err.message.contains("new") => {},
+					if !err.message.contains("new") && !err.message.contains(r#""old""#) => {},
 				(Verdict::Emptied, Err(err))
 					if err.message.contains("emptied") && !err.message.contains("new") => {},
 				(_, result) => panic!("{path}: {result:?}"),

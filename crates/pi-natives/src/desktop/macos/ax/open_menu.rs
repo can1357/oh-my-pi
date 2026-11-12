@@ -32,7 +32,7 @@ use super::{
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
-	menus::{DesktopMenuItem, match_index, require_enabled},
+	menus::{DesktopMenuItem, format_menu_item, match_index, require_enabled},
 	types::DesktopWindow,
 };
 
@@ -532,12 +532,8 @@ fn render<M: Menus>(
 ) -> String {
 	let mut parts = Vec::with_capacity(entries.len());
 	for entry in entries {
-		let mut part = format!("\"{}\"", entry.title);
-		if !entry.enabled {
-			part.push_str(" (disabled)");
-		}
+		let mut part = format_menu_item(&entry.title, entry.enabled, entry.submenu.is_some());
 		if let Some(submenu) = &entry.submenu {
-			part.push_str(" ▸");
 			if entry.enabled
 				&& depth < MAX_LISTED_DEPTH
 				&& let Ok(children) = menus.items(submenu)
