@@ -1597,8 +1597,14 @@ def _magic_set_env(args: str) -> str:
 
 @line_magic("time")
 def _magic_time(args: str) -> Any:
+    # Like IPython's %time, accept a statement (`%time x = f()`) as well as an
+    # expression; only an expression has a value to return.
+    try:
+        code = compile(args, "<string>", "eval")
+    except SyntaxError:
+        code = compile(args, "<string>", "exec")
     start = time.perf_counter()
-    result = eval(args, _STATE.user_ns)
+    result = eval(code, _STATE.user_ns)
     elapsed = time.perf_counter() - start
     sys.stdout.write(f"Wall time: {elapsed * 1000:.2f} ms\n")
     _emit_status("time", elapsed_ms=round(elapsed * 1000, 3))
