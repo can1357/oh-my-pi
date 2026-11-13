@@ -1504,6 +1504,20 @@ Modular Cloud serves open models on an OpenAI-compatible API at `https://api.mod
 ### Catalog model handling
 - **Catalog-only**: the models.dev `modular` entry (`openAiCompletionsDescriptor` in `packages/catalog/src/provider-models/openai-compat.ts`) supplies models, prices, and limits, and receives additive models.dev updates at runtime. There is no `/v1/models` discovery: that endpoint returns only ids, and it also lists models that are not sold on the shared endpoint yet.
 
+## BharatCode (`bharatcode`)
+BharatCode is a flat-rate subscription gateway for coding agents at `https://bharatcode.ai/api/model/v1`. Requests use the OpenAI Chat Completions transport (`openai-completions`). Paid plans carry no per-token charge, so every catalog row prices at zero.
+
+### Special casings
+- **Thinking wire format**: `packages/catalog/src/compat/rules/providers/bharatcode.kdl` uses the standard `reasoning_effort` field (`thinking-format "openai"`) and pins `reasoning-disable-mode "none-effort"` provider-wide: measured over four runs per rung, `reasoning_effort: "none"` is the only input that suppresses reasoning on either model (zero `reasoning_content`), while every effort rung returns reasoning text. The effort ladders differ per model, so each is pinned separately: `deepseek-v4.1-flash` scales with effort (median reasoning tokens 38 at `low`, 54 at `medium`, 84 at `xhigh`) and advertises the full `minimal`-`xhigh` ladder, while `qwen-3.8-27b` accepts the rungs without a monotonic depth response (medians 220/170/218/164 for `low`/`medium`/`high`/`xhigh`) and advertises `low`-`xhigh` without `minimal`.
+- **Minimum output limit**: both models think by default and the gateway rejects a small output cap with `400 output_limit_too_small` ("Set the output limit to at least 11 tokens, omit it, or disable thinking"). The key probe therefore pins `max-tokens=32`.
+
+### Auth & usage
+- **API Key Login**: `packages/catalog/src/compat/rules/auth/bharatcode.kdl` declares a `login "api-key"` rule pointing at the account page's developer-key section and validates the key with a real `chat-completions` call against `https://bharatcode.ai/api/model/v1` and `qwen-3.8-27b`. Environment key: `BHARATCODE_API_KEY`.
+- **`/models` cannot validate a key**: `https://bharatcode.ai/api/model/v1/models` is public and answers `200` for any bearer, including an invalid one.
+
+### Catalog model handling
+- **Hand-seeded**: BharatCode has no models.dev entry, and `/models` returns bare ids with no prices, limits, or reasoning flags, so there is nothing to discover. The two catalog rows come from `seed` blocks in the provider KDL, and `bun run gen:models --provider bharatcode` must be re-run alongside `gen:compat` after editing them.
+
 ## Moonshot (`moonshot`)
 
 Moonshot is the pay-as-you-go open platform provider for Moonshot AI endpoints (`https://api.moonshot.ai/v1` or mainland China `https://api.moonshot.cn/v1`). It rides the `OpenAI Chat Completions` transport engine (`openai-completions` API surface) and shares Kimi-family dialect and thinking mechanics (Kimi taxonomy in `packages/catalog/src/compat/taxonomy.ts`). It is distinct from `kimi-code`, which uses subscription device OAuth and subscription endpoints (`api.kimi.com` / `/coding/v1/*`).

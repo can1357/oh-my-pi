@@ -1,0 +1,14 @@
+auth "bharatcode" {
+	name "BharatCode"
+	login "api-key" {
+		auth-url "https://bharatcode.ai/account#developer-key-title"
+		instructions "Copy your developer key from the BharatCode account page"
+		prompt "Paste your BharatCode API key" placeholder="..."
+		// Validate against inference, not /models: BharatCode's models endpoint is
+		// public and answers 200 for any bearer, so it would accept any string.
+		// max-tokens=32 because the thinking models reject an output limit below
+		// 11 with "output_limit_too_small", and the probe default of 1 is exactly
+		// the case they refuse.
+		validate "chat-completions" label="BharatCode" base-url="https://bharatcode.ai/api/model/v1" model="qwen-3.8-27b" max-tokens=32
+	}
+}
