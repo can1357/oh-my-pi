@@ -174,6 +174,9 @@ const SPOTLIGHT_VIEW_TTL_MS = 60_000;
 /** Spotlight payloads (JSON) of one live data version by `range\0agent`, with when each build started. */
 let spotlightViews: { version: number; views: Map<string, { at: number; json: Promise<string> }> } | null = null;
 
+/** Aborted when the last dashboard of this process stops, ending the Spotlight builds still running for it. */
+let spotlightBuilds = new AbortController();
+
 /**
  * The Spotlight dashboard as JSON, built once per data version and view. Every open page refetches on each version
  * bump and a build takes seconds of a worker's CPU, so pages showing the same view share one build.
@@ -185,7 +188,7 @@ function spotlightView(range: string | null, agent: string | null): Promise<stri
 	const key = `${range ?? ""}\0${agent ?? ""}`;
 	const cached = views.get(key);
 	if (cached && Date.now() - cached.at < SPOTLIGHT_VIEW_TTL_MS) return cached.json;
-	const json = buildSpotlightDashboardJson(range, agent);
+	const json = buildSpotlightDashboardJson(range, agent, spotlightBuilds.signal);
 	const entry = { at: Date.now(), json };
 	views.set(key, entry);
 	// A failed build is not reused.
@@ -458,6 +461,8 @@ function createDashboardServer(port: number, hostname: string): Server<undefined
 				server.timeout(req, 0);
 				return liveEventStream(dashboardHeaders, req.signal);
 			}
+			// A Spotlight build runs on a worker and can outlast the idle timeout, which counts a pending handler.
+			if (path === "/api/stats/spotlight") server.timeout(req, 0);
 
 			try {
 				let response: Response;
@@ -596,8 +601,12 @@ export async function startServer(
 				server.stop(true);
 				if (stopped) return;
 				stopped = true;
-				// The last dashboard in this process takes background ingest down with it.
-				if (--liveServers === 0) statsLive().stop();
+				// The last dashboard in this process takes background ingest and Spotlight builds down with it.
+				if (--liveServers === 0) {
+					statsLive().stop();
+					spotlightBuilds.abort(new Error("Stats dashboard stopped"));
+					spotlightBuilds = new AbortController();
+				}
 			},
 		};
 		for (const key of keys) activeServers.set(key, handle);

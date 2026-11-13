@@ -1832,17 +1832,19 @@ function createSpotlightWorker(): Worker {
 	return new Worker(new URL("./spotlight-worker.ts", import.meta.url).href, { type: "module" });
 }
 
-/** Send one request to a fresh worker and terminate it after the reply, so a build's memory goes with it. */
+/**
+ * Send one request to a fresh worker and terminate it after the reply, so a build's memory goes with it. Aborting
+ * `signal` terminates it early and rejects with the signal's reason.
+ */
 async function askSpotlightWorker(
 	request: SpotlightWorkerRequest,
-	timeoutMs?: number,
+	signal?: AbortSignal,
 ): Promise<Extract<SpotlightWorkerResponse, { ok: true }>> {
+	signal?.throwIfAborted();
 	const worker = createSpotlightWorker();
 	const { promise, resolve, reject } = Promise.withResolvers<SpotlightWorkerResponse>();
-	const timer =
-		timeoutMs === undefined
-			? undefined
-			: setTimeout(() => reject(new Error(`spotlight worker did not reply within ${timeoutMs}ms`)), timeoutMs);
+	const onAbort = () => reject(signal?.reason);
+	signal?.addEventListener("abort", onAbort, { once: true });
 	worker.onmessage = (event: MessageEvent<SpotlightWorkerResponse>) => resolve(event.data);
 	worker.onerror = (event: ErrorEvent) => {
 		reject(event.error instanceof Error ? event.error : new Error(event.message || "spotlight worker error"));
@@ -1854,19 +1856,23 @@ async function askSpotlightWorker(
 		if (!response.ok) throw new Error(response.error);
 		return response;
 	} finally {
-		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
 		worker.terminate();
 	}
 }
 
 /**
  * `GET /api/stats/spotlight?range=&agent=` as JSON, built on a worker: a build takes seconds, and on the server's
- * thread it held every other request and ingest until it ended.
+ * thread it held every other request and ingest until it ended. Aborting `signal` ends the build.
  */
-export async function buildSpotlightDashboardJson(range: string | null, agent: string | null): Promise<string> {
+export async function buildSpotlightDashboardJson(
+	range: string | null,
+	agent: string | null,
+	signal?: AbortSignal,
+): Promise<string> {
 	// The worker opens the database read-only, so it must already exist with the current schema.
 	await initDb();
-	const response = await askSpotlightWorker({ kind: "build", dbPath: getStatsDbPath(), range, agent });
+	const response = await askSpotlightWorker({ kind: "build", dbPath: getStatsDbPath(), range, agent }, signal);
 	if (response.kind !== "build") throw new Error(`spotlight worker: expected a build, got ${response.kind}`);
 	return response.json;
 }
@@ -1876,7 +1882,7 @@ export async function buildSpotlightDashboardJson(range: string | null, agent: s
  * catches a worker that fails to load from the compiled binary or npm bundle.
  */
 export async function smokeTestSpotlightWorker({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
-	const response = await askSpotlightWorker({ kind: "ping" }, timeoutMs);
+	const response = await askSpotlightWorker({ kind: "ping" }, AbortSignal.timeout(timeoutMs));
 	if (response.kind !== "pong") throw new Error(`spotlight worker: expected pong, got ${response.kind}`);
 }
 
