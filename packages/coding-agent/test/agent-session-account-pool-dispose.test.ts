@@ -146,7 +146,9 @@ describe("AgentSession account pools after a dispose deadline", () => {
 		const rows = authStorage.credentials.list("anthropic");
 		const accountA = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-a");
 		const accountC = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-c");
-		if (!accountA || !accountC) throw new Error("expected OAuth fixtures");
+		if (!accountA || accountA.credential.type !== "oauth" || !accountC || accountC.credential.type !== "oauth") {
+			throw new Error("expected OAuth fixtures");
+		}
 
 		expect(session.pinCurrentProviderOAuthAccount(accountC.id)).toBe(true);
 		expect(session.isCurrentProviderOAuthAccountPermitted(accountA.id)).toBe(true);
