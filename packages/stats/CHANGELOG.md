@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The stats dashboard keeps serving its other pages and the Live status while the Spotlight view rebuilds, instead of freezing for the seconds each rebuild after a sync takes
+- The stats dashboard keeps serving its other pages and the Live status while the Spotlight view rebuilds, instead of freezing for the seconds each rebuild after a sync takes ([#19118](https://github.com/can1357/oh-my-pi/pull/19118) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.20.0] - 2026-11-12
 
