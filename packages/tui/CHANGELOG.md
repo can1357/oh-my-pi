@@ -4,7 +4,7 @@
 
 ### Added
 
-- Right arrow opens the composer prediction alternatives wherever Tab does, so Right alone inserts, browses, and picks a prediction ([#19152](https://github.com/can1357/oh-my-pi/pull/19152) by [@wolfiesch](https://github.com/wolfiesch))
+- Right arrow opens the composer prediction alternatives wherever Tab does, so Right alone inserts, browses, and picks a prediction. While the list still selects the line already in the composer, Right keeps it open and Enter sends that line ([#19152](https://github.com/can1357/oh-my-pi/pull/19152) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.20.0] - 2026-11-12
 

@@ -2137,6 +2137,20 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// A prediction list still selecting the line already in the buffer: Right keeps it open, so a held
+		// Right settles on the open list instead of toggling it, and Enter closes it and sends that line.
+		if (
+			this.#autocompleteState === "assist" &&
+			this.#textAssistReplacement?.prediction &&
+			this.#autocompleteList?.getSelectedItem()?.value === this.#textAssistReplacement.original
+		) {
+			if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) return;
+			if (kb.matchesCanonical(canonical, "tui.input.submit")) {
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
+			}
+		}
+
 		// Handle autocomplete special keys first (but don't block other input)
 		if (this.#autocompleteState && this.#autocompleteList) {
 			// Escape - cancel autocomplete. A hidden popup (empty narrowed `@` list) is
@@ -5507,9 +5521,9 @@ export class Editor implements Component, Focusable {
 		if (prediction) return prediction;
 		const alternatives = this.#getPredictionAlternatives();
 		if (alternatives) {
-			// Tab opens the alternatives list from here; without a bound key there is nothing to hint.
-			const tab = editorKey("tui.input.tab");
-			if (tab) return ` ${tab} ${alternatives.choices.length - 1} more`;
+			// Tab or Right opens the alternatives list from here; without a bound key there is nothing to hint.
+			const key = editorKey("tui.input.tab") || editorKey("tui.editor.cursorRight");
+			if (key) return ` ${key} ${alternatives.choices.length - 1} more`;
 		}
 		// Fall back to provider's getInlineHint
 		if (this.#autocompleteProvider?.getInlineHint) {
