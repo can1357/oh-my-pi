@@ -2232,7 +2232,9 @@ fn key_menu_guarded(
 	press: impl FnOnce() -> CoreResult<()>,
 	settle: impl FnOnce(&[u32]) -> CoreResult<ax::open_menu::Settled>,
 ) -> CoreResult<()> {
-	if !ax::open_menu::keys_may_open(keys, || if background() { role() } else { None }) {
+	if !ax::open_menu::keys_may_open(keys, || {
+		background().then(|| role().unwrap_or_else(|| "AXPopUpButton".to_string()))
+	}) {
 		return press();
 	}
 	let before = menus().ok_or_else(|| {
@@ -7704,8 +7706,7 @@ mod tests {
 	fn a_menu_key_lists_no_menus_off_a_menu_control_or_with_its_app_in_front() {
 		let window = background_window("Fixture");
 		// The focused element opens no menu, or the user's app is not in front.
-		for (background, focused) in
-			[(true, Some("AXTextField")), (true, None), (false, Some("AXPopUpButton"))]
+		for (background, focused) in [(true, Some("AXTextField")), (false, Some("AXPopUpButton"))]
 		{
 			let role = || {
 				assert!(background, "the role is read only behind the user's app");
@@ -7722,6 +7723,44 @@ mod tests {
 			)
 			.expect("posted");
 		}
+	}
+
+	#[test]
+	fn an_unreadable_focused_role_watches_down_but_leaves_letters_unwatched() {
+		let window = background_window("Fixture");
+		let pressed = std::cell::Cell::new(0);
+		let settled = std::cell::Cell::new(false);
+		key_menu_guarded(
+			&window,
+			&[KeyName::Down],
+			|| true,
+			|| None,
+			|| Some(Vec::new()),
+			|| {
+				pressed.set(pressed.get() + 1);
+				Ok(())
+			},
+			|_| {
+				settled.set(true);
+				Ok(ax::open_menu::Settled::NoMenu)
+			},
+		)
+		.expect("posted and watched");
+		assert_eq!((pressed.get(), settled.get()), (1, true));
+		key_menu_guarded(
+			&window,
+			&[KeyName::Char('a')],
+			|| panic!("letters do not check the front application"),
+			|| panic!("letters do not read the focused role"),
+			|| panic!("letters do not list menus"),
+			|| {
+				pressed.set(pressed.get() + 1);
+				Ok(())
+			},
+			|_| panic!("letters do not settle menus"),
+		)
+		.expect("letter posted");
+		assert_eq!(pressed.get(), 2);
 	}
 
 	#[test]
