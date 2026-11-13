@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed Gemini 4 Argon, Carbon and Hydrogen on the Gemini API and Vertex AI stopping long answers at 32,768 or 65,536 output tokens, often before any visible text; they now allow up to 262,144, so long answers continue past the first segment ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat)).
-- Fixed Command Code under-reporting Grok 4.7 spend at $1.20/$3.60 per million tokens and over-reporting Claude Sonnet 5.5 cache reads at $0.20; they now follow Command Code's CLI: Grok 4.7 at $2/$6 with a 2x tier above 200K input, and Sonnet 5.5 cache reads at $0.10. With that tier, Grok 4.7's default window now starts at 200K, with `/extended-context on` opening the full 500K
+- Fixed Command Code under-reporting Grok 4.7 spend at $1.20/$3.60 per million tokens and over-reporting Claude Sonnet 5.5 cache reads at $0.20; they now follow Command Code's CLI: Grok 4.7 at $2/$6 with a 2x tier above 200K input, and Sonnet 5.5 cache reads at $0.10. With that tier, Grok 4.7's default window now starts at 200K, with `/extended-context on` opening the full 500K ([#19149](https://github.com/can1357/oh-my-pi/pull/19149) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.20.0] - 2026-11-12
 
