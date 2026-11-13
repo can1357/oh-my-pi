@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- `/settings` now names the model Mnemopi's `llmMode: smol` uses (the MEMORY role from `/models`, else TINY, else `@smol`; local or online) and labels the option `Memory role` instead of `Online (tiny)` ([#19097](https://github.com/can1357/oh-my-pi/pull/19097) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - `write` no longer fails with "content is required" on strict-mode providers such as Wafer and Fireworks, where models sent `content: null` for an ordinary file write
 - A seance `task` whose `sourceSession` id belongs to another project now fails with a hint to pass that session's `.jsonl` path, which works from any project, instead of only "was not found" ([#19095](https://github.com/can1357/oh-my-pi/pull/19095) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - On Windows, a `mnemopi.dbPath` of `~/…` now resolves to a native path (`C:\Users\you\mnemopi\custom.db`) instead of mixing `\` and `/` ([#19106](https://github.com/can1357/oh-my-pi/pull/19106) by [@zhivko-kocev](https://github.com/zhivko-kocev))
