@@ -4095,6 +4095,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			provider: model.provider,
 			providerType: model.providerType,
 			protocol: "anthropic",
+			modelId: model.id,
 			sessionId,
 		});
 
@@ -4168,6 +4169,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		provider: model.provider,
 		providerType: model.providerType,
 		protocol: "anthropic",
+		modelId: model.id,
 		sessionId,
 	});
 

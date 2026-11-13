@@ -3,6 +3,7 @@
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { isOpenCodeFreeModel, OPENCODE_FREE_USER_AGENT, openCodeFreeSessionId } from "./opencode-free";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -21,6 +22,8 @@ export interface InferenceHeaderOptions {
 	 */
 	providerType?: string;
 	protocol: "anthropic" | "google" | "openai";
+	/** Resolved model id; picks out the free Zen lanes. */
+	modelId?: string;
 	sessionId?: string;
 	/**
 	 * Shared prompt-cache affinity key (see {@link resolveOpenCodeGoCacheAffinity}).
@@ -122,12 +125,16 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	}
 
 	if (isOpenCode) {
-		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
+		// Free Zen models are gated on the OpenCode client's own identity: a
+		// different User-Agent or session shape is refused with a plain 429
+		// before the model is reached (see ./opencode-free).
+		const free = isOpenCodeFreeModel({ provider: options.provider, providerType: options.providerType, id: options.modelId ?? "" });
+		setHeaderIfAbsent(headers, "User-Agent", free ? OPENCODE_FREE_USER_AGENT : USER_AGENT);
 		// Go's session header doubles as the gateway's cache-affinity handle:
 		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
 		// task cache key there; every other lane keeps the conversation id.
 		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
-		if (goSession) setHeader(headers, "x-opencode-session", goSession);
+		if (goSession) setHeader(headers, "x-opencode-session", free ? openCodeFreeSessionId(goSession) : goSession);
 	}
 }
 
