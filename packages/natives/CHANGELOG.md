@@ -45,6 +45,8 @@
 - Fixed the shell visualization copying a multi-line command’s full text into every row, which cost about 1 GB per bash card for long commands ([#18791](https://github.com/can1357/oh-my-pi/issues/18791)) ([#19177](https://github.com/can1357/oh-my-pi/pull/19177) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 - Fixed the shell's `cp` builtin so `-L`, `-H`, `-P`, and `-d` after `-a` or `-d` override only symlink following instead of dropping recursion or preserved attributes ([#19215](https://github.com/can1357/oh-my-pi/pull/19215) by [@eggpeat](https://github.com/eggpeat))
 - Fixed a crash in the built-in shell when a `[` or `test` expression chained tens of thousands of terms with `-a` or `-o`: the chain is now evaluated iteratively, and parentheses nested past the shell's nesting limit are reported as an error instead. ([#18498](https://github.com/can1357/oh-my-pi/pull/18498) by [@sjawhar](https://github.com/sjawhar))
+- Fixed macOS `axSetValue` refusing every option of a Chromium `<select>` (Chrome, Electron) with an empty option list: options are matched by the text Chromium reports as their value, the menu is opened when the closed popup publishes only its chosen option, and the menu is closed afterwards with Escape when it is still showing after `AXCancel`, which a Chromium menu ignores, instead of being left open with your keystrokes when no option matched
+- Fixed macOS posting Escape to an application whose background menu had already closed, or whose menu windows could not be read, when closing a menu a click opened: Escape now goes only to a menu window listed right before it, so it cannot cancel a dialog or form in the app instead
 
 ## [18.20.0] - 2026-11-12
 
