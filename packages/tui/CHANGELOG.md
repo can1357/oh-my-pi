@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Usage views (`/usage`, `omp usage` and the usage dashboard, including Tern's) spell provider names as their brands do: `OpenAI Codex`, `GitHub Copilot`, `Google Gemini CLI`, `MiniMax Code CN` and `Z.AI` instead of `Openai Codex`, `Github Copilot`, `Google Gemini Cli`, `Minimax Code Cn` and `Zai`
+- Usage views (`/usage`, `omp usage` and the usage dashboard, including Tern's) spell provider names as their brands do: `OpenAI Codex`, `GitHub Copilot`, `Google Gemini CLI`, `MiniMax Code CN` and `Z.AI` instead of `Openai Codex`, `Github Copilot`, `Google Gemini Cli`, `Minimax Code Cn` and `Zai` ([#19101](https://github.com/can1357/oh-my-pi/pull/19101) by [@a-glapinski](https://github.com/a-glapinski))
 
 ## [18.20.0] - 2026-11-12
 
