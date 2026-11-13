@@ -134,14 +134,14 @@ describe("getGainDashboardStats", () => {
 
 		const fooStats = await getGainDashboardStats("24h", "/Users/me/Code/foo");
 		expect(fooStats.overall.savedTokens).toBe(150);
-		expect(fooStats.bySource.toolResults.hits).toBe(2);
+		expect(fooStats.bySource.snapcompact.hits).toBe(2);
 		expect(fooStats.timeSeries).toEqual([
-			{ date: new Date(now).toISOString().slice(0, 10), toolResults: 150, compaction: 0, total: 150 },
+			{ date: new Date(now).toISOString().slice(0, 10), snapcompact: 150, compaction: 0, total: 150 },
 		]);
 
 		const foobarStats = await getGainDashboardStats("24h", "/Users/me/Code/foobar");
 		expect(foobarStats.overall.savedTokens).toBe(200);
-		expect(foobarStats.bySource.toolResults.hits).toBe(1);
+		expect(foobarStats.bySource.snapcompact.hits).toBe(1);
 	});
 
 	it("counts the context snapcompact compactions freed, once per entry across forks and rewrites", async () => {
@@ -153,7 +153,7 @@ describe("getGainDashboardStats", () => {
 		const stats = await getGainDashboardStats("all");
 		expect(stats.bySource.compaction).toMatchObject({ savedTokens: 600, hits: 1, reductionPercent: 0.6 });
 		expect(stats.overall.reductionPercent).toBe(0.6);
-		expect(stats.timeSeries).toEqual([{ date: "2026-11-01", toolResults: 0, compaction: 600, total: 600 }]);
+		expect(stats.timeSeries).toEqual([{ date: "2026-11-01", snapcompact: 0, compaction: 600, total: 600 }]);
 		expect(stats.projects).toEqual(["/Users/me/Code/foo"]);
 		expect((await getGainDashboardStats("all", "/Users/me/Code/bar")).overall.savedTokens).toBe(0);
 

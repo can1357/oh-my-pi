@@ -27,8 +27,8 @@ export interface GainRouteProps {
 const DAY_MS = 86_400_000;
 
 const SOURCE_LABEL: Record<GainSource, string> = {
-	toolResults: "Snapcompact imaged tool results",
-	compaction: "Snapcompact compaction",
+	snapcompact: "Snapcompact imaged tool results",
+	compaction: "Snapcompact compaction (context freed)",
 };
 
 /** The server buckets gain by UTC calendar day (`YYYY-MM-DD`). */
@@ -92,7 +92,7 @@ export function GainRoute({ active, range }: GainRouteProps) {
 		<div className="page">
 			<PageHeader
 				title="Gain"
-				description={`Tokens snapcompact kept out of context${scope} in ${meta.windowLabel}.`}
+				description={`Context snapcompact freed by compacting, and tokens it saved by imaging tool results${scope}, in ${meta.windowLabel}.`}
 				actions={
 					projectOptions.length > 0 && (
 						<select

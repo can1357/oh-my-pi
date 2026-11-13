@@ -285,12 +285,12 @@ export async function getGainDashboardStats(
 
 	const toolResults = emptyTotals();
 	const compaction = emptyTotals();
-	const timeMap = new Map<string, { toolResults: number; compaction: number }>();
+	const timeMap = new Map<string, { snapcompact: number; compaction: number }>();
 	const bucketFor = (epochMs: number) => {
 		const date = toDateBucket(epochMs);
 		let bucket = timeMap.get(date);
 		if (!bucket) {
-			bucket = { toolResults: 0, compaction: 0 };
+			bucket = { snapcompact: 0, compaction: 0 };
 			timeMap.set(date, bucket);
 		}
 		return bucket;
@@ -301,7 +301,7 @@ export async function getGainDashboardStats(
 		toolResults.savedTokens += rec.savedTokens;
 		toolResults.savedBytes += rec.savedTokens * BYTES_PER_TOKEN_ESTIMATE;
 		toolResults.hits += 1;
-		bucketFor(rec.ts).toolResults += rec.savedTokens;
+		bucketFor(rec.ts).snapcompact += rec.savedTokens;
 	}
 
 	// A compaction whose estimate did not shrink kept nothing out of context.
@@ -330,16 +330,16 @@ export async function getGainDashboardStats(
 		.sort(([a], [b]) => a.localeCompare(b))
 		.map(([date, bucket]) => ({
 			date,
-			toolResults: bucket.toolResults,
+			snapcompact: bucket.snapcompact,
 			compaction: bucket.compaction,
-			total: bucket.toolResults + bucket.compaction,
+			total: bucket.snapcompact + bucket.compaction,
 		}));
 
 	const projects = dedupeProjects(new Set([...toolResultSets.projects, ...compactionSets.projects]));
 
 	return {
 		overall,
-		bySource: { toolResults, compaction },
+		bySource: { snapcompact: toolResults, compaction },
 		timeSeries,
 		project: effectiveProject,
 		projects,
