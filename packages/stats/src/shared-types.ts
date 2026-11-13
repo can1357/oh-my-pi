@@ -297,13 +297,17 @@ export interface GainSourceTotals {
 	reductionPercent: number | null;
 }
 
-/** Per-source breakdown. */
-export type GainSource = "snapcompact";
+/**
+ * Per-source breakdown: `snapcompact` is tool results snapcompact sent as images,
+ * `compaction` is the context snapcompact compactions freed.
+ */
+export type GainSource = "snapcompact" | "compaction";
 
 /** Time-series point for gain (daily bucket). */
 export interface GainTimeSeriesPoint {
 	date: string;
 	snapcompact: number;
+	compaction: number;
 	total: number;
 }
 
