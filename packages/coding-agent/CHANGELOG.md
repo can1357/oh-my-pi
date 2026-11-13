@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `browser.open` with `app: "/usr/bin/chromium"` on Arch now reuses the Chromium already running on that profile instead of failing with "Timed out waiting for CDP endpoint" ([#19235](https://github.com/can1357/oh-my-pi/pull/19235) by [@tuschla](https://github.com/tuschla))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
