@@ -1,7 +1,7 @@
-import { type FetchImpl, SPEECH_FORMATS, type SpeechFormat, type Usage } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, SpeechFormat, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "../auth-retry";
 
-export { SPEECH_FORMATS, type SpeechFormat };
+export type { SpeechFormat };
 
 export const SPEECH_FORMAT_MIME_TYPES: Record<SpeechFormat, string> = {
 	mp3: "audio/mpeg",

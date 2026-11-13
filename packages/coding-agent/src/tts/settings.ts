@@ -50,6 +50,19 @@ export const cfgSpeechEnabled = register({
 	},
 });
 
+export const cfgSpeechCloud = register({
+	id: "speech.cloud",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Cloud Speech Vocalization",
+		description:
+			"Vocalize through the configured cloud speech models (openai-speech/xai-tts) in modelRoles.speech and its fallbacks, sending each spoken segment to that endpoint. Off keeps vocalization on local Kokoro",
+	},
+});
+
 export const cfgSpeechMode = register({
 	id: "speech.mode",
 	type: "enum",
