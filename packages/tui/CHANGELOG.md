@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
 
-- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - The Spotlight sheet of a `;`/`,` path `read` shows each part as its own section, numbered from its file's lines with its own ranking ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
 
 ### Fixed
