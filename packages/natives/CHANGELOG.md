@@ -6,6 +6,11 @@
 
 - Added optimistic concurrency and alternate-index support to `commitCreate()`: commits can use a separate index file without modifying the repository index and can reject stale commits when `HEAD` has moved.
 - Improved `grep()` and `glob()` performance for ovnfs checkouts by using the serving daemon when supported, while retaining native fallback behavior and existing streaming, filtering, and link-following options.
+- `commitCreate()` accepts `indexPath` to commit from an alternate index file (hooks see it as `GIT_INDEX_FILE`; the repository's index is left untouched) and `expectedHead` to reject with code `HeadMoved` when HEAD has moved
+- `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
+- `DirectoryWatcher` changes say whether their entry is a directory, and `close()` returns without waiting for the watcher thread to cancel its reads (a network round trip on shares)
+- `grep()` and `glob()` below an ovnfs checkout are answered by the ovnfs daemon serving it, which searches the checkout's overlay in-process instead of paying an NFS round trip per file: the walker finds ovnfs mounts in the host mount table, and falls back to its own walk whenever the daemon cannot answer (no daemon, another protocol version, a daemon serving another mount, an error reply). Named file roots, `onMatches` streaming, `type` filters and link-following globs always walk natively
+- `DesktopFocusReturn.keyboard` says what a macOS takeover did with the user's keyboard (`handedBack`, `leftAsChosen`, `kept`, `frontOnly`, `notSent`)
 
 ### Fixed
 

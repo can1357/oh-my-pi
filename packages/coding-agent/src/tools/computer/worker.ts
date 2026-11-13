@@ -22,6 +22,7 @@ import type {
 	DesktopDisplay,
 	DesktopDragResult,
 	DesktopFocusReturn,
+	DesktopKeyboardReturn,
 	DesktopPoint,
 	DesktopScreenState,
 	DesktopSessionOptions,
@@ -593,12 +594,32 @@ async function focusReport(
 ): Promise<string> {
 	if (!report || report.frontPid == null) return "focus was not confirmed afterwards";
 	const { frontPid, previousPid, handedBack } = report;
+	// macOS says what it did with the user's keyboard: nothing outside an app
+	// can see which of its windows is key, so it names what was sent, never a
+	// verified key window.
+	const keyboard: `${DesktopKeyboardReturn}` | undefined = report.keyboard;
 	const names = await appNames(session, signal);
 	const name = (pid: number) => names.get(pid) ?? `pid ${pid}`;
 	const front = name(frontPid);
 	if (previousPid == null) return `focus is on ${front}`;
-	if (frontPid === previousPid) return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	if (keyboard === "leftAsChosen") return `focus is on ${front}, left as the user chose`;
 	const user = name(previousPid);
+	if (frontPid === previousPid) {
+		switch (keyboard) {
+			case "handedBack":
+				return `handed the keyboard back to ${front}'s window`;
+			case "notSent":
+				return handedBack
+					? `handed the front back to ${front} but not its window's keyboard: the user's last input was still being read`
+					: `focus is on ${front}; the user's last input was still being read, so nothing was sent to its window`;
+			case "frontOnly":
+				return `handed the front back to ${front}, which shows no window`;
+			case "kept":
+				return `focus is on ${front}`;
+		}
+		return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	}
+	if (keyboard === "handedBack") return `handed the keyboard back to ${user}'s window, but ${front} is now front`;
 	if (handedBack) return `focus was handed back to ${user}, but ${front} is now front`;
 	if (frontPid === target) return `focus stayed on ${front}; it did not return to ${user}`;
 	return `focus is on ${front}; it did not return to ${user}`;

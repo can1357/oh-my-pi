@@ -46,6 +46,7 @@ import type {
 	DesktopDisplay,
 	DesktopDragResult,
 	DesktopFocusReturn,
+	DesktopKeyboardReturn,
 	DesktopPoint,
 	DesktopScreenState,
 	DesktopTypeResult,
@@ -5211,6 +5212,32 @@ describe("computer background fallback", () => {
 		].join("\n");
 		await run(native, code, "takeover");
 		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);
+	});
+
+	it("says what a macOS takeover did with the user's keyboard, never that focus returned", async () => {
+		const said = async (keyboard: `${DesktopKeyboardReturn}`, frontPid = 300, handedBack = true) => {
+			const native = new RefusingSession();
+			native.report = {
+				handedBack,
+				previousPid: 300,
+				frontPid,
+				keyboard: keyboard as DesktopKeyboardReturn,
+			};
+			return notice(await run(native, clickTarget, "takeover"));
+		};
+		expect(await said("handedBack")).toEndWith("handed the keyboard back to Notes's window");
+		expect(await said("handedBack", 400)).toEndWith(
+			"handed the keyboard back to Notes's window, but Mail is now front",
+		);
+		expect(await said("leftAsChosen")).toEndWith("focus is on Notes, left as the user chose");
+		expect(await said("leftAsChosen", 400)).toEndWith("focus is on Mail, left as the user chose");
+		expect(await said("notSent")).toContain("not its window's keyboard");
+		// WindowServer refused the hand-back: nothing was sent, and the notice does not claim one.
+		expect(await said("notSent", 300, false)).toEndWith(
+			"focus is on Notes; the user's last input was still being read, so nothing was sent to its window",
+		);
+		expect(await said("frontOnly")).toEndWith("handed the front back to Notes, which shows no window");
+		expect(await said("kept")).toEndWith("focus is on Notes");
 	});
 
 	it("reports where native saw focus end, not the window list's focused flag", async () => {
