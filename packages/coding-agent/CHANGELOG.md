@@ -5,6 +5,10 @@
 ### Added
 
 - Added `task.inheritContext` (default off): a task item can set `inheritContext: true` to start its subagent with a redacted tail of the parent conversation; agents with `inheritContext: false`, including the bundled reviewers and `seance`, ignore it and are marked in the agent list; advisor task spawns never inherit ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
+### Fixed
+
+- Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
+- `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
 
 ## [18.20.0] - 2026-11-12
 
