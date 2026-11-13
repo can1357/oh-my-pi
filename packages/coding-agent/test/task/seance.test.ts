@@ -134,7 +134,7 @@ describe("seance source resolution", () => {
 		});
 	});
 
-	it("fails closed for missing paths and IDs, ambiguous prefixes, and files without a session header", async () => {
+	it("fails closed for missing paths, ambiguous prefixes, and files without a session header", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-source-invalid-");
 		const cwd = path.join(tempDir.path(), "project");
 		const sessionDir = path.join(tempDir.path(), "sessions");
@@ -147,7 +147,6 @@ describe("seance source resolution", () => {
 		await expect(resolveSeanceSource(path.join(sessionDir, "missing.jsonl"), options)).rejects.toThrow(
 			"The selected session file was not found or could not be accessed.",
 		);
-		await expect(resolveSeanceSource("not-present", options)).rejects.toThrow('Session "not-present" was not found.');
 		await expect(resolveSeanceSource("ambiguous", options)).rejects.toThrow(
 			'Session selector "ambiguous" is ambiguous.',
 		);
@@ -209,9 +208,8 @@ describe("seance source resolution", () => {
 			const foreignFile = path.join(sessionDirForCwd(otherCwd), "foreign.jsonl");
 			await writeSession(foreignFile, "foreign-project-id", otherCwd);
 
-			await expect(resolveSeanceSource("foreign-project-id", { cwd })).rejects.toThrow(
-				'Session "foreign-project-id" was not found.',
-			);
+			await expect(resolveSeanceSource("foreign-project-id", { cwd })).rejects.toThrow("pass its .jsonl file path");
+			await expect(resolveSeanceSource(foreignFile, { cwd })).resolves.toMatchObject({ id: "foreign-project-id" });
 			await expect(resolveSeanceSource("foreign-project-id", { cwd, includeGlobal: true })).resolves.toMatchObject({
 				file: foreignFile,
 				id: "foreign-project-id",
