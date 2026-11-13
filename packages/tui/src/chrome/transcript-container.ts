@@ -889,15 +889,20 @@ export class TranscriptContainer extends Container {
 	}
 
 	/**
-	 * Whether pressure retirement can take every live block older than
-	 * `live[cursor]`, and that block itself (as a split) when `clipped`. It
-	 * advances only across settled blocks, so an active block there would stay
-	 * pinned out of view instead.
+	 * Whether every live block older than `live[cursor]`, and that block itself
+	 * (as a split) when `clipped`, holds its final content, so pressure
+	 * retirement takes it into scrollback once it settles and clipping hides
+	 * nothing that can still change. A finalized block still pending (an async
+	 * figure render or image conversion in replayed history) only delays that;
+	 * a block still streaming or running would stay pinned out of view instead.
 	 */
 	#retiresThrough(live: ReadonlyArray<{ entry: TranscriptEntry }>, cursor: number, clipped: boolean): boolean {
 		const end = clipped ? cursor + 1 : cursor;
 		for (let index = 0; index < end; index++) {
-			if (live[index]!.entry.state !== "settled") return false;
+			const { entry } = live[index]!;
+			if (entry.state === "settled") continue;
+			const block = entry.component as Component & FinalizableBlock;
+			if (block.isTranscriptBlockFinalized?.() === false) return false;
 		}
 		return true;
 	}

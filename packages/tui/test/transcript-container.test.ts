@@ -852,6 +852,21 @@ describe("TranscriptContainer", () => {
 		expect(transcript.renderViewport(80, 3, frame)).toEqual(["run3", "done1", "done2"]);
 	});
 
+	it("clips replayed history above a finished block whose figure is still rendering", () => {
+		class PendingFigureBlock extends Block {
+			isTranscriptBlockPending(): boolean {
+				return true;
+			}
+		}
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["older"], true));
+		// Finalized text with an async figure render in flight: retirement waits for it, but nothing on it changes.
+		transcript.addChild(new PendingFigureBlock(["figure1", "figure2"], true));
+		transcript.addChild(new Block(["done1", "done2"], true));
+
+		expect(transcript.renderViewport(80, 4, frame)).toEqual(["figure2", "", "done1", "done2"]);
+	});
+
 	it("keeps an emergency row from a block behind the bounded viewport walk", () => {
 		class HintBlock extends Block {
 			renderTranscriptBlockEmergencyRow(): string {
