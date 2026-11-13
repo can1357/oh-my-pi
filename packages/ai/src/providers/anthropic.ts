@@ -3271,7 +3271,12 @@ const streamAnthropicOnce = (
 							);
 							if (openBlock.kind === "ignored" || openBlock.contentIndex < 0) continue;
 							const danglingBlock = blocks[openBlock.contentIndex];
-							if (danglingBlock) finalizeStreamBlock(danglingBlock, openBlock.contentIndex);
+							if (danglingBlock) {
+								// An unclosed block's signature cannot verify: blank it ("" survives
+								// adoptThinkingState) so unsigned-thinking replay applies.
+								if (danglingBlock.type === "thinking") danglingBlock.thinkingSignature = "";
+								finalizeStreamBlock(danglingBlock, openBlock.contentIndex);
+							}
 						}
 						openBlocks.clear();
 					}

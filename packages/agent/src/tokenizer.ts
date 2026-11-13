@@ -589,10 +589,10 @@ export class Tokenizer {
 	 * blocks instead, `null` when it replays but the backend reported no
 	 * reasoning tokens to price it by. The payload goes back on the wire only
 	 * to the api, model and provider that produced it (`convertMessages` in
-	 * pi-ai's Responses providers), and then only what survives replay: a
-	 * truncated thinking-only turn is dropped, a hidden-empty or reasoning-only
-	 * payload sanitizes to nothing, and a cold session rebuilds the turn without
-	 * its reasoning, so those send no reasoning and no signature (0).
+	 * pi-ai's Responses providers), and then only what survives replay:
+	 * failed thinking-only turns and ordinary hidden-empty payloads send none.
+	 * Retained output-length reasoning stays in the native input; a cold session
+	 * rebuilds rather than replaying connection-bound state.
 	 */
 	#replayedReasoningTokens(message: AssistantMessage): number | null | undefined {
 		// A payload this reader does not own is not native history at all: the turn

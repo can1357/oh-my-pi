@@ -14,6 +14,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
+import { getOpenAIResponsesHistoryPayload } from "../utils";
 import {
 	isDemotedThinking,
 	kCarriedReasoning,
@@ -481,10 +482,13 @@ function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[
 /**
  * Whether {@link transformMessages} drops `msg` from every replay: a turn cut
  * off by `length` / `error` / `aborted` that carries no text and no tool call.
+ * A `length` turn that still carries replayable reasoning ({@link hasReplayableThinking})
+ * survives; its reasoning continues on the next response.
  */
 export function shouldDropTruncatedThinkingOnlyAssistant(msg: AssistantMessage): boolean {
 	const isTruncatedStop = msg.stopReason === "length" || msg.stopReason === "error" || msg.stopReason === "aborted";
-	return isTruncatedStop && !msg.content.some(block => block.type === "toolCall" || block.type === "text");
+	if (isTruncatedStop && msg.content.some(block => block.type === "toolCall" || block.type === "text")) return false;
+	return isTruncatedStop && (msg.stopReason !== "length" || !hasReplayableThinking(msg));
 }
 
 /**
@@ -496,6 +500,7 @@ export function shouldDropTruncatedThinkingOnlyAssistant(msg: AssistantMessage):
  * to apply its tool-name limits; without one, any provider-declarable name survives.
  */
 export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): boolean {
+	if (msg.stopReason === "length" && hasReplayableThinking(msg, model)) return true;
 	const isTruncatedStop = msg.stopReason === "length" || msg.stopReason === "error" || msg.stopReason === "aborted";
 	if (msg.content.length === 0) return !isTruncatedStop;
 	const { allowedName, maxLength } = toolCallNameLimits(model);
@@ -544,6 +549,72 @@ export function isSameModelTurn(
 	model: Pick<Model, "provider" | "api" | "id">,
 ): boolean {
 	return turn.provider === model.provider && turn.api === model.api && turn.model === model.id;
+}
+
+/**
+ * Readable reasoning or usable native state; an omitted target means the
+ * original model.
+ */
+export function hasReplayableThinking(message: AssistantMessage, model?: Model): boolean {
+	if (message.content.some(block => block.type === "thinking" && block.thinking.trim().length > 0)) return true;
+	if (model && !isSameModelTurn(message, model)) return false;
+	if (isResponsesFamilyApi(message.api)) {
+		const compat = model?.compat;
+		const stored = Boolean(
+			message.responseId &&
+			(!model ||
+				(compat &&
+					(("statefulResponses" in compat && compat.statefulResponses === true) ||
+						("officialEndpoint" in compat && compat.officialEndpoint === true)))),
+		);
+		const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, message.provider);
+		if (payload) {
+			for (const item of payload.items) {
+				if (isReplayableResponsesReasoning(item, stored)) return true;
+			}
+		}
+		for (const block of message.content) {
+			if (block.type !== "thinking" || !block.thinkingSignature) continue;
+			try {
+				const item: unknown = JSON.parse(block.thinkingSignature);
+				if (isReplayableResponsesReasoning(item, stored)) return true;
+			} catch {
+				// Completions field-name markers and unfinished signatures are not native state.
+			}
+		}
+		return false;
+	}
+	if (message.api === "openai-completions") {
+		// LiteLLM's `thinking_blocks` carrier replays redacted blocks natively.
+		return message.content.some(block => block.type === "redactedThinking" && block.data.trim().length > 0);
+	}
+	if (message.api !== "anthropic-messages" && message.api !== "bedrock-converse-stream") return false;
+	return message.content.some(block => {
+		if (block.type === "redactedThinking") return block.data.trim().length > 0;
+		if (block.type !== "thinking") return false;
+		const signature = block.thinkingSignature;
+		return (
+			Boolean(signature?.trim()) &&
+			signature !== "reasoning_content" &&
+			signature !== "reasoning" &&
+			signature !== "reasoning_text"
+		);
+	});
+}
+
+function isReplayableResponsesReasoning(item: unknown, stored: boolean): boolean {
+	if (typeof item !== "object" || item === null || !("type" in item) || item.type !== "reasoning") return false;
+	if ("encrypted_content" in item && typeof item.encrypted_content === "string" && item.encrypted_content.length > 0) {
+		return true;
+	}
+	return (
+		stored &&
+		"id" in item &&
+		typeof item.id === "string" &&
+		item.id.length > 0 &&
+		"status" in item &&
+		item.status === "completed"
+	);
 }
 
 /**
@@ -1153,11 +1224,15 @@ export function transformMessages<TApi extends Api>(
 						// Both undefined and empty string signatures are invalid and must
 						// be dropped entirely — not demoted to text. Demotion would cause
 						// the reasoning_extraction safety classifier to refuse the response.
-						if (
-							isSameModel &&
-							isSigningAnthropicTarget &&
-							(!sanitized.thinkingSignature || sanitized.thinkingSignature.trim() === "")
-						) {
+						// Except a `length` turn: the cap cut its signature, so its thought demotes.
+						if (isSameModel && isSigningAnthropicTarget && !sanitized.thinkingSignature?.trim()) {
+							if (assistantMsg.stopReason === "length" && sanitized.thinking.trim().length > 0) {
+								return {
+									type: "text" as const,
+									text: renderDemotedThinking(model.id, sanitized.thinking),
+									[kDemotedThinking]: true,
+								};
+							}
 							return [];
 						}
 						return sanitized;
@@ -1475,7 +1550,13 @@ export function transformMessages<TApi extends Api>(
 			// represent reasoning-only assistant turns used for replay round-trips
 			// (OpenAI completions `reasoning_text`, Google signed thought parts).
 			const originalMsg = messages[i]!;
-			if (originalMsg.role === "assistant" && shouldDropTruncatedThinkingOnlyAssistant(originalMsg)) {
+			if (
+				originalMsg.role === "assistant" &&
+				(shouldDropTruncatedThinkingOnlyAssistant(originalMsg) ||
+					(originalMsg.stopReason === "length" &&
+						assistantMsg.content.length === 0 &&
+						!hasReplayableThinking(assistantMsg, model)))
+			) {
 				continue;
 			}
 

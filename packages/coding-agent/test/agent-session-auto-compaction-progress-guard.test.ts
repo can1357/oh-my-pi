@@ -6,7 +6,7 @@ import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { type CompactionPreparation, resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { prompt, TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
@@ -15,6 +15,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { INCOMPLETE_RECOVERY_MAX_RETRIES } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
+import lengthStopContinuePrompt from "../src/prompts/system/length-stop-continue.md" with { type: "text" };
 import * as telemetryExport from "../src/telemetry-export";
 
 import {
@@ -1062,34 +1063,62 @@ describe("AgentSession auto-compaction progress guard", () => {
 			expect(session.agent.state.messages).toContain(truncated);
 		});
 
-		it("retries a reasoning-only turn without compacting, telling the model its reasoning was discarded", async () => {
-			// Signed thinking is replay-worthy but delivers nothing: the budget went
-			// to reasoning, so retry rather than keep a truncated non-answer. The retry
-			// must not re-send the identical context: a model that burned the whole cap
-			// planning would re-plan into the same cap forever.
+		it("continues a reasoning-only turn without compacting, keeping its reasoning", async () => {
+			// Signed thinking delivers nothing yet: the budget went to reasoning. It stays
+			// in context and the next response continues it, so a model that burned the
+			// whole cap planning does not re-plan into the same cap.
 			const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+			const reasoning = lengthStop([
+				{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" },
+			]);
 
-			await endTurn(lengthStop([{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" }]));
+			await endTurn(reasoning);
 
 			expect(handoffSpy).not.toHaveBeenCalled();
 			expect(continueSpy).toHaveBeenCalledTimes(1);
-			expect(sessionManager.getBranch()).not.toContainEqual(
-				expect.objectContaining({
-					type: "message",
-					message: expect.objectContaining({ role: "assistant", stopReason: "length" }),
-				}),
-			);
-			expect(session.agent.state.messages.at(-1)).toMatchObject({
-				role: "developer",
-				content: [{ type: "text", text: expect.stringContaining("1024-token output limit") }],
+			expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "message", message: reasoning });
+			expect(session.agent.state.messages.slice(-2)).toMatchObject([
+				reasoning,
+				{
+					role: "developer",
+					attribution: "agent",
+					content: [{ type: "text", text: prompt.render(lengthStopContinuePrompt) }],
+				},
+			]);
+		});
+
+		it("pauses instead of continuing when the reasoning the turn replays no longer fits", async () => {
+			// A 120k prompt budget. The provider billed a 1k prompt plus 100k of signed
+			// reasoning, so the window looks open, but the retained turn replays that
+			// reasoning on top of ~40k of stored history.
+			cfgCompactionEnabled.set(session.settings, false);
+			cfgCompactionReserveTokens.set(session.settings, 80_000);
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+			const errorNotices: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice" && event.level === "error") errorNotices.push(event.message);
 			});
+			session.agent.replaceMessages([
+				...session.agent.state.messages,
+				{ role: "user", content: "earlier findings ".repeat(20_000), timestamp: Date.now() },
+			]);
+			const reasoning = lengthStop([
+				{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" },
+			]);
+			reasoning.usage = { ...reasoning.usage, input: 1_000, output: 100_000, totalTokens: 101_000 };
+
+			await endTurn(reasoning);
+
+			expect(continueSpy).not.toHaveBeenCalled();
+			expect(errorNotices.some(message => message.includes("retained reasoning cannot fit"))).toBe(true);
 		});
 
 		describe("with a configured threshold below prompt plus the discarded output", () => {
-			// #15870: the cut output never reaches the next request, so a prompt
+			// #15870: a dropped cut output never reaches the next request, so a prompt
 			// under `compaction.thresholdTokens` is not an exhausted window even when
-			// prompt + output (here 10_000 + 1_024) crosses it.
+			// prompt + output (here 10_000 + 1_024) crosses it. Retained reasoning is held
+			// to the window's prompt budget instead of the trigger.
 			beforeEach(() => {
 				cfgCompactionThresholdTokens.set(session.settings, 10_500);
 			});
@@ -1098,26 +1127,23 @@ describe("AgentSession auto-compaction progress guard", () => {
 				{ source: "prompt buckets", contextTokens: undefined },
 				// Authoritative occupancy (Cursor checkpoints) includes the cut output.
 				{ source: "reported context occupancy", contextTokens: 11_024 },
-			])(
-				"retries a reasoning-only turn with the length-stop hint instead of compacting ($source)",
-				async ({ contextTokens }) => {
-					const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
-					const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
-					const message = lengthStop([
-						{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" },
-					]);
-					message.usage.contextTokens = contextTokens;
+			])("continues a reasoning-only turn instead of compacting ($source)", async ({ contextTokens }) => {
+				const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
+				const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+				const message = lengthStop([
+					{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" },
+				]);
+				message.usage.contextTokens = contextTokens;
 
-					await endTurn(message);
+				await endTurn(message);
 
-					expect(handoffSpy).not.toHaveBeenCalled();
-					expect(continueSpy).toHaveBeenCalledTimes(1);
-					expect(session.agent.state.messages.at(-1)).toMatchObject({
-						role: "developer",
-						content: [{ type: "text", text: expect.stringContaining("1024-token output limit") }],
-					});
-				},
-			);
+				expect(handoffSpy).not.toHaveBeenCalled();
+				expect(continueSpy).toHaveBeenCalledTimes(1);
+				expect(session.agent.state.messages.at(-1)).toMatchObject({
+					role: "developer",
+					content: [{ type: "text", text: prompt.render(lengthStopContinuePrompt) }],
+				});
+			});
 
 			it("keeps a truncated deliverable instead of compacting it away", async () => {
 				cfgCompactionKeepRecentTokens.set(session.settings, 1);
@@ -1341,15 +1367,11 @@ describe("AgentSession auto-compaction progress guard", () => {
 			type: "compaction",
 			summary: "speculative handoff",
 		});
-		expect(sessionManager.getBranch()).not.toContainEqual(
-			expect.objectContaining({
-				type: "message",
-				message: expect.objectContaining({
-					role: "assistant",
-					stopReason: "length",
-				}),
-			}),
-		);
+		// The interrupted reasoning survives the handoff in the kept tail, and the next response continues it.
+		expect(session.agent.state.messages.slice(-2)).toMatchObject([
+			{ role: "assistant", stopReason: "length" },
+			{ role: "developer", content: [{ type: "text", text: prompt.render(lengthStopContinuePrompt) }] },
+		]);
 	});
 
 	it("resumes length recovery when overlapping speculation fails before agent_end", async () => {
