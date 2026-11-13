@@ -29,18 +29,15 @@ npx tsx examples/sdk/01-minimal.ts
 ## Quick Reference
 
 ```typescript
-import { getModel } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	AuthStorage,
 	createAgentSession,
 	discoverAuthStorage,
-	discoverModels,
 	discoverSkills,
-	discoverHooks,
-	discoverCustomTools,
 	discoverContextFiles,
 	discoverSlashCommands,
-	loadSettings,
+	discoverExtensions,
 	buildSystemPrompt,
 	ModelRegistry,
 	SessionManager,
@@ -50,14 +47,14 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 
 // Auth and models setup
-const authStorage = discoverAuthStorage();
-const modelRegistry = discoverModels(authStorage);
+const authStorage = await discoverAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
 
 // Minimal
 const { session } = await createAgentSession({ authStorage, modelRegistry });
 
 // Custom model
-const model = getModel("anthropic", "claude-opus-4-5");
+const model = getBundledModel("anthropic", "claude-opus-4-5");
 const { session } = await createAgentSession({ model, thinkingLevel: "high", authStorage, modelRegistry });
 
 // Modify prompt
@@ -68,7 +65,7 @@ const { session } = await createAgentSession({
 });
 
 // Read-only tools
-const { session } = await createAgentSession({ toolNames: ["read", "search", "find"], authStorage, modelRegistry });
+const { session } = await createAgentSession({ toolNames: ["read", "grep", "glob"], authStorage, modelRegistry });
 
 // In-memory
 const { session } = await createAgentSession({
@@ -88,8 +85,8 @@ const { session } = await createAgentSession({
 	modelRegistry: customRegistry,
 	systemPrompt: ["You are helpful."],
 	toolNames: ["read", "bash"],
-	customTools: [{ tool: myTool }],
-	hooks: [{ factory: myHook }],
+	customTools: [myTool],
+	extensions: [pi => pi.on("session_start", () => console.log("session started"))],
 	skills: [],
 	contextFiles: [],
 	slashCommands: [],
@@ -129,17 +126,16 @@ await writeTool.execute("call-1", {
 | Option                      | Default                       | Description                       |
 | --------------------------- | ----------------------------- | --------------------------------- |
 | `authStorage`               | `discoverAuthStorage()`       | Credential storage                |
-| `modelRegistry`             | `discoverModels(authStorage)` | Model registry                    |
+| `modelRegistry`             | `new ModelRegistry(authStorage)` | Model registry                    |
 | `cwd`                       | `process.cwd()`               | Working directory                 |
 | `agentDir`                  | `~/.omp/agent`                | Config directory                  |
 | `model`                     | From settings/first available | Model to use                      |
 | `thinkingLevel`             | From settings/"off"           | off, low, medium, high            |
 | `systemPrompt`              | Discovered                    | String or `(default) => modified` |
 | `toolNames`                 | All built-in tools            | Filter which tools to include     |
-| `customTools`               | Discovered                    | Replaces discovery                |
-| `additionalCustomToolPaths` | `[]`                          | Merge with discovery              |
-| `hooks`                     | Discovered                    | Replaces discovery                |
-| `additionalHookPaths`       | `[]`                          | Merge with discovery              |
+| `customTools`               | `[]`                          | Extra tools to register           |
+| `extensions`                | Discovered                    | Inline extension factories        |
+| `additionalExtensionPaths`  | `[]`                          | Extension files merged with discovery |
 | `skills`                    | Discovered                    | Skills for prompt                 |
 | `contextFiles`              | Discovered                    | AGENTS.md files                   |
 | `slashCommands`             | Discovered                    | File commands                     |

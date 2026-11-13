@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the README quick start referencing `@oh-my-pi/pi-agent` — the published package is `@oh-my-pi/pi-agent-core` — and importing `getModel` from `@oh-my-pi/pi-ai`; the snippets now use `getBundledModel` from `@oh-my-pi/pi-catalog/models` ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.20.0] - 2026-11-12
 
 ### Changed
