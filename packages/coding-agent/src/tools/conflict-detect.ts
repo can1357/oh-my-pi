@@ -20,6 +20,7 @@ import type { ConflictBlock, ConflictEntry, ConflictScope } from "@oh-my-pi/pi-t
  */
 
 import type { ToolSession } from "./index";
+import { getToolConversationState } from "./tool-state";
 import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -367,10 +368,11 @@ export async function reconcileRegisteredConflicts(history: ConflictHistory, abs
 	}
 }
 
-/** Lazily attach a `ConflictHistory` to the session and return it. */
+/** The session's `ConflictHistory`, created on first use. */
 export function getConflictHistory(session: ToolSession): ConflictHistory {
-	if (!session.conflictHistory) session.conflictHistory = new ConflictHistory();
-	return session.conflictHistory;
+	const state = getToolConversationState(session);
+	state.conflictHistory ??= new ConflictHistory();
+	return state.conflictHistory;
 }
 
 const CONFLICT_SCOPES = new Set<ConflictScope>(["ours", "theirs", "base"]);

@@ -85,7 +85,7 @@ For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline 
 
 For openzoo, run `npx openzoo` and nothing else: the proxy at `http://localhost:8402/v1` pays for each call over x402 from a local burner wallet, so there is no account and no key. OMP treats `openzoo` as authenticated out of the box, discovers the live `/v1/models` catalog (per-token pricing and limits come from the proxy; nothing is bundled), and defaults to the `auto` router (published and routed per the upstream contract, staccDOTsol/openzoo@211f6cf). Set `OPENZOO_BASE_URL` when the proxy runs on another port or behind an openzoo public tunnel URL; only the tunnel URL needs the bearer printed at proxy startup, supplied via `OPENZOO_API_KEY` or `/login openzoo`.
 
-For Command Code, set `COMMAND_CODE_API_KEY` or run `/login commandcode`; login checks the key against Command Code's `/alpha/whoami` endpoint and rejects it only on a 401, as the Command Code CLI does, so a 403 or an unreachable check keeps the key. Claude models use the Anthropic Messages endpoint, the ten GPT models use the OpenAI Responses endpoint, and every other model uses Chat Completions, the same split the Command Code CLI uses. Thinking levels, image input, output limits, and prices follow the Command Code CLI's model registry; Claude Sonnet 5.5, which that registry does not list yet, takes them from Anthropic's catalog. The GPT models can run hosted web search, but not hosted image generation, which Command Code does not serve. TypeSafe's `typesafe/jev` decision model is available to the `judge` role. `omp usage`, `/usage`, and the status line show the credit balance, plus the five-hour and weekly windows on plans that have them. These figures come from the account endpoints the Command Code CLI uses; the Provider API docs do not document them.
+For Command Code, set `COMMAND_CODE_API_KEY` or run `/login commandcode`; login checks the key against Command Code's `/alpha/whoami` endpoint and rejects it only on a 401, as the Command Code CLI does, so a 403 or an unreachable check keeps the key. Claude models use the Anthropic Messages endpoint, the ten GPT models use the OpenAI Responses endpoint, and every other model uses Chat Completions, the same split the Command Code CLI uses. Thinking levels, image input, output limits, and prices follow the Command Code CLI's model registry; Claude Sonnet 5.5, whose thinking levels and image input that registry does not list yet, takes those two from Anthropic's catalog. The GPT models can run hosted web search, but not hosted image generation, which Command Code does not serve. TypeSafe's `typesafe/jev` decision model is available to the `judge` role. `omp usage`, `/usage`, and the status line show the credit balance, plus the five-hour and weekly windows on plans that have them. These figures come from the account endpoints the Command Code CLI uses; the Provider API docs do not document them.
 
 ### Pinning a key in `models.yml`
 
@@ -140,6 +140,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`                     |
 | `baseten`                        | `BASETEN_API_KEY`                                                                   |
 | `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain (SigV4)                      |
+| `chutes`                         | `CHUTES_API_KEY`                                                                    |
 | `commandcode`                    | `COMMAND_CODE_API_KEY`, then `COMMANDCODE_API_KEY`                                  |
 | `coralbricks`                    | `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`                                         |
 | `deepinfra`                      | `DEEPINFRA_API_KEY`                                                                 |
@@ -198,7 +199,6 @@ The variables below supply credentials after runtime/config overrides and stored
 | `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                      |
 | `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                                     |
 | `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                              |
-| `openzoo`                        | `OPENZOO_API_KEY` (optional; the local proxy is keyless — any value works)          |
 | `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)                  |
 | `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                                  |
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                            |
