@@ -63,6 +63,7 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- `withTimeout` takes an optional `keepWaiting` check, asked when the deadline passes; when it returns true the timeout does not apply and the wrapped promise decides the result ([#17799](https://github.com/can1357/oh-my-pi/pull/17799) by [@sjawhar](https://github.com/sjawhar))
 - Added `ensureSqliteLockShim()`, which `openSqliteDatabase`/`openSqliteDatabaseSync` call before opening a store, so on Linux the process's SQLite locks are open-file-description locks that other closes of the file cannot release ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 - Added `assertNotHeldOpen(path)` (`@oh-my-pi/pi-utils/held-file`), which throws `EBUSY` for a SQLite database or `-shm` this process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 
