@@ -148,6 +148,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"mistral-reasoning-content-parts": wire("mistralReasoningContentParts", ["openai"]),
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
+	"opencode-client-identity": wire("opencodeClientIdentity", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
 	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id", "x-session-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),

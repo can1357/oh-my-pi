@@ -478,6 +478,8 @@ export interface OpenAICompat {
 	promptCacheSessionHeader?: "x-grok-conv-id" | "x-session-id";
 	/** Request header carrying the conversation session id, independent of prompt caching. Default: unset. */
 	sessionHeader?: "x-litellm-session-id";
+	/** Send the OpenCode client identity (User-Agent, session token, prompt). Default: unset. */
+	opencodeClientIdentity?: boolean;
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/**
@@ -1005,6 +1007,7 @@ export interface ResolvedOpenAISharedCompat {
 	usesOpenAIToolCallIdLimit: boolean;
 	promptCacheSessionHeader?: OpenAICompat["promptCacheSessionHeader"];
 	sessionHeader?: OpenAICompat["sessionHeader"];
+	opencodeClientIdentity?: OpenAICompat["opencodeClientIdentity"];
 	/**
 	 * Whether this model accepts explicit OpenAI prompt-cache breakpoints.
 	 * Built catalog models always materialize this false-by-default value;
@@ -1085,6 +1088,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "usesOpenAIToolCallIdLimit"
 			| "promptCacheSessionHeader"
 			| "sessionHeader"
+			| "opencodeClientIdentity"
 			| "supportsPromptCacheBreakpoints"
 			| "promptCacheBreakpointTtl"
 			| "openRouterRouting"

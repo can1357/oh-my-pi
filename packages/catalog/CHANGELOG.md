@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `opencode-client-identity` compat axis and the `wire/opencode` client identity (pinned User-Agent with `PI_AI_OPENCODE_VERSION` overrides, `ses_` session-token derivation), set on free OpenCode Zen models by `opencode-zen.kdl` ([#19112](https://github.com/can1357/oh-my-pi/pull/19112) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed Gemini 4 Argon, Carbon and Hydrogen on the Gemini API and Vertex AI stopping long answers at 32,768 or 65,536 output tokens, often before any visible text; they now allow up to 262,144, so long answers continue past the first segment ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat)).
