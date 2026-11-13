@@ -2317,11 +2317,17 @@ async function dispatchToolCall(
  * still kept; a re-adoption that works is reported by the next result.
  */
 function readoptHeldOutTab(tab: WorkerTabSession, timeoutMs: number): void {
-	const readoption: Promise<boolean> = recoverWorkerTab(tab, tab.name, timeoutMs, "Browser tab worker lost; tab killed", {
-		// The page is as the user left it; stopping its loading would cancel a navigation they started.
-		recover: false,
-		failedReason: "omp could not reattach to the tab after Chrome had refused it, so the tab was released",
-	})
+	const readoption: Promise<boolean> = recoverWorkerTab(
+		tab,
+		tab.name,
+		timeoutMs,
+		"Browser tab worker lost; tab killed",
+		{
+			// The page is as the user left it; stopping its loading would cancel a navigation they started.
+			recover: false,
+			failedReason: "omp could not reattach to the tab after Chrome had refused it, so the tab was released",
+		},
+	)
 		.then(reattached => {
 			if (reattached) {
 				tab.workerExitNotice = `Chrome had kept omp out of this tab since an earlier call (${DEBUGGER_DETACH_REFUSAL}); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`;
