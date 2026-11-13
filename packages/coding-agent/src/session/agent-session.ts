@@ -3965,6 +3965,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		) {
 			return;
 		}
+		// Another live process owns the session, so this process wrote nothing to
+		// it (its first write would have moved it to a sibling it owns). Writing
+		// the marker would fork the conversation into an "open-elsewhere" copy
+		// just to say a reader exited, and any pending tool calls are the owner's.
+		if (this.sessionManager.isOwnedElsewhere()) return;
 		const kind: SessionExitData["kind"] =
 			reason === "dispose" || reason === postmortem.Reason.MANUAL
 				? "normal"

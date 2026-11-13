@@ -20,6 +20,7 @@
 - `omp zsh` on Windows: `zsh/files` (`mkdir`, `rmdir`, `rm`, `mv`, `ln`) and `zstat` work on real directories instead of failing with "the filename, directory name, or volume label syntax is incorrect" ([#19146](https://github.com/can1357/oh-my-pi/pull/19146) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - `omp zsh` on Windows: after a failed `zsh/system` call, `syserror` prints the POSIX error (`Bad file descriptor`, `Illegal seek`) instead of a Windows message such as "The operation completed successfully." ([#19107](https://github.com/can1357/oh-my-pi/pull/19107) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - On Windows, `find -exec`, `xargs` and `env` no longer fail with `not found` (status 127) when running an external program such as `sh` ([#19108](https://github.com/can1357/oh-my-pi/pull/19108) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Fixed loading a session another omp process has open (e.g. ACP `session/load` from a second process) and then exiting creating a duplicate "open-elsewhere" copy of the session ([#19103](https://github.com/can1357/oh-my-pi/issues/19103))
 
 ## [18.20.0] - 2026-11-12
 
