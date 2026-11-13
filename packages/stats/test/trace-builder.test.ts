@@ -498,7 +498,8 @@ describe("buildSessionTrace", () => {
 			result("r3", "a3", T + 5000, "wait", {
 				op: "wait",
 				jobs: [
-					{ id: "bg_1", type: "bash", status: "completed" },
+					// Settled before the wait reported it: the span ends at `settledAtMs`.
+					{ id: "bg_1", type: "bash", status: "completed", settledAtMs: T + 4000 },
 					{ id: "bg_2", type: "bash", status: "running" },
 				],
 			}),
@@ -531,7 +532,7 @@ describe("buildSessionTrace", () => {
 		expect(
 			spans.filter(span => span.kind === "background").map(span => [span.start, span.end, span.unterminated]),
 		).toEqual([
-			[T + 2000, T + 5000, undefined],
+			[T + 2000, T + 4000, undefined],
 			[T + 2500, T + 6000, undefined],
 		]);
 		expect(spans.filter(span => span.kind === "turn").map(span => [span.start, span.end])).toEqual([

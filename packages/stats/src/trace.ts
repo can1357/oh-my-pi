@@ -277,11 +277,11 @@ function argsPreview(args: unknown): string | undefined {
 	}
 }
 
-/** End the open background job with `jobId` at `at`; a later job may reuse the id. */
+/** End the open background job with `jobId` at `at`, never before it opened; a later job may reuse the id. */
 function closeBackgroundJob(active: Map<string, PendingBackgroundJob>, jobId: string, at: number): void {
 	const job = active.get(jobId);
 	if (!job) return;
-	job.end = at;
+	job.end = Math.max(job.start, at);
 	active.delete(jobId);
 }
 
@@ -515,7 +515,7 @@ function scanTranscript(
 				activeBackgroundJobs.set(job.jobId, job);
 			}
 			// A `wait` (`details.jobs`) or proc:// cancel (`details.proc.jobs`) that reports a settled
-			// job replaces its async-result delivery, so the job closes at this result.
+			// job replaces its async-result delivery, so the job closes when it settled, or at this result.
 			const proc = details?.proc;
 			const reportedJobs =
 				details?.op === "wait"
@@ -534,7 +534,11 @@ function scanTranscript(
 						typeof job.status === "string" &&
 						SETTLED_JOB_STATUSES[job.status] === true
 					) {
-						closeBackgroundJob(activeBackgroundJobs, job.id, end);
+						const settledAt =
+							"settledAtMs" in job && typeof job.settledAtMs === "number" && Number.isFinite(job.settledAtMs)
+								? Math.min(job.settledAtMs, end)
+								: end;
+						closeBackgroundJob(activeBackgroundJobs, job.id, settledAt);
 					}
 				}
 			}
