@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `@oh-my-pi/pi-utils/sandbox`: `detectSandbox()` reports the sandbox omp runs in as layers (nono, Docker, Podman, Kubernetes, or a `confined` layer for an unnamed kernel sandbox) with the kernel facts behind them, `inspectSandbox()` adds the kernel's Landlock version and what each probe reports on request, and `registerSandboxProbe()` lets a distribution or an extension describe its own sandbox ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Added `filterLauncherEnv()`, which returns the environment omp was started with, without what dotenv files added ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
@@ -14,8 +19,6 @@
 
 - Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Added `prompt.closeCodeFence`: closes a code fence a text leaves open, by the same rule `prompt.format` uses ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
-- Added `@oh-my-pi/pi-utils/sandbox`: `detectSandbox()` reports the sandbox omp runs in as layers (nono, Docker, Podman, Kubernetes, or a `confined` layer for an unnamed kernel sandbox) with the kernel facts behind them, `inspectSandbox()` adds the kernel's Landlock version and what each probe reports on request, and `registerSandboxProbe()` lets a distribution or an extension describe its own sandbox ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- Added `filterLauncherEnv()`, which returns the environment omp was started with, without what dotenv files added ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.18.8] - 2026-11-11
 

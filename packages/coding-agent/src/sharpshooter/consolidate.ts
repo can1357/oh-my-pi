@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
@@ -30,6 +31,22 @@ import {
 import { cfgSharpshooterIntervalMinutes } from "./settings";
 
 const PROJECT_DOC_TOKEN_LIMIT = 6000;
+
+/**
+ * Output budget for one consolidation reply: complete rewrites of all three files at the
+ * {@link SHARPSHOOTER_MAX_FILE_LINES} ceiling plus medium reasoning over the whole backlog.
+ */
+const CONSOLIDATION_MAX_TOKENS = 32_768;
+
+/** Smallest output budget requested when the prompt leaves less context than that. */
+const MIN_CONSOLIDATION_MAX_TOKENS = 1024;
+
+/** Fixed allowance for the tool schema and per-message framing the prompt count omits. */
+const PROMPT_FRAMING_TOKENS = 1024;
+
+/** Floor and ceiling of the retry delay after a failed consolidation pass. */
+const MIN_RETRY_BACKOFF_MS = 60_000;
+const MAX_RETRY_BACKOFF_MS = 6 * 60 * 60_000;
 
 const replaceMemoryFilesTool = {
 	name: "replace_memory_files",
@@ -111,6 +128,50 @@ export async function runSharpshooterConsolidation(options: {
 	}
 }
 
+/**
+ * Earliest wall-clock ms at which a non-forced consolidation may run.
+ *
+ * One interval after the last completed pass; after consecutive failures the next attempt
+ * waits `interval × 2^(failures-1)` (clamped to [1 min, 6 h]) past the last failure, so a
+ * bank that keeps failing does not re-send its full input on every scheduler tick.
+ * Shared by the consolidation gate, the scheduler, and `/memory diagnose`.
+ */
+export function sharpshooterNextConsolidationAt(state: SharpshooterState, intervalMinutes: number): number {
+	const intervalMs = Math.max(0, intervalMinutes) * 60_000;
+	const next = state.lastConsolidatedAt + intervalMs;
+	const failures = consecutiveFailures(state);
+	if (failures === 0 || !state.lastError) return next;
+	const backoffMs = Math.min(MAX_RETRY_BACKOFF_MS, Math.max(MIN_RETRY_BACKOFF_MS, intervalMs) * 2 ** (failures - 1));
+	return Math.max(next, state.lastError.at + backoffMs);
+}
+
+/** Failures recorded since the last completed pass; an error older than that pass is stale. */
+function consecutiveFailures(state: SharpshooterState): number {
+	const error = state.lastError;
+	if (!error || error.at < state.lastConsolidatedAt) return 0;
+	return error.failures ?? 1;
+}
+
+/**
+ * Output budget for a consolidation request whose system prompt and input count `promptTokens`.
+ *
+ * {@link CONSOLIDATION_MAX_TOKENS}, capped by the model's output limit and by the context the
+ * prompt leaves free (estimate padded 10% plus {@link PROMPT_FRAMING_TOKENS}, since the local
+ * tokenizer may not match the model's), never below {@link MIN_CONSOLIDATION_MAX_TOKENS}.
+ */
+export function sharpshooterConsolidationMaxTokens(
+	model: Pick<Model, "maxTokens" | "contextWindow">,
+	promptTokens: number,
+): number {
+	let budget = CONSOLIDATION_MAX_TOKENS;
+	if (model.maxTokens !== null && model.maxTokens > 0) budget = Math.min(budget, model.maxTokens);
+	if (model.contextWindow !== null && model.contextWindow > 0) {
+		const reserved = promptTokens + Math.ceil(promptTokens / 10) + PROMPT_FRAMING_TOKENS;
+		budget = Math.min(budget, model.contextWindow - reserved);
+	}
+	return Math.max(MIN_CONSOLIDATION_MAX_TOKENS, budget);
+}
+
 async function consolidateLocked(
 	options: {
 		agentDir: string;
@@ -125,7 +186,7 @@ async function consolidateLocked(
 	const state = await readSharpshooterState(options.agentDir, options.cwd);
 	try {
 		const intervalMinutes = cfgSharpshooterIntervalMinutes.get(options.settings);
-		if (!options.force && Date.now() - state.lastConsolidatedAt < intervalMinutes * 60_000) {
+		if (!options.force && Date.now() < sharpshooterNextConsolidationAt(state, intervalMinutes)) {
 			return { ran: false, reason: "not_due" };
 		}
 
@@ -155,6 +216,7 @@ async function consolidateLocked(
 			maxFileLines: SHARPSHOOTER_MAX_FILE_LINES,
 		});
 
+		const maxTokens = sharpshooterConsolidationMaxTokens(model, new Tokenizer(model).countTokens([system, input]));
 		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(
@@ -167,7 +229,7 @@ async function consolidateLocked(
 					{
 						apiKey: options.modelRegistry.resolver(model, options.sessionId),
 						sessionId: options.sessionId,
-						maxTokens: 8192,
+						maxTokens,
 						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 						toolChoice: "required",
 					},
@@ -176,6 +238,11 @@ async function consolidateLocked(
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
+		}
+		if (response.stopReason === "length") {
+			throw new Error(
+				`sharpshooter consolidation response truncated at the ${maxTokens}-token output limit before replace_memory_files completed`,
+			);
 		}
 
 		const files = parseReplacementFiles(response.content, currentFiles);
@@ -303,7 +370,7 @@ async function recordConsolidationError(
 	try {
 		await writeSharpshooterState(agentDir, cwd, {
 			...state,
-			lastError: { at: Date.now(), message },
+			lastError: { at: Date.now(), message, failures: consecutiveFailures(state) + 1 },
 		});
 	} catch {
 		// The original consolidation error is more actionable than a secondary state-write failure.

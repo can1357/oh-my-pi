@@ -423,6 +423,15 @@ export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemo
 	};
 }
 
+/** Nace Drex judges: the authored Drex rows. */
+export function naceModelManagerOptions(): ModelManagerOptions<"nace-systemone"> {
+	return {
+		providerId: "nace",
+		cacheProviderId: resolveModelCacheProviderId("nace"),
+		staticModels: seedModels<"nace-systemone">("nace"),
+	};
+}
+
 /** Credentials and endpoint overrides for the TypeSafe catalog manager. */
 export interface TypeSafeModelManagerConfig {
 	apiKey?: string;

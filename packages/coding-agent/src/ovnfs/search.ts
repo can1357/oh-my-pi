@@ -1,6 +1,8 @@
 /**
  * `grep` and `glob` that answer through the ovnfs daemon when the search root
  * lies in an ovnfs mount, and through `@oh-my-pi/pi-natives` otherwise.
+ * Named file roots for `grep` always take the native scanner, which searches
+ * their content as text.
  *
  * The caller names its ovnfs command (`ovnfsCommand`), whose daemon reports
  * the mount it serves ({@link runningDaemon}); a root below that mount is
@@ -61,7 +63,7 @@ function onHost(p: string, filesystem: natives.ShellFilesystem | undefined): boo
 	);
 }
 
-/** Clamp `options.timeoutMs` to the budget remaining after an attempted daemon call. */
+/** Clamp `options.timeoutMs` to the budget remaining after routing or an attempted daemon call. */
 function withRemainingTimeout<T extends { timeoutMs?: number }>(options: T, startedAt: number): T {
 	if (!options.timeoutMs || options.timeoutMs <= 0) return options;
 	const remaining = options.timeoutMs - (Date.now() - startedAt);
@@ -124,7 +126,7 @@ async function callDaemon<T>(
 	}
 }
 
-/** `natives.grep`, answered by the daemon of the ovnfs command `ovnfs` when `options.path` lies in its mount. */
+/** `natives.grep`, answered by ovnfs for directory roots in its mount; named files use the native scanner. */
 export async function grep(
 	options: natives.GrepOptions,
 	onMatch?: GrepCallback | null,
@@ -134,6 +136,8 @@ export async function grep(
 		return natives.grep(options, onMatch);
 	}
 	const startedAt = Date.now();
+	const stat = await fs.stat(options.path).catch(() => undefined);
+	if (stat?.isFile()) return natives.grep(withRemainingTimeout(options, startedAt), onMatch);
 	const reply = await callDaemon<DaemonGrepReply>(
 		ovnfs,
 		"grep",
@@ -156,7 +160,7 @@ export async function grep(
 			exclude: options.exclude?.length ? options.exclude : undefined,
 		},
 		options.signal,
-		options.timeoutMs,
+		withRemainingTimeout(options, startedAt).timeoutMs,
 	);
 	if (!reply) return natives.grep(withRemainingTimeout(options, startedAt), onMatch);
 	const countMode = options.mode === natives.GrepOutputMode.Count;

@@ -258,10 +258,22 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
          /**
           * The full HTML contents of the frame, including the DOCTYPE.
 diff --git a/lib/puppeteer/cdp/ExecutionContext.js b/lib/puppeteer/cdp/ExecutionContext.js
-index c67098fd6c9f66666ad2b41d5b7dea42e1991833..2a543a09bfbd48bb9c02f085399788e913d0e8e4 100644
+index c67098fd6c9f66666ad2b41d5b7dea42e1991833..8cb17f9acc50ff47bbbd5faf09112e05558c4af2 100644
 --- a/lib/puppeteer/cdp/ExecutionContext.js
 +++ b/lib/puppeteer/cdp/ExecutionContext.js
-@@ -326,14 +326,19 @@ export class ExecutionContext extends EventEmitter {
+@@ -201,7 +201,10 @@ export class ExecutionContext extends EventEmitter {
+     #puppeteerUtil;
+     get puppeteerUtil() {
+         let promise = Promise.resolve();
+-        if (!this.#bindingsInstalled) {
++        // xxx-stealth: ARIA queries run in the named utility world. Polling in the main
++        // world needs the utility pollers, not the page-visible query bindings.
++        // Do not install globals that page scripts can read or replace.
++        if (!this.#bindingsInstalled && this.#name) {
+             promise = Promise.all([
+                 this.#addBindingWithoutThrowing(ariaQuerySelectorBinding),
+                 this.#addBindingWithoutThrowing(ariaQuerySelectorAllBinding),
+@@ -326,14 +329,19 @@ export class ExecutionContext extends EventEmitter {
          return await this.#evaluate(false, pageFunction, ...args);
      }
      async #evaluate(returnByValue, pageFunction, ...args) {
@@ -284,7 +296,7 @@ index c67098fd6c9f66666ad2b41d5b7dea42e1991833..2a543a09bfbd48bb9c02f085399788e9
              const { exceptionDetails, result: remoteObject } = await this.#client
                  .send('Runtime.evaluate', {
                  expression: expressionWithSourceUrl,
-@@ -352,9 +357,8 @@ export class ExecutionContext extends EventEmitter {
+@@ -352,9 +360,8 @@ export class ExecutionContext extends EventEmitter {
              return this.#world.createCdpHandle(remoteObject);
          }
          const functionDeclaration = stringifyFunction(pageFunction);
@@ -694,10 +706,36 @@ index 8c406cf90e0f9d899efaa5acb6a636a86f32e37e..185ef5954b2b95b708855ed68e8327a8
                  catch (e_3) {
                      env_4.error = e_3;
 diff --git a/lib/puppeteer/common/WaitTask.js b/lib/puppeteer/common/WaitTask.js
-index eee0d68b24442c5628266663a2d6334a7f1f1540..24a07eec697f644c4f6219d66efbd7420cc1ffe3 100644
+index eee0d68b24442c5628266663a2d6334a7f1f1540..1216fe4ee94de5544652973227180574c272dab2 100644
 --- a/lib/puppeteer/common/WaitTask.js
 +++ b/lib/puppeteer/common/WaitTask.js
-@@ -176,6 +176,9 @@ export class WaitTask {
+@@ -6,5 +6,6 @@
++import { JSHandle } from '../api/JSHandle.js';
+ import { Deferred } from '../util/Deferred.js';
+ import { isErrorLike } from '../util/ErrorLike.js';
+ import { stringifyFunction } from '../util/Function.js';
+-import { TimeoutError } from './Errors.js';
++import { ProtocolError, TimeoutError } from './Errors.js';
+ import { LazyArg } from './LazyArg.js';
+@@ -156,6 +157,17 @@ export class WaitTask {
+             if (error.message.includes('Cannot find context with specified id')) {
+                 return;
+             }
++            // xxx-stealth: navigation can reuse the numeric context id
++            // before Page.frameNavigated invalidates the old utility handle.
++            // A user handle or root cannot survive replacement; keep its error.
++            if (
++                error instanceof ProtocolError &&
++                !this.#root &&
++                !this.#args.some(arg => arg instanceof JSHandle) &&
++                error.message.includes('Argument should belong to the same JavaScript world as target object')
++            ) {
++                return;
++            }
+             // Errors coming from WebDriver BiDi. TODO: Adjust messages after
+             // https://github.com/w3c/webdriver-bidi/issues/540 is resolved.
+             if (error.message.includes('DiscardedBrowsingContextError')) {
+@@ -176,6 +188,9 @@ export class WaitTask {
   */
  export class TaskManager {
      #tasks = new Set();
