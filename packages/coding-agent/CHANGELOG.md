@@ -2,10 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can call `ctx.getContextBreakdown()` to read the session's per-category context usage, including free space, the auto-compaction buffer, and the snapcompact wire savings ([#14208](https://github.com/can1357/oh-my-pi/pull/14208) by [@listellm](https://github.com/listellm)).
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
 - `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
+- Fixed `/context` crashing instead of degrading when a malformed system-prompt section makes the snapcompact savings estimate throw ([#9331](https://github.com/can1357/oh-my-pi/issues/9331)).
 
 ## [18.20.0] - 2026-11-12
 
