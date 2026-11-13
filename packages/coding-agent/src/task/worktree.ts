@@ -849,6 +849,19 @@ interface FilteredAgentReplayOptions {
 }
 
 /**
+ * `treeish` with the baseline WIP applied, or bare `treeish` when the WIP does
+ * not apply there (it was captured against the baseline commit).
+ */
+async function dirtyTreeAt(repoDir: string, treeish: string, baselineWip: readonly string[]): Promise<string> {
+	try {
+		return await writeSyntheticTree(repoDir, treeish, baselineWip);
+	} catch (error) {
+		if (!vcs.isVcsError(error)) throw error;
+		return writeSyntheticTree(repoDir, treeish, []);
+	}
+}
+
+/**
  * Rewrite each agent commit against the captured baseline WIP so user
  * staged/unstaged/untracked changes never enter the task history. Returns the
  * tip commit (the baseline sha when nothing survived filtering).
@@ -864,11 +877,17 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 	// cannot read objects created only inside isolation.
 	await writeSyntheticTree(opts.repoRoot, baselineSha, baselineWip);
 	const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, baselineWip);
+	// The agent can branch from a commit older than the baseline (`git switch
+	// -c work <older>`). Measure its work from where it forked, or every state
+	// below also undoes what the baseline commit added since that fork.
+	const forkSha = (await isolationRepo.mergeBase(baselineSha, opts.isolationHead)) ?? baselineSha;
+	const dirtyForkTree =
+		forkSha === baselineSha ? dirtyBaselineTree : await dirtyTreeAt(opts.isolationDir, forkSha, baselineWip);
 	let tip = baselineSha;
 	let previousFilteredTree = baselineSha;
 
 	for (const commitSha of agentCommits) {
-		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
+		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyForkTree, `${commitSha}^{tree}`);
 		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
 		// filtered tree through `patchTree` with that WIP context: hunks that
 		// touch WIP paths — including deletions of untracked WIP the agent never
@@ -912,11 +931,21 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 	// same WIP context applies: `rootPatch` is captured against `HEAD + WIP`,
 	// so synthesise through `patchTree` or hunks touching WIP paths fail on the
 	// clean baseline tree ("patch does not apply: … does not exist").
+	// `rootPatch` is measured from the dirty baseline; rebase it onto the fork
+	// point like the commits above.
+	const finalStatePatch =
+		forkSha === baselineSha
+			? opts.rootPatch
+			: await diffTreeOrEmpty(
+					isolationRepo,
+					dirtyForkTree,
+					await writeSyntheticTree(opts.isolationDir, dirtyBaselineTree, [opts.rootPatch]),
+				);
 	const finalFilteredTree = await patchTree(
 		opts.repoRoot,
 		baselineSha,
 		opts.taskId,
-		opts.rootPatch,
+		finalStatePatch,
 		opts.baseline.root,
 	);
 	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
