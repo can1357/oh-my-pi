@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
+- Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+
 ### Changed
 
 - `TaskItem.model` and `TaskParams.model` now document configured `@role` selectors and ordered candidate lists for per-call selection; their `string | string[]` types are unchanged ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))

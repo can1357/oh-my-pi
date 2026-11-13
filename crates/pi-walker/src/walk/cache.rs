@@ -33,8 +33,12 @@ use parking_lot::RwLock;
 use super::is_separator;
 use crate::{
 	fs::{Dir, Listing, Session, Stamp},
-	ignore::{DirIgnores, Names},
+	ignore::{DirIgnores, Names, Sources},
 };
+
+/// The ignore sources of cached listings: walks with their own ignore file
+/// ([`super::Options::ignore_file`]) never use the cache.
+const CACHED_SOURCES: Sources = Sources { vcs: true, custom: None, parents: true };
 
 /// Listing budget of the process-wide cache.
 const MAX_BYTES: i64 = 64 << 20;
@@ -157,7 +161,7 @@ impl Cache {
 			},
 		}
 		if let Some(ignores) = ignores {
-			for (index, name) in DirIgnores::source_names(dir.names) {
+			for (index, name) in DirIgnores::source_names(dir.names, CACHED_SOURCES) {
 				scratch.clear();
 				scratch.extend_from_slice(key);
 				if !scratch.last().is_some_and(|&b| is_separator(b)) {

@@ -240,6 +240,25 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
+	it.each(["models.noJudge", "models.offline"])(
+		"%s prevents foreign judge requests and retains same-provider fallback",
+		async key => {
+			const settings = Settings.isolated({
+				[key]: true,
+				modelRoles: { judge: "typesafe/jev-preview" },
+			});
+			const registry = makeRegistry([JEV_PREVIEW, ONLINE], { typesafe: "ts-key", [ONLINE.provider]: "online-key" });
+			const fetch = vi.spyOn(globalThis, "fetch");
+			const complete = vi.spyOn(ai, "completeSimple").mockImplementation(async model => reply(model, "level: low"));
+			const judge = new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE });
+
+			const result = await judge.judge({ state: "rename a local", questions: { level: TIER_QUESTION } });
+
+			expect(result.answers.level.choice).toBe("low");
+			expect(fetch).not.toHaveBeenCalled();
+			expect(complete).toHaveBeenCalled();
+		},
+	);
 	it.each([false, true])("tries the lead first and falls back on failure (%s)", async leadFails => {
 		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
 		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });

@@ -39,6 +39,7 @@
  */
 import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { type Settings, settings } from "../config/settings";
@@ -60,13 +61,16 @@ const MAX_REWRITES_IN_FLIGHT = 2;
 export interface VocalizerModelSource {
 	settings: Settings;
 	registry: ModelBrowserRegistry;
+	getSessionProvider?: () => string | undefined;
 }
 
 /** Resolve the first speech-role candidate that the local streaming worker can run. */
 export function resolveLocalSpeechModelId(source: VocalizerModelSource): string {
 	const pool = roleCandidatePool("speech", source.settings, source.registry);
 	const local = resolveRoleChain("speech", source.settings, pool).find(
-		candidate => candidate.model.api === "local-inference",
+		candidate =>
+			candidate.model.api === "local-inference" &&
+			(!cfgOffline.get(source.settings) || candidate.model.provider === source.getSessionProvider?.()),
 	);
 	return local?.model.id ?? TTS_LOCAL_MODELS[0].key;
 }
@@ -139,7 +143,18 @@ export class Vocalizer {
 
 	/** Wire (or drop) the live per-session model source used by local speech synthesis. */
 	setModelSource(source: VocalizerModelSource | null): void {
+		this.clear();
 		this.#modelSource = source;
+	}
+
+	/** Stop any active local synthesis when the session provider no longer permits it. */
+	enforceProviderPolicy(): boolean {
+		const source = this.#modelSource;
+		if (cfgOffline.get(source?.settings ?? settings) && source?.getSessionProvider?.() !== "local") {
+			this.clear();
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -167,7 +182,7 @@ export class Vocalizer {
 	 */
 	pushDelta(text: string): void {
 		const speechSettings = this.#modelSource?.settings ?? settings;
-		if (this.#suspensions > 0 || !cfgSpeechEnabled.get(speechSettings)) return;
+		if (!this.enforceProviderPolicy() || this.#suspensions > 0 || !cfgSpeechEnabled.get(speechSettings)) return;
 		if (!text) return;
 		if (this.#enhanced || (!this.#speakable && this.#enhancer && cfgSpeechEnhanced.get(speechSettings))) {
 			this.#pushEnhanced(text);
@@ -189,6 +204,7 @@ export class Vocalizer {
 	 * utterance may already be streaming.
 	 */
 	flush(): void {
+		if (!this.enforceProviderPolicy()) return;
 		this.#clearIdleTimer();
 		const utterance = this.#enhanced;
 		if (utterance) {
@@ -320,7 +336,7 @@ export class Vocalizer {
 		const result = this.#boundedRewrite(block, utterance.abort.signal);
 		utterance.order = utterance.order.then(async () => {
 			const rewritten = await result;
-			if (utterance.abort.signal.aborted) return;
+			if (utterance.abort.signal.aborted || !this.enforceProviderPolicy()) return;
 			// Empty string: the model judged the block unspeakable (pure code).
 			if (rewritten === "") return;
 			// Null: rewrite failed/timed out — mechanical cleanup of the raw
@@ -364,7 +380,7 @@ export class Vocalizer {
 
 	/** Mechanical mode: feed ready segments, opening the session lazily. */
 	#pushSegments(segments: string[]): void {
-		if (segments.length === 0) return;
+		if (segments.length === 0 || !this.enforceProviderPolicy()) return;
 		if (!this.#handle) {
 			const abort = new AbortController();
 			this.#liveAborts.add(abort);
