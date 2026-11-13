@@ -491,7 +491,10 @@ describe("buildSessionTrace", () => {
 			result("r1", "a1", T + 2000, "bash", { async: { state: "running", jobId: "bg_1", type: "bash" } }),
 			call("a2", "r1", T + 2200, "bash"),
 			result("r2", "a2", T + 2500, "bash", { async: { state: "running", jobId: "bg_2", type: "bash" } }),
-			call("a3", "r2", T + 3000, "wait"),
+			// Another tool's own `jobs` list is not a handover, even when an id matches.
+			call("a2x", "r2", T + 2600, "ci_status"),
+			result("r2x", "a2x", T + 2800, "ci_status", { jobs: [{ id: "bg_2", status: "completed" }] }),
+			call("a3", "r2x", T + 3000, "wait"),
 			result("r3", "a3", T + 5000, "wait", {
 				op: "wait",
 				jobs: [

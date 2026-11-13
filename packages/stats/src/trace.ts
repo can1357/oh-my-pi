@@ -35,13 +35,16 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 5;
+export const TRACE_ETAG_VERSION = 6;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
 const DETAIL_MAX = 160;
 const TITLE_SCAN_BYTES = 4096;
 const LIST_FOLD_LIMIT = 300;
+
+/** Async job statuses after which no async-result delivery follows a `wait` or cancel handover. */
+const SETTLED_JOB_STATUSES: Record<string, true> = { completed: true, failed: true, cancelled: true };
 
 // ---------------------------------------------------------------------------
 // Structural entry views (journal shapes mirrored without importing coding-agent)
@@ -511,11 +514,15 @@ function scanTranscript(
 				backgroundJobs.push(job);
 				activeBackgroundJobs.set(job.jobId, job);
 			}
-			// `wait` (`details.jobs`) and a proc:// cancel (`details.proc.jobs`) hand over settled
-			// jobs in place of their async-result delivery, so each closes at this result.
+			// A `wait` (`details.jobs`) or proc:// cancel (`details.proc.jobs`) that reports a settled
+			// job replaces its async-result delivery, so the job closes at this result.
 			const proc = details?.proc;
 			const reportedJobs =
-				details?.jobs ?? (proc && typeof proc === "object" && "jobs" in proc ? proc.jobs : undefined);
+				details?.op === "wait"
+					? details.jobs
+					: proc && typeof proc === "object" && "op" in proc && proc.op === "cancel" && "jobs" in proc
+						? proc.jobs
+						: undefined;
 			if (Array.isArray(reportedJobs)) {
 				for (const job of reportedJobs) {
 					if (
@@ -525,7 +532,7 @@ function scanTranscript(
 						typeof job.id === "string" &&
 						"status" in job &&
 						typeof job.status === "string" &&
-						job.status !== "running"
+						SETTLED_JOB_STATUSES[job.status] === true
 					) {
 						closeBackgroundJob(activeBackgroundJobs, job.id, end);
 					}
