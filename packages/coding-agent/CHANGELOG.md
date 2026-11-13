@@ -80,7 +80,7 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
-- Fixed the `examples/sdk` examples and README quick reference importing `getModel` from `@oh-my-pi/pi-ai` and removed helpers (`discoverModels`, `discoverHooks`, `ModelRegistry.create`); they now use `getBundledModel` from `@oh-my-pi/pi-catalog/models`, `new ModelRegistry(authStorage)`, and the `extensions`/`additionalExtensionPaths` options ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- Fixed the `examples/sdk` examples and README quick reference importing `getModel` from `@oh-my-pi/pi-ai` and removed helpers (`discoverModels`, `discoverHooks`, `ModelRegistry.create`); they now use `getBundledModel` from `@oh-my-pi/pi-catalog/models`, `new ModelRegistry(authStorage)`, and the `extensions`/`additionalExtensionPaths` options ([#19192](https://github.com/can1357/oh-my-pi/pull/19192) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.0] - 2026-11-12
 
