@@ -30,7 +30,7 @@ use std::{
 	ffi::OsStr,
 	future::Future,
 	io,
-	path::{Path, PathBuf},
+	path::PathBuf,
 	pin::Pin,
 	sync::Arc,
 	task::{Context, Poll, Waker},
@@ -377,9 +377,9 @@ impl Lookup {
 			.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
 		let cwd = command.dir().unwrap_or(&self.cwd);
 		if has_separator(name) {
-			return match executable(&cwd.join(name)) {
-				Some(true) => Ok(Program::Path(runnable(cwd.join(name)))),
-				Some(false) => Err(io::ErrorKind::PermissionDenied.into()),
+			return match executable(cwd.join(name)) {
+				Some(Candidate::Runs(file)) => Ok(Program::Path(file)),
+				Some(Candidate::Denied) => Err(io::ErrorKind::PermissionDenied.into()),
 				None => Err(io::ErrorKind::NotFound.into()),
 			};
 		}
@@ -398,10 +398,9 @@ impl Lookup {
 			.unwrap_or(DEFAULT_PATH);
 		let mut denied = false;
 		for dir in std::env::split_paths(OsStr::new(path)) {
-			let candidate = cwd.join(dir).join(name);
-			match executable(&candidate) {
-				Some(true) => return Ok(Program::Path(runnable(candidate))),
-				Some(false) => denied = true,
+			match executable(cwd.join(dir).join(name)) {
+				Some(Candidate::Runs(file)) => return Ok(Program::Path(file)),
+				Some(Candidate::Denied) => denied = true,
 				None => {},
 			}
 		}
@@ -428,36 +427,40 @@ fn has_separator(name: &OsStr) -> bool {
 	bytes.contains(&b'/') || (cfg!(windows) && bytes.contains(&b'\\'))
 }
 
-/// `Some(true)` for an executable file at `path`, `Some(false)` for a file
-/// that is not executable, `None` for nothing (or a directory).
+/// A file found for a command name.
+enum Candidate {
+	/// The file that runs.
+	Runs(PathBuf),
+	/// A file that cannot be executed.
+	Denied,
+}
+
+/// What `path` names as a command; `None` for nothing (or a directory).
 #[cfg(unix)]
-fn executable(path: &Path) -> Option<bool> {
+fn executable(path: PathBuf) -> Option<Candidate> {
 	use std::os::unix::fs::PermissionsExt as _;
-	let meta = std::fs::metadata(path)
+	let meta = std::fs::metadata(&path)
 		.ok()
 		.filter(std::fs::Metadata::is_file)?;
-	Some(meta.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn executable(path: &Path) -> Option<bool> {
-	(path.is_file() || path.with_extension("exe").is_file()).then_some(true)
-}
-
-/// The file `executable` accepted at `path`: off Unix, `path` itself or its
-/// `.exe` sibling, as that is the one that runs.
-#[cfg(unix)]
-fn runnable(path: PathBuf) -> PathBuf {
-	path
-}
-
-#[cfg(not(unix))]
-fn runnable(path: PathBuf) -> PathBuf {
-	if path.is_file() {
-		path
+	Some(if meta.permissions().mode() & 0o111 != 0 {
+		Candidate::Runs(path)
 	} else {
-		path.with_extension("exe")
+		Candidate::Denied
+	})
+}
+
+/// What `path` names as a command: the file itself, else the file with `.exe`
+/// appended (as a shell's `PATHEXT` search does, so `python3.11` finds
+/// `python3.11.exe`, not `python3.exe`); `None` for nothing (or a directory).
+#[cfg(not(unix))]
+fn executable(path: PathBuf) -> Option<Candidate> {
+	if path.is_file() {
+		return Some(Candidate::Runs(path));
 	}
+	let mut exe = path.into_os_string();
+	exe.push(".exe");
+	let exe = PathBuf::from(exe);
+	exe.is_file().then_some(Candidate::Runs(exe))
 }
 
 #[cfg(test)]
@@ -478,5 +481,18 @@ mod tests {
 		assert!(!is_name("1x"));
 		assert!(!is_name("a-b"));
 		assert!(!is_name(""));
+	}
+
+	#[cfg(not(unix))]
+	#[test]
+	fn a_dotted_name_runs_its_own_exe() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("python3.11.exe"), b"").unwrap();
+		std::fs::write(dir.path().join("python3.exe"), b"").unwrap();
+		let Some(Candidate::Runs(file)) = executable(dir.path().join("python3.11")) else {
+			panic!("python3.11 did not resolve");
+		};
+		assert_eq!(file, dir.path().join("python3.11.exe"));
+		assert!(executable(dir.path().join("missing")).is_none());
 	}
 }
