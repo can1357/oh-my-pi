@@ -2,17 +2,17 @@ import { describe, expect, it } from "bun:test";
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import { applyInferenceHeaders } from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
-	isOpenCodeFreeModel,
 	OPENCODE_FREE_SYSTEM_PROMPT,
-	OPENCODE_FREE_USER_AGENT,
-	openCodeFreeSessionId,
+	usesOpenCodeClientIdentity,
 	withOpenCodeFreeSystemPrompt,
 } from "@oh-my-pi/pi-ai/providers/opencode-free";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { OPENCODE_SESSION_TOKEN_PATTERN, toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
 const OPENCODE_SESSION_HEADER = "x-opencode-session";
+const OPENCODE_UA = "opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4";
 
 interface WireCall {
 	headers: Headers;
@@ -48,32 +48,32 @@ function makeZenModel(id = "deepseek-v4.1-flash-free"): Model<"openai-completion
 	});
 }
 
-describe("isOpenCodeFreeModel", () => {
-	it("matches only free Zen models", () => {
-		expect(isOpenCodeFreeModel({ provider: "opencode-zen", id: "deepseek-v4.1-flash-free" })).toBe(true);
-		expect(isOpenCodeFreeModel({ provider: "opencode-zen", id: "deepseek-v4.1-flash" })).toBe(false);
-		expect(isOpenCodeFreeModel({ provider: "opencode-go", id: "deepseek-v4.1-flash-free" })).toBe(false);
-	});
-
-	it("resolves the declared backend for a custom provider", () => {
-		expect(isOpenCodeFreeModel({ provider: "mine", providerType: "opencode-zen", id: "glm-5-free" })).toBe(true);
-	});
-
-	it("is not fooled by an empty id", () => {
-		expect(isOpenCodeFreeModel({ provider: "opencode-zen", id: "" })).toBe(false);
+describe("usesOpenCodeClientIdentity", () => {
+	it("follows the KDL opt-in", () => {
+		expect(usesOpenCodeClientIdentity({ opencodeClientIdentity: true })).toBe(true);
+		expect(usesOpenCodeClientIdentity({})).toBe(false);
+		expect(usesOpenCodeClientIdentity(undefined)).toBe(false);
 	});
 });
 
-describe("openCodeFreeSessionId", () => {
-	it("shapes the id like the client's and stays stable", () => {
-		const id = openCodeFreeSessionId("session-1");
-		expect(id).toMatch(/^ses_[a-z0-9]+$/);
-		expect(openCodeFreeSessionId("session-1")).toBe(id);
-		expect(openCodeFreeSessionId("session-2")).not.toBe(id);
+describe("toOpenCodeSessionToken", () => {
+	it("produces the accepted shape and keeps the head's low 12 bits in range", () => {
+		for (let index = 0; index < 40; index++) {
+			const token = toOpenCodeSessionToken(`session-${index}`);
+			expect(token).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
+			expect(Number.parseInt(token.slice(4, 16), 16) & 0xfff).toBeGreaterThanOrEqual(0xfc0);
+		}
 	});
 
-	it("leaves an already-shaped session alone", () => {
-		expect(openCodeFreeSessionId("ses_abc123")).toBe("ses_abc123");
+	it("stays stable for one conversation and apart across conversations", () => {
+		expect(toOpenCodeSessionToken("session-1")).toBe(toOpenCodeSessionToken("session-1"));
+		expect(toOpenCodeSessionToken("session-1")).not.toBe(toOpenCodeSessionToken("session-2"));
+	});
+
+	it("leaves an already-accepted token alone", () => {
+		const token = "ses_0123456789abABCDEFGHIJKLMN";
+		expect(token).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
+		expect(toOpenCodeSessionToken(token)).toBe(token);
 	});
 });
 
@@ -106,20 +106,17 @@ describe("free Zen request identity", () => {
 		applyInferenceHeaders(headers, {
 			provider: "opencode-zen",
 			protocol: "openai",
-			modelId: "deepseek-v4.1-flash-free",
+			compat: { opencodeClientIdentity: true },
 			sessionId: "session-1",
 		});
-		expect(headers["User-Agent"]).toBe(OPENCODE_FREE_USER_AGENT);
-		expect(headers[OPENCODE_SESSION_HEADER]).toBe(openCodeFreeSessionId("session-1"));
+		expect(headers["User-Agent"]).toBe(OPENCODE_UA);
+		expect(headers[OPENCODE_SESSION_HEADER]).toBe(toOpenCodeSessionToken("session-1"));
 	});
 
 	it("leaves every other Zen and Go lane on omp's identity", () => {
-		for (const [provider, modelId] of [
-			["opencode-zen", "deepseek-v4.1-flash"],
-			["opencode-go", "deepseek-v4-pro"],
-		] as const) {
+		for (const provider of ["opencode-zen", "opencode-go"] as const) {
 			const headers: Record<string, string> = {};
-			applyInferenceHeaders(headers, { provider, protocol: "openai", modelId, sessionId: "session-1" });
+			applyInferenceHeaders(headers, { provider, protocol: "openai", compat: {}, sessionId: "session-1" });
 			expect(headers["User-Agent"]).toBe(USER_AGENT);
 			expect(headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
 		}
@@ -138,8 +135,8 @@ describe("free Zen request identity", () => {
 		);
 
 		expect(seen).toHaveLength(1);
-		expect(seen[0]?.headers.get("User-Agent")).toBe(OPENCODE_FREE_USER_AGENT);
-		expect(seen[0]?.headers.get(OPENCODE_SESSION_HEADER)).toBe(openCodeFreeSessionId("session-1"));
+		expect(seen[0]?.headers.get("User-Agent")).toBe(OPENCODE_UA);
+		expect(seen[0]?.headers.get(OPENCODE_SESSION_HEADER)).toBe(toOpenCodeSessionToken("session-1"));
 		const system = seen[0]?.body.messages.find(m => m.role === "system");
 		expect(system?.content).toBe(`${OPENCODE_FREE_SYSTEM_PROMPT}\n\nYou are omp.`);
 		expect(seen[0]?.body.stream).toBe(true);
