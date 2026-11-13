@@ -26,7 +26,7 @@ import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
 let received: http2.IncomingHttpHeaders = {};
-let receivedSessions: http2.ServerHttp2Session[] = [];
+let receivedSessions: http2.Http2Session[] = [];
 
 function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	const frame = Buffer.alloc(5 + data.length);
