@@ -460,6 +460,8 @@ export class UiHelpers {
 							synthetic: isSynthetic,
 							imageLinks,
 							images,
+							imageBudget: this.ctx.ui.imageBudget,
+							onImageUpdate: () => this.ctx.ui.requestRender(),
 							liveSteered: message.role === "user" && message.liveSteered === true,
 							timestamp: message.timestamp,
 						});
