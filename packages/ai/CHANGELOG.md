@@ -12,6 +12,9 @@
 - Fixed Cursor models receiving context a hook appends after the prompt (such as claude-mem's memory) as the user's message, with the real prompt moved into history; the prompt stays the run's message, and the turn's server records replay on the next turn ([#19156](https://github.com/can1357/oh-my-pi/pull/19156) by [@anzhen-tech](https://github.com/anzhen-tech))
 - Fixed a Google Antigravity Gemini 4 Argon block never healing when the quota summary reports no Argon bucket (for example after a plan change): a fresh usage report now lifts it while the shared Gemini quota has headroom, instead of leaving the account unusable for Argon until the old weekly reset ([#19123](https://github.com/can1357/oh-my-pi/pull/19123) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed a corrupt AWS event-stream frame length (Amazon Bedrock) making the decoder wait for and buffer the bogus length instead of failing the stream ([#19031](https://github.com/can1357/oh-my-pi/pull/19031) by [@Xytronix](https://github.com/Xytronix))
+### Fixed
+
+- Fixed Claude accounts staying blocked after recovery when `/usage` reports only one shared usage window ([#19090](https://github.com/can1357/oh-my-pi/pull/19090) by [@jeffscottward](https://github.com/jeffscottward))
 
 ## [18.20.0] - 2026-11-12
 
