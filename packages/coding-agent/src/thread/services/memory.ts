@@ -2,8 +2,8 @@
  * Memory-backend bridge between the main thread and subagent workers.
  *
  * A subagent aliases its parent's memory state (`ExecutorOptions.parentHindsightSessionState`
- * / `parentMnemopiSessionState`). When the child runs on a worker, those parents stay on
- * main and cross by reference:
+ * / `parentMnemopiSessionState` / `parentMnemosyneOssSessionState`). When the child
+ * runs on a worker, those parents stay on main and cross by reference:
  *
  * - `HindsightSessionState` → {@link RemoteHindsightSessionState}: the worker alias copies
  *   the parent's routing and config as an in-process alias does, but its client is main's
@@ -13,12 +13,15 @@
  * - `MnemopiSessionState` → {@link RemoteMnemopiSessionState}: an alias whose parent is
  *   remote holds no banks; it routes every scoped-bank read and write to the parent, so
  *   saves land in main's live SQLite banks.
+ * - `MnemosyneOssSessionState` → {@link RemoteMnemosyneOssSessionState}: tools and
+ *   direct worker requests use main's live Python worker, including after replacement.
  *
  * Nothing is held per worker: the link releases exported objects when it closes.
  */
 import { HindsightApi, HindsightError } from "../../hindsight/client";
 import { HindsightSessionState } from "../../hindsight/state";
 import { MnemopiSessionState } from "../../mnemopi/state";
+import { MnemosyneOssSessionState } from "../../mnemosyne-oss/state";
 import type { WorkerThreadLink } from "../protocol";
 import { registerRpcError, type RpcServe } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
@@ -29,8 +32,15 @@ import {
 	type HindsightSessionStateProtocol,
 	MNEMOPI_SESSION_STATE_KIND,
 	type MnemopiSessionStateProtocol,
+	MNEMOSYNE_OSS_SESSION_STATE_KIND,
+	type MnemosyneOssSessionStateProtocol,
 } from "./memory-protocol";
-import { RemoteHindsightClient, RemoteHindsightSessionState, RemoteMnemopiSessionState } from "./memory-remote";
+import {
+	RemoteHindsightClient,
+	RemoteHindsightSessionState,
+	RemoteMnemopiSessionState,
+	RemoteMnemosyneOssSessionState,
+} from "./memory-remote";
 
 const serveHindsightClient: RpcServe<HindsightApi, HindsightClientProtocol> = {
 	retain: (client, bankId, content, options) => client.retain(bankId, content, options),
@@ -88,6 +98,31 @@ const serveMnemopiState: RpcServe<MnemopiSessionState, MnemopiSessionStateProtoc
 	consolidate: (state, options) => state.consolidate(options),
 };
 
+const serveMnemosyneOssState: RpcServe<MnemosyneOssSessionState, MnemosyneOssSessionStateProtocol> = {
+	config: state => state.config,
+	aliasOf: state => state.aliasOf,
+	lastRecallSnippet: state => state.lastRecallSnippet,
+	lastRecallAt: state => state.lastRecallAt,
+	lastWriteAt: state => state.lastWriteAt,
+	setLastRecallAt: (state, value) => {
+		state.lastRecallAt = value;
+	},
+	setLastWriteAt: (state, value) => {
+		state.lastWriteAt = value;
+	},
+	workerRequest: (state, ...args) => state.worker.request(...args),
+	workerShutdown: state => state.worker.shutdown(),
+	recall: (state, ...args) => state.recall(...args),
+	remember: (state, ...args) => state.remember(...args),
+	save: (state, ...args) => state.save(...args),
+	get: (state, ...args) => state.get(...args),
+	edit: (state, ...args) => state.edit(...args),
+	capabilities: state => state.capabilities(),
+	status: state => state.status(),
+	clearAndRehydrate: state => state.clearAndRehydrate(),
+	retain: (state, ...args) => state.retain(...args),
+};
+
 let memoryErrorsRegistered = false;
 
 /** Rebuild Hindsight request errors by class on the receiving thread. */
@@ -97,7 +132,7 @@ function registerMemoryErrors(): void {
 	registerRpcError("HindsightError", message => new HindsightError(message));
 }
 
-/** Hindsight and Mnemopi parent-state bridging for subagent workers. */
+/** Parent memory-state bridging for subagent workers. */
 export const memoryThreadService: ThreadService = {
 	name: "memory",
 
@@ -119,6 +154,11 @@ export const memoryThreadService: ThreadService = {
 			(value): value is MnemopiSessionState => value instanceof MnemopiSessionState,
 			serveMnemopiState,
 		);
+		link.exportClass<MnemosyneOssSessionState, MnemosyneOssSessionStateProtocol>(
+			MNEMOSYNE_OSS_SESSION_STATE_KIND,
+			(value): value is MnemosyneOssSessionState => value instanceof MnemosyneOssSessionState,
+			serveMnemosyneOssState,
+		);
 	},
 
 	installWorker(link: WorkerThreadLink): void {
@@ -134,6 +174,10 @@ export const memoryThreadService: ThreadService = {
 		link.importClass<RemoteMnemopiSessionState, MnemopiSessionStateProtocol>(
 			MNEMOPI_SESSION_STATE_KIND,
 			remote => new RemoteMnemopiSessionState(remote),
+		);
+		link.importClass<RemoteMnemosyneOssSessionState, MnemosyneOssSessionStateProtocol>(
+			MNEMOSYNE_OSS_SESSION_STATE_KIND,
+			remote => new RemoteMnemosyneOssSessionState(remote),
 		);
 	},
 };

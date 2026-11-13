@@ -9,12 +9,18 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MnemosyneOssSessionState } from "../mnemosyne-oss/state";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
 /** Id prefixes of the memory backends' own settings; their live edits reconfigure the active backend. */
-const MEMORY_BACKEND_SETTING_PREFIXES: readonly string[] = ["hindsight.", "mnemopi.", "sharpshooter."];
+const MEMORY_BACKEND_SETTING_PREFIXES: readonly string[] = [
+	"hindsight.",
+	"mnemopi.",
+	"mnemosyne-oss.",
+	"sharpshooter.",
+];
 
 let memorySettings: Derived<Record<string, unknown>> | undefined;
 
@@ -50,6 +56,8 @@ export interface SessionMemoryHost {
 	setHindsightSessionState(state: HindsightSessionState | undefined): void;
 	getMnemopiSessionState(): MnemopiSessionState | undefined;
 	takeMnemopiSessionState(): MnemopiSessionState | undefined;
+	getMnemosyneOssSessionState(): MnemosyneOssSessionState | undefined;
+	takeMnemosyneOssSessionState(): MnemosyneOssSessionState | undefined;
 	/** Restores the base prompt captured before a memory promotion; the committed prompt sources stay. */
 	restoreBaseSystemPromptBeforeMemoryPromotion(prompt: string[]): void;
 	refreshBaseSystemPrompt(): Promise<void>;
@@ -186,10 +194,21 @@ export class SessionMemory {
 	restorePromotionSnapshot(prompt: string[] | undefined): void {
 		this.#baseSystemPromptBeforeMemoryPromotion = prompt;
 	}
+
+	/**
+	 * Retains the unretained suffix of the transcript about to be replaced (/new, resume, fork, branch).
+	 * The Mnemosyne OSS state reads the live session manager, so after the swap it would only see the next transcript.
+	 */
+	async retainOutgoingTranscript(): Promise<void> {
+		if (cfgMemoryBackend.get(this.#host.settings) !== "mnemosyne-oss") return;
+		await this.#host.getMnemosyneOssSessionState()?.retainFinal();
+	}
+
 	/** Rekeys every active memory backend to the current provider session. */
 	rekeyForCurrentSessionId(): void {
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyMnemosyneOssMemoryForCurrentSessionId();
 	}
 
 	#rekeyHindsightMemoryForCurrentSessionId(): void {
@@ -204,6 +223,17 @@ export class SessionMemory {
 		const sid = this.#host.agent.sessionId;
 		if (!sid) return;
 		this.#host.getMnemopiSessionState()?.setSessionId(sid);
+	}
+
+	/** The worker's SDK session id is immutable, so a new provider session restarts the backend. */
+	#rekeyMnemosyneOssMemoryForCurrentSessionId(): void {
+		if (cfgMemoryBackend.get(this.#host.settings) !== "mnemosyne-oss") return;
+		const state = this.#host.getMnemosyneOssSessionState();
+		const sid = this.#host.agent.sessionId;
+		if (!state || state.aliasOf || !sid || state.sessionId === sid) return;
+		void this.applyMemoryBackend().catch(error => {
+			logger.warn("Memory lifecycle: Mnemosyne OSS session rekey failed", { error: String(error) });
+		});
 	}
 
 	/** New transcript: reset Hindsight counters and reload its frozen mental-model snapshot. */
@@ -227,16 +257,25 @@ export class SessionMemory {
 		return true;
 	}
 
+	#resetMnemosyneOssConversationTrackingIfMnemosyneOss(): boolean {
+		if (cfgMemoryBackend.get(this.#host.settings) !== "mnemosyne-oss") return false;
+		const state = this.#host.getMnemosyneOssSessionState();
+		if (!state || state.aliasOf) return false;
+		state.resetConversationTracking();
+		return true;
+	}
+
 	/** Resets transcript-scoped memory counters and removes a promoted prompt. */
 	async resetContextForNewTranscript(): Promise<void> {
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
+		const resetMnemosyneOss = this.#resetMnemosyneOssConversationTrackingIfMnemosyneOss();
 		if (hadPromotedMemoryPrompt) {
 			this.#host.restoreBaseSystemPromptBeforeMemoryPromotion(this.#baseSystemPromptBeforeMemoryPromotion!);
 			this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		}
-		if (resetHindsight || resetMnemopi || hadPromotedMemoryPrompt) {
+		if (resetHindsight || resetMnemopi || resetMnemosyneOss || hadPromotedMemoryPrompt) {
 			await this.#host.refreshBaseSystemPrompt();
 		}
 	}
@@ -284,6 +323,15 @@ export class SessionMemory {
 				await mnemopi.dispose({ consolidate: consolidateMnemopi, retain: retainMnemopi });
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
+			}
+		}
+
+		const mnemosyneOss = this.#host.takeMnemosyneOssSessionState();
+		if (mnemosyneOss) {
+			try {
+				await mnemosyneOss.dispose();
+			} catch (error) {
+				logger.warn("Memory lifecycle: Mnemosyne OSS dispose failed", { error: String(error) });
 			}
 		}
 	}

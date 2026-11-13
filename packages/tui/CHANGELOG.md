@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Mnemosyne OSS group to the Memory settings tab ([#15687](https://github.com/can1357/oh-my-pi/pull/15687) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

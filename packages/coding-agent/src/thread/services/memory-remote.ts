@@ -47,11 +47,13 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
+import type { MnemosyneOssSessionStateApi, MnemosyneOssWorkerLike } from "../../mnemosyne-oss/state";
 import type { RemoteObject } from "../rpc";
 import type {
 	HindsightClientProtocol,
 	HindsightSessionStateProtocol,
 	MnemopiSessionStateProtocol,
+	MnemosyneOssSessionStateProtocol,
 } from "./memory-protocol";
 
 /** Main's Hindsight client, as seen from a worker; every request runs on main. */
@@ -283,5 +285,69 @@ export class RemoteMnemopiSessionState implements MnemopiSessionStateApi {
 
 	consolidate(options?: MnemopiConsolidateOptions): Promise<void> {
 		return this.#remote.call("consolidate", options);
+	}
+}
+
+/** Main's Mnemosyne state; aliases never start or own another Python worker. */
+export class RemoteMnemosyneOssSessionState implements MnemosyneOssSessionStateApi {
+	readonly #remote: RemoteObject<MnemosyneOssSessionStateProtocol>;
+	readonly worker: MnemosyneOssWorkerLike;
+
+	constructor(remote: RemoteObject<MnemosyneOssSessionStateProtocol>) {
+		this.#remote = remote;
+		this.worker = {
+			request: <T>(...args: Parameters<MnemosyneOssWorkerLike["request"]>) =>
+				remote.call("workerRequest", ...args) as Promise<T>,
+			shutdown: () => remote.call("workerShutdown"),
+		};
+	}
+
+	get config() {
+		return this.#remote.callSync("config");
+	}
+	get aliasOf(): MnemosyneOssSessionStateApi | undefined {
+		return this.#remote.callSync("aliasOf");
+	}
+	get lastRecallSnippet() {
+		return this.#remote.callSync("lastRecallSnippet");
+	}
+	get lastRecallAt() {
+		return this.#remote.callSync("lastRecallAt");
+	}
+	set lastRecallAt(value: string | undefined) {
+		this.#remote.callSync("setLastRecallAt", value);
+	}
+	get lastWriteAt() {
+		return this.#remote.callSync("lastWriteAt");
+	}
+	set lastWriteAt(value: string | undefined) {
+		this.#remote.callSync("setLastWriteAt", value);
+	}
+	recall(...args: Parameters<MnemosyneOssSessionStateApi["recall"]>) {
+		return this.#remote.call("recall", ...args);
+	}
+	remember(...args: Parameters<MnemosyneOssSessionStateApi["remember"]>) {
+		return this.#remote.call("remember", ...args);
+	}
+	save(...args: Parameters<MnemosyneOssSessionStateApi["save"]>) {
+		return this.#remote.call("save", ...args);
+	}
+	get(...args: Parameters<MnemosyneOssSessionStateApi["get"]>) {
+		return this.#remote.call("get", ...args);
+	}
+	edit(...args: Parameters<MnemosyneOssSessionStateApi["edit"]>) {
+		return this.#remote.call("edit", ...args);
+	}
+	capabilities() {
+		return this.#remote.call("capabilities");
+	}
+	status() {
+		return this.#remote.call("status");
+	}
+	clearAndRehydrate() {
+		return this.#remote.call("clearAndRehydrate");
+	}
+	retain(...args: Parameters<MnemosyneOssSessionStateApi["retain"]>) {
+		return this.#remote.call("retain", ...args);
 	}
 }
