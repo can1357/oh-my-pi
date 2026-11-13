@@ -448,7 +448,7 @@ describe("SDK async task guidance", () => {
 			allowRestrictedCustomTools: true,
 			toolNames: ["manager_test", "manager_query"],
 			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test"],
+			trustedTaskDelegationTools: ["manager_test", "manager_query"],
 		});
 		const tool = session.getToolForEvalBridge("manager_test");
 		const query = session.getToolForEvalBridge("manager_query");
@@ -477,7 +477,7 @@ describe("SDK async task guidance", () => {
 			allowRestrictedCustomTools: true,
 			toolNames: ["manager_test", "manager_query"],
 			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test"],
+			trustedTaskDelegationTools: ["manager_test", "manager_query"],
 		});
 		observations = [];
 		await restored.session
@@ -653,7 +653,7 @@ describe("SDK async task guidance", () => {
 			allowRestrictedCustomTools: true,
 			toolNames: ["manager_test", "manager_query"],
 			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test"],
+			trustedTaskDelegationTools: ["manager_test", "manager_query"],
 		});
 		const sessionFile = first.session.sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("missing session file");
@@ -674,7 +674,7 @@ describe("SDK async task guidance", () => {
 			allowRestrictedCustomTools: true,
 			toolNames: ["manager_test", "manager_query"],
 			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test"],
+			trustedTaskDelegationTools: ["manager_test", "manager_query"],
 		});
 		await restored.session
 			.getToolForEvalBridge("manager_query")
@@ -767,7 +767,7 @@ describe("SDK async task guidance", () => {
 				allowRestrictedCustomTools: true,
 				toolNames: ["manager_query"],
 				customTools: [queryTool],
-				trustedTaskDelegationTools: [],
+				trustedTaskDelegationTools: ["manager_query"],
 			});
 			await restored.session.getToolForEvalBridge("manager_query")?.execute("query-crashed", {});
 			expect(observations).toHaveLength(1);
@@ -957,22 +957,12 @@ describe("SDK async task guidance", () => {
 		expect(session.asyncJobManager?.getAllJobs() ?? []).toHaveLength(1);
 	});
 
-	it.each(["deny", "rewritten", "mutated"])("does not spawn when the native task is %s", async condition => {
+	// Note: tool_call hook rewrite/mutate variants were removed with the path-based grant:
+	// `<sdk>`-authorized side-calls run through wrapTrustedTask, and the hook input channel
+	// does not observe them, so there is no hook-tamper surface left to test here.
+	it("does not spawn when the native task is denied by user policy", async () => {
+		const condition = "deny";
 		const failures: string[] = [];
-		const hookExtension: ExtensionFactory = pi => {
-			if (condition === "rewritten") {
-				pi.on("tool_call", event =>
-					event.toolName === "task" ? { input: { ...event.input, task: "unapproved replacement" } } : undefined,
-				);
-			}
-			if (condition === "mutated") {
-				pi.on("tool_call", event => {
-					if (event.toolName !== "task") return;
-					event.input.task = "unapproved replacement";
-					return { input: event.input };
-				});
-			}
-		};
 		const manager: CustomTool = {
 			name: "manager_test",
 			label: "Manager",
@@ -997,7 +987,6 @@ describe("SDK async task guidance", () => {
 		});
 		const { session } = await harness(
 			{
-				extensions: [hookExtension],
 				restrictToolNames: true,
 				allowRestrictedCustomTools: true,
 				toolNames: ["manager_test"],
