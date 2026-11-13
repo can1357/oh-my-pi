@@ -5154,18 +5154,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						activeToolNames.delete(name);
 						continue;
 					}
-					if (tool.name !== name) {
-						activeToolNames.delete(name);
-						activeToolNames.add(tool.name);
-					}
 					// Wrapped like every registry tool: `ExtensionToolWrapper` is where the
 					// approval mode, per-tool `tools.approval.<tool>` policies and
 					// `autoApprove` are enforced. The advisor's loop and its Cursor exec
 					// bridge both run these instances directly, so a raw one would execute a
 					// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 					// first, matching the registry's wrap order.
-					if (tool)
-						tools.push(new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent));
+					tools.push(new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent));
 				}
 				return {
 					tools,

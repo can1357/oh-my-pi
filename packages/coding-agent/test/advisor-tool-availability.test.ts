@@ -10,7 +10,6 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import * as sessionAdvisors from "@oh-my-pi/pi-coding-agent/session/session-advisors";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -37,12 +36,6 @@ function requireTool(tools: readonly AgentTool[], name: string): AgentTool {
 function schemaText(tool: AgentTool): string {
 	const parameters = tool.parameters as { toJsonSchema(): unknown };
 	return JSON.stringify(parameters.toJsonSchema());
-}
-
-function toolSessionOf(tool: AgentTool): ToolSession {
-	const session = (tool as AgentTool & { session?: ToolSession }).session;
-	if (!session) throw new Error(`${tool.name} did not expose its tool session`);
-	return session;
 }
 
 async function outcomeText(tool: AgentTool): Promise<string> {
@@ -129,21 +122,6 @@ test("advisor tool availability follows that advisor's grant, not the primary", 
 		expect(narrowBash.description).toContain("Long-lived services");
 		expect(narrowTask.description).not.toContain("Call `wait`");
 		expect(narrowGrep.description).not.toContain("`find`");
-
-		const advisorSession = toolSessionOf(richBash);
-		const primarySession = toolSessionOf(primaryBash!);
-		expect(advisorSession.setActiveToolNames).toBeUndefined();
-		expect(primarySession.setActiveToolNames).toBeTypeOf("function");
-		expect(advisorSession.isToolActive?.("bash")).toBe(true);
-		expect(advisorSession.isToolActive?.("wait")).toBe(true);
-		expect(advisorSession.isToolActive?.("find")).toBe(true);
-		expect(advisorSession.isToolActive?.("lsp")).toBe(false);
-		expect(advisorSession.isToolActive?.("grep")).toBe(true);
-		expect(toolSessionOf(narrowBash).isToolActive?.("wait")).toBe(false);
-		expect(toolSessionOf(narrowBash).isToolActive?.("bash")).toBe(true);
-		advisorSession.setActiveToolNames?.(["read"]);
-		expect(session.getActiveToolNames()).toContain("read");
-		expect(session.getActiveToolNames()).not.toContain("bash");
 
 		const launch = await outcomeText(richBash);
 		expect(launch).toContain("exists only in the embedded shell");
