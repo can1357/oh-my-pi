@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Wayland, pasting while the clipboard holds an image or nothing no longer logs a misleading `Executable not found in $PATH: "xsel"` warning ([#19260](https://github.com/can1357/oh-my-pi/pull/19260) by [@tuschla](https://github.com/tuschla))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
