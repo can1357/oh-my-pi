@@ -114,8 +114,13 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		return this.#remote.callSync("reopen", id, expected);
 	}
 
-	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean {
-		return this.#remote.callSync("setHistory", id, history, expectedSessionFile);
+	setHistory(
+		id: string,
+		history: AgentHistorySummary,
+		expectedSessionFile?: string,
+		options?: { isScan?: boolean },
+	): boolean {
+		return this.#remote.callSync("setHistory", id, history, expectedSessionFile, options);
 	}
 
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean {

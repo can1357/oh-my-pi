@@ -50,8 +50,9 @@ export interface AgentHistorySummary {
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
-	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 	directCost?: number;
+	tokensPerSecond?: number;
+	tokensPerSecondSource?: "park" | "scan";
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
@@ -143,7 +144,12 @@ export interface AgentRegistryApi {
 	/** Start a fresh `parked` generation for the killed ref `expected`. */
 	reopen(id: string, expected: AgentRef): AgentRef | undefined;
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
-	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean;
+	setHistory(
+		id: string,
+		history: AgentHistorySummary,
+		expectedSessionFile?: string,
+		options?: { isScan?: boolean },
+	): boolean;
 	/** Transition `id` to `status` when it still matches `expected`. */
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
 	/** Record that the current run handed over its final result. */
@@ -273,7 +279,12 @@ export class AgentRegistry implements AgentRegistryApi {
 	}
 
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
-	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean {
+	setHistory(
+		id: string,
+		history: AgentHistorySummary,
+		expectedSessionFile?: string,
+		options?: { isScan?: boolean },
+	): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || (expectedSessionFile !== undefined && ref.sessionFile !== expectedSessionFile)) return false;
 		const definedHistory = Object.fromEntries(
@@ -294,6 +305,14 @@ export class AgentRegistry implements AgentRegistryApi {
 			incomingDirectCost >= 0
 		) {
 			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
+		}
+		if (
+			options?.isScan &&
+			ref.history?.tokensPerSecondSource === "park" &&
+			ref.history?.tokensPerSecond !== undefined
+		) {
+			delete definedHistory.tokensPerSecond;
+			delete definedHistory.tokensPerSecondSource;
 		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });

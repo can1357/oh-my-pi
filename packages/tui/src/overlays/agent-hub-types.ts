@@ -15,6 +15,7 @@ export interface AgentMetricsSummary {
 	durationKind?: "active" | "span" | "unknown";
 	contextTokens?: number;
 	contextWindow?: number;
+	tokensPerSecond?: number;
 }
 /** Live session data and actions used by the agent hub. */
 export interface AgentHubSession {
@@ -22,6 +23,8 @@ export interface AgentHubSession {
 	readonly model: Model | undefined;
 	readonly servingModel?: { selector: string; isFallback: boolean };
 	readonly agent?: { state: { messages: AgentMessage[] } };
+	readonly isStreaming?: boolean;
+	readonly tokenRate?: { rate: (nowMs?: number) => number | null };
 	/** Existing session ledger includes off-transcript model usage and nested-task attribution. */
 	readonly sessionManager?: {
 		getUsageStatistics(): { cost: number; subagentCost: number };
@@ -55,6 +58,8 @@ export interface AgentRecordLike {
 		metrics?: AgentMetricsSummary;
 		/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 		directCost?: number;
+		tokensPerSecond?: number;
+		tokensPerSecondSource?: "park" | "scan";
 		readOnly?: boolean;
 		outputPath?: string;
 		patchPath?: string;

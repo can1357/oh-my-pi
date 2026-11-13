@@ -296,6 +296,53 @@ describe("persisted agent model attribution", () => {
 		expect(ref.history?.directCost).toBeCloseTo(0.05);
 	});
 
+	it("protects fresh park-time throughput from delayed history scan overwrite while allowing follow-up park updates", () => {
+		const registry = new AgentRegistry();
+		const ref = registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/worker.jsonl",
+			status: "idle",
+		});
+		// Authoritative park snapshot sets rate to 150 tok/s with park provenance:
+		registry.setHistory("Worker", { tokensPerSecond: 150.0, tokensPerSecondSource: "park" }, "/tmp/worker.jsonl");
+		expect(ref.history?.tokensPerSecond).toBe(150.0);
+		expect(ref.history?.tokensPerSecondSource).toBe("park");
+
+		// Delayed background scan with an older rate (75 tok/s) must NOT overwrite the park-time rate:
+		registry.setHistory("Worker", { tokensPerSecond: 75.0 }, "/tmp/worker.jsonl", { isScan: true });
+		expect(ref.history?.tokensPerSecond).toBe(150.0);
+
+		// A subsequent authoritative park update (e.g. from follow-up turn) updates the rate:
+		registry.setHistory("Worker", { tokensPerSecond: 180.0 }, "/tmp/worker.jsonl");
+		expect(ref.history?.tokensPerSecond).toBe(180.0);
+	});
+
+	it("allows fresh scans to update scan-derived throughput (e.g. for advisor rows)", () => {
+		const registry = new AgentRegistry();
+		const ref = registry.register({
+			id: "Advisor",
+			displayName: "Advisor",
+			kind: "advisor",
+			session: null,
+			sessionFile: "/tmp/advisor.jsonl",
+			status: "idle",
+		});
+		// First scan sets rate to 75 tok/s:
+		registry.setHistory("Advisor", { tokensPerSecond: 75.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", {
+			isScan: true,
+		});
+		expect(ref.history?.tokensPerSecond).toBe(75.0);
+
+		// Subsequent scan after another advisor turn updates rate to 150 tok/s:
+		registry.setHistory("Advisor", { tokensPerSecond: 150.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", {
+			isScan: true,
+		});
+		expect(ref.history?.tokensPerSecond).toBe(150.0);
+	});
+
 	it("uses an off-branch usage record's active leaf for cold selected-leaf metrics", async () => {
 		using tempDir = TempDir.createSync("@omp-active-leaf-history-");
 		const registry = await historyFor(tempDir.path(), "Branching", [

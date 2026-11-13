@@ -2424,6 +2424,7 @@ export interface AgentProgress {
 	/** Cumulative billing cost in USD, accumulated incrementally from message_end events. */
 	cost: number;
 	durationMs: number;
+	tokensPerSecond?: number;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;

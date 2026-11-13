@@ -100,6 +100,7 @@ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { sessionThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import {
 	AUTO_THINKING,
 	assertModelSupportsEffortCeiling,
@@ -1719,6 +1720,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const emitProgressNow = () => {
 		refreshRecentOutput();
 		progress.durationMs = Date.now() - startTime;
+		const throughput = sessionThroughput(activeSession);
+		if (throughput !== undefined) progress.tokensPerSecond = throughput;
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
@@ -2493,6 +2496,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
+			if (session) {
+				const throughput = sessionThroughput(session);
+				if (throughput !== undefined) progress.tokensPerSecond = throughput;
+			}
 			activeSession = null;
 			return session;
 		},

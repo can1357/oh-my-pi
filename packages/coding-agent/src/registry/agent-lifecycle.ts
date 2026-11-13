@@ -24,6 +24,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
+import { sessionThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -418,17 +419,30 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				if (live !== ref || !live.session || live.session !== session) return;
 				if (this.#adopted.get(id)?.ref !== ref) return;
 
-				// Preserve cost before detaching the only live source. The session usage
+				// Preserve cost and completed throughput before detaching the only live source. The session usage
 				// index includes off-transcript model calls; remove completed task-result
 				// billing so child rows remain the sole owners of nested spend.
 				try {
 					const usage = session.sessionManager.getUsageStatistics();
 					const directCost = usage.cost - usage.subagentCost;
+					const tokensPerSecond = sessionThroughput(session);
+					const historyPatch: {
+						directCost?: number;
+						tokensPerSecond?: number;
+						tokensPerSecondSource?: "park" | "scan";
+					} = {};
 					if (Number.isFinite(directCost) && directCost >= 0) {
-						this.#registry.setHistory(id, { directCost }, ref.sessionFile ?? undefined);
+						historyPatch.directCost = directCost;
+					}
+					if (tokensPerSecond !== undefined) {
+						historyPatch.tokensPerSecond = tokensPerSecond;
+						historyPatch.tokensPerSecondSource = "park";
+					}
+					if (Object.keys(historyPatch).length > 0) {
+						this.#registry.setHistory(id, historyPatch, ref.sessionFile ?? undefined);
 					}
 				} catch (error) {
-					logger.debug("AgentLifecycleManager.park: cost snapshot failed", { id, error: String(error) });
+					logger.debug("AgentLifecycleManager.park: cost/rate snapshot failed", { id, error: String(error) });
 				}
 
 				// Commit: detach + parked *before* dispose so callers never see a
@@ -651,6 +665,20 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		}
 
 		const live = this.#registry.get(id) === ref ? ref.session : null;
+		if (options?.tombstone && live) {
+			try {
+				const tps = sessionThroughput(live);
+				if (tps !== undefined) {
+					this.#registry.setHistory(
+						id,
+						{ tokensPerSecond: tps, tokensPerSecondSource: "park" },
+						ref.sessionFile ?? undefined,
+					);
+				}
+			} catch (error) {
+				logger.debug("AgentLifecycleManager.release: throughput snapshot failed", { id, error: String(error) });
+			}
+		}
 		if (options?.tombstone) {
 			// Apply the terminal transition synchronously, before any await. The
 			// dying session's own dispose path calls unregisterUnlessParked

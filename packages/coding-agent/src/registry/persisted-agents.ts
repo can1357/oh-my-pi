@@ -18,6 +18,7 @@ import {
 	MAIN_AGENT_ID,
 } from "./agent-registry";
 import { getAgentTombstonePath } from "./agent-tombstone";
+import { usageThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 
 /** Maximum prefix entries inspected for task metadata. */
 const MAX_METADATA_LINES = 64;
@@ -123,6 +124,7 @@ interface AssistantMetrics {
 	 * same verdict the session reached while running it.
 	 */
 	served: boolean;
+	tokensPerSecond?: number;
 }
 
 function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
@@ -131,6 +133,8 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 	const content = Array.isArray(message.content) ? message.content : [];
 	const provider = typeof message.provider === "string" ? message.provider : undefined;
 	const model = typeof message.model === "string" ? message.model : undefined;
+	const duration = typeof message.duration === "number" ? message.duration : undefined;
+	const output = finiteNumber(usage.output);
 	return {
 		tokens: usageTokens(usage),
 		tools: content.filter(part => recordOf(part)?.type === "toolCall").length,
@@ -141,6 +145,7 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 			stopReason: message.stopReason,
 			content,
 		} as Pick<AssistantMessage, "stopReason" | "content">),
+		tokensPerSecond: usageThroughput({ output }, duration),
 	};
 }
 
@@ -261,6 +266,7 @@ async function readPersistedAgentHistory(
 	let contextTokens: number | undefined;
 	let servedModel: string | undefined;
 	let latestModelChange: { model: string; resolvedModelIsFallback: boolean } | undefined;
+	let tokensPerSecond: number | undefined;
 	const visited = new Set<string>();
 	for (let id = leafId; id && !visited.has(id); id = parents.get(id)) {
 		visited.add(id);
@@ -297,6 +303,9 @@ async function readPersistedAgentHistory(
 		metrics.tools += assistant.tools;
 		metrics.cost += assistant.cost;
 		contextTokens ??= assistant.contextTokens;
+		if (tokensPerSecond === undefined && assistant.tokensPerSecond !== undefined) {
+			tokensPerSecond = assistant.tokensPerSecond;
+		}
 	}
 	// No transition described the serving model (pre-`model_change` transcript, or
 	// the spawn record was pruned) — the message's own model still beats a
@@ -307,8 +316,11 @@ async function readPersistedAgentHistory(
 		resolvedModelIsFallback = servedModel !== undefined ? false : latestModelChange?.resolvedModelIsFallback;
 	}
 	if (contextTokens !== undefined) metrics.contextTokens = contextTokens;
+	if (tokensPerSecond !== undefined) metrics.tokensPerSecond = tokensPerSecond;
 	return {
 		directCost,
+		tokensPerSecond,
+		tokensPerSecondSource: "scan",
 		...(metrics.requests > 0 ? { metrics } : {}),
 		...(resolvedModel ? { resolvedModel, resolvedModelIsFallback } : {}),
 		...(modelRole ? { modelRole } : {}),
@@ -714,7 +726,10 @@ export async function registerPersistedSubagents(
 			if (stamp !== undefined && historyStamps.get(ref) === stamp) continue;
 			const history = await readPersistedAgentHistory(transcript, shouldContinue);
 			if (!shouldContinue()) return;
-			if (registry.setHistory(transcript.id, history, transcript.sessionFile) && stamp !== undefined) {
+			if (
+				registry.setHistory(transcript.id, history, transcript.sessionFile, { isScan: true }) &&
+				stamp !== undefined
+			) {
 				historyStamps.set(ref, stamp);
 			}
 		}

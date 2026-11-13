@@ -33,7 +33,10 @@ export type AgentRegistryProtocol = {
 	register: RpcMethod<[input: RegisterInput], AgentRef>;
 	registerIfAvailable: RpcMethod<[input: RegisterInput, expected: AgentRef | null], AgentRef | undefined>;
 	reopen: RpcMethod<[id: string, expected: AgentRef], AgentRef | undefined>;
-	setHistory: RpcMethod<[id: string, history: AgentHistorySummary, expectedSessionFile?: string], boolean>;
+	setHistory: RpcMethod<
+		[id: string, history: AgentHistorySummary, expectedSessionFile?: string, options?: { isScan?: boolean }],
+		boolean
+	>;
 	setStatus: RpcMethod<[id: string, status: AgentStatus, expected?: AgentRefExpectation], boolean>;
 	markResultAccepted: RpcMethod<[id: string, expected?: AgentRefExpectation, responseAt?: number], boolean>;
 	staleAcceptedRuns: RpcMethod<[], AgentRef[]>;
