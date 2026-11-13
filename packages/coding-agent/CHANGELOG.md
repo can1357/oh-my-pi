@@ -74,6 +74,7 @@
 - Fixed `yield` rejecting a JSON-string `data` payload with `expected object, received string` when the decoded value fails the output schema; it now reports the decoded field violations ([#18971](https://github.com/can1357/oh-my-pi/pull/18971) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `github` `run_watch` marking failed-job logs unavailable when they contain ANSI or other terminal escape sequences, returning plain-text logs on both current and older GitHub CLI (`gh`) releases ([#18968](https://github.com/can1357/oh-my-pi/pull/18968) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `web_search` leaving pages open in the shared headless browser when a search was cancelled while its page was still opening or the page failed to close, so the browser's memory no longer grows over a long session ([#19058](https://github.com/can1357/oh-my-pi/pull/19058) by [@tuschla](https://github.com/tuschla))
+- Isolated tasks that branch from a commit older than a dirty baseline no longer revert the baseline commit on their task branch ([#18958](https://github.com/can1357/oh-my-pi/issues/18958)) ([#19174](https://github.com/can1357/oh-my-pi/pull/19174) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 
 ### Removed
 
