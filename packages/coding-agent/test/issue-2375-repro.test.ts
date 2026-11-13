@@ -4,7 +4,7 @@
  * When a user attaches an image in their LOCAL terminal (e.g. drag/drop into
  * iTerm2 on macOS) while the omp process actually runs on a remote host (Pi
  * over SSH), the terminal forwards a bracketed-paste containing the local
- * macOS path. The remote `handleImagePathPaste` tries to read that path on
+ * macOS path. The remote `handleFilePathPaste` tries to read that path on
  * the remote filesystem, fails (ENOENT), then falls through to pasting the
  * unresolvable path as plain text — making it look like the image was
  * "attached as a local path" when in fact nothing was sent.
@@ -64,7 +64,7 @@ function createContext() {
 	return { ctx, spies: { pasteText, insertText, insertAtom, requestRender, showStatus } };
 }
 
-describe("InputController.handleImagePathPaste (issue #2375)", () => {
+describe("InputController.handleFilePathPaste (issue #2375)", () => {
 	const originalSshConnection = process.env.SSH_CONNECTION;
 	const originalSshTty = process.env.SSH_TTY;
 	const originalSshClient = process.env.SSH_CLIENT;
@@ -94,7 +94,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		const controller = new InputController(ctx);
 		const missing = "/Users/someone/Pictures/local-only.png";
 
-		await controller.handleImagePathPaste(missing);
+		await controller.handleFilePathPaste(missing);
 
 		expect(spies.pasteText).not.toHaveBeenCalled();
 		expect(spies.showStatus).toHaveBeenCalledTimes(1);
@@ -109,7 +109,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		const controller = new InputController(ctx, EMPTY_CLIPBOARD);
 		const missing = "/tmp/definitely-does-not-exist-omp-2375.png";
 
-		await controller.handleImagePathPaste(missing);
+		await controller.handleFilePathPaste(missing);
 
 		expect(spies.pasteText).not.toHaveBeenCalled();
 		expect(spies.showStatus).toHaveBeenCalledTimes(1);
@@ -127,7 +127,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		// keeps firing.
 		const hostile = `/tmp/\x1b[31mevil\x1b[0m\r\nname\twith-${"x".repeat(100)}.png`;
 
-		await controller.handleImagePathPaste(hostile);
+		await controller.handleFilePathPaste(hostile);
 
 		expect(spies.pasteText).not.toHaveBeenCalled();
 		expect(spies.showStatus).toHaveBeenCalledTimes(1);
@@ -156,7 +156,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		const stale =
 			"C:\\Users\\u\\AppData\\Local\\Packages\\MicrosoftWindows.Client.Core_cw5n1h2txyewy\\TempState\\gone.png";
 
-		await controller.handleImagePathPaste(stale);
+		await controller.handleFilePathPaste(stale);
 
 		expect(spies.pasteText).not.toHaveBeenCalled();
 		expect(spies.showStatus).not.toHaveBeenCalled();
@@ -178,7 +178,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		const nonImage = path.join(os.tmpdir(), `issue-2375-not-png-${Math.random().toString(36).slice(2)}.png`);
 		await Bun.write(nonImage, "not really a png");
 		try {
-			await controller.handleImagePathPaste(nonImage);
+			await controller.handleFilePathPaste(nonImage);
 		} finally {
 			await Bun.file(nonImage).delete();
 		}
@@ -211,7 +211,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		try {
 			expect(await process.exited).toBe(0);
 
-			await controller.handleImagePathPaste(video);
+			await controller.handleFilePathPaste(video);
 		} finally {
 			await Bun.file(video)
 				.delete()

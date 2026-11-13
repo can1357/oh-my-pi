@@ -721,7 +721,7 @@ export class BtwController {
 				return this.startFollowUp(record.id, question, signal, images);
 			},
 			onPasteImage: () => this.ctx.handleImagePaste(),
-			onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
+			onPasteImagePath: path => this.ctx.handleFilePathPaste(path),
 			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
 			spaceHold: input => this.ctx.dictationSpaceHold(input),
 			requestRender: () => this.ctx.ui.requestRender(),

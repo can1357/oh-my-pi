@@ -21,6 +21,11 @@ import {
  */
 export const CONVERTIBLE_EXTENSIONS: ReadonlySet<string> = new Set([".pdf", ".docx", ".pptx", ".xlsx", ".epub"]);
 
+/** True when the path has an extension markit can convert to markdown. */
+export function isConvertibleDocumentPath(filePath: string): boolean {
+	return CONVERTIBLE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
 export interface MarkitConversionResult {
 	content: string;
 	ok: boolean;

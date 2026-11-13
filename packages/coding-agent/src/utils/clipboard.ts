@@ -94,7 +94,7 @@ function isPasteboardTypedByHeader(text: string): boolean {
  *
  * Used to reach the Finder `Cmd+C` pasteboard (which exposes only file URLs,
  * no plain text or raw image bytes) so an image-file clipboard can be attached
- * via {@link handleImagePathPaste} instead of falling through to "Clipboard is
+ * via {@link handleFilePathPaste} instead of falling through to "Clipboard is
  * empty". Returns an empty array on non-darwin platforms, when AppleScript is
  * unavailable, or when the pasteboard holds no file URLs.
  */

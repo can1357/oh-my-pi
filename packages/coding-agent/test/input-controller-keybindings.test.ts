@@ -11,6 +11,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
+import * as markit from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -42,6 +43,7 @@ type FakeEditor = {
 	clearCustomKeyHandlers(): void;
 	spaceHold: SpaceHoldGesture;
 	pasteText(text: string): void;
+	insertTextAttachment?(content: string, expansion?: string): void;
 	handleInput?(data: string): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
@@ -1133,7 +1135,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 			promptStyle: true,
 			acceptImages: true,
 			onPasteImagePath: pastedPath => {
-				const paste = controller.handleImagePathPaste(pastedPath);
+				const paste = controller.handleFilePathPaste(pastedPath);
 				pasted.push(paste);
 				return paste;
 			},
@@ -1271,9 +1273,9 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		});
 
 		// Windows 11 Win+Shift+S: the pasted TempState path is already gone; the bitmap is on the clipboard.
-		await controller.handleImagePathPaste(tempDir.join("TempState", "gone.png"));
+		await controller.handleFilePathPaste(tempDir.join("TempState", "gone.png"));
 		clipboardImage = null;
-		await controller.handleImagePathPaste(tempDir.join("missing.png"));
+		await controller.handleFilePathPaste(tempDir.join("missing.png"));
 
 		expect(delivered).toEqual(["[Image #1]"]);
 		expect(attached.map(image => imageAttachmentSource(image)?.path)).toEqual([
@@ -1289,11 +1291,71 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const { prompt, onSubmit } = createPrompt(context, { acceptImages: true });
 		const videoPath = tempDir.join("clip.mp4");
 
-		await new InputController(context.ctx).handleImagePathPaste(videoPath);
+		await new InputController(context.ctx).handleFilePathPaste(videoPath);
 		prompt.handleInput("\r");
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Video paste is not supported in this prompt");
 		expect(onSubmit).toHaveBeenCalledWith(videoPath);
+	});
+
+	it("converts a pasted document path into an attachment chip (#9931)", async () => {
+		const context = await createPromptContext();
+		const insertTextAttachment = vi.fn<(content: string, expansion?: string) => void>();
+		context.editor.insertTextAttachment = insertTextAttachment;
+		const docPath = tempDir.join("report.pdf");
+		const converted = vi
+			.spyOn(markit, "convertFileWithMarkit")
+			.mockResolvedValue({ ok: true, content: "# Quarterly report\n\nRevenue is up." });
+
+		await new InputController(context.ctx).handleFilePathPaste(docPath);
+
+		expect(converted).toHaveBeenCalledWith(expect.stringMatching(/report\.pdf$/));
+		expect(insertTextAttachment).toHaveBeenCalledWith(
+			"# Quarterly report\n\nRevenue is up.",
+			"<attachment>\n# Quarterly report\n\nRevenue is up.\n</attachment>",
+		);
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Attached report.pdf as markdown text");
+		// The raw path must not leak into the prompt as text.
+		expect(context.editor.getText()).toBe("");
+		converted.mockRestore();
+	});
+
+	it("pastes the path back when document conversion fails (#9931)", async () => {
+		const context = await createPromptContext();
+		const docPath = tempDir.join("broken.docx");
+		const converted = vi
+			.spyOn(markit, "convertFileWithMarkit")
+			.mockRejectedValue(new Error("unsupported document layout"));
+
+		await new InputController(context.ctx).handleFilePathPaste(docPath);
+
+		expect(context.editor.getText()).toBe(docPath);
+		expect(context.ctx.showStatus).toHaveBeenCalledWith(
+			expect.stringContaining("Document paste failed: unsupported document layout"),
+		);
+		converted.mockRestore();
+	});
+
+	it("keeps a pasted document path as text and says why in an image-accepting prompt", async () => {
+		const context = await createPromptContext();
+		const { prompt, onSubmit } = createPrompt(context, { acceptImages: true });
+		const docPath = tempDir.join("report.pdf");
+
+		await new InputController(context.ctx).handleFilePathPaste(docPath);
+		prompt.handleInput("\r");
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Document paste is not supported in this prompt");
+		expect(onSubmit).toHaveBeenCalledWith(docPath);
+	});
+
+	it("pastes a plain non-document file path as text (#9931)", async () => {
+		const context = await createPromptContext();
+		const notesPath = tempDir.join("notes.txt");
+
+		await new InputController(context.ctx).handleFilePathPaste(notesPath);
+
+		expect(context.editor.getText()).toBe(notesPath);
+		expect(context.ctx.showStatus).not.toHaveBeenCalled();
 	});
 
 	it("refuses a clipboard image in a prompt that did not opt in", async () => {
@@ -1317,7 +1379,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const context = await createPromptContext();
 		const { prompt, onSubmit } = createPrompt(context);
 
-		await new InputController(context.ctx).handleImagePathPaste(imagePath);
+		await new InputController(context.ctx).handleFilePathPaste(imagePath);
 		prompt.handleInput("\r");
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");

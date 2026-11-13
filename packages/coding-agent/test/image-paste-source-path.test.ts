@@ -142,7 +142,7 @@ describe("path-pasted image source path (#12244)", () => {
 		await Bun.write(imagePath, Buffer.from(TINY_PNG, "base64"));
 		const { ctx, editor } = createPasteContext(SessionManager.inMemory(tmpDir));
 		const controller = new InputController(ctx);
-		await controller.handleImagePathPaste(imagePath);
+		await controller.handleFilePathPaste(imagePath);
 		expect(editor.pendingImages.length).toBe(1);
 		return { editor, imagePath };
 	}
