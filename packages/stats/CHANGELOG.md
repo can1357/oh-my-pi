@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.20.0] - 2026-11-12
+
 ### Fixed
 
 - Spotlight stats count a `;`/`,` path `read` once with all its parts, and count a later read of any of its files as a re-read or a needed line ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))

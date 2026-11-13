@@ -12,7 +12,7 @@
 //! status 137).
 //! `externalize` adds what only the engine has, the execution position:
 //! the `Frames` blob (frames, partial words, staged ops, fd tables with
-//! in-memory pipe contents, subshell overlays and scopes, pending calls and
+//! in-memory pipe contents, forked vprocs' images and scopes, pending calls and
 //! signals, the scheduler) plus the unit blobs live frames need. A running
 //! background job's table entry is live in the store; its execution
 //! position needs `externalize` at a safepoint.

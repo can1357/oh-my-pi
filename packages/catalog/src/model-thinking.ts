@@ -99,15 +99,18 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 	return effort;
 }
 
-/** Maps a normalized thinking effort to Google's `thinkingLevel` enum values.
+/** Maps a normalized thinking effort to Google's `thinkingLevel` values.
  * When a collapsed family routes `minimal` onto the same wire id as `low`
  * (Antigravity Gemini 3.6/3.7 Flash), emit `LOW` — Cloud Code Assist rejects
- * `MINIMAL` on those `-low` SKUs.
+ * `MINIMAL` on those `-low` SKUs. `xhigh` reaches here only for ladders that
+ * expose it (Gemini 4 Hydrogen); the Gemini API documents it as lowercase
+ * `xhigh`, which the SDK enum does not mirror yet.
+ * https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
  */
 export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 	effort: Effort,
 	model?: ApiModel<TApi>,
-): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" {
+): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "xhigh" {
 	if (effort === Effort.Minimal) {
 		const routing = model?.thinking?.effortRouting;
 		if (routing?.[Effort.Minimal] && routing[Effort.Minimal] === routing[Effort.Low]) {
@@ -121,9 +124,10 @@ export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 		case Effort.Medium:
 			return "MEDIUM";
 		case Effort.High:
-		case Effort.XHigh:
 		case Effort.Max:
 			return "HIGH";
+		case Effort.XHigh:
+			return "xhigh";
 	}
 }
 
