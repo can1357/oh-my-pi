@@ -1,5 +1,5 @@
 use std::{
-	cell::Cell,
+	cell::{Cell, RefCell},
 	ffi::c_void,
 	mem, ptr,
 	sync::{
@@ -33,6 +33,7 @@ use super::{
 	release::Route,
 	release_guard,
 	route::{self, Routes, symbol},
+	window_order,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -51,6 +52,9 @@ const BACKGROUND_SETTLE: Duration = ACTION_REFLEX;
 /// Upper bound on waiting for a foreground activation to become observable.
 const ACTIVATION_TIMEOUT: Duration = Duration::from_millis(400);
 const ACTIVATION_POLL: Duration = Duration::from_millis(10);
+/// How many times per [`ACTIVATION_POLL`] the background guard checks the
+/// window stacking while it keeps the user's key window in front of the target.
+const ORDER_CHECKS: u32 = 10;
 /// How long before an app came forward a click, ⌘/⌃ chord or panel counts as
 /// the user's switch to it. Measured on a VM: ⌘-Tab activates the chosen app
 /// about 3 ms after ⌘ is released.
@@ -1316,6 +1320,12 @@ pub(super) fn with_background_watch<T>(
 			Placement::HitTest(&placer)
 		},
 	};
+	// The stacking the action must leave as it found it, read before anything
+	// is sent.
+	let order = previous
+		.pid
+		.zip(capture::stacked_windows())
+		.and_then(|(user, stack)| window_order::EntryOrder::new(pid, user, previous_key, &stack));
 	let now = Instant::now();
 	let lease = Mutex::new(BackgroundFocusLease::new(
 		previous.psn,
@@ -1337,8 +1347,15 @@ pub(super) fn with_background_watch<T>(
 	thread::scope(|scope| {
 		let visit = &visited;
 		let lease = &lease;
-		let desktop =
-			WindowServerDesktop { spi, previous, key: previous_key, placement, stopped: &stopped };
+		let desktop = WindowServerDesktop {
+			spi,
+			previous,
+			key: previous_key,
+			placement,
+			stopped: &stopped,
+			order: RefCell::new(order),
+			raises: Cell::new(0),
+		};
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || guard_focus(lease, &desktop, visit))
@@ -1429,6 +1446,17 @@ trait GuardedDesktop {
 	fn stopped(&self) -> bool;
 	/// Waits one poll, or until the action ends.
 	fn wait(&self);
+	/// Waits one of the poll's [`ORDER_CHECKS`] stacking checks, or until the
+	/// action ends.
+	fn wait_order(&self);
+	/// Whether the user's key window covered the target when the action
+	/// began, so there is a stacking to keep.
+	fn has_order(&self) -> bool;
+	/// Raises again the user's key window when it covered the target as the
+	/// action began and the target now covers it ([`window_order::keep`]),
+	/// asking `still_kept` again right before the raise; on the `last` pass, an
+	/// error names it if it stayed behind.
+	fn keep_order(&self, last: bool, still_kept: &dyn Fn() -> bool) -> CoreResult<()>;
 }
 
 struct WindowServerDesktop<'a> {
@@ -1439,6 +1467,9 @@ struct WindowServerDesktop<'a> {
 	key:       Option<u32>,
 	placement: Placement<'a>,
 	stopped:   &'a AtomicBool,
+	/// The stacking at entry; `None` when nothing covered the target.
+	order:     RefCell<Option<window_order::EntryOrder>>,
+	raises:    Cell<u8>,
 }
 
 impl GuardedDesktop for WindowServerDesktop<'_> {
@@ -1481,6 +1512,56 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 	fn wait(&self) {
 		thread::park_timeout(ACTIVATION_POLL);
 	}
+
+	fn wait_order(&self) {
+		thread::park_timeout(ACTIVATION_POLL / ORDER_CHECKS);
+	}
+
+	fn has_order(&self) -> bool {
+		self.order.borrow().is_some()
+	}
+
+	fn keep_order(&self, last: bool, still_kept: &dyn Fn() -> bool) -> CoreResult<()> {
+		let mut order = self.order.borrow_mut();
+		let Some(order) = order.as_mut() else {
+			return Ok(());
+		};
+		let mut tries = self.raises.get();
+		let kept = keep_key_window(order, &mut tries, last, still_kept);
+		self.raises.set(tries);
+		kept
+	}
+}
+
+/// One pass of [`window_order::keep`] on the desktop: the user's key window is
+/// raised through accessibility, and a failure on the `last` pass names it.
+fn keep_key_window(
+	order: &mut window_order::EntryOrder,
+	tries: &mut u8,
+	last: bool,
+	still_kept: &dyn Fn() -> bool,
+) -> CoreResult<()> {
+	window_order::keep(
+		order,
+		tries,
+		capture::stacked_windows,
+		still_kept,
+		|window| match ax::raise_window_id(window.pid, window.id) {
+			Err(error) if error.code == ErrorCode::WindowNotFound => window_order::Raised::Unraisable,
+			// Any other failure shows in a later reading.
+			_ => window_order::Raised::Asked,
+		},
+		|| thread::sleep(ACTIVATION_POLL),
+		last,
+	)
+	.map_err(|window| {
+		DesktopError::input_failed(format!(
+			"the user's window {} of {} covered the target when the action began, and the target is \
+			 still in front of it after raising it again",
+			window.id,
+			app_label(Some(window.pid)),
+		))
+	})
 }
 
 /// One switch-sampler reading of the front app: the lease sees every app as
@@ -1617,7 +1698,25 @@ fn guard_focus(
 			},
 		}
 		visit.store(lease.lock().visited, Ordering::Release);
-		if desktop.stopped() {
+		// The user's key window goes back in front of a target the action
+		// ordered over it while their app is in front and they have neither
+		// switched nor come to the target. `keep_order` asks again right
+		// before it raises, so a switch of theirs between this check and its
+		// reading of the stacking is honoured; one inside the few microseconds
+		// between that last check and `AXRaise` itself still sees one raise of
+		// their key window, which the next poll then leaves alone.
+		let keeps_order = || {
+			let armed = {
+				let lease = lease.lock();
+				!lease.disarmed && !lease.visited
+			};
+			armed && desktop.front() == Some(previous)
+		};
+		let stopped = desktop.stopped();
+		if desktop.has_order() && keeps_order() {
+			desktop.keep_order(stopped, &keeps_order)?;
+		}
+		if stopped {
 			let now = desktop.now();
 			let signals = desktop.signals(now);
 			let left = desktop
@@ -1635,7 +1734,22 @@ fn guard_focus(
 			}
 			return Ok(());
 		}
-		desktop.wait();
+		if desktop.has_order() {
+			// The stacking is checked every millisecond between polls: a raise
+			// stays visible until the check after it, and checking only every
+			// poll left it on screen for about 27 ms.
+			for check in 1..=ORDER_CHECKS {
+				desktop.wait_order();
+				if check == ORDER_CHECKS || desktop.stopped() {
+					break;
+				}
+				if keeps_order() {
+					desktop.keep_order(false, &keeps_order)?;
+				}
+			}
+		} else {
+			desktop.wait();
+		}
 	}
 }
 
@@ -2324,7 +2438,8 @@ pub(super) enum ForegroundInput {
 }
 
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
-/// previous front process (or, within one process, its previous key window).
+/// previous front process (or, within one process, its previous key window),
+/// with its key window back in front of the target's ([`window_order`]).
 ///
 /// `action` receives whether focus actually moved, so keyboard delivery can
 /// give a just-activated surface time to arm its input handling. A target that
@@ -2377,6 +2492,12 @@ pub(super) fn with_foreground<T>(
 	})?;
 	let previous_key = takeover_key(restoration_key(previous_pid), previous_pid == pid)
 		.map_err(DesktopError::input_failed)?;
+	// The stacking the hand-back must leave as it found it, read before
+	// anything is sent: the takeover's input can leave the target's window in
+	// front of the user's, and the hand-back brings their app forward without
+	// its windows.
+	let mut order = capture::stacked_windows()
+		.and_then(|stack| window_order::EntryOrder::new(pid, previous_pid, previous_key, &stack));
 	// The reads above can take a while in a busy app; a press or hold of the
 	// user's meanwhile refuses here, before the target comes forward.
 	control::intervention::start_takeover()?;
@@ -2450,6 +2571,20 @@ pub(super) fn with_foreground<T>(
 			// The user's own key window gets no route to it in the refusal.
 			|key| await_window_focused(spi, previous_pid, key, previous.psn, ForegroundInput::Keys),
 		)?));
+		// Their key window goes back in front of the target too, unless they
+		// switched or chose meanwhile; raising it keeps it key.
+		if let Some(order) = order.as_mut() {
+			let still_kept = || {
+				hand_back_keeps_order(
+					keyboard.get(),
+					front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn),
+					|| user_choice(since.0, since.1),
+				)
+			};
+			if still_kept() {
+				keep_key_window(order, &mut 0, true, &still_kept)?;
+			}
+		}
 		Ok(())
 	};
 	let prepare = set_front(spi, target, wid)
@@ -2463,6 +2598,18 @@ pub(super) fn with_foreground<T>(
 	};
 	report_focus_return(handed_back.get(), keyboard.get(), previous.pid);
 	result
+}
+
+/// Whether takeover's hand-back puts the user's key window back in front of
+/// the target: only once it handed their keyboard back to that window, while
+/// their app is still in front and they have chosen nothing since the
+/// hand-back's request. Asked again right before the raise.
+fn hand_back_keeps_order(
+	keyboard: Option<DesktopKeyboardReturn>,
+	user_front: bool,
+	choice: impl FnOnce() -> UserChoice,
+) -> bool {
+	keyboard == Some(DesktopKeyboardReturn::HandedBack) && user_front && choice() == UserChoice::None
 }
 
 /// Records for the host where a takeover left focus, read from `WindowServer`
@@ -3604,6 +3751,13 @@ mod tests {
 		/// Refuses the next key-window request for the user's input after its
 		/// timestamp: the app then in front, and what the next reading sees.
 		refused_key_for:    Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
+		/// Each order pass the guard made: whether it was the last, and
+		/// whether the user's app was in front.
+		order_passes:       std::cell::RefCell<Vec<(bool, bool)>>,
+		/// Whether the user's key window covered the target at entry.
+		has_order:          bool,
+		/// Polls waited whole, and stacking checks waited within polls.
+		waits:              Cell<(u32, u32)>,
 	}
 
 	impl GuardedDesktop for FakeDesktop {
@@ -3661,7 +3815,32 @@ mod tests {
 		}
 
 		fn wait(&self) {
-			let now = self.clock.get() + ACTIVATION_POLL;
+			self.waits.update(|(polls, checks)| (polls + 1, checks));
+			self.step(ACTIVATION_POLL);
+		}
+
+		fn wait_order(&self) {
+			self.waits.update(|(polls, checks)| (polls, checks + 1));
+			self.step(ACTIVATION_POLL / ORDER_CHECKS);
+		}
+
+		fn has_order(&self) -> bool {
+			self.has_order
+		}
+
+		fn keep_order(&self, last: bool, still_kept: &dyn Fn() -> bool) -> CoreResult<()> {
+			assert!(still_kept(), "a pass runs only while the order is kept");
+			self
+				.order_passes
+				.borrow_mut()
+				.push((last, self.front.get() == PREVIOUS));
+			Ok(())
+		}
+	}
+
+	impl FakeDesktop {
+		fn step(&self, by: Duration) {
+			let now = self.clock.get() + by;
 			self.clock.set(now);
 			if let Some((at, app)) = self.arrives.get()
 				&& now >= at
@@ -3689,6 +3868,9 @@ mod tests {
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     Duration::ZERO,
 			refused_key_for:    Cell::new(None),
+			order_passes:       std::cell::RefCell::default(),
+			has_order:          false,
+			waits:              Cell::new((0, 0)),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_err());
@@ -3704,43 +3886,76 @@ mod tests {
 		// The target came forward 20 ms into the action while the user typed;
 		// `WindowServer` refuses the guard's first hand-back for `input` the user
 		// gave after the guard's check.
-		let run = |input: SwitchSignals| {
+		let run = |input: SwitchSignals, has_order: bool, back: Option<Instant>| {
 			let desktop = FakeDesktop {
-				clock:              Cell::new(t0 + ms(20)),
-				end:                t0 + ms(120),
-				front:              Cell::new(TARGET),
-				arrives:            Cell::new(None),
-				signals:            Cell::new(idle),
-				refused_for:        Cell::new(Some(input)),
-				after_hand_back:    None,
-				hand_backs:         Cell::new(0),
-				keys:               std::cell::RefCell::default(),
-				user_window:        42,
+				clock: Cell::new(t0 + ms(20)),
+				end: t0 + ms(120),
+				front: Cell::new(TARGET),
+				arrives: Cell::new(back.map(|at| (at, PREVIOUS))),
+				signals: Cell::new(idle),
+				refused_for: Cell::new(Some(input)),
+				after_hand_back: None,
+				hand_backs: Cell::new(0),
+				keys: std::cell::RefCell::default(),
+				user_window: 42,
 				switch_on_key_read: Cell::new(None),
-				key_read_takes:     Duration::ZERO,
-				refused_key_for:    Cell::new(None),
+				key_read_takes: Duration::ZERO,
+				refused_key_for: Cell::new(None),
+				order_passes: std::cell::RefCell::default(),
+				has_order,
+				waits: Cell::new((0, 0)),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let visit = AtomicBool::new(false);
 			let result = guard_focus(&lease, &desktop, &visit);
 			assert!(result.is_ok(), "the guard ends without an error");
 			let visited = visit.load(Ordering::Acquire);
-			(desktop.front.get(), desktop.hand_backs.get(), desktop.keys.into_inner(), visited)
+			let passes = desktop.order_passes.take();
+			let waits = desktop.waits.get();
+			(
+				desktop.front.get(),
+				desktop.hand_backs.get(),
+				desktop.keys.into_inner(),
+				visited,
+				passes,
+				waits,
+			)
 		};
 		// A key, a capital letter's Shift, a ⌃A or ⌘S, or a panel opened once
 		// the target is in front picks no app: the guard asks again and the
-		// user's app and key window are back.
+		// user's app and key window are back, and from then on the windows
+		// that covered the target are kept in front of it, through the last
+		// poll.
 		for typing in [idle, input(0, SHIFT), input(0, OPTION), input(0, CONTROL), keyboard_in(THIRD)]
 		{
-			let (front, hand_backs, keys, visited) = run(typing);
+			let (front, hand_backs, keys, visited, passes, waits) = run(typing, true, None);
 			assert!(front == PREVIOUS, "the user's app is back in front");
 			assert_eq!((hand_backs, keys, visited), (2, vec![42], false));
+			// The stacking is checked every millisecond, not once a poll.
+			assert_eq!(waits.0, 0);
+			assert!(passes.len() > 5 * ORDER_CHECKS as usize, "{} passes", passes.len());
+			// With no order to keep, the guard polls as before and checks
+			// nothing.
+			let (_, _, _, _, none, waits) = run(typing, false, None);
+			assert_eq!((none, waits.1), (vec![], 0));
+			assert!(waits.0 > 0);
+			// Only polls that see the user's app in front keep the stacking:
+			// the first ones, with the target in front, do not.
+			assert!(passes.iter().all(|&(_, user_front)| user_front));
+			assert_eq!(passes.last(), Some(&(true, true)), "the last poll checks the stacking");
+			assert!(passes[..passes.len() - 1].iter().all(|&(last, _)| !last));
 		}
 		// A click after the check, into the target, say, chose it: it stays in
-		// front, and later steps of the input see the visit.
-		let (front, hand_backs, keys, visited) = run(clicked_at(t0 + ms(21)));
+		// front, later steps of the input see the visit, and its window keeps
+		// the place the user gave it.
+		let (front, hand_backs, keys, visited, passes, _) = run(clicked_at(t0 + ms(21)), true, None);
 		assert!(front == TARGET, "the target the user chose stays in front");
-		assert_eq!((hand_backs, keys, visited), (1, vec![], true));
+		assert_eq!((hand_backs, keys, visited, passes), (1, vec![], true, vec![]));
+		// Their app coming back in front later does not re-arm it: nothing is
+		// raised over what they chose.
+		let (front, _, _, visited, passes, _) = run(clicked_at(t0 + ms(21)), true, Some(t0 + ms(60)));
+		assert!(front == PREVIOUS, "the user went back to their app");
+		assert_eq!((visited, passes), (true, vec![]));
 	}
 
 	#[test]
@@ -3892,6 +4107,9 @@ mod tests {
 				switch_on_key_read: Cell::new(switch),
 				key_read_takes:     Duration::ZERO,
 				refused_key_for:    Cell::new(None),
+				order_passes:       std::cell::RefCell::default(),
+				has_order:          false,
+				waits:              Cell::new((0, 0)),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3915,6 +4133,22 @@ mod tests {
 	}
 
 	#[test]
+	fn a_takeover_puts_the_key_window_back_in_front_only_when_it_handed_the_keyboard_back() {
+		use DesktopKeyboardReturn::{FrontOnly, HandedBack, Kept, LeftAsChosen, NotSent};
+		let none = || UserChoice::None;
+		assert!(hand_back_keeps_order(Some(HandedBack), true, none));
+		// A switch away, or a click or shortcut of theirs after the request:
+		// their choice stands.
+		assert!(!hand_back_keeps_order(Some(HandedBack), false, none));
+		assert!(!hand_back_keeps_order(Some(HandedBack), true, || UserChoice::Made));
+		assert!(!hand_back_keeps_order(Some(HandedBack), true, || UserChoice::Pending));
+		// Nothing was handed back, or the target was one of their app's windows.
+		for keyboard in [None, Some(Kept), Some(FrontOnly), Some(LeftAsChosen), Some(NotSent)] {
+			assert!(!hand_back_keeps_order(keyboard, true, || panic!("not asked")));
+		}
+	}
+
+	#[test]
 	fn a_switch_that_races_the_key_window_request_keeps_the_app_the_user_chose() {
 		// The guard handed the user's app back; `WindowServer` then refuses its
 		// key-window request for input of theirs after the request's timestamp.
@@ -3934,6 +4168,9 @@ mod tests {
 				key_read_takes:     Duration::ZERO,
 				refused_key_for:    Cell::new(Some(refusal)),
 				after_hand_back:    None,
+				order_passes:       std::cell::RefCell::default(),
+				has_order:          false,
+				waits:              Cell::new((0, 0)),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
@@ -3967,6 +4204,9 @@ mod tests {
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     ms(600),
 			refused_key_for:    Cell::new(None),
+			order_passes:       std::cell::RefCell::default(),
+			has_order:          false,
+			waits:              Cell::new((0, 0)),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
@@ -4011,6 +4251,9 @@ mod tests {
 				switch_on_key_read: Cell::new(None),
 				key_read_takes:     Duration::ZERO,
 				refused_key_for:    Cell::new(None),
+				order_passes:       std::cell::RefCell::default(),
+				has_order:          false,
+				waits:              Cell::new((0, 0)),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -4044,6 +4287,9 @@ mod tests {
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     Duration::ZERO,
 			refused_key_for:    Cell::new(None),
+			order_passes:       std::cell::RefCell::default(),
+			has_order:          false,
+			waits:              Cell::new((0, 0)),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
