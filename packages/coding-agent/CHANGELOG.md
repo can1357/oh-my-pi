@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `serviceTiers` to custom models and `modelOverrides` in models.yml, so compatible gateways can opt into Ultrafast with `/fast ultra` ([#18304](https://github.com/can1357/oh-my-pi/pull/18304) by [@Ikaleio](https://github.com/Ikaleio)).
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
