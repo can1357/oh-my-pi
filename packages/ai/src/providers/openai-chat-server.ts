@@ -78,11 +78,12 @@ function rejectUnsupportedExplicitPromptCacheFields(body: unknown): void {
 // ---------------------------------------------------------------------------
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
-	// Header capture is centralized in `auth-gateway/server.ts` (allow-listed
-	// headers like openai-organization/openai-project/openai-beta/x-stainless-*
-	// land on `options.headers` automatically). We consult `headers` here too
-	// for `resolvePromptCacheKey` to pull a cache identity out of inbound
-	// vendor-neutral headers when the body doesn't carry one.
+	// The gateway forwards allow-listed request headers (openai-organization,
+	// openai-project, openai-beta, x-stainless-*, …) itself, for the gateway
+	// token only (`applyCallerTrust` in `auth-gateway/caller-options.ts`). We
+	// consult `headers` here for `resolvePromptCacheKey` to pull a cache
+	// identity out of inbound vendor-neutral headers when the body doesn't
+	// carry one.
 	rejectUnsupportedExplicitPromptCacheFields(body);
 	const request =
 		typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
@@ -407,6 +408,7 @@ function buildTools(tools: OpenAIChatTool[]): Tool[] | undefined {
 			name: t.function.name,
 			description: t.function.description ?? "",
 			parameters: (t.function.parameters ?? {}) as Record<string, unknown> as TSchema,
+			...(typeof t.function.strict === "boolean" ? { strict: t.function.strict } : {}),
 		});
 	}
 	return out;

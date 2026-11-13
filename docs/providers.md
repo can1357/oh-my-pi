@@ -22,7 +22,9 @@ The roster includes Factory's `generate_image` models (`gpt-image-2.5-sunburst`,
 
 Organization identity and residency travel with the credential serving each request, including account rotation, and each account/residency scope has its own model cache. Residency chooses the API host; the independent inference region (`global`, `us`, or `eu`) constrains upstream eligibility.
 
-`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows each model's base credit rate; dollar figures are upstream list-price references, not Factory billing, and neither includes temporary promotions. Models without a dollar reference display their credit rate rather than `free`. Extra balance alone does not establish that overage billing is enabled.
+Claude requests on Anthropic's own upstream offer Factory's server-side refusal fallback (Opus 5 for Fable and Opus 5.5) only when discovery found the fallback model in the account's roster. A request served by another organization's credential than discovery saw offers none; a Factory model OMP did not discover (one defined in `models.yml`) offers every fallback its rules name, as before discovery tracked them.
+
+`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows each model's credit rate in force now, including Factory's dated credit promotions, and the model details name the next scheduled rate and its date; dollar figures are upstream list-price references, not Factory billing, and include no promotions. Models without a dollar reference display their credit rate rather than `free`. Extra balance alone does not establish that overage billing is enabled.
 
 If account rotation would narrow the selected model's context window, OMP stops before sending that retry rather than guessing whether the existing conversation fits. Refresh discovery with `omp models refresh factory-droid` and select the region-appropriate model before retrying.
 
@@ -162,6 +164,8 @@ The variables below supply credentials after runtime/config overrides and stored
 | `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery)       |
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | `cloudflare-workers-ai`          | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, + `CLOUDFLARE_ACCOUNT_ID`     |
+| `liquid`                         | `LIQUID_API_KEY`                                                                    |
+| `nace`                           | `NACE_API_KEY`                                                                      |
 | `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                               |
 | `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint               |
 | `kilo`                           | `KILO_API_KEY`                                                                      |
@@ -179,6 +183,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
 | `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
 | `scaleway`                       | `SCW_SECRET_KEY`, then `SCW_API_KEY`                                                |
+| `otari`                          | `OTARI_API_KEY`                                                                     |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
@@ -207,6 +212,10 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
 `cloudflare-workers-ai` serves Cloudflare's Clef decision models (`cloudflare-workers-ai/@cf/cloudflare/clef` and `cloudflare-workers-ai/@cf/cloudflare/clef-flash`) as `judge` models; assign one to the `judge` role to use it. `/login cloudflare-workers-ai` prompts for a Cloudflare API token with Workers AI Read and Edit permissions (create one at `https://dash.cloudflare.com/profile/api-tokens`) and your account ID, then stores both together. To use environment variables, set `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`) and `CLOUDFLARE_ACCOUNT_ID`.
+
+`liquid` serves Liquid AI's decision models (`liquid/d1.1` and `liquid/d1-ultra`) as `judge` models; assign one to the `judge` role to use it. `/login liquid` prompts for an API key from `https://console.liquid.ai/` (Dashboard > API Keys); to use an environment variable, set `LIQUID_API_KEY`. Images sent to Liquid are resized to fit its 10,000 patches of 32×32 pixels per request.
+
+`nace` serves Nace's Drex decision models (`nace/drex-max-v1.1`, `nace/drex-max-finance` and the text-only `nace/drex-v2.0`) as `judge` models; assign one to the `judge` role to use it. `/login nace` prompts for an API key from `https://console.nace.ai/dashboard/api-keys`; to use an environment variable, set `NACE_API_KEY`. The Drex Max models take up to 8 PNG, JPEG, or WebP images per request. Drex rejects any text that holds a base64 image, audio, video, or PDF data URL, so OMP replaces each one in the state, instructions, and criteria with a description such as `[image/png base64 data URL]`.
 
 `/login snowflake` prompts for your Snowflake account identifier or account URL, then signs in through the browser with Snowflake's built-in local-application OAuth integration and stores the account with the token. To use environment variables instead, set both `SNOWFLAKE_PAT` and `SNOWFLAKE_ACCOUNT`.
 

@@ -26,7 +26,7 @@ import {
 import type { StructuredSubagentOutput } from "./task";
 import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
-import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
+import type { IrcDeliveryReceipt } from "./irc";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { card as cardNode, compact, elapsed, keyed, md, node, row, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
@@ -54,6 +54,12 @@ export interface JobSnapshot {
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
 	intent?: string;
 	durationMs: number;
+	/**
+	 * When the run settled (epoch ms); absent while it is still running. Lets a
+	 * snapshot tell a result that finished during the call from one recovered
+	 * from an earlier, never-delivered completion (#16052).
+	 */
+	settledAtMs?: number;
 	/** Process exit status when the job reports one. */
 	exitCode?: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
@@ -144,8 +150,6 @@ export interface CoordinationDetails {
 	from?: string;
 	to?: string;
 	receipts?: IrcDeliveryReceipt[];
-	/** Message consumed by `wait`. */
-	waited?: IrcMessage | null;
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
@@ -168,7 +172,7 @@ const PREVIEW_LINE_WIDTH = 80;
 function statusToIcon(status: JobSnapshot["status"]): ToolUIStatus {
 	switch (status) {
 		case "completed":
-			return "done";
+			return "success";
 		case "failed":
 			return "error";
 		case "cancelled":
@@ -377,7 +381,7 @@ function jobsRenderResult(
 	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
 	const compactJobLines = (width: number, live: boolean): string[] => {
 		const lines: string[] = [];
-		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("success", uiTheme)) + 1);
 		// Failures sort first, so the cap never hides one behind successes;
 		// Ctrl+O lists the rest.
 		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
@@ -640,11 +644,15 @@ function jobsRenderResult(
 		invalidate() {
 			cached = undefined;
 		},
+		releaseRenderCaches() {
+			cached = undefined;
+			previewRows.clear();
+		},
 	};
 }
 
 // =============================================================================
-// Display-only IRC cards and wait-message results
+// Display-only IRC cards
 // =============================================================================
 
 const BODY_LINES_COLLAPSED = 2;
@@ -838,30 +846,6 @@ function describeJobsResult(
 	};
 }
 
-/** Received-message view: sender head, terminal-clocked age, markdown body. */
-function describeMessage(
-	from: string,
-	ts: number | undefined,
-	bodyText: string,
-	meta: readonly string[],
-): NativeToolView {
-	const head: TspSpan[] = [span(`IRC ← ${plainText(from)}`, "toolTitle strong")];
-	for (const part of meta) head.push(span(` ${part}`, "muted"));
-	return {
-		head,
-		tone: "info",
-		preview: { lines: BODY_LINES_COLLAPSED + 1 },
-		body: compact([
-			ts
-				? row([text([span("received", "dim")]), elapsed(Date.now() - ts), text([span("ago", "dim")])], {
-						gap: "xs",
-					})
-				: undefined,
-			bodyText.trim() ? md(bodyText) : undefined,
-		]),
-	};
-}
-
 const waitResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /** Render either a received message or a background-job snapshot. */
@@ -889,9 +873,7 @@ export const waitToolRenderer = {
 					inline: true,
 				};
 			}
-			const waited = details?.waited;
-			if (!waited) return describeJobsResult(result, options.isPartial);
-			return describeMessage(waited.from, waited.ts, waited.body, waited.replyTo ? ["reply"] : []);
+			return describeJobsResult(result, options.isPartial);
 		});
 	},
 	renderResult(
@@ -910,22 +892,6 @@ export const waitToolRenderer = {
 				0,
 			);
 		}
-		const waited = result.details?.waited;
-		if (!waited) return jobsRenderResult(result, options, uiTheme);
-		return createCachedComponent(
-			() => options.expanded,
-			(width, expanded) =>
-				[
-					renderStatusLine(
-						{
-							iconOverride: ircGlyph(uiTheme),
-							title: `IRC ${uiTheme.nav.back} ${replaceTabs(waited.from)}`,
-							meta: [messageAge(waited.ts), ...(waited.replyTo ? ["reply"] : [])],
-						},
-						uiTheme,
-					),
-					...bodyLines(waited.body, expanded, uiTheme, { indent: "  " }),
-				].map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
-		);
+		return jobsRenderResult(result, options, uiTheme);
 	},
 } satisfies ToolRenderer<object, CoordinationDetails>;

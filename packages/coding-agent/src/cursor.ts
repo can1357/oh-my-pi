@@ -8,11 +8,13 @@ import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	joinAdditionalContext,
+	resolveToolConcurrency,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	CursorExecFrameContext,
 	CursorMcpCall,
 	CursorMcpResource,
 	CursorMcpResourceContent,
@@ -33,8 +35,10 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { editDiffString } from "@oh-my-pi/pi-natives";
+import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
 	approvalRestrictions,
@@ -50,6 +54,7 @@ import {
 	resolveToCwd,
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
+import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
@@ -115,17 +120,13 @@ interface CursorExecBridgeOptions {
 	 */
 	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
-	 * Mirror Cursor's server-owned todo list into local session state. Cursor
-	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
-	 * the provider's list and the local `todo` state diverge silently.
+	 * Mirror Cursor's server-owned todo list into local session state and the
+	 * session branch. Cursor resolves `update_todos` / `read_todos` remotely and
+	 * emits no local `todo` toolResult, so without this bridge the provider's
+	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
-	setTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (phases: TodoPhase[]) => void;
 	getTodoPhases?: () => TodoPhase[];
-	/**
-	 * Persist the mirrored list to the session branch so it survives reloads.
-	 * Cursor emits no local `todo` toolResult, so nothing else records it.
-	 */
-	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/**
 	 * Build a `grep` tool honoring a frame's own context width and match cap.
 	 *
@@ -361,6 +362,57 @@ async function executeTool(
 	return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
 }
 
+/** Tool result content as `executeTool` emits it: text passed through `sanitizeText`. */
+function sanitizedContent(content: ToolResultMessage["content"]): ToolResultMessage["content"] {
+	return content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c));
+}
+
+/** Bridge options whose tool runs surface no call of their own. */
+function withoutEvents(options: CursorExecBridgeOptions): CursorExecBridgeOptions {
+	return { ...options, emitEvent: undefined };
+}
+
+/**
+ * Writes a native StrReplace or Write back as its `edit` card's result: the
+ * diff against the file as it was, not a `write` call of its own.
+ */
+async function materializeEdit(
+	options: CursorExecBridgeOptions,
+	toolCallId: string,
+	pathArg: string,
+	content: string,
+): Promise<ToolResultMessage> {
+	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	let before: string | undefined;
+	try {
+		before = await fs.promises.readFile(absolutePath, "utf8");
+	} catch (error) {
+		if (isEnoent(error)) before = "";
+	}
+	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
+	const result: ToolResultMessage = { ...written, toolName: "edit" };
+	if (!written.isError && before !== undefined) {
+		// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
+		const { diff, firstChangedLine } = editDiffString(
+			normalizeToLF(stripBom(before).text),
+			normalizeToLF(stripBom(content).text),
+			absolutePath,
+		);
+		const writeDetails =
+			typeof written.details === "object" && written.details !== null ? written.details : undefined;
+		const details: EditToolDetails = { ...writeDetails, diff, firstChangedLine, path: absolutePath };
+		result.details = details;
+	}
+	options.emitEvent?.({
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "edit",
+		result: { content: sanitizedContent(result.content), details: result.details },
+		isError: result.isError,
+	});
+	return result;
+}
+
 function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
 	const grant = options.allowDirectFileMutation;
 	return typeof grant === "function" ? grant() : grant !== false;
@@ -503,6 +555,33 @@ function decodeMcpArgs(rawArgs: Record<string, Uint8Array>): Record<string, unkn
 	return decoded;
 }
 
+/** The arguments an MCP call will execute with: the provider's decoded map, or the raw wire map decoded here. */
+function mcpCallArgs(call: CursorMcpCall): Record<string, unknown> {
+	return Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+}
+
+/**
+ * The tool an MCP call will actually run.
+ *
+ * One resolution for execution, approval preflight, and exec ordering: a
+ * replace-shaped edit (an injected StrReplace name, or `edit` carrying
+ * replacement fields) runs the replace-mode instance, and every other call
+ * runs its execution override or registry tool. Classifying or approving by
+ * the frame's name instead would judge a different tool than the one that
+ * executes.
+ */
+function resolveMcpTool(
+	options: CursorExecBridgeOptions,
+	toolName: string,
+	args: Record<string, unknown>,
+): { tool: CursorBridgeTool | undefined; preferReplace: boolean } {
+	const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
+	const tool = preferReplace
+		? options.getEditReplaceTool?.()
+		: (options.getExecutableTool?.(toolName) ?? options.tools.get(toolName));
+	return { tool, preferReplace };
+}
+
 function formatMcpToolErrorMessage(toolName: string, availableTools: string[]): string {
 	const list = availableTools.length > 0 ? availableTools.join(", ") : "none";
 	return `MCP tool "${toolName}" not found. Available tools: ${list}`;
@@ -561,7 +640,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * large file never advances. Composed with the same helper, so both frames
 	 * translate a range identically.
 	 */
-	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0]) {
+	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0], frame?: CursorExecFrameContext) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const composed = piReadPath(
 			args.path,
@@ -572,7 +651,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (composed === null) {
 			return createToolResultMessage(toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
 		}
-		return await executeTool(this.options, "read", toolCallId, { path: composed });
+		const options = frame?.editMaterialization ? withoutEvents(this.options) : this.options;
+		return await executeTool(options, "read", toolCallId, { path: composed });
 	}
 
 	async ls(args: Parameters<NonNullable<ICursorExecHandlers["ls"]>>[0]) {
@@ -610,14 +690,26 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		return toolResultMessage;
 	}
 
-	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {
+	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0], frame?: CursorExecFrameContext) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
+		if (frame?.editMaterialization) return await materializeEdit(this.options, toolCallId, args.path, content);
 		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
 			path: args.path,
 			content,
 		});
 		return toolResultMessage;
+	}
+
+	/** Ends the live card of a native StrReplace or Write the server completed without writing. */
+	editSettled(result: ToolResultMessage): void {
+		this.options.emitEvent?.({
+			type: "tool_execution_end",
+			toolCallId: result.toolCallId,
+			toolName: "edit",
+			result: { content: sanitizedContent(result.content), details: result.details },
+			isError: result.isError,
+		});
 	}
 
 	async delete(args: Parameters<NonNullable<ICursorExecHandlers["delete"]>>[0]) {
@@ -1008,7 +1100,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		error: string | null = null,
 		origin: "read" | "update" = "update",
 	): ToolResultMessage {
-		const setPhases = this.options.setTodoPhases;
+		const commitPhases = this.options.commitTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
 		// Mirroring is gated on having both a snapshot and somewhere to put it.
@@ -1016,7 +1108,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// only on a matching `tool_execution_end`, so a refusal, a server error,
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
-		if (snapshot && setPhases) {
+		if (snapshot && commitPhases) {
 			const phaseByContent = new Map<string, string>();
 			for (const phase of existing) {
 				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
@@ -1045,8 +1137,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
 				phases = undefined;
 			} else {
-				setPhases(next);
-				this.options.persistTodoPhases?.(next);
+				commitPhases(next);
 				phases = next;
 			}
 		}
@@ -1075,17 +1166,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
-		if (cursorMcpPrefersReplaceEdit(toolName, args)) {
-			const replaceTool = this.options.getEditReplaceTool?.();
-			if (!replaceTool) {
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
+		if (preferReplace) {
+			if (!tool) {
 				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 				const message = formatMcpToolErrorMessage(toolName, availableTools);
 				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 			}
-			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
+			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), tool);
 		}
-		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 			const message = formatMcpToolErrorMessage(toolName, availableTools);
@@ -1098,6 +1188,23 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	}
 
 	/**
+	 * Order an MCP call by the tool it will run.
+	 *
+	 * The bridge executes tools directly, bypassing the agent loop's batch
+	 * scheduler, so without this an exclusive tool (`edit`, `write`, …)
+	 * arriving as MCP races the frames around it: a later shell can read the
+	 * file before the edit lands, and the edit can start before an earlier
+	 * read finishes. An unknown tool executes nothing and stays shared.
+	 */
+	mcpConcurrency(call: CursorMcpCall): "shared" | "exclusive" {
+		const toolName = call.toolName || call.name;
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
+		if (!tool) return "shared";
+		return resolveToolConcurrency(tool, preferReplace ? normalizeCursorReplaceArgs(args) : args);
+	}
+
+	/**
 	 * Resolve an MCP call's approval without running it.
 	 *
 	 * Same resolution the wrapper applies at execution time, minus the
@@ -1107,11 +1214,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async mcpApprovalPreflight(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
-		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
-		const tool = preferReplace
-			? this.options.getEditReplaceTool?.()
-			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(context);

@@ -142,12 +142,14 @@ function harness(options: HarnessOptions = {}) {
 			usage: { input: 10, output: 5 },
 			stopReason: "stop",
 		} as unknown as EphemeralTurnResult["assistantMessage"];
+		turn.options.onUsage?.(assistantMessage);
 		turn.resolve({ replyText, assistantMessage });
 		await turn.promise;
 	};
-	/** The side turn rejects, as `runEphemeralTurn` does once its signal aborts. */
-	const fail = async (index: number, error: unknown) => {
+	/** A provider can report billed usage before the side turn rejects. */
+	const fail = async (index: number, error: unknown, message?: EphemeralTurnResult["assistantMessage"]) => {
 		const turn = turns[index]!;
+		if (message) turn.options.onUsage?.(message);
 		turn.reject(error);
 		await turn.promise.catch(() => {});
 	};
@@ -252,6 +254,28 @@ describe("ComposerPredictionController", () => {
 		]);
 	});
 
+	it("journals provider errors before a prediction rejects", async () => {
+		const { controller, fail, usageEntries, firstLeafId } = harness();
+		controller.request();
+		await fail(0, new Error("529 overloaded_error"), {
+			api: MODEL.api,
+			provider: MODEL.provider,
+			model: MODEL.id,
+			usage: { input: 0, output: 0 },
+			stopReason: "error",
+			errorMessage: "529 overloaded_error",
+		} as EphemeralTurnResult["assistantMessage"]);
+
+		expect(usageEntries()).toEqual([
+			expect.objectContaining({
+				purpose: "composer-prediction",
+				parentId: firstLeafId,
+				stopReason: "error",
+				errorMessage: "529 overloaded_error",
+			}),
+		]);
+	});
+
 	it("hides a prediction once the conversation moves past it", async () => {
 		const { controller, messages, reply } = harness();
 		controller.request();
@@ -260,6 +284,19 @@ describe("ComposerPredictionController", () => {
 		messages.push(userMessage("something else", 2));
 
 		expect(controller.choices).toBeUndefined();
+	});
+
+	it("keeps the prediction when a silent advisor card lands during or after the request", async () => {
+		const advisorCard = (timestamp: number) =>
+			({ role: "custom", customType: "advisor", content: "note", display: true, timestamp }) as AgentMessage;
+		const { controller, messages, reply } = harness();
+		controller.request();
+		messages.push(advisorCard(2));
+		await reply(0, "now run the tests");
+		expect(controller.choices).toEqual(["now run the tests"]);
+
+		messages.push(advisorCard(3));
+		expect(controller.choices).toEqual(["now run the tests"]);
 	});
 
 	it("drops a reply that lands after cancel or a newer request", async () => {

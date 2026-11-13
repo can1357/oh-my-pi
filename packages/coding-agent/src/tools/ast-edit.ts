@@ -186,7 +186,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 		return lines;
 	};
 	readonly label = "AST Edit";
-	readonly summary = "Perform AST-aware code edits (structural refactoring)";
+	readonly summary = "Perform AST-aware code edits (SHOULD be preferred for codemods)";
 	readonly description: string;
 	readonly parameters = astEditSchema;
 	readonly strict = true;

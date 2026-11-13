@@ -18,7 +18,7 @@ import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
-import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
@@ -28,7 +28,7 @@ import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg
 import type { XdevRenderDispatch } from "@oh-my-pi/pi-tui/tools/xdev";
 import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 
-/** Transcript-only render state a handler write attaches to the `write` tool result. */
+/** Render state and prewalk facts a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {
 	message?: CoordinationDetails;
 	proc?: ProcWriteDetails;
@@ -36,6 +36,12 @@ export interface InternalWriteDetails {
 	xdev?: XdevRenderDispatch;
 	/** Absolute file the write landed in, for the transcript card's file link (conflict://). */
 	resolvedPath?: string;
+	/**
+	 * The write changed no files (process stdin, service mode), so the prewalk gate must not read
+	 * it as implementation work. Unlike {@link SchemeWritePolicy.cancels}, the plan-mode and
+	 * device-only gates still apply.
+	 */
+	touchesNoFiles?: true;
 }
 
 /**
@@ -156,6 +162,8 @@ export interface SchemeHost {
 	settingsApproval: boolean;
 	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
 	outReplies: boolean;
+	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
+	subagent: boolean;
 }
 
 /**
@@ -276,7 +284,7 @@ export interface ResolveContext {
 	 */
 	seanceSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: Settings;
 	/** Caller's abort signal. */
@@ -432,4 +440,10 @@ export interface ProtocolHandler {
 	 * (conflict://, attachment://) omit this method.
 	 */
 	promptDoc?(host: SchemeHost): string | undefined;
+	/**
+	 * Sub-path, query and limit grammar the {@link promptDoc} line leaves out
+	 * (rendered from `prompts/internal-urls/<scheme>-reference.md`), served on demand
+	 * at `xd://read/urls`. Reads cheap process facts only; `undefined` omits the scheme.
+	 */
+	promptReference?(): string | undefined;
 }

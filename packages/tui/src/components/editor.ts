@@ -3491,10 +3491,11 @@ export class Editor implements Component, Focusable {
 		this.#applyUndo();
 	}
 
-	setText(text: string): void {
+	/** Replace the buffer; the caret lands at the end unless `cursor: "start"` (multi-row text only). */
+	setText(text: string, options: { cursor?: "start" | "end" } = {}): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
-		this.#setTextInternal(text);
+		this.#setTextInternal(text, options.cursor);
 	}
 	submit(): void {
 		if (this.disableSubmit) return;
@@ -3805,6 +3806,11 @@ export class Editor implements Component, Focusable {
 			}
 			// Auto-trigger for "#" prompt actions anywhere in the current token
 			else if (char === "#") {
+				this.#tryTriggerAutocomplete();
+			} else if (
+				char === ":" &&
+				MENTION_CONTEXT_RE.test((this.#state.lines[this.#state.cursorLine] || "").slice(0, this.#state.cursorCol))
+			) {
 				this.#tryTriggerAutocomplete();
 			}
 			// Argument providers may expose candidates only after a separator.
@@ -5446,7 +5452,7 @@ export class Editor implements Component, Focusable {
 	 */
 	#refreshAutocomplete(): void {
 		if (this.#autocompleteState === "assist") return;
-		if (this.#refreshSlashCommandListSync()) return;
+		if (this.#refreshSlashCommandListSync() || this.#refreshModelMentionListSync()) return;
 		this.#narrowAtFileList();
 		void this.#updateAutocomplete();
 	}
@@ -5477,6 +5483,25 @@ export class Editor implements Component, Focusable {
 		if (token.slice(1).includes("/")) return false;
 		this.#cancelAutocomplete();
 		this.onAutocompleteUpdate?.();
+		return true;
+	}
+
+	#refreshModelMentionListSync(): boolean {
+		const provider = this.#autocompleteProvider;
+		if (this.#autocompleteState !== "regular" || !provider?.trySyncModelMentionCompletion) return false;
+		const completion = provider.trySyncModelMentionCompletion(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+		);
+		if (completion.kind === "unhandled") return false;
+		this.#invalidateAutocompleteRequests();
+		if (completion.kind === "matched") {
+			this.#showAutocompleteSuggestions(completion.suggestions, "regular");
+		} else {
+			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
+		}
 		return true;
 	}
 

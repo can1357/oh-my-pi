@@ -7,10 +7,12 @@ import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesystem";
 import { openStandaloneJudge } from "../judgment/standalone";
+import { standaloneFindSpotlight } from "../spotlight/session";
 import { formatPathRelativeToCwd, resolveSearchResultPath } from "../tools/path-utils";
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
 import { rankedHeat } from "../tools/jfind/passages";
 import { resolveSearchRoot, type SearchRoot } from "../tools/jfind/tree";
+import { cfgFindHitThreshold, cfgFindVerifyModel } from "../tools/settings";
 
 export interface FindCommandArgs {
 	query: string;
@@ -99,7 +101,10 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	// scope has none of its own, so it keeps the caller's.
 	const baseCwd = root.type === "directory" && !isUrlPath(root.path) ? root.path : cwd;
 	log("resolving judge");
-	const { judge, close } = await openStandaloneJudge(baseCwd, "find");
+	const { judge, settings, leadJudge, close } = await openStandaloneJudge(baseCwd, "find");
+	const verifyModel = cfgFindVerifyModel.get(settings)?.trim();
+	const verifyJudge = verifyModel ? leadJudge(verifyModel) : undefined;
+	const spotlight = standaloneFindSpotlight(settings);
 	try {
 		const started = performance.now();
 		const raw = await runCascade({
@@ -108,7 +113,10 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 			query: cmd.query.trim(),
 			extraKeywords: cmd.keywords,
 			judge,
+			verifyJudge,
+			spotlight,
 			includeHidden: cmd.hidden,
+			threshold: cfgFindHitThreshold.get(settings),
 			onProgress: log,
 		});
 		// Hits print as paths usable from the caller's cwd: relative files or URLs.
@@ -128,6 +136,7 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 		// `exitCode`, not `exit`: process.exit skips the finally below, and with it close().
 		if (result.coverage === "unavailable") process.exitCode = 1;
 	} finally {
+		spotlight?.client.close();
 		close();
 	}
 }

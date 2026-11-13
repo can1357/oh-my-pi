@@ -6,7 +6,13 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
+import {
+	type AsyncJob,
+	type AsyncJobDetails,
+	type AsyncJobManagerApi,
+	type AsyncJobType,
+	agentProgress,
+} from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -30,7 +36,7 @@ import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/wait";
  * Drops missing ids and ids owned by other agents, preventing cross-agent inspection.
  * An unowned caller (`ownerId` undefined) sees only unowned jobs.
  */
-export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: string | undefined): AsyncJob[] {
+export function visibleJobs(manager: AsyncJobManagerApi, ids: string[], ownerId: string | undefined): AsyncJob[] {
 	const out: AsyncJob[] = [];
 	for (const id of ids) {
 		const job = manager.getJob(id);
@@ -47,7 +53,7 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
  * dead-lettered, or skipped while a `wait` watched it. Consumed, acknowledged,
  * and currently watched results are excluded.
  */
-export function undeliveredJobs(manager: AsyncJobManager, ownerId: string | undefined): AsyncJob[] {
+export function undeliveredJobs(manager: AsyncJobManagerApi, ownerId: string | undefined): AsyncJob[] {
 	return manager
 		.getAllJobs({ ownerId })
 		.filter(
@@ -179,21 +185,9 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
 		if (latest.type === "task") {
-			const progressValue = latest.latestDetails?.progress;
-			if (Array.isArray(progressValue)) {
-				// A batch job's progress lists every spawn of the call, keyed by agent id.
-				// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
-				const agentId = current?.agentId ?? latest.id;
-				let progressRecord: Record<string, unknown> | undefined;
-				for (const item of progressValue) {
-					if (!item || typeof item !== "object") continue;
-					const candidate = item as Record<string, unknown>;
-					if (!progressRecord) progressRecord = candidate;
-					if (candidate.id === agentId) {
-						progressRecord = candidate;
-						break;
-					}
-				}
+			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
+			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
+			if (progressRecord) {
 				const modelValue = progressRecord?.resolvedModel;
 				if (typeof modelValue === "string") {
 					const trimmed = modelValue.trim();
@@ -233,6 +227,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			label: latest.label,
 			...(latest.intent ? { intent: latest.intent } : {}),
 			durationMs: Math.max(0, (latest.endTime ?? now) - latest.startTime),
+			...(latest.endTime !== undefined ? { settledAtMs: latest.endTime } : {}),
 			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(resolvedModelIdentity ? { resolvedModelIdentity } : {}),
@@ -286,13 +281,100 @@ export function runningTaskProgressSuffix(job: JobSnapshot, options: { duration:
 	return ` — ${parts.join(" · ")}`;
 }
 
+/** Ids of `ownerId`'s jobs that have already settled — a call's entry state. */
+export function settledJobIds(manager: AsyncJobManagerApi, ownerId: string | undefined): Set<string> {
+	return new Set(
+		manager
+			.getAllJobs({ ownerId })
+			.filter(job => job.status !== "running")
+			.map(job => job.id),
+	);
+}
+
+/** Inputs that let a snapshot describe how a settled result reached its owner. */
+export interface JobResultOptions {
+	/**
+	 * Ids already settled when this call started, captured before its first
+	 * await. A settled job outside this set finished while the call was in
+	 * flight, so the call itself handed the result over. Membership is the
+	 * evidence — comparing timestamps would call a job settled in the same
+	 * millisecond as the call "delivered by it" (#16052 review).
+	 *
+	 * Absent for `jobs`, which never waits and therefore only ever reports
+	 * results it did not deliver.
+	 */
+	settledAtEntry?: ReadonlySet<string>;
+	/**
+	 * Epoch ms when this call started. Used only to state how long before the
+	 * call a genuinely late result had settled.
+	 */
+	startedAtMs?: number;
+}
+
+/**
+ * Model-facing delivery line for one settled job. Three very different
+ * situations used to read as the same "not auto-delivered" failure:
+ *
+ * - the job finished while this call was already running: the call is what
+ *   handed the result over — the completion push was never lost, the call
+ *   simply won the race;
+ * - it had already finished and its push was still queued when this snapshot
+ *   consumed it: the snapshot superseded that push, so the follow-up cannot
+ *   arrive — promising one would make the model expect a duplicate;
+ * - it had already finished and nothing is on the way: a genuinely late
+ *   result, reported with how long before the call it settled.
+ *
+ * A queued push this snapshot consumed is always reported as superseded:
+ * `consumeJobResults` re-checks `isDeliveryPending` per id before it
+ * acknowledges the queue, so every pending push the snapshot reads lands in
+ * the superseded set — a "push still on the way" line could never be reached.
+ *
+ * `watchedByWait` is the fallback evidence for a snapshot that did not capture
+ * its entry state (a direct `buildJobResult` call): a suppressed delivery means
+ * a `wait` was watching the job when it settled, so that wait handed the result
+ * over. It keeps the wording #17040 gave it. Entry-state membership decides
+ * whenever it is available, because a job suppressed by an earlier, interrupted
+ * wait is settled at this call's entry and was not delivered by it.
+ */
+function describeDelivery(
+	job: JobSnapshot,
+	op: "wait" | "cancel" | "jobs",
+	options: JobResultOptions,
+	alreadyConsumed: boolean,
+	deliverySuperseded: boolean,
+	watchedByWait: boolean,
+): string {
+	if (alreadyConsumed) return "Delivery: already delivered or recovered.";
+	if (options.settledAtEntry === undefined) {
+		if (watchedByWait) return "Delivery: delivered directly to wait.";
+	} else if (!options.settledAtEntry.has(job.id)) {
+		const surface = op === "wait" ? "this wait" : "this call";
+		const when = op === "wait" ? "it finished while you were waiting" : "it finished as the call ran";
+		return `Delivery: delivered by ${surface} — ${when}.`;
+	}
+	const settledAt = job.settledAtMs;
+	const startedAt = options.startedAtMs;
+	const age =
+		settledAt !== undefined && startedAt !== undefined && startedAt > settledAt
+			? formatDuration(startedAt - settledAt)
+			: undefined;
+	if (deliverySuperseded) {
+		const before = age === undefined ? "" : ` (it finished ${age} before this call)`;
+		return `Delivery: handed over by this snapshot${before} — this snapshot superseded its queued completion push.`;
+	}
+	return `Delivery: not auto-delivered; recovered by this snapshot${
+		age === undefined ? "" : ` — it had already finished ${age} before this call`
+	}.`;
+}
+
 export function buildJobResult(
 	session: ToolSession,
-	manager: AsyncJobManager,
+	manager: AsyncJobManagerApi,
 	op: "wait" | "cancel",
 	jobs: TrackedJobLike[],
 	cancelOutcomes: CancelOutcome[],
 	agents: AgentActivitySnapshot[] = [],
+	options: JobResultOptions = {},
 ): AgentToolResult<CoordinationDetails> {
 	// Deduplicate by id (cancelled jobs may also appear in the watched set).
 	const seen = new Set<string>();
@@ -312,6 +394,13 @@ export function buildJobResult(
 	);
 
 	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+
+	// Read AFTER `consumeJobResults`: that call is what supersedes a queued push,
+	// so reading before it would always miss the jobs this snapshot handed over
+	// and the line would promise a follow-up that cannot arrive (#16135 review).
+	const deliverySuperseded = new Set(
+		jobResults.filter(job => manager.isDeliverySuperseded(job.id)).map(job => job.id),
+	);
 
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");
@@ -340,11 +429,14 @@ export function buildJobResult(
 			}
 			if (j.status !== "cancelled") {
 				lines.push(
-					alreadyConsumed.has(j.id)
-						? "Delivery: already delivered or recovered."
-						: watchedByWait.has(j.id)
-							? "Delivery: delivered directly to wait."
-							: "Delivery: not auto-delivered; recovered by this snapshot.",
+					describeDelivery(
+						j,
+						op,
+						options,
+						alreadyConsumed.has(j.id),
+						deliverySuperseded.has(j.id),
+						watchedByWait.has(j.id),
+					),
 				);
 			}
 			if (j.resultText) {
@@ -415,10 +507,17 @@ export function buildJobResult(
 /** `cancel`: kill the named jobs; returns immediately with outcomes + snapshots. */
 export async function executeCancel(
 	session: ToolSession,
-	manager: AsyncJobManager,
+	manager: AsyncJobManagerApi,
 	ownerId: string | undefined,
 	ids: string[],
+	options: { startedAtMs?: number; settledAtEntry?: ReadonlySet<string> } = {},
 ): Promise<AgentToolResult<CoordinationDetails>> {
+	// Same rule as `wait`: a job that settled after this call began is one this
+	// call is handing over, not a lost completion push (#16052). The caller may
+	// pass its own start time — `write proc://<id>/kill` awaits a broker lookup
+	// first, so stamping here would miss a job that settled during that await.
+	const callStartedAt = options.startedAtMs ?? Date.now();
+	const settledAtEntry = options.settledAtEntry ?? settledJobIds(manager, ownerId);
 	const cancelOutcomes: CancelOutcome[] = [];
 	for (const id of ids) {
 		const existing = manager.getJob(id);
@@ -453,7 +552,10 @@ export async function executeCancel(
 				: { id, status: "already_completed", message: `Background job ${id} is already completed.` },
 		);
 	}
-	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
+	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes, [], {
+		startedAtMs: callStartedAt,
+		settledAtEntry,
+	});
 }
 
 /**

@@ -66,9 +66,46 @@ describe("MCP bridge structuredContent", () => {
 		expect(occurrences).toBe(1);
 	});
 
-	it("leaves results without structuredContent untouched", async () => {
-		const text = await modelText({ content: [{ type: "text", text: "plain result" }] });
-		expect(text).toBe("plain result");
+	it("does not repeat SDK-wrapped list and string results already in content", async () => {
+		const marker = "PROBE-MARKER-7f3d-9a2c";
+		const items = [
+			{ marker, item: 1 },
+			{ marker, item: 2 },
+		];
+		const list = await build({
+			content: items.map(item => ({ type: "text", text: JSON.stringify(item) })),
+			structuredContent: { result: items },
+		});
+		const listText = list.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+		expect(listText.split(marker)).toHaveLength(3);
+		expect(list.details?.structuredContent).toEqual({ result: items });
+
+		const string = await modelText({
+			content: [{ type: "text", text: marker }],
+			structuredContent: { result: marker },
+		});
+		expect(string.split(marker)).toHaveLength(2);
+
+		const scalar = await modelText({
+			content: [{ type: "text", text: JSON.stringify(marker) }],
+			structuredContent: { result: marker },
+		});
+		expect(scalar.split(marker)).toHaveLength(2);
+	});
+
+	it("renders wrapped results when content carries distinct data or a partial payload", async () => {
+		const distinct = await modelText({
+			content: [{ type: "text", text: "issues listed" }],
+			structuredContent: { result: ["first", "second"] },
+		});
+		expect(distinct).toContain("issues listed");
+		expect(distinct).toContain("first");
+
+		const partial = await modelText({
+			content: [{ type: "text", text: '{"item":1}' }],
+			structuredContent: { result: [{ item: 1 }, { item: 2 }] },
+		});
+		expect(partial).toContain('"item": 2');
 	});
 
 	it("lets an eval consumer advance pages using opaque cursors rather than display text", async () => {

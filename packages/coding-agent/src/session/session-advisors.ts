@@ -10,6 +10,7 @@ import {
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	ThinkingLevel,
+	type ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	canReplayRemoteCompaction,
@@ -325,6 +326,8 @@ interface ActiveAdvisor {
 	recorder: AdvisorTranscriptRecorder;
 	recorderClosed: Promise<void>;
 	agentUnsubscribe?: () => void;
+	/** Drops this advisor's tool state when its conversation restarts. */
+	resetToolState: (() => void) | undefined;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
 	/**
@@ -344,6 +347,9 @@ interface ActiveAdvisor {
 	syncBacklog: AdvisorSyncBacklog | undefined;
 	/** Eligible updates since the last reset; a review is scheduled at each multiple of the interval. */
 	eligibleUpdates: number;
+	/** An advisor continuation cancelled this advisor's review of the work it
+	 *  revises: the continuation's terminal boundary owes the review instead. */
+	reviewOwed: boolean;
 	/** Primary-turn count when the latest review was scheduled; the update that
 	 *  runs from it covers work up to this turn. Notes stamped with it so merged
 	 *  deliveries can show how many turns old each review was. */
@@ -410,6 +416,7 @@ interface AdvisorRuntimeDescriptor {
 interface AdvisorCarry {
 	held: AdvisorHeldUpdates | undefined;
 	eligibleUpdates: number;
+	reviewOwed: boolean;
 }
 
 /** Options for the headless advisor drain ({@link SessionAdvisors.waitForAdvisorCatchup}). */
@@ -420,33 +427,53 @@ export interface AdvisorCatchupOptions {
 	strictWithoutDeadline?: boolean;
 }
 
-/** Inputs that configure the advisor roster owned by a session. */
-export interface SessionAdvisorsOptions {
-	enabled: boolean;
-	tools?: AgentTool[];
+/** One advisor's tools, bound to a tool session no other advisor shares. */
+export interface AdvisorToolSlate {
+	tools: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
 	 * match cap. The advisor's tools are fixed instances carrying session
 	 * defaults, so without this an advisor running against Cursor silently
 	 * drops both fields — the same gap the primary bridge closes.
 	 */
-	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
+	createGrepTool?: (options: { context?: number; totalMatchLimit?: number }) => AgentTool | undefined;
 	/**
 	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs. The
 	 * advisor's own instance follows the configured `edit.mode` (`hashline` by
 	 * default), whose schema the frame's `old_string`/`new_string` args do not
 	 * match, so without this every native advisor edit fails validation.
 	 */
-	createEditTool?(): AgentTool | undefined;
+	createEditTool?: () => AgentTool | undefined;
+	/** Start a new conversation: drop what these tools accumulated (snapshots, repeat-read counts, …). */
+	resetState?: () => void;
+}
+
+/**
+ * Builds advisor tool slates. Each advisor is its own conversation, and tools
+ * keep per-conversation state on their tool session (repeat-read counts,
+ * hashline snapshots, conflict history), so every advisor gets a fresh slate
+ * on a fresh session rather than instances shared across the roster.
+ */
+export interface AdvisorToolFactory {
+	/** Every tool name a slate can hold. */
+	names(): readonly string[];
+	/** Build the granted `names` against a new tool session. */
+	create(names: ReadonlySet<string>): AdvisorToolSlate;
+}
+
+/** Inputs that configure the advisor roster owned by a session. */
+export interface SessionAdvisorsOptions {
+	enabled: boolean;
+	tools?: AdvisorToolFactory;
 	/**
-	 * The execute-time context the bridge's tools resolve approval from.
+	 * The execute-time context for advisor loop and bridge tools.
 	 *
 	 * `ExtensionToolWrapper` reads the approval mode, per-tool policies and
 	 * `autoApprove` only from here; with none it fails closed to `always-ask`
 	 * with empty policies (no user grant), so a native frame that needs a
 	 * prompt cannot run unattended.
 	 */
-	getToolContext?: () => AgentToolContext | undefined;
+	getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	/**
 	 * The live MCP connections Cursor's resource frames answer from.
 	 *
@@ -486,8 +513,8 @@ export interface SessionAdvisorsHost {
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
-	/** Live `providers.openaiWebsockets` hint for provider calls. */
-	preferWebsockets(): boolean | undefined;
+	/** Per-model WebSocket preference from the live transport settings (Codex and standard Responses). */
+	preferWebsockets(model: Model): boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
@@ -557,9 +584,7 @@ export interface AdvisorStatusOverviewEntry {
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
 	#advisorEnabled: boolean;
-	#advisorTools: AgentTool[] | undefined;
-	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
-	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
+	#advisorTools: AdvisorToolFactory | undefined;
 	#advisorGetToolContext: SessionAdvisorsOptions["getToolContext"];
 	#advisorMcpResources: SessionAdvisorsOptions["mcpResources"];
 	#advisorWatchdogPrompt: string | undefined;
@@ -576,7 +601,7 @@ export class SessionAdvisors {
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
 	/**
-	 * Slugs whose recorded spend ran on an OAuth/subscription model. Kept in
+	 * Slugs whose recorded spend ran on a subscription model. Kept in
 	 * lockstep with {@link #advisorCosts} so {@link isUsingSubscription} can
 	 * attribute historical advisor spend without rescanning the model catalog
 	 * once the advisor runtime is gone (#10131).
@@ -631,8 +656,6 @@ export class SessionAdvisors {
 		this.#host = host;
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
-		this.#advisorCreateGrepTool = options.createGrepTool;
-		this.#advisorCreateEditTool = options.createEditTool;
 		this.#advisorGetToolContext = options.getToolContext;
 		this.#advisorMcpResources = options.mcpResources;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
@@ -673,6 +696,9 @@ export class SessionAdvisors {
 			}
 			// A boundary of a continuation the advisor itself started is captured but
 			// never schedules a review: the next genuinely started boundary reviews it.
+			// The exception is the terminal boundary owed by an advisor whose review
+			// the continuation cancelled: scheduled whatever the cadence, and as a
+			// stand-in for the cancelled review it does not advance cadence.
 			const continuation = this.#advisorContinuation;
 			const advisorContinuation =
 				continuation !== undefined && lastPrimaryUserMessage(messages) === continuation.userMessage;
@@ -693,8 +719,10 @@ export class SessionAdvisors {
 				const reviewMode = advisor.reviewMode ?? defaultReviewMode;
 				const eligible = !advisorContinuation && !(reviewMode === "agent-end" && willContinue === true);
 				if (eligible) advisor.eligibleUpdates++;
+				const owed = advisorContinuation && terminalBoundary && advisor.reviewOwed;
+				if (terminalBoundary) advisor.reviewOwed = false;
 				const scheduled =
-					eligible && advisor.eligibleUpdates % (advisor.reviewInterval ?? defaultReviewInterval) === 0;
+					owed || (eligible && advisor.eligibleUpdates % (advisor.reviewInterval ?? defaultReviewInterval) === 0);
 				if (scheduled) {
 					scheduledAdvisors ??= [];
 					scheduledAdvisors.push(advisor);
@@ -840,8 +868,8 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Slugs whose restored spend ran on a provider that currently authenticates
-	 * via OAuth — the persisted-spend equivalent of the live {@link isUsingSubscription}
+	 * Slugs whose restored spend ran on a provider currently using subscription
+	 * credentials — the persisted-spend equivalent of the live {@link isUsingSubscription}
 	 * check, so resumed sessions attribute subscription usage without a catalog scan.
 	 */
 	#deriveSubscriptionSlugs(
@@ -854,7 +882,7 @@ export class SessionAdvisors {
 		for (const [slug, providers] of providersBySlug) {
 			if ((costs.get(slug) ?? 0) <= 0) continue;
 			for (const provider of providers) {
-				if (auth.credentials.hasOAuth(provider)) {
+				if (auth.credentials.hasSubscription(provider)) {
 					slugs.add(slug);
 					break;
 				}
@@ -1088,7 +1116,9 @@ export class SessionAdvisors {
 			this.#releaseRefusalPin(a);
 			// Resets the emission guard and every tool-side note state together.
 			a.adviseTool.resetDeliveredNotes();
+			a.resetToolState?.();
 			a.eligibleUpdates = 0;
+			a.reviewOwed = false;
 			this.#attachAdvisorRecorderFeed(a);
 		}
 		this.#advisorPrimaryTurnsCompleted = 0;
@@ -1284,7 +1314,11 @@ export class SessionAdvisors {
 	#rebuildAdvisorRuntime(emitWarnings = true): boolean {
 		const carried = new Map<string, AdvisorCarry>();
 		for (const advisor of this.#advisors) {
-			carried.set(advisor.slug, { held: advisor.runtime.releaseHeld(), eligibleUpdates: advisor.eligibleUpdates });
+			carried.set(advisor.slug, {
+				held: advisor.runtime.releaseHeld(),
+				eligibleUpdates: advisor.eligibleUpdates,
+				reviewOwed: advisor.reviewOwed,
+			});
 		}
 		this.#stopAdvisorRuntime();
 		return this.#buildAdvisorRuntime(true, emitWarnings, carried);
@@ -1357,7 +1391,10 @@ export class SessionAdvisors {
 			// primary. Explicit `tools` lists stay user-owned and are not widened.
 			const names =
 				config.tools === undefined ? new Set([...ADVISOR_DEFAULT_TOOL_NAMES, "recall"]) : new Set(config.tools);
-			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
+			// A fresh slate per advisor: tool state such as repeat-read counts must
+			// reflect this advisor's own reads, not its siblings' (#18834).
+			const slate = this.#advisorTools?.create(names);
+			const tools = (slate?.tools ?? []).filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			for (const tool of advisorLoopTools) {
@@ -1417,7 +1454,7 @@ export class SessionAdvisors {
 			const advisorCursorExecHandlers = new CursorExecHandlers({
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
-				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				tools: bridgeToolMap(advisorToolMap, slate?.createEditTool),
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool fails closed to
 				// `always-ask`.
@@ -1426,7 +1463,7 @@ export class SessionAdvisors {
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
 				// without `grep` a search tool it was denied.
-				createGrepTool: advisorToolMap.has("grep") ? this.#advisorCreateGrepTool : undefined,
+				createGrepTool: advisorToolMap.has("grep") ? slate?.createGrepTool : undefined,
 				// Advisors share the session's live MCP connections, so their
 				// resource frames answer from the same catalog the primary sees.
 				// Not gated on a tool grant: reading what a server advertises is
@@ -1435,10 +1472,10 @@ export class SessionAdvisors {
 			});
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {
-				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
+				// Read per request so transport setting changes reach existing advisors.
 				const options = {
 					...streamOptions,
-					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(),
+					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(requestModel),
 				};
 				if (requestModel.api === "openai-codex-responses") {
 					return baseAdvisorStreamFn(requestModel, context, {
@@ -1468,6 +1505,18 @@ export class SessionAdvisors {
 				providerSessionState: this.#host.providerSessionState,
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
+				// The primary's context, scoped to this advisor: a tool that cancels
+				// (`ask`) stops the advisor, and `bash` judges commands against the
+				// tools the advisor has, not the primary's.
+				getToolContext: toolCall => {
+					const context = this.#advisorGetToolContext?.(toolCall);
+					if (!context) return undefined;
+					return {
+						...context,
+						abort: () => advisorAgent.abort(),
+						toolNames: advisorAgent.state.tools.map(tool => tool.name),
+					};
+				},
 				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
@@ -1674,6 +1723,7 @@ export class SessionAdvisors {
 				agent: advisorAgent,
 				runtime,
 				adviseTool,
+				resetToolState: slate?.resetState,
 				recorder,
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
@@ -1684,6 +1734,7 @@ export class SessionAdvisors {
 				reviewInterval: descriptor.reviewInterval,
 				syncBacklog: descriptor.syncBacklog,
 				eligibleUpdates: carried?.get(slug)?.eligibleUpdates ?? 0,
+				reviewOwed: carried?.get(slug)?.reviewOwed ?? false,
 				pendingCoveredTurn: 0,
 				retryFallbackPendingSuccess: false,
 				providerWaitRetries: 0,
@@ -1773,7 +1824,12 @@ export class SessionAdvisors {
 		// would have granted it. The loop may still report streaming here, and an
 		// aside would be drained into an extra turn that skips the continuation latch.
 		if (this.#terminalUnwindActive && terminalAnswerNoQueuedWork) {
-			this.#deliverAdvisorBatch(notes, formatAdvisorBatchContent(notes), this.#continuesFinishedRun(severity));
+			this.#deliverAdvisorBatch(
+				notes,
+				formatAdvisorBatchContent(notes),
+				this.#continuesFinishedRun(severity),
+				advisor,
+			);
 			return;
 		}
 		const channel = resolveAdvisorDeliveryChannel({
@@ -1793,7 +1849,7 @@ export class SessionAdvisors {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
 			return;
 		}
-		this.#deliverAdvisorBatch(notes, formatAdvisorBatchContent(notes), channel === "steer");
+		this.#deliverAdvisorBatch(notes, formatAdvisorBatchContent(notes), channel === "steer", advisor);
 	}
 
 	/**
@@ -1868,7 +1924,7 @@ export class SessionAdvisors {
 	 *  - ACP bridges with `deferAgentInitiatedTurns`: the client cannot show an
 	 *    agent-initiated turn as busy, so idle triggers are refused (#5628 review).
 	 */
-	#deliverAdvisorBatch(notes: AdvisorNote[], content: string, steer: boolean): void {
+	#deliverAdvisorBatch(notes: AdvisorNote[], content: string, steer: boolean, producer?: ActiveAdvisor): void {
 		const details = { notes } satisfies AdvisorMessageDetails;
 		if (steer) {
 			// Plan mode preserves would-be-steering advice as a visible card:
@@ -1885,10 +1941,15 @@ export class SessionAdvisors {
 				// real concerns/blockers to skip-idle-flush asides (#5628 review).
 				this.#recordAdvisorInterruptDelivered();
 				// A steer into a run still working only redirects it; one delivered
-				// while idle or past a terminal boundary starts the continuation
-				// that must not schedule another review.
+				// while idle or past a terminal boundary starts a continuation that
+				// revises the reviewed work. It supersedes every review of that work
+				// still running or queued, so none can re-raise what is being fixed;
+				// each advisor that lost one reviews at the continuation's end instead.
 				if (!this.#host.agent.state.isStreaming || this.#terminalUnwindActive) {
 					this.#advisorContinuation = { userMessage: lastPrimaryUserMessage(this.#host.agent.state.messages) };
+					for (const advisor of this.#advisors) {
+						if (advisor.runtime.supersede(advisor === producer)) advisor.reviewOwed = true;
+					}
 				}
 				void this.#host
 					.sendCustomMessage(
@@ -1944,9 +2005,9 @@ export class SessionAdvisors {
 	#recordAdvisorCost(advisor: ActiveAdvisor, message: AssistantMessage): void {
 		const cost = message.usage.cost.total;
 		this.#advisorCosts.set(advisor.slug, (this.#advisorCosts.get(advisor.slug) ?? 0) + cost);
-		// Cheap in-memory OAuth-credential check; captured now so subscription
-		// attribution survives the advisor runtime being torn down (#10131).
-		if (cost > 0 && Number.isFinite(cost) && this.#host.modelRegistry.isUsingOAuth(advisor.model)) {
+		// Capture credential attribution now so subscription spend survives
+		// the advisor runtime being torn down (#10131).
+		if (cost > 0 && Number.isFinite(cost) && this.#host.modelRegistry.isUsingSubscription(advisor.model)) {
 			this.#advisorSubscriptionSlugs.add(advisor.slug);
 		}
 	}
@@ -2599,7 +2660,7 @@ export class SessionAdvisors {
 						promptCacheKey: advisorProviderSessionId,
 						metadata: advisorMetadata,
 						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets(),
+						preferWebsockets: this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						codexCompaction,
 					},
@@ -2876,7 +2937,7 @@ export class SessionAdvisors {
 	 * no servers) is absent.
 	 */
 	getAdvisorAvailableToolNames(): string[] {
-		return (this.#advisorTools ?? []).map(tool => tool.name);
+		return [...(this.#advisorTools?.names() ?? [])];
 	}
 
 	/**
@@ -2937,14 +2998,14 @@ export class SessionAdvisors {
 		return cost;
 	}
 	/**
-	 * Whether advisor spend should be attributed to an OAuth/subscription plan.
+	 * Whether advisor spend should be attributed to a subscription plan.
 	 * With live advisors it reflects their current models; once the runtime is
 	 * gone it consults the attribution recorded as spend accrued, so the status
 	 * line never rescans the model catalog per render (#10131).
 	 */
 	isUsingSubscription(): boolean {
 		if (this.#advisors.length > 0) {
-			return this.#advisors.some(a => this.#host.modelRegistry.isUsingOAuth(a.model));
+			return this.#advisors.some(a => this.#host.modelRegistry.isUsingSubscription(a.model));
 		}
 		return this.#advisorSubscriptionSlugs.size > 0;
 	}

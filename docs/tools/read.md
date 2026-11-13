@@ -6,6 +6,7 @@
 
 - Entry: `packages/coding-agent/src/tools/read.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/read.md`
+- On-demand doc topics (`ReadTool.docTopics()`): `xd://read/sources` (`prompts/tools/read-sources.md`: SQLite, archive, JSON query, executable, video, SVG and merge-conflict selectors, plus `write` targets for archives and SQLite) and `xd://read/urls` (each internal URL scheme's `promptReference()`: sub-paths, queries and limits its one-line system-prompt entry leaves out).
 - Key collaborators:
    - `packages/coding-agent/src/tools/path-utils.ts` — prefer literal filenames; normalize local paths and recover accidental delimited path lists.
    - `packages/tui/src/tools/read.ts` / `line-ranges.ts` — split trailing selectors and parse line ranges; `packages/coding-agent/src/tools/read-selector.ts` resolves raw, range, and tail selectors.
@@ -24,7 +25,7 @@
 ## Registration / Visibility
 
 - Metadata: `strict = true`, `loadMode = "essential"`. Approval normally uses the internal scheme's read tier; PDF page screenshots require `"exec"`.
-- The model-facing prompt renders hashline guidance from the live display mode and executable-view guidance only when IDA is available.
+- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable views only when IDA is available.
 
 ## Inputs
 
@@ -150,7 +151,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### Archives
 
 - Supported archive containers (extension table in `packages/utils/src/ar/registry.ts`): tar family `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`/`.tbz`, `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`, `.tar.z`; ZIP family `.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`; standalone `.rar`/`.cbr`, `.7z`, `.iso`, `.cab`, `.cpio`, `.rpm`, `.ar`/`.a`/`.lib`, `.deb`, `.lzh`/`.lha`, `.arj`, `.asar`; single-stream `.gz`, `.bz2`, `.xz`, `.zst`, `.z`, `.lzma`.
-- Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`.
+- Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`, `archive.ext:path/inside.json?q=.x`.
 - `openArchive()` dispatches through the `@oh-my-pi/pi-utils/ar` registry (`packages/utils/src/ar/open.ts`); limits live in `packages/utils/src/ar/limits.ts`: in-memory archives cap at 256 MiB, index reads at 64 MiB, and individual member extraction at 64 MiB.
 - Plain TAR indexing reads headers and bounded metadata through byte ranges, skipping member payloads. Its container size is not subject to the whole-buffer limit; selected members retain the extraction limit.
 - Archive paths normalize `/`, drop `.` segments, and reject `..`.
@@ -159,7 +160,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Selected PDF entries use the same Markdown conversion as ordinary PDF files, including line, multi-range, tail, and raw selectors. The read identity retains both the archive and member path and is immutable.
 - PDF page-image reads such as `a.zip:folder/sample document.pdf:page2.png` render only the selected member through Chromium. Its bounded temporary PDF is removed after success, failure, or cancellation; archive paths are never unpacked into the working directory.
 - Other file entries are UTF-8 decoded. Unsupported binary entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
-- Text archive entries reuse the normal in-memory pagination/anchoring path.
+- Text archive entries are paginated in memory as immutable resources (no hashline anchors) and accept [JSON queries](#json-queries).
 
 ### Executables and IDA databases
 
@@ -231,6 +232,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Modifier-only selectors (`?limit=2`, `?offset=1`, `?raw=true`, `?compact=true`) and empty `q=`/`query=` use the identity filter `.`. Unknown-only query strings are not JSON selectors.
 - One leading UTF-8 BOM is accepted per JSON input, including JSONL. U+FEFF inside strings and raw-input (`jq -R`) bytes remain unchanged; malformed JSON still reports a parse error.
 - `ssh://HOST/tmp/data.json?q=.items&limit=2` resolves the bare SSH file URI and runs the same JSON renderer locally on its bounded text. The 1 MiB SSH ceiling still applies. Filters never enter the remote shell, `%3F` still names a literal `?`, and unsupported URL parameters remain errors. Temporary query input is owned and removed on success, failure, or cancellation; trailing line selectors address query output.
+- Archive members accept JSON queries (`archive.tar:receipt.json?q=.x`). A literal member name containing `?` wins; otherwise the query runs on the extracted UTF-8 member text, and trailing line selectors address query output. Directory, PDF, and binary members with a JSON selector throw a `ToolError`.
 
 ### Documents
 
@@ -294,7 +296,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - URL render pipeline in `renderUrl()`:
    1. normalize scheme (`https://` added for bare `www.`)
    2. try special handlers for known sites unless raw
-   3. fetch with `loadPage()`
+   3. fetch with `loadPage()`, which names the bot protection when the response is its challenge or block page and then never reports it `ok`, so a site handler or alternate fetched through `loadPage()` treats it as a failed fetch: on any status Cloudflare's `cf-mitigated: challenge` header or a `js_challenge` `<input>` outside comments and raw-text elements on a page of at most 64 KiB (an interstitial), and on an error status also `_cf_chl_opt` (Cloudflare), `captcha-delivery.com` (DataDome), `px-captcha` (PerimeterX) or "blocked by network security". A 2xx challenge page is not rendered: the URL goes to the remote readers (Parallel, Firecrawl, Jina) only, skipping the alternates, content negotiation, local renderers, `llms.txt` and raw-HTML fallbacks, and if none returns more than a JavaScript gate or a short block page the read ends with `method: "blocked"` and a note naming the protection and status and pointing to the `browser` tool, which runs the challenge script. A walled error status stays `method: "failed"`, with the protection named in its notes
    4. if content is image/PDF/DOCX/etc., try binary fetch + markit/image handling
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try declared markdown alternates, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
@@ -316,7 +318,8 @@ Notes: ...
    - profile (`/<handle>`, `/with_replies`, `/media`) → `x_user_search` plus a `from:<handle>` `x_keyword_search` (Latest, 10 posts), with `allowed_x_handles` pinned to the handle;
    - search (`/search?q=`; `f=live` → Latest, `f=media` → `filter:media`, `f=user` → `x_user_search`) and hashtag (`/hashtag/<tag>`) → `x_keyword_search`.
    - Models are tried in `xaiModelChain()` order (`web` role xAI candidates plus the provider default's `webSearchModel`, ranked by provider priority so `xai-oauth` runs before `xai` unless `modelProviderOrder` says otherwise) with `max_turns: 2` and low reasoning effort; the call bills the xAI account per post and profile fetched. The answer is the model's rendering of the tool output, which the API does not expose raw; the `Notes:` header names the model and fetch counts. Without xAI credentials, for other X pages (home, explore, followers, lists), or when every model fails, the result is a `text/plain` explanation with method `x-unavailable`.
-- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, etc.).
+- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, `blocked`, etc.).
+- A Jina rendering whose header warns `Target URL returned error`, or a Firecrawl scrape whose `metadata.statusCode` is 400 or more, is rejected like an empty one: the reader's own fetch got the target's error or block page. A Parallel, Firecrawl or Jina rendering of at most 2 KB carrying block-page or JavaScript-gate wording ("blocked by network security", "verify you are human", "are you a robot", "access to this page has been denied", "enable javascript", "javascript required") is skipped the same way, so later readers still run.
 - URL reads may return an inline image block when the fetched resource is a supported image and survives resizing.
 
 ## Side Effects
@@ -348,7 +351,7 @@ Notes: ...
 - Local text open-ended default line limit: `read.defaultLimit` (default `300`), clamped to `[1, DEFAULT_MAX_LINES]`.
 - Single bounded non-raw text ranges add `1` leading and `3` trailing context lines on constrained sides. Raw and multi-range reads are exact.
 - File streaming chunk size: `8 * 1024` bytes (`READ_CHUNK_SIZE`).
-- Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`.
+- Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`. Numbered reads charge a line cut to `tools.outputMaxColumns` the UTF-8 bytes of its cut display, not its source size; `:raw` reads and a cap of `0` charge source bytes. Past the 4 MiB buffering cap a line longer than `3 * outputMaxColumns + 6` bytes (always cut) is kept only as the head its display needs, however much page budget remains, and such a window never builds the whole-file hashline snapshot or registers a conflict block from those heads. A multi-range read whose budget stops a range early appends `[Range A-B stopped before line N at the … read budget. Use :N-B to continue]`.
 - Structural summaries only run when file size `<= 2 MiB` and line count `<= 20_000`.
 - Profile summaries run only for whole-file reads of recognized reports at most `32 MiB`; line selectors and `:raw` read the file.
 - Image input max: `20 MiB`.
@@ -384,7 +387,7 @@ Notes: ...
 - Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
 - Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
-- Binary archive entries do not throw; they return a text notice.
+- Binary archive entries return a text notice without throwing, unless a JSON selector is attached (JSON selectors on directory, PDF, or binary archive entries throw a `ToolError`).
 - Document conversion failure returns a text notice.
 - Image oversize/unsupported/invalid cases throw.
 - SQLite parser rejects unsupported parameter combinations early; DB/runtime errors are caught and rethrown as `ToolError(message)`.
@@ -402,3 +405,4 @@ Notes: ...
 - Raw SQLite `q=` execution is not keyword-restricted beyond “no bound parameters”; `PRAGMA query_only = ON` prevents database writes.
 - The file snapshot store is not a read acceleration cache. It exists to verify and recover hashline edits when the file changed after the read.
 - From the third identical successful text result for the same path, a per-session loop-breaking hint advises narrowing the selector or proceeding with the edit; tracking resets when the output changes.
+- A read that runs beside an earlier call of the same message that may write (its approval, asked with its arguments and no context, is not `read`, e.g. `bash`) gets `ctx.toolCall.earlierEffectsSettled` from the agent loop. `execute()` waits for those calls before reading, so it returns the file as they left it; an abort during the wait rejects the read. A single web URL (no `;`) does not wait.

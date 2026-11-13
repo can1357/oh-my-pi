@@ -23,11 +23,13 @@ import {
 	capPreviewLines,
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
+	formatCount,
 	formatDuration,
 	formatExpandHint,
 	formatFeedModelBadge,
 	formatMoreItems,
 	formatNumber,
+	formatStatusIcon,
 	isFeedModelBadgeEnabled,
 	pluralize,
 	previewLine,
@@ -351,7 +353,7 @@ function renderOutputSection(
 	if (warning) {
 		lines.push(`${continuePrefix}${theme.fg("dim", "Output")}`);
 		lines.push(
-			`${continuePrefix}  ${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}  ${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(warning), 80, expanded),
 			)}`,
@@ -483,10 +485,10 @@ function renderTaskSection(
 	return lines;
 }
 
-function taskPreviewText(task: unknown, taskFile: unknown): string {
+/** A spawn's preview text: its `task`, else its first streamed step. */
+function taskPreviewText(task: unknown, steps: unknown): string {
 	if (typeof task === "string") return task;
-	if (typeof taskFile !== "string") return "";
-	return flattenLine(replaceTabs(shortenPath(sanitizeText(taskFile))));
+	return Array.isArray(steps) && typeof steps[0] === "string" ? steps[0] : "";
 }
 
 /**
@@ -518,6 +520,12 @@ export function agentTypeBadge(agent: string | undefined, theme: Theme): string 
 	return ` ${theme.fg("dim", `${theme.format.bracketLeft}${trimmed}${theme.format.bracketRight}`)}`;
 }
 
+/** Dim `[N steps]` badge for a spawn with sequential `steps`; empty without any. */
+function stepsBadge(steps: unknown, theme: Theme): string {
+	if (!Array.isArray(steps) || steps.length === 0) return "";
+	return theme.fg("dim", ` [${formatCount("step", steps.length)}]`);
+}
+
 /**
  * Render the call preview lines for the single spawned agent. The
  * args stream in token by token, so every field access is defensive.
@@ -529,13 +537,14 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 
 	const rawName = typeof args.name === "string" ? args.name.trim() : "";
 	const idLabel = rawName ? formatTaskId(rawName) : "";
-	const brief = taskFirstLine(taskPreviewText(args.task, args.taskFile));
+	const brief = taskFirstLine(taskPreviewText(args.task, args.steps));
 	if (idLabel || brief) {
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || "agent"))}`;
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(args.agent, theme);
+		line += stepsBadge(args.steps, theme);
 		lines.push(line);
 	}
 	lines.push(...renderTaskItemLines(args.tasks, theme));
@@ -565,11 +574,12 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		const rawName = typeof item?.name === "string" ? item.name.trim() : "";
 		const idLabel = rawName ? formatTaskId(rawName) : `#${i + 1}`;
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel))}`;
-		const brief = taskFirstLine(taskPreviewText(item?.task, item?.taskFile));
+		const brief = taskFirstLine(taskPreviewText(item?.task, item?.steps));
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(item?.agent, theme);
+		line += stepsBadge(item?.steps, theme);
 		if (item?.isolated === true) {
 			line += theme.fg("dim", " [isolated]");
 		}
@@ -603,11 +613,20 @@ function createAssignmentSectionRenderer(
 	// `renderResult` receives the raw tool args (unlike `renderCall`, which is
 	// fed through `repairTaskParams`), so undo any per-field double-encoding
 	// here too. The repair is idempotent on already-clean text.
-	const assignment = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : ""),
-	).trim();
+	const brief = typeof args?.task === "string" ? repairDoubleEncodedJsonString(args.task) : stepsMarkdown(args?.steps);
+	const assignment = sanitizeText(brief).trim();
 	if (!assignment) return undefined;
 	return createMarkdownSectionRenderer(assignment, theme);
+}
+
+/** A flat call's `steps` as numbered Markdown sections; skips entries still streaming in as non-strings. */
+function stepsMarkdown(steps: unknown): string {
+	if (!Array.isArray(steps)) return "";
+	return steps
+		.flatMap((step, index) =>
+			typeof step === "string" ? [`**Step ${index + 1}**\n\n${repairDoubleEncodedJsonString(step)}`] : [],
+		)
+		.join("\n\n");
 }
 
 /**
@@ -958,9 +977,7 @@ function renderReviewResult(
 	// Verdict line
 	const verdictColor = summary.overall_correctness === "correct" ? "success" : "error";
 	const isCorrect = summary.overall_correctness === "correct";
-	const verdictIcon = isCorrect
-		? theme.styledSymbol("status.done", "accent")
-		: theme.fg(verdictColor, theme.status.error);
+	const verdictIcon = formatStatusIcon(isCorrect ? "success" : "error", theme);
 	lines.push(
 		`${continuePrefix} Patch is ${theme.fg(verdictColor, summary.overall_correctness)} ${verdictIcon} ${theme.fg(
 			"dim",
@@ -1059,13 +1076,15 @@ function renderAgentResult(
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
-	const icon = aborted
-		? theme.status.aborted
-		: needsWarning
-			? theme.status.warning
+	// A merge failure is a warning: the agent's work succeeded, only folding it back did not.
+	const iconStatus: ToolUIStatus = aborted
+		? "aborted"
+		: needsWarning || mergeFailed
+			? "warning"
 			: success
-				? theme.styledSymbol("status.done", "text")
-				: theme.status.error;
+				? "success"
+				: "error";
+	const icon = formatStatusIcon(iconStatus, theme);
 	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
 	const statusText = aborted
 		? "aborted"
@@ -1109,7 +1128,7 @@ function renderAgentResult(
 			? fullDescription
 			: undefined;
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine = `${indent}${theme.fg(iconColor, icon)} ${modelLead}${theme.fg(
+	let statusLine = `${indent}${icon} ${modelLead}${theme.fg(
 		success && !needsWarning ? "text" : "accent",
 		titlePart,
 	)}${badges}`;
@@ -1138,7 +1157,7 @@ function renderAgentResult(
 
 	if (aborted && result.abortReason) {
 		lines.push(
-			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("aborted", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(flattenLine(sanitizeText(result.abortReason)), 80, expanded),
 			)}`,
@@ -1230,7 +1249,7 @@ function renderAgentResult(
 
 	if (hasCustomRendering && missingCompleteWarning) {
 		lines.push(
-			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(missingCompleteWarning), 80, expanded),
 			)}`,
@@ -1370,16 +1389,10 @@ export function renderResult(
 	if (!details) {
 		const text = result.content.find(c => c.type === "text")?.text || "";
 		const errored = result.isError === true;
-		const header = errored
-			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel }, theme)
-			: renderStatusLine(
-					{
-						iconOverride: theme.styledSymbol("status.done", "accent"),
-						title: "Task",
-						description: agentLabel,
-					},
-					theme,
-				);
+		const header = renderStatusLine(
+			{ icon: errored ? "error" : "success", title: "Task", description: agentLabel },
+			theme,
+		);
 		return framedToolCard(theme, ({ width }) => ({
 			header,
 			sections: [
@@ -1424,16 +1437,11 @@ export function renderResult(
 	const metaLabel = countLabel ?? agentLabel;
 	const header = renderStatusLine(
 		{
-			icon: icon === "success" || icon === "running" ? undefined : icon,
 			// While agents are in flight the header shows the dispatch glyph, not a
 			// spinner: async spawns return immediately, so "running" means
 			// "delegated to peers", not "this call is blocking the turn".
-			iconOverride:
-				icon === "running"
-					? theme.styledSymbol("tool.task", "accent")
-					: icon === "success"
-						? theme.styledSymbol("status.done", "accent")
-						: undefined,
+			icon: icon === "running" ? undefined : icon,
+			iconOverride: icon === "running" ? theme.styledSymbol("tool.task", "accent") : undefined,
 			title: "Task",
 			meta: metaLabel ? [metaLabel] : undefined,
 		},
@@ -2066,7 +2074,7 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 			key,
 		);
 	const flatName = typeof args?.name === "string" ? args.name.trim() : "";
-	const flatBrief = taskPreviewText(args?.task, args?.taskFile);
+	const flatBrief = taskPreviewText(args?.task, args?.steps);
 	if (flatName || taskFirstLine(flatBrief)) {
 		agents.push(
 			pending(
@@ -2085,7 +2093,7 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 				pending(
 					name ? formatTaskId(name) : `#${index + 1}`,
 					entry?.agent,
-					taskPreviewText(entry?.task, entry?.taskFile),
+					taskPreviewText(entry?.task, entry?.steps),
 					entry?.isolated,
 					name || `#${index + 1}`,
 				),
@@ -2256,9 +2264,10 @@ export interface TaskItem {
 	sourceSession?: string;
 	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
 	model?: string | string[];
-	/** Inline instructions; exactly one of task or taskFile is required. */
+	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
-	taskFile?: string;
+	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
+	steps?: string[];
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
@@ -2290,8 +2299,8 @@ export interface TaskParams {
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
-	/** Absolute path or local:// URL to a UTF-8 file (flat form), mutually exclusive with task. */
-	taskFile?: string;
+	/** Ordered stages (flat form); see {@link TaskItem.steps}. */
+	steps?: string[];
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
@@ -2380,9 +2389,6 @@ export interface AgentProgress {
 	status: "pending" | "running" | "completed" | "failed" | "aborted";
 	task: string;
 	assignment?: string;
-	taskFile?: string;
-	/** SHA-256 of the exact task file bytes before decoding and trimming. */
-	taskFileSha256?: string;
 	description?: string;
 	lastIntent?: string;
 	currentTool?: string;
@@ -2491,8 +2497,6 @@ export interface SingleResult {
 	agentSource: AgentSource;
 	task: string;
 	assignment?: string;
-	taskFile?: string;
-	taskFileSha256?: string;
 	description?: string;
 	lastIntent?: string;
 	exitCode: number;

@@ -866,23 +866,34 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
-	test("routes live Zen Argon to the native Google endpoint (#15977)", async () => {
-		const id = "gemini-4-argon";
+	test("routes live Zen Gemini 4 models to the native Google endpoint with thinking levels (#15977)", async () => {
+		const efforts: Record<string, string[]> = {
+			"gemini-4-argon": ["low", "medium", "high"],
+			"gemini-4-carbon": ["low", "medium", "high"],
+			"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+		};
+		const ids = Object.keys(efforts);
 		const baseUrl = "https://opencode.ai/inference/google/v1beta";
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-zen");
-		expect(descriptor?.resolveApi?.(id, { tool_call: true, provider: { npm: "@ai-sdk/google" } })).toEqual({
-			api: "google-generative-ai",
-			baseUrl,
-		});
-
 		const options = opencodeZenModelManagerOptions({
 			apiKey: "test-key",
-			fetch: async () => modelListResponse([id]),
+			fetch: async () => modelListResponse(ids),
 		});
-		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === id);
-		if (!spec) throw new Error("Zen did not discover Argon");
-		expect(spec).toMatchObject({ api: "google-generative-ai", baseUrl });
-		expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		const discovered = await options.fetchDynamicModels?.();
+		for (const id of ids) {
+			expect(descriptor?.resolveApi?.(id, { tool_call: true, provider: { npm: "@ai-sdk/google" } })).toEqual({
+				api: "google-generative-ai",
+				baseUrl,
+			});
+			const spec = discovered?.find(model => model.id === id);
+			if (!spec) throw new Error(`Zen did not discover ${id}`);
+			expect(spec).toMatchObject({ api: "google-generative-ai", baseUrl });
+			expect(buildModel(spec)).toMatchObject({
+				reasoning: true,
+				thinking: { mode: "google-level", efforts: efforts[id] },
+			});
+			expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		}
 	});
 
 	test("routes opencode-go muse-spark-1.2 to the responses API (#8957)", () => {

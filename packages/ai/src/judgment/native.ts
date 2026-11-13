@@ -5,8 +5,10 @@
  * Each judgment API is one wire dialect: TypeSafe's System One route
  * (`POST /v1/systemone`), OpenRouter Decisions (`POST /api/alpha/decisions`,
  * same body), Cloudflare Workers AI (`POST /ai/run/{model}`, same body plus
- * top-level data URL images; `systemone.ts`), and OpenAI Decisions
- * (`POST /v1/decisions`, translated both ways; `openai-decisions.ts`).
+ * top-level data URL images; `systemone.ts`), OpenAI Decisions
+ * (`POST /v1/decisions`, translated both ways; `openai-decisions.ts`), and
+ * Gemini Decisions (`POST /v1beta/decisions`, positional question keys and an
+ * `x-goog-api-key` credential; `google-decisions.ts`).
  * Credentials flow through {@link withAuth}, so a stored key rotates on
  * 401/403 exactly like chat providers; transient 429/5xx responses retry with
  * bounded, `retry-after`-aware backoff. Endpoints that cap the questions per
@@ -19,7 +21,11 @@
  * (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL` overrides the API root,
  * `TYPESAFE_DEFAULT_MODEL` the model.
  */
-import { resolveJudgmentImageInput, type JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
+import {
+	type JudgmentImageInput,
+	judgmentImagePatches,
+	resolveJudgmentImageInput,
+} from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { resolveJudgmentQuestionsMax } from "@oh-my-pi/pi-catalog/compat/judgment-questions";
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -31,8 +37,16 @@ import { withInferenceUserAgent } from "../providers/inference-headers";
 import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { googleDecisionsWire } from "./google-decisions";
 import { openaiDecisionsWire } from "./openai-decisions";
-import { openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
+import {
+	liquidWire,
+	naceWire,
+	openrouterDecisionsWire,
+	referencedImageAssets,
+	typesafeWire,
+	workersAiWire,
+} from "./systemone";
 import {
 	type Answer,
 	type Judge,
@@ -54,6 +68,9 @@ const JUDGMENT_WIRES = {
 	"openrouter-decisions": openrouterDecisionsWire,
 	"workers-ai-systemone": workersAiWire,
 	"openai-decisions": openaiDecisionsWire,
+	"google-decisions": googleDecisionsWire,
+	"liquid-systemone": liquidWire,
+	"nace-systemone": naceWire,
 } as const satisfies Partial<Record<Api, JudgmentWire>>;
 
 /** APIs {@link NativeJudge} can serve. */
@@ -90,7 +107,12 @@ export function nativeJudgmentImageBounds(model: Model): JudgmentImageInput | un
 /** Whether `model`'s native judgment API takes these exact images: image support within every {@link nativeJudgmentImageBounds}. */
 export function nativeJudgmentAcceptsImages(model: Model, images: readonly ImageContent[]): boolean {
 	const bounds = nativeJudgmentImageBounds(model);
-	return bounds !== undefined && imageLimitViolation(images, bounds) === undefined;
+	return bounds !== undefined && judgmentImagesWithin(images, bounds);
+}
+
+/** Whether `images` fall within every cap and floor of `bounds`. */
+export function judgmentImagesWithin(images: readonly ImageContent[], bounds: JudgmentImageInput): boolean {
+	return imageLimitViolation(images, bounds) === undefined;
 }
 
 /** The bounds both `a` and `b` allow: shared MIME types, the lower of each cap, the higher of each floor. */
@@ -101,7 +123,7 @@ function intersectImageInput(a: JudgmentImageInput, b: JudgmentImageInput): Judg
 			? a.mimeTypes.filter(type => b.mimeTypes?.includes(type))
 			: (a.mimeTypes ?? b.mimeTypes);
 	if (mimeTypes !== undefined) bounds.mimeTypes = mimeTypes;
-	for (const cap of ["maxCount", "maxBytes", "maxTotalBytes", "maxPixels", "maxSide"] as const) {
+	for (const cap of ["maxCount", "maxBytes", "maxTotalBytes", "maxPixels", "maxSide", "maxTotalPatches"] as const) {
 		const limit = a[cap] === undefined ? b[cap] : b[cap] === undefined ? a[cap] : Math.min(a[cap], b[cap]);
 		if (limit !== undefined) bounds[cap] = limit;
 	}
@@ -196,6 +218,8 @@ export interface NativeJudgeOptions extends NativeJudgeConnection {
 	supportsImages?: boolean;
 	/** Catalog-selected image bounds, applied in addition to the wire's transport constraints. */
 	imageInput?: JudgmentImageInput;
+	/** Fields merged over every encoded request body (e.g. OpenRouter `provider` routing preferences). */
+	extraBody?: Record<string, unknown>;
 }
 
 /** Per-call options for {@link NativeJudge.judge}. */
@@ -240,9 +264,14 @@ function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentIm
 		return `accepts at most ${limits.maxCount} images, got ${images.length}`;
 	}
 	let totalBytes = 0;
-	const { minPixels, maxPixels, minSide, maxSide } = limits;
+	let totalPatches = 0;
+	const { minPixels, maxPixels, minSide, maxSide, maxTotalPatches } = limits;
 	const checkDimensions =
-		minPixels !== undefined || maxPixels !== undefined || minSide !== undefined || maxSide !== undefined;
+		minPixels !== undefined ||
+		maxPixels !== undefined ||
+		minSide !== undefined ||
+		maxSide !== undefined ||
+		maxTotalPatches !== undefined;
 	const needsBytes = limits.maxBytes !== undefined || limits.maxTotalBytes !== undefined;
 	for (const [index, image] of images.entries()) {
 		const mimeType = image.mimeType.toLowerCase();
@@ -259,6 +288,7 @@ function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentIm
 		const metadata = parseImageMetadata(bytes);
 		if (!metadata?.width || !metadata.height) continue;
 		const { width, height } = metadata;
+		totalPatches += judgmentImagePatches(width, height);
 		const size = `images[${index}] is ${width}x${height}`;
 		if (maxPixels !== undefined && width * height > maxPixels)
 			return `accepts images up to ${maxPixels} pixels; ${size}`;
@@ -274,6 +304,9 @@ function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentIm
 	}
 	if (limits.maxTotalBytes !== undefined && totalBytes > limits.maxTotalBytes) {
 		return `accepts at most ${limits.maxTotalBytes} image bytes per request, got ${totalBytes}`;
+	}
+	if (maxTotalPatches !== undefined && totalPatches > maxTotalPatches) {
+		return `accepts at most ${maxTotalPatches} 32x32 image patches per request, got ${totalPatches}`;
 	}
 	return undefined;
 }
@@ -334,6 +367,7 @@ export class NativeJudge implements Judge {
 	readonly #timeoutMs: number;
 	readonly #maxQuestions: number | undefined;
 	readonly #imageInput: JudgmentImageInput | undefined;
+	readonly #extraBody: Record<string, unknown> | undefined;
 
 	constructor(options: NativeJudgeOptions) {
 		this.#apiKey = options.apiKey;
@@ -350,6 +384,7 @@ export class NativeJudge implements Judge {
 		}
 		this.#maxQuestions = options.maxQuestions;
 		this.#imageInput = options.imageInput;
+		this.#extraBody = options.extraBody;
 		const optedIntoImages = options.supportsImages ?? this.#wire.imagesRequireOptIn !== true;
 		if (this.#wire.images !== undefined && optedIntoImages) this.supportsImages = true;
 		this.label = `${this.provider}/${this.model}`;
@@ -458,12 +493,13 @@ export class NativeJudge implements Judge {
 		request: JudgmentRequest<Q>,
 		options: NativeJudgeCallOptions | undefined,
 	): Promise<JudgmentResult<Q>> {
-		const body = JSON.stringify(this.#wire.encode(request, this.model, options?.imageAssets));
+		const encoded = this.#wire.encode(request, this.model, options?.imageAssets);
+		const body = JSON.stringify(this.#extraBody ? { ...encoded, ...this.#extraBody } : encoded);
 		const hasImages = (request.images?.length ?? 0) > 0 || Object.keys(options?.imageAssets ?? {}).length > 0;
 		const requestHeaders = hasImages ? this.#wire.imageHeaders : undefined;
 		const signal = options?.signal;
 		const payload = await withAuth(this.#apiKey, key => this.#attempt(body, key, signal, requestHeaders), { signal });
-		const decoded = this.#wire.decode(payload);
+		const decoded = this.#wire.decode(payload, request);
 		if (!decoded) {
 			throw new AIError.ProviderResponseError(`${this.label} returned a malformed judgment response`, {
 				provider: this.provider,
@@ -508,7 +544,9 @@ export class NativeJudge implements Judge {
 		const headers: Record<string, string> = {
 			...this.#headers,
 			...requestHeaders,
-			Authorization: `Bearer ${target.token}`,
+			...(target.tokenHeader === undefined
+				? { Authorization: `Bearer ${target.token}` }
+				: { [target.tokenHeader]: target.token }),
 			Accept: "application/json",
 			"Content-Type": "application/json",
 		};
@@ -545,9 +583,11 @@ export class NativeJudge implements Judge {
 
 /**
  * The {@link NativeJudge} for a catalog judge model: its API's dialect, wire id
- * (`requestModelId ?? id`), base URL, and catalog question cap
- * (`judgment-questions-max`). Shared by the coding agent's judge chain and the
- * auth-gateway System One route so both address a model the same way.
+ * (`requestModelId ?? id`), base URL, catalog question cap
+ * (`judgment-questions-max`), and, for OpenRouter Decisions, the compat
+ * `openRouterRouting` (sent as `provider`) and `extraBody` request controls.
+ * Shared by the coding agent's judge chain and the auth-gateway System One
+ * route so both address a model the same way.
  *
  * @throws ConfigurationError when the model's API is not a judgment API.
  */
@@ -564,5 +604,21 @@ export function createNativeJudge(model: Model, connection: NativeJudgeConnectio
 		maxQuestions: resolveJudgmentQuestionsMax(model),
 		supportsImages: nativeJudgmentSupportsImages(model),
 		imageInput: resolveJudgmentImageInput(model),
+		extraBody: openRouterDecisionsBody(model),
 	});
+}
+
+/**
+ * OpenRouter Decisions request controls from the model's configured compat, in the chat vocabulary:
+ * `openRouterRouting` becomes `provider`, then `extraBody` overlays the body as on chat requests.
+ * Judgment APIs resolve no compat, so the sparse user `compatConfig` is the source. Applied under any
+ * base URL: the Decisions API is OpenRouter's own, and relays forward the body to it.
+ */
+function openRouterDecisionsBody(model: Model): Record<string, unknown> | undefined {
+	const config = model.compatConfig;
+	if (model.api !== "openrouter-decisions" || !config) return undefined;
+	const routing = "openRouterRouting" in config ? config.openRouterRouting : undefined;
+	const extraBody = "extraBody" in config ? config.extraBody : undefined;
+	if (!routing && !extraBody) return undefined;
+	return { ...(routing && { provider: routing }), ...extraBody };
 }

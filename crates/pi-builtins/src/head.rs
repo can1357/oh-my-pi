@@ -9,14 +9,13 @@ use std::{
 	path::PathBuf,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 use memchr::memrchr_iter;
 use pi_vfs::File;
 use thiserror::Error;
 use uucore::{display::Quotable, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, matches_parser, util};
+use crate::host::{Host, Utility, matches_parser};
 
 const BUF_SIZE: usize = 65536;
 
@@ -1463,11 +1462,6 @@ impl Utility for Head {
 		}
 		host.exit_code()
 	}
-}
-
-/// Creates the `head` builtin registration.
-pub(crate) fn head_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Head, SE>()
 }
 
 #[cfg(test)]

@@ -39,6 +39,8 @@ export interface LoopConditionOptions {
 	signal?: AbortSignal;
 	/** Owning session id, so the condition's shell session cannot leak state into (or from) another session's. */
 	sessionId: string;
+	/** Asked once the run settles; `false` drops the condition shell if the owning session was left mid-run. */
+	isSessionCurrent?: () => boolean;
 }
 
 /**
@@ -100,6 +102,7 @@ export async function evaluateLoopCondition(
 			timeout: options.timeoutMs,
 			signal: options.signal,
 			sessionKey: `${LOOP_CONDITION_SESSION_KEY}:${options.sessionId}`,
+			isSessionCurrent: options.isSessionCurrent,
 		});
 	} catch (error) {
 		logger.error("loop condition failed to start", { command: condition.command, error: String(error) });

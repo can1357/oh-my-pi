@@ -22,8 +22,12 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Autofix: lint + format prompts | `bun run fix`         |
 | Build the `dist/omp` binary    | `bun run build`       |
 
-Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
-changing export HTML/CSS/JS, web themes, or the shared tool/trace renderers, run
+Type checks use Bun's built-in checker (`bun check --no-script`); the explicit
+flag bypasses each package's `check` script. Stable TypeScript is retained only
+for publishing declarations and JavaScript, which `bun check` does not emit.
+Use `bun run check` for the full typecheck/lint gate.
+
+After changing export HTML/CSS/JS, web themes, or the shared tool/trace renderers, run
 `bun run gen:export-viewer` and include `src/export/html/viewer.generated.json`
 with the change. The generated JS lives in ignored `export-assets/`; CI verifies
 the committed metadata (`--check`, also implied by `CI=true`) and publishes the
@@ -95,7 +99,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | `mcp/`                                                   | MCP transport / manager / loader / tool bridge               | [mcp-config.md](../../docs/mcp-config.md), [mcp-runtime-lifecycle.md](../../docs/mcp-runtime-lifecycle.md)                                                   |
 | `extensibility/`, `slash-commands/`                      | Extensions, hooks, custom tools/commands, skills, plugins    | [extensions.md](../../docs/extensions.md), [hooks.md](../../docs/hooks.md), [skills.md](../../docs/skills.md)                                                |
 | `capability/`, `discovery/`                              | Capability registry + provider discovery modules             | [extension-loading.md](../../docs/extension-loading.md), [context-files.md](../../docs/context-files.md)                                                     |
-| `advisor/`, `autolearn/`, `autoresearch/`                | Advisor/watchdog, managed skills, background research        | [advisor-watchdog.md](../../docs/advisor-watchdog.md)                                                                                                        |
+| `advisor/`, `autolearn/`, `autoresearch/`                | Advisor/watchdog, managed skills, background research        | [advisor-watchdog.md](../../docs/advisor-watchdog.md), [autoresearch.md](../../docs/autoresearch.md)                                                         |
 | `memories/`, `memory-backend/`, `mnemopi/`, `hindsight/` | Memory subsystems and backends                               | [memory.md](../../docs/memory.md), [mnemosyne-memory-backend.md](../../docs/mnemosyne-memory-backend.md)                                                     |
 | `internal-urls/`                                         | Router + handlers (`agent://`, `docs://`, `rule://`, …)      | [tree.md](../../docs/tree.md)                                                                                                                                |
 | `tui/`, `collab/`                                        | Low-level TUI primitives, live session sharing               | [tui.md](../../docs/tui.md), [collab.md](../../docs/collab.md)                                                                                               |

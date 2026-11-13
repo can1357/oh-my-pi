@@ -11,7 +11,7 @@ import { effect, register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
@@ -49,7 +49,12 @@ export const cfgIsolationBackend = register({
 		label: "Isolation Backend",
 		description: "Backend used for subagent isolation and worktree cloning",
 		options: [
-			{ value: "auto", label: "Auto", description: "Let the PAL pick the best available backend" },
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Isolated subagents use ovnfs checkouts when ovnfs is found; otherwise (and for worktrees) the PAL picks the best available backend",
+			},
 			{ value: "apfs", label: "APFS", description: "macOS clonefile reflink (APFS)" },
 			{ value: "btrfs", label: "btrfs", description: "btrfs subvolume snapshot" },
 			{ value: "zfs", label: "ZFS", description: "ZFS snapshot + clone" },
@@ -159,6 +164,30 @@ export const cfgTaskIsolationApply = register({
 	},
 });
 
+export const cfgOvnfsPath = register({
+	id: "ovnfs.path",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs Binary",
+		description:
+			"ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed, with `isolation.backend` on auto) run in checkouts instead of native clones",
+	},
+});
+
+/**
+ * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
+ * or `undefined` when that binary is not found. Read by the system prompt (checkout
+ * guidance), the bash git guard, `grep`/`glob` (searches through the daemon), and the
+ * task runner (ovnfs-backed isolation when `isolation.backend` is auto).
+ */
+export function ovnfsCommand(settings: Settings): string | undefined {
+	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";
+	return $which(command) ? command : undefined;
+}
+
 export const cfgTaskIsolationMerge = register({
 	id: "task.isolation.merge",
 	protocolDefault: ["rpc", "acp"],
@@ -226,7 +255,7 @@ export const cfgTaskEager = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Prefer Task Delegation",
-		description: "How strongly to push delegating work to subagents",
+		description: "How strongly to push the main agent to delegate work; subagents keep the model's own policy",
 		options: [
 			{
 				value: "default",
@@ -235,6 +264,34 @@ export const cfgTaskEager = register({
 			},
 			{ value: "preferred", label: "Preferred", description: "Adds delegation guidance to the system prompt" },
 			{ value: "always", label: "Always", description: "Prompt guidance plus a first-turn delegation reminder" },
+		],
+	},
+});
+
+export const cfgTaskAutoParallel = register({
+	id: "task.autoParallel",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "suggest", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Auto Parallel",
+		description:
+			"Ask the native judge resolved through the 'judge' role which parts of each new top-level prompt can run concurrently. Needs a native judge and the task tool; without them nothing is judged.",
+		options: [
+			{ value: "off", label: "Off", description: "Never split prompts" },
+			{
+				value: "suggest",
+				label: "Suggest",
+				description: "Judge each prompt and report the split without acting on it",
+			},
+			{
+				value: "on",
+				label: "On",
+				description: "When a prompt splits into independent subtasks, tell the agent to delegate them in parallel",
+			},
 		],
 	},
 });
@@ -253,16 +310,17 @@ export const cfgTaskBatch = register({
 	},
 });
 
-export const cfgTaskFile = register({
-	id: "task.file",
+export const cfgTaskSteps = register({
+	id: "task.steps",
+	protocolDefault: ["rpc", "acp"],
 	type: "boolean",
 	default: false,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "Task Instructions from Files",
+		label: "Sequential Task Steps",
 		description:
-			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+			"Spawns take ordered `steps` instead of one `task`: the subagent gets the first step, then each next one once it finishes the previous; past 4 steps, earlier messages carry two or more. The last step's result is the task's result.",
 	},
 });
 
@@ -391,6 +449,39 @@ export const cfgTaskMaxConcurrency = register({
 			{ value: "16", label: "16 tasks" },
 			{ value: "32", label: "32 tasks" },
 			{ value: "64", label: "64 tasks" },
+		],
+	},
+});
+
+function validateWorkerThreads(value: unknown): void {
+	if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) return;
+	throw new Error(
+		`Invalid task.workerThreads: expected a non-negative integer (0 runs subagents on the main thread), got ${Bun.inspect(value)}.`,
+	);
+}
+
+/**
+ * Upper bound on worker threads hosting subagents; how many are used follows the number of
+ * concurrent subagents (`allowedSubagentWorkers`). 0 keeps every subagent on the main thread.
+ */
+export const cfgTaskWorkerThreads = register({
+	id: "task.workerThreads",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 4,
+	validate: validateWorkerThreads,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Worker Threads",
+		description:
+			"Maximum worker threads for subagents. Up to 8 concurrent subagents run on the main thread; at 9 one worker joins, and one more each time the count doubles (18, 36, 72). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
+		options: [
+			{ value: "0", label: "Main thread only" },
+			{ value: "1", label: "Up to 1 worker" },
+			{ value: "2", label: "Up to 2 workers" },
+			{ value: "4", label: "Up to 4 workers", description: "Default" },
+			{ value: "8", label: "Up to 8 workers" },
 		],
 	},
 });

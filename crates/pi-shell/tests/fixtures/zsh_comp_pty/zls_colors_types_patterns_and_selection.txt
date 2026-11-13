@@ -1,0 +1,28 @@
+### ": \u{14}"
+% : dir1/
+dir1/    dir2/    file1    file2    foo.c    foo.h    link@    run.sh*
+@ 0,9
+--- sgr
+:: ^Gdir1{1}/{0}
+{7;33}dir1/  {0}  {01;34}dir2{0}/    file1    file2    {1;31}fo{0}{35}o.c{0}    {1;31}fo{0}{35}o.h{0}    {36}link{0}@    {32}run.sh{0}*{0}{27}{24}: dir1{1}/{0}
+### "\u{1b}[C"
+% : dir2/
+dir1/    dir2/    file1    file2    foo.c    foo.h    link@    run.sh*
+@ 0,9
+--- sgr
+
+{7;33}dir1/  {0}  {7;33}dir1/  {0}  {0}{27}{24}: dir1{1}/{0}2
+{7;33}dir2/  {0}  {01;34}dir1{0}/    {0}{27}{24}: dir2{1}/{0}
+### "\u{1b}[C"
+% : file1
+dir1/    dir2/    file1    file2    foo.c    foo.h    link@    run.sh*
+@ 0,9
+--- sgr
+file{0}1
+{7;33}file1  {0}  {01;34}dir2{0}/    {0}{27}{24}: file1
+### "\r"
+% : file1
+@ 0,10
+--- sgr
+
+{1} {0}

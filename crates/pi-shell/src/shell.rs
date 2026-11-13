@@ -1,4 +1,6 @@
-//! Runtime-agnostic brush shell execution.
+//! The embedded shell: pi's commands run on a [`crate::bash`] engine session
+//! ([`crate::session::Session`]) over pi's filesystem, with pi's
+//! utilities, process builtins and `git` layers as engine commands.
 
 #[cfg(windows)]
 use std::collections::HashSet;
@@ -6,6 +8,7 @@ use std::{
 	collections::HashMap,
 	fs,
 	io::{self},
+	path::Path,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -14,38 +17,41 @@ use std::{
 };
 
 use anyhow::{Error, Result};
-use brush_core::{
-	ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult, PipeTap,
-	ProcessGroupPolicy, ProfileLoadBehavior, RcLoadBehavior, Shell as BrushShell, ShellValue,
-	ShellVariable, SourceInfo, SpawnObserver,
-	env::EnvironmentScope,
-	openfiles::{self, OpenFile, OpenFiles},
-};
+use bstr::{BString, ByteSlice};
 use bytes::Bytes;
 use flume::Sender;
-use pi_builtins::{BuiltinSet, default_builtins};
 use pi_vfs::Fs;
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
 use tokio::{sync::Mutex as TokioMutex, time};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(windows)]
-use crate::windows::configure_windows_path;
+pub use crate::git::GIT_REPO_LOCATION_ENV_VARS;
 use crate::{
+	bash::trace::{RunTrace, SegmentSource},
 	cancel::{AbortReason, AbortToken, CancelToken},
-	git::{GitLayers, git_builtin},
+	git::is_git_repo_location_var,
 	minimizer,
-	output_decode::OutputDecoder,
-	process,
+	output_decode::CaptureDecoder,
+	session::{
+		Children, Image, LatestImage, RunOptions, RunOutcome, RunStdio, Session, SessionConfig,
+		SessionError,
+	},
 	taps::PipeTaps,
+	vfs::VfsFs,
 };
 
+/// A live engine session and the filesystem it runs on.
 struct ShellSessionCore {
-	shell:      BrushShell,
-	/// Session filesystem; each run installs a cancellation-scoped view of it
-	/// (or of the run's own override) and restores it afterwards.
+	session:    Session,
+	/// The engine's filesystem slot (shared with the session's host). Each run
+	/// installs a cancellation-scoped view of the session filesystem, or of
+	/// the run's own override, and restores the session filesystem after it.
+	slot:       VfsFs,
+	/// Session filesystem.
 	filesystem: Fs,
+	/// The shell's working directory after the last command.
+	cwd:        BString,
 }
 
 #[derive(Clone, Default)]
@@ -68,36 +74,64 @@ impl ShellAbortState {
 	}
 }
 
-fn shell_working_dir_matches(shell: &BrushShell, cwd: &str) -> bool {
-	let requested = std::path::Path::new(cwd);
-	let current = shell.working_dir();
-	if pi_vfs::is_virtual_path(requested) {
-		return current == requested;
+/// `path` as the engine spells it.
+fn path_bytes(path: &Path) -> BString {
+	BString::from(path.as_os_str().as_encoded_bytes())
+}
+
+/// Whether the shell, now in `current`, is already in `requested`.
+fn working_dir_matches(current: &[u8], requested: &str) -> bool {
+	let path = Path::new(requested);
+	if pi_vfs::is_virtual_path(path) {
+		return current == requested.as_bytes();
 	}
-	if !requested.is_absolute() {
+	if !path.is_absolute() {
 		return false;
 	}
-	// On Windows the stored dir is already long-form (brush-core expands 8.3
-	// short names on every store), so only the requested spelling needs
-	// expansion for a short-spelled host cwd to match its long spelling.
+	// The stored dir is long-form on Windows (every `cd` stores what the
+	// request expanded to), so only the requested spelling needs expansion
+	// for a short-spelled host cwd to match its long spelling.
 	#[cfg(windows)]
 	{
-		current == brush_core::sys::fs::expand_to_long_path(requested)
+		current == path_bytes(&crate::windows::expand_to_long_path(path)).as_slice()
 	}
 	#[cfg(not(windows))]
 	{
-		current == requested
+		current == requested.as_bytes()
 	}
 }
 
-async fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> Result<()> {
-	if shell_working_dir_matches(shell, cwd) {
-		return Ok(());
+/// The directory to move the shell to before a command: `None` when it is
+/// there already. Like `cd`, the target must be a directory the run's
+/// filesystem knows; a short-spelled Windows path is stored long-form, a URL
+/// path verbatim.
+async fn requested_cwd(core: &ShellSessionCore, cwd: Option<&str>) -> Result<Option<BString>> {
+	let Some(cwd) = cwd else {
+		return Ok(None);
+	};
+	if working_dir_matches(&core.cwd, cwd) {
+		return Ok(None);
 	}
-	shell
-		.set_working_dir(cwd)
-		.await
-		.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))
+	let path = Path::new(cwd);
+	let target = if pi_vfs::is_virtual_path(path) {
+		path.to_path_buf()
+	} else if path.is_absolute() {
+		#[cfg(windows)]
+		{
+			crate::windows::expand_to_long_path(path)
+		}
+		#[cfg(not(windows))]
+		{
+			path.to_path_buf()
+		}
+	} else {
+		return Err(Error::msg(format!("Failed to set cwd: {cwd} is not an absolute path")));
+	};
+	match core.slot.filesystem().metadata(&target).await {
+		Ok(metadata) if metadata.file_type().is_dir() => Ok(Some(path_bytes(&target))),
+		Ok(_) => Err(Error::msg(format!("Failed to set cwd: {cwd}: Not a directory"))),
+		Err(err) => Err(Error::msg(format!("Failed to set cwd: {cwd}: {err}"))),
+	}
 }
 
 #[derive(Clone)]
@@ -106,6 +140,9 @@ struct ShellConfig {
 	snapshot_path: Option<String>,
 	minimizer:     Option<minimizer::MinimizerConfig>,
 	filesystem:    Fs,
+	/// The state a forked shell's session starts from ([`Shell::fork`]);
+	/// it replaces the env fallback and snapshot sourcing of a new session.
+	seed:          Option<Image>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -126,6 +163,8 @@ struct ShellRunConfig {
 	filesystem: Option<Fs>,
 	/// Mirrors the run's pipeline pipes.
 	pipe_taps:  Option<Arc<PipeTaps>>,
+	/// Folds the run's engine events.
+	trace:      Option<Arc<RunTrace>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,6 +177,9 @@ pub struct ShellRunOptions {
 	pub filesystem: Option<Fs>,
 	/// Receives a copy of every byte crossing the run's pipeline pipes.
 	pub pipe_taps:  Option<Arc<PipeTaps>>,
+	/// Folds the run's engine events into a live model of `command`
+	/// (built over the same command text).
+	pub trace:      Option<Arc<RunTrace>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -173,36 +215,29 @@ pub struct ShellExecuteOptions {
 
 pub type ShellExecuteResult = ShellRunResult;
 
-/// Spawn registry of the run currently executing on a [`Shell`], if any.
-///
-/// Kept apart from the session mutex (held for the whole command) so
-/// [`Shell::pids`] can read it while the run is in flight.
-type ActiveSpawns = Arc<parking_lot::Mutex<Option<Arc<process::SpawnRegistry>>>>;
+/// Handles of the live session readable apart from the session mutex (held
+/// for the whole command), so [`Shell::pids`] and [`Shell::fork`] never wait
+/// for it. Set when a session is created, cleared when it is dropped.
+type ActiveSession = Arc<parking_lot::Mutex<Option<SessionHandles>>>;
 
-/// Publishes a run's registry in [`ActiveSpawns`] for as long as it lives;
-/// dropping it (normal return, error, cancellation, or task abort) clears the
-/// slot.
-struct ActiveSpawnsGuard(ActiveSpawns);
-
-impl ActiveSpawnsGuard {
-	fn publish(slot: &ActiveSpawns, registry: Arc<process::SpawnRegistry>) -> Self {
-		*slot.lock() = Some(registry);
-		Self(slot.clone())
-	}
+struct SessionHandles {
+	/// The live externals of the session's run in flight.
+	children: Children,
+	/// The session's state at its last command boundary.
+	image:    LatestImage,
 }
 
-impl Drop for ActiveSpawnsGuard {
-	fn drop(&mut self) {
-		*self.0.lock() = None;
+impl SessionHandles {
+	fn of(session: &Session) -> Self {
+		Self { children: session.children(), image: session.latest_image() }
 	}
 }
 
 pub struct Shell {
-	session:                  Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state:              ShellAbortState,
-	config:                   ShellConfig,
-	active_spawns:            ActiveSpawns,
-	background_reaper_active: Arc<AtomicBool>,
+	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state: ShellAbortState,
+	config:      ShellConfig,
+	active:      ActiveSession,
 }
 
 impl Shell {
@@ -214,6 +249,7 @@ impl Shell {
 				snapshot_path: None,
 				minimizer:     None,
 				filesystem:    Fs::native(),
+				seed:          None,
 			},
 			Some(opt) => {
 				let minimizer = opt
@@ -225,16 +261,36 @@ impl Shell {
 					snapshot_path: opt.snapshot_path,
 					minimizer,
 					filesystem: opt.filesystem,
+					seed: None,
 				}
 			},
 		};
+		Self::with_config(config)
+	}
+
+	fn with_config(config: ShellConfig) -> Self {
 		Self {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
 			config,
-			active_spawns: ActiveSpawns::default(),
-			background_reaper_active: Arc::new(AtomicBool::new(false)),
+			active: ActiveSession::default(),
 		}
+	}
+
+	/// A new shell with this one's options whose session starts from this
+	/// session's state (variables, functions, aliases, options, working
+	/// directory) as of its last command boundary: while a command runs, the
+	/// state that command started from. What the fork sets stays in the
+	/// fork. Never waits for a running command. Before this shell has a
+	/// session, the fork starts from this shell's own seed, or as a new
+	/// shell.
+	#[must_use]
+	pub fn fork(&self) -> Self {
+		let latest = self.active.lock().as_ref().map(|active| active.image.get());
+		Self::with_config(ShellConfig {
+			seed: latest.or_else(|| self.config.seed.clone()),
+			..self.config.clone()
+		})
 	}
 
 	pub async fn run(
@@ -250,12 +306,12 @@ impl Shell {
 			minimizer:  self.config.minimizer.clone(),
 			filesystem: options.filesystem,
 			pipe_taps:  options.pipe_taps,
+			trace:      options.trace,
 		};
 		run_shell_session(
 			self.session.clone(),
 			self.abort_state.clone(),
-			self.active_spawns.clone(),
-			self.background_reaper_active.clone(),
+			self.active.clone(),
 			self.config.clone(),
 			run_config,
 			on_chunk,
@@ -269,7 +325,7 @@ impl Shell {
 	}
 
 	/// Pids of the processes spawned by the in-flight [`Shell::run`] that are
-	/// still alive, in spawn order. Covers every external child the run
+	/// still alive, in spawn order. Covers every external child the session
 	/// started — foreground commands, pipeline stages, and `&` background
 	/// jobs — but not builtins, which run in-process. Empty when no run is
 	/// executing (including one still waiting for a previous run to release
@@ -277,33 +333,28 @@ impl Shell {
 	/// command.
 	#[must_use]
 	pub fn pids(&self) -> Vec<i32> {
-		let registry = self.active_spawns.lock().clone();
-		registry.map_or_default(|registry| registry.live_pids())
+		self
+			.active
+			.lock()
+			.as_ref()
+			.map_or_else(Vec::new, |active| active.children.pids())
 	}
 
 	/// Number of live external background jobs tracked by the persistent
 	/// session. The host retains a per-call shell while this is nonzero, since
-	/// dropping it would kill its children. Reaps exited children without
-	/// discarding their status, so a later `wait` still sees the exit code.
+	/// dropping it would kill its children. Exited children are reaped
+	/// without discarding their status, so a later `wait` still sees the exit
+	/// code. 0 when the session is gone.
 	pub async fn live_background_job_count(&self) -> u32 {
-		let mut guard = self.session.lock().await;
-		let Some(core) = guard.as_mut() else {
+		let guard = self.session.lock().await;
+		let Some(core) = guard.as_ref() else {
 			return 0;
 		};
-		let jobs = core.shell.jobs_mut();
-		// A poll error leaves the table in an unknown state; fail closed
-		// rather than retain a per-call shell forever on stale entries.
-		if jobs.poll_preserving_completed().is_err() {
-			return 0;
-		}
-		u32::try_from(
-			jobs
-				.jobs
-				.iter()
-				.filter(|job| job.external_process_count() > 0)
-				.count(),
-		)
-		.unwrap_or(u32::MAX)
+		core
+			.session
+			.live_external_jobs()
+			.await
+			.map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX))
 	}
 }
 
@@ -321,6 +372,7 @@ pub async fn execute_shell(
 		snapshot_path: options.snapshot_path,
 		minimizer:     minimizer.clone(),
 		filesystem:    options.filesystem,
+		seed:          None,
 	};
 	let run_config = ShellRunConfig {
 		command: options.command,
@@ -329,6 +381,7 @@ pub async fn execute_shell(
 		minimizer,
 		filesystem: None,
 		pipe_taps: None,
+		trace: None,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -360,6 +413,7 @@ pub async fn execute_shell_streams(
 		snapshot_path: options.snapshot_path,
 		minimizer:     None,
 		filesystem:    options.filesystem,
+		seed:          None,
 	};
 	let run_config = ShellRunConfig {
 		command:    options.command,
@@ -368,136 +422,94 @@ pub async fn execute_shell_streams(
 		minimizer:  None,
 		filesystem: None,
 		pipe_taps:  None,
+		trace:      None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
 
 /// How long a cancelled run waits for its task to wind down before aborting
-/// it (discarding any output still queued in the pipe readers).
+/// it (discarding any output still queued in the pipe readers, and stopping
+/// the command with `KILL`).
 ///
-/// On Windows the wait covers more hops: in-process pipeline producers stop on
-/// a poll between writes and consumers cannot observe cancellation out of a
-/// blocked pipe read (readiness polling is unix-only in the builtin stdin
-/// layer), so producer exit, pipe EOF, the consumer's final flush and the
-/// reader's last read each need a separate thread wakeup. Under heavy load
-/// that chain exceeded 2s, the abort then discarded the consumer's final
-/// output mid-flight (`yes x | tail -5` lost its 5 lines).
+/// The session's own cancel sends `TERM`, then `KILL` after its 1 s grace;
+/// a run that ends within these two seconds reports normally. Windows needs a
+/// wider budget: in-process pipeline producers stop on a poll between
+/// writes, so producer exit, pipe EOF, the consumer's final flush and the
+/// reader's last read each need a separate thread wakeup; under heavy load
+/// that chain exceeded 2s (`yes x | tail -5` lost its 5 lines).
 #[cfg(windows)]
 const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
 #[cfg(not(windows))]
 const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
 
-/// How long a cancelled POSIX run's processes get to finish TERM cleanup
-/// (traps, lock/marker removal) before the KILL wave.
-#[cfg(unix)]
-const TERM_GRACE: Duration = Duration::from_secs(1);
-
 /// Delay between cancellation and cancelling the output readers. Readers stay
 /// open so pipeline consumers can flush after their producers die, and so a
-/// TERM trap that writes output during [`TERM_GRACE`] does not hit EPIPE and
-/// die before finishing its cleanup. Windows needs a wider budget for the same
-/// reason as `CANCEL_RUN_GRACE`: the consumer's flush depends on the
-/// producer's exit becoming visible through several thread wakeups. The
-/// delayed fallback still releases readers whose writers never close.
+/// TERM trap that writes output during the session's TERM grace does not hit
+/// EPIPE and die before finishing its cleanup. Windows needs a wider budget
+/// for the same reason as `CANCEL_RUN_GRACE`. The delayed fallback still
+/// releases readers whose writers never close.
 #[cfg(windows)]
 const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
 #[cfg(not(windows))]
 const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
 
-/// Poll only the persistent session's background children, never process-wide
-/// waitpid: foreground runs and other shells own their own child handles.
-/// Finished jobs keep their statuses so `wait` can consume them on a later run.
-/// The caller holds the session lock, including through this initial poll.
-fn ensure_background_reaper(
-	core: &mut ShellSessionCore,
-	session: &Arc<TokioMutex<Option<ShellSessionCore>>>,
-	active: &Arc<AtomicBool>,
-) {
-	let _ = core.shell.jobs_mut().poll_preserving_completed();
-	if !core.shell.jobs().has_live_external_jobs() || active.swap(true, Ordering::AcqRel) {
-		return;
-	}
+/// What a run reports when it ends normally.
+struct CommandResult {
+	status:      i32,
+	minimized:   Option<MinimizerResult>,
+	working_dir: String,
+}
 
-	// A weak session reference lets dropping Shell keep its existing
-	// kill-on-drop behavior; the reaper never extends the session's lifetime
-	// across sleeps.
-	let session = Arc::downgrade(session);
-	let active = Arc::clone(active);
-	tokio::spawn(async move {
-		loop {
-			time::sleep(Duration::from_millis(25)).await;
-			let Some(session) = session.upgrade() else {
-				active.store(false, Ordering::Release);
-				break;
-			};
-			let mut guard = session.lock().await;
-			let still_running = guard.as_mut().is_some_and(|core| {
-				let _ = core.shell.jobs_mut().poll_preserving_completed();
-				core.shell.jobs().has_live_external_jobs()
-			});
-			if !still_running {
-				// Clear while holding the session lock. A concurrent run
-				// cannot add jobs and observe `active == true` between our
-				// last poll and this store.
-				active.store(false, Ordering::Release);
-				break;
-			}
+impl CommandResult {
+	fn into_run_result(self) -> ShellRunResult {
+		ShellRunResult {
+			exit_code:   Some(self.status),
+			cancelled:   false,
+			timed_out:   false,
+			minimized:   self.minimized,
+			working_dir: Some(self.working_dir),
 		}
-	});
+	}
+}
+
+/// The result of a run cancelled by `reason`.
+const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
+	ShellRunResult {
+		exit_code:   None,
+		cancelled:   matches!(reason, AbortReason::Signal),
+		timed_out:   matches!(reason, AbortReason::Timeout),
+		minimized:   None,
+		working_dir: None,
+	}
 }
 
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
-	active_spawns: ActiveSpawns,
-	background_reaper_active: Arc<AtomicBool>,
+	active: ActiveSession,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	ct: &mut CancelToken,
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
-	let spawn_registry = Arc::new(process::SpawnRegistry::new());
-	let process_cancel_bridge = tokio::spawn({
-		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
-		async move {
-			tokio_cancel.cancelled().await;
-			terminate_run(&spawn_registry).await;
-		}
-	});
-
 	let mut run_task = tokio::spawn({
 		let session = session.clone();
 		let abort_state = abort_state.clone();
+		let active = active.clone();
 		let tokio_cancel = tokio_cancel.clone();
 		let at = ct.emplace_abort_token();
-		let spawn_registry = spawn_registry.clone();
 		async move {
 			let mut session_guard = session.lock().await;
-			// Published only once this run owns the session, so a run queued
-			// behind another never shadows the executing run's pids. Declared
-			// after `session_guard`, so it clears before the lock is released.
-			let _active_spawns = ActiveSpawnsGuard::publish(&active_spawns, spawn_registry.clone());
-
-			let core = match &mut *session_guard {
-				Some(core) => core,
-				None => session_guard.insert(
-					create_session_for_run(
-						&config,
-						Some(spawn_registry.clone()),
-						Some(tokio_cancel.clone()),
-					)
-					.await?,
-				),
+			let core = if let Some(core) = &mut *session_guard {
+				core
+			} else {
+				let core = create_session_for_run(&config, Some(&tokio_cancel)).await?;
+				*active.lock() = Some(SessionHandles::of(&core.session));
+				session_guard.insert(core)
 			};
 			abort_state.set(at).await;
-			let result =
-				run_shell_command(core, &run_config, on_chunk, tokio_cancel, spawn_registry).await;
-			if result.is_ok() {
-				ensure_background_reaper(core, &session, &background_reaper_active);
-			}
-			result
+			run_shell_command(core, &run_config, on_chunk, tokio_cancel).await
 		}
 	});
 
@@ -507,6 +519,7 @@ async fn run_shell_session(
 			tokio_cancel.cancel();
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
 			if graceful.is_err() {
+				// Dropping the run stops the command with `KILL`.
 				run_task.abort();
 				let _ = run_task.await;
 			}
@@ -516,21 +529,13 @@ async fn run_shell_session(
 			// holding task finishes.
 			if let Ok(mut guard) = session.try_lock() {
 				*guard = None;
+				*active.lock() = None;
 			}
-			let _ = process_cancel_bridge.await;
-			return Ok(ShellRunResult {
-				exit_code:   None,
-				cancelled:   matches!(reason, AbortReason::Signal),
-				timed_out:   matches!(reason, AbortReason::Timeout),
-				minimized:   None,
-				working_dir: None,
-			});
+			return Ok(cancelled_result(reason));
 		}
 	};
 	let res =
 		res.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
-	process_cancel_bridge.abort();
-	let _ = process_cancel_bridge.await;
 	abort_state.clear().await;
 
 	// `exit`, errexit, or a stray top-level `return`/`break` ends this command,
@@ -538,15 +543,9 @@ async fn run_shell_session(
 	// built so far. Only a failed run leaves the shell in an unknown state.
 	if res.is_err() {
 		*session.lock().await = None;
+		*active.lock() = None;
 	}
-	let (exec, minimized, working_dir) = res?;
-	Ok(ShellRunResult {
-		exit_code: Some(exit_code(&exec)),
-		cancelled: false,
-		timed_out: false,
-		working_dir,
-		minimized,
-	})
+	Ok(res?.into_run_result())
 }
 
 async fn run_shell_oneshot(
@@ -556,27 +555,12 @@ async fn run_shell_oneshot(
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
-	let spawn_registry = Arc::new(process::SpawnRegistry::new());
-	let process_cancel_bridge = tokio::spawn({
-		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
-		async move {
-			tokio_cancel.cancelled().await;
-			terminate_run(&spawn_registry).await;
-		}
-	});
-
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
 		async move {
-			let mut session = create_session_for_run(
-				&config,
-				Some(spawn_registry.clone()),
-				Some(tokio_cancel.clone()),
-			)
-			.await?;
-			run_shell_command(&mut session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
+			// The session ends with this task: its background jobs end with it.
+			let mut session = create_session_for_run(&config, Some(&tokio_cancel)).await?;
+			run_shell_command(&mut session, &run_config, on_chunk, tokio_cancel).await
 		}
 	});
 
@@ -589,29 +573,13 @@ async fn run_shell_oneshot(
 				task.abort();
 				let _ = task.await;
 			}
-			let _ = process_cancel_bridge.await;
-			return Ok(ShellExecuteResult {
-				exit_code:   None,
-				cancelled:   matches!(reason, AbortReason::Signal),
-				timed_out:   matches!(reason, AbortReason::Timeout),
-				minimized:   None,
-				working_dir: None,
-			});
+			return Ok(cancelled_result(reason));
 		},
 	};
 
-	process_cancel_bridge.abort();
-	let _ = process_cancel_bridge.await;
 	let res = run_result
 		.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
-	let (exec, minimized, working_dir) = res?;
-	Ok(ShellExecuteResult {
-		exit_code: Some(exit_code(&exec)),
-		cancelled: false,
-		timed_out: false,
-		working_dir,
-		minimized,
-	})
+	Ok(res?.into_run_result())
 }
 
 async fn run_shell_oneshot_streams(
@@ -621,28 +589,11 @@ async fn run_shell_oneshot_streams(
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
-	let spawn_registry = Arc::new(process::SpawnRegistry::new());
-	let process_cancel_bridge = tokio::spawn({
-		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
-		async move {
-			tokio_cancel.cancelled().await;
-			terminate_run(&spawn_registry).await;
-		}
-	});
-
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
 		async move {
-			let mut session = create_session_for_run(
-				&config,
-				Some(spawn_registry.clone()),
-				Some(tokio_cancel.clone()),
-			)
-			.await?;
-			run_shell_command_streams(&mut session, &run_config, streams, tokio_cancel, spawn_registry)
-				.await
+			let mut session = create_session_for_run(&config, Some(&tokio_cancel)).await?;
+			run_shell_command_streams(&mut session, &run_config, streams, tokio_cancel).await
 		}
 	});
 
@@ -655,47 +606,32 @@ async fn run_shell_oneshot_streams(
 				task.abort();
 				let _ = task.await;
 			}
-			let _ = process_cancel_bridge.await;
-			return Ok(ShellExecuteResult {
-				exit_code: None,
-				cancelled: matches!(reason, AbortReason::Signal),
-				timed_out: matches!(reason, AbortReason::Timeout),
-				minimized: None,
-				working_dir: None,
-			});
+			return Ok(cancelled_result(reason));
 		},
 	};
 
-	process_cancel_bridge.abort();
-	let _ = process_cancel_bridge.await;
 	let res = run_result
 		.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
-	let (exec, working_dir) = res?;
-	Ok(ShellExecuteResult {
-		exit_code: Some(exit_code(&exec)),
-		cancelled: false,
-		timed_out: false,
-		working_dir,
-		minimized: None,
+	Ok(res?.into_run_result())
+}
+
+/// The null device, for a stream a command must not see.
+fn null_file() -> Result<fs::File> {
+	let path = if cfg!(windows) { "NUL" } else { "/dev/null" };
+	fs::OpenOptions::new()
+		.read(true)
+		.write(true)
+		.open(path)
+		.map_err(|err| Error::msg(format!("Failed to create null file: {err}")))
+}
+
+/// Standard streams for a command that reads nothing and writes nowhere.
+fn null_stdio() -> Result<RunStdio> {
+	Ok(RunStdio {
+		stdin:  Some(null_file()?),
+		stdout: Some(null_file()?),
+		stderr: Some(null_file()?),
 	})
-}
-
-fn null_file() -> Result<OpenFile> {
-	openfiles::null().map_err(|err| Error::msg(format!("Failed to create null file: {err}")))
-}
-
-const fn exit_code(result: &ExecutionResult) -> i32 {
-	match result.exit_code {
-		ExecutionExitCode::Success => 0,
-		ExecutionExitCode::GeneralError => 1,
-		ExecutionExitCode::InvalidUsage => 2,
-		ExecutionExitCode::Unimplemented => 99,
-		ExecutionExitCode::CannotExecute => 126,
-		ExecutionExitCode::NotFound => 127,
-		ExecutionExitCode::Interrupted => 130,
-		ExecutionExitCode::BrokenPipe => 141,
-		ExecutionExitCode::Custom(code) => code as i32,
-	}
 }
 
 #[cfg(windows)]
@@ -718,7 +654,7 @@ const fn normalize_env_key(key: &str) -> &str {
 /// case-sensitive shell. Per-command env keeps the narrower
 /// [`normalize_env_key`]: a lowercase `tmp` there is an ordinary variable.
 #[cfg(windows)]
-const fn normalize_inherited_env_key(key: &str) -> &str {
+pub(crate) const fn normalize_inherited_env_key(key: &str) -> &str {
 	if key.eq_ignore_ascii_case("TEMP") {
 		"TEMP"
 	} else if key.eq_ignore_ascii_case("TMP") {
@@ -731,7 +667,7 @@ const fn normalize_inherited_env_key(key: &str) -> &str {
 }
 
 #[cfg(not(windows))]
-const fn normalize_inherited_env_key(key: &str) -> &str {
+pub(crate) const fn normalize_inherited_env_key(key: &str) -> &str {
 	key
 }
 
@@ -743,19 +679,25 @@ const fn normalize_inherited_env_key(key: &str) -> &str {
 /// are expanded with the same `GetLongPathNameW` routine `cd` uses (symlinks
 /// and junctions kept); anything else, or a failed expansion, passes through.
 #[cfg(windows)]
-fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
-	let path = std::path::Path::new(value);
+pub(crate) fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+	let path = Path::new(value);
 	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
 		return std::borrow::Cow::Borrowed(value);
 	}
-	match brush_core::sys::fs::expand_to_long_path(path).into_string() {
+	match crate::windows::expand_to_long_path(path)
+		.into_os_string()
+		.into_string()
+	{
 		Ok(expanded) => std::borrow::Cow::Owned(expanded),
 		Err(_) => std::borrow::Cow::Borrowed(value),
 	}
 }
 
 #[cfg(not(windows))]
-const fn inherited_env_value<'a>(_key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+pub(crate) const fn inherited_env_value<'a>(
+	_key: &str,
+	value: &'a str,
+) -> std::borrow::Cow<'a, str> {
 	std::borrow::Cow::Borrowed(value)
 }
 
@@ -792,7 +734,7 @@ fn normalize_path_segment(segment: &str) -> String {
 	}
 
 	let mut normalized = std::path::PathBuf::new();
-	for component in std::path::Path::new(trimmed).components() {
+	for component in Path::new(trimmed).components() {
 		normalized.push(component.as_os_str());
 	}
 
@@ -806,21 +748,23 @@ fn merge_path_values(_existing: &str, incoming: &str) -> String {
 
 #[cfg(test)]
 async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
-	create_session_for_run(config, None, None).await
+	create_session_for_run(config, None).await
 }
 
-/// Copies the host environment into `shell`, merging duplicate `PATH` values
-/// and registering the merged `PATH` last.
+/// Copies the host environment into `vars` (the shell's starting
+/// environment, every entry exported), merging duplicate `PATH` values and
+/// setting the merged `PATH` last.
 ///
 /// Entries whose key or value is not valid Unicode are skipped: a corrupt
 /// entry carries no usable meaning, and `std::env::vars()` — the naive way to
 /// read the host environment — panics on the first one before any command can
 /// run. `vars_os()` yields the raw entries without panicking, leaving the
-/// skip decision here.
-fn copy_env_into_shell(
-	shell: &mut BrushShell,
+/// skip decision here. Shell-owned variables ([`should_skip_env_var`]) and
+/// git repository-location overrides are not inherited.
+fn copy_env_into(
+	vars: &mut HashMap<String, String>,
 	env: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
-) -> Result<()> {
+) {
 	let mut merged_path: Option<String> = None;
 	for (key, value) in env {
 		// A key or value that cannot be decoded as Unicode is unusable; drop
@@ -840,12 +784,7 @@ fn copy_env_into_shell(
 			continue;
 		}
 		let value = inherited_env_value(normalized_key, value);
-		let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
-		var.export();
-		shell
-			.env_mut()
-			.set_global(normalized_key, var)
-			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
+		vars.insert(normalized_key.to_owned(), value.into_owned());
 	}
 
 	#[cfg(windows)]
@@ -855,153 +794,211 @@ fn copy_env_into_shell(
 		merged_path = Some(value.to_string_lossy().into_owned());
 	}
 
-	if let Some(path_value) = &merged_path {
-		let mut var = ShellVariable::new(ShellValue::String(path_value.clone()));
-		var.export();
-		shell
-			.env_mut()
-			.set_global("PATH", var)
-			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
+	if let Some(path_value) = merged_path {
+		vars.insert("PATH".to_owned(), path_value);
 	}
-
-	Ok(())
 }
 
-async fn create_session_for_run(
-	config: &ShellConfig,
-	spawn_registry: Option<Arc<process::SpawnRegistry>>,
-	cancel_token: Option<CancellationToken>,
-) -> Result<ShellSessionCore> {
-	// Session setup (snapshot sourcing) belongs to the creating run, so its
-	// provider calls stop with that run's cancellation.
-	let setup_filesystem = match cancel_token.as_ref() {
-		Some(cancel_token) => config.filesystem.with_cancellation(cancel_token.clone()),
-		None => config.filesystem.clone(),
-	};
-	let mut shell = BrushShell::builder()
-		.do_not_inherit_env(true)
-		.profile(ProfileLoadBehavior::Skip)
-		.rc(RcLoadBehavior::Skip)
-		.builtins(default_builtins(BuiltinSet::BashMode))
-		.filesystem(setup_filesystem)
-		.build()
-		.await
-		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
-
-	// `exec` would replace the host process and `suspend` would stop it.
-	// Replace them with disabled refusals rather than only disabling them, so
-	// `enable exec` cannot hand the real builtins back.
-	for name in ["exec", "suspend"] {
-		if shell.builtin_mut(name).is_some() {
-			shell.register_builtin(name, pi_builtins::withheld_builtin());
-		}
-	}
-	// Process inspection and control (see `pi_builtins::process_builtins`).
-	// `nohup` is withheld when PI_DISABLE_NOHUP_BUILTIN asks for the system one;
-	// `kill` already comes from the default set, where our richer implementation
-	// replaced brush's.
-	for (name, registration) in pi_builtins::process_builtins() {
-		if name == "nohup" && nohup_builtin_disabled(config) {
+/// Apply the caller's session env over the inherited one, with the same skips
+/// and temp-path expansion.
+fn apply_session_env(vars: &mut HashMap<String, String>, session_env: &HashMap<String, String>) {
+	for (key, value) in session_env {
+		let normalized_key = normalize_inherited_env_key(key);
+		if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 			continue;
 		}
-		shell.register_builtin(name, registration);
+		// The agent forwards its whole host env here, so temp paths need the
+		// same long-form expansion as the direct host copy.
+		let value = inherited_env_value(normalized_key, value);
+		vars.insert(normalized_key.to_owned(), value.into_owned());
 	}
-	// In-process command-line utility builtins (see
-	// `pi_builtins::utility_builtins`): consistent, cross-platform
-	// implementations that run without spawning a process and resolve paths
-	// against the shell working directory. The whole set can be disabled
-	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`, `rsync`) additionally
-	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own
-	// switches.
-	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
-		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
-		let rm_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_RM_BUILTIN");
-		let mv_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_MV_BUILTIN");
-		for (name, registration) in pi_builtins::utility_builtins() {
-			let disabled = match name {
-				"rm" => rm_disabled,
-				"mv" => mv_disabled,
-				// cp, dd (`of=`), and rsync overwrite existing files (rsync also
-				// deletes with --delete), ln can clobber them via -f; gate them
-				// with the destructive set.
-				"cp" | "ln" | "dd" | "rsync" => destructive_disabled,
-				_ => false,
-			};
-			if !disabled {
-				shell.register_builtin(name, registration);
-			}
-		}
-	}
-
-	// Opt-in `git` layers (see `crate::git`): PI_SMART_GIT makes `git worktree
-	// add` a copy-on-write clone through pi-vcs; PI_GIT_GUARD refuses commands
-	// that discard or move work in a shared checkout. Anything a layer does not
-	// take reaches the binary unchanged.
-	if let Some(git) = git_builtin(GitLayers {
-		smart_worktree: env_flag(config, "PI_SMART_GIT"),
-		guard:          env_flag(config, "PI_GIT_GUARD"),
-	}) {
-		shell.register_builtin("git", git);
-	}
-
-	copy_env_into_shell(&mut shell, std::env::vars_os())?;
-
-	if let Some(env) = config.session_env.as_ref() {
-		for (key, value) in env {
-			let normalized_key = normalize_inherited_env_key(key);
-			if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
-				continue;
-			}
-			// The agent forwards its whole host env here, so temp paths need the
-			// same long-form expansion as the direct host copy above.
-			let value = inherited_env_value(normalized_key, value);
-			let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
-			var.export();
-			shell
-				.env_mut()
-				.set_global(normalized_key, var)
-				.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
-		}
-	}
-	apply_env_fallback(&mut shell)?;
-	// `nohup` is registered above, with the rest of the process builtins.
-
-	#[cfg(windows)]
-	configure_windows_path(&mut shell)?;
-
-	if let Some(snapshot_path) = config.snapshot_path.as_ref() {
-		source_snapshot(&mut shell, snapshot_path, spawn_registry, cancel_token).await?;
-	}
-
-	Ok(ShellSessionCore { shell, filesystem: config.filesystem.clone() })
 }
 
-async fn source_snapshot(
-	shell: &mut BrushShell,
-	snapshot_path: &str,
-	spawn_registry: Option<Arc<process::SpawnRegistry>>,
-	cancel_token: Option<CancellationToken>,
-) -> Result<()> {
-	let mut params = shell.default_exec_params();
-	let source_info = SourceInfo::from("pi-natives:snapshot");
-	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
-	params.set_fd(OpenFiles::STDOUT_FD, null_file()?);
-	params.set_fd(OpenFiles::STDERR_FD, null_file()?);
-	if let Some(cancel_token) = cancel_token {
-		params.set_cancel_token(cancel_token);
+/// The shell's starting environment: the host's, then the session env.
+fn session_vars(config: &ShellConfig) -> HashMap<String, String> {
+	let mut vars = HashMap::new();
+	copy_env_into(&mut vars, std::env::vars_os());
+	if let Some(env) = config.session_env.as_ref() {
+		apply_session_env(&mut vars, env);
 	}
-	if let Some(spawn_registry) = spawn_registry {
-		params.set_spawn_observer(spawn_registry);
+	#[cfg(windows)]
+	crate::windows::configure_windows_path(&mut vars);
+	vars
+}
+
+/// The directory a new shell starts in: the process's, or `HOME` (then `/`)
+/// when a long-running host's working directory was deleted.
+fn initial_cwd() -> BString {
+	if let Ok(cwd) = std::env::current_dir()
+		&& cwd.is_dir()
+	{
+		#[cfg(windows)]
+		let cwd = crate::windows::expand_to_long_path(&cwd);
+		return path_bytes(&cwd);
+	}
+	let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+		.map(std::path::PathBuf::from)
+		.filter(|home| home.is_dir());
+	home.map_or_else(|| BString::from("/"), |home| path_bytes(&home))
+}
+
+/// Start a session for `config`, from its seed when it has one. Setup (the
+/// `env` fallback, snapshot sourcing) belongs to the creating run, so its
+/// processes and provider calls stop with `cancel_token`.
+async fn create_session_for_run(
+	config: &ShellConfig,
+	cancel_token: Option<&CancellationToken>,
+) -> Result<ShellSessionCore> {
+	let cancel = cancel_token.cloned().unwrap_or_default();
+	let runtime = tokio::runtime::Handle::current();
+	let slot = VfsFs::new(config.filesystem.with_cancellation(cancel.clone()), runtime.clone());
+	let vars = session_vars(config);
+	let has_env_var = vars.contains_key("env");
+	let env = vars
+		.into_iter()
+		.map(|(key, value)| (BString::from(key), BString::from(value)))
+		.collect();
+	let cwd = config.seed.as_ref().map_or_else(initial_cwd, Image::cwd);
+	// The pi utilities (and their `PI_DISABLE_*` gates), the process
+	// builtins, `nohup`, `timeout` and the `git` layers are the session's
+	// commands (`crate::tools`), configured from this environment; `exec`
+	// and `suspend` never act on this process.
+	let session_config = SessionConfig {
+		env,
+		cwd: cwd.clone(),
+		fs: Box::new(slot.clone()),
+		vfs: Some(slot.clone()),
+		runtime,
+		output_decoding: None,
+	};
+	let session = match &config.seed {
+		Some(image) => Session::restore(session_config, image),
+		None => Session::new(session_config),
+	}
+	.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
+	let mut core = ShellSessionCore { session, slot, filesystem: config.filesystem.clone(), cwd };
+
+	// A seed already holds both.
+	if config.seed.is_none() {
+		if !has_env_var {
+			apply_env_fallback(&mut core, &cancel)
+				.await
+				.map_err(|err| Error::msg(format!("Failed to set env fallback: {err}")))?;
+		}
+		if let Some(snapshot_path) = config.snapshot_path.as_ref() {
+			let escaped = snapshot_path.replace('\'', "'\\''");
+			run_setup(&mut core, format!("source '{escaped}'"), &cancel)
+				.await
+				.map_err(|err| Error::msg(format!("Failed to source snapshot: {err}")))?;
+		}
+	}
+	restore_session_filesystem(&core);
+	if cancel.is_cancelled() {
+		return Err(Error::msg("Shell setup was cancelled"));
+	}
+	Ok(core)
+}
+
+/// Run a setup command of a new session with null stdio.
+async fn run_setup(
+	core: &mut ShellSessionCore,
+	command: String,
+	cancel: &CancellationToken,
+) -> Result<()> {
+	let outcome = core
+		.session
+		.run_with(RunOptions::new(command), null_stdio()?, cancel.clone())
+		.await?;
+	core.cwd = outcome.cwd;
+	Ok(())
+}
+
+/// Define `env` as a shell variable expanding to the literal `$env` so that
+/// POSIX parameter expansion preserves PowerShell-style `$env:NAME`
+/// references when commands are dispatched to a PowerShell (or any)
+/// subprocess. The variable is not exported, so it only influences the
+/// shell's own expansion; the child process environment is unaffected.
+///
+/// User-driven assignments (`env=prod; echo "$env:8080"`) replace this
+/// default, preserving the bash POSIX contract for callers that genuinely use
+/// a variable named `env`.
+async fn apply_env_fallback(core: &mut ShellSessionCore, cancel: &CancellationToken) -> Result<()> {
+	run_setup(core, "env='$env'".to_owned(), cancel).await
+}
+
+fn is_macos_malloc_stack_logging_var(key: &str) -> bool {
+	matches!(key, "MallocStackLogging" | "MallocStackLoggingNoCompact")
+}
+
+fn should_skip_env_var(key: &str) -> bool {
+	if key.starts_with("BASH_FUNC_") && key.ends_with("%%") {
+		return true;
+	}
+	if is_macos_malloc_stack_logging_var(key) {
+		return true;
 	}
 
-	let escaped = snapshot_path.replace('\'', "'\\''");
-	let command = format!("source '{escaped}'");
-	shell
-		.run_string(command, &source_info, &params)
-		.await
-		.map_err(|err| Error::msg(format!("Failed to source snapshot: {err}")))?;
-	Ok(())
+	matches!(
+		key,
+		"BASH_ENV"
+			| "ENV"
+			| "HISTFILE"
+			| "HISTTIMEFORMAT"
+			| "HISTCMD"
+			| "PS0"
+			| "PS1"
+			| "PS2"
+			| "PS4"
+			| "READLINE_LINE"
+			| "READLINE_POINT"
+			| "BASH"
+			| "BASHOPTS"
+			| "BASH_ALIASES"
+			| "BASH_ARGV0"
+			| "BASH_CMDS"
+			| "BASH_SOURCE"
+			| "BASH_SUBSHELL"
+			| "BASH_VERSINFO"
+			| "BASH_VERSION"
+			| "SHELLOPTS"
+			| "SHLVL"
+			| "SHELL"
+			| "COMP_WORDBREAKS"
+			| "DIRSTACK"
+			| "EPOCHREALTIME"
+			| "EPOCHSECONDS"
+			| "FUNCNAME"
+			| "GROUPS"
+			| "IFS"
+			| "LINENO"
+			| "MACHTYPE"
+			| "OSTYPE"
+			| "OPTERR"
+			| "OPTIND"
+			| "PIPESTATUS"
+			| "PPID"
+			| "PWD"
+			| "OLDPWD"
+			| "RANDOM"
+			| "SRANDOM"
+			| "SECONDS"
+			| "UID"
+			| "EUID"
+			| "HOSTNAME"
+			| "HOSTTYPE"
+	)
+}
+
+/// The per-command environment: exported to this command only, each name
+/// back to its previous value afterwards.
+fn command_env(env: Option<&HashMap<String, String>>) -> Vec<(BString, BString)> {
+	env.into_iter()
+		.flatten()
+		.filter_map(|(key, value)| {
+			let key = normalize_env_key(key);
+			(!should_skip_env_var(key)).then(|| (BString::from(key), BString::from(value.as_str())))
+		})
+		.collect()
 }
 
 #[derive(Clone, Copy)]
@@ -1010,11 +1007,47 @@ enum CommandCaptureMode {
 	Buffered { max_capture_bytes: usize },
 }
 
+/// How one session run of a command ended.
 struct CommandRunOutput {
-	result:         ExecutionResult,
+	outcome:        RunOutcome,
 	buffered:       Option<BufferedOutput>,
 	/// A command reported an error yet went on, so the exit status hides it.
 	reported_error: bool,
+}
+
+/// What every session run of one command shares.
+struct CommandScope<'a> {
+	options: &'a ShellRunConfig,
+	env:     Vec<(BString, BString)>,
+	cancel:  CancellationToken,
+}
+
+impl CommandScope<'_> {
+	/// The session run of `command`; `cwd` moves the shell first.
+	fn run_options(
+		&self,
+		command: String,
+		cwd: Option<BString>,
+		reported_error: Option<Arc<AtomicBool>>,
+	) -> RunOptions {
+		RunOptions {
+			command,
+			env: self.env.clone(),
+			cwd,
+			pipe_tap: self
+				.options
+				.pipe_taps
+				.as_ref()
+				.map(|taps| Arc::clone(taps) as Arc<dyn crate::bash::PipeTap>),
+			reported_error,
+			text_capture: false,
+			events: self
+				.options
+				.trace
+				.as_ref()
+				.map(|trace| Arc::clone(trace) as Arc<dyn crate::bash::EventSink>),
+		}
+	}
 }
 
 struct ChainCapture {
@@ -1044,9 +1077,9 @@ impl ChainCapture {
 
 /// Install the run's filesystem — its override, else the session's — scoped
 /// to the run's cancellation, so an aborted run stops waiting on provider
-/// calls while background work keeps the scope it was started under.
+/// calls.
 fn install_run_filesystem(
-	session: &mut ShellSessionCore,
+	session: &ShellSessionCore,
 	options: &ShellRunConfig,
 	cancel_token: &CancellationToken,
 ) {
@@ -1055,24 +1088,20 @@ fn install_run_filesystem(
 		.as_ref()
 		.unwrap_or(&session.filesystem)
 		.with_cancellation(cancel_token.clone());
-	session.shell.set_filesystem(filesystem);
+	session.slot.set_filesystem(filesystem);
 }
 
 /// Put the session filesystem back so a run's override never leaks into
-/// later runs.
-fn restore_session_filesystem(session: &mut ShellSessionCore) {
-	let filesystem = session.filesystem.clone();
-	session.shell.set_filesystem(filesystem);
+/// later runs (or into the background jobs it left running).
+fn restore_session_filesystem(session: &ShellSessionCore) {
+	session.slot.set_filesystem(session.filesystem.clone());
 }
 
 /// Wait for the closes of virtual files the command dropped, so its writes
 /// have settled before the run reports. Cancellation ends the wait, never the
 /// closes themselves.
-async fn drain_dropped_files(
-	shell: &BrushShell,
-	cancel_token: &CancellationToken,
-) -> io::Result<()> {
-	let filesystem = shell.filesystem().clone();
+async fn drain_dropped_files(slot: &VfsFs, cancel_token: &CancellationToken) -> io::Result<()> {
+	let filesystem = slot.filesystem();
 	tokio::select! {
 		drained = filesystem.drain_closes() => drained,
 		() = cancel_token.cancelled() => Ok(()),
@@ -1081,17 +1110,17 @@ async fn drain_dropped_files(
 
 /// A failed close lost data the command believed written: say so on the
 /// command's stderr and fail a command that otherwise succeeded.
-fn report_close_failure<E>(
+fn report_close_failure(
 	stderr: &mut fs::File,
 	err: &io::Error,
-	result: &mut std::result::Result<ExecutionResult, E>,
+	result: &mut std::result::Result<RunOutcome, SessionError>,
 ) {
 	use std::io::Write as _;
 	let _ = writeln!(stderr, "pi-shell: closing a file failed: {err}");
-	if let Ok(exec) = result
-		&& matches!(exec.exit_code, ExecutionExitCode::Success)
+	if let Ok(outcome) = result
+		&& outcome.status == 0
 	{
-		exec.exit_code = ExecutionExitCode::GeneralError;
+		outcome.status = 1;
 	}
 }
 
@@ -1100,12 +1129,9 @@ async fn run_shell_command(
 	options: &ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
-	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)> {
+) -> Result<CommandResult> {
 	install_run_filesystem(session, options, &cancel_token);
-	let result =
-		run_shell_command_in_filesystem(session, options, on_chunk, cancel_token, spawn_registry)
-			.await;
+	let result = run_shell_command_in_filesystem(session, options, on_chunk, cancel_token).await;
 	restore_session_filesystem(session);
 	result
 }
@@ -1115,13 +1141,10 @@ async fn run_shell_command_in_filesystem(
 	options: &ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
-	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)> {
-	if let Some(cwd) = options.cwd.as_deref() {
-		set_shell_working_dir_if_changed(&mut session.shell, cwd).await?;
-	}
-
-	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
+) -> Result<CommandResult> {
+	let cwd = requested_cwd(session, options.cwd.as_deref()).await?;
+	let scope =
+		CommandScope { options, env: command_env(options.env.as_ref()), cancel: cancel_token };
 
 	let minimizer_mode = if let Some(config) = options.minimizer.as_ref() {
 		minimizer::engine::mode_for(&options.command, config)
@@ -1129,59 +1152,28 @@ async fn run_shell_command_in_filesystem(
 		minimizer::engine::MinimizerMode::None
 	};
 
-	let result = match minimizer_mode {
+	let (status, minimized) = match minimizer_mode {
 		minimizer::engine::MinimizerMode::SegmentedChain => {
-			run_shell_command_segmented_chain(session, options, on_chunk, cancel_token, spawn_registry)
-				.await
+			run_shell_command_segmented_chain(session, &scope, cwd, on_chunk).await?
 		},
 		minimizer::engine::MinimizerMode::WholeCommand | minimizer::engine::MinimizerMode::None => {
-			run_shell_command_single(
-				session,
-				options,
-				on_chunk,
-				cancel_token,
-				spawn_registry,
-				minimizer_mode,
-			)
-			.await
+			run_shell_command_single(session, &scope, cwd, on_chunk, minimizer_mode).await?
 		},
 	};
 
-	if env_scope_pushed {
-		session
-			.shell
-			.env_mut()
-			.pop_scope(EnvironmentScope::Command)
-			.map_err(|err| Error::msg(format!("Failed to pop env scope: {err}")))?;
-	}
-
-	result.map(|(exec, minimized)| {
-		let working_dir = Some(session.shell.working_dir().to_string_lossy().into_owned());
-		(exec, minimized, working_dir)
-	})
-}
-
-/// The session's execution parameters for one run's command, carrying the
-/// run's pipe taps.
-fn command_params(session: &ShellSessionCore, options: &ShellRunConfig) -> ExecutionParameters {
-	let mut params = session.shell.default_exec_params();
-	if let Some(taps) = &options.pipe_taps {
-		params.set_pipe_tap(Arc::clone(taps) as Arc<dyn PipeTap>);
-	}
-	params
+	Ok(CommandResult { status, minimized, working_dir: session.cwd.to_str_lossy().into_owned() })
 }
 
 async fn run_shell_command_single(
 	session: &mut ShellSessionCore,
-	options: &ShellRunConfig,
+	scope: &CommandScope<'_>,
+	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
-	cancel_token: CancellationToken,
-	spawn_registry: Arc<process::SpawnRegistry>,
 	minimizer_mode: minimizer::engine::MinimizerMode,
-) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
+) -> Result<(i32, Option<MinimizerResult>)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
+	let options = scope.options;
 
-	let params = command_params(session, options);
 	let capture_mode = match minimizer_mode {
 		minimizer::engine::MinimizerMode::WholeCommand => {
 			let Some(config) = options.minimizer.as_ref() else {
@@ -1195,14 +1187,15 @@ async fn run_shell_command_single(
 
 	let command_run = run_shell_command_once(
 		session,
+		scope,
 		options.command.clone(),
-		params,
+		cwd,
 		on_chunk,
-		cancel_token,
-		spawn_registry,
 		capture_mode,
+		None,
 	)
 	.await?;
+	let status = command_run.outcome.status;
 
 	let mut minimized_out = None;
 	if let Some(buffered) = command_run.buffered
@@ -1210,21 +1203,15 @@ async fn run_shell_command_single(
 	{
 		// When the capture cap is exceeded the output was streamed raw and never
 		// buffered, so nothing was minimized — leave `minimized` absent, matching
-		// every other passthrough path and `apply_shell_minimizer`. Previously a
-		// `too-large` result with empty `text`/`original_text` was emitted, which
-		// a consumer keying off `minimized` presence could mistake for a real
-		// rewrite that produced empty output.
+		// every other passthrough path and `apply_shell_minimizer`.
 		// A command that reported an error yet exited 0 (jq after an input that
 		// fails) is left whole: a filter may cut the error, and its exit-code
 		// gate cannot see it.
 		if !buffered.exceeded && !command_run.reported_error {
 			let minimized = match minimizer_mode {
-				minimizer::engine::MinimizerMode::WholeCommand => minimizer::apply(
-					&options.command,
-					&buffered.text,
-					exit_code(&command_run.result),
-					config,
-				),
+				minimizer::engine::MinimizerMode::WholeCommand => {
+					minimizer::apply(&options.command, &buffered.text, status, config)
+				},
 				minimizer::engine::MinimizerMode::None => {
 					minimizer::MinimizerOutput::passthrough(&buffered.text)
 				},
@@ -1235,11 +1222,8 @@ async fn run_shell_command_single(
 			// Surface telemetry only when the filter actually rewrote the output
 			// and kept the original buffer — same contract as
 			// `apply_shell_minimizer` in `pi-natives`. A supported filter that
-			// runs but leaves the output unchanged (e.g. a short `git diff
-			// --name-only`) reports `changed: false` with no `original_text`
-			// and must NOT set `minimized`, or API consumers keying off
-			// `result.minimized` are misled. The separate `too-large` reason
-			// path above is unaffected.
+			// runs but leaves the output unchanged reports `changed: false` with
+			// no `original_text` and must NOT set `minimized`.
 			if minimized.changed
 				&& let Some(original_text) = minimized.original_text
 			{
@@ -1255,86 +1239,83 @@ async fn run_shell_command_single(
 		}
 	}
 
-	Ok((command_run.result, minimized_out))
+	Ok((status, minimized_out))
+}
+
+/// The source of a chain segment whose failure must not trip `set -e`: the
+/// left side of `&&`, where bash ignores errexit. `&& :` puts the segment in
+/// that position without changing its status, and the braces keep a trailing
+/// comment from swallowing it.
+fn errexit_suppressed(command: &str) -> String {
+	format!("{{ {command}\n}} && :")
 }
 
 async fn run_shell_command_segmented_chain(
 	session: &mut ShellSessionCore,
-	options: &ShellRunConfig,
+	scope: &CommandScope<'_>,
+	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
-	cancel_token: CancellationToken,
-	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
+) -> Result<(i32, Option<MinimizerResult>)> {
+	let options = scope.options;
+	let unsegmented = minimizer::engine::MinimizerMode::None;
 	let Some(config) = options.minimizer.as_ref() else {
-		return run_shell_command_single(
-			session,
-			options,
-			on_chunk,
-			cancel_token,
-			spawn_registry,
-			minimizer::engine::MinimizerMode::None,
-		)
-		.await;
+		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
 	};
 
 	// When minimizer is disabled, don't segment — stream the original single
 	// path.
 	if !config.enabled {
-		return run_shell_command_single(
-			session,
-			options,
-			on_chunk,
-			cancel_token,
-			spawn_registry,
-			minimizer::engine::MinimizerMode::None,
-		)
-		.await;
+		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
 	}
 
 	let minimizer::plan::CommandPlan::Chain { segments } =
 		minimizer::plan::analyze(&options.command)
 	else {
-		return run_shell_command_single(
-			session,
-			options,
-			on_chunk,
-			cancel_token,
-			spawn_registry,
-			minimizer::engine::MinimizerMode::None,
-		)
-		.await;
+		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
 	};
 
-	let params = command_params(session, options);
+	let mut cwd = cwd;
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
-	let mut last_result = None;
+	let mut last_status = None;
 	let max_capture_bytes = config.max_capture_bytes as usize;
 	for segment in segments {
 		if segment.run_if_previous_succeeded && !previous_succeeded {
 			continue;
 		}
 
-		let mut segment_params = params.clone();
-		segment_params.suppress_errexit = segment.suppress_errexit;
 		let capture_mode = if aggregate.is_some() {
 			CommandCaptureMode::Buffered { max_capture_bytes }
 		} else {
 			CommandCaptureMode::Streaming
 		};
+		let source = if segment.suppress_errexit {
+			errexit_suppressed(&segment.command)
+		} else {
+			segment.command.clone()
+		};
 
+		// Only the first segment moves the shell; later ones start wherever
+		// the earlier ones left it.
+		let events = options.trace.as_ref().map(|trace| {
+			trace.segment(SegmentSource {
+				at:     segment.source_at,
+				len:    segment.source_len,
+				prefix: if segment.suppress_errexit { 2 } else { 0 },
+			})
+		});
 		let command_run = run_shell_command_once(
 			session,
-			segment.command.clone(),
-			segment_params,
+			scope,
+			source,
+			cwd.take(),
 			on_chunk.clone(),
-			cancel_token.clone(),
-			spawn_registry.clone(),
 			capture_mode,
+			events,
 		)
 		.await?;
 
-		let exit = exit_code(&command_run.result);
+		let exit = command_run.outcome.status;
 		previous_succeeded = exit == 0;
 
 		if let Some(buffered) = command_run.buffered {
@@ -1365,16 +1346,21 @@ async fn run_shell_command_segmented_chain(
 			aggregate = None;
 		}
 
-		let keep_running = continues_command(&command_run.result) && !cancel_token.is_cancelled();
-		last_result = Some(command_run.result);
+		// `exit` and errexit end the command (the session itself stays usable).
+		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
+		last_status = Some(exit);
 		if !keep_running {
 			break;
 		}
 	}
 
-	let Some(result) = last_result else {
+	let Some(status) = last_status else {
 		return Err(Error::msg("Segmented chain executed no segments"));
 	};
+
+	if let Some(trace) = options.trace.as_ref() {
+		trace.finish_segments(status);
+	}
 
 	let minimized_out = aggregate
 		// Only surface telemetry when the segmented chain actually rewrote the
@@ -1398,46 +1384,36 @@ async fn run_shell_command_segmented_chain(
 		});
 	// A chain that overflowed the aggregate cap streamed its output raw and was
 	// not minimized — `minimized_out` stays `None`, matching the whole-command
-	// path and `apply_shell_minimizer`. (Previously a `too-large` result with
-	// empty `text` was emitted, a footgun for consumers keying off presence.)
+	// path and `apply_shell_minimizer`.
 
-	Ok((result, minimized_out))
+	Ok((status, minimized_out))
 }
 
+/// Run `command` once on the session, its stdout and stderr merged into one
+/// pipe that is decoded into `on_chunk`.
 async fn run_shell_command_once(
 	session: &mut ShellSessionCore,
+	scope: &CommandScope<'_>,
 	mut command: String,
-	mut params: ExecutionParameters,
+	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
-	cancel_token: CancellationToken,
-	spawn_registry: Arc<process::SpawnRegistry>,
 	capture_mode: CommandCaptureMode,
+	events: Option<Arc<dyn crate::bash::EventSink>>,
 ) -> Result<CommandRunOutput> {
+	let cancel_token = scope.cancel.clone();
 	let (reader_file, writer_file) = pipe_to_files("output")?;
 
-	let stdout_file = OpenFile::from(
-		writer_file
-			.try_clone()
-			.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?,
-	);
+	let stdout_file = writer_file
+		.try_clone()
+		.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?;
 	let mut diagnostics = writer_file
 		.try_clone()
 		.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?;
-	let stderr_file = OpenFile::from(writer_file);
-
-	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
-	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
-	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
-	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
-	register_background_jobs(&session.shell, &spawn_registry);
-	params.set_cancel_token(cancel_token.clone());
-	params.set_spawn_observer(spawn_registry.clone());
+	let stdio =
+		RunStdio { stdin: Some(null_file()?), stdout: Some(stdout_file), stderr: Some(writer_file) };
 	// Only a buffered capture can be minimized, so only it asks for the report.
 	let reported_error = matches!(capture_mode, CommandCaptureMode::Buffered { .. })
 		.then(|| Arc::new(AtomicBool::new(false)));
-	if let Some(flag) = &reported_error {
-		params.set_reported_error(Arc::clone(flag));
-	}
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 	let reader_callback = on_chunk;
@@ -1474,31 +1450,38 @@ async fn run_shell_command_once(
 		}
 	});
 	ensure_trailing_newline_for_heredoc(&mut command);
-	let source_info = SourceInfo::from("pi-natives:command");
+	let mut run = scope.run_options(command, cwd, reported_error.clone());
+	if let Some(events) = events {
+		run.events = Some(events);
+	}
+	// Stdout and stderr are one pipe read as text: externals' output is
+	// decoded per program before it joins what the builtins wrote.
+	run.text_capture = true;
 	let mut result = session
-		.shell
-		.run_string(command, &source_info, &params)
+		.session
+		.run_with(run, stdio, cancel_token.clone())
 		.await;
+	if let Ok(outcome) = &result {
+		session.cwd.clone_from(&outcome.cwd);
+	}
 
-	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
+	if let Err(err) = drain_dropped_files(&session.slot, &cancel_token).await {
 		report_close_failure(&mut diagnostics, &err, &mut result);
 	}
 	// Release the extra writer so the reader can reach EOF.
 	drop(diagnostics);
 
-	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell, &spawn_registry).await;
-	}
-
-	drop(params);
-
 	// The foreground command can complete while background jobs keep the
 	// stdout/stderr pipe open. Don't hang forever waiting for EOF; drain output
-	// for a short period, then cancel.
+	// for a short period, then cancel. A cancelled run is the exception: the
+	// processes its cancel signalled may still be running their TERM traps, so
+	// the reader stays open until they close the pipe or the cancel bridge
+	// releases it (`CANCEL_READER_GRACE`).
 	const POST_EXIT_IDLE: Duration = Duration::from_millis(250);
 	const POST_EXIT_MAX: Duration = Duration::from_secs(2);
 	const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
+	let cancelled = cancel_token.is_cancelled();
 	let mut reader_finished = false;
 	let mut reader_output = None;
 	let mut idle_timer = Box::pin(time::sleep(POST_EXIT_IDLE));
@@ -1519,8 +1502,8 @@ async fn run_shell_command_once(
 				}
 				idle_timer.as_mut().reset(time::Instant::now() + POST_EXIT_IDLE);
 			}
-			() = &mut idle_timer => break,
-			() = &mut max_timer => break,
+			() = &mut idle_timer, if !cancelled => break,
+			() = &mut max_timer, if !cancelled => break,
 		}
 	}
 
@@ -1538,13 +1521,13 @@ async fn run_shell_command_once(
 	cancel_bridge.abort();
 	let _ = cancel_bridge.await;
 
-	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
+	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
 	let buffered = match reader_output {
 		Some(OutputRead::Buffered(output)) => Some(output),
 		Some(OutputRead::Streaming) | None => None,
 	};
 	let reported_error = reported_error.is_some_and(|flag| flag.load(Ordering::Relaxed));
-	Ok(CommandRunOutput { result, buffered, reported_error })
+	Ok(CommandRunOutput { outcome, buffered, reported_error })
 }
 
 async fn run_shell_command_streams(
@@ -1552,17 +1535,10 @@ async fn run_shell_command_streams(
 	options: &ShellRunConfig,
 	streams: StreamSinks,
 	cancel_token: CancellationToken,
-	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<String>)> {
+) -> Result<CommandResult> {
 	install_run_filesystem(session, options, &cancel_token);
-	let result = run_shell_command_streams_in_filesystem(
-		session,
-		options,
-		streams,
-		cancel_token,
-		spawn_registry,
-	)
-	.await;
+	let result =
+		run_shell_command_streams_in_filesystem(session, options, streams, cancel_token).await;
 	restore_session_filesystem(session);
 	result
 }
@@ -1572,13 +1548,13 @@ async fn run_shell_command_streams_in_filesystem(
 	options: &ShellRunConfig,
 	streams: StreamSinks,
 	cancel_token: CancellationToken,
-	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<String>)> {
-	if let Some(cwd) = options.cwd.as_deref() {
-		set_shell_working_dir_if_changed(&mut session.shell, cwd).await?;
-	}
-
-	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
+) -> Result<CommandResult> {
+	let cwd = requested_cwd(session, options.cwd.as_deref()).await?;
+	let scope = CommandScope {
+		options,
+		env: command_env(options.env.as_ref()),
+		cancel: cancel_token.clone(),
+	};
 
 	let (stdout_reader, stdout_writer) = pipe_to_files("stdout")?;
 	let (stderr_reader, stderr_writer) = pipe_to_files("stderr")?;
@@ -1586,17 +1562,11 @@ async fn run_shell_command_streams_in_filesystem(
 	let mut diagnostics = stderr_writer
 		.try_clone()
 		.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?;
-	let stdout_file = OpenFile::from(stdout_writer);
-	let stderr_file = OpenFile::from(stderr_writer);
-
-	let mut params = session.shell.default_exec_params();
-	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
-	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
-	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
-	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
-	register_background_jobs(&session.shell, &spawn_registry);
-	params.set_cancel_token(cancel_token.clone());
-	params.set_spawn_observer(spawn_registry.clone());
+	let stdio = RunStdio {
+		stdin:  Some(null_file()?),
+		stdout: Some(stdout_writer),
+		stderr: Some(stderr_writer),
+	};
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 
@@ -1625,36 +1595,29 @@ async fn run_shell_command_streams_in_filesystem(
 	});
 	let mut command = options.command.clone();
 	ensure_trailing_newline_for_heredoc(&mut command);
-	let source_info = SourceInfo::from("pi-shell:streams");
+	let run = scope.run_options(command, cwd, None);
 	let mut result = session
-		.shell
-		.run_string(command, &source_info, &params)
+		.session
+		.run_with(run, stdio, cancel_token.clone())
 		.await;
+	if let Ok(outcome) = &result {
+		session.cwd.clone_from(&outcome.cwd);
+	}
 
-	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
+	if let Err(err) = drain_dropped_files(&session.slot, &cancel_token).await {
 		report_close_failure(&mut diagnostics, &err, &mut result);
 	}
 	// Release the extra writer so the stderr reader can reach EOF.
 	drop(diagnostics);
 
-	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell, &spawn_registry).await;
-	}
-
-	if env_scope_pushed {
-		session
-			.shell
-			.env_mut()
-			.pop_scope(EnvironmentScope::Command)
-			.map_err(|err| Error::msg(format!("Failed to pop env scope: {err}")))?;
-	}
-
-	drop(params);
-
+	// As in `run_shell_command_once`: a short drain after the run, except
+	// that a cancelled run's readers stay open for its TERM traps until the
+	// cancel bridge releases them.
 	const POST_EXIT_IDLE: Duration = Duration::from_millis(250);
 	const POST_EXIT_MAX: Duration = Duration::from_secs(2);
 	const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
+	let cancelled = cancel_token.is_cancelled();
 	let mut stdout_finished = false;
 	let mut stderr_finished = false;
 	let mut idle_timer = Box::pin(time::sleep(POST_EXIT_IDLE));
@@ -1679,8 +1642,8 @@ async fn run_shell_command_streams_in_filesystem(
 				}
 				idle_timer.as_mut().reset(time::Instant::now() + POST_EXIT_IDLE);
 			}
-			() = &mut idle_timer => break,
-			() = &mut max_timer => break,
+			() = &mut idle_timer, if !cancelled => break,
+			() = &mut max_timer, if !cancelled => break,
 		}
 	}
 
@@ -1706,9 +1669,12 @@ async fn run_shell_command_streams_in_filesystem(
 	cancel_bridge.abort();
 	let _ = cancel_bridge.await;
 
-	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
-	let working_dir = Some(session.shell.working_dir().to_string_lossy().into_owned());
-	Ok((result, working_dir))
+	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
+	Ok(CommandResult {
+		status:      outcome.status,
+		minimized:   None,
+		working_dir: session.cwd.to_str_lossy().into_owned(),
+	})
 }
 
 async fn read_output_bytes(
@@ -1769,245 +1735,6 @@ async fn read_output_bytes(
 	}
 }
 
-impl SpawnObserver for process::SpawnRegistry {
-	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
-		// Pin a stable process reference *now*, before the pid can be recycled.
-		// On Windows an open handle keeps the pid slot reserved for the lifetime
-		// of the handle; on Linux the pidfd carries identity; on macOS the
-		// recorded start-time triple detects impersonation. Deferring the open
-		// to `build_targets` (as the old code did) let a recycled pid resolve
-		// to an unrelated process — issue #4605.
-		let process = process::Process::from_pid(pid);
-		self.record(pgid, process);
-	}
-}
-
-// Escalating TERM -> KILL waves over the processes this run spawned, scoped via
-// the per-run `SpawnRegistry`. The kill set is rebuilt each wave so a child
-// spawned in a grace window — or a grandchild whose recorded parent already
-// exited but whose process group is still live — is still reaped, and the loop
-// stops as soon as the run's whole tree is gone. Scoping to the registry (vs a
-// process-global descendant diff) is what keeps a cancel from reaping a
-// concurrent run's children in a shared host process.
-async fn terminate_run(registry: &process::SpawnRegistry) {
-	const WAVES: u32 = 3;
-	let mut saw_targets = false;
-	for wave in 0..WAVES {
-		let targets = registry.build_targets();
-		if targets.is_empty() {
-			if saw_targets || wave + 1 == WAVES {
-				return;
-			}
-		} else {
-			saw_targets = true;
-			let signal = if wave == 0 {
-				process::TERM_SIGNAL
-			} else {
-				process::KILL_SIGNAL
-			};
-			targets.signal(signal);
-		}
-		if wave + 1 < WAVES {
-			if wave == 0 {
-				wait_for_term_grace(registry).await;
-			} else {
-				time::sleep(Duration::from_millis(150)).await;
-			}
-		}
-	}
-}
-
-#[cfg_attr(
-	not(unix),
-	expect(clippy::unused_async, reason = "the TERM grace wait only awaits on unix")
-)]
-async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
-	// Windows TERM is already hard termination; there is no trap to wait for.
-	#[cfg(unix)]
-	{
-		let deadline = time::Instant::now() + TERM_GRACE;
-		while !registry.build_targets().is_empty() {
-			let now = time::Instant::now();
-			if now >= deadline {
-				break;
-			}
-			time::sleep_until((now + Duration::from_millis(25)).min(deadline)).await;
-		}
-	}
-	#[cfg(not(unix))]
-	let _ = registry;
-}
-
-fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistry) {
-	// Include retained session jobs in the same cancellation wave as new spawns.
-	for job in &shell.jobs().jobs {
-		// A reaped job keeps its representative PID for `wait`, but that PID
-		// may later be reused by an unrelated process. Use an external child
-		// still held by the job (the first pipeline stage may have exited).
-		let Some(pid) = job.process_ids().next() else {
-			continue;
-		};
-		let process = process::Process::from_pid(pid);
-		registry.record(job.process_group_id(), process);
-	}
-}
-
-async fn terminate_background_jobs(shell: &mut BrushShell, registry: &process::SpawnRegistry) {
-	// The run's cancellation bridge owns TERM/KILL, including background jobs.
-	// Aborting their internal tasks sooner drops ChildProcess and hard-kills
-	// children while their TERM traps are still running.
-	wait_for_term_grace(registry).await;
-	for job in &mut shell.jobs_mut().jobs {
-		job.abort_internal_tasks();
-	}
-}
-
-/// Apply per-command environment variables onto a freshly pushed
-/// `Command` scope. Returns `true` when a scope was pushed (so the caller
-/// can pop it after the command runs), `false` when there were no vars and
-/// the existing scopes remain untouched.
-fn apply_command_env(
-	shell: &mut BrushShell,
-	env: Option<&HashMap<String, String>>,
-) -> Result<bool> {
-	let Some(env) = env else {
-		return Ok(false);
-	};
-	shell.env_mut().push_scope(EnvironmentScope::Command);
-	for (key, value) in env {
-		let normalized_key = normalize_env_key(key);
-		if should_skip_env_var(normalized_key) {
-			continue;
-		}
-		let mut var = ShellVariable::new(ShellValue::String(value.clone()));
-		var.export();
-		if let Err(err) = shell
-			.env_mut()
-			.add(normalized_key, var, EnvironmentScope::Command)
-		{
-			let _ = shell.env_mut().pop_scope(EnvironmentScope::Command);
-			return Err(Error::msg(format!("Failed to set env: {err}")));
-		}
-	}
-	Ok(true)
-}
-
-/// Define `env` as a shell variable expanding to the literal `$env` so that
-/// brush-core's POSIX parameter expansion preserves PowerShell-style
-/// `$env:NAME` references when commands are dispatched through brush to a
-/// PowerShell (or any) subprocess. The variable is not exported, so it only
-/// influences brush's own expansion; the child process environment is
-/// unaffected.
-///
-/// User-driven assignments (`env=prod; echo "$env:8080"`) push their own
-/// binding in the command scope and shadow this global default, preserving
-/// the bash POSIX contract for callers that genuinely use a variable named
-/// `env`.
-fn apply_env_fallback(shell: &mut BrushShell) -> Result<()> {
-	if shell.env().get("env").is_some() {
-		return Ok(());
-	}
-	let var = ShellVariable::new(ShellValue::String("$env".to_string()));
-	shell
-		.env_mut()
-		.set_global("env", var)
-		.map_err(|err| Error::msg(format!("Failed to set env fallback: {err}")))
-}
-
-fn is_macos_malloc_stack_logging_var(key: &str) -> bool {
-	matches!(key, "MallocStackLogging" | "MallocStackLoggingNoCompact")
-}
-
-/// Git variables that pin a repository location to the launch checkout.
-///
-/// Forwarding them into a shell makes `git` ignore the command's working
-/// directory and mutate the wrong worktree or index, so the shell rediscovers
-/// the repository from `cwd` instead. Mirrors the `env_remove` list in
-/// `crates/pi-vcs/src/git/cli.rs`.
-pub const GIT_REPO_LOCATION_ENV_VARS: [&str; 6] = [
-	"GIT_DIR",
-	"GIT_COMMON_DIR",
-	"GIT_WORK_TREE",
-	"GIT_INDEX_FILE",
-	"GIT_OBJECT_DIRECTORY",
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
-];
-
-/// Windows environment lookups are case-insensitive, so `git_dir` binds there
-/// exactly like `GIT_DIR`; POSIX names are case-sensitive.
-#[cfg(windows)]
-pub(crate) fn is_git_repo_location_var(key: &str) -> bool {
-	GIT_REPO_LOCATION_ENV_VARS
-		.iter()
-		.any(|name| key.eq_ignore_ascii_case(name))
-}
-
-#[cfg(not(windows))]
-pub(crate) fn is_git_repo_location_var(key: &str) -> bool {
-	GIT_REPO_LOCATION_ENV_VARS.contains(&key)
-}
-
-fn should_skip_env_var(key: &str) -> bool {
-	if key.starts_with("BASH_FUNC_") && key.ends_with("%%") {
-		return true;
-	}
-	if is_macos_malloc_stack_logging_var(key) {
-		return true;
-	}
-
-	matches!(
-		key,
-		"BASH_ENV"
-			| "ENV"
-			| "HISTFILE"
-			| "HISTTIMEFORMAT"
-			| "HISTCMD"
-			| "PS0"
-			| "PS1"
-			| "PS2"
-			| "PS4"
-			| "BRUSH_PS_ALT"
-			| "READLINE_LINE"
-			| "READLINE_POINT"
-			| "BRUSH_VERSION"
-			| "BASH"
-			| "BASHOPTS"
-			| "BASH_ALIASES"
-			| "BASH_ARGV0"
-			| "BASH_CMDS"
-			| "BASH_SOURCE"
-			| "BASH_SUBSHELL"
-			| "BASH_VERSINFO"
-			| "BASH_VERSION"
-			| "SHELLOPTS"
-			| "SHLVL"
-			| "SHELL"
-			| "COMP_WORDBREAKS"
-			| "DIRSTACK"
-			| "EPOCHREALTIME"
-			| "EPOCHSECONDS"
-			| "FUNCNAME"
-			| "GROUPS"
-			| "IFS"
-			| "LINENO"
-			| "MACHTYPE"
-			| "OSTYPE"
-			| "OPTERR"
-			| "OPTIND"
-			| "PIPESTATUS"
-			| "PPID"
-			| "PWD"
-			| "OLDPWD"
-			| "RANDOM"
-			| "SRANDOM"
-			| "SECONDS"
-			| "UID"
-			| "EUID"
-			| "HOSTNAME"
-			| "HOSTTYPE"
-	)
-}
-
 fn ensure_trailing_newline_for_heredoc(command: &mut String) {
 	if command.ends_with('\n')
 		|| !command
@@ -2018,18 +1745,6 @@ fn ensure_trailing_newline_for_heredoc(command: &mut String) {
 		return;
 	}
 	command.push('\n');
-}
-
-/// Whether the command goes on to its next segment; `exit`, errexit, and other
-/// non-normal control flow stop it (the session itself stays usable).
-const fn continues_command(result: &ExecutionResult) -> bool {
-	match result.next_control_flow {
-		ExecutionControlFlow::Normal => true,
-		ExecutionControlFlow::BreakLoop { .. } => false,
-		ExecutionControlFlow::ContinueLoop { .. } => false,
-		ExecutionControlFlow::ReturnFromFunctionOrScript => false,
-		ExecutionControlFlow::ExitShell => false,
-	}
 }
 
 enum OutputRead {
@@ -2043,6 +1758,21 @@ struct BufferedOutput {
 	exceeded:    bool,
 }
 
+/// How long the capture reader waits for the rest of a held line before
+/// judging what it has (a prompt or progress text without a newline).
+#[cfg(not(unix))]
+const CAPTURE_LINE_IDLE: Duration = Duration::from_millis(50);
+
+/// Completes after [`CAPTURE_LINE_IDLE`] when `holds_line`, never otherwise.
+#[cfg(not(unix))]
+async fn capture_line_idle(holds_line: bool) {
+	if holds_line {
+		time::sleep(CAPTURE_LINE_IDLE).await;
+	} else {
+		std::future::pending::<()>().await;
+	}
+}
+
 async fn read_output(
 	reader: fs::File,
 	on_chunk: Option<Sender<String>>,
@@ -2051,7 +1781,7 @@ async fn read_output(
 ) {
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
-	let mut decoder = OutputDecoder::new();
+	let mut decoder = CaptureDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -2083,10 +1813,19 @@ async fn read_output(
 		let n = {
 			let read_future = reader.read(&mut buf);
 			tokio::pin!(read_future);
-			match tokio::select! {
-				res = &mut read_future => res,
-				() = cancel_token.cancelled() => break,
-			} {
+			let res = loop {
+				tokio::select! {
+					res = &mut read_future => break Some(res),
+					() = cancel_token.cancelled() => break None,
+					() = capture_line_idle(decoder.holds_line()) => {
+						emit_chunk(decoder.flush_line(), on_chunk.as_ref()).await;
+					}
+				}
+			};
+			let Some(res) = res else {
+				break;
+			};
+			match res {
 				Ok(0) => break, // EOF
 				Ok(n) => n,
 				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -2123,7 +1862,7 @@ async fn read_output_buffered(
 	let mut captured = String::new();
 	let mut captured_bytes = 0usize;
 	let mut exceeded = false;
-	let mut decoder = OutputDecoder::new();
+	let mut decoder = CaptureDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -2155,10 +1894,23 @@ async fn read_output_buffered(
 		let n = {
 			let read_future = reader.read(&mut buf);
 			tokio::pin!(read_future);
-			match tokio::select! {
-				res = &mut read_future => res,
-				() = cancel_token.cancelled() => break,
-			} {
+			let res = loop {
+				tokio::select! {
+					res = &mut read_future => break Some(res),
+					() = cancel_token.cancelled() => break None,
+					() = capture_line_idle(decoder.holds_line()) => {
+						let text = decoder.flush_line();
+						if !exceeded {
+							captured.push_str(&text);
+						}
+						emit_chunk(text, on_chunk.as_ref()).await;
+					}
+				}
+			};
+			let Some(res) = res else {
+				break;
+			};
+			match res {
 				Ok(0) => break,
 				Ok(n) => n,
 				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -2175,7 +1927,8 @@ async fn read_output_buffered(
 		// large output.
 		if !exceeded && captured_bytes.saturating_add(n) > max_capture_bytes {
 			exceeded = true;
-			captured = String::new();
+			captured.clear();
+			captured.shrink_to_fit();
 		}
 		captured_bytes = captured_bytes.saturating_add(n);
 
@@ -2260,6253 +2013,5 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 	Ok((fs::File::from(Owned::from(r)), fs::File::from(Owned::from(w))))
 }
 
-/// Whether the `nohup` builtin should stand aside for the system binary.
-///
-/// The builtin detaches its operand into a new session so a backgrounded server
-/// survives this embedded shell's kill-on-drop teardown, which a system `nohup`
-/// does not do. It therefore shadows the real one unless
-/// `PI_DISABLE_NOHUP_BUILTIN` (session env or process env) asks otherwise.
-fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
-	env_flag(config, "PI_DISABLE_NOHUP_BUILTIN")
-}
-
-/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`,
-/// `PI_GIT_GUARD`) from the session environment (preferred) then the process
-/// environment. Truthy = present and not "", "0", or "false".
-fn env_flag(config: &ShellConfig, key: &str) -> bool {
-	let raw = config
-		.session_env
-		.as_ref()
-		.and_then(|env| env.get(key).cloned())
-		.or_else(|| std::env::var(key).ok());
-	matches!(raw.as_deref(), Some(value) if !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false"))
-}
-
 #[cfg(test)]
-mod tests {
-	#[cfg(unix)]
-	use std::os::unix::process::ExitStatusExt as _;
-
-	use tokio::process::Command;
-
-	use super::*;
-
-	/// 8.3 short spelling of `path` (`GetShortPathNameW`).
-	#[cfg(windows)]
-	fn short_name_of(path: &std::path::Path) -> std::path::PathBuf {
-		use std::os::windows::ffi::{OsStrExt, OsStringExt};
-		let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-		// SAFETY: `wide` is NUL-terminated; a null buffer with length 0 asks
-		// only for the required size.
-		let needed = unsafe {
-			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
-				wide.as_ptr(),
-				std::ptr::null_mut(),
-				0,
-			)
-		};
-		assert!(needed > 0, "GetShortPathNameW failed for {}", path.display());
-		let mut buf = vec![0u16; needed as usize];
-		// SAFETY: `wide` is NUL-terminated and `buf` is writable for
-		// `buf.len()` u16s.
-		let written = unsafe {
-			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
-				wide.as_ptr(),
-				buf.as_mut_ptr(),
-				buf.len() as u32,
-			)
-		};
-		assert!(written > 0, "GetShortPathNameW fill failed for {}", path.display());
-		buf.truncate(written as usize);
-		std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf))
-	}
-
-	#[cfg(windows)]
-	const LONG_DIR_NAME: &str = "pi-shell-long-name-probe";
-
-	/// A fresh directory whose long name has a distinct 8.3 alias, as
-	/// `(guard, long, short)`. `None` when the volume does not generate short
-	/// names, since no spelling split can exist there.
-	#[cfg(windows)]
-	fn short_alias_fixture() -> Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
-		let root = tempfile::tempdir().expect("tempdir");
-		let long = root.path().join(LONG_DIR_NAME);
-		std::fs::create_dir(&long).expect("create long-named dir");
-		let short = short_name_of(&long);
-		(short.file_name() != long.file_name()).then_some((root, long, short))
-	}
-
-	/// The shell stores `working_dir` in long form both at construction and on
-	/// `cd`, even when handed the 8.3 short spelling of the directory.
-	#[cfg(windows)]
-	#[tokio::test]
-	async fn working_dir_stores_long_form() {
-		let Some((_root, _long, short)) = short_alias_fixture() else {
-			return;
-		};
-
-		let mut shell = BrushShell::builder()
-			.do_not_inherit_env(true)
-			.profile(ProfileLoadBehavior::Skip)
-			.rc(RcLoadBehavior::Skip)
-			.working_dir(short.clone())
-			.build()
-			.await
-			.expect("build shell");
-
-		assert_eq!(
-			shell.working_dir().file_name(),
-			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
-			"built from {}",
-			short.display()
-		);
-
-		shell
-			.set_working_dir(short.parent().expect("parent"))
-			.await
-			.expect("cd parent");
-		shell
-			.set_working_dir(&short)
-			.await
-			.expect("cd short spelling");
-		assert_eq!(
-			shell.working_dir().file_name(),
-			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
-			"cd {}",
-			short.display()
-		);
-	}
-
-	/// A temp directory reachable through an 8.3 alias, as
-	/// `(short, long, guard)`. Existing profile aliases survive after new 8.3
-	/// creation is disabled, so the host TEMP is preferred; otherwise a fresh
-	/// alias is made when the volume still creates them.
-	#[cfg(windows)]
-	fn short_temp_fixture()
-	-> Option<(std::path::PathBuf, std::path::PathBuf, Option<tempfile::TempDir>)> {
-		let host_temp = std::env::temp_dir();
-		let expanded_host_temp = brush_core::sys::fs::expand_to_long_path(&host_temp);
-		if host_temp != expanded_host_temp {
-			return Some((host_temp, expanded_host_temp, None));
-		}
-		let (root, long, short) = short_alias_fixture()?;
-		Some((short, brush_core::sys::fs::expand_to_long_path(&long), Some(root)))
-	}
-
-	/// Runs `cd "$TEMP"` and asserts the shell cwd, `PWD`, and every temp var
-	/// share the long spelling `expected`.
-	#[cfg(windows)]
-	async fn assert_cd_temp_matches_pwd(shell: &mut BrushShell, expected: &std::path::Path) {
-		let expected_str = expected.to_string_lossy().into_owned();
-		let mut params = shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		let result = shell
-			.run_string("cd \"$TEMP\"", &SourceInfo::from("pi-shell:test"), &params)
-			.await
-			.expect("cd inherited TEMP");
-		assert_eq!(exit_code(&result), 0);
-		assert_eq!(shell.working_dir(), expected);
-		for key in ["TEMP", "TMP", "TMPDIR", "PWD"] {
-			assert_eq!(shell.env_str(key).as_deref(), Some(expected_str.as_str()), "{key}");
-		}
-	}
-
-	/// Host TEMP/TMP paths must not export the short profile spelling after
-	/// entering the directory.
-	#[cfg(windows)]
-	#[tokio::test]
-	async fn inherited_short_temp_matches_pwd_after_cd() {
-		let Some((short, expected, _guard)) = short_temp_fixture() else {
-			return;
-		};
-		let mut shell = BrushShell::builder()
-			.do_not_inherit_env(true)
-			.profile(ProfileLoadBehavior::Skip)
-			.rc(RcLoadBehavior::Skip)
-			.builtins(default_builtins(BuiltinSet::BashMode))
-			.working_dir(short.parent().expect("parent").to_path_buf())
-			.build()
-			.await
-			.expect("build shell");
-
-		copy_env_into_shell(
-			&mut shell,
-			["TEMP", "TMP", "TMPDIR"]
-				.into_iter()
-				.map(|key| (std::ffi::OsString::from(key), short.as_os_str().to_os_string())),
-		)
-		.expect("inherit temp vars");
-
-		assert_cd_temp_matches_pwd(&mut shell, &expected).await;
-	}
-
-	/// The agent forwards its host env as `session_env`, applied after the
-	/// direct host copy; a short TEMP arriving that way must be expanded too,
-	/// or it overwrites the expanded host value.
-	#[cfg(windows)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn session_env_short_temp_matches_pwd_after_cd() {
-		let Some((short, expected, _guard)) = short_temp_fixture() else {
-			return;
-		};
-		let short_str = short.to_str().expect("utf8 short temp").to_string();
-		let env = ["TEMP", "TMP", "TMPDIR"]
-			.into_iter()
-			.map(|key| (key.to_string(), short_str.clone()))
-			.collect();
-		let config = ShellConfig {
-			session_env:   Some(env),
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-
-		assert_cd_temp_matches_pwd(&mut session.shell, &expected).await;
-	}
-
-	/// Windows env names are case-insensitive: a host `Temp`/`Tmp`/`TmpDir`
-	/// must surface as the uppercase names shell scripts read. Relative values
-	/// are not paths to expand and pass through verbatim.
-	#[cfg(windows)]
-	#[tokio::test]
-	async fn inherited_temp_keys_fold_to_uppercase() {
-		let mut shell = BrushShell::builder()
-			.do_not_inherit_env(true)
-			.profile(ProfileLoadBehavior::Skip)
-			.rc(RcLoadBehavior::Skip)
-			.build()
-			.await
-			.expect("build shell");
-
-		copy_env_into_shell(
-			&mut shell,
-			[("Temp", "rel\\temp"), ("Tmp", "rel\\tmp"), ("TmpDir", "rel\\tmpdir")]
-				.into_iter()
-				.map(|(key, value)| (key.into(), value.into())),
-		)
-		.expect("inherit temp vars");
-
-		assert_eq!(shell.env_str("TEMP").as_deref(), Some("rel\\temp"));
-		assert_eq!(shell.env_str("TMP").as_deref(), Some("rel\\tmp"));
-		assert_eq!(shell.env_str("TMPDIR").as_deref(), Some("rel\\tmpdir"));
-		assert_eq!(shell.env_str("Temp"), None);
-	}
-
-	/// A host cwd spelled with 8.3 short names matches the stored long form of
-	/// the same directory, so no redundant `set_working_dir` runs.
-	#[cfg(windows)]
-	#[tokio::test]
-	async fn short_spelled_cwd_matches_stored_long_form() {
-		let Some((_root, long, short)) = short_alias_fixture() else {
-			return;
-		};
-
-		let shell = BrushShell::builder()
-			.do_not_inherit_env(true)
-			.profile(ProfileLoadBehavior::Skip)
-			.rc(RcLoadBehavior::Skip)
-			.working_dir(long)
-			.build()
-			.await
-			.expect("build shell");
-
-		assert!(
-			shell_working_dir_matches(&shell, &short.to_string_lossy()),
-			"short spelling {} should match stored {}",
-			short.display(),
-			shell.working_dir().display()
-		);
-	}
-
-	#[cfg(unix)]
-	async fn kill_test_context() -> (ShellSessionCore, ExecutionParameters) {
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let session = create_session(&config).await.expect("create_session");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		(session, params)
-	}
-
-	#[cfg(unix)]
-	fn pseudo_terminal_session() -> (std::os::fd::OwnedFd, fs::File) {
-		use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
-
-		let mut master = -1;
-		let mut slave = -1;
-		// SAFETY: openpty initializes two new owned file descriptors on success;
-		// the null name, termios, and winsize pointers request defaults.
-		let opened = unsafe {
-			libc::openpty(
-				&mut master,
-				&mut slave,
-				std::ptr::null_mut(),
-				std::ptr::null_mut(),
-				std::ptr::null_mut(),
-			)
-		};
-		assert_eq!(opened, 0, "openpty");
-		// SAFETY: openpty returned unique descriptors on success.
-		let master = unsafe { OwnedFd::from_raw_fd(master) };
-		// SAFETY: openpty returned unique descriptors on success.
-		let slave = unsafe { fs::File::from_raw_fd(slave) };
-		// SAFETY: this re-exec test process inherited its parent's process
-		// group, so it is not a process-group leader and may create a session.
-		assert_ne!(unsafe { libc::setsid() }, -1, "setsid");
-		// SAFETY: slave is a live pseudo-terminal descriptor owned by this
-		// process; fd 0 is deliberately replaced only in this isolated test.
-		assert_eq!(unsafe { libc::dup2(slave.as_raw_fd(), libc::STDIN_FILENO) }, 0, "dup2 stdin");
-		// The ioctl request parameter's integer type differs between platforms.
-		let tiocsctty = libc::TIOCSCTTY as _;
-		// SAFETY: this session has no controlling terminal and fd 0 is the
-		// pseudo-terminal slave, so TIOCSCTTY establishes it as controlling.
-		assert_eq!(unsafe { libc::ioctl(libc::STDIN_FILENO, tiocsctty, 0) }, 0, "TIOCSCTTY");
-		for signal in [libc::SIGTTOU, libc::SIGHUP] {
-			// SAFETY: this isolated test process deliberately ignores terminal
-			// background-write stops and hangups while fg hands the
-			// pseudo-terminal to a job. The dispositions cannot escape the
-			// re-exec test process.
-			let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
-			assert_ne!(previous, libc::SIG_ERR, "ignore terminal job-control signal {signal}");
-		}
-		(master, slave)
-	}
-
-	#[cfg(unix)]
-	async fn interactive_kill_test_context(
-		terminal_stdin: &fs::File,
-	) -> (ShellSessionCore, ExecutionParameters) {
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.options_mut().enable_job_control = true;
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(
-			OpenFiles::STDIN_FD,
-			OpenFile::from(terminal_stdin.try_clone().expect("clone terminal stdin")),
-		);
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		(session, params)
-	}
-
-	/// Shell-quotes an argument when building a command string for a test.
-	///
-	/// Mirrors what the `timeout`/`nohup` builtins do when they rebuild a
-	/// command line; kept local because it exists only to construct these
-	/// fixtures.
-	fn quote_arg(arg: &str) -> String {
-		if arg.is_empty() {
-			return "''".to_string();
-		}
-		if arg
-			.chars()
-			.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '+'))
-		{
-			return arg.to_string();
-		}
-		let escaped = arg.replace('\'', "'\"'\"'");
-		format!("'{escaped}'")
-	}
-
-	async fn execute_captured(command: String) -> (ShellExecuteResult, String) {
-		let (tx, rx) = flume::unbounded();
-		let result = execute_shell(
-			ShellExecuteOptions { command, ..Default::default() },
-			Some(tx),
-			CancelToken::default(),
-		)
-		.await
-		.expect("shell execution");
-		let output = rx.try_iter().collect();
-		(result, output)
-	}
-
-	/// Shell initialization must recover when a long-running host's inherited
-	/// working directory is deleted. This runs in a child process because cwd is
-	/// process-global.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn shell_initializes_after_process_cwd_is_deleted() {
-		const MARKER: &str = "PI_SHELL_TEST_DELETED_CWD";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::shell_initializes_after_process_cwd_is_deleted",
-				MARKER,
-				false,
-			)
-			.await;
-			return;
-		}
-
-		let dir = tempfile::tempdir().expect("temporary cwd");
-		std::env::set_current_dir(dir.path()).expect("enter temporary cwd");
-		std::fs::remove_dir(dir.path()).expect("delete process cwd");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let session = create_session(&config)
-			.await
-			.expect("initialize shell after deleted cwd");
-		let fallback = std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from);
-		assert_eq!(session.shell.working_dir(), fallback);
-	}
-
-	/// Native Windows tools write the ANSI code page to pipes. On a Chinese
-	/// system that is GBK; treating it as UTF-8 used to turn `echo 中文` into
-	/// replacement characters.
-	#[cfg(windows)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn cmd_echo_chinese_decodes_from_system_acp() {
-		// SAFETY: GetACP has no preconditions.
-		let acp = unsafe { windows_sys::Win32::Globalization::GetACP() };
-		if acp != 936 {
-			return;
-		}
-		let (result, output) = execute_captured("cmd.exe /c echo 中文".to_string()).await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert!(output.contains("中文"), "garbled command output: {output:?}");
-	}
-
-	/// Regression for issue #8925: a host env entry whose key or value is not
-	/// valid Unicode must be skipped, not fatal. `std::env::vars()` panics on
-	/// the first one (e.g. the corrupt `GHOSTTY_BIN_DIR` cmux/Ghostty stages,
-	/// bytes `9d d9 50`) before any command runs; `copy_env_into_shell` reads
-	/// via `vars_os()` and drops corrupt entries while still copying the rest
-	/// and merging duplicate `PATH` values.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn copy_env_skips_non_utf8_entries_and_merges_path() {
-		use std::os::unix::ffi::OsStringExt;
-
-		let mut shell = BrushShell::builder()
-			.do_not_inherit_env(true)
-			.profile(ProfileLoadBehavior::Skip)
-			.rc(RcLoadBehavior::Skip)
-			.builtins(default_builtins(BuiltinSet::BashMode))
-			.build()
-			.await
-			.expect("build shell");
-
-		// GHOSTTY_BIN_DIR with the corrupt bytes, a normal var, a corrupt key,
-		// and a duplicate PATH — in host-env iteration order.
-		let entries = vec![
-			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/usr/bin:/bin")),
-			(
-				std::ffi::OsString::from("GHOSTTY_BIN_DIR"),
-				std::ffi::OsString::from_vec(vec![0x9d, 0xd9, 0x50]),
-			),
-			(std::ffi::OsString::from("HOME"), std::ffi::OsString::from("/home/tester")),
-			(
-				std::ffi::OsString::from_vec(vec![0xff, b'B', b'A', b'D']),
-				std::ffi::OsString::from("x"),
-			),
-			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/opt/bin")),
-		];
-		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
-
-		let value = |name: &str| {
-			shell
-				.env()
-				.get(name)
-				.and_then(|(_, var)| match var.value() {
-					ShellValue::String(value) => Some(value.clone()),
-					_ => None,
-				})
-		};
-		assert_eq!(value("PATH").as_deref(), Some("/opt/bin"), "PATH is merged/preserved");
-		assert_eq!(value("HOME").as_deref(), Some("/home/tester"), "valid entry copied");
-		assert!(value("GHOSTTY_BIN_DIR").is_none(), "non-UTF-8 value must be skipped");
-		assert!(value("BAD").is_none(), "non-UTF-8 key must be skipped");
-	}
-
-	/// The strip must stay narrowly scoped: unrelated `GIT_*` names are part of
-	/// the shell contract (`GIT_EDITOR`, author identity) and must survive.
-	#[test]
-	fn git_repo_location_vars_exclude_unrelated_git_names() {
-		assert!(!is_git_repo_location_var("GIT_EDITOR"));
-		assert!(!is_git_repo_location_var("GIT_AUTHOR_NAME"));
-	}
-
-	/// Regression for issue #11082: the embedded shell copies the host
-	/// environment, and repo-location overrides in it (git hooks, `git
-	/// --git-dir` wrappers) must not reach child commands — `git` would ignore
-	/// the command's `cwd` and mutate the worktree the agent was launched from.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn copy_env_skips_git_repo_location_overrides() {
-		let mut shell = BrushShell::builder()
-			.do_not_inherit_env(true)
-			.profile(ProfileLoadBehavior::Skip)
-			.rc(RcLoadBehavior::Skip)
-			.builtins(default_builtins(BuiltinSet::BashMode))
-			.build()
-			.await
-			.expect("build shell");
-
-		let entries = vec![
-			(std::ffi::OsString::from("GIT_DIR"), std::ffi::OsString::from("/primary/.git")),
-			(std::ffi::OsString::from("GIT_WORK_TREE"), std::ffi::OsString::from("/primary")),
-			(
-				std::ffi::OsString::from("GIT_INDEX_FILE"),
-				std::ffi::OsString::from("/primary/.git/index"),
-			),
-			(std::ffi::OsString::from("GIT_EDITOR"), std::ffi::OsString::from("true")),
-		];
-		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
-
-		let value = |name: &str| {
-			shell
-				.env()
-				.get(name)
-				.and_then(|(_, var)| match var.value() {
-					ShellValue::String(value) => Some(value.clone()),
-					_ => None,
-				})
-		};
-		assert!(value("GIT_DIR").is_none(), "GIT_DIR must not reach child commands");
-		assert!(value("GIT_WORK_TREE").is_none(), "GIT_WORK_TREE must not reach child commands");
-		assert!(value("GIT_INDEX_FILE").is_none(), "GIT_INDEX_FILE must not reach child commands");
-		assert_eq!(value("GIT_EDITOR").as_deref(), Some("true"), "unrelated git vars are kept");
-	}
-
-	/// The per-session env overlay is built from the same host environment, so
-	/// it must not reintroduce the repo-location overrides.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn session_env_does_not_export_git_repo_location_overrides() {
-		let dir = tempfile::tempdir().expect("probe directory");
-		let out = dir.path().join("probe");
-		let mut env = HashMap::new();
-		env.insert("GIT_DIR".to_string(), "/primary/.git".to_string());
-		env.insert("OMP_GIT_ENV_PROBE".to_string(), "kept".to_string());
-		let config = ShellConfig {
-			session_env:   Some(env),
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-
-		let command = format!(
-			"printf '%s|%s' \"${{GIT_DIR-unset}}\" \"$OMP_GIT_ENV_PROBE\" > {}",
-			quote_arg(out.to_str().expect("utf8 probe path"))
-		);
-		session
-			.shell
-			.run_string(command, &SourceInfo::from("pi-natives:test"), &params)
-			.await
-			.expect("run_string");
-
-		assert_eq!(fs::read_to_string(&out).expect("probe output"), "unset|kept");
-	}
-
-	/// Waits until `pid` runs as `expected`. Each poll walks the whole process
-	/// table, which takes seconds on a loaded host, so the bound is generous;
-	/// it stays below the 30 s lifetime of the process-test children.
-	#[cfg(unix)]
-	async fn wait_for_process_name(pid: i32, expected: &str) {
-		time::timeout(Duration::from_secs(20), async {
-			loop {
-				if pi_builtins::ProcInfo::all().into_iter().any(|process| {
-					process.pid() == pid
-						&& process.match_name() == expected
-						&& process.status() == pi_builtins::ProcessStatus::Running
-				}) {
-					return;
-				}
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("child did not enter expected executable");
-	}
-
-	#[cfg(unix)]
-	fn test_executable(name: &str) -> std::path::PathBuf {
-		use std::os::unix::fs::PermissionsExt as _;
-
-		std::env::var_os("PATH")
-			.and_then(|path| {
-				std::env::split_paths(&path)
-					.map(|directory| directory.join(name))
-					.find(|candidate| {
-						candidate.metadata().is_ok_and(|metadata| {
-							metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-						})
-					})
-			})
-			.unwrap_or_else(|| panic!("{name} executable on PATH"))
-	}
-
-	#[cfg(unix)]
-	fn process_test_command(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
-		let dir = tempfile::tempdir().expect("process test directory");
-		let name = format!("{prefix}{}", std::process::id());
-		let command = dir.path().join(&name);
-		let test_binary = std::env::current_exe().expect("current test executable");
-		std::os::unix::fs::symlink(test_binary, &command).expect("test executable symlink");
-		(dir, command, name)
-	}
-
-	#[cfg(unix)]
-	fn process_test_child(command: &std::path::Path, duration: Duration) -> Command {
-		let duration_ms = u64::try_from(duration.as_millis()).expect("test duration fits u64");
-		let mut child = Command::new(command);
-		child
-			.args(["--ignored", "--exact", "shell::tests::process_test_sleeper"])
-			.env("PI_SHELL_PROCESS_TEST_SLEEP_MS", duration_ms.to_string())
-			.stdout(std::process::Stdio::null())
-			.stderr(std::process::Stdio::null());
-		child
-	}
-
-	#[cfg(unix)]
-	#[test]
-	#[ignore = "spawned by process-control tests"]
-	fn process_test_sleeper() {
-		let Ok(duration_ms) = std::env::var("PI_SHELL_PROCESS_TEST_SLEEP_MS") else {
-			return;
-		};
-		let duration_ms = duration_ms
-			.parse()
-			.expect("valid process test sleep duration");
-		std::thread::sleep(Duration::from_millis(duration_ms));
-	}
-
-	#[cfg(unix)]
-	struct PidfileProcessCleanup(Vec<std::path::PathBuf>);
-
-	#[cfg(unix)]
-	impl Drop for PidfileProcessCleanup {
-		fn drop(&mut self) {
-			for pidfile in &self.0 {
-				if let Some(process) = fs::read_to_string(pidfile)
-					.ok()
-					.and_then(|pid| pid.trim().parse::<i32>().ok())
-					.and_then(process::Process::from_pid)
-				{
-					let _ = process.kill_tree(Some(libc::SIGKILL));
-				}
-			}
-		}
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pgrep_matches_name_and_pkills_signal_probe() {
-		let (_dir, command, name) = process_test_command("opg");
-		let mut child = process_test_child(&command, Duration::from_secs(30))
-			.spawn()
-			.expect("matching process");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		wait_for_process_name(pid, &name).await;
-
-		let (pgrep_result, output) = execute_captured(format!("pgrep -x -p {pid} {name}")).await;
-		let (pkill_result, pkill_output) =
-			execute_captured(format!("pkill -0 -x -p {pid} {name}")).await;
-
-		let still_running = child.try_wait().expect("probe child status").is_none();
-		let _ = child.start_kill();
-		let _ = child.wait().await;
-		assert_eq!(pgrep_result.exit_code, Some(0));
-		assert_eq!(output, format!("{pid}\n"));
-		assert_eq!(pkill_result.exit_code, Some(0));
-		assert_eq!(pkill_output, "");
-		assert!(still_running, "signal 0 must not terminate a matching process");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pkill_accepts_platform_signal_names() {
-		#[cfg(target_os = "macos")]
-		let signal = "INFO";
-		#[cfg(not(target_os = "macos"))]
-		let signal = "WINCH";
-		let dir = tempfile::tempdir().expect("signal test directory");
-		let ready = dir.path().join("ready");
-		let script = format!("trap '' {signal}; : > \"$1\"; while :; do sleep 0.05; done");
-		let mut command = Command::new("sh");
-		command
-			.args(["-c", &script, "sh", ready.to_str().expect("utf8 ready path")])
-			.kill_on_drop(true);
-		let mut child = command.spawn().expect("signal test process");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		time::timeout(Duration::from_secs(2), async {
-			while !ready.exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("signal trap was not installed");
-
-		let (result, _) = execute_captured(format!("pkill -{signal} -p {pid}")).await;
-		let still_running = child.try_wait().expect("signal child status").is_none();
-		let _ = child.start_kill();
-		let _ = child.wait().await;
-		assert_eq!(result.exit_code, Some(0));
-		assert!(still_running, "{signal} should be ignored by the test process");
-	}
-
-	#[cfg(target_os = "linux")]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pkill_queue_option_consumes_its_value() {
-		let (_dir, command, name) = process_test_command("opq");
-		let mut command = process_test_child(&command, Duration::from_secs(30));
-		command.kill_on_drop(true);
-		let mut child = command.spawn().expect("queue test process");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		wait_for_process_name(pid, &name).await;
-
-		let (result, output) = execute_captured(format!("pkill -0 -q 37 -x -p {pid} {name}")).await;
-		let still_running = child.try_wait().expect("queue child status").is_none();
-		let _ = child.start_kill();
-		let _ = child.wait().await;
-		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
-		assert!(still_running, "queued signal 0 must only probe the process");
-	}
-
-	#[cfg(target_os = "macos")]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pkill_interactive_prompt_honors_cancellation() {
-		let (_dir, command, name) = process_test_command("opi");
-		let mut command = process_test_child(&command, Duration::from_secs(30));
-		command.kill_on_drop(true);
-		let mut child = command.spawn().expect("interactive target");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		wait_for_process_name(pid, &name).await;
-
-		let mut cancel = CancelToken::default();
-		let abort = cancel.emplace_abort_token();
-		let execution = tokio::spawn(execute_shell(
-			ShellExecuteOptions {
-				command: format!("sleep 30 | pkill -I -x -p {pid} {name}"),
-				..Default::default()
-			},
-			None,
-			cancel,
-		));
-		time::sleep(Duration::from_millis(100)).await;
-		abort.abort(crate::cancel::AbortReason::User);
-		let result = time::timeout(Duration::from_secs(2), execution)
-			.await
-			.expect("interactive pkill remained blocked after cancellation")
-			.expect("interactive execution task")
-			.expect("interactive shell execution");
-		let still_running = child
-			.try_wait()
-			.expect("interactive target status")
-			.is_none();
-		let _ = child.start_kill();
-		let _ = child.wait().await;
-		assert_ne!(result.exit_code, Some(0));
-		assert!(still_running, "cancelled pkill must not signal its pending target");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pgrep_reads_pidfile_from_standard_input() {
-		let (_dir, command, name) = process_test_command("opf");
-		let mut child = process_test_child(&command, Duration::from_secs(30))
-			.spawn()
-			.expect("pidfile process");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		wait_for_process_name(pid, &name).await;
-
-		let (result, output) =
-			execute_captured(format!("printf '%s\\n' {pid} | pgrep -F - -x {name}")).await;
-		let _ = child.start_kill();
-		let _ = child.wait().await;
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, format!("{pid}\n"));
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pgrep_requires_an_externally_locked_pidfile() {
-		let python = Command::new("python3").arg("--version").output().await;
-		if !python.is_ok_and(|output| output.status.success()) {
-			eprintln!("skipping pgrep_requires_an_externally_locked_pidfile: python3 unavailable");
-			return;
-		}
-
-		let (_dir, command, name) = process_test_command("opl");
-		let mut child = process_test_child(&command, Duration::from_secs(30))
-			.spawn()
-			.expect("locked pidfile process");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		wait_for_process_name(pid, &name).await;
-
-		let files = tempfile::tempdir().expect("pidfile directory");
-		let pidfile = files.path().join("service.pid");
-		let ready = files.path().join("locked");
-		let pid_arg = pid.to_string();
-		let mut locker = Command::new("python3")
-			.args([
-				"-c",
-				"import fcntl,pathlib,sys,time; f=open(sys.argv[1],'w'); f.write(sys.argv[2]+'\\n'); \
-				 f.flush(); fcntl.lockf(f,fcntl.LOCK_EX); pathlib.Path(sys.argv[3]).touch(); \
-				 time.sleep(30)",
-				pidfile.to_str().expect("utf8 pidfile"),
-				&pid_arg,
-				ready.to_str().expect("utf8 ready path"),
-			])
-			.spawn()
-			.expect("pidfile locker");
-		let ready_result = time::timeout(Duration::from_secs(2), async {
-			while !ready.exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await;
-		if ready_result.is_err() {
-			let _ = locker.start_kill();
-			let _ = child.start_kill();
-			let _ = locker.wait().await;
-			let _ = child.wait().await;
-			panic!("pidfile locker did not become ready");
-		}
-
-		let command =
-			format!("pgrep -L -F {} -x {name}", quote_arg(pidfile.to_str().expect("utf8 pidfile")));
-		let (locked_result, locked_output) = execute_captured(command.clone()).await;
-		let _ = locker.start_kill();
-		let _ = locker.wait().await;
-		let (unlocked_result, unlocked_output) = execute_captured(command).await;
-		let _ = child.start_kill();
-		let _ = child.wait().await;
-
-		assert_eq!(locked_result.exit_code, Some(0));
-		assert_eq!(locked_output, format!("{pid}\n"));
-		assert_eq!(unlocked_result.exit_code, Some(3));
-		assert!(unlocked_output.contains("is not locked"), "{unlocked_output:?}");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pkill_signals_every_matching_process() {
-		let (_dir, command, name) = process_test_command("opk");
-		let mut first = process_test_child(&command, Duration::from_secs(30))
-			.spawn()
-			.expect("first matching process");
-		let mut second = process_test_child(&command, Duration::from_secs(30))
-			.spawn()
-			.expect("second matching process");
-		let first_pid = i32::try_from(first.id().expect("first pid")).expect("pid fits i32");
-		let second_pid = i32::try_from(second.id().expect("second pid")).expect("pid fits i32");
-		wait_for_process_name(first_pid, &name).await;
-		wait_for_process_name(second_pid, &name).await;
-
-		let (result, output) = execute_captured(format!("pkill -TERM -x {name}")).await;
-		let statuses =
-			time::timeout(Duration::from_secs(2), async { tokio::join!(first.wait(), second.wait()) })
-				.await;
-		if statuses.is_err() {
-			let _ = first.start_kill();
-			let _ = second.start_kill();
-			let _ = first.wait().await;
-			let _ = second.wait().await;
-		}
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "");
-		assert!(statuses.is_ok(), "pkill did not signal every matching process");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pidwait_returns_after_the_matching_process_exits() {
-		let (_dir, command, name) = process_test_command("opw");
-		let mut command = process_test_child(&command, Duration::from_secs(30));
-		command.kill_on_drop(true);
-		let mut child = command.spawn().expect("waited process");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		wait_for_process_name(pid, &name).await;
-
-		// `-e` reports selection before pidwait starts its exit wait. Seeing this
-		// line proves it selected the still-live child, so the test can release
-		// the child without a wall-clock race.
-		// `-e` prints the kernel command name, which on macOS is the resolved
-		// executable rather than the symlink name `-x` matches.
-		let command_name = pi_builtins::ProcInfo::all()
-			.into_iter()
-			.find(|process| process.pid() == pid)
-			.expect("waited process info")
-			.command_name();
-		let (tx, rx) = flume::unbounded();
-		let waiting_for = format!("waiting for {command_name} (pid {pid})\n");
-		let pidwait_command = format!("pidwait -e -x -p {pid} {name}");
-		let mut pidwait = tokio::spawn(async move {
-			execute_shell(
-				ShellExecuteOptions { command: pidwait_command, ..Default::default() },
-				Some(tx),
-				CancelToken::default(),
-			)
-			.await
-			.expect("pidwait execution")
-		});
-		let mut output = String::new();
-		time::timeout(Duration::from_secs(30), async {
-			while !output.contains(&waiting_for) {
-				output.push_str(
-					&rx.recv_async()
-						.await
-						.expect("pidwait output closed before it selected the child"),
-				);
-			}
-		})
-		.await
-		.expect("pidwait did not select the child");
-		tokio::task::yield_now().await;
-		assert!(
-			!pidwait.is_finished(),
-			"pidwait returned while its matching process was still running"
-		);
-		assert!(
-			child.try_wait().expect("waited child status").is_none(),
-			"pidwait selected a child that already exited"
-		);
-
-		let _ = child.start_kill();
-		let result = time::timeout(Duration::from_secs(30), &mut pidwait)
-			.await
-			.expect("pidwait did not return after its matching process exited")
-			.expect("pidwait task");
-		while let Ok(chunk) = rx.recv_async().await {
-			output.push_str(&chunk);
-		}
-		let mut status = child.try_wait().expect("waited child status");
-		if status.is_none() {
-			let _ = child.start_kill();
-			let _ = child.wait().await;
-			status = child.try_wait().expect("reaped child status");
-		}
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, waiting_for);
-		assert!(status.is_some(), "pidwait returned while its matching process was still running");
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn ps_builtin_supports_common_bsd_and_posix_forms() {
-		let pid = std::process::id();
-		let (custom_result, custom) =
-			execute_captured(format!("ps -p {pid} -o pid=,ppid=,stat=,comm=")).await;
-		let (posix_result, posix) = execute_captured(format!("ps -ef -p {pid}")).await;
-		let (bsd_result, bsd) = execute_captured(format!("ps aux -p {pid}")).await;
-
-		assert_eq!(custom_result.exit_code, Some(0));
-		assert_eq!(custom.lines().count(), 1);
-		let mut fields = custom.split_whitespace();
-		assert_eq!(fields.next(), Some(pid.to_string().as_str()));
-		assert!(
-			fields
-				.next()
-				.and_then(|value| value.parse::<i32>().ok())
-				.is_some()
-		);
-		assert!(fields.next().is_some_and(|value| !value.is_empty()));
-		assert!(fields.next().is_some_and(|value| !value.is_empty()));
-
-		assert_eq!(posix_result.exit_code, Some(0));
-		assert!(
-			posix
-				.lines()
-				.next()
-				.is_some_and(|line| line.contains("PPID"))
-		);
-		assert!(posix.lines().skip(1).any(|line| {
-			line
-				.split_whitespace()
-				.any(|value| value == pid.to_string())
-		}));
-
-		assert_eq!(bsd_result.exit_code, Some(0));
-		assert!(bsd.lines().next().is_some_and(|line| line.contains("%CPU")));
-		assert!(bsd.lines().skip(1).any(|line| {
-			line
-				.split_whitespace()
-				.any(|value| value == pid.to_string())
-		}));
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn ps_builtin_formats_parseable_long_start_without_a_header() {
-		let pid = std::process::id();
-		let (result, output) = execute_captured(format!("ps -p {pid} -o lstart=")).await;
-		assert_eq!(result.exit_code, Some(0));
-		assert!(
-			jiff::fmt::strtime::parse("%a %b %e %H:%M:%S %Y", output.trim()).is_ok(),
-			"{output:?}"
-		);
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn ps_builtin_supports_extended_format_specifiers() {
-		let pid = std::process::id();
-		let (result, output) = execute_captured(format!(
-			"ps -p {pid} -o \
-			 pid=,tpgid=,ruid=,rgid=,egid=,pri=,f=,min_flt=,maj_flt=,times=,sz=,s=,ruser=,rgroup=,\
-			 tgid="
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		let fields: Vec<&str> = output.split_whitespace().collect();
-		assert_eq!(fields.len(), 15, "{output:?}");
-		assert_eq!(fields[0], pid.to_string());
-		assert_eq!(fields[14], pid.to_string(), "tgid aliases pid");
-		#[cfg(unix)]
-		{
-			// tpgid is an integer; -1 without a controlling terminal.
-			assert!(fields[1].parse::<i32>().is_ok(), "tpgid: {:?}", fields[1]);
-			for (index, name) in [(2, "ruid"), (3, "rgid"), (4, "egid")] {
-				assert!(fields[index].parse::<u32>().is_ok(), "{name}: {:?}", fields[index]);
-			}
-			assert!(fields[5].parse::<i64>().is_ok(), "pri: {:?}", fields[5]);
-			assert!(u64::from_str_radix(fields[6], 16).is_ok(), "flags: {:?}", fields[6]);
-			assert!(fields[7].parse::<u64>().is_ok(), "min_flt: {:?}", fields[7]);
-			assert!(fields[8].parse::<u64>().is_ok(), "maj_flt: {:?}", fields[8]);
-			assert!(fields[9].parse::<u64>().is_ok(), "times: {:?}", fields[9]);
-			assert!(fields[10].parse::<u64>().is_ok(), "sz: {:?}", fields[10]);
-			assert_eq!(fields[11].chars().count(), 1, "state: {:?}", fields[11]);
-			assert_ne!(fields[12], "?", "ruser should resolve to a name");
-			assert_ne!(fields[13], "?", "rgroup should resolve to a name");
-		}
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn ps_builtin_accepts_tpgid_alongside_job_control_columns() {
-		// Exact form from the field report that failed with
-		// "unknown output format specifier 'tpgid'".
-		let pid = std::process::id();
-		let (result, output) =
-			execute_captured(format!("ps -o pid,ppid,pgid,tpgid,sess,stat,tty,command -p {pid}"))
-				.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		let header = output.lines().next().unwrap_or_default();
-		for label in ["PID", "PPID", "PGID", "TPGID", "SID", "STAT", "TTY", "COMMAND"] {
-			assert!(header.contains(label), "missing {label} in {header:?}");
-		}
-		assert!(output.lines().skip(1).any(|line| {
-			line
-				.split_whitespace()
-				.next()
-				.is_some_and(|value| value == pid.to_string())
-		}));
-	}
-
-	/// Contract: `read` from a file consumes exactly one line of the shared
-	/// offset — the next `read`, and any later reader of the same descriptor,
-	/// resumes right after it.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn read_from_a_file_leaves_the_rest_for_the_next_reader() {
-		let dir = tempfile::tempdir().expect("temporary directory");
-		let path = dir.path().join("lines.txt");
-		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
-		let path = path.to_string_lossy().replace('\\', "/");
-		let (result, output) = execute_captured(format!(
-			"{{ read -r a; read -r b; echo \"[$a][$b]\"; cat; }} < '{path}'"
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "[one][two]\nthree\nfour\n");
-	}
-
-	/// Contract: `read` assigns UTF-8 input as text, not one Latin-1
-	/// character per byte.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn read_decodes_utf8_input() {
-		let (result, output) = execute_captured(
-			"printf 'é ü\\n' | { read -r first rest; echo \"$first|$rest\"; }".to_owned(),
-		)
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "é|ü\n");
-	}
-
-	/// Contract: `read -n` counts characters, not bytes, as bash does in a
-	/// UTF-8 locale; a multibyte character is never split.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn read_count_takes_whole_utf8_characters() {
-		let (result, output) = execute_captured(
-			"printf 'éa\\n' | { read -r -n 1 first; read -r rest; echo \"$first|$rest\"; }".to_owned(),
-		)
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "é|a\n");
-	}
-
-	/// Contract: `mapfile -n` from a file consumes exactly the lines it
-	/// stores; a later reader of the descriptor gets the rest.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn mapfile_count_from_a_file_leaves_the_rest_for_the_next_reader() {
-		let dir = tempfile::tempdir().expect("temporary directory");
-		let path = dir.path().join("lines.txt");
-		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
-		let path = path.to_string_lossy().replace('\\', "/");
-		let (result, output) = execute_captured(format!(
-			"{{ mapfile -t -n 2 lines; echo \"${{lines[*]}}\"; cat; }} < '{path}'"
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "one two\nthree\nfour\n");
-	}
-
-	/// Contract: a `mapfile -C` callback that reads the same piped stdin gets
-	/// the lines after the one mapfile stored, as in bash; mapfile must not
-	/// have read them ahead.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn mapfile_callback_reads_the_next_line_of_a_pipe() {
-		let (result, output) = execute_captured(
-			"cb() { read -r x; echo \"cb:$1:$2:$x\"; }; seq 1 4 | { mapfile -t -C cb -c 1 arr; echo \
-			 \"arr=${arr[*]}\"; }"
-				.to_owned(),
-		)
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
-	}
-
-	/// Contract: the same holds for a regular file, whose read-ahead mapfile
-	/// gives back to the shared offset before each callback.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn mapfile_callback_reads_the_next_line_of_a_file() {
-		let dir = tempfile::tempdir().expect("temporary directory");
-		let path = dir.path().join("lines.txt");
-		std::fs::write(&path, "1\n2\n3\n4\n").expect("write fixture");
-		let path = path.to_string_lossy().replace('\\', "/");
-		let (result, output) = execute_captured(format!(
-			"cb() {{ read -r x; echo \"cb:$1:$2:$x\"; }}; {{ mapfile -t -C cb -c 1 arr; echo \
-			 \"arr=${{arr[*]}}\"; }} < '{path}'"
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
-	}
-
-	/// Contract: `mapfile` into a readonly array fails before reading, as in
-	/// bash: the array is unchanged and the piped input stays for the next
-	/// reader.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn mapfile_into_a_readonly_array_leaves_the_input_unread() {
-		let (_, output) = execute_captured(
-			"printf 'a\\nb\\n' | { arr=(x); readonly arr; mapfile -t -O 1 arr; echo \"rc=$? \
-			 ${arr[*]}\"; cat; }"
-				.to_owned(),
-		)
-		.await;
-		assert!(output.ends_with("rc=1 x\na\nb\n"), "{output:?}");
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn ps_builtin_lists_one_line_per_thread_with_m() {
-		// Field report: `ps -M -p <pid>` failed with "unsupported option '-M'".
-		let pid = std::process::id().to_string();
-		let (result, output) = execute_captured(format!("ps -M -p {pid}")).await;
-		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		let mut lines = output.lines();
-		let header: Vec<&str> = lines
-			.next()
-			.unwrap_or_default()
-			.split_whitespace()
-			.collect();
-		assert_eq!(header, ["USER", "PID", "TT", "%CPU", "STAT", "PRI", "STIME", "UTIME", "COMMAND"]);
-		let threads: Vec<Vec<&str>> = lines
-			.map(|line| line.split_whitespace().collect())
-			.collect();
-		// The multi-threaded tokio runtime guarantees several threads.
-		assert!(threads.len() > 1, "{output:?}");
-		// USER, TT and COMMAND print only on the first thread line.
-		assert_eq!(threads[0].get(1), Some(&pid.as_str()), "{output:?}");
-		assert!(threads[0].len() >= 9, "{output:?}");
-		for fields in &threads[1..] {
-			assert_eq!(fields.len(), 6, "{output:?}");
-			assert_eq!(fields[0], pid);
-			assert!(fields[1].parse::<f64>().is_ok(), "%CPU: {:?}", fields[1]);
-			#[cfg(target_os = "macos")]
-			assert!(fields[5].contains(':'), "UTIME: {:?}", fields[5]);
-		}
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn top_builtin_emits_one_finite_snapshot() {
-		#[cfg(target_os = "macos")]
-		let command = "top -l 1 -n 3";
-		#[cfg(not(target_os = "macos"))]
-		let command = "top -b -n 1 -r 3";
-		let (result, output) = execute_captured(command.to_string()).await;
-		assert_eq!(result.exit_code, Some(0));
-		assert!(output.contains("top - snapshot 1"));
-		assert!(output.contains("PID"));
-		assert!(output.contains("COMMAND"));
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn top_builtin_stops_when_its_output_pipe_closes() {
-		#[cfg(target_os = "macos")]
-		let command = "top -s 0 | head -n 1";
-		#[cfg(not(target_os = "macos"))]
-		let command = "top -d 0 | head -n 1";
-		// top observes head's closed pipe on its next write, after completing a
-		// full synchronous process snapshot. Under host load that scan takes
-		// seconds; this is only a bound against a broken pipe-close loop.
-		let execution = time::timeout(Duration::from_secs(30), execute_captured(command.to_string()))
-			.await
-			.expect("top kept sampling after its output pipe closed");
-		assert_eq!(execution.0.exit_code, Some(0));
-		assert!(execution.1.contains("top - snapshot 1"), "{:?}", execution.1);
-	}
-
-	/// Regression: builtin tail upstream of an early-exiting consumer printed
-	/// "tail: Broken pipe" and failed (`tail -c N big.jsonl | jq …` with jq
-	/// aborting on a parse error). Real tail dies silently from SIGPIPE; the
-	/// builtin must exit 141 with no diagnostic. `pipefail` exposes tail's own
-	/// status, so rc=141 proves the broken pipe actually fired (head closed
-	/// the pipe early) and was mapped to the silent SIGPIPE exit, not 1.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn tail_builtin_is_silent_when_downstream_closes_pipe() {
-		let dir = tempfile::tempdir().expect("tempdir");
-		let file = dir.path().join("big.txt");
-		// ~589 KiB: forces the seekable bounded_tail path, and the 400 KB tail
-		// overflows the OS pipe buffer so tail is still writing when head exits.
-		let command = format!(
-			"seq 1 100000 > '{file}'; set -o pipefail; tail -c 400000 '{file}' | head -c 10 > \
-			 /dev/null; echo rc=$?",
-			file = file.display()
-		);
-		let (result, output) = execute_captured(command).await;
-		assert_eq!(result.exit_code, Some(0));
-		assert!(output.contains("rc=141"), "{output:?}");
-		assert!(!output.contains("Broken pipe"), "{output:?}");
-	}
-
-	/// Regression: every ported utility upstream of a stage that quits early
-	/// printed `<name>: Broken pipe (os error 32)` (and `write error`
-	/// variants) and exited 1 — `cut f | sed 'bad'` when sed died at parse
-	/// time, `sed … | head`, `ls | head`. SIGPIPE emulation lives in the host
-	/// boundary, so ports that know nothing about broken pipes must still die
-	/// silently with 141.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn builtins_upstream_of_closed_pipe_are_silent_and_exit_141() {
-		let dir = tempfile::tempdir().expect("tempdir");
-		let file = dir.path().join("big.txt");
-		let file = file.display();
-		// Large enough that the writer is still producing when the reader exits.
-		let cases = [
-			format!("cut -c1-5 '{file}' | sed -n 1-30p"),
-			format!("sed -n p '{file}' | head -n 1 > /dev/null"),
-			format!("sort -n '{file}' | head -n 1 > /dev/null"),
-			format!("uniq '{file}' | head -n 1 > /dev/null"),
-			format!("cat '{file}' | head -n 1 > /dev/null"),
-			format!("tr a-z A-Z < '{file}' | head -n 1 > /dev/null"),
-		];
-		for case in cases {
-			let command =
-				format!("seq 1 200000 > '{file}'; set -o pipefail; {case}; echo rc=${{PIPESTATUS[0]}}");
-			let (result, output) = execute_captured(command).await;
-			assert_eq!(result.exit_code, Some(0), "{case}: {output:?}");
-			assert!(output.contains("rc=141"), "{case}: {output:?}");
-			assert!(!output.contains("Broken pipe"), "{case}: {output:?}");
-			assert!(!output.contains("write error"), "{case}: {output:?}");
-		}
-	}
-
-	/// The kill builtin accepts a numeric signal and applies it to every process
-	/// operand.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_accepts_numeric_signal_for_multiple_processes() {
-		let mut first = Command::new("sleep")
-			.arg("30")
-			.spawn()
-			.expect("first sleep");
-		let mut second = Command::new("sleep")
-			.arg("30")
-			.spawn()
-			.expect("second sleep");
-		let first_pid = first.id().expect("first pid");
-		let second_pid = second.id().expect("second pid");
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		let result = session
-			.shell
-			.run_string(format!("kill -9 {first_pid} {second_pid}"), &source_info, &params)
-			.await
-			.expect("kill command");
-		let code = exit_code(&result);
-		if code != 0 {
-			let _ = first.kill().await;
-			let _ = second.kill().await;
-			let _ = first.wait().await;
-			let _ = second.wait().await;
-			assert_eq!(code, 0, "numeric multi-process kill should succeed");
-		}
-
-		let statuses =
-			time::timeout(Duration::from_secs(5), async { tokio::join!(first.wait(), second.wait()) })
-				.await;
-		if statuses.is_err() {
-			let _ = first.kill().await;
-			let _ = second.kill().await;
-			let _ = first.wait().await;
-			let _ = second.wait().await;
-			panic!("kill must signal every process operand");
-		}
-		let (first_status, second_status) = statuses.expect("checked timeout");
-		assert_eq!(first_status.expect("first wait").signal(), Some(libc::SIGKILL));
-		assert_eq!(second_status.expect("second wait").signal(), Some(libc::SIGKILL));
-	}
-
-	/// The kill builtin defaults to SIGTERM so processes can shut down
-	/// gracefully.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_defaults_to_sigterm() {
-		let dir = tempfile::tempdir().expect("temp dir");
-		let ready = dir.path().join("ready");
-		let mut child = Command::new("sh")
-			.args([
-				"-c",
-				"trap 'exit 42' TERM; : > \"$1\"; while :; do :; done",
-				"sh",
-				ready.to_str().expect("utf8 path"),
-			])
-			.spawn()
-			.expect("trapping child");
-		let pid = child.id().expect("child pid");
-		let ready_result = time::timeout(Duration::from_secs(5), async {
-			while !ready.exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await;
-		if ready_result.is_err() {
-			let _ = child.kill().await;
-			let _ = child.wait().await;
-			panic!("child did not install its SIGTERM trap");
-		}
-
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-		let result = session
-			.shell
-			.run_string(format!("kill {pid}"), &source_info, &params)
-			.await
-			.expect("kill command");
-		let code = exit_code(&result);
-
-		let status = time::timeout(Duration::from_secs(5), child.wait()).await;
-		if status.is_err() {
-			let _ = child.kill().await;
-			let _ = child.wait().await;
-			panic!("default kill signal did not terminate the child");
-		}
-		assert_eq!(code, 0, "default kill should succeed");
-		assert_eq!(status.expect("checked timeout").expect("child wait").code(), Some(42));
-	}
-
-	/// A negative PID after `--` targets a process group per `kill(2)` instead
-	/// of being parsed as a numeric signal, and a plain PID in the same command
-	/// is still signaled.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_preserves_negative_pid_process_group_operands() {
-		let dir = tempfile::tempdir().expect("temp dir");
-		let group_ready = dir.path().join("group-ready");
-		let plain_ready = dir.path().join("plain-ready");
-		let spawn_trapping = |ready: &std::path::Path, own_group: bool| {
-			let mut cmd = Command::new("sh");
-			cmd.args([
-				"-c",
-				"trap 'exit 42' TERM; : > \"$1\"; while :; do sleep 0.05; done",
-				"sh",
-				ready.to_str().expect("utf8 path"),
-			]);
-			if own_group {
-				// pgid becomes this child's own pid, so `-pid` addresses the group.
-				cmd.process_group(0);
-			}
-			cmd.spawn().expect("trapping child")
-		};
-
-		let mut group_child = spawn_trapping(&group_ready, true);
-		let mut plain_child = spawn_trapping(&plain_ready, false);
-		let group_pid = group_child.id().expect("group pid");
-		let plain_pid = plain_child.id().expect("plain pid");
-
-		let ready_result = time::timeout(Duration::from_secs(5), async {
-			while !group_ready.exists() || !plain_ready.exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await;
-		if ready_result.is_err() {
-			let _ = group_child.start_kill();
-			let _ = plain_child.start_kill();
-			let _ = group_child.wait().await;
-			let _ = plain_child.wait().await;
-			panic!("children did not install their SIGTERM traps");
-		}
-
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-		let result = session
-			.shell
-			.run_string(format!("kill -TERM -- -{group_pid} {plain_pid}"), &source_info, &params)
-			.await
-			.expect("kill command");
-		let code = exit_code(&result);
-
-		let statuses = time::timeout(Duration::from_secs(5), async {
-			tokio::join!(group_child.wait(), plain_child.wait())
-		})
-		.await;
-		if statuses.is_err() {
-			let _ = group_child.start_kill();
-			let _ = plain_child.start_kill();
-			let _ = group_child.wait().await;
-			let _ = plain_child.wait().await;
-			panic!("negative-PID kill must signal the process group and the plain PID");
-		}
-		let (group_status, plain_status) = statuses.expect("checked timeout");
-		assert_eq!(code, 0, "negative-PID kill should succeed");
-		assert_eq!(group_status.expect("group wait").code(), Some(42));
-		assert_eq!(plain_status.expect("plain wait").code(), Some(42));
-	}
-
-	/// When clap consumes the `--` marker before `execute` (the default-signal
-	/// and `-s SIG` forms), a following negative PID is still an operand, not a
-	/// signal: `kill -- -<pgid>` defaults to SIGTERM for the group, and
-	/// `kill -s TERM -- -<pgid>` sends the named signal to the group.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_signals_group_when_marker_precedes_negative_pid() {
-		let dir = tempfile::tempdir().expect("temp dir");
-		let default_ready = dir.path().join("default-ready");
-		let named_ready = dir.path().join("named-ready");
-		let spawn_group_leader = |ready: &std::path::Path| {
-			Command::new("sh")
-				.args([
-					"-c",
-					"trap 'exit 42' TERM; : > \"$1\"; while :; do sleep 0.05; done",
-					"sh",
-					ready.to_str().expect("utf8 path"),
-				])
-				.process_group(0)
-				.spawn()
-				.expect("group leader")
-		};
-
-		let mut default_child = spawn_group_leader(&default_ready);
-		let mut named_child = spawn_group_leader(&named_ready);
-		let default_pid = default_child.id().expect("default pid");
-		let named_pid = named_child.id().expect("named pid");
-
-		let ready_result = time::timeout(Duration::from_secs(5), async {
-			while !default_ready.exists() || !named_ready.exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await;
-		if ready_result.is_err() {
-			let _ = default_child.start_kill();
-			let _ = named_child.start_kill();
-			let _ = default_child.wait().await;
-			let _ = named_child.wait().await;
-			panic!("group leaders did not install their SIGTERM traps");
-		}
-
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-		// Default signal (SIGTERM) with the marker consumed by clap.
-		let default_result = session
-			.shell
-			.run_string(format!("kill -- -{default_pid}"), &source_info, &params)
-			.await
-			.expect("default kill command");
-		// Named signal via -s, marker consumed by clap.
-		let named_result = session
-			.shell
-			.run_string(format!("kill -s TERM -- -{named_pid}"), &source_info, &params)
-			.await
-			.expect("named kill command");
-
-		let statuses = time::timeout(Duration::from_secs(5), async {
-			tokio::join!(default_child.wait(), named_child.wait())
-		})
-		.await;
-		if statuses.is_err() {
-			let _ = default_child.start_kill();
-			let _ = named_child.start_kill();
-			let _ = default_child.wait().await;
-			let _ = named_child.wait().await;
-			panic!("marker-preceded negative PID must signal the process group");
-		}
-		let (default_status, named_status) = statuses.expect("checked timeout");
-		assert_eq!(exit_code(&default_result), 0, "`kill -- -<pgid>` should succeed");
-		assert_eq!(exit_code(&named_result), 0, "`kill -s TERM -- -<pgid>` should succeed");
-		assert_eq!(default_status.expect("default wait").code(), Some(42));
-		assert_eq!(named_status.expect("named wait").code(), Some(42));
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_signals_every_process_in_a_jobspec_pipeline() {
-		const MARKER: &str = "PI_SHELL_TEST_KILL_JOBSPEC_PIPELINE";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::kill_builtin_signals_every_process_in_a_jobspec_pipeline",
-				MARKER,
-				true,
-			)
-			.await;
-			return;
-		}
-
-		let dir = tempfile::tempdir().expect("jobspec directory");
-		let first_pidfile = dir.path().join("first.pid");
-		let second_pidfile = dir.path().join("second.pid");
-		let _cleanup = PidfileProcessCleanup(vec![first_pidfile.clone(), second_pidfile.clone()]);
-		let first_ready = dir.path().join("first.ready");
-		let second_ready = dir.path().join("second.ready");
-		let first_script = "trap 'exit 42' TERM; echo $$ > \"$1\"; : > \"$2\"; kill -STOP $$; while \
-		                    :; do sleep 0.05; done";
-		let second_script = "trap 'exit 43' TERM; echo $$ > \"$1\"; : > \"$2\"; kill -STOP $$; \
-		                     while :; do sleep 0.05; done";
-		let command = format!(
-			"sh -c {} sh {} {} | sh -c {} sh {} {}",
-			quote_arg(first_script),
-			quote_arg(first_pidfile.to_str().expect("utf8 first pidfile")),
-			quote_arg(first_ready.to_str().expect("utf8 first ready path")),
-			quote_arg(second_script),
-			quote_arg(second_pidfile.to_str().expect("utf8 second pidfile")),
-			quote_arg(second_ready.to_str().expect("utf8 second ready path")),
-		);
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		time::timeout(
-			Duration::from_secs(5),
-			session.shell.run_string(command, &source_info, &params),
-		)
-		.await
-		.expect("pipeline did not stop")
-		.expect("stopped pipeline");
-		time::timeout(Duration::from_secs(5), async {
-			while !first_ready.exists() || !second_ready.exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("pipeline processes did not become ready");
-		assert_eq!(
-			session
-				.shell
-				.jobs()
-				.current_job()
-				.expect("stopped pipeline job")
-				.process_ids()
-				.count(),
-			2,
-			"jobspec must retain every external pipeline process",
-		);
-		let pids = [&first_pidfile, &second_pidfile].map(|pidfile| {
-			fs::read_to_string(pidfile)
-				.expect("pipeline pidfile")
-				.trim()
-				.parse::<i32>()
-				.expect("pipeline pid")
-		});
-
-		let killed = session
-			.shell
-			.run_string("kill -CONT %1; kill %1", &source_info, &params)
-			.await
-			.expect("kill jobspec");
-		assert_eq!(exit_code(&killed), 0, "`kill %1` should signal every pipeline process");
-		let _ = session
-			.shell
-			.run_string("wait %1", &source_info, &params)
-			.await
-			.expect("reap jobspec");
-		for pid in pids {
-			assert!(process::Process::from_pid(pid).is_none(), "pipeline process {pid} survived");
-		}
-	}
-
-	/// Detached non-interactive external pipeline stages do not share a process
-	/// group. A stopped later stage must still stop the whole pipeline instead
-	/// of leaving its earlier producer blocked on a full pipe.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn stopped_later_detached_pipeline_stage_stops_pipeline() {
-		const MARKER: &str = "PI_SHELL_TEST_STOPPED_LATER_DETACHED_STAGE";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::stopped_later_detached_pipeline_stage_stops_pipeline",
-				MARKER,
-				false,
-			)
-			.await;
-			return;
-		}
-
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-		let result = time::timeout(
-			Duration::from_secs(20),
-			session
-				.shell
-				.run_string("/usr/bin/yes | sh -c 'kill -STOP $$'", &source_info, &params),
-		)
-		.await
-		.expect("pipeline did not report its stopped later stage")
-		.expect("stopped pipeline");
-		assert_eq!(exit_code(&result), 148);
-		assert_eq!(
-			session
-				.shell
-				.jobs()
-				.current_job()
-				.expect("stopped pipeline job")
-				.process_ids()
-				.count(),
-			2,
-			"stopped pipeline must retain every external stage"
-		);
-	}
-
-	/// Interactive job control can give the first stage a process group while
-	/// a pipe-input later stage still detaches into its own session. The later
-	/// stop must cover the pipeline despite that partial group membership.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn stopped_later_interactive_detached_stage_stops_pipeline() {
-		const MARKER: &str = "PI_SHELL_TEST_STOPPED_LATER_INTERACTIVE_STAGE";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::stopped_later_interactive_detached_stage_stops_pipeline",
-				MARKER,
-				false,
-			)
-			.await;
-			return;
-		}
-
-		let (_pty_master, pty_slave) = pseudo_terminal_session();
-		let (mut session, params) = interactive_kill_test_context(&pty_slave).await;
-		let source_info = SourceInfo::from("pi-natives:test");
-		let result = time::timeout(
-			Duration::from_secs(20),
-			session
-				.shell
-				.run_string("/usr/bin/yes | sh -c 'kill -STOP $$'", &source_info, &params),
-		)
-		.await
-		.expect("interactive pipeline did not report its stopped later stage")
-		.expect("stopped pipeline");
-		assert_eq!(exit_code(&result), 148);
-		assert_eq!(
-			session
-				.shell
-				.jobs()
-				.current_job()
-				.expect("stopped pipeline job")
-				.process_ids()
-				.count(),
-			2,
-			"stopped pipeline must retain every external stage"
-		);
-	}
-
-	/// Every selected stopped stage reports one pipeline stop episode. After
-	/// every stage is continued, fg must consume no stale stop report and wait
-	/// for the pipeline to complete.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn resumed_pipeline_drains_every_selected_stop_report() {
-		const MARKER: &str = "PI_SHELL_TEST_DRAINED_STOP_REPORTS";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::resumed_pipeline_drains_every_selected_stop_report",
-				MARKER,
-				false,
-			)
-			.await;
-			return;
-		}
-
-		let script = "echo $$ > \"$1\"; : > \"$2\"; if test \"$3\" -eq 1; then kill -STOP $$; fi; \
-		              while ! test -e \"$4\"; do sleep 0.01; done";
-		let (_pty_master, pty_slave) = pseudo_terminal_session();
-		for stage_count in [2_usize, 3] {
-			for stopped_subset in 1..(1_usize << stage_count) {
-				let files = tempfile::tempdir().expect("pipeline files");
-				let release = files.path().join("release");
-				let pidfiles: Vec<_> = (0..stage_count)
-					.map(|stage| files.path().join(format!("{stage}.pid")))
-					.collect();
-				let readyfiles: Vec<_> = (0..stage_count)
-					.map(|stage| files.path().join(format!("{stage}.ready")))
-					.collect();
-				let command = (0..stage_count)
-					.map(|stage| {
-						let stopped = usize::from(stopped_subset & (1 << stage) != 0);
-						format!(
-							"sh -c {} sh {} {} {stopped} {}",
-							quote_arg(script),
-							quote_arg(pidfiles[stage].to_str().expect("utf8 pidfile")),
-							quote_arg(readyfiles[stage].to_str().expect("utf8 readyfile")),
-							quote_arg(release.to_str().expect("utf8 release")),
-						)
-					})
-					.collect::<Vec<_>>()
-					.join(" | ");
-				let (mut session, params) = interactive_kill_test_context(&pty_slave).await;
-				let source_info = SourceInfo::from("pi-natives:test");
-				let initial = time::timeout(
-					Duration::from_secs(20),
-					session.shell.run_string(command, &source_info, &params),
-				)
-				.await
-				.expect("pipeline did not report its initial stop")
-				.expect("stopped pipeline");
-				assert_eq!(exit_code(&initial), 148, "subset {stopped_subset:#b}");
-				time::timeout(Duration::from_secs(20), async {
-					while !readyfiles.iter().all(|file| file.exists()) {
-						time::sleep(Duration::from_millis(10)).await;
-					}
-				})
-				.await
-				.expect("pipeline stages did not become ready");
-				let pids: Vec<i32> = pidfiles
-					.iter()
-					.map(|file| {
-						fs::read_to_string(file)
-							.expect("stage pidfile")
-							.trim()
-							.parse()
-							.expect("stage pid")
-					})
-					.collect();
-				time::timeout(Duration::from_secs(20), async {
-					while pids.iter().enumerate().any(|(stage, pid)| {
-						stopped_subset & (1 << stage) != 0
-							&& !pi_builtins::ProcInfo::all()
-								.into_iter()
-								.any(|process| process.pid() == *pid && process.state() == 'T')
-					}) {
-						time::sleep(Duration::from_millis(10)).await;
-					}
-				})
-				.await
-				.expect("selected stages did not stop");
-				fs::write(&release, "").expect("release stages");
-				let continued = session
-					.shell
-					.run_string(
-						format!(
-							"kill -CONT {}",
-							pids
-								.iter()
-								.map(ToString::to_string)
-								.collect::<Vec<_>>()
-								.join(" ")
-						),
-						&source_info,
-						&params,
-					)
-					.await
-					.expect("continue stages");
-				assert_eq!(exit_code(&continued), 0, "subset {stopped_subset:#b}");
-				let resumed = time::timeout(
-					Duration::from_secs(20),
-					session.shell.run_string("fg %1", &source_info, &params),
-				)
-				.await
-				.expect("resumed pipeline did not complete")
-				.expect("foreground resumed pipeline");
-				assert_eq!(
-					exit_code(&resumed),
-					0,
-					"subset {stopped_subset:#b} reported a stale stop after fg"
-				);
-			}
-		}
-	}
-
-	/// A child that stops before `ChildProcess::wait` begins is still reported
-	/// as stopped. Every pipeline stage is spawned before the first one is
-	/// waited on, so a stage that stops itself at once (the jobspec test above)
-	/// can stop before the wait subscribes to SIGCHLD; that signal is never
-	/// observed, and without a check for already-stopped children the wait
-	/// hangs.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn child_wait_reports_a_stop_that_precedes_the_wait() {
-		const MARKER: &str = "PI_SHELL_TEST_CHILD_STOP_BEFORE_WAIT";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::child_wait_reports_a_stop_that_precedes_the_wait",
-				MARKER,
-				false,
-			)
-			.await;
-			return;
-		}
-
-		let mut command = Command::new("sh");
-		command.args(["-c", "kill -STOP $$"]).kill_on_drop(true);
-		let child = command.spawn().expect("self-stopping child");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
-		time::timeout(Duration::from_secs(20), async {
-			while !pi_builtins::ProcInfo::all()
-				.into_iter()
-				.any(|process| process.pid() == pid && process.state() == 'T')
-			{
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("child did not stop itself");
-
-		let mut child = brush_core::processes::ChildProcess::new(child, Some(pid), None);
-		let result = time::timeout(Duration::from_secs(20), child.wait(None))
-			.await
-			.expect("wait missed a stop that happened before it began")
-			.expect("child wait");
-		assert!(matches!(result, brush_core::processes::ProcessWaitResult::Stopped));
-	}
-
-	/// A stopped background process must not make the next foreground process
-	/// look stopped. The inner run is isolated: after the background child
-	/// stops, the foreground command is the only new child that could report
-	/// status to the shell.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn stopped_background_job_does_not_stop_foreground_process() {
-		const MARKER: &str = "PI_SHELL_TEST_STOPPED_BACKGROUND_JOB";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::stopped_background_job_does_not_stop_foreground_process",
-				MARKER,
-				false,
-			)
-			.await;
-			return;
-		}
-
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-		let background = session
-			.shell
-			.run_string("sh -c 'kill -STOP $$' &", &source_info, &params)
-			.await
-			.expect("start stopped background process");
-		assert_eq!(exit_code(&background), 0);
-		let background_pid = session
-			.shell
-			.jobs()
-			.current_job()
-			.expect("background job")
-			.process_ids()
-			.next()
-			.expect("background process");
-		time::timeout(Duration::from_secs(20), async {
-			while !pi_builtins::ProcInfo::all()
-				.into_iter()
-				.any(|process| process.pid() == background_pid && process.state() == 'T')
-			{
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("background process did not stop");
-
-		let foreground = session
-			.shell
-			.run_string("/bin/sleep 1", &source_info, &params)
-			.await
-			.expect("foreground sleep");
-		assert_eq!(
-			exit_code(&foreground),
-			0,
-			"a stopped background process must not stop the foreground sleep"
-		);
-		assert_eq!(
-			session.shell.jobs().jobs.len(),
-			1,
-			"foreground sleep must not become a stopped job"
-		);
-
-		let _ = session
-			.shell
-			.run_string("kill -CONT %1; kill %1; wait %1", &source_info, &params)
-			.await;
-	}
-
-	/// A failed target makes `kill` return non-zero without preventing later
-	/// process operands from receiving the selected signal.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_continues_after_target_failure() {
-		let mut first = Command::new("sleep")
-			.arg("30")
-			.spawn()
-			.expect("first sleep");
-		let mut second = Command::new("sleep")
-			.arg("30")
-			.spawn()
-			.expect("second sleep");
-		let mut stale = Command::new("true").spawn().expect("stale process");
-		let first_pid = first.id().expect("first pid");
-		let second_pid = second.id().expect("second pid");
-		let stale_pid = stale.id().expect("stale pid");
-		stale.wait().await.expect("stale wait");
-
-		let (mut session, params) = kill_test_context().await;
-		let source_info = SourceInfo::from("pi-natives:test");
-		let result = session
-			.shell
-			.run_string(
-				format!("kill -KILL {first_pid} {stale_pid} {second_pid}"),
-				&source_info,
-				&params,
-			)
-			.await
-			.expect("kill command");
-		let code = exit_code(&result);
-
-		let statuses =
-			time::timeout(Duration::from_secs(5), async { tokio::join!(first.wait(), second.wait()) })
-				.await;
-		if statuses.is_err() {
-			let _ = first.start_kill();
-			let _ = second.start_kill();
-			let _ = first.wait().await;
-			let _ = second.wait().await;
-			panic!("kill must continue signaling after an intermediate target fails");
-		}
-		let (first_status, second_status) = statuses.expect("checked timeout");
-		assert_ne!(code, 0, "a failed target should make kill return non-zero");
-		assert_eq!(first_status.expect("first wait").signal(), Some(libc::SIGKILL));
-		assert_eq!(second_status.expect("second wait").signal(), Some(libc::SIGKILL));
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_translates_signal_names_and_numbers() {
-		let (result, output) = execute_captured("kill -l KILL; kill -l 9".to_string()).await;
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "9\nKILL\n");
-	}
-
-	async fn run_isolated_kill_test(test_name: &str, marker: &str, own_process_group: bool) {
-		let mut command =
-			tokio::process::Command::new(std::env::current_exe().expect("current test executable"));
-		command.args(["--exact", test_name]).env(marker, "1");
-		#[cfg(unix)]
-		if own_process_group {
-			command.process_group(0);
-		}
-		#[cfg(not(unix))]
-		let _ = own_process_group;
-		let status = command.status().await.expect("isolated test process");
-		assert!(status.success(), "isolated kill test failed: {status}");
-	}
-
-	/// `kill -0` can probe the shell, but a nonzero signal aimed at its PID is
-	/// refused without terminating command execution.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_refuses_own_pid() {
-		const MARKER: &str = "PI_SHELL_TEST_KILL_OWN_PID";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test("shell::tests::kill_builtin_refuses_own_pid", MARKER, false).await;
-			return;
-		}
-
-		let pid = std::process::id();
-		let (probe, _) = execute_captured(format!("kill -0 {pid}")).await;
-		assert_eq!(probe.exit_code, Some(0), "signal 0 should probe the shell process");
-		let (result, output) = execute_captured(format!(
-			"kill -KILL {pid}; status=$?; printf 'status=%s survived\\n' \"$status\"; test \
-			 \"$status\" -ne 0"
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "the shell must survive a direct kill attempt");
-		assert!(output.contains("refusing to signal the shell process"), "{output:?}");
-		assert!(output.contains("survived"), "{output:?}");
-	}
-
-	/// A process-group operand that contains the shell is rejected before the
-	/// `kill(2)` group operation can signal any member.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_refuses_own_process_group() {
-		const MARKER: &str = "PI_SHELL_TEST_KILL_OWN_GROUP";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::kill_builtin_refuses_own_process_group",
-				MARKER,
-				true,
-			)
-			.await;
-			return;
-		}
-
-		let (result, output) = execute_captured(
-			"kill -KILL -- 0; status=$?; printf 'status=%s survived\\n' \"$status\"; test \
-			 \"$status\" -ne 0"
-				.to_string(),
-		)
-		.await;
-		assert_eq!(result.exit_code, Some(0), "the shell must survive a group kill attempt");
-		assert!(output.contains("refusing to signal the shell process"), "{output:?}");
-		assert!(output.contains("survived"), "{output:?}");
-	}
-
-	/// An agent that runs `kill <terminal pid>` or `pkill <terminal>` must not
-	/// be able to take down the terminal the session lives in. Self-kill was
-	/// already refused, but an ancestor is a different process in a different
-	/// process group and session, so it slipped straight through.
-	///
-	/// Uses `CONT` rather than a lethal signal: the guard runs for any real
-	/// signal (only `-0` is exempt), so `CONT` exercises exactly the same code
-	/// path while staying harmless if the guard ever regresses. A lethal signal
-	/// here could terminate the test harness. `TERM` appears once, aimed only
-	/// at a child this test spawned, to prove the guard has not over-blocked
-	/// into uselessness.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_builtin_refuses_ancestors_but_not_unrelated_processes() {
-		let sleep = test_executable("sleep");
-		let command = format!(
-			"parent=$(ps -o ppid= -p $$ | tr -d ' ')\nkill -CONT \"$parent\"; printf \
-			 'ancestor=%s\\n' \"$?\"\n{} 30 &\nchild=$!\nkill -TERM \"$child\"; printf 'child=%s\\n' \
-			 \"$?\"\nprintf 'survived\\n'",
-			quote_arg(sleep.to_str().expect("utf8 sleep path"))
-		);
-		let (result, output) = execute_captured(command).await;
-		assert_eq!(result.exit_code, Some(0), "the shell must survive: {output:?}");
-		assert!(output.contains("survived"), "{output:?}");
-		assert!(
-			output.contains("refusing to signal the shell process"),
-			"signalling an ancestor must be refused: {output:?}"
-		);
-		assert!(output.contains("ancestor=1"), "the ancestor kill must report failure: {output:?}");
-		// The same guard must leave a process outside our ancestry alone, or
-		// `kill` would be useless.
-		assert!(output.contains("child=0"), "an unrelated child must remain signallable: {output:?}");
-	}
-
-	/// `pkill` removes the shell PID from the candidate set before sending the
-	/// selected signal, even when that PID is requested explicitly.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pkill_builtin_excludes_own_pid() {
-		const MARKER: &str = "PI_SHELL_TEST_PKILL_OWN_PID";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test("shell::tests::pkill_builtin_excludes_own_pid", MARKER, false)
-				.await;
-			return;
-		}
-
-		let pid = std::process::id();
-		let (result, output) = execute_captured(format!(
-			"pkill -KILL -p {pid}; status=$?; printf 'status=%s survived\\n' \"$status\"; test \
-			 \"$status\" -eq 1"
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "the shell must survive an explicit pkill");
-		assert!(output.contains("survived"), "{output:?}");
-	}
-
-	/// `cmp` remains available with no executable search path, proving the shell
-	/// dispatches the in-process builtin rather than a platform binary.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn cmp_is_registered_as_an_in_process_builtin() {
-		let dir = tempfile::tempdir().expect("temp dir");
-		let root = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
-		std::fs::write(root.join("a"), b"same").expect("write a");
-		std::fs::write(root.join("b"), b"same").expect("write b");
-		std::fs::write(root.join("c"), b"different").expect("write c");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(root.to_str().expect("utf8 temp path"))
-			.await
-			.expect("set cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		let equal = session
-			.shell
-			.run_string("PATH=/definitely-missing cmp -s a b", &source_info, &params)
-			.await
-			.expect("equal cmp");
-		assert_eq!(exit_code(&equal), 0);
-
-		let different = session
-			.shell
-			.run_string("PATH=/definitely-missing cmp -s a c", &source_info, &params)
-			.await
-			.expect("different cmp");
-		assert_eq!(exit_code(&different), 1);
-	}
-
-	/// The moreutils-style builtins (`ts`, `sponge`, `isutf8`, `combine`,
-	/// `ifne`, `errno`) dispatch in-process: the script runs with no usable
-	/// executable search path, and the `ts | sponge` pipeline must land its
-	/// output in the shell's working directory.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn moreutils_builtins_are_registered_in_process() {
-		let dir = tempfile::tempdir().expect("temp dir");
-		let root = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(root.to_str().expect("utf8 temp path"))
-			.await
-			.expect("set cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		let script = "PATH=/definitely-missing\necho x | ts -s '%H:%M:%S' | sponge out || exit \
-		              10\nisutf8 out || exit 11\necho x | combine - and out || exit 12\nifne \
-		              /definitely-missing/tool || exit 13";
-		let result = session
-			.shell
-			.run_string(script, &source_info, &params)
-			.await
-			.expect("moreutils script");
-		assert_eq!(exit_code(&result), 0);
-
-		// `ts -s` stamps the first line with zero elapsed time: `HH:MM:SS x`.
-		let out = std::fs::read_to_string(root.join("out")).expect("sponge output");
-		assert!(out.len() == 11 && out.ends_with(" x\n"), "unexpected ts+sponge output: {out:?}");
-
-		#[cfg(unix)]
-		{
-			let errno = session
-				.shell
-				.run_string("errno ENOENT", &source_info, &params)
-				.await
-				.expect("errno lookup");
-			assert_eq!(exit_code(&errno), 0);
-		}
-	}
-
-	/// `sort --compress-program` spawns real children from inside the
-	/// external-sort temp-file machinery. Those children must inherit the
-	/// *shell's* context, not the host process's: the program is resolved
-	/// against the shell's exported `PATH` (here a directory that exists only
-	/// there), it runs in the shell working directory, and its stderr is
-	/// forwarded to the command's own fd 2 instead of being inherited — an
-	/// inherited fd 2 belongs to the TUI and would corrupt the rendered frame.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_sort_compress_program_uses_shell_path_and_stderr() {
-		use std::os::unix::fs::PermissionsExt as _;
-
-		let tmp = std::env::temp_dir().join(format!("pi-sort-compress-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		let bin = tmp.join("bin");
-		std::fs::create_dir_all(&bin).expect("bin dir");
-
-		// An identity "compressor" that also proves it was started with the
-		// shell's working directory and reaches the command's stderr.
-		let shim = bin.join("pi-test-compress");
-		let shell = test_executable("sh");
-		let cat = test_executable("cat");
-		let shim_source = format!(
-			"#!{}\nprintf 'compressor cwd=%s\\n' \"$PWD\" >&2\nexec {}\n",
-			shell.display(),
-			quote_arg(cat.to_str().expect("utf8 cat path"))
-		);
-		std::fs::write(&shim, shim_source).expect("write shim");
-		std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod shim");
-
-		// Enough distinct lines that the 1K buffer forces spilling through the
-		// compressor rather than sorting entirely in memory.
-		let mut input = String::new();
-		for n in (0..400).rev() {
-			use std::fmt::Write as _;
-			let _ = writeln!(input, "line{n:04}");
-		}
-		std::fs::write(tmp.join("in.txt"), &input).expect("write input");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
-			.await
-			.expect("set cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		// `PATH` holds only the shim directory, so the compressor is reachable
-		// solely through the shell's exported environment.
-		let script = format!(
-			"export PATH={}\nsort -S 1K --compress-program=pi-test-compress in.txt > out.txt 2> \
-			 err.txt",
-			bin.to_str().expect("utf8 bin path")
-		);
-		let exec = session
-			.shell
-			.run_string(script, &source_info, &params)
-			.await
-			.expect("run sort");
-		assert_eq!(exit_code(&exec), 0, "sort --compress-program failed");
-
-		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
-		let mut expected: Vec<&str> = input.lines().collect();
-		expected.sort_unstable();
-		assert_eq!(out.lines().collect::<Vec<_>>(), expected, "compressed external sort misordered");
-
-		// The compressor really ran (so the spill path was exercised), its
-		// stderr reached the command's redirected fd 2, and it started in the
-		// shell working directory.
-		let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
-		assert!(
-			err.contains("compressor cwd="),
-			"compressor stderr never reached the command's fd 2: {err:?}"
-		);
-		// The shell reports the working directory as it was set; macOS also
-		// exposes it under `/private`, so accept either spelling.
-		let canonical = std::fs::canonicalize(&tmp).expect("canonical tmp");
-		assert!(
-			err.contains(&format!("cwd={}\n", tmp.display()))
-				|| err.contains(&format!("cwd={}\n", canonical.display())),
-			"compressor did not start in the shell working directory ({}): {err:?}",
-			tmp.display()
-		);
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// The uutils-backed `mkdir` builtin must (1) create directories under the
-	/// shell's working directory rather than the host process cwd, (2) route
-	/// `-v` output through the command's (here redirected) stdout, and (3)
-	/// display the original operand, not the resolved absolute path.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_mkdir_resolves_cwd_and_displays_operand() {
-		let tmp = std::env::temp_dir().join(format!("pi-mkdir-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		let tmp_str = tmp.to_str().expect("utf8 temp path");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp_str)
-			.await
-			.expect("set cwd");
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-
-		let source_info = SourceInfo::from("pi-natives:test");
-		let exec = session
-			.shell
-			.run_string("mkdir -v -p a/b/c rel > out.txt", &source_info, &params)
-			.await
-			.expect("run_string");
-		assert!(matches!(exec.exit_code, ExecutionExitCode::Success), "exit {}", exit_code(&exec));
-
-		// (1) created under the shell working dir, and (2) not leaked into the
-		// host process cwd.
-		assert!(tmp.join("a/b/c").is_dir(), "nested dirs not created under shell cwd");
-		assert!(tmp.join("rel").is_dir(), "rel not created under shell cwd");
-		assert!(!std::path::Path::new("a/b/c").exists(), "mkdir leaked into process cwd");
-
-		// (2)+(3): -v output reached the redirected file, names the operand, and
-		// does not leak the absolute resolved path.
-		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
-		assert!(out.contains("'rel'"), "verbose output missing operand `rel`: {out:?}");
-		assert!(!out.contains(tmp_str), "verbose output leaked absolute path: {out:?}");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// `command -v`/`-V` must iterate over every operand like bash/zsh, printing
-	/// one line per name that resolves and skipping the misses, rather than
-	/// honoring only the first operand. Regression test for silently dropped
-	/// operands in `command -v a b c` (issue #10544).
-	#[tokio::test(flavor = "multi_thread")]
-	async fn command_v_iterates_all_operands() {
-		let tmp = std::env::temp_dir().join(format!("pi-command-v-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		let tmp_str = tmp.to_str().expect("utf8 temp path");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp_str)
-			.await
-			.expect("set cwd");
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		// Three always-registered builtins plus a name that never resolves. bash
-		// prints one line per resolved builtin and skips the miss, exiting 0.
-		let exec = session
-			.shell
-			.run_string("command -v true false pwd nope-xyz-10544 > out.txt", &source_info, &params)
-			.await
-			.expect("run_string");
-		assert_eq!(exit_code(&exec), 0, "command -v exit code with a resolvable name");
-
-		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
-		let lines: Vec<&str> = out.lines().collect();
-		assert_eq!(
-			lines,
-			vec!["true", "false", "pwd"],
-			"command -v must print one line per resolved operand and skip misses: {out:?}"
-		);
-
-		// When no operand resolves, the exit status is a general error.
-		let exec = session
-			.shell
-			.run_string("command -v nope-a-10544 nope-b-10544", &source_info, &params)
-			.await
-			.expect("run_string");
-		assert_eq!(exit_code(&exec), 1, "command -v exit code when nothing resolves");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// Every utility `pi-builtins` offers must actually be dispatchable in
-	/// process, under the name it is registered as.
-	///
-	/// The registry (`pi_builtins::utility_builtins`) maps a name to a
-	/// `Registration`, and each registration renders its help from its own
-	/// `clap` command. Wiring a name to the wrong module — easy to do, since the
-	/// mapping is written by hand — still compiles and still runs; the only
-	/// visible symptom is that `NAME --help` describes some other utility. With
-	/// `PATH` emptied there is no binary to fall back on, so this also proves
-	/// the whole set resolves as builtins rather than as system commands.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn every_utility_builtin_is_registered_under_its_own_name() {
-		let tmp = std::env::temp_dir().join(format!("pi-utility-help-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
-			.await
-			.expect("set cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		// Pin the registry contents rather than iterating whatever it happens to
-		// contain: a loop over the registry cannot notice a name missing from it.
-		// Adding a utility is expected to update this list.
-		let expected = [
-			"ast-grep",
-			"b2sum",
-			"base32",
-			"base64",
-			"basename",
-			"cat",
-			#[cfg(unix)]
-			"chmod",
-			"cksum",
-			"cmp",
-			"combine",
-			"comm",
-			"cp",
-			"cut",
-			"date",
-			"dd",
-			"df",
-			"diff",
-			"dirname",
-			"du",
-			"env",
-			#[cfg(unix)]
-			"errno",
-			"fd",
-			"find",
-			"fold",
-			"grep",
-			"head",
-			"hostname",
-			#[cfg(unix)]
-			"id",
-			"ifne",
-			"isutf8",
-			"jq",
-			"ln",
-			"ls",
-			"md5sum",
-			"mkdir",
-			"mktemp",
-			"mv",
-			"nl",
-			"nproc",
-			"od",
-			"paste",
-			"printenv",
-			"readlink",
-			"realpath",
-			"rg",
-			"rm",
-			"rmdir",
-			"rsync",
-			"sed",
-			"seq",
-			"sg",
-			"sha1sum",
-			"sha224sum",
-			"sha256sum",
-			"sha384sum",
-			"sha512sum",
-			"sort",
-			"sponge",
-			"stat",
-			"tac",
-			"tail",
-			"tee",
-			"touch",
-			"tr",
-			"truncate",
-			"ts",
-			"uname",
-			"uniq",
-			"uptime",
-			"wc",
-			"which",
-			"whoami",
-			"xargs",
-			"yes",
-		];
-		let mut names: Vec<&'static str> =
-			pi_builtins::utility_builtins::<brush_core::extensions::DefaultShellExtensions>()
-				.into_iter()
-				.map(|(name, _)| name)
-				.collect();
-		names.sort_unstable();
-		assert_eq!(names, expected, "the utility builtin registry changed");
-
-		for name in names {
-			let exec = session
-				.shell
-				.run_string(format!("PATH= {name} --help > help.txt 2> err.txt"), &source_info, &params)
-				.await
-				.unwrap_or_else(|err| panic!("{name} --help failed to run: {err}"));
-			assert_eq!(exit_code(&exec), 0, "{name} --help exited nonzero");
-
-			let help = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
-			let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
-			assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
-			// Some builtins are registered under the familiar command name but
-			// keep their implementation's own help text, exactly as the
-			// standalone versions did: `rg` is ripgrep, `jq` is jaq, `sg`
-			// is ast-grep (whose help names itself only through its usage
-			// line, here `sg`).
-			let expected = match name {
-				"rg" => "ripgrep",
-				"jq" => "jaq",
-				"sg" => "using AST pattern",
-				other => other,
-			};
-			assert!(
-				help.contains(expected),
-				"{name} --help does not mention {expected:?}, so it is wired to the wrong utility: \
-				 {help:.200?}"
-			);
-		}
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// Every process builtin `pi-builtins` offers must be installed and
-	/// dispatch in process.
-	///
-	/// `factory.rs` maps each name to a struct by hand, so a mis-wire compiles
-	/// and runs — and with `PATH` emptied there is no binary to silently fall
-	/// back to, which is the failure this catches. Each command gets an
-	/// invocation that is benign but must reach the builtin: exit 127 means the
-	/// name never resolved.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn every_process_builtin_is_installed_and_dispatches() {
-		let tmp = std::env::temp_dir().join(format!("pi-process-builtins-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
-			.await
-			.expect("set cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		// Bounded, side-effect-free invocations. `pgrep`/`pkill`/`pidwait` render
-		// their own help; `sleep`/`timeout`/`top` are given the smallest amount
-		// of work that still exercises dispatch; `nohup` with no operand is a
-		// usage error, which is still the builtin answering.
-		let probes = [
-			("nohup", "nohup"),
-			("pgrep", "pgrep --help"),
-			("pidwait", "pidwait --help"),
-			("pkill", "pkill --help"),
-			("ps", "ps --help"),
-			("sleep", "sleep 0"),
-			("timeout", "timeout 1 true"),
-			("top", "top -n 0"),
-		];
-
-		// Pin the registry contents rather than deriving the probe list from it:
-		// a test that skips whatever the registry omits cannot notice an
-		// omission.
-		let mut registered: Vec<&'static str> =
-			pi_builtins::process_builtins::<brush_core::extensions::DefaultShellExtensions>()
-				.into_iter()
-				.map(|(name, _)| name)
-				.collect();
-		registered.sort_unstable();
-		let expected: Vec<&'static str> = probes.iter().map(|(name, _)| *name).collect();
-		assert_eq!(registered, expected, "the process builtin registry changed");
-
-		// `kill` comes from the default builtin set, where our implementation
-		// replaced brush's, so it is checked alongside but not listed above.
-		for (name, command) in probes.iter().copied().chain([("kill", "kill -l")]) {
-			let exec = session
-				.shell
-				.run_string(format!("PATH= {command}"), &source_info, &params)
-				.await
-				.unwrap_or_else(|err| panic!("{name} failed to run: {err}"));
-			assert_ne!(
-				exit_code(&exec),
-				127,
-				"{name} resolved to nothing: it is not registered as a builtin"
-			);
-		}
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// Regression test for issue #5819: `mkdir -p ~/proj/{a,b}` must create both
-	/// `a` and `b` under `$HOME/proj`. Brace expansion runs before tilde
-	/// expansion and previously left every element after the first with a
-	/// literal `~`, so `b` was created as `./~/proj/b` in the shell cwd instead.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_mkdir_expands_tilde_for_every_brace_element() {
-		let base = std::env::temp_dir().join(format!("pi-mkdir-brace-{}", std::process::id()));
-		let home = base.join("home");
-		let cwd = base.join("cwd");
-		let _ = std::fs::remove_dir_all(&base);
-		std::fs::create_dir_all(&home).expect("home dir");
-		std::fs::create_dir_all(&cwd).expect("cwd dir");
-		let cwd_str = cwd.to_str().expect("utf8 cwd path");
-
-		let mut env = HashMap::new();
-		env.insert("HOME".to_string(), home.to_string_lossy().to_string());
-		let config = ShellConfig {
-			session_env:   Some(env),
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(cwd_str)
-			.await
-			.expect("set cwd");
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-
-		let source_info = SourceInfo::from("pi-natives:test");
-		let exec = session
-			.shell
-			.run_string("mkdir -p ~/proj/{a,b}", &source_info, &params)
-			.await
-			.expect("run_string");
-		assert!(matches!(exec.exit_code, ExecutionExitCode::Success), "exit {}", exit_code(&exec));
-
-		// Both elements' tildes expanded: dirs land under $HOME/proj.
-		assert!(home.join("proj/a").is_dir(), "~/proj/a not created under HOME");
-		assert!(home.join("proj/b").is_dir(), "~/proj/b not created under HOME");
-		// The buggy path created a literal `~` tree in the shell cwd.
-		assert!(!cwd.join("~").exists(), "literal ~ tree leaked into cwd");
-		assert!(!cwd.join("a").exists(), "unexpanded element leaked into cwd");
-
-		let _ = std::fs::remove_dir_all(&base);
-	}
-
-	/// `mkdir --help` and an invalid flag must be handled in-process: rendered
-	/// to the command streams and returned as an exit code. The upstream
-	/// `uumain` parser calls `std::process::exit`, which would terminate the
-	/// whole host (and this test binary); reaching the asserts proves the
-	/// vendored `run` entry point bypasses that path.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_mkdir_help_and_bad_flag_do_not_exit_process() {
-		let tmp = std::env::temp_dir().join(format!("pi-mkdir-help-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		let tmp_str = tmp.to_str().expect("utf8 temp path");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp_str)
-			.await
-			.expect("set cwd");
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		let help = session
-			.shell
-			.run_string("mkdir --help > help.txt", &source_info, &params)
-			.await
-			.expect("run_string help");
-		assert_eq!(exit_code(&help), 0, "mkdir --help should succeed");
-		let help_text = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
-		assert!(help_text.contains("mkdir"), "help text missing util name: {help_text:?}");
-
-		let bad = session
-			.shell
-			.run_string("mkdir --no-such-flag 2> err.txt", &source_info, &params)
-			.await
-			.expect("run_string bad flag");
-		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
-		let err_text = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
-		assert!(!err_text.is_empty(), "usage error should be reported to stderr");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// The uutils-backed `head` builtin must read piped stdin through the
-	/// context, read file operands resolved against the shell working directory,
-	/// honor the obsolete `-NUM` syntax, and write to the command's (here
-	/// redirected) stdout.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_head_streams_stdin_and_reads_files() {
-		let tmp = std::env::temp_dir().join(format!("pi-head-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		std::fs::write(tmp.join("data.txt"), "l1\nl2\nl3\nl4\nl5\n").expect("write data");
-		let tmp_str = tmp.to_str().expect("utf8 temp path");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp_str)
-			.await
-			.expect("set cwd");
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		// File operand, resolved against the shell working directory.
-		let f = session
-			.shell
-			.run_string("head -2 data.txt > out_file.txt", &source_info, &params)
-			.await
-			.expect("run_string file");
-		assert_eq!(exit_code(&f), 0, "head file read should succeed");
-		assert_eq!(std::fs::read_to_string(tmp.join("out_file.txt")).unwrap(), "l1\nl2\n");
-
-		// Piped stdin (head is the final stage; reads the pipe through the ctx).
-		let p = session
-			.shell
-			.run_string("printf 'a\\nb\\nc\\nd\\n' | head -2 > out_pipe.txt", &source_info, &params)
-			.await
-			.expect("run_string pipe");
-		assert_eq!(exit_code(&p), 0, "head stdin read should succeed");
-		assert_eq!(std::fs::read_to_string(tmp.join("out_pipe.txt")).unwrap(), "a\nb\n");
-
-		// Obsolete `-NUM` syntax, normalized by arg_iterate.
-		let o = session
-			.shell
-			.run_string("printf '1\\n2\\n3\\n' | head -1 > out_obs.txt", &source_info, &params)
-			.await
-			.expect("run_string obsolete");
-		assert_eq!(exit_code(&o), 0, "head -1 should succeed");
-		assert_eq!(std::fs::read_to_string(tmp.join("out_obs.txt")).unwrap(), "1\n");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// `head --help` / invalid flag must be handled in-process (rendered to the
-	/// command streams, returned as an exit code) — head has its own `run`
-	/// entry point bypassing uutils' process-exiting parser, and literalized
-	/// help strings.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_head_help_and_bad_flag_do_not_exit_process() {
-		let tmp = std::env::temp_dir().join(format!("pi-head-help-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		let tmp_str = tmp.to_str().expect("utf8 temp path");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session
-			.shell
-			.set_working_dir(tmp_str)
-			.await
-			.expect("set cwd");
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let source_info = SourceInfo::from("pi-natives:test");
-
-		let help = session
-			.shell
-			.run_string("head --help > help.txt", &source_info, &params)
-			.await
-			.expect("run_string head help");
-		assert_eq!(exit_code(&help), 0, "head --help should succeed");
-		let help_text = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
-		assert!(help_text.contains("first"), "help text not localized: {help_text:?}");
-
-		let bad = session
-			.shell
-			.run_string("head --no-such-flag 2> err.txt", &source_info, &params)
-			.await
-			.expect("run_string head bad flag");
-		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
-		assert_ne!(std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt"), "");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// Smoke-test the read-only uutils filter/listing builtins end-to-end
-	/// through the shell: piped stdin (sort/wc/tail), file reads + cwd
-	/// resolution (grep/ls/find), and redirected stdout capture.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_filters_listing_find_grep() {
-		let tmp = std::env::temp_dir().join(format!("pi-utils-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(tmp.join("sub")).expect("temp dirs");
-		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");
-		std::fs::write(tmp.join("sub/nested.txt"), "deep\n").expect("nested");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		// sort: reads piped stdin, parallel sort, writes sorted output.
-		session
-			.shell
-			.run_string("printf 'c\\na\\nb\\n' | sort > sort.txt", &si, &params)
-			.await
-			.expect("sort");
-		assert_eq!(read("sort.txt"), "a\nb\nc\n");
-		// wc -l: line count from stdin.
-		session
-			.shell
-			.run_string("printf 'x\\ny\\nz\\n' | wc -l > wc.txt", &si, &params)
-			.await
-			.expect("wc");
-		assert_eq!(read("wc.txt").trim(), "3");
-		// tail: last N lines from stdin.
-		session
-			.shell
-			.run_string("printf '1\\n2\\n3\\n4\\n' | tail -2 > tail.txt", &si, &params)
-			.await
-			.expect("tail");
-		assert_eq!(read("tail.txt"), "3\n4\n");
-		// grep: matching lines from a cwd-resolved file (single file => no
-		// prefix).
-		session
-			.shell
-			.run_string("grep ba data.txt > grep.txt", &si, &params)
-			.await
-			.expect("grep");
-		assert_eq!(read("grep.txt"), "bar\nbaz\n");
-		// ls: non-tty listing of the cwd.
-		session
-			.shell
-			.run_string("ls > ls.txt", &si, &params)
-			.await
-			.expect("ls");
-		let ls = read("ls.txt");
-		assert!(ls.contains("data.txt") && ls.contains("sub"), "ls output: {ls:?}");
-		// find: recursive name match. Paths must keep the `.` operand prefix
-		// (GNU/BSD contract) instead of leaking the working-dir-resolved absolute
-		// root the walk is physically rooted at.
-		session
-			.shell
-			.run_string("find . -name '*.txt' > find.txt", &si, &params)
-			.await
-			.expect("find");
-		let found = read("find.txt");
-		assert!(!found.trim().is_empty(), "find produced no output");
-		for line in found.lines() {
-			assert!(
-				line.starts_with("./"),
-				"find path is not operand-relative: {line:?} (full: {found:?})"
-			);
-		}
-		assert!(
-			found.contains("./data.txt") && found.contains("./sub/nested.txt"),
-			"find output: {found:?}"
-		);
-		// cat: concatenate a cwd-resolved file with -n line numbering.
-		session
-			.shell
-			.run_string("cat -n data.txt > cat.txt", &si, &params)
-			.await
-			.expect("cat");
-		assert_eq!(read("cat.txt"), "     1\tfoo\n     2\tbar\n     3\tbaz\n");
-		// uniq: collapse adjacent duplicate lines from piped stdin.
-		session
-			.shell
-			.run_string("printf 'a\\na\\nb\\nb\\nb\\nc\\n' | uniq > uniq.txt", &si, &params)
-			.await
-			.expect("uniq");
-		assert_eq!(read("uniq.txt"), "a\nb\nc\n");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// `rg` is not an alias for `grep`: it recurses by default, respects
-	/// ripgrep's ignore/hidden/binary filters, and keeps `-h` as help.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn rg_builtin_uses_ripgrep_defaults() {
-		let tmp = std::env::temp_dir().join(format!("pi-rg-defaults-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(tmp.join("sub")).expect("sub dir");
-		std::fs::create_dir_all(tmp.join(".git")).expect("git dir");
-		std::fs::write(tmp.join("data.txt"), "alpha\nneedle\n").expect("data");
-		std::fs::write(tmp.join("sub/nested.txt"), "needle\n").expect("nested");
-		std::fs::write(tmp.join(".hidden.txt"), "needle\n").expect("hidden");
-		std::fs::write(tmp.join("ignored.log"), "needle\n").expect("ignored");
-		std::fs::write(tmp.join(".gitignore"), "ignored.log\n").expect("gitignore");
-		std::fs::write(tmp.join("binary.bin"), b"needle\0hidden\n").expect("binary");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		let exec = session
-			.shell
-			.run_string("rg needle > rg.txt", &si, &params)
-			.await
-			.expect("rg");
-		assert_eq!(exit_code(&exec), 0, "rg recursive search should match");
-		let out = read("rg.txt");
-		assert!(out.contains("data.txt:needle"), "rg missed visible file: {out:?}");
-		assert!(out.contains("sub/nested.txt:needle"), "rg missed nested file: {out:?}");
-		assert!(!out.contains(".hidden.txt"), "rg searched hidden file by default: {out:?}");
-		assert!(!out.contains("ignored.log"), "rg ignored .gitignore by default: {out:?}");
-		assert!(!out.contains("binary.bin"), "rg printed binary file by default: {out:?}");
-
-		let single = session
-			.shell
-			.run_string("rg -nH needle data.txt > single.txt", &si, &params)
-			.await
-			.expect("rg single");
-		assert_eq!(exit_code(&single), 0, "rg explicit file should match");
-		assert_eq!(read("single.txt"), "data.txt:2:needle\n");
-
-		let explicit_binary = session
-			.shell
-			.run_string("rg needle binary.bin > explicit-binary.txt", &si, &params)
-			.await
-			.expect("rg explicit binary");
-		assert_eq!(exit_code(&explicit_binary), 0, "explicit binary file should be searched");
-		assert_eq!(read("explicit-binary.txt"), "needle\n");
-
-		let help = session
-			.shell
-			.run_string("rg -h > help.txt", &si, &params)
-			.await
-			.expect("rg help");
-		assert_eq!(exit_code(&help), 0, "rg -h should be help, not no-filename");
-		assert!(
-			read("help.txt").contains("ripgrep recursively searches"),
-			"help text should describe ripgrep"
-		);
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// `fd` recurses from the shell working directory, respects hidden and
-	/// ignore filters (including `.fdignore`), preserves explicit search-path
-	/// prefixes, and renders help to stdout with a success status.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn fd_builtin_uses_fd_defaults() {
-		let tmp = std::env::temp_dir().join(format!("pi-fd-defaults-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(tmp.join("sub")).expect("sub dir");
-		std::fs::create_dir_all(tmp.join(".git/info")).expect("git info dir");
-		std::fs::write(tmp.join("needle.txt"), "visible\n").expect("visible");
-		std::fs::write(tmp.join("sub/needle.rs"), "nested\n").expect("nested");
-		std::fs::write(tmp.join(".hidden-needle.txt"), "hidden\n").expect("hidden");
-		std::fs::write(tmp.join("ignored-needle.log"), "ignored\n").expect("ignored");
-		std::fs::write(tmp.join("excluded-needle.vcs"), "excluded\n").expect("excluded");
-		std::fs::write(tmp.join("fdignored-needle.tmp"), "fdignored\n").expect("fdignored");
-		std::fs::write(tmp.join(".gitignore"), "ignored-needle.log\n").expect("gitignore");
-		std::fs::write(tmp.join(".git/info/exclude"), "excluded-needle.vcs\n").expect("exclude");
-		std::fs::write(tmp.join(".fdignore"), "fdignored-needle.tmp\n").expect("fdignore");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		let exec = session
-			.shell
-			.run_string("fd needle > fd.txt", &si, &params)
-			.await
-			.expect("fd");
-		assert_eq!(exit_code(&exec), 0, "fd should match visible files");
-		let out = read("fd.txt");
-		assert!(out.contains("needle.txt"), "fd missed visible file: {out:?}");
-		assert!(out.contains("sub/needle.rs"), "fd missed nested file: {out:?}");
-		assert!(!out.contains(".hidden-needle.txt"), "fd searched hidden file: {out:?}");
-		assert!(!out.contains("ignored-needle.log"), "fd ignored .gitignore: {out:?}");
-		assert!(!out.contains("fdignored-needle.tmp"), "fd ignored .fdignore: {out:?}");
-		assert!(!out.contains("excluded-needle.vcs"), "fd ignored .git/info/exclude: {out:?}");
-
-		session
-			.shell
-			.run_string("fd -u needle > unrestricted.txt", &si, &params)
-			.await
-			.expect("fd -u");
-		let unrestricted = read("unrestricted.txt");
-		assert!(unrestricted.contains(".hidden-needle.txt"), "-u should include hidden files");
-		assert!(unrestricted.contains("ignored-needle.log"), "-u should include gitignored files");
-		assert!(unrestricted.contains("fdignored-needle.tmp"), "-u should include fdignored files");
-
-		session
-			.shell
-			.run_string("fd --no-ignore-vcs needle > no-ignore-vcs.txt", &si, &params)
-			.await
-			.expect("fd --no-ignore-vcs");
-		let no_ignore_vcs = read("no-ignore-vcs.txt");
-		assert!(
-			no_ignore_vcs.contains("ignored-needle.log"),
-			"--no-ignore-vcs should include .gitignore matches"
-		);
-		assert!(
-			no_ignore_vcs.contains("excluded-needle.vcs"),
-			"--no-ignore-vcs should include .git/info/exclude matches"
-		);
-		assert!(
-			!no_ignore_vcs.contains("fdignored-needle.tmp"),
-			"--no-ignore-vcs must still respect .fdignore"
-		);
-
-		session
-			.shell
-			.run_string("fd --glob '*.rs' sub > glob.txt", &si, &params)
-			.await
-			.expect("fd glob");
-		assert_eq!(read("glob.txt"), "sub/needle.rs\n");
-
-		let no_match = session
-			.shell
-			.run_string("fd definitely-absent > no-match.txt", &si, &params)
-			.await
-			.expect("fd no match");
-		assert_eq!(exit_code(&no_match), 0, "ordinary fd no-match should still succeed");
-		assert_eq!(read("no-match.txt"), "");
-
-		let quiet_miss = session
-			.shell
-			.run_string("fd -q definitely-absent > quiet-miss.txt", &si, &params)
-			.await
-			.expect("fd quiet miss");
-		assert_eq!(exit_code(&quiet_miss), 1, "quiet fd no-match should fail");
-		assert_eq!(read("quiet-miss.txt"), "");
-
-		let quiet_hit = session
-			.shell
-			.run_string("fd -q needle > quiet-hit.txt", &si, &params)
-			.await
-			.expect("fd quiet hit");
-		assert_eq!(exit_code(&quiet_hit), 0, "quiet fd match should succeed");
-		assert_eq!(read("quiet-hit.txt"), "");
-
-		let help = session
-			.shell
-			.run_string("fd --help > help.txt 2> help.err", &si, &params)
-			.await
-			.expect("fd help");
-		assert_eq!(exit_code(&help), 0, "fd help should succeed");
-		assert!(read("help.txt").contains("A program to find entries in your filesystem"));
-		assert_eq!(read("help.err"), "");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// Plain `rg PATTERN` uses the shell working directory when the host wired
-	/// stdin to null, but a real pipeline remains stdin input. Pattern stdin
-	/// (`-f -`) must not consume the implicit search path decision.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn rg_builtin_defaults_to_cwd_unless_stdin_is_pipeline() {
-		let tmp = std::env::temp_dir().join(format!("pi-rg-stdin-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		std::fs::write(tmp.join("data.txt"), "from-cwd\nfrom-pattern\n").expect("data");
-		std::fs::write(tmp.join("z-output.txt"), "from-cwd\n").expect("output seed");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		session
-			.shell
-			.run_string("rg --sort path --max-count 1 from-cwd >> z-output.txt", &si, &params)
-			.await
-			.expect("rg cwd");
-		assert_eq!(read("z-output.txt"), "from-cwd\ndata.txt:from-cwd\n");
-
-		session
-			.shell
-			.run_string("printf 'from-pipe\\n' | rg from-pipe > pipe.txt", &si, &params)
-			.await
-			.expect("rg pipe");
-		assert_eq!(read("pipe.txt"), "from-pipe\n");
-
-		session
-			.shell
-			.run_string("printf 'from-pattern\\n' | rg -f - > pattern.txt", &si, &params)
-			.await
-			.expect("rg pattern stdin");
-		assert_eq!(read("pattern.txt"), "data.txt:from-pattern\n");
-
-		session
-			.shell
-			.run_string("printf 'not-a-path\\n' | rg --files > files.txt", &si, &params)
-			.await
-			.expect("rg files");
-		let files = read("files.txt");
-		assert!(files.contains("data.txt"), "--files should list cwd files: {files:?}");
-		assert!(!files.contains("not-a-path"), "--files must not read piped stdin: {files:?}");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// `grep -q` must suppress all stdout and drive the exit status (0 on match,
-	/// 1 otherwise) so shell conditionals work; `-x` must anchor whole lines.
-	/// Mirrors busybox applet probing: `grep -qx "$applet" <(strings bin)`.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn grep_quiet_and_line_regexp() {
-		let tmp = std::env::temp_dir().join(format!("pi-walkerq-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		// -q: no stdout even on a match.
-		session
-			.shell
-			.run_string("grep -q ba data.txt > qout.txt", &si, &params)
-			.await
-			.expect("grep -q");
-		assert_eq!(read("qout.txt"), "", "-q must not print matches");
-		// -q exit code drives `&&` (match) and `||` (no match).
-		session
-			.shell
-			.run_string("grep -q ba data.txt && echo HIT > hit.txt", &si, &params)
-			.await
-			.expect("grep -q hit");
-		assert_eq!(read("hit.txt"), "HIT\n", "-q match must exit 0");
-		session
-			.shell
-			.run_string("grep -q zzz data.txt || echo MISS > miss.txt", &si, &params)
-			.await
-			.expect("grep -q miss");
-		assert_eq!(read("miss.txt"), "MISS\n", "-q no-match must exit 1");
-		// -qx: whole-line match succeeds on an exact line ...
-		session
-			.shell
-			.run_string("grep -qx bar data.txt && echo XHIT > xhit.txt", &si, &params)
-			.await
-			.expect("grep -qx hit");
-		assert_eq!(read("xhit.txt"), "XHIT\n", "-x must match a whole line");
-		// ... and fails on a substring that is not a whole line.
-		session
-			.shell
-			.run_string("grep -qx ba data.txt || echo XMISS > xmiss.txt", &si, &params)
-			.await
-			.expect("grep -qx miss");
-		assert_eq!(read("xmiss.txt"), "XMISS\n", "-x must reject a partial-line match");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// The destructive uutils builtins (`rm`, `mv`) must operate on paths
-	/// resolved against the shell working directory, not the host process cwd.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_rm_and_mv_operate_on_shell_cwd() {
-		let tmp = std::env::temp_dir().join(format!("pi-rmmv-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(tmp.join("tree/inner")).expect("tree");
-		std::fs::write(tmp.join("a.txt"), "hello").expect("a");
-		std::fs::write(tmp.join("tree/inner/leaf.txt"), "x").expect("leaf");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-
-		// mv: rename within the shell cwd.
-		let mv = session
-			.shell
-			.run_string("mv a.txt b.txt", &si, &params)
-			.await
-			.expect("mv");
-		assert_eq!(exit_code(&mv), 0, "mv should succeed");
-		assert!(!tmp.join("a.txt").exists(), "source should be gone");
-		assert_eq!(std::fs::read_to_string(tmp.join("b.txt")).unwrap(), "hello");
-
-		// rm -rf: recursive removal resolved against the shell cwd.
-		let rm = session
-			.shell
-			.run_string("rm -rf tree", &si, &params)
-			.await
-			.expect("rm");
-		assert_eq!(exit_code(&rm), 0, "rm -rf should succeed");
-		assert!(!tmp.join("tree").exists(), "tree should be removed");
-		// and the host process cwd must be untouched.
-		assert!(tmp.join("b.txt").exists());
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// Removing a nonexistent file must print exactly one diagnostic (like GNU
-	/// rm) and exit non-zero — not a second, message-less `rm:` line. Regression
-	/// guard: the in-process entry point used to re-print the status-only
-	/// `Err(1)` returned after `remove()` had already reported each failure.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_rm_missing_file_prints_single_diagnostic() {
-		let tmp = std::env::temp_dir().join(format!("pi-rm-missing-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-
-		let rm = session
-			.shell
-			.run_string("rm nonexistent.txt 2> err.txt", &si, &params)
-			.await
-			.expect("rm");
-		assert_ne!(exit_code(&rm), 0, "rm of a missing file must report failure");
-		let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
-		let lines: Vec<&str> = err.lines().collect();
-		assert_eq!(lines.len(), 1, "rm should emit exactly one diagnostic line, got: {err:?}");
-		assert!(lines[0].contains("nonexistent.txt"), "diagnostic should name the file: {err:?}");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// The find display/match surface must use the operand-relative path while
-	/// filesystem actions still target the real (resolved) path: `-path` and
-	/// `-printf %p` see `./...`, while `-delete` removes the correct file.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_find_display_and_actions_split_paths() {
-		let tmp = std::env::temp_dir().join(format!("pi-find-split-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(tmp.join("sub")).expect("dirs");
-		std::fs::write(tmp.join("keep.log"), "k").expect("keep");
-		std::fs::write(tmp.join("sub/drop.tmp"), "d").expect("drop");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		// -path matches against the operand-relative path.
-		session
-			.shell
-			.run_string("find . -path './sub/*' > p.txt", &si, &params)
-			.await
-			.expect("path");
-		assert_eq!(read("p.txt"), "./sub/drop.tmp\n", "-path should match the operand-relative path");
-
-		// -printf %p emits the operand-relative path.
-		session
-			.shell
-			.run_string("find . -name keep.log -printf '%p\\n' > pf.txt", &si, &params)
-			.await
-			.expect("printf");
-		assert_eq!(read("pf.txt"), "./keep.log\n", "-printf %p should be operand-relative");
-
-		// -delete operates on the real (resolved) path, removing the right file.
-		let del = session
-			.shell
-			.run_string("find . -name '*.tmp' -delete", &si, &params)
-			.await
-			.expect("delete");
-		assert_eq!(exit_code(&del), 0, "find -delete should succeed");
-		assert!(!tmp.join("sub/drop.tmp").exists(), "-delete should remove the matched file");
-		assert!(tmp.join("keep.log").exists(), "-delete must not touch unmatched files");
-
-		// -exec substitutes the operand-relative path and runs in the shell cwd,
-		// so the relative `{}` resolves and the child's redirect lands in the
-		// cwd.
-		session
-			.shell
-			.run_string(
-				"find . -name keep.log -exec sh -c 'printf %s \"$1\" > ex.txt' sh {} ';'",
-				&si,
-				&params,
-			)
-			.await
-			.expect("exec");
-		assert_eq!(
-			read("ex.txt"),
-			"./keep.log",
-			"-exec {{}} should be operand-relative and run in the shell cwd"
-		);
-
-		// -exec children must write through the scope streams — an inherited
-		// process stdout would bypass the shell redirect and spam the host
-		// TUI's terminal — and must see the shell's exported environment.
-		session
-			.shell
-			.run_string(
-				"export PI_EXEC_ENV=zed; find . -name keep.log -exec sh -c 'echo \"$PI_EXEC_ENV $1\"' \
-				 sh {} ';' > cap.txt",
-				&si,
-				&params,
-			)
-			.await
-			.expect("exec capture");
-		assert_eq!(
-			read("cap.txt"),
-			"zed ./keep.log\n",
-			"-exec child stdout must flow through the shell redirect with the shell's exported env"
-		);
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// The vendored `sed` builtin must stream pipeline stdin through scripts and
-	/// perform `-i` in-place edits (with backup suffix) against the shell
-	/// working directory rather than the host process cwd.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_sed_substitutes_streams_and_edits_in_place() {
-		let tmp = std::env::temp_dir().join(format!("pi-sed-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		std::fs::write(tmp.join("conf.txt"), "x=1\n").expect("conf");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		// Piped stdin through a quiet substitute-and-print script.
-		session
-			.shell
-			.run_string("printf 'hello\\nworld\\n' | sed -n 's/hello/HI/p' > sed.txt", &si, &params)
-			.await
-			.expect("sed pipeline");
-		assert_eq!(read("sed.txt"), "HI\n");
-		// In-place edit of a cwd-relative operand, keeping the requested backup.
-		session
-			.shell
-			.run_string("sed -i.bak 's/1/2/' conf.txt", &si, &params)
-			.await
-			.expect("sed -i");
-		assert_eq!(read("conf.txt"), "x=2\n", "in-place edit must land in the shell cwd");
-		assert_eq!(read("conf.txt.bak"), "x=1\n", "backup must keep the original");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// `declare -r` lists readonly variables; it must not also require the
-	/// trace attribute (`-t`).
-	#[tokio::test(flavor = "multi_thread")]
-	async fn declare_readonly_listing_does_not_require_trace() {
-		let (result, output) =
-			execute_captured("readonly OMP_DECLARE_RO=1; declare -r | grep -c OMP_DECLARE_RO".into())
-				.await;
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		assert_eq!(output.trim(), "1");
-	}
-
-	/// `exec` would replace the host process. `enable exec` must not bring it
-	/// back: on regression the test process itself turns into `false` and fails.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn enable_cannot_restore_exec_or_suspend() {
-		let (result, output) = execute_captured(
-			"enable exec suspend; exec false; echo exec-refused; suspend -f; echo suspend-refused"
-				.into(),
-		)
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		assert!(output.contains("exec: not available in this shell"), "{output}");
-		assert!(output.contains("exec-refused"), "{output}");
-		assert!(output.contains("suspend-refused"), "{output}");
-	}
-
-	/// `sort -m -o f - g < f` truncates `f` for its output while stdin is still
-	/// reading it, so stdin must be copied first or the rest of `f` is lost.
-	/// The input is far larger than what stdin reads ahead, and the small
-	/// buffer makes the merge read it in many chunks.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn sort_merge_into_the_file_on_stdin_keeps_all_input() {
-		let dir = tempfile::tempdir().expect("temp dir");
-		let odd: String = (0..20_000).map(|n| format!("{:06}\n", 2 * n + 1)).collect();
-		let even: String = (0..20_000).map(|n| format!("{:06}\n", 2 * n)).collect();
-		std::fs::write(dir.path().join("f"), odd).expect("write f");
-		std::fs::write(dir.path().join("g"), even).expect("write g");
-		let (result, output) =
-			execute_captured(format!("cd '{}' && sort -m -S 1K -o f - g < f", dir.path().display()))
-				.await;
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		let merged = std::fs::read_to_string(dir.path().join("f")).expect("read f");
-		let expected: String = (0..40_000).map(|n| format!("{n:06}\n")).collect();
-		assert!(merged == expected, "merged {} of 40000 lines", merged.lines().count());
-	}
-
-	/// `umask` belongs to the shell: it masks files the shell, its builtins,
-	/// and its external commands create, subshells keep their own copy, and
-	/// the host process umask never changes.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn umask_is_scoped_to_the_shell() {
-		use std::os::unix::fs::PermissionsExt;
-
-		let host_umask = || {
-			// SAFETY: `umask` cannot fail; the mask is restored at once. Each
-			// nextest test runs in its own process.
-			let mask = unsafe { libc::umask(0) };
-			unsafe { libc::umask(mask) };
-			mask
-		};
-		let before = host_umask();
-		let dir = tempfile::tempdir().expect("temp dir");
-		let (result, output) = execute_captured(format!(
-			"cd '{}' && umask 077 && : > redirect && touch builtin && sh -c ': > external' && mkdir \
-			 made && (umask 000) && umask",
-			dir.path().display()
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		assert_eq!(output.trim(), "0077", "a subshell's umask must not leak out");
-		let mode = |name: &str| {
-			std::fs::metadata(dir.path().join(name))
-				.expect("created file")
-				.permissions()
-				.mode()
-				& 0o777
-		};
-		assert_eq!(mode("redirect"), 0o600, "redirections use the shell umask");
-		assert_eq!(mode("builtin"), 0o600, "builtins use the shell umask");
-		assert_eq!(mode("external"), 0o600, "external commands inherit the shell umask");
-		assert_eq!(mode("made"), 0o700, "mkdir uses the shell umask");
-
-		// A mask looser than the host's keeps the bits the host umask clears.
-		let (result, output) = execute_captured(format!(
-			"cd '{}' && umask 000 && : > loose-redirect && touch loose-builtin && mkdir loose-dir",
-			dir.path().display()
-		))
-		.await;
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		assert_eq!(mode("loose-redirect"), 0o666);
-		assert_eq!(mode("loose-builtin"), 0o666);
-		assert_eq!(mode("loose-dir"), 0o777);
-		assert_eq!(host_umask(), before, "the host process umask must not change");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn executable_text_without_shebang_preserves_arguments_and_exit_status() {
-		use std::os::unix::fs::PermissionsExt;
-
-		let dir = tempfile::tempdir().expect("temp dir");
-		let script = dir.path().join("plain-script");
-		std::fs::write(&script, "printf '%s|%s|%s\\n' \"$1\" \"$2\" \"$SCRIPT_TOKEN\"\nexit 23\n")
-			.expect("write executable text");
-		std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-			.expect("make script executable");
-		for invocation in ["./plain-script", "plain-script"] {
-			let (result, output) = execute_captured(format!(
-				"cd {} && SCRIPT_TOKEN=from-env PATH=\"$PWD:$PATH\" {invocation} 'two words' \
-				 ';literal' > captured; status=$?; cat captured; exit \"$status\"",
-				quote_arg(dir.path().to_str().expect("utf8 path")),
-			))
-			.await;
-			assert_eq!(result.exit_code, Some(23), "{invocation}: {output}");
-			assert_eq!(output, "two words|;literal|from-env\n", "{invocation}");
-		}
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn external_command_receives_extra_file_descriptor() {
-		let (result, output) =
-			execute_captured("sh -c 'printf descriptor-output >&3' 3>&1".into()).await;
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		assert_eq!(output, "descriptor-output");
-	}
-
-	/// The `xargs` builtin spawns real child processes, but their stdout must
-	/// flow back into the shell pipeline (ctx streams, not the host fds), items
-	/// must batch per `-n`, and a failing invocation must surface GNU's 123.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_xargs_children_feed_pipeline_and_report_failure() {
-		let tmp = std::env::temp_dir().join(format!("pi-xargs-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		// Default echo action: child stdout is captured into the redirect.
-		session
-			.shell
-			.run_string("printf 'a b c\\n' | xargs > xargs.txt", &si, &params)
-			.await
-			.expect("xargs default");
-		assert_eq!(read("xargs.txt"), "a b c\n");
-		// -n batching, with child output feeding a downstream builtin stage.
-		session
-			.shell
-			.run_string(
-				"printf '1\\n2\\n3\\n4\\n' | xargs -n2 echo | wc -l > batches.txt",
-				&si,
-				&params,
-			)
-			.await
-			.expect("xargs -n2");
-		assert_eq!(read("batches.txt").trim(), "2");
-		// A child exiting 1-125 makes xargs exit 123 (GNU contract).
-		session
-			.shell
-			.run_string("printf 'x\\n' | xargs false; printf %s $? > code.txt", &si, &params)
-			.await
-			.expect("xargs false");
-		assert_eq!(read("code.txt"), "123");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// The `jq` builtin must evaluate filters over piped JSON, resolve file
-	/// operands against the shell working directory, and propagate `-e`'s
-	/// null/false exit status through the shell.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_jq_filters_json_and_propagates_exit_status() {
-		let tmp = std::env::temp_dir().join(format!("pi-jq-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&tmp);
-		std::fs::create_dir_all(&tmp).expect("temp dir");
-		std::fs::write(tmp.join("in.json"), "{\"name\":\"pi\"}\n").expect("in.json");
-		let tmp_str = tmp.to_str().expect("utf8");
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).await.expect("cwd");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let si = SourceInfo::from("pi-natives:test");
-		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
-
-		// Compact filter over piped stdin.
-		session
-			.shell
-			.run_string("printf '{\"a\":{\"b\":2}}' | jq -c .a > jq.txt", &si, &params)
-			.await
-			.expect("jq pipeline");
-		assert_eq!(read("jq.txt"), "{\"b\":2}\n");
-		// Raw output from a cwd-relative file operand.
-		session
-			.shell
-			.run_string("jq -r .name in.json > name.txt", &si, &params)
-			.await
-			.expect("jq file");
-		assert_eq!(read("name.txt"), "pi\n");
-		// -e maps a null result to exit status 1.
-		session
-			.shell
-			.run_string("printf 'null' | jq -e . > /dev/null; printf %s $? > code.txt", &si, &params)
-			.await
-			.expect("jq -e");
-		assert_eq!(read("code.txt"), "1");
-
-		let _ = std::fs::remove_dir_all(&tmp);
-	}
-
-	/// A stdin-reading builtin blocked on an open pipe must honor abort/timeout:
-	/// the context's cancel flag makes the read return EOF so the utility
-	/// unwinds promptly and the command reports interrupted (130) — it must not
-	/// hang or leak a detached thread that keeps the fds alive.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_head_stdin_read_is_cancellable() {
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-
-		// Hold the pipe's write end open with no data so `head` blocks reading.
-		let (reader, _writer) = pipe_to_files("cancel").expect("pipe");
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, OpenFile::from(reader));
-		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
-		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
-		let token = CancellationToken::new();
-		params.set_cancel_token(token.clone());
-		let si = SourceInfo::from("pi-natives:test");
-
-		let canceller = tokio::spawn(async move {
-			time::sleep(Duration::from_millis(150)).await;
-			token.cancel();
-		});
-		let result = time::timeout(
-			Duration::from_secs(5),
-			session.shell.run_string("head -n 1000000", &si, &params),
-		)
-		.await;
-		let _ = canceller.await;
-
-		let exec = result
-			.expect("head must return promptly after cancel, not hang on the open pipe")
-			.expect("run_string");
-		// Core contract: prompt return (the 5s timeout did NOT fire) proves the
-		// read unblocked and the blocking task unwound cleanly — no hang, no
-		// detached thread. The interrupted command reports a non-zero status;
-		// `run_uutil` yields 130 but brush's run_string maps the cancelled
-		// program to its own non-zero code, so we assert the stable contract.
-		assert_ne!(
-			exit_code(&exec),
-			0,
-			"cancelled stdin read should report a non-zero (interrupted) status"
-		);
-	}
-
-	/// The disable env vars must actually gate registration: the global switch
-	/// drops the whole set, and the per-utility destructive switches drop only
-	/// the risky shadows.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_builtins_respect_disable_env() {
-		let session_with = |pairs: &[(&str, &str)]| {
-			let map: std::collections::HashMap<String, String> = pairs
-				.iter()
-				.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-				.collect();
-			ShellConfig {
-				session_env:   Some(map),
-				snapshot_path: None,
-				minimizer:     None,
-				filesystem:    Fs::native(),
-			}
-		};
-
-		let mut default = create_session(&ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		})
-		.await
-		.expect("create_session");
-		assert!(default.shell.builtin_mut("head").is_some(), "head registered by default");
-		assert!(default.shell.builtin_mut("rg").is_some(), "rg registered by default");
-		assert!(default.shell.builtin_mut("rm").is_some(), "rm registered by default");
-		assert!(default.shell.builtin_mut("mv").is_some(), "mv registered by default");
-
-		let mut all_off = create_session(&session_with(&[("PI_DISABLE_UUTILS_BUILTINS", "1")]))
-			.await
-			.expect("create_session");
-		assert!(all_off.shell.builtin_mut("head").is_none(), "kill-switch drops head");
-		assert!(all_off.shell.builtin_mut("rg").is_none(), "kill-switch drops rg");
-		assert!(all_off.shell.builtin_mut("rm").is_none(), "kill-switch drops rm");
-
-		let mut rm_off = create_session(&session_with(&[("PI_DISABLE_RM_BUILTIN", "1")]))
-			.await
-			.expect("create_session");
-		assert!(rm_off.shell.builtin_mut("rm").is_none(), "rm disabled individually");
-		assert!(rm_off.shell.builtin_mut("mv").is_some(), "mv stays enabled");
-		assert!(rm_off.shell.builtin_mut("head").is_some(), "head stays enabled");
-	}
-
-	/// Truth-table coverage for `brush_core::commands::child_session_action`.
-	///
-	/// Lives in `pi-natives` because the brush-core crate is excluded from the
-	/// workspace (vendored upstream) and cannot be tested standalone — its tokio
-	/// dependency only resolves the `net` feature via feature-unification with
-	/// other workspace members.
-	mod child_session_action {
-		use brush_core::commands::{ChildSessionAction, child_session_action};
-
-		/// Interactive brush, leading its own pgroup, terminal stdin: foreground.
-		#[test]
-		fn interactive_with_terminal_stdin_takes_foreground() {
-			assert_eq!(child_session_action(true, true, false), ChildSessionAction::TakeForeground,);
-			// Terminal foregrounding wins even when this is the first stage of a
-			// pipeline; no detach is attempted.
-			assert_eq!(child_session_action(true, true, true), ChildSessionAction::TakeForeground,);
-		}
-
-		/// Brush leading a new pgroup with non-terminal stdin always detaches —
-		/// including the first stage of a pipeline. `setsid()` keeps the child
-		/// off the host's controlling tty; the spawn path skips
-		/// `process_group(...)` for detached children, so later stages no longer
-		/// try to `setpgid`-join a leader that has moved sessions (the historical
-		/// EPERM hazard).
-		#[test]
-		fn non_terminal_stdin_detaches_regardless_of_pipeline() {
-			assert_eq!(child_session_action(true, false, false), ChildSessionAction::DetachSession,);
-			assert_eq!(child_session_action(true, false, true), ChildSessionAction::DetachSession,);
-		}
-
-		/// Non-interactive brush, terminal stdin, no pipeline: nothing to do.
-		#[test]
-		fn non_interactive_with_terminal_stdin_does_nothing() {
-			assert_eq!(child_session_action(false, true, false), ChildSessionAction::None,);
-		}
-
-		/// Non-interactive brush, terminal stdin, joining a pipeline pgroup:
-		/// nothing to do (parent already wired pgroup membership).
-		#[test]
-		fn non_interactive_terminal_stdin_in_pipeline_does_nothing() {
-			assert_eq!(child_session_action(false, true, true), ChildSessionAction::None,);
-		}
-
-		/// **Embedded host bug fix.** Non-interactive brush, non-terminal stdin,
-		/// no pipeline pgroup: detach so the child cannot SIGTTIN/SIGTTOU the
-		/// host. This is the case that regressed before this fix and is the
-		/// motivating bug for PR #895.
-		#[test]
-		fn embedded_host_with_non_terminal_stdin_detaches() {
-			assert_eq!(child_session_action(false, false, false), ChildSessionAction::DetachSession,);
-		}
-
-		/// **Pipeline tty-safety.** Non-interactive brush, non-terminal stdin
-		/// (pipe), and a multi-command pipeline: detach. An interactive child in
-		/// a pipeline (`zsh -i ... | awk`) would otherwise open `/dev/tty`,
-		/// `tcsetpgrp` itself to the foreground, and leave the host stopped on
-		/// its next tty read (`suspended (tty input)`). Each stage gets its own
-		/// session instead; the embedded host cancels via the descendant tree,
-		/// not a shared pgroup, and pipes are session-independent.
-		#[test]
-		fn pipeline_stage_with_non_terminal_stdin_detaches() {
-			assert_eq!(child_session_action(false, false, true), ChildSessionAction::DetachSession,);
-		}
-	}
-
-	fn shell_test_lock() -> &'static TokioMutex<()> {
-		static LOCK: TokioMutex<()> = TokioMutex::const_new(());
-		&LOCK
-	}
-
-	/// Runs `command` under [`shell_test_lock`] and returns its result and
-	/// output.
-	#[cfg(unix)]
-	async fn run_command_capture(
-		command: &str,
-		cwd: Option<&std::path::Path>,
-		minimizer: Option<minimizer::MinimizerOptions>,
-		cancel_token: CancelToken,
-	) -> (ShellExecuteResult, String) {
-		let _guard = shell_test_lock().lock().await;
-		capture_unlocked(command, cwd, minimizer, cancel_token).await
-	}
-
-	/// [`run_command_capture`] that fails once the run outlasts `limit`. The
-	/// limit starts when the lock is held: in a single-process `cargo test`,
-	/// the wait behind slower shell tests took up the limit of a fast one.
-	#[cfg(unix)]
-	async fn run_command_capture_within(
-		limit: Duration,
-		command: &str,
-		cwd: Option<&std::path::Path>,
-		minimizer: Option<minimizer::MinimizerOptions>,
-		cancel_token: CancelToken,
-	) -> Result<(ShellExecuteResult, String), time::error::Elapsed> {
-		let _guard = shell_test_lock().lock().await;
-		time::timeout(limit, capture_unlocked(command, cwd, minimizer, cancel_token)).await
-	}
-
-	/// Runs `command` and collects its streamed output; the caller holds
-	/// [`shell_test_lock`].
-	#[cfg(unix)]
-	async fn capture_unlocked(
-		command: &str,
-		cwd: Option<&std::path::Path>,
-		minimizer: Option<minimizer::MinimizerOptions>,
-		cancel_token: CancelToken,
-	) -> (ShellExecuteResult, String) {
-		let (tx, rx) = flume::unbounded::<String>();
-		let options = ShellExecuteOptions {
-			command: command.to_string(),
-			cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
-			minimizer,
-			..Default::default()
-		};
-		let result = execute_shell(options, Some(tx), cancel_token)
-			.await
-			.expect("execute_shell");
-		let mut output = String::new();
-		while let Ok(chunk) = rx.recv_async().await {
-			output.push_str(&chunk);
-		}
-		(result, output)
-	}
-
-	#[cfg(unix)]
-	fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
-		let mut path = std::env::temp_dir();
-		let nonce = std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.expect("system time")
-			.as_nanos();
-		path.push(format!("pi-shell-{prefix}-{}-{nonce}", std::process::id()));
-		std::fs::create_dir_all(&path).expect("create temp dir");
-		path
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn uutils_diff_reads_process_substitution_fds() {
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(5),
-			"diff <(echo a) <(echo b)",
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("process substitution should not hang");
-
-		assert_eq!(result.exit_code, Some(1));
-		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
-	}
-
-	/// Every run reads through a cancellable filesystem, and its redirects must
-	/// still open a FIFO as a blocking open does. A non-blocking open let a
-	/// reader that reads the descriptor itself (an external `cat`, `$(< f)`)
-	/// see EOF before a late writer connected; the writer then blocked forever.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn fifo_redirect_waits_for_a_late_writer() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		pi_vfs::BlockingFs::native()
-			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(5),
-			"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo two \
-			 > f' & x=$(< f); echo \"x=$x\"; wait",
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("a FIFO redirect waits for its writer and returns");
-
-		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\nx=two\n"));
-	}
-
-	/// A FIFO redirect's open waits for the other end, which is often a
-	/// background job queued on the same runtime worker: `echo hi > f & cat <
-	/// f` deadlocked when the open held the worker. On a one-worker runtime,
-	/// both orders must finish.
-	#[cfg(unix)]
-	#[test]
-	fn fifo_redirects_do_not_hold_the_worker_their_other_end_needs() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		for name in ["f", "g"] {
-			pi_vfs::BlockingFs::native()
-				.make_node(root.path().join(name), pi_vfs::NodeKind::Fifo, 0o600)
-				.expect("create FIFO");
-		}
-		let (result, output) = capture_on_runtime(
-			"echo one > f & cat < f; cat < g & echo two > g; wait",
-			Some(root.path().to_path_buf()),
-			512,
-		)
-		.expect("a FIFO redirect must not hold the worker its other end needs");
-
-		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
-	}
-
-	/// A background external command's FIFO redirect is opened by its child,
-	/// as in bash: the parent shell spawned it and then waited for the FIFO's
-	/// other end, which was the next command, so `/bin/cat < f & echo one > f`
-	/// never returned. Job control must still see the command's real pid:
-	/// `$!` is the pid the command itself reports, and `wait`, `jobs`, `kill
-	/// %N` and `kill $!` reach a command still waiting for its FIFO.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn background_external_command_opens_its_fifo_redirect_itself() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		pi_vfs::BlockingFs::native()
-			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(10),
-			concat!(
-				// First, so the job is `%1`.
-				"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
-				"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
-				"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
-				"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
-				"[ \"$self\" = \"$bg\" ] && echo same-pid",
-			),
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("the shell goes on while a background command waits for its FIFO");
-
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		assert!(output.contains("Running"), "`jobs` lists the waiting command: {output}");
-		assert!(output.ends_with("kill-job=143\nkill-pid=143\none\nwait=0\nsame-pid\n"), "{output}");
-	}
-
-	/// `kill %1` aborts a background job without polling it again, so a FIFO
-	/// open it was waiting in is dropped, not cancelled. Its helper thread then
-	/// stayed in `open` and took the next writer's connection, whose data was
-	/// lost. A dropped open must leave no reader behind.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn killed_job_leaves_no_reader_on_its_fifo() {
-		use std::os::unix::fs::OpenOptionsExt;
-		let root = tempfile::tempdir().expect("scratch directory");
-		let fifo = root.path().join("f");
-		pi_vfs::BlockingFs::native()
-			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(10),
-			"cat < f & sleep 0.2; kill %1; wait; echo done",
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("the killed job ends");
-		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
-
-		// The release runs on its own thread; give it time, then a writer that
-		// does not wait must find no reader.
-		time::sleep(Duration::from_millis(500)).await;
-		let writer = std::fs::OpenOptions::new()
-			.write(true)
-			.custom_flags(libc::O_NONBLOCK)
-			.open(&fifo);
-		assert_eq!(
-			writer.err().and_then(|err| err.raw_os_error()),
-			Some(libc::ENXIO),
-			"a reader was left on the FIFO"
-		);
-	}
-
-	/// The release of a killed job's FIFO open must be done when `kill`
-	/// returns: a release that came later woke the next command's open of the
-	/// same FIFO too, so that reader read EOF, its writer's data was lost, and
-	/// the writer then blocked with no reader.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn killed_job_releases_its_fifo_before_the_next_command() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		pi_vfs::BlockingFs::native()
-			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(30),
-			concat!(
-				"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
-				"  cat < f & sleep 0.05; kill %%\n",
-				"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
-				"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
-				"done; echo done",
-			),
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("no writer is left without a reader");
-
-		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
-	}
-
-	/// A background external command's descriptor path (`/dev/stdout`) reaches
-	/// the shell's own output pipe and looked like a FIFO, so it was left to
-	/// the child, which then wrote to its `/dev/null` placeholder. And the
-	/// `/bin/sh` that makes deferred redirects stored the FIFO path in `f1`,
-	/// replacing an exported `f1` in the command's environment.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn deferred_redirects_keep_descriptor_paths_and_the_environment() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		pi_vfs::BlockingFs::native()
-			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(10),
-			concat!(
-				"/bin/echo out > /dev/stdout & wait\n",
-				"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
-			),
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("the commands finish");
-
-		assert_eq!((result.exit_code, output.as_str()), (Some(0), "out\nf1=orig\n"));
-	}
-
-	/// A later redirection of a descriptor that a deferred FIFO redirection
-	/// sets (`>f >/dev/null`), or a duplication, move or close of it, made
-	/// every deferred redirection in the parent after all: the parent opened
-	/// the FIFO and waited for its reader, the next command, so the shell
-	/// never returned. The child now makes them all, in the order written.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn later_redirects_of_a_deferred_descriptor_stay_in_the_child() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		pi_vfs::BlockingFs::native()
-			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(10),
-			concat!(
-				"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
-				"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
-				"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
-				"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
-				"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
-			),
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("the shell goes on while a background command waits for its FIFO");
-
-		assert_eq!(
-			(result.exit_code, output.as_str()),
-			(Some(0), "replace=0\nclosed\nmoved\nboth=0\ndescriptor\n")
-		);
-	}
-
-	/// A deferred duplication reads the descriptor this process holds, so the
-	/// null device that stands in for a deferred descriptor must not take its
-	/// place: `>f 1>&3 3>/dev/null` sent the output to the null device, the
-	/// move `>f 1>&4-` lost it, and so did the swap idiom.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn deferred_duplications_read_the_descriptors_the_parent_holds() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		pi_vfs::BlockingFs::native()
-			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(10),
-			concat!(
-				"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
-				"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
-				"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
-			),
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("the shell goes on while a background command waits for its FIFO");
-
-		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
-	}
-
-	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
-	/// a builtin waiting for more input hung once the writer closed: `mapfile`
-	/// and `read` until cancelled, and `read -t` timed out instead of reading
-	/// EOF. Each writer here closes while its reader waits.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn builtins_waiting_on_a_fifo_see_its_writer_close() {
-		let root = tempfile::tempdir().expect("scratch directory");
-		pi_vfs::BlockingFs::native()
-			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
-			.expect("create FIFO");
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(10),
-			concat!(
-				"{ echo a; sleep 0.2; } > f & mapfile -t lines < f; wait; echo \
-				 \"mapfile=${#lines[@]}\"\n",
-				"{ echo b; sleep 0.2; } > f & while read -r l; do echo \"read=$l\"; done < f; wait\n",
-				"{ printf c; sleep 0.2; } > f & read -t 5 -r x < f; echo \"read-t=$? $x\"; wait",
-			),
-			Some(root.path()),
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("each reader ends at its writer's EOF");
-
-		assert_eq!((result.exit_code, output.as_str()), (Some(0), "mapfile=1\nread=b\nread-t=1 c\n"));
-	}
-
-	/// Runs `command` on a dedicated single-worker runtime and fails after five
-	/// seconds.
-	#[cfg(unix)]
-	fn capture_on_single_worker(command: &'static str) -> (ShellExecuteResult, String) {
-		capture_on_runtime(command, None, 512)
-			.expect("read must not wait on a blocking worker it cannot get")
-	}
-
-	/// Runs `command` in `cwd` on a dedicated single-worker runtime whose
-	/// blocking pool holds `max_blocking_threads`; fails once the run outlasts
-	/// five seconds. The deadline lives on the calling thread, so it still
-	/// fires when a builtin blocks the runtime's only worker, and starts once
-	/// this thread holds [`shell_test_lock`].
-	#[cfg(unix)]
-	fn capture_on_runtime(
-		command: &'static str,
-		cwd: Option<std::path::PathBuf>,
-		max_blocking_threads: usize,
-	) -> Result<(ShellExecuteResult, String), std::sync::mpsc::RecvTimeoutError> {
-		let _guard = shell_test_lock().blocking_lock();
-		let (tx, rx) = std::sync::mpsc::channel();
-		std::thread::spawn(move || {
-			let runtime = tokio::runtime::Builder::new_multi_thread()
-				.worker_threads(1)
-				.max_blocking_threads(max_blocking_threads)
-				.enable_all()
-				.build()
-				.expect("single-worker runtime");
-			let _ = tx.send(runtime.block_on(capture_unlocked(
-				command,
-				cwd.as_deref(),
-				None,
-				CancelToken::default(),
-			)));
-		});
-		rx.recv_timeout(Duration::from_secs(5))
-	}
-
-	/// Owned-shell pipeline stages already hold a blocking worker. Two `read`
-	/// stages fill a two-thread pool; offloading each read again would queue it
-	/// behind the workers its own stages hold, forever.
-	#[cfg(unix)]
-	#[test]
-	fn pipeline_reads_do_not_nest_on_a_full_blocking_pool() {
-		let (result, output) =
-			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", None, 2)
-				.expect("read must not wait on a blocking worker it cannot get");
-
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "done\n");
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn async_utilities_wait_for_a_slow_producer_without_blocking_the_worker() {
-		let (result, output) =
-			capture_on_runtime("{ sleep 0.3; echo hit; } | grep hit | rg hit", None, 512)
-				.expect("async utilities must not block the runtime's only worker");
-
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "hit\n");
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn async_utilities_pipe_more_than_a_pipe_buffer() {
-		let dir = tempfile::tempdir().expect("temp dir");
-		for i in 0..3000 {
-			std::fs::write(dir.path().join(format!("{}{i:05}", "f".repeat(40))), b"")
-				.expect("create file");
-		}
-
-		let find =
-			capture_on_runtime("find . -type f | grep -c f", Some(dir.path().to_path_buf()), 512);
-		let fd = capture_on_runtime("fd -t f . | rg -c f", Some(dir.path().to_path_buf()), 512);
-
-		let (result, output) = find.expect("find | grep must not deadlock on a full pipe");
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "3000\n");
-		let (result, output) = fd.expect("fd | rg must not deadlock on a full pipe");
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "3000\n");
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn async_utility_waiting_on_stdin_is_cancelled_by_timeout() {
-		// The pipeline ends with its producer (1 s); `grep` must be cancelled at
-		// 0.3 s while the producer still needs the worker.
-		let (result, output) =
-			capture_on_runtime("{ sleep 1; echo x; } | timeout 0.3 grep x", None, 512)
-				.expect("timeout must cancel a utility waiting on stdin");
-
-		assert_eq!((result.exit_code, output.as_str()), (Some(124), ""));
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn read_process_substitution_assigns_line() {
-		let (result, output) =
-			capture_on_single_worker("read -r line < <(printf 'ok\\n'); printf '%s\\n' \"$line\"");
-
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "ok\n");
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn read_process_substitution_delivers_lines_and_reaches_eof() {
-		let (result, output) = capture_on_single_worker(
-			"while IFS= read -r l; do export X=\"$l\"; done < <(printf 'v\\n'); printf '%s\\n' \"$X\"",
-		);
-
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "v\n");
-	}
-
-	/// Builtins share the host process, so a descriptor path must reach the
-	/// command's descriptors rather than the host's: the host's fd 0 is its
-	/// terminal (`cat /dev/stdin` once blocked on the TUI's keystrokes for
-	/// good) and its fd 2 is not the capture pipe. Covers a utility operand,
-	/// a redirect, a utility output file, and `source`.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn descriptor_paths_reach_the_commands_descriptors() {
-		// The first command is the shape that hung the TUI.
-		let command = "for f in $(cat /dev/stdin <<'EOF'\na\nb\nEOF\n); do echo \"$f\"; done\necho \
-		               to-stderr > /dev/stderr\necho via-tee | tee /dev/stderr > /dev/null\nsource \
-		               /dev/stdin <<< 'echo sourced'";
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(5),
-			command,
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("descriptor paths must not read the host terminal");
-
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "a\nb\nto-stderr\nvia-tee\nsourced\n");
-	}
-
-	/// A descriptor the shell does not have fails like a closed one, instead
-	/// of reaching whatever the host process holds at that number.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn descriptor_paths_never_reach_host_only_descriptors() {
-		use std::os::fd::AsRawFd as _;
-
-		let dir = unique_temp_dir("host-fd");
-		let host_path = dir.join("host-only.txt");
-		std::fs::write(&host_path, "host-only\n").expect("write host file");
-		let host_file = std::fs::File::open(&host_path).expect("open host file");
-		let fd = host_file.as_raw_fd();
-		let command =
-			format!("cat /dev/fd/{fd}; echo \"rc=$?\"; cat < /proc/self/fd/{fd}; echo \"rc=$?\"");
-
-		let (_, output) = run_command_capture_within(
-			Duration::from_secs(5),
-			&command,
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("closed descriptor paths should fail fast");
-		drop(host_file);
-		let _ = std::fs::remove_dir_all(&dir);
-
-		assert!(!output.contains("host-only"), "read a host-only descriptor: {output:?}");
-		assert_eq!(output.matches("rc=1").count(), 2, "both opens should fail: {output:?}");
-	}
-
-	/// `<(…)` operands resolve through the shell's descriptor table, so
-	/// utilities report the name the shell passed and script-file options read
-	/// them too.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn process_substitution_operands_keep_the_shell_fd_name() {
-		let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(5),
-			command,
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("process substitution should not hang");
-
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "2 /dev/fd/63\n/dev/fd/63\nfrom-sed\n");
-	}
-
-	/// `sed`'s `w /dev/stdout` writes through sed's own output, as GNU sed
-	/// does: a second open of a redirected stdout truncates it and races the
-	/// primary output at its own offset.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn sed_w_dev_stdout_shares_sed_output() {
-		let dir = unique_temp_dir("sed-w-stdout");
-		let command = format!(
-			"cd '{}'; printf 'a\\nb\\n' | sed 'w /dev/stdout' > f; cat f; printf 'c\\n' | sed -n \
-			 's/c/d/w /dev/stdout'",
-			dir.display()
-		);
-		let (result, output) = run_command_capture_within(
-			Duration::from_secs(5),
-			&command,
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("sed should not hang");
-		let _ = std::fs::remove_dir_all(&dir);
-
-		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
-		assert_eq!(output, "a\na\nb\nb\nd\n");
-	}
-
-	/// A descriptor the shell lacks is reported under the name the user
-	/// typed, and `readlink` reads `/dev/stdin` as the symlink it is instead
-	/// of the descriptor behind it.
-	#[cfg(target_os = "linux")]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn descriptor_paths_keep_their_spelling() {
-		let command = "pgrep -F /dev/fd/9; sed 'w /dev/fd/9' <<< x; readlink /dev/stdin <<< x";
-		let (_, output) = run_command_capture_within(
-			Duration::from_secs(5),
-			command,
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("closed descriptor paths should fail fast");
-
-		assert!(!output.contains("/dev/fd/-1"), "leaked the placeholder path: {output:?}");
-		assert!(output.contains("cannot read pidfile '/dev/fd/9'"), "output: {output:?}");
-		assert!(output.contains("creating file '/dev/fd/9'"), "output: {output:?}");
-		assert!(output.ends_with("/proc/self/fd/0\n"), "output: {output:?}");
-	}
-
-	#[cfg(unix)]
-	fn printf_minimizer(
-		settings_path: &std::path::Path,
-		max_capture_bytes: Option<u32>,
-	) -> minimizer::MinimizerOptions {
-		std::fs::write(
-			settings_path,
-			r#"
-schema_version = 1
-
-[filters.printf]
-match_command = "^printf$"
-replace = [{ pattern = "hello", replacement = "HI" }]
-"#,
-		)
-		.expect("write settings");
-		minimizer::MinimizerOptions {
-			enabled: Some(true),
-			settings_path: Some(settings_path.to_string_lossy().into_owned()),
-			max_capture_bytes,
-			..Default::default()
-		}
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn one_shot_completion_aborts_internal_background_jobs() {
-		let marker = tempfile::NamedTempFile::new().expect("marker file");
-		let marker_path = marker.path().to_string_lossy();
-		std::fs::remove_file(marker.path()).expect("remove initial marker");
-		let command = format!("{{ sleep 1; echo leaked > {}; }} &", quote_arg(&marker_path));
-
-		execute_shell(
-			ShellExecuteOptions { command, ..Default::default() },
-			None,
-			CancelToken::default(),
-		)
-		.await
-		.expect("one-shot shell execution");
-		// `execute_shell` returns after its short post-exit idle drain (~250ms),
-		// while the background job cannot write the marker until its 1s sleep
-		// elapses. Wait well past that delay so a job that outlived the dropped
-		// session has demonstrably had its chance to run — the pre-fix leak fires
-		// at ~1s and is caught here; the fixed path aborts the task on drop and
-		// the marker never appears.
-		time::sleep(Duration::from_millis(2000)).await;
-
-		assert!(
-			!marker.path().exists(),
-			"an internal background job outlived its one-shot shell session"
-		);
-	}
-
-	/// Lets in-flight writes land, empties `path`, and reports whether anything
-	/// wrote to it again: a background `yes` still running refills it within
-	/// milliseconds.
-	async fn still_written(path: &std::path::Path) -> bool {
-		time::sleep(Duration::from_millis(300)).await;
-		std::fs::File::options()
-			.write(true)
-			.open(path)
-			.and_then(|file| file.set_len(0))
-			.expect("truncate output");
-		time::sleep(Duration::from_millis(300)).await;
-		std::fs::metadata(path).expect("stat output").len() > 0
-	}
-
-	/// A background builtin started in a subshell ends with the subshell, as an
-	/// external one does. Left running it was out of reach — no process for
-	/// `pkill`, no job for `kill %N` — and spun for the life of the host.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn subshell_exit_ends_its_background_builtins() {
-		let _guard = shell_test_lock().lock().await;
-		let output = tempfile::NamedTempFile::new().expect("output file");
-		let shell = Shell::new(None);
-		let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
-
-		shell
-			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
-			.await
-			.expect("run subshell");
-
-		assert!(!still_written(output.path()).await, "background `yes` outlived its subshell");
-	}
-
-	/// `kill %N` ends a background job running inside the shell, which has no
-	/// process to deliver the signal to.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_jobspec_ends_in_process_background_job() {
-		let _guard = shell_test_lock().lock().await;
-		let output = tempfile::NamedTempFile::new().expect("output file");
-		let shell = Shell::new(None);
-		let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
-
-		let result = shell
-			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
-			.await
-			.expect("run kill");
-
-		assert_eq!(result.exit_code, Some(0), "kill %1 failed");
-		assert!(!still_written(output.path()).await, "`yes` kept running after kill %1");
-	}
-
-	/// VictorCano's #12309 follow-up trigger (2026-10-21): a backgrounded
-	/// compound loop — not a simple builtin command at job level — inside a
-	/// subshell must also end with the subshell, like a backgrounded `yes`.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn subshell_exit_ends_backgrounded_compound_loops() {
-		let _guard = shell_test_lock().lock().await;
-		let output = tempfile::NamedTempFile::new().expect("output file");
-		let shell = Shell::new(None);
-		let command =
-			format!("(while :; do echo x >> {}; done &)", quote_arg(&output.path().to_string_lossy()));
-
-		shell
-			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
-			.await
-			.expect("run compound loop");
-
-		assert!(
-			!still_written(output.path()).await,
-			"background compound loop outlived its subshell"
-		);
-	}
-
-	/// `kill %N` must reach a backgrounded compound loop in a retained session
-	/// (the bash-tool persistent shell keeps its job table alive, so the loop
-	/// legitimately outlives the call — the agent's only off-switch is the
-	/// jobspec). Uses a writing loop so liveness is observable without timing,
-	/// and bounds both calls: a hanging `kill %1` is exactly the wedge the
-	/// reporter hit on 18.12.5, not a pass.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn kill_jobspec_ends_backgrounded_compound_loop_in_retained_session() {
-		let _guard = shell_test_lock().lock().await;
-		let output = tempfile::NamedTempFile::new().expect("output file");
-		let shell = Shell::new(None);
-		let sub =
-			format!("(while :; do echo x >> {}; done) &", quote_arg(&output.path().to_string_lossy()));
-
-		time::timeout(
-			Duration::from_secs(10),
-			shell.run(
-				ShellRunOptions { command: sub, ..Default::default() },
-				None,
-				CancelToken::default(),
-			),
-		)
-		.await
-		.expect("backgrounding a subshell loop must return promptly")
-		.expect("run backgrounded subshell loop");
-		assert!(still_written(output.path()).await, "loop never started");
-
-		let kill = time::timeout(
-			Duration::from_secs(10),
-			shell.run(
-				ShellRunOptions { command: "kill %1".into(), ..Default::default() },
-				None,
-				CancelToken::default(),
-			),
-		)
-		.await
-		.expect("kill %1 must return instead of wedging the session")
-		.expect("kill %1");
-		assert_eq!(kill.exit_code, Some(0), "kill %1 failed");
-		assert!(!still_written(output.path()).await, "kill %1 did not end the compound loop");
-	}
-
-	/// `live_background_job_count` reports 0 when the session has no live
-	/// external background jobs and 1 while one is running. The host relies on
-	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
-	/// instead of dropping it (which would SIGKILL the child via kill-on-drop).
-	/// `sh -c` forces an external process because the bare `sleep` builtin runs
-	/// in-process and is intentionally not counted.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn live_background_job_count_tracks_external_background_jobs() {
-		let _guard = shell_test_lock().lock().await;
-		let shell = Shell::new(None);
-
-		// No session core materialized yet.
-		assert_eq!(shell.live_background_job_count().await, 0);
-
-		// A foreground-only command leaves nothing in the background.
-		shell
-			.run(
-				ShellRunOptions { command: "true".into(), ..Default::default() },
-				None,
-				CancelToken::default(),
-			)
-			.await
-			.expect("run true");
-		assert_eq!(shell.live_background_job_count().await, 0);
-
-		// An external background process is tracked while it runs.
-		shell
-			.run(
-				ShellRunOptions { command: "sh -c 'sleep 30' &".into(), ..Default::default() },
-				None,
-				CancelToken::default(),
-			)
-			.await
-			.expect("run sleep");
-		assert_eq!(shell.live_background_job_count().await, 1);
-
-		// Dropping the shell at scope end reaps the child via kill-on-drop.
-		shell.abort().await;
-	}
-
-	/// An exited `&` child must be waited on while the persistent shell is
-	/// idle, not only when the host submits another command. Keep its status
-	/// for a later explicit `wait` after the OS process has disappeared.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn persistent_shell_reaps_background_child_without_followup_run() {
-		let _guard = shell_test_lock().lock().await;
-		let shell = Shell::new(None);
-		let (tx, rx) = flume::unbounded::<String>();
-		let started = shell
-			.run(
-				ShellRunOptions {
-					command: "/bin/sh -c 'sleep 1; exit 7' >/dev/null 2>&1 & pid=$!; printf '%s\\n' \
-					          \"$pid\""
-						.into(),
-					..Default::default()
-				},
-				Some(tx),
-				CancelToken::default(),
-			)
-			.await
-			.expect("start external background child");
-		assert_eq!(started.exit_code, Some(0));
-		let output: String = rx.try_iter().collect();
-		let pid = output
-			.trim()
-			.parse::<i32>()
-			.expect("background process pid");
-		assert!(pid > 0);
-
-		// No calls to the shell (including the live-job counter) until this
-		// child has exited and its parent has reaped it.
-		time::timeout(Duration::from_secs(5), async {
-			loop {
-				// SAFETY: signal 0 only probes this pid's existence.
-				if unsafe { libc::kill(pid, 0) } == -1 {
-					let err = io::Error::last_os_error();
-					assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "probe child: {err}");
-					break;
-				}
-				time::sleep(Duration::from_millis(20)).await;
-			}
-		})
-		.await
-		.expect("background child remained a zombie after exit");
-
-		assert_eq!(shell.live_background_job_count().await, 0);
-
-		let waited = shell
-			.run(
-				ShellRunOptions { command: "wait \"$pid\"".into(), ..Default::default() },
-				None,
-				CancelToken::default(),
-			)
-			.await
-			.expect("wait for already-reaped child");
-		assert_eq!(waited.exit_code, Some(7));
-	}
-
-	/// A short-lived stage of a background pipeline must be reaped even if
-	/// another stage is still running. The pipeline's last-stage status must
-	/// remain available to `wait` after both children have been reaped.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
-		let _guard = shell_test_lock().lock().await;
-		let shell = Shell::new(None);
-		let first_pidfile = tempfile::NamedTempFile::new().expect("pipeline pidfile");
-		let command = format!(
-			"/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 15' _ {} | /bin/sh -c 'sleep 1; exit 9' \
-			 >/dev/null 2>&1 & pid=$!; printf '%s\\n' \"$pid\"",
-			quote_arg(&first_pidfile.path().to_string_lossy())
-		);
-		let (tx, rx) = flume::unbounded::<String>();
-		let started = shell
-			.run(ShellRunOptions { command, ..Default::default() }, Some(tx), CancelToken::default())
-			.await
-			.expect("start background pipeline");
-		assert_eq!(started.exit_code, Some(0));
-		let output: String = rx.try_iter().collect();
-		let last_pid = output
-			.trim()
-			.parse::<i32>()
-			.expect("last pipeline stage pid");
-		assert!(last_pid > 0);
-		let first_pid = time::timeout(Duration::from_secs(2), async {
-			loop {
-				if let Ok(pid) = fs::read_to_string(first_pidfile.path())
-					.unwrap_or_default()
-					.trim()
-					.parse::<i32>()
-				{
-					break pid;
-				}
-				time::sleep(Duration::from_millis(20)).await;
-			}
-		})
-		.await
-		.expect("first pipeline stage did not record its pid");
-		assert_ne!(first_pid, last_pid, "pipeline stages need distinct pids");
-
-		// A zombie still responds to signal 0. The last stage must disappear
-		// while the first is alive, without another shell/tool invocation.
-		time::timeout(Duration::from_secs(5), async {
-			loop {
-				// SAFETY: signal 0 only probes this pid's existence.
-				if unsafe { libc::kill(last_pid, 0) } == -1 {
-					let err = io::Error::last_os_error();
-					assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "probe child: {err}");
-					break;
-				}
-				time::sleep(Duration::from_millis(20)).await;
-			}
-		})
-		.await
-		.expect("early exiting pipeline stage remained a zombie");
-		// SAFETY: signal 0 only probes the other child, which must still be
-		// running for this to prove independent reaping.
-		assert_eq!(unsafe { libc::kill(first_pid, 0) }, 0, "first stage exited too soon");
-		// SAFETY: end only this test-owned sleep so the final wait is prompt.
-		assert_eq!(unsafe { libc::kill(first_pid, libc::SIGTERM) }, 0);
-
-		let waited = shell
-			.run(
-				ShellRunOptions { command: "wait \"$pid\"".into(), ..Default::default() },
-				None,
-				CancelToken::default(),
-			)
-			.await
-			.expect("wait for background pipeline");
-		assert_eq!(waited.exit_code, Some(9), "wait must report the pipeline's last stage");
-	}
-
-	/// `exit` and errexit end the command, not the session: later runs keep
-	/// the variables, functions, and options set before them.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn exit_and_errexit_keep_session_state() {
-		let _guard = shell_test_lock().lock().await;
-		let shell = Shell::new(None);
-		let exit_code = async |command: &str| {
-			shell
-				.run(
-					ShellRunOptions { command: command.into(), ..Default::default() },
-					None,
-					CancelToken::default(),
-				)
-				.await
-				.expect("run")
-				.exit_code
-		};
-		let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
-
-		assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
-		assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
-		assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
-		assert_eq!(exit_code("exit 3").await, Some(3));
-		assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
-		assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
-	}
-
-	/// `Shell::pids` reports the in-flight run's live external children without
-	/// waiting on the session lock that the running command holds, and goes
-	/// empty once the run returns — including through cancellation.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pids_reports_in_flight_children_until_run_returns() {
-		let _guard = shell_test_lock().lock().await;
-		let shell = Arc::new(Shell::new(None));
-		assert!(shell.pids().is_empty(), "no run in flight");
-
-		// The bare `sleep` builtin runs in-process; use the external binary.
-		let sleep = test_executable("sleep");
-		let run = tokio::spawn({
-			let shell = shell.clone();
-			async move {
-				shell
-					.run(
-						ShellRunOptions {
-							command: format!("'{}' 30", sleep.display()),
-							..Default::default()
-						},
-						None,
-						CancelToken::default(),
-					)
-					.await
-			}
-		});
-
-		let pids = time::timeout(Duration::from_secs(5), async {
-			loop {
-				let pids = shell.pids();
-				if !pids.is_empty() {
-					break pids;
-				}
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("in-flight run never reported a pid");
-		assert_eq!(pids.len(), 1, "exactly the sleep child: {pids:?}");
-		let child = process::Process::from_pid(pids[0]).expect("reported pid is alive");
-		assert_eq!(child.status(), process::ProcessStatus::Running);
-
-		shell.abort().await;
-		let result = time::timeout(Duration::from_secs(5), run)
-			.await
-			.expect("aborted run returns")
-			.expect("run task")
-			.expect("run result");
-		assert!(result.cancelled, "run was aborted");
-		assert!(shell.pids().is_empty(), "pids cleared once the run returns");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_false_and_printf_skips_second_and_returns_nonzero() {
-		let root = unique_temp_dir("false-and");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"false && printf skipped",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert_eq!(result.exit_code, Some(1));
-		assert!(!result.cancelled);
-		assert!(!result.timed_out);
-		assert_eq!(output, "");
-		// `false && printf` short-circuits: nothing is rewritten, so a no-op
-		// chain must surface no minimizer telemetry (None).
-		assert!(result.minimized.is_none(), "chain noop must not surface telemetry");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_false_semicolon_printf_continues_and_returns_last_code() {
-		let root = unique_temp_dir("false-semi");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let expected = "hello\n".repeat(200);
-		let command = format!("false ; printf '{}'", "hello\\n".repeat(200));
-		let (result, output) =
-			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
-		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("long output should be minimized");
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, expected);
-		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.original_text, expected);
-		assert_eq!(minimized.text, "HI\n".repeat(200));
-	}
-
-	/// Like jq, the built-in jq reports an input that fails and exits 0 when it
-	/// is not the last. Such a run is never shortened, even when the error does
-	/// not start a line; long successful output that only looks like an error
-	/// still is.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn jq_run_that_reported_an_error_is_not_minimized() {
-		let root = unique_temp_dir("jq-error");
-		std::fs::write(root.join("in.jsonl"), "1\n2\n3\n").expect("write input");
-		let _guard = shell_test_lock().lock().await;
-		let run = async |command: &str| {
-			let (tx, rx) = flume::unbounded::<String>();
-			let options = ShellExecuteOptions {
-				command: command.to_string(),
-				cwd: Some(root.to_string_lossy().into_owned()),
-				// the built-in jq even when the environment turns builtins off
-				session_env: Some(HashMap::from([(
-					"PI_DISABLE_UUTILS_BUILTINS".to_string(),
-					"0".to_string(),
-				)])),
-				minimizer: Some(minimizer::MinimizerOptions {
-					enabled: Some(true),
-					..Default::default()
-				}),
-				..Default::default()
-			};
-			let result = execute_shell(options, Some(tx), CancelToken::default())
-				.await
-				.expect("execute_shell");
-			let output: String = rx.drain().collect();
-			(result, output)
-		};
-		let rows = r#"range(0; 200) | "row with many fields and a longer string value""#;
-		// `stderr` writes no newline, so the error lands mid-line
-		let failing = format!(
-			r#"jq -r 'if . == 2 then "prefix" | stderr | error("boom") else {rows} end' in.jsonl"#
-		);
-		for command in [failing.clone(), format!("cd . && {failing}")] {
-			let (result, output) = run(&command).await;
-			assert_eq!(result.exit_code, Some(0), "{command}");
-			assert!(output.contains("prefixError: \"boom\""), "{command}: {output:?}");
-			assert!(result.minimized.is_none(), "{command}: {:?}", result.minimized);
-			// Without the reported error the jq filter would shorten this capture.
-			let filtered = minimizer::apply(&failing, &output, 0, &minimizer::MinimizerConfig {
-				enabled: true,
-				..Default::default()
-			});
-			assert!(filtered.changed, "{command}");
-		}
-		for value in ["Error: expected user data", "jq: error is data"] {
-			let command = format!(r#"jq -nr 'range(0; 1000) | "{value}"'"#);
-			let (result, _) = run(&command).await;
-			assert_eq!(result.exit_code, Some(0), "{command}");
-			assert!(result.minimized.is_some(), "{command} is shortened");
-		}
-		let _ = std::fs::remove_dir_all(&root);
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_cd_tmp_and_pwd_persists_state_across_segments() {
-		let root = unique_temp_dir("cwd");
-		let tmp_dir = root.join("tmp");
-		std::fs::create_dir_all(&tmp_dir).expect("create nested tmp dir");
-		let settings_path = root.join("minimizer.toml");
-		std::fs::write(
-			&settings_path,
-			r#"
-schema_version = 1
-
-[filters.pwd]
-match_command = "^pwd$"
-replace = [{ pattern = "^.+$", replacement = "PWD" }]
-"#,
-		)
-		.expect("write settings");
-		let minimizer = minimizer::MinimizerOptions {
-			enabled: Some(true),
-			settings_path: Some(settings_path.to_string_lossy().into_owned()),
-			..Default::default()
-		};
-
-		let expected = format!("{}\n", tmp_dir.display());
-		let (result, output) =
-			run_command_capture("cd tmp && pwd", Some(&root), Some(minimizer), CancelToken::default())
-				.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert!(result.minimized.is_none(), "short pwd output must not be minimized");
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, expected);
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn whole_command_exceeding_capture_cap_streams_raw_without_minimized() {
-		let root = unique_temp_dir("whole-cap");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), Some(1024));
-		let (result, output) =
-			run_command_capture("printf '%1200s' x", None, Some(minimizer), CancelToken::default())
-				.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output.len(), 1200);
-		assert!(output.ends_with('x'));
-		// Output exceeded the capture cap: streamed raw and never buffered, so
-		// nothing was minimized. `minimized` must be absent (not a `too-large`
-		// result with empty `text`, which would mislead presence-keyed
-		// consumers).
-		assert!(result.minimized.is_none());
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_printf_chain_preserves_raw_original_text() {
-		let root = unique_temp_dir("minimizer");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let hello = "hello\n".repeat(200);
-		let world = "world\n".repeat(200);
-		let command =
-			format!("printf '{}' ; printf '{}'", "hello\\n".repeat(200), "world\\n".repeat(200));
-		let (result, output) =
-			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
-		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("long output should be minimized");
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, format!("{hello}{world}"));
-		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.original_text, format!("{hello}{world}"));
-		assert_eq!(minimized.text, format!("{}{}", "HI\n".repeat(200), world));
-		assert_eq!(minimized.input_bytes, (hello.len() + world.len()) as u32);
-		assert_eq!(minimized.output_bytes, ("HI\n".repeat(200).len() + world.len()) as u32);
-	}
-
-	/// Regression: a quoted here-doc followed by another command must execute
-	/// instead of failing with "unterminated here document". The minimizer's
-	/// segmented runner used to rebuild each segment via the brush AST Display
-	/// impl, which re-emitted the `<<'PY'` close tag as the quoted `'PY'` — an
-	/// invalid delimiter that left the body unterminated. Here-doc-bearing
-	/// commands now bail out of segmentation and run whole via the single path.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn quoted_heredoc_in_chain_runs_via_single_path() {
-		let root = unique_temp_dir("heredoc-chain");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"cat <<'PY'\nhello $USER\nPY\nprintf 'after\\n'",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert_eq!(result.exit_code, Some(0));
-		// Quoted delimiter keeps the body literal ($USER unexpanded) and the
-		// trailing command still runs in order.
-		assert_eq!(output, "hello $USER\nafter\n");
-		assert!(!output.contains("unterminated"));
-	}
-
-	/// Regression: a `&&` / `;` chain whose later pipeline stage is a compound
-	/// command (`while … done`) must execute instead of failing with
-	/// "pi-natives:command: syntax error at end of input". The segmented chain
-	/// runner rebuilt each segment via the brush AST `Display` impl, but only
-	/// validated the *first* pipeline stage — so a compound later stage was
-	/// reconstructed without its terminator and re-run as invalid shell. Such a
-	/// command now bails out of segmentation and runs whole via the single path.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn compound_stage_in_chain_runs_via_single_path() {
-		let root = unique_temp_dir("compound-chain");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"printf 'start\\n' && seq 5 | while read n; do echo \"n=$n\"; done | head -2",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "start\nn=1\nn=2\n");
-		assert!(!output.contains("syntax error"));
-		// Ran whole (unsegmented), so nothing was minimized.
-		assert!(result.minimized.is_none());
-	}
-
-	/// A segment that carries a file redirect is still segmented, and the brush
-	/// `Display` reconstruction the runner executes must round-trip through
-	/// brush's own parser **without losing the redirect**.
-	/// `echo hidden >/dev/null` suppresses its own stdout: if the reconstruction
-	/// dropped the redirect, `hidden` would leak into the captured output.
-	/// Proves the reconstruction path is semantically sound for the
-	/// redirect-bearing shapes the per-stage whitelist accepts (not just
-	/// syntactically parseable).
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_chain_with_redirect_executes_correctly() {
-		let root = unique_temp_dir("redirect-chain");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let expected = "hello\n".repeat(200);
-		let command = format!("echo hidden >/dev/null && printf '{}'", "hello\\n".repeat(200));
-		let (result, output) =
-			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert_eq!(result.exit_code, Some(0));
-		// The redirect survived reconstruction: segment 1's stdout went to
-		// /dev/null, so only segment 2's output is captured.
-		assert!(!output.contains("hidden"), "redirect must suppress segment-1 stdout");
-		assert_eq!(output, expected);
-		let minimized = result.minimized.expect("long output should be minimized");
-		assert_eq!(minimized.original_text, expected);
-		assert_eq!(minimized.text, "HI\n".repeat(200));
-		assert!(!output.contains("syntax error"));
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_chain_exceeding_aggregate_capture_cap_stays_raw() {
-		let root = unique_temp_dir("aggregate-cap");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), Some(1024));
-		let (result, output) = run_command_capture(
-			"printf '%600s' x ; printf '%600s' y",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output.len(), 1200);
-		assert!(output.ends_with('y'));
-		// Aggregate cap exceeded: the chain streamed its output raw and was not
-		// minimized, so `minimized` is absent (not an empty-text `too-large`).
-		assert!(result.minimized.is_none());
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_timeout_in_first_segment_prevents_later_segments() {
-		let root = unique_temp_dir("timeout");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"sleep 1 && printf later",
-			None,
-			Some(minimizer),
-			CancelToken::new(Some(10)),
-		)
-		.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert!(result.exit_code.is_none());
-		assert!(!result.cancelled);
-		assert!(result.timed_out);
-		assert!(result.minimized.is_none());
-		assert!(!output.contains("later"));
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn segmented_cancel_in_first_segment_prevents_later_segments() {
-		let root = unique_temp_dir("cancel");
-		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let mut cancel_token = CancelToken::default();
-		let abort_token = cancel_token.emplace_abort_token();
-		let cancel_task = tokio::spawn(async move {
-			time::sleep(Duration::from_millis(10)).await;
-			abort_token.abort(AbortReason::Signal);
-		});
-		let (result, output) =
-			run_command_capture("sleep 1 && printf later", None, Some(minimizer), cancel_token).await;
-		let _ = cancel_task.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert!(result.exit_code.is_none());
-		assert!(result.cancelled);
-		assert!(!result.timed_out);
-		assert!(result.minimized.is_none());
-		assert!(!output.contains("later"));
-	}
-	/// End-to-end verification that brush, when embedded as a non-interactive
-	/// library (`interactive: false`, exactly what `create_session` produces),
-	/// spawns external commands in a **separate session** from the host.
-	///
-	/// The truth-table tests in `child_session_action` cover the decision in
-	/// isolation. This test covers the wiring: it boots a real `BrushShell`,
-	/// runs a child that prints its PID then sleeps, and asks the kernel for
-	/// that PID's session via `getsid(2)` while the child is still alive.
-	/// Pre-fix (`new_pg=false` skipped `detach_session`), the child inherited
-	/// the host's session, so `getsid(child_pid) == getsid(0)`. Post-fix,
-	/// `setsid` ran and the child is its own session leader
-	/// (`getsid(child_pid) == child_pid`).
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn embedded_external_command_runs_in_its_own_session() {
-		use std::io::Read as _;
-
-		// SAFETY: `getsid(0)` only queries the current process session; the
-		// return value is checked. Inside a PID namespace (the containerized CI
-		// runner) the host's session leader can live outside the namespace, so
-		// `getsid(0)` legitimately reports 0 — only -1 is a real failure. The
-		// child-session invariants below (own session, distinct from host) stay
-		// meaningful.
-		let host_sid = unsafe { libc::getsid(0) };
-		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
-
-		// Build the same kind of session pi-natives uses in production.
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-
-		// Output pipe shared between the brush child and a concurrent reader. The
-		// reader runs on a blocking thread because pipe reads are blocking.
-		let (mut reader, writer) = pipe_to_files("e2e").expect("pipe");
-		let stdout_file = OpenFile::from(writer.try_clone().expect("clone"));
-		let stderr_file = OpenFile::from(writer);
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
-		params.set_fd(OpenFiles::STDERR_FD, stderr_file);
-
-		// (pid_tx, pid_rx) — reader task signals the test as soon as it has the
-		// PID.
-		let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<i32>();
-		let reader_handle = tokio::task::spawn_blocking(move || {
-			let mut buf = Vec::new();
-			// Read just enough to capture the PID line. The child sleeps after
-			// printing so the pipe will not back-pressure.
-			let mut chunk = [0u8; 64];
-			let mut pid_tx = Some(pid_tx);
-			while let Ok(n) = reader.read(&mut chunk)
-				&& n > 0
-			{
-				buf.extend_from_slice(&chunk[..n]);
-				if pid_tx.is_some()
-					&& let Some(line_end) = buf.iter().position(|&byte| byte == b'\n')
-					&& let Ok(line) = std::str::from_utf8(&buf[..line_end])
-					&& let Ok(pid) = line.trim().parse::<i32>()
-				{
-					let _ = pid_tx
-						.take()
-						.expect("pid sender should be present")
-						.send(pid);
-				}
-			}
-			buf
-		});
-
-		// Run brush in the background so we can call `getsid(child_pid)` while
-		// the child is still alive.
-		let shell_handle = tokio::spawn(async move {
-			let source_info = SourceInfo::from("pi-natives:test");
-			// `printf '%d\n' "$$"` then `sleep 0.5`. Long enough for our `getsid`.
-			let exec = session
-				.shell
-				.run_string("sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &source_info, &params)
-				.await
-				.expect("run_string");
-			drop(params);
-			(session, exec)
-		});
-
-		let child_pid = time::timeout(Duration::from_secs(5), pid_rx)
-			.await
-			.expect("timed out waiting for child PID")
-			.expect("reader closed pid channel without sending");
-		assert!(child_pid > 0, "got non-positive child pid: {child_pid}");
-
-		// Snapshot the child's session ID immediately, while the child is still
-		// in `sleep`. POSIX guarantees `getsid` against a live PID returns the
-		// session of that process.
-		// SAFETY: `child_pid` is a positive PID from the child; errors are
-		// reported via the checked return value.
-		let child_sid = unsafe { libc::getsid(child_pid) };
-		assert!(
-			child_sid > 0,
-			"getsid({child_pid}) failed: {} (child may have already exited)",
-			std::io::Error::last_os_error(),
-		);
-
-		// Drain the brush task and the pipe reader.
-		let (_session, exec) = time::timeout(Duration::from_secs(5), shell_handle)
-			.await
-			.expect("shell timed out")
-			.expect("shell task panicked");
-		assert!(
-			matches!(exec.exit_code, ExecutionExitCode::Success),
-			"unexpected exit: {}",
-			exit_code(&exec),
-		);
-		let _ = time::timeout(Duration::from_secs(2), reader_handle).await;
-
-		assert_ne!(
-			child_sid, host_sid,
-			"child PID {child_pid} inherited host session {host_sid}; setsid() did not run — the \
-			 embedded-host bug is back",
-		);
-		assert_eq!(
-			child_sid, child_pid,
-			"child PID {child_pid} should be its own session leader after setsid",
-		);
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() {
-		let _guard = shell_test_lock().lock().await;
-		let root = tempfile::tempdir().expect("cleanup directory");
-		let script = root.path().join("cleanup.sh");
-		fs::write(
-			&script,
-			"trap 'sleep 0.2; printf cleaned >> cleaned; exit 0' TERM\n: > ready\nwhile :; do :; \
-			 done\n",
-		)
-		.expect("cleanup script");
-		let shell = Shell::new(None);
-		let mut cancel = CancelToken::default();
-		let abort = cancel.emplace_abort_token();
-		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
-		let task = tokio::spawn(async move {
-			shell
-				.run(
-					ShellRunOptions {
-						command: "sh cleanup.sh & sleep 30".into(),
-						cwd: Some(cwd),
-						..Default::default()
-					},
-					None,
-					cancel,
-				)
-				.await
-		});
-		time::timeout(Duration::from_secs(5), async {
-			while !root.path().join("ready").exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("background child ready");
-		abort.abort(AbortReason::Signal);
-		let result = time::timeout(Duration::from_secs(5), task)
-			.await
-			.expect("cancel finished")
-			.expect("run task")
-			.expect("shell result");
-		assert!(result.cancelled);
-		assert_eq!(fs::read_to_string(root.path().join("cleaned")).expect("TERM cleanup"), "cleaned");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
-		let _guard = shell_test_lock().lock().await;
-		let root = tempfile::tempdir().expect("cleanup directory");
-		// The trap writes once the readers' old 500 ms cancel would have closed
-		// them, and finishes well inside the 1 s TERM grace even when a loaded
-		// runner is slow to start `sleep`.
-		fs::write(
-			root.path().join("cleanup.sh"),
-			"trap 'sleep 0.55; echo flushing; printf cleaned > cleaned; exit 0' TERM\n: > \
-			 ready\nwhile :; do :; done\n",
-		)
-		.expect("cleanup script");
-		let shell = Shell::new(None);
-		let mut cancel = CancelToken::default();
-		let abort = cancel.emplace_abort_token();
-		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
-		let task = tokio::spawn(async move {
-			shell
-				.run(
-					ShellRunOptions {
-						command: "sh cleanup.sh".into(),
-						cwd: Some(cwd),
-						..Default::default()
-					},
-					None,
-					cancel,
-				)
-				.await
-		});
-		time::timeout(Duration::from_secs(5), async {
-			while !root.path().join("ready").exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("child ready");
-		abort.abort(AbortReason::Signal);
-		let result = time::timeout(Duration::from_secs(5), task)
-			.await
-			.expect("cancel finished")
-			.expect("run task")
-			.expect("shell result");
-		assert!(result.cancelled);
-		assert_eq!(
-			fs::read_to_string(root.path().join("cleaned"))
-				.expect("TERM cleanup after writing output"),
-			"cleaned"
-		);
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
-	async fn termination_returns_early_after_the_child_exits() {
-		let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
-		if cfg!(windows) {
-			command.args(["/c", "ping -n 30 127.0.0.1"]);
-		} else {
-			command.args(["-c", "exec sleep 30"]);
-		}
-		let mut child = command.kill_on_drop(true).spawn().expect("child");
-		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits");
-		let registry = process::SpawnRegistry::new();
-		registry.record(None, process::Process::from_pid(pid));
-		let started = time::Instant::now();
-		let ((), status) = tokio::join!(terminate_run(&registry), child.wait());
-		assert!(status.is_ok(), "terminated child must be reaped");
-		assert!(started.elapsed() < Duration::from_millis(750), "exited child consumed TERM grace");
-	}
-
-	/// Cancelling one `Shell::run` must only signal processes spawned by that
-	/// run. Run B starts first so its old host-descendant baseline would not
-	/// include run A's later-spawned child; pre-fix, cancelling B classified A's
-	/// child as "new" and SIGTERM'd it, so run A returned 143 instead of 0.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn cancelling_one_run_spares_a_concurrent_runs_child() {
-		let _guard = shell_test_lock().lock().await;
-
-		let shell_b = Shell::new(None);
-		let (tx_b, rx_b) = flume::unbounded::<String>();
-		let mut ct_b = CancelToken::default();
-		let abort_b = ct_b.emplace_abort_token();
-		let handle_b = tokio::spawn(async move {
-			shell_b
-				.run(
-					ShellRunOptions {
-						command: "sh -c 'printf \"ready\\n\"; sleep 30'".into(),
-						..Default::default()
-					},
-					Some(tx_b),
-					ct_b,
-				)
-				.await
-		});
-
-		let mut b_output = String::new();
-		let b_ready = time::timeout(Duration::from_secs(5), async {
-			loop {
-				let chunk = rx_b
-					.recv_async()
-					.await
-					.expect("run B ended before printing readiness");
-				b_output.push_str(&chunk);
-				if let Some(line_end) = b_output.find('\n') {
-					return b_output[..line_end].to_string();
-				}
-			}
-		})
-		.await
-		.expect("timed out waiting for run B readiness");
-		assert_eq!(b_ready.trim(), "ready", "run B should reach its long sleep before run A starts");
-
-		let shell_a = Shell::new(None);
-		let (tx_a, rx_a) = flume::unbounded::<String>();
-		let handle_a = tokio::spawn(async move {
-			shell_a
-				.run(
-					ShellRunOptions {
-						command: "sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
-						..Default::default()
-					},
-					Some(tx_a),
-					CancelToken::default(),
-				)
-				.await
-		});
-
-		let mut a_output = String::new();
-		let a_child_pid = time::timeout(Duration::from_secs(5), async {
-			loop {
-				let chunk = rx_a
-					.recv_async()
-					.await
-					.expect("run A ended before printing its child pid");
-				a_output.push_str(&chunk);
-				if let Some(line_end) = a_output.find('\n') {
-					return a_output[..line_end]
-						.trim()
-						.parse::<i32>()
-						.expect("run A pid line should be an integer");
-				}
-			}
-		})
-		.await
-		.expect("timed out waiting for run A child pid");
-		assert!(a_child_pid > 0, "got non-positive run A child pid: {a_child_pid}");
-
-		abort_b.abort(AbortReason::Signal);
-
-		let result_a = time::timeout(Duration::from_secs(10), handle_a)
-			.await
-			.expect("run A timed out")
-			.expect("run A task panicked")
-			.expect("run A failed");
-		let result_b = time::timeout(Duration::from_secs(10), handle_b)
-			.await
-			.expect("run B timed out")
-			.expect("run B task panicked")
-			.expect("run B failed");
-
-		assert_eq!(result_a.exit_code, Some(0), "cancelling run B must not SIGTERM run A's child");
-		assert!(!result_a.cancelled, "run A was never cancelled");
-		assert!(result_b.cancelled, "run B should report cancellation");
-	}
-
-	/// Cancelling while `Shell::run` is still sourcing a snapshot must terminate
-	/// the foreground process spawned by that snapshot. The snapshot runs before
-	/// the user command, so this specifically guards the shared cancel token and
-	/// spawn registry wiring passed into `source_snapshot`.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn cancelling_while_sourcing_snapshot_kills_snapshot_foreground_child() {
-		let _guard = shell_test_lock().lock().await;
-		let root = unique_temp_dir("snapshot-cancel");
-		let snapshot_path = root.join("snapshot.sh");
-		let pid_path = root.join("snapshot-child.pid");
-		let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
-		std::fs::write(
-			&snapshot_path,
-			format!("sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
-		)
-		.expect("write snapshot file");
-
-		let shell = Shell::new(Some(ShellOptions {
-			snapshot_path: Some(snapshot_path.to_string_lossy().into_owned()),
-			..Default::default()
-		}));
-		let mut cancel_token = CancelToken::default();
-		let abort_token = cancel_token.emplace_abort_token();
-		let run_handle = tokio::spawn(async move {
-			shell
-				.run(
-					ShellRunOptions { command: "printf done".into(), ..Default::default() },
-					None,
-					cancel_token,
-				)
-				.await
-		});
-
-		let child_pid = time::timeout(Duration::from_secs(5), async {
-			loop {
-				if let Ok(pid_text) = std::fs::read_to_string(&pid_path)
-					&& let Ok(pid) = pid_text.trim().parse::<i32>()
-					&& pid > 0
-				{
-					return pid;
-				}
-				time::sleep(Duration::from_millis(20)).await;
-			}
-		})
-		.await
-		.expect("timed out waiting for snapshot foreground child to write its positive PID");
-
-		abort_token.abort(AbortReason::Signal);
-
-		let result = time::timeout(Duration::from_secs(10), run_handle)
-			.await
-			.expect("timed out waiting for cancellation while sourcing snapshot")
-			.expect("snapshot sourcing run task panicked")
-			.expect("shell run failed while cancelling snapshot sourcing");
-		assert!(result.cancelled, "cancelling while sourcing a snapshot should report cancellation");
-		assert_eq!(
-			result.exit_code, None,
-			"cancelled snapshot sourcing run should not report an exit code"
-		);
-		assert!(
-			!result.timed_out,
-			"signal cancellation during snapshot sourcing must not report timeout"
-		);
-
-		let child_dead = time::timeout(Duration::from_secs(5), async {
-			loop {
-				// SAFETY: `child_pid` came from the foreground `sh` spawned by the
-				// snapshot; `kill(pid, 0)` only probes whether that process still
-				// exists.
-				let kill_result = unsafe { libc::kill(child_pid, 0) };
-				if kill_result == -1 {
-					let err = std::io::Error::last_os_error();
-					if err.raw_os_error() == Some(libc::ESRCH) {
-						return;
-					}
-					panic!(
-						"kill({child_pid}, 0) failed with unexpected error while checking snapshot \
-						 child cleanup: {err}"
-					);
-				}
-				time::sleep(Duration::from_millis(20)).await;
-			}
-		})
-		.await;
-		let _ = std::fs::remove_dir_all(&root);
-		assert!(
-			child_dead.is_ok(),
-			"snapshot foreground child PID {child_pid} was still alive after cancelling while \
-			 sourcing snapshot; cancel bridge did not terminate the snapshot-spawned process"
-		);
-	}
-
-	/// Regression for the `suspended (tty input)` bug: an **interactive child
-	/// inside a pipeline** (`zsh -i ... | awk`) used to stay in the host
-	/// session, open `/dev/tty`, `tcsetpgrp` itself to the foreground, and
-	/// leave the embedded host (OMP) stopped on its next tty read. The earlier
-	/// embedded-host fix carved pipelines out of `detach_session` because a
-	/// later stage that `setpgid`-joined a detached leader failed with EPERM.
-	///
-	/// This test boots a real embedded `BrushShell` and runs a two-stage
-	/// pipeline whose first stage prints its PID then sleeps (forwarded to us
-	/// by `cat`). It asserts two contracts at once:
-	///   1. the first stage runs in its **own session** (`getsid == own pid`),
-	///      so it can never reach the host's controlling tty — guards the
-	///      decision; and
-	///   2. the pipeline still exits **successfully**, proving the second stage
-	///      spawned without the cross-session `setpgid` EPERM — guards the
-	///      wiring that skips `process_group(...)` for detached children.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn embedded_pipeline_stage_runs_in_its_own_session() {
-		use std::io::Read as _;
-
-		// SAFETY: `getsid(0)` only queries the current process session; checked
-		// below. In a PID namespace (containerized CI) the host's session leader
-		// can live outside the namespace, so `getsid(0)` reports 0, not an error;
-		// only -1 is a real failure.
-		let host_sid = unsafe { libc::getsid(0) };
-		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
-
-		let config = ShellConfig {
-			session_env:   None,
-			snapshot_path: None,
-			minimizer:     None,
-			filesystem:    Fs::native(),
-		};
-		let mut session = create_session(&config).await.expect("create_session");
-
-		let (mut reader, writer) = pipe_to_files("e2e-pipe").expect("pipe");
-		let stdout_file = OpenFile::from(writer.try_clone().expect("clone"));
-		let stderr_file = OpenFile::from(writer);
-
-		let mut params = session.shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
-		params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
-		params.set_fd(OpenFiles::STDERR_FD, stderr_file);
-
-		let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<i32>();
-		let reader_handle = tokio::task::spawn_blocking(move || {
-			let mut buf = Vec::new();
-			let mut chunk = [0u8; 64];
-			let mut pid_tx = Some(pid_tx);
-			while let Ok(n) = reader.read(&mut chunk)
-				&& n > 0
-			{
-				buf.extend_from_slice(&chunk[..n]);
-				if pid_tx.is_some()
-					&& let Some(line_end) = buf.iter().position(|&byte| byte == b'\n')
-					&& let Ok(line) = std::str::from_utf8(&buf[..line_end])
-					&& let Ok(pid) = line.trim().parse::<i32>()
-				{
-					let _ = pid_tx
-						.take()
-						.expect("pid sender should be present")
-						.send(pid);
-				}
-			}
-			buf
-		});
-
-		let shell_handle = tokio::spawn(async move {
-			let source_info = SourceInfo::from("pi-natives:test");
-			// First stage prints its own PID and sleeps; `sh -c cat` forwards
-			// the PID line to our reader and exits on EOF. The first stage
-			// leads the pipeline's process group, while the second stage is the
-			// join-or-detach process that would EPERM without the wiring fix.
-			let exec = session
-				.shell
-				.run_string(
-					"sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | sh -c cat",
-					&source_info,
-					&params,
-				)
-				.await
-				.expect("run_string");
-			drop(params);
-			(session, exec)
-		});
-
-		let child_pid = time::timeout(Duration::from_secs(5), pid_rx)
-			.await
-			.expect("timed out waiting for first-stage PID")
-			.expect("reader closed pid channel without sending");
-		assert!(child_pid > 0, "got non-positive child pid: {child_pid}");
-
-		// SAFETY: `child_pid` is a live positive PID (still in `sleep`); the
-		// return value is checked.
-		let child_sid = unsafe { libc::getsid(child_pid) };
-		assert!(
-			child_sid > 0,
-			"getsid({child_pid}) failed: {} (child may have already exited)",
-			std::io::Error::last_os_error(),
-		);
-
-		let (_session, exec) = time::timeout(Duration::from_secs(5), shell_handle)
-			.await
-			.expect("shell timed out")
-			.expect("shell task panicked");
-		// Guards the wiring: the second stage spawned without a cross-session
-		// `setpgid` EPERM, so the whole pipeline succeeded.
-		assert!(
-			matches!(exec.exit_code, ExecutionExitCode::Success),
-			"pipeline did not succeed (second stage may have hit setpgid EPERM): {}",
-			exit_code(&exec),
-		);
-		let _ = time::timeout(Duration::from_secs(2), reader_handle).await;
-
-		// Guards the decision: a pipeline stage must not share the host session,
-		// or it could seize the controlling tty and SIGTTIN the host.
-		assert_ne!(
-			child_sid, host_sid,
-			"pipeline stage PID {child_pid} inherited host session {host_sid}; it could seize the \
-			 controlling tty — the pipeline tty-suspend bug is back",
-		);
-		assert_eq!(
-			child_sid, child_pid,
-			"pipeline stage PID {child_pid} should be its own session leader after setsid",
-		);
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn wait_accepts_last_background_process_id() {
-		let options = ShellExecuteOptions {
-			command: "sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
-			..Default::default()
-		};
-
-		let result = execute_shell(options, None, CancelToken::default())
-			.await
-			.expect("execute should succeed");
-
-		assert_eq!(result.exit_code, Some(7));
-		assert!(!result.cancelled);
-		assert!(!result.timed_out);
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn wait_n_p_records_completed_process_id() {
-		let options = ShellExecuteOptions {
-			command: "sh -c 'sleep 0.2; exit 42' & slow=$!; sh -c 'exit 13' & fast=$!; wait -n -p \
-			          hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" -eq 13 ] && \
-			          [ \"$hit\" = \"$fast\" ]"
-				.to_string(),
-			..Default::default()
-		};
-
-		let result = execute_shell(options, None, CancelToken::default())
-			.await
-			.expect("execute should succeed");
-
-		assert_eq!(result.exit_code, Some(0));
-		assert!(!result.cancelled);
-		assert!(!result.timed_out);
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn wait_f_accepts_process_id() {
-		let options = ShellExecuteOptions {
-			command: "sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
-			..Default::default()
-		};
-
-		let result = execute_shell(options, None, CancelToken::default())
-			.await
-			.expect("execute should succeed");
-
-		assert_eq!(result.exit_code, Some(5));
-		assert!(!result.cancelled);
-		assert!(!result.timed_out);
-	}
-	#[tokio::test]
-	async fn abort_state_signals_cancel_token() {
-		let abort_state = ShellAbortState::default();
-		let mut cancel_token = CancelToken::default();
-		let abort_token = cancel_token.emplace_abort_token();
-
-		abort_state.set(abort_token).await;
-		abort_state.abort().await;
-
-		let reason = time::timeout(Duration::from_millis(100), cancel_token.wait())
-			.await
-			.expect("cancel token should be signalled");
-		assert!(matches!(reason, AbortReason::Signal));
-	}
-
-	#[cfg(unix)]
-	#[tokio::test]
-	async fn read_output_stops_when_cancelled_before_pipe_eof() {
-		let (reader, _writer) = pipe_to_files("test").expect("test pipe should be created");
-		let cancel = CancellationToken::new();
-		let (activity_tx, _activity_rx) = flume::bounded(1);
-		let handle = tokio::spawn(read_output(reader, None, cancel.clone(), activity_tx));
-
-		time::sleep(Duration::from_millis(10)).await;
-		cancel.cancel();
-
-		time::timeout(Duration::from_millis(100), handle)
-			.await
-			.expect("reader task should stop after cancellation")
-			.expect("reader task should not panic");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn execute_shell_streams_separates_stdout_and_stderr() {
-		let (stdout_tx, stdout_rx) = flume::unbounded::<Bytes>();
-		let (stderr_tx, stderr_rx) = flume::unbounded::<Bytes>();
-		let options = ShellExecuteOptions {
-			command: "echo out; echo err 1>&2".to_string(),
-			..Default::default()
-		};
-		let streams = StreamSinks { stdout: Some(stdout_tx), stderr: Some(stderr_tx) };
-		let result = execute_shell_streams(options, streams, CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(0));
-		assert!(!result.cancelled);
-
-		let mut stdout = Vec::new();
-		while let Ok(chunk) = stdout_rx.recv_async().await {
-			stdout.extend_from_slice(&chunk);
-		}
-		let mut stderr = Vec::new();
-		while let Ok(chunk) = stderr_rx.recv_async().await {
-			stderr.extend_from_slice(&chunk);
-		}
-		assert_eq!(stdout, b"out\n");
-		assert_eq!(stderr, b"err\n");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn execute_shell_streams_works_when_sinks_are_none() {
-		// Both sinks `None` — pipes must still drain so the child can exit.
-		let options = ShellExecuteOptions {
-			command: "yes done | head -n 100 1>&2; echo final".to_string(),
-			..Default::default()
-		};
-		let result = execute_shell_streams(options, StreamSinks::default(), CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(0));
-	}
-
-	/// Brush expands `$env:NAME` against the `env` shell variable by default,
-	/// collapsing PowerShell references like `Write-Host $env:OMPCODE` to
-	/// `:OMPCODE`. The session-level fallback below defines `env=$env` so the
-	/// expansion is the literal `$env:OMPCODE`, preserving the PowerShell
-	/// token when the command is forwarded to a child shell.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn powershell_env_reference_survives_brush_expansion() {
-		let (tx, rx) = flume::unbounded::<Bytes>();
-		let options = ShellExecuteOptions {
-			command: "printf '%s' \"$env:SystemRoot\"".to_string(),
-			..Default::default()
-		};
-		let streams = StreamSinks { stdout: Some(tx), stderr: None };
-		let result = execute_shell_streams(options, streams, CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(0));
-
-		let mut stdout = Vec::new();
-		while let Ok(chunk) = rx.recv_async().await {
-			stdout.extend_from_slice(&chunk);
-		}
-		assert_eq!(stdout, b"$env:SystemRoot");
-	}
-
-	/// A user assignment to `env` in the command itself must shadow the
-	/// session-level fallback so callers that genuinely use a POSIX variable
-	/// named `env` see their value, not the literal `$env`.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn user_env_assignment_shadows_powershell_fallback() {
-		let (tx, rx) = flume::unbounded::<Bytes>();
-		let options = ShellExecuteOptions {
-			command: "env=prod; printf '%s' \"$env:8080\"".to_string(),
-			..Default::default()
-		};
-		let streams = StreamSinks { stdout: Some(tx), stderr: None };
-		let result = execute_shell_streams(options, streams, CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(0));
-
-		let mut stdout = Vec::new();
-		while let Ok(chunk) = rx.recv_async().await {
-			stdout.extend_from_slice(&chunk);
-		}
-		assert_eq!(stdout, b"prod:8080");
-	}
-
-	/// Quoted heredoc delimiters at EOF must behave like bash. `brush-parser`
-	/// currently rejects that shape unless the input stream ends with a newline,
-	/// which surfaced as `unterminated here document sequence; tag(s) [...]` for
-	/// normal paste-run Python snippets.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn quoted_heredoc_without_trailing_newline_runs() {
-		let (result, output) =
-			run_command_capture("cat <<'PY'\nhello $USER\nPY", None, None, CancelToken::default())
-				.await;
-
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "hello $USER\n");
-	}
-
-	/// Regression for a Windows/macOS deadlock in
-	/// `brush_core::interp::setup_open_file_with_contents`. The body is
-	/// 256 KiB — well past the default pipe buffer on every platform
-	/// (Windows ~4 KiB, macOS 16-64 KiB, Linux 64 KiB), so any inline
-	/// `write_all` on the calling thread blocks forever. The `:` builtin
-	/// never reads its stdin, so the only way `echo done` runs is if the
-	/// heredoc writer is decoupled from the main thread (or, on Linux,
-	/// the pipe buffer was grown via `F_SETPIPE_SZ`). The
-	/// `tokio::time::timeout` is the safety net that turns a regression
-	/// into a 10 s failure instead of hanging CI for the full
-	/// hard-timeout window.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn large_heredoc_does_not_deadlock() {
-		let body = "X".repeat(256 * 1024);
-		let command = format!(": <<'EOF'\n{body}\nEOF\necho done");
-		let options = ShellExecuteOptions { command, ..Default::default() };
-
-		let result = time::timeout(
-			Duration::from_secs(10),
-			execute_shell(options, None, CancelToken::default()),
-		)
-		.await
-		.expect("execute_shell hung past 10 s — heredoc writer deadlocked")
-		.expect("execute_shell errored");
-
-		assert_eq!(result.exit_code, Some(0), "command did not run to completion");
-	}
-
-	/// The `nohup` builtin runs its operand command and surfaces that command's
-	/// own exit status — not nohup's (`125`/`126`/`127`) error codes.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn nohup_builtin_propagates_command_exit_code() {
-		let command = if cfg!(windows) {
-			"nohup cmd /C exit 7"
-		} else {
-			"nohup sh -c 'exit 7'"
-		};
-		let options = ShellExecuteOptions { command: command.to_string(), ..Default::default() };
-		let result = execute_shell(options, None, CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(7));
-		assert!(!result.cancelled);
-		assert!(!result.timed_out);
-	}
-
-	/// `nohup` is a no-op builtin in this embedded shell, but `nohup cmd &`
-	/// must still behave like a process-launching background command for `$!`.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn nohup_background_captures_operand_pid() {
-		let (tx, rx) = flume::unbounded::<String>();
-		let options = ShellExecuteOptions {
-			command: "nohup sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \"$pid\"; \
-			          test -n \"$pid\""
-				.to_string(),
-			..Default::default()
-		};
-		let result = execute_shell(options, Some(tx), CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(0));
-		assert!(!result.cancelled);
-		assert!(!result.timed_out);
-
-		let mut out = String::new();
-		while let Ok(chunk) = rx.recv_async().await {
-			out.push_str(&chunk);
-		}
-		let pid = out
-			.trim()
-			.strip_prefix("pid=")
-			.expect("nohup background PID output should include pid= prefix");
-		assert!(pid.parse::<i32>().is_ok_and(|pid| pid > 0), "invalid PID output: {out:?}");
-	}
-
-	/// `nohup` with no operand mirrors coreutils: a `missing operand` diagnostic
-	/// and exit code 125 (a nohup-level error, distinct from any command code).
-	#[tokio::test(flavor = "multi_thread")]
-	async fn nohup_builtin_without_command_reports_missing_operand() {
-		let (tx, rx) = flume::unbounded::<String>();
-		let options = ShellExecuteOptions { command: "nohup".to_string(), ..Default::default() };
-		let result = execute_shell(options, Some(tx), CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(125));
-		let mut out = String::new();
-		while let Ok(chunk) = rx.recv_async().await {
-			out.push_str(&chunk);
-		}
-		assert!(
-			out.contains("missing operand"),
-			"expected a missing-operand diagnostic, got: {out:?}"
-		);
-	}
-
-	/// The contract that makes this a *builtin* and not the external tool: the
-	/// child must **not** inherit `SIGHUP = SIG_IGN`. Real `nohup` masks SIGHUP
-	/// (and it survives `exec`), so a process launched through `/usr/bin/nohup`
-	/// reports `IGN` here; the builtin runs the command as an ordinary
-	/// descendant, so it reports `DFL` and dies with the host on hangup. The
-	/// probe needs `getsid`-style signal introspection, so it is gated on
-	/// `python3` (skipped, not failed, when absent — matching the embedded
-	/// session-detach e2e suite).
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn nohup_builtin_does_not_mask_sighup() {
-		let python_ok = std::process::Command::new("python3")
-			.arg("-c")
-			.arg("pass")
-			.stdout(std::process::Stdio::null())
-			.stderr(std::process::Stdio::null())
-			.status()
-			.is_ok_and(|status| status.success());
-		if !python_ok {
-			eprintln!("skipping nohup_builtin_does_not_mask_sighup: python3 unavailable");
-			return;
-		}
-
-		let probe = "import signal,sys; sys.stdout.write('IGN' if \
-		             signal.getsignal(signal.SIGHUP)==signal.SIG_IGN else 'DFL')";
-		let (tx, rx) = flume::unbounded::<String>();
-		let options = ShellExecuteOptions {
-			command: format!("nohup python3 -c \"{probe}\""),
-			..Default::default()
-		};
-		let result = execute_shell(options, Some(tx), CancelToken::default())
-			.await
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(0));
-		let mut out = String::new();
-		while let Ok(chunk) = rx.recv_async().await {
-			out.push_str(&chunk);
-		}
-		assert!(
-			out.contains("DFL") && !out.contains("IGN"),
-			"builtin nohup masked SIGHUP like the external tool (output: {out:?})",
-		);
-	}
-
-	/// Regression for #4078: the JS bridge hands the pipe readers a *bounded*
-	/// chunk channel. With a consumer slower than the producer the readers
-	/// must park on `send_async` (backpressuring the child through its pipe)
-	/// rather than buffer unboundedly — and, unlike a drop-on-full design,
-	/// every produced byte must still reach the consumer.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn streaming_output_backpressures_on_bounded_channel_without_loss() {
-		const TOTAL_BYTES: usize = 1_048_576;
-		let (tx, rx) = flume::bounded::<String>(4);
-		let options = ShellExecuteOptions {
-			command: format!("yes x | head -c {TOTAL_BYTES}"),
-			..Default::default()
-		};
-		let run = tokio::spawn(execute_shell(options, Some(tx), CancelToken::default()));
-
-		let mut received = 0usize;
-		while let Ok(chunk) = rx.recv_async().await {
-			received += chunk.len();
-			// Slow consumer: forces the bounded queue to fill and the readers
-			// to park between chunks.
-			time::sleep(Duration::from_micros(50)).await;
-		}
-
-		let result = time::timeout(Duration::from_secs(30), run)
-			.await
-			.expect("command should finish despite backpressure")
-			.expect("run task should not panic")
-			.expect("execute should succeed");
-		assert_eq!(result.exit_code, Some(0));
-		assert!(!result.cancelled);
-		assert!(!result.timed_out);
-		assert_eq!(received, TOTAL_BYTES, "streamed bytes were dropped under backpressure");
-	}
-
-	/// Runs `command` on a fresh shell with pipe taps, collecting its output.
-	fn run_tapped(
-		command: &str,
-		cancel: CancelToken,
-	) -> (Arc<PipeTaps>, tokio::task::JoinHandle<Result<ShellRunResult>>, flume::Receiver<String>)
-	{
-		let taps = Arc::new(PipeTaps::new());
-		let (tx, rx) = flume::unbounded::<String>();
-		let options = ShellRunOptions {
-			command: command.into(),
-			pipe_taps: Some(Arc::clone(&taps)),
-			..Default::default()
-		};
-		let run = tokio::spawn(async move { Shell::new(None).run(options, Some(tx), cancel).await });
-		(taps, run, rx)
-	}
-
-	/// Everything a finished run printed.
-	async fn collect_output(rx: &flume::Receiver<String>) -> String {
-		let mut output = String::new();
-		while let Ok(chunk) = rx.recv_async().await {
-			output.push_str(&chunk);
-		}
-		output
-	}
-
-	/// The point of the tap: while `tail` holds its input back, the bytes the
-	/// producer already wrote are readable as stream 1.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pipe_tap_exposes_input_a_later_stage_holds_back() {
-		let _guard = shell_test_lock().lock().await;
-		let mut cancel = CancelToken::default();
-		let abort = cancel.emplace_abort_token();
-		let (taps, run, rx) = run_tapped("{ printf 'a\\nb\\nc\\n'; sleep 30; } | tail -n 1", cancel);
-
-		let seen = time::timeout(Duration::from_secs(10), async {
-			loop {
-				if let Some(read) = taps.read(1, None)
-					&& read.data == b"a\nb\nc\n"
-				{
-					return read;
-				}
-				time::sleep(Duration::from_millis(20)).await;
-			}
-		})
-		.await
-		.expect("producer output never reached stream 1");
-		assert!(seen.open);
-		assert!(rx.try_recv().is_err(), "tail printed before its input ended");
-		let [stream] = taps.list().try_into().expect("one pipe");
-		assert!(stream.producer.contains("printf"), "producer text: {}", stream.producer);
-		assert!(stream.consumer.contains("tail"), "consumer text: {}", stream.consumer);
-
-		abort.abort(AbortReason::Signal);
-		let result = time::timeout(Duration::from_secs(10), run)
-			.await
-			.expect("run did not stop after abort")
-			.expect("run task panicked")
-			.expect("run");
-		assert!(result.cancelled);
-		assert!(!taps.read(1, None).expect("stream 1").open);
-	}
-
-	/// A consumer that exits early still ends the pipeline at once through a
-	/// tapped pipe: the relay lets go of the producer's end when `head`
-	/// leaves, so `tail -f` (idle, no further writes) sees its pipe widowed.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pipe_tap_widows_the_producer_when_the_consumer_exits() {
-		let _guard = shell_test_lock().lock().await;
-		let log = tempfile::NamedTempFile::new().expect("log file");
-		std::fs::write(log.path(), "first\nsecond\n").expect("write log");
-		let command = format!("tail -f {} | head -n 1", quote_arg(&log.path().to_string_lossy()));
-		let (_taps, run, rx) = run_tapped(&command, CancelToken::default());
-
-		let result = time::timeout(Duration::from_secs(10), run)
-			.await
-			.expect("tail -f kept following after head exited")
-			.expect("run task panicked")
-			.expect("run");
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(collect_output(&rx).await, "first\n");
-	}
-
-	/// Every byte reaches the consumer unchanged, and the stream counts all of
-	/// them while retaining only its newest megabyte.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pipe_tap_forwards_every_byte_and_counts_them() {
-		let _guard = shell_test_lock().lock().await;
-		const LAST: usize = 200_000;
-		let (taps, run, rx) = run_tapped(&format!("seq 1 {LAST} | wc -l"), CancelToken::default());
-
-		let result = time::timeout(Duration::from_secs(30), run)
-			.await
-			.expect("run did not finish")
-			.expect("run task panicked")
-			.expect("run");
-		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(collect_output(&rx).await.trim(), LAST.to_string());
-		let written: usize = (1..=LAST).map(|n| n.to_string().len() + 1).sum();
-		let read = taps.read(1, None).expect("stream 1");
-		assert_eq!(read.end, written as u64);
-		assert_eq!(read.data.len(), written.min(1 << 20));
-		assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
-		assert!(!read.open);
-	}
-}
+mod tests;

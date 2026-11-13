@@ -53,7 +53,9 @@ import {
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
 import { stripExtensionLinkMarkers } from "./render/extension-links";
+import { applyRowMove, BLANK_ROW, findRowMove, rowMoveSequence, UNKNOWN_ROW } from "./render/row-moves";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
+import { minFrameIntervalMs } from "./frame-rate";
 import {
 	Ellipsis,
 	getWidthConfigEpoch,
@@ -280,7 +282,9 @@ export interface Component {
 	 * an overlay: the sheet's `role` (Tern styles `omp.overlay.*` roles as
 	 * glass sheets, so the component's own root must not draw a second frame),
 	 * `head` spans for the sheet's title row, and `size`/`anchor` overriding
-	 * the ones derived from the overlay options.
+	 * the ones derived from the overlay options. `size` is a width class: on a
+	 * narrow pane the backend fills it only when the described content is tall
+	 * (see `NativeBackend`).
 	 */
 	nativeOverlay?: {
 		role?: string;
@@ -307,6 +311,13 @@ export interface Component {
 
 	/** User actions on nodes this component described (toggle, select, activate, custom). */
 	handleNativeEvent?(event: NativeUiEvent): void;
+
+	/**
+	 * Native transcript blocks drawn right after this one as siblings (a `TranscriptContainer` child only): notes
+	 * about the block that must show while it is collapsed, such as a tool card's Spotlight notice. The terminal
+	 * rows never show them. Return the same array while unchanged.
+	 */
+	nativeTrailers?(): readonly Component[];
 
 	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
@@ -649,6 +660,18 @@ export class Container implements Component {
 	}
 }
 
+/**
+ * `component`'s own native description, or `null` when it draws as rendered rows: it has no
+ * `describe`, answers `null`, or is a Container subclass that paints its own rows but inherits the
+ * plain column description, which would lose that rendering.
+ */
+export function ownDescription(component: Component, cx: DescribeContext): NativeNode | null {
+	const describe = component.describe;
+	if (describe === undefined) return null;
+	if (describe === Container.prototype.describe && component.render !== Container.prototype.render) return null;
+	return describe.call(component, cx);
+}
+
 interface HardwareCursorState {
 	row: number;
 	col: number;
@@ -942,12 +965,22 @@ export class TUI extends Container {
 	 * `#scheduleRender` to inflate the next render delay proportionally so a
 	 * spike of slow frames (large transcript diffs, huge assistant text wrap,
 	 * component-tree walks) does not busy-loop the CPU: the throttle would
-	 * otherwise collapse to zero once `elapsed >= MIN_RENDER_INTERVAL_MS` and
+	 * otherwise collapse to zero once `elapsed` passes the frame interval and
 	 * fire the next frame immediately (see #4145).
 	 */
 	#lastFrameCostMs = 0;
-	static readonly #MIN_RENDER_INTERVAL_MS = 1000 / 30;
-	static readonly #INPUT_RENDER_GRACE_MS = TUI.#MIN_RENDER_INTERVAL_MS;
+	/**
+	 * Cadence of frames a keystroke is waiting on. Pinned at the historical 30 fps regardless of
+	 * the `tui.maxFps` ceiling (see {@link minFrameIntervalMs}): the ceiling exists to quiet panes
+	 * nobody is typing in, and the one being typed in must echo within a frame.
+	 */
+	static readonly #INPUT_FRAME_INTERVAL_MS = 1000 / 30;
+	static readonly #INPUT_RENDER_GRACE_MS = TUI.#INPUT_FRAME_INTERVAL_MS;
+	/**
+	 * Set when the pending render was requested by terminal input, so `#scheduleRender` paces it
+	 * at `#INPUT_FRAME_INTERVAL_MS` instead of the ceiling; cleared when that frame paints.
+	 */
+	#inputRenderPending = false;
 	/**
 	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
 	 * responsiveness at ~5 fps under sustained heavy renders — anything slower
@@ -989,6 +1022,9 @@ export class TUI extends Container {
 	// caps `s` at 7. This bounds spacer lookups and supplies enough context
 	// above the resize viewport to classify every legal heading exactly.
 	static readonly #OSC66_MAX_SPACER_ROWS = 6;
+	// Band moves per unsynchronized frame: a streaming shift, the chrome a
+	// history push displaced, and one spare.
+	static readonly #MAX_ROW_MOVES = 3;
 	// Ghostty can drop Kitty graphics commands sent during its first post-startup
 	// settle window, leaving only Unicode placeholder cells. Hold the first image
 	// paint until that window has passed; later images render normally.
@@ -1326,6 +1362,11 @@ export class TUI extends Container {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					this.overlayStack.splice(index, 1);
+					// Overlays opened over this one return focus to where it would have.
+					for (const other of this.overlayStack) {
+						if (other.preFocus && isOverlayFocusTarget(component, other.preFocus))
+							other.preFocus = entry.preFocus;
+					}
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
 						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
@@ -2781,6 +2822,16 @@ export class TUI extends Container {
 			});
 			return;
 		}
+		// A render while a keystroke's latch is set rides the fixed input cadence: an animation frame
+		// parked further out under the `tui.maxFps` ceiling is replaced by one the keystroke can ride.
+		// Input listeners (scroll wheel, toggles) and focused components alike request through here.
+		if (this.#inputRenderPending && this.#renderTimer && !this.#nativeLive) {
+			this.#renderTimer.cancel();
+			this.#renderTimer = undefined;
+			this.#renderRequested = true;
+			this.#scheduleRender();
+			return;
+		}
 		this.#requestOrdinaryRender();
 	}
 
@@ -2885,7 +2936,12 @@ export class TUI extends Container {
 		}
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
-		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		// Animation and content frames land no closer than the `tui.maxFps` ceiling allows; a frame
+		// a keystroke is waiting on keeps the fixed input cadence.
+		const frameIntervalMs = this.#inputRenderPending
+			? Math.min(TUI.#INPUT_FRAME_INTERVAL_MS, minFrameIntervalMs())
+			: minFrameIntervalMs();
+		const cadenceDelay = Math.max(0, frameIntervalMs - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
 		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
 		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
@@ -2908,6 +2964,7 @@ export class TUI extends Container {
 	 */
 	#executeRender(): void {
 		if (this.#deferRenderForOutputBacklog()) return;
+		this.#inputRenderPending = false;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
 		this.#doRender();
@@ -2978,6 +3035,11 @@ export class TUI extends Container {
 			data = data.slice(0, searchFrom + match.index) + data.slice(searchFrom + match.index + match[0].length);
 		}
 		if (data.length === 0) return;
+		// Every keystroke arms the input latch before any consumer runs, so whichever consumer
+		// requests the paint — an input listener or the focused component — it is paced at the input
+		// cadence, not the ceiling. Input that triggers no render leaves the latch for the next frame
+		// to consume at the 30 fps floor once; harmless.
+		this.#inputRenderPending = true;
 
 		if (
 			this.#heldInput !== undefined &&
@@ -3002,7 +3064,6 @@ export class TUI extends Container {
 				this.setFocus(focusedOverlay.preFocus);
 			}
 		}
-
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
 		// key would make idle navigation pay a full frame of latency.
@@ -3598,6 +3659,115 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Rows of a frame for a terminal that may present any prefix of the write
+	 * (no synchronized output), or `undefined` when the frame needs the plain
+	 * row-rewrite paths (images, OSC 66 text, stale row preparation, a viewport
+	 * taller than the screen).
+	 *
+	 * Rows bound for scrollback are first made to show their history line, then
+	 * pushed with line feeds on the bottom row; surviving rows then shift into
+	 * place with DL/IL, and only rows that still differ are rewritten. Every
+	 * intermediate screen is the previous frame scrolled or shifted, never a
+	 * rewritten row beside its stale copy (the duplicated band a top-down
+	 * repaint shows) or an erased band awaiting repaint.
+	 */
+	#movedRowsSequence(
+		width: number,
+		height: number,
+		startTop: number,
+		newTop: number,
+		history: PreparedLines,
+		viewport: PreparedLines,
+	): string | undefined {
+		const window = this.#providerWindow;
+		const rows = viewport.lines.length;
+		if (rows > height || startTop + window.length > height) return undefined;
+		const widthEpoch = getWidthConfigEpoch();
+		const imageProtocol = TERMINAL.imageProtocol;
+		for (const row of this.#providerPreparedRows) {
+			if (
+				row.isImage ||
+				row.width !== width ||
+				row.widthEpoch !== widthEpoch ||
+				row.imageProtocol !== imageProtocol
+			) {
+				return undefined;
+			}
+		}
+		if (viewport.rows.some(row => row.isImage) || history.rows.some(row => row.isImage)) return undefined;
+		if (window.some(isOsc66Line) || viewport.lines.some(isOsc66Line) || history.lines.some(isOsc66Line)) {
+			return undefined;
+		}
+
+		const keys = new Map<string, number>([["", BLANK_ROW]]);
+		const keyOf = (line: string): number => {
+			let key = keys.get(line);
+			if (key === undefined) {
+				key = keys.size;
+				keys.set(line, key);
+			}
+			return key;
+		};
+		// oxlint-disable-next-line unicorn/no-new-array -- screen-height model preallocation
+		const screen: number[] = new Array(height).fill(BLANK_ROW);
+		screen.fill(UNKNOWN_ROW, 0, startTop);
+		for (let index = 0; index < window.length; index++) screen[startTop + index] = keyOf(window[index]!);
+
+		let out = "";
+		// Inserted, deleted, and scrolled-in lines take the current background.
+		let reset = false;
+		const resetOnce = (): string => {
+			if (reset) return "";
+			reset = true;
+			return SEGMENT_RESET;
+		};
+		// Push in screenfuls: physical row r holds combined row `done + r` of the
+		// ledger (history above the old viewport, then the batch, then the
+		// viewport), so each row about to scroll off must show its batch row.
+		const pushed = Math.max(0, startTop + history.lines.length + rows - height);
+		for (let done = 0; done < pushed;) {
+			const count = Math.min(pushed - done, height);
+			for (let r = 0; r < count; r++) {
+				const index = done + r - startTop;
+				if (index < 0) continue;
+				const key = keyOf(history.lines[index]!);
+				if (screen[r] === key) continue;
+				out += `\x1b[${r + 1};1H${this.#lineRewriteSequence(history.rows[index]!, width)}`;
+				screen[r] = key;
+			}
+			out += `${resetOnce()}\x1b[${height};1H${"\n".repeat(count)}`;
+			screen.copyWithin(0, count);
+			screen.fill(BLANK_ROW, height - count);
+			done += count;
+		}
+
+		const base = Math.max(0, startTop - pushed);
+		// oxlint-disable-next-line unicorn/no-new-array -- screen-height model preallocation
+		const target: number[] = new Array(height).fill(BLANK_ROW);
+		target.fill(UNKNOWN_ROW, 0, base);
+		for (let r = base; r < newTop; r++) target[r] = keyOf(history.lines[r + pushed - startTop]!);
+		for (let index = 0; index < rows; index++) target[newTop + index] = keyOf(viewport.lines[index]!);
+
+		for (let moves = 0; moves < TUI.#MAX_ROW_MOVES; moves++) {
+			const move = findRowMove(screen, target, base);
+			if (move === undefined) break;
+			out += `${resetOnce()}${rowMoveSequence(move, height)}`;
+			applyRowMove(screen, move);
+		}
+		for (let r = base; r < newTop + rows; r++) {
+			if (screen[r] === target[r]) continue;
+			const row = r < newTop ? history.rows[r + pushed - startTop]! : viewport.rows[r - newTop]!;
+			out += `\x1b[${r + 1};1H${this.#lineRewriteSequence(row, width)}`;
+		}
+		for (let r = newTop + rows; r < height; r++) {
+			if (screen[r] === BLANK_ROW) continue;
+			out += this.#eraseBelowRow(r, height);
+			break;
+		}
+		return out;
+	}
+
+	/**
 	 * Physical write transaction: append an ordinary batch, or bottom-split one
 	 * complete replay into a history remainder and final viewport, then serialize
 	 * the whole result in one terminal write before acknowledgement.
@@ -3721,7 +3891,22 @@ export class TUI extends Container {
 			this.#providerWindow.length > 0;
 		buffer += this.#retireImagePlacements(this.#screenImagePlacements, prepared.lines, newTop, !diffable);
 		for (const sequence of this.#imageBudget.takeTransmits()) append(sequence);
-		if (diffable) {
+		// Without synchronized output the terminal may show any prefix of this
+		// write, so move surviving rows instead of repainting through them.
+		const moved =
+			!this.#synchronizedOutputEnabled &&
+			geometryStable &&
+			!destructiveReset &&
+			history?.kind !== "replay" &&
+			!this.#forceViewportRepaintOnNextRender &&
+			this.#providerWindow.length > 0 &&
+			pendingAltExit === "" &&
+			this.#screenImagePlacements.size === 0
+				? this.#movedRowsSequence(width, height, startTop, newTop, preparedHistory, prepared)
+				: undefined;
+		if (moved !== undefined) {
+			buffer += moved;
+		} else if (diffable) {
 			for (let index = 0; index < rows; index++) {
 				if (
 					!this.#rowNeedsRewrite(

@@ -19,26 +19,28 @@ def _applefm_toolchain_impl(ctx):
         return [platform_common.ToolchainInfo(args = [], files = depset([ctx.file.toolchain_file]), toolchain_file = ctx.file.toolchain_file)]
     swiftc = ctx.executable.swiftc
     sdk = ctx.file.sdk_settings.dirname
-    swift_root = swiftc.dirname.rsplit("/", 2)[0]  # <repo>/usr/bin/swiftc -> <repo>
+    resource_dir = ctx.attr.resources.label.workspace_root
     args = [
         swiftc.path,
         sdk,
-        # See //bazel/toolchains/swift:linux.bzl for why each of these is needed.
+        # The target resource overlay has Clang builtins and macosx pointing
+        # to the SDK's real Swift runtime, without Linux corelibs module maps.
         "-resource-dir",
-        swift_root + "/darwin",
+        resource_dir,
         "-I",
         sdk + "/usr/lib/swift/shims",
         "-ld-path=" + ctx.file.ld.path,
         "-Xclang-linker",
         "-mlinker-version=907",
     ]
-    return [platform_common.ToolchainInfo(args = args, files = depset(ctx.files.srcs), toolchain_file = None)]
+    return [platform_common.ToolchainInfo(args = args, files = depset(ctx.files.srcs + ctx.files.resources), toolchain_file = None)]
 
 applefm_toolchain = rule(
     implementation = _applefm_toolchain_impl,
     doc = "A Swift toolchain able to build bridge.swift: either a detected host one (toolchain_file) or a hermetic one.",
     attrs = {
         "ld": attr.label(allow_single_file = True, cfg = "exec", doc = "ld64.lld the Swift driver links with."),
+        "resources": attr.label(allow_files = True, cfg = "exec", doc = "Darwin resource overlay: Clang builtins and the SDK's Swift runtime."),
         "sdk_settings": attr.label(allow_single_file = True, doc = "SDKSettings.json of the macOS SDK; its directory is the SDK."),
         "srcs": attr.label_list(allow_files = True, cfg = "exec", doc = "Every file the compile and link read."),
         "swiftc": attr.label(allow_single_file = True, cfg = "exec", executable = True),

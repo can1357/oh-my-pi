@@ -258,6 +258,8 @@ Opted in: Muse Code `muse-spark-1.3`, `muse-spark-1.3-contributor`, and the four
 
 The routed-subscription registry axes (`upstream-rotation`, `region-upstreams-global|us|eu`, `region-limits-eu`, `credit-rates`, `list-price-from`, `routing-family`, `policy-aliases`, `entitlement`, `default-reasoning-off`) describe a gateway whose proxy fans one model out to several upstreams. They are read through `src/compat/factory-droid.ts` by Factory Droid discovery and its request provider, not materialized by `buildModel`. A provider-wide `region-upstreams-*` rule is the upstream serving table and a model rule replaces it for that region. `list-price-from "<provider>" ["<id>"]` shows a bundled row's list price beside the subscription's own billing; unlike seed values it is resolved at runtime and degrades to the seed's zero cost when the row is gone. See [`providers/factory-droid.kdl`](providers/factory-droid.kdl), whose wire and billing pool per model are `api-routes` and `quota-tiers` rules in `runtime/behavior.kdl`.
 
+`credit-rates` accepts the same optional `effective-rates` block of named dated cards as `cost-patch`, parsed by the same code: each card has a distinct ISO UTC `effective-from` and any of `input`/`output`/`cache-read`, and the latest card at or before the moment the model browser renders overwrites the legs it names. A vendor credit promotion is two cards, the discounted rate from its start and the base rate again from its end, so a card left behind after the end changes nothing. See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
+
 ### Time-based pricing
 
 The catalog object axis `time-based-cost` materializes into `ModelCost.timeBased`. It uses **named child objects**, not KDL arrays or repeated anonymous windows. For example, inside a matching provider/model scope:
@@ -408,10 +410,18 @@ auth "anthropic" {
     native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
     show-in-login-list #false
+    disabled "Why it is paused, shown to users"  // turns the provider off: no login, no credential reaches it
+    login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
 }
 ```
 
 `org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
+
+`login-subscription #true` marks login-sourced API keys as subscription billing, leaving pasted and environment keys metered; absent or `#false` keeps all API keys metered.
+
+`disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice. Delete the line to turn it back on — stored logins come back as they were.
+
+`login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
 Login kinds:
 

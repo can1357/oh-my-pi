@@ -229,6 +229,7 @@ async function createContext() {
 		toolOutputExpanded: false,
 		settings: Settings.isolated(),
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
+		pendingShellContainer: { children: [] },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleNewCommand: vi.fn(),
@@ -406,12 +407,13 @@ describe("InputController keybinding setup", () => {
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.retry", ["alt+r"]);
 		expect(editor.onRetry).toBeDefined();
 
-		editor.setText("draft that should clear after retry");
+		editor.setText("draft that should survive retry");
 		editor.onRetry?.();
 		await Promise.resolve();
 
 		expect(spies.retry).toHaveBeenCalledTimes(1);
-		expect(editor.getText()).toBe("");
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft that should survive retry");
 	});
 
 	it("retries the focused view session instead of the main session", async () => {
@@ -461,8 +463,8 @@ describe("InputController keybinding setup", () => {
 		expect(editor.getText()).toBe("draft that should survive");
 	});
 
-	it("clears retry draft attachments only after retry starts", async () => {
-		const { InputController, ctx, editor } = await createContext();
+	it("keeps retry draft attachments after retry starts", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "abc" };
 		const controller = new InputController(ctx);
 
@@ -474,10 +476,11 @@ describe("InputController keybinding setup", () => {
 		editor.onRetry?.();
 		await Promise.resolve();
 
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
-		expect(editor.imageLinks).toBeUndefined();
-		expect(editor.getText()).toBe("");
+		expect(spies.retry).toHaveBeenCalledTimes(1);
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
+		expect(editor.imageLinks).toEqual(["local://draft.png"]);
+		expect(editor.getText()).toBe("draft with image");
 	});
 
 	it("routes b to branch a branchable /btw panel", async () => {
@@ -1171,6 +1174,41 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
+	it("pastes a TIFF-only enhanced (OSC 5522) listing through the native clipboard reader (#17696)", async () => {
+		const context = await createPromptContext();
+		const submittedOnce = Promise.withResolvers<void>();
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[]) => void>(() => submittedOnce.resolve());
+		const prompt = new HookEditorComponent(context.ctx.ui, "Answer", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		context.setFocused(prompt);
+		const readImage = vi.fn(async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }));
+		new InputController(context.ctx, {
+			readImage,
+			readText: async () => "",
+			readMacFileUrls: async () => [],
+		}).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+
+		// macOS `⌃⌘⇧4` screenshots reach the pasteboard as TIFF only.
+		const tiffMime = Buffer.from("image/tiff").toString("base64");
+		for (const input of [
+			"\x1b]5522;type=read:status=OK:pw=secret\x1b\\",
+			`\x1b]5522;type=read:status=DATA:mime=${tiffMime}\x1b\\`,
+			"\x1b]5522;type=read:status=DONE\x1b\\",
+		]) {
+			dispatchInput(listeners, input);
+		}
+		prompt.handleInput("\r");
+		await submittedOnce.promise;
+
+		expect(readImage).toHaveBeenCalledTimes(1);
+		expect(submittedImage(onSubmit).source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
+		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Clipboard paste has no supported text or image data");
+	});
+
 	it("prefers a Finder file URL over the co-advertised icon bitmap (#8769)", async () => {
 		const imagePath = await writePng("finder.png");
 		const context = await createPromptContext();
@@ -1432,7 +1470,7 @@ describe("InputController global editor actions", () => {
 
 	it("refuses Alt+G when collabGuest is active", async () => {
 		const context = await createContext();
-		context.ctx.collabGuest = {} as unknown as InteractiveModeContext["collabGuest"];
+		Object.assign(context.ctx, { collabGuest: {} });
 		const controller = new context.InputController(context.ctx);
 		controller.setupKeyHandlers();
 		const listeners = registeredInputListeners(context.spies.addInputListener);
