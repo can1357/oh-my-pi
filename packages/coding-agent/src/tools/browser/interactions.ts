@@ -461,14 +461,17 @@ export async function clickElement(
 	const frame = handle.frame;
 	// The main frame outlives any press; a child frame's record is read once while the first press is down, since
 	// the browser reports a removed frame only after it acknowledges the press.
-	let goneWhileDown = false;
 	const checkWhileDown =
 		frame === frame.page().mainFrame()
 			? undefined
 			: async () => {
-					goneWhileDown = await untilAborted(signal, () => watch.evaluate(() => false)).catch((error: unknown) => {
+					await untilAborted(signal, () => watch.evaluate(() => false)).catch((error: unknown) => {
 						if (signal?.aborted) throw error;
-						return true;
+						if (frame.detached) {
+							throw new ToolError(
+								`${label}: could not confirm the click: the press reached the page, which removed the element's frame before the button came up, so no click followed; check the page before clicking again`,
+							);
+						}
 					});
 				};
 	try {
@@ -486,7 +489,6 @@ export async function clickElement(
 	}
 	// A click that navigated away, or whose frame the page removed after the release, took the page's record
 	// with it; it reached the page. A cancelled call still fails as cancelled.
-	let recordLost = false;
 	const delivered = await untilAborted(signal, () =>
 		watch.evaluate(state => {
 			state.stop();
@@ -494,15 +496,9 @@ export async function clickElement(
 		}),
 	).catch((error: unknown) => {
 		if (signal?.aborted) throw error;
-		recordLost = true;
 		return true;
 	});
 	await watch.dispose().catch(() => undefined);
-	if (recordLost && goneWhileDown) {
-		throw new ToolError(
-			`${label}: could not confirm the click: the press reached the page, which removed the element's frame before the button came up, so no click followed; check the page before clicking again`,
-		);
-	}
 	if (!delivered) {
 		throw new ToolError(`${label}: the browser did not deliver the click to the element (disabled or inert)`);
 	}

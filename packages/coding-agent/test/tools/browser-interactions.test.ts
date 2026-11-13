@@ -1799,7 +1799,9 @@ button.addEventListener("${removeOn}", () => frameElement.remove());`;
 			const srcdoc = `<button>Bump</button><script>${script}</script>`
 				.replaceAll("&", "&amp;")
 				.replaceAll('"', "&quot;");
-			await page.setContent(`<iframe name="inner" srcdoc="${srcdoc}"></iframe>`);
+			await page.setContent(
+				`<button style="position:absolute;inset:0;width:100%;height:100%" onclick="document.body.dataset.stray='1'">Behind</button><iframe style="position:relative" name="inner" srcdoc="${srcdoc}"></iframe>`,
+			);
 			const frame = await page.waitForFrame(candidate => candidate.name() === "inner");
 			const handle = await frame.waitForSelector("button");
 			if (!handle) throw new Error("Expected the frame's button");
@@ -1808,6 +1810,7 @@ button.addEventListener("${removeOn}", () => frameElement.remove());`;
 				error => (String(error).includes("could not confirm the click") ? "unconfirmed" : String(error)),
 			);
 			await handle.dispose().catch(() => undefined);
+			if (removeOn !== "click") expect(await page.evaluate("document.body.dataset.stray || '0'")).toBe("0");
 			return { outcome, clicks: String(await page.evaluate("document.body.dataset.clicks || '0'")) };
 		};
 		try {
@@ -1822,6 +1825,29 @@ button.addEventListener("${removeOn}", () => frameElement.remove());`;
 			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
 		}
 	}, 30_000);
+
+	test("keeps a child-frame click delivered when the first press navigates its frame", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent(
+				`<iframe name="inner" srcdoc="<button onpointerdown='location.replace(&quot;about:blank&quot;)'>Go</button>"></iframe>`,
+			);
+			const frame = await page.waitForFrame(candidate => candidate.name() === "inner");
+			const handle = await frame.waitForSelector("button");
+			if (!handle) throw new Error("Expected the frame's button");
+			const navigated = frame.waitForNavigation();
+			expect(await clickElement(handle, "click go").then(() => "clicked")).toBe("clicked");
+			await navigated;
+			expect(frame.detached).toBe(false);
+			expect(frame.url()).toBe("about:blank");
+			await handle.dispose().catch(() => undefined);
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
 
 	test("skips an off-screen text match that stays clipped once scrolled to", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
