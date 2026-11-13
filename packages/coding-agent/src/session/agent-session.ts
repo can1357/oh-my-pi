@@ -4853,7 +4853,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 
-		if (event.type === "turn_end") this.#ttsr.onTurnEnd();
+		if (event.type === "turn_end") this.#ttsr.onTurnEnd(event.message);
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
 		// This must happen at turn_end (not message_end) because onInvoked handlers
 		// run during tool execution, which happens between message_end and turn_end.

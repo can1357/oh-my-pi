@@ -132,6 +132,8 @@ interface TtsrEntry {
 interface InjectionRecord {
 	/** Message count (turn index) when the rule was last injected. */
 	lastInjectedAt: number;
+	/** Injected since the last completed assistant turn; holds `always` rules to one firing per turn. */
+	firedThisTurn: boolean;
 }
 
 const DEFAULT_SETTINGS: TtsrSettings = {
@@ -589,9 +591,10 @@ export class TtsrManager {
 			return true;
 		}
 
-		const repeatMode = this.#rules.get(ruleName)?.rule.repeatMode ?? this.#settings.repeatMode;
+		const repeatMode = this.#repeatModeOf(ruleName);
 		if (repeatMode === "always") {
-			return true;
+			// Once per turn: an interrupt retry that repeats the match must not re-fire and loop.
+			return !record.firedThisTurn;
 		}
 		if (repeatMode === "once") {
 			return false;
@@ -599,6 +602,10 @@ export class TtsrManager {
 
 		const gap = this.#messageCount - record.lastInjectedAt;
 		return gap >= this.#settings.repeatGap;
+	}
+
+	#repeatModeOf(ruleName: string): NonNullable<Rule["repeatMode"]> {
+		return this.#rules.get(ruleName)?.rule.repeatMode ?? this.#settings.repeatMode;
 	}
 
 	#compileConditions(rule: Rule): RegExp[] {
@@ -1112,14 +1119,15 @@ export class TtsrManager {
 			}
 			const record = this.#injectionRecords.get(ruleName);
 			if (!record) {
-				this.#injectionRecords.set(ruleName, { lastInjectedAt: this.#messageCount });
+				this.#injectionRecords.set(ruleName, { lastInjectedAt: this.#messageCount, firedThisTurn: true });
 			} else {
 				record.lastInjectedAt = this.#messageCount;
+				record.firedThisTurn = true;
 			}
 			logger.debug("TTSR rule marked as injected", {
 				ruleName,
 				messageCount: this.#messageCount,
-				repeatMode: this.#rules.get(ruleName)?.rule.repeatMode ?? this.#settings.repeatMode,
+				repeatMode: this.#repeatModeOf(ruleName),
 			});
 		}
 	}
@@ -1132,7 +1140,7 @@ export class TtsrManager {
 	/** Restore injected state from a list of rule names. */
 	restoreInjected(ruleNames: string[]): void {
 		for (const name of ruleNames) {
-			this.#injectionRecords.set(name, { lastInjectedAt: 0 });
+			this.#injectionRecords.set(name, { lastInjectedAt: 0, firedThisTurn: false });
 		}
 		if (ruleNames.length > 0) {
 			logger.debug("TTSR injected state restored", { ruleNames });
@@ -1207,6 +1215,13 @@ export class TtsrManager {
 	/** Increment message counter (call after each turn). */
 	incrementMessageCount(): void {
 		this.#messageCount++;
+	}
+
+	/** Re-arm `repeatMode: always` rules; call when an assistant turn completes without abort or error. */
+	completeTurn(): void {
+		for (const record of this.#injectionRecords.values()) {
+			record.firedThisTurn = false;
+		}
 	}
 
 	/** Get current message count. */

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` re-triggers the rule on every match ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
+- Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` re-triggers the rule on every matching turn, at most once per turn ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

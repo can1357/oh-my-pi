@@ -131,9 +131,16 @@ export class TtsrCoordinator {
 		this.#manager?.resetBuffer();
 	}
 
-	/** Advances repeat-after-gap tracking at turn end. */
-	onTurnEnd(): void {
+	/**
+	 * Advances repeat-after-gap tracking at turn end, and re-arms `always` rules
+	 * unless the turn's assistant message was aborted or failed (a TTSR
+	 * interrupt's retry belongs to the same turn).
+	 */
+	onTurnEnd(message: AgentMessage): void {
 		this.#manager?.incrementMessageCount();
+		if (message.role !== "assistant" || (message.stopReason !== "aborted" && message.stopReason !== "error")) {
+			this.#manager?.completeTurn();
+		}
 		this.#emittedTriggerRules.clear();
 	}
 	/** Checks one streamed message update and reports whether TTSR consumed it by aborting. */

@@ -196,7 +196,7 @@ Within a matching batch, each rule is attached to exactly one sibling tool call:
 
 A rule can trigger only once after it has an injection record.
 
-A rule's own `repeatMode` frontmatter key (`once`, `after-gap`, or `always`) overrides this global setting for that rule. `always` ignores injection records, so the rule re-triggers on every match; each match interrupts the stream, so keep such rules narrow.
+A rule's own `repeatMode` frontmatter key (`once`, `after-gap`, or `always`) overrides this global setting for that rule. `always` re-triggers on every later matching turn but fires at most once per turn: after it fires, it stays suppressed until an assistant turn completes without abort or error, so the retry after a TTSR interrupt cannot re-trigger it. Each firing interrupts the stream, so keep such rules narrow.
 
 ### `repeatMode: "after-gap"`
 
