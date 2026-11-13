@@ -2,13 +2,27 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Gemini 4 Argon, Carbon and Hydrogen on the Gemini API and Vertex AI stopping long answers at 32,768 or 65,536 output tokens, often before any visible text; they now allow up to 262,144, so long answers continue past the first segment ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat)).
+
+## [18.20.0] - 2026-11-12
+
 ### Added
 
+- Added the Gemini Decision 1 judge model (`google/gemini-decision-1`, `GEMINI_API_KEY`); assign it to the `judge` role to use it ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
+- Added Gemini 4 Hydrogen (`gemini-4-hydrogen`) on Google, Vertex, OpenCode Zen, OpenRouter, Vercel AI Gateway, and Kilo, with low, medium, high, and xhigh thinking levels on the native Google transports.
+
+### Changed
+
+- Factory Droid requests identify as droid 1.7.1 and report the interactive CLI as their surface, and prefix-bound Claude models (Opus, Sonnet and Haiku 5.5, Fable 5.1) on Factory's direct Anthropic route now ask Anthropic to drop stale signed thinking instead of rejecting a turn whose earlier context changed ([#18771](https://github.com/can1357/oh-my-pi/pull/18771) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
 - Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
+- Fixed Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) misrouting to the first-party Gemini endpoint; they now ride the `publishers/mistralai` raw-predict endpoint with ADC auth and an OpenAI-shaped body ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+- Added Liquid AI (`liquid`) with the `d1.1` and `d1-ultra` judge models and `/login liquid` (`LIQUID_API_KEY`) ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.19.0] - 2026-11-12
 
@@ -19,10 +33,6 @@
 ### Fixed
 
 - Fixed Google Antigravity Gemini 4 Argon models sharing the general Gemini quota scope instead of their dedicated weekly bucket ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
-- Added Liquid AI (`liquid`) with the `d1.1` and `d1-ultra` judge models and `/login liquid` (`LIQUID_API_KEY`) ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
-### Changed
-
-- Factory Droid requests identify as droid 1.7.1 and report the interactive CLI as their surface, and prefix-bound Claude models (Opus, Sonnet and Haiku 5.5, Fable 5.1) on Factory's direct Anthropic route now ask Anthropic to drop stale signed thinking instead of rejecting a turn whose earlier context changed ([#18771](https://github.com/can1357/oh-my-pi/pull/18771) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.9] - 2026-11-11
 

@@ -346,6 +346,7 @@ export async function initDb(): Promise<Database> {
 			heat TEXT,
 			kept TEXT,
 			gated INTEGER NOT NULL DEFAULT 0,
+			windows TEXT,
 			PRIMARY KEY (session_file, tool_call_id)
 		) WITHOUT ROWID;
 		CREATE INDEX IF NOT EXISTS idx_spotlight_results_call ON spotlight_results(tool_call_id);
@@ -411,6 +412,8 @@ export async function initDb(): Promise<Database> {
 		["gated", "INTEGER NOT NULL DEFAULT 0"],
 		// Failed calls by cause (JSON); shape entries before pi journaled it leave it NULL.
 		["sp_failure_causes", "TEXT"],
+		// A `;`/`,` list read's windows (JSON); NULL for a single-window original, which the columns above describe.
+		["windows", "TEXT"],
 	] as const) {
 		if (!spotlightResultColumns.some(existing => existing.name === column)) {
 			db.run(`ALTER TABLE spotlight_results ADD COLUMN ${column} ${type}`);
@@ -2012,11 +2015,12 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 			"heat",
 			"kept",
 			"gated",
+			"windows",
 		],
 		identity: ["tool_call_id"],
 		upsert: `ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
 			${["tool", "in_chars", "out_chars", "in_tokens", "out_tokens", "steps", "hidden_lines"].map(fromDetails).join(",\n")},
-			${["original_url", "path", "start_line", "lines", "hidden", "artifacts", "sp_calls", "sp_failures", "sp_failure_causes", "sp_ms", "sp_cost", "shape_ms", "plain_chars", "plain_tokens", "capped_tokens", "heat", "kept"].map(coalesce).join(",\n")},
+			${["original_url", "path", "start_line", "lines", "hidden", "artifacts", "sp_calls", "sp_failures", "sp_failure_causes", "sp_ms", "sp_cost", "shape_ms", "plain_chars", "plain_tokens", "capped_tokens", "heat", "kept", "windows"].map(coalesce).join(",\n")},
 			has_details = MAX(spotlight_results.has_details, excluded.has_details),
 			holdout = MAX(spotlight_results.holdout, excluded.holdout),
 			score_free = MAX(spotlight_results.score_free, excluded.score_free),
@@ -2060,6 +2064,7 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 					o?.heat ?? null,
 					o ? JSON.stringify(o.kept) : null,
 					r.gated ? 1 : 0,
+					o && o.windows.length > 1 ? JSON.stringify(o.windows) : null,
 				],
 			);
 		}
@@ -2077,8 +2082,8 @@ export function upsertSpotlightNeeds(rows: Iterable<SpotlightNeedRow>): number {
 	const claimed = database.query<{ one: number }, [string, string]>(
 		"SELECT 1 AS one FROM spotlight_needs WHERE tool_call_id = ? AND session_file <> ? LIMIT 1",
 	);
-	const stored = database.query<{ reread: string; edit: string }, [string, string]>(
-		"SELECT reread, edit FROM spotlight_needs WHERE session_file = ? AND tool_call_id = ?",
+	const stored = database.query<{ file: string; reread: string; edit: string }, [string, string]>(
+		"SELECT file, reread, edit FROM spotlight_needs WHERE session_file = ? AND tool_call_id = ?",
 	);
 	const write = database.query(
 		"INSERT OR REPLACE INTO spotlight_needs (session_file, tool_call_id, file, open, reread, edit) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2101,7 +2106,8 @@ export function upsertSpotlightNeeds(rows: Iterable<SpotlightNeedRow>): number {
 			changes += write.run(
 				r.sessionFile,
 				r.toolCallId,
-				r.file,
+				// A list read's later parse may first touch another window: the stored file stays.
+				old?.file ?? r.file,
 				r.open ? 1 : 0,
 				JSON.stringify(mergeRanges([...ranges(old?.reread), ...r.reread])),
 				JSON.stringify(mergeRanges([...ranges(old?.edit), ...r.edit])),
