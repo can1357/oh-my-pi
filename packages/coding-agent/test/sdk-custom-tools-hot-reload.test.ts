@@ -230,6 +230,57 @@ describe("custom tools hot reload", () => {
 		expect(session.getToolByName("hot_probe")?.description).toBe("initial tool");
 	}, 20_000);
 
+	// A tool can be a directory whose `index.ts` re-exports from a helper. Editing only the helper leaves the entry
+	// file untouched, which is what a description or policy edit does.
+	function writeSplitTool(name: string, description: string, helperSource?: string): void {
+		const dir = path.join(toolsDir, name);
+		fs.mkdirSync(dir, { recursive: true });
+		const entry = path.join(dir, "index.ts");
+		const helper = path.join(dir, "description.ts");
+		if (!fs.existsSync(entry)) {
+			fs.writeFileSync(
+				entry,
+				[
+					'import { description } from "./description.js";',
+					"export default api => ({",
+					`\tname: ${JSON.stringify(name)},`,
+					`\tlabel: ${JSON.stringify(name)},`,
+					"\tdescription,",
+					"\tparameters: api.arktype({}),",
+					'\tasync execute() { return { content: [{ type: "text", text: description }] }; },',
+					"});",
+				].join("\n"),
+			);
+		}
+		fs.writeFileSync(helper, helperSource ?? `export const description = ${JSON.stringify(description)};\n`);
+		const bumped = new Date(Date.now() + ++writes * 1000);
+		fs.utimesSync(helper, bumped, bumped);
+	}
+
+	it("replaces a tool when only a helper its entry file imports was edited", async () => {
+		writeSplitTool("split_probe", "first version");
+		const { session } = await startSession();
+		expect(session.getToolByName("split_probe")?.description).toBe("first version");
+
+		writeSplitTool("split_probe", "second version");
+		const summary = await session.refreshCustomTools();
+
+		expect(summary).toMatchObject({ added: [], replaced: ["split_probe"], removed: [], errors: [] });
+		expect(session.getToolByName("split_probe")?.description).toBe("second version");
+	});
+
+	it("loads a tool that failed at startup once its broken helper is fixed, without retryFailed", async () => {
+		writeSplitTool("split_probe", "unused", "export const description = `unterminated;\n");
+		const { session } = await startSession();
+		expect(session.getAllToolNames()).not.toContain("split_probe");
+
+		writeSplitTool("split_probe", "fixed version");
+		const summary = await session.refreshCustomTools();
+
+		expect(summary).toMatchObject({ added: ["split_probe"], replaced: [], removed: [], errors: [] });
+		expect(session.getToolByName("split_probe")?.description).toBe("fixed version");
+	});
+
 	it("stays quiet when nothing changed", async () => {
 		writeToolFile("hot_probe.ts", "hot_probe", "first version");
 		const { session, notices } = await startSession();
