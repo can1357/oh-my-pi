@@ -1,8 +1,13 @@
 import { describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { isExcludedModel } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { xaiOAuthModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { filterModelsDevCatalogRows } from "@oh-my-pi/pi-catalog/provider-models/models-dev-policies";
+import {
+	buildXaiOAuthStaticSeed,
+	xaiOAuthModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 // Regression for https://github.com/can1357/oh-my-pi/issues/12697: xAI's
@@ -52,6 +57,7 @@ describe("xai-oauth grok-4.7 discovery", () => {
 					{ id: "grok-stt-1" },
 					{ id: "grok-voice-latest" },
 					{ id: "grok-voice-think-fast" },
+					{ id: "grok-voice-fast-1" },
 				],
 			}),
 		);
@@ -62,5 +68,16 @@ describe("xai-oauth grok-4.7 discovery", () => {
 			api: "xai-stt",
 			baseUrl: "https://api.x.ai/v1",
 		});
+	});
+
+	test("the grok-voice- exclusion spares the authored transcriber seed at generation", () => {
+		const seed = buildXaiOAuthStaticSeed().find(model => model.id === "grok-voice-transcribe-2.0");
+		if (!seed) throw new Error("Expected the grok-voice-transcribe-2.0 seed row");
+		const discovered = { ...seed, id: "grok-voice-transcribe-3.0" };
+		const realtime = { ...seed, id: "grok-voice-latest" };
+		expect(isExcludedModel("xai-oauth", seed.id)).toBe(true);
+		expect(filterModelsDevCatalogRows([seed, discovered, realtime]).map(model => model.id)).toEqual([
+			"grok-voice-transcribe-2.0",
+		]);
 	});
 });

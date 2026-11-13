@@ -56,7 +56,11 @@ export function decodeTranscriptionUsage(model: Model<Api>, raw: unknown): { usa
 	return { usage, seconds: finiteNumber(upstream.seconds) };
 }
 
-/** Build a {@link TranscriptionApiError} from a non-2xx response, preferring the `error` envelope's message. */
+/**
+ * Build a {@link TranscriptionApiError} from a non-2xx response. Decodes the
+ * OpenAI `{ error: { message, code | type } }` envelope and xAI's flat
+ * `{ code, error: "message" }` envelope.
+ */
 export async function transcriptionResponseError(
 	response: Response,
 	model: Model<Api>,
@@ -68,7 +72,10 @@ export async function transcriptionResponseError(
 		const parsed: unknown = JSON.parse(text);
 		if (parsed && typeof parsed === "object" && "error" in parsed) {
 			const error = parsed.error;
-			if (error && typeof error === "object") {
+			if (typeof error === "string") {
+				detail = error;
+				if ("code" in parsed && typeof parsed.code === "string") code = parsed.code;
+			} else if (error && typeof error === "object") {
 				const envelope = error as { message?: unknown; code?: unknown; type?: unknown };
 				if (typeof envelope.message === "string") detail = envelope.message;
 				if (typeof envelope.code === "string") code = envelope.code;

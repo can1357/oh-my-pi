@@ -155,7 +155,8 @@ describe("xai-stt transcription runner", () => {
 		).catch(err => err);
 		expect(error).toBeInstanceOf(TranscriptionApiError);
 		expect(error.status).toBe(403);
-		expect(error.message).toContain("xai-oauth/grok-voice-transcribe-2.0 transcription API error (403)");
+		expect(error.message).toBe("xai-oauth/grok-voice-transcribe-2.0 transcription API error (403): no access");
+		expect(error.code).toBe("forbidden");
 
 		const malformed = upstream(() => Response.json({ text: "x", words: [{ text: "x", start: "0" }] }));
 		await expect(

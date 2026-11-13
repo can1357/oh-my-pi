@@ -2094,11 +2094,7 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
 		if (isResponsesSeed(seed)) curatedModels.push(seed);
 		else runnerIds.add(seed.id);
 	}
-	// Only the authored seed rows serve transcription (`xai-stt`); an unseeded
-	// transcriber the roster lists would otherwise become a chat row.
-	const filtered = dynamic.filter(
-		e => !runnerIds.has(e.id) && !e.id.startsWith("grok-voice-transcribe-") && !isExcludedModel("xai-oauth", e.id),
-	);
+	const filtered = dynamic.filter(e => !runnerIds.has(e.id) && !isExcludedModel("xai-oauth", e.id));
 
 	const byId = new Map<string, ModelSpec<"openai-responses">>(filtered.map(e => [e.id, e]));
 	for (const curated of curatedModels) {
