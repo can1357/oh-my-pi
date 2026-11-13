@@ -33,6 +33,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import {
 	mergeNativeCaptures,
 	NATIVE_CASES,
@@ -199,7 +200,12 @@ async function capture(testCase: NativeCase, workdir: string): Promise<NativeReq
 const label = (testCase: NativeCase) =>
 	`${testCase.model}@${testCase.upstream} ${testCase.effort}${testCase.prime ? ` after ${testCase.prime}` : ""}`;
 
-const previous: NativeCapture[] = (await Bun.file(values.out).exists()) ? await Bun.file(values.out).json() : [];
+const previous: NativeCapture[] = await Bun.file(values.out)
+	.json()
+	.catch((error: unknown) => {
+		if (isEnoent(error)) return [];
+		throw error;
+	});
 const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "droid-native-capture-"));
 await Bun.write(path.join(workdir, "probe.txt"), `${NONCE}\n`);
 const captured: NativeCapture[] = [];
