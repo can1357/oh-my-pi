@@ -52,7 +52,7 @@ import {
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { AssistantMessage, ImageContent, Message, TextContent, Usage, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
@@ -690,13 +690,12 @@ export function usageContextTokens(raw: unknown): number {
 	};
 	const contextTokens = raw.contextTokens;
 	const orchestration = isRecord(raw.orchestration) ? raw.orchestration : undefined;
-	const usage: Usage = {
+	return calculateContextTokens({
 		input: field(raw, "input"),
 		output: field(raw, "output"),
 		cacheRead: field(raw, "cacheRead"),
 		cacheWrite: field(raw, "cacheWrite"),
 		totalTokens: field(raw, "totalTokens"),
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		...(typeof contextTokens === "number" && Number.isFinite(contextTokens) ? { contextTokens } : {}),
 		...(orchestration
 			? {
@@ -707,8 +706,7 @@ export function usageContextTokens(raw: unknown): number {
 					},
 				}
 			: {}),
-	};
-	return calculateContextTokens(usage);
+	});
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's
