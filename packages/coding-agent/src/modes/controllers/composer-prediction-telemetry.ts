@@ -52,7 +52,9 @@ class PredictionInstruments {
 		this.duration = meter.createHistogram("omp.composer.prediction.duration", {
 			description: "Time from a prediction request to its settlement.",
 			unit: "ms",
-			advice: { explicitBucketBoundaries: [250, 500, 1000, 2000, 3000, 5000, 8000, 12000, 15000, 20000] },
+			advice: {
+				explicitBucketBoundaries: [250, 500, 1000, 2000, 3000, 5000, 8000, 12000, 15000, 20000, 30000, 45000],
+			},
 		});
 		this.shown = meter.createCounter("omp.composer.prediction.shown", {
 			description: "Offered predictions the composer painted, counted on first display.",

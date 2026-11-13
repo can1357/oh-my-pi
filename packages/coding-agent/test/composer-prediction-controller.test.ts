@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
 import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -15,6 +15,7 @@ import {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ComposerPredictionController,
+	composerPredictionDeadlineMs,
 	parseComposerPrediction,
 	parseComposerPredictions,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/composer-prediction-controller";
@@ -221,6 +222,33 @@ describe("ComposerPredictionController", () => {
 		expect(capped.turns[0]!.options.maxTokens).toBe(1024);
 		expect(uncapped.turns).toHaveLength(1);
 		expect(uncapped.turns[0]!.options.maxTokens).toBeUndefined();
+	});
+
+	it("waits longer for a prediction only where the side turn reasons at the session's effort", () => {
+		const reasoning = { ...MODEL, reasoning: true };
+		const deadline = (model: object, thinkingLevel: ThinkingLevel) =>
+			composerPredictionDeadlineMs({ model: model as Model, thinkingLevel });
+
+		// Gemini transports cannot lower effort per message: a high-effort pass outlasts 15 s.
+		expect(deadline({ ...reasoning, api: "google-gemini-cli" }, ThinkingLevel.High)).toBe(45_000);
+		expect(deadline({ ...reasoning, api: "google-gemini-cli" }, ThinkingLevel.Off)).toBe(15_000);
+		expect(deadline({ ...reasoning, compat: { supportsPerMessageEffort: true } }, ThinkingLevel.High)).toBe(15_000);
+		// OpenAI lowers effort only through `configuration_update`, and Responses not in pro mode.
+		const configurationUpdate = { supportsConfigurationUpdate: true };
+		expect(
+			deadline({ ...reasoning, api: "openai-codex-responses", compat: configurationUpdate }, ThinkingLevel.High),
+		).toBe(15_000);
+		expect(deadline({ ...reasoning, api: "openai-codex-responses", compat: {} }, ThinkingLevel.High)).toBe(45_000);
+		expect(deadline({ ...reasoning, api: "openai-responses", compat: configurationUpdate }, ThinkingLevel.High)).toBe(
+			15_000,
+		);
+		expect(
+			deadline(
+				{ ...reasoning, api: "openai-responses", compat: configurationUpdate, reasoningMode: "pro" },
+				ThinkingLevel.High,
+			),
+		).toBe(45_000);
+		expect(deadline(MODEL, ThinkingLevel.High)).toBe(15_000);
 	});
 
 	it("aborts a stalled prediction at the deadline", async () => {
