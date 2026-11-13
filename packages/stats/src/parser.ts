@@ -503,10 +503,66 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	return entries;
 }
 
-/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier and the Spotlight state. */
-function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): ServiceTierByFamily | undefined {
+/**
+ * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as pi-tui's
+ * `isUserTurnInitiator` defines them.
+ */
+function startsNewRequest(entry: SessionEntry): boolean {
+	if (entry.type === "reset_boundary") return true;
+	if (entry.type !== "custom_message" || !("customType" in entry) || !("attribution" in entry)) return false;
+	return entry.attribution === "user" && (entry.customType === "skill-prompt" || entry.customType === "collab-prompt");
+}
+
+/**
+ * Links each user message to its reply across tail reads. The agent writes non-message entries (the system-prompt
+ * digest, extension notices, side-model usage, title changes) between a user message and its reply, so the reply is
+ * the first assistant message descending from the user message through such entries. Another message or a new
+ * request on the way ends that branch only; a sibling branch can still carry the reply.
+ */
+class ReplyTracker {
+	/** User messages still awaiting a reply and the non-message entries beneath them, each to its user message. */
+	readonly #waiting: Map<string, string>;
+
+	constructor(waiting?: Record<string, string>) {
+		this.#waiting = new Map(waiting ? Object.entries(waiting) : undefined);
+	}
+
+	get state(): Record<string, string> {
+		return Object.fromEntries(this.#waiting);
+	}
+
+	/** The user message `entry` answers, if `entry` is an assistant message descending from it through non-message entries. */
+	visit(entry: SessionEntry): string | undefined {
+		if (isUserMessage(entry)) {
+			this.#waiting.set(entry.id, entry.id);
+			return undefined;
+		}
+		const parentId = "parentId" in entry ? entry.parentId : undefined;
+		const user = typeof parentId === "string" ? this.#waiting.get(parentId) : undefined;
+		if (!user) return undefined;
+		if (isAssistantMessage(entry)) {
+			for (const [waitingId, waitingUser] of this.#waiting) {
+				if (waitingUser === user) this.#waiting.delete(waitingId);
+			}
+			return user;
+		}
+		if (entry.type !== "message" && !startsNewRequest(entry) && "id" in entry && typeof entry.id === "string") {
+			this.#waiting.set(entry.id, user);
+		}
+		return undefined;
+	}
+}
+
+/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier, the awaited replies and the Spotlight state. */
+function scanPrefixState(
+	bytes: Uint8Array,
+	spotlight: SpotlightCollector,
+	replies: ReplyTracker,
+): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
+		replies.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 		else spotlight.visit(entry);
 	});
@@ -515,7 +571,6 @@ function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): Serv
 export interface SessionParserState {
 	version: 1;
 	offset: number;
-	dev: number;
 	ino: number;
 	birthtimeMs: number;
 	size: number;
@@ -524,6 +579,8 @@ export interface SessionParserState {
 	serviceTier: ServiceTierByFamily | null;
 	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
 	spotlight?: SpotlightParserState;
+	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
+	pendingReplies?: Record<string, string>;
 }
 
 export interface ParseSessionResult {
@@ -553,8 +610,13 @@ async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8
 	return bytes.subarray(0, read);
 }
 
+/**
+ * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
+ * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
+ * `birthtimeMs` (plus size/mtime at call sites) identify the file.
+ */
 export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
-	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
 }
 
 /** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
@@ -581,9 +643,11 @@ export async function parseSessionFile(
 	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
 	const callsById = new Map<string, ToolCallStats>();
 	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
+	let replies = new ReplyTracker();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
+		const answered = replies.visit(entry);
 		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
@@ -618,12 +682,11 @@ export async function parseSessionFile(
 				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
 			}
 			// Persist links even when the user entry was ingested in an earlier tail read.
-			const parentId = entry.parentId;
 			const msg = entry.message;
-			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+			if (answered && msg.role === "assistant" && msg.model && msg.provider) {
 				userLinks.push({
 					sessionFile: sessionPath,
-					entryId: parentId,
+					entryId: answered,
 					model: msg.model,
 					provider: msg.provider,
 				});
@@ -646,7 +709,8 @@ export async function parseSessionFile(
 					const previous = await readCheckpoint(handle, fromOffset);
 					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
 				}
-				resume = !reset;
+				// A cursor written before replies were tracked rebuilds its state from the prefix instead.
+				resume = !reset && state.pendingReplies !== undefined;
 			}
 			if (fromOffset > info.size) reset = true;
 			if (replay) resume = false;
@@ -656,9 +720,10 @@ export async function parseSessionFile(
 			if (resume) {
 				currentServiceTier = state?.serviceTier ?? undefined;
 				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+				replies = new ReplyTracker(state?.pendingReplies);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
-				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
@@ -700,7 +765,6 @@ export async function parseSessionFile(
 		parserState: {
 			version: 1,
 			offset: newOffset,
-			dev: info.dev,
 			ino: info.ino,
 			birthtimeMs: info.birthtimeMs,
 			size: info.size,
@@ -708,6 +772,7 @@ export async function parseSessionFile(
 			checkpoint,
 			serviceTier: currentServiceTier ?? null,
 			spotlight: spotlight.state,
+			pendingReplies: replies.state,
 		},
 	};
 }

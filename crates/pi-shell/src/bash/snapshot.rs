@@ -12,7 +12,7 @@
 //! status 137).
 //! `externalize` adds what only the engine has, the execution position:
 //! the `Frames` blob (frames, partial words, staged ops, fd tables with
-//! in-memory pipe contents, subshell overlays and scopes, pending calls and
+//! in-memory pipe contents, forked vprocs' images and scopes, pending calls and
 //! signals, the scheduler) plus the unit blobs live frames need. A running
 //! background job's table entry is live in the store; its execution
 //! position needs `externalize` at a safepoint.
@@ -61,7 +61,11 @@ pub struct RestoreOpts {
 	/// Ignore the frames blob: keep root state, abandon the scripts that were
 	/// running (each reports `Done` with status 255). The fallback after
 	/// [`RestoreError::Incompatible`](crate::bash::RestoreError::Incompatible).
-	pub drop_frames: bool,
+	pub drop_frames:   bool,
+	/// Seed `$RANDOM` from the host instead of continuing the snapshot's
+	/// sequence, as bash reseeds a forked subshell: shells restored from one
+	/// image next to each other would otherwise draw the same numbers.
+	pub reseed_random: bool,
 }
 
 /// Result of [`Shell::externalize`](crate::bash::Shell::externalize).

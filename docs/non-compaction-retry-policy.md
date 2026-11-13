@@ -14,6 +14,7 @@ It explicitly excludes context-overflow recovery via auto-compaction. Overflow i
 - [`../packages/coding-agent/src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-client.ts`](../packages/coding-agent/src/modes/rpc/rpc-client.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-types.ts`](../packages/coding-agent/src/modes/rpc/rpc-types.ts)
+- [`../packages/coding-agent/src/modes/acp/acp-agent.ts`](../packages/coding-agent/src/modes/acp/acp-agent.ts)
 
 ## Scope boundary vs compaction
 
@@ -183,6 +184,8 @@ await session.dispose();
 `AgentSession.waitForIdle()` drains core streaming, pending advisor card events, internal session event handlers, and deferred recovery. It rechecks for streaming and event handlers started during settlement. This keeps a successful retry's `auto_retry_end` observable before the caller unsubscribes, without changing retry policy or the ordering of `agent_end` relative to `auto_retry_end`.
 
 This barrier does not await arbitrary asynchronous work started by public subscribers. Call it outside callbacks whose completion the session itself awaits; otherwise the drain can wait on its own caller. The barrier has no timeout of its own, so hosts still need an external deadline for stalled work.
+
+ACP completion remains scoped to the client prompt that emitted the event. A late `agent_end` handler cannot drain background work or finish a newer prompt after its client receives `end_turn`; later results are recorded once and consumed by the next explicit client prompt.
 
 ## Controls: settings and RPC
 

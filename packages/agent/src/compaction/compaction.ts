@@ -35,7 +35,7 @@ import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
@@ -691,6 +691,8 @@ function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boole
 export interface SummaryOptions {
 	promptOverride?: string;
 	extraContext?: string[];
+	/** Additional summary context fetched only when a compaction request consumes it. */
+	loadExtraContext?: () => Promise<string[] | undefined>;
 	remoteEndpoint?: string;
 	/** Stable system-prompt segments from the live turn, preserved for provider cache reuse. */
 	remoteSystemPrompt?: string[];
@@ -755,6 +757,8 @@ export interface SummaryOptions {
 	tools?: Tool[];
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
+	/** Inspect or replace a generic remote-compaction payload before it is sent. */
+	onPayload?: SimpleStreamOptions["onPayload"];
 	/**
 	 * Optional completion transport override for host-level request wrappers
 	 * (e.g. the coding-agent provider-concurrency limiter). When provided,
@@ -1038,7 +1042,7 @@ async function summarizeConversationWindow(
 					endpoint,
 					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 					signal,
-					{ fetch: options.fetch, model, apiKey: key },
+					{ fetch: options.fetch, model, apiKey: key, onPayload: options.onPayload },
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
@@ -1269,7 +1273,7 @@ async function generateShortSummary(
 						endpoint,
 						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 						signal,
-						{ fetch: options?.fetch, model, apiKey: key },
+						{ fetch: options?.fetch, model, apiKey: key, onPayload: options?.onPayload },
 					),
 				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 			);
@@ -1285,7 +1289,9 @@ async function generateShortSummary(
 					maxTokens,
 					signal,
 					apiKey,
-					reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+					// Display-only summary under a 512-token cap: reasoning would consume the
+					// whole budget. The full summary keeps the session's effort.
+					disableReasoning: true,
 					initiatorOverride: options?.initiatorOverride,
 					metadata: options?.metadata,
 					fetch: options?.fetch,
@@ -1399,6 +1405,19 @@ export function canReplayRemoteCompaction(
 }
 
 /**
+ * Whether `reader` can replay the provider-native compaction `compactor` would
+ * write. Only the OpenAI Responses lanes (the model's own API or its
+ * `remoteCompaction.api` override) store a provider-bound payload; the
+ * Anthropic lane and local methods leave a summary any model reads.
+ */
+export function canReplayRemoteCompactionFrom(compactor: Model, reader: Model): boolean {
+	return (
+		!isOpenAiRemoteCompactionApi(compactor.remoteCompaction?.api ?? compactor.api) ||
+		(compactor.provider === reader.provider && isOpenAiRemoteCompactionApi(reader.api))
+	);
+}
+
+/**
  * Whether compaction preparation may reuse a native boundary instead of
  * re-expanding its original messages. This is deliberately stricter than normal
  * replay: the active model must both read the payload and remain eligible for
@@ -1451,7 +1470,9 @@ export function findReadableCompactionIndex(
 /**
  * Pass the caller's warm `tokenizer` (the Agent's for the active model) so the
  * full-branch estimate walk hits its memo; the cold default is for one-shot
- * callers that have no live agent.
+ * callers that have no live agent. A cold walk over a long branch blocks the
+ * event loop for hundreds of milliseconds, so it runs as the
+ * `compaction.prepare` loop phase.
  */
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
@@ -1459,9 +1480,25 @@ export function prepareCompaction(
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
 ): CompactionPreparation | undefined {
+	return withLoopPhase("compaction.prepare", () =>
+		prepareCompactionUnlabeled(pathEntries, settings, activeModel, tokenizer),
+	);
+}
+
+function prepareCompactionUnlabeled(
+	pathEntries: SessionEntry[],
+	settings: CompactionSettings,
+	activeModel: Model | undefined,
+	tokenizer: Tokenizer,
+): CompactionPreparation | undefined {
 	const lastEntry = pathEntries[pathEntries.length - 1];
 	// A speculative native record may leave uncovered messages before the record.
-	if (lastEntry?.type === "compaction" && !lastEntry.providerReplayThroughEntryId) {
+	// A trailing boundary this preparation re-expands covers nothing yet.
+	if (
+		lastEntry?.type === "compaction" &&
+		!lastEntry.providerReplayThroughEntryId &&
+		(!activeModel || remotePreserveReusable(lastEntry.preserveData, activeModel, settings))
+	) {
 		return undefined;
 	}
 
@@ -1776,10 +1813,19 @@ export async function compact(
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		fetch: options?.fetch,
+		onPayload: options?.onPayload,
 		completeImpl: options?.completeImpl,
 		// The caller's opt-out must reach every summarization oneshot, otherwise
 		// an outer retry loop multiplies with the inner one (see SummaryOptions).
 		oneshotRetry: options?.oneshotRetry,
+	};
+	let extraContextLoaded = false;
+	const ensureExtraContext = async (): Promise<void> => {
+		if (extraContextLoaded || !options?.loadExtraContext) return;
+		const context = await options.loadExtraContext();
+		signal?.throwIfAborted();
+		if (context?.length) summaryOptions.extraContext = [...(summaryOptions.extraContext ?? []), ...context];
+		extraContextLoaded = true;
 	};
 
 	// An archive keeps the reasoning policy of the model it was rendered for;
@@ -2214,6 +2260,7 @@ export async function compact(
 			].filter(files => files.after >= filesDueBefore);
 			if (carried.length > 0) nativeRetainedFiles = carried;
 		}
+		await ensureExtraContext();
 		try {
 			// The live turn's own system prompt, wire tools and transformed
 			// history when the host can build them: kept thinking remains valid
@@ -2274,6 +2321,7 @@ export async function compact(
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
 	}
+	if (!usedRemoteCompaction && nativeSummary === undefined) await ensureExtraContext();
 
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
@@ -2332,11 +2380,7 @@ export async function compact(
 
 	const shortSummary = usedRemoteCompaction
 		? "Remote compaction"
-		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, {
-				...summaryOptions,
-				extraContext: options?.extraContext,
-				thinkingLevel: options?.thinkingLevel,
-			});
+		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, summaryOptions);
 
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);

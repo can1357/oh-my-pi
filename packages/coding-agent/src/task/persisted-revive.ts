@@ -39,7 +39,6 @@ import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
 	compactionThresholdSettings,
-	createMCPProxyTools,
 	createSubagentSettings,
 	followMCPTools,
 	replayRevivedAgentStart,
@@ -428,8 +427,9 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const structured = revivedToolNames.includes("yield");
 	const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 	// Subscribe before minting proxies so a manager change during startup is replayed on bind.
-	const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
-	const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+	// The revived session reopens its own view, keeping the tools its earlier requests rendered.
+	const mcpFollower = mcpManager ? followMCPTools(mcpManager, { scope: reopened.getSessionId() }) : undefined;
+	const mcpProxyTools = mcpFollower?.proxyTools() ?? [];
 
 	let session: AgentSession;
 	try {
@@ -497,6 +497,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 						enableMCP: !mcpManager,
 						mcpManager,
 						mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+						mcpToolScope: mcpFollower?.scope,
 					}),
 			...seanceOptions,
 		}));

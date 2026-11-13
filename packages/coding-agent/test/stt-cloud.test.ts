@@ -3,6 +3,7 @@ import * as transcription from "@oh-my-pi/pi-ai/transcription";
 import type { TranscriptionResult } from "@oh-my-pi/pi-ai/transcription";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
@@ -62,6 +63,26 @@ describe("STTController cloud transcription", () => {
 		controller?.dispose();
 		controller = undefined;
 		restoreSettingsTestState(state);
+	});
+
+	it("offline prevents recording and transcription through a foreign provider", async () => {
+		const model = getBundledModel("openai", "whisper-1");
+		settings.setModelRole("dictation", "openai/whisper-1");
+		cfgOffline.override(settings, true);
+		const transcribe = vi.spyOn(transcription, "transcribeAudio");
+		const capture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(capture, {
+			settings,
+			registry: registryFor(model),
+			getSessionProvider: () => "local",
+		});
+		const options = makeOptions();
+
+		await controller.toggle(makeEditor(), options);
+
+		expect(capture).not.toHaveBeenCalled();
+		expect(transcribe).not.toHaveBeenCalled();
+		expect(options.showWarning).toHaveBeenCalled();
 	});
 
 	it("buffers microphone PCM into a valid mono 16-bit WAV and commits the cloud transcript", async () => {

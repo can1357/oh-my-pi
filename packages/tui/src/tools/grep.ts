@@ -10,8 +10,9 @@ import type {
 } from "./renderer";
 import { compact } from "../native/describe";
 import type { NativeChild } from "../native/node";
+import { compactText, styledSpans } from "../native/spans";
 import { footnoteText, inlineErrorView, resultText } from "./native-view";
-import { type Theme } from "../theme/theme";
+import { ensureThemeSync, highlightCode, type Theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
 import { fileHyperlink, renderStatusLine, renderTreeList } from "../render";
@@ -22,6 +23,7 @@ import {
 	formatEmptyMessage,
 	formatErrorDetail,
 	PREVIEW_LIMITS,
+	replaceTabs,
 	toPathList,
 } from "../render/render-utils";
 import {
@@ -34,6 +36,7 @@ import {
 	groupedLinkTargets,
 	groupLineIndicesByBlank,
 	groupsByFile,
+	isGroupedHeader,
 	isMatchRow,
 } from "./grouped-file-output";
 
@@ -68,6 +71,8 @@ export interface GrepToolDetails {
 	 * skipped these and continued with the surviving entries; surfaced as a
 	 * non-fatal warning in the renderer and in the model-facing text. */
 	missingPaths?: string[];
+	/** Files skipped as binary although their content matches (cwd-relative display paths). */
+	binaryMatches?: string[];
 }
 
 // =============================================================================
@@ -105,9 +110,11 @@ function grepFlagMeta(args: GrepRenderArgs): string[] {
 /**
  * Header subject, `pattern in scope`. A result names the tool's display scope
  * (linked to the original search path); a call falls back to the requested paths.
+ * Callers pass the pattern already syntax-colored: the bundled regex grammar also
+ * handles incomplete, still-streaming patterns.
  */
 function grepSubject(
-	pattern: string | undefined,
+	subject: string | undefined,
 	args: GrepRenderArgs | undefined,
 	uiTheme: Theme,
 	details?: GrepToolDetails,
@@ -116,7 +123,7 @@ function grepSubject(
 	let scope = details?.scopePath || undefined;
 	if (scope && searchPath) scope = fileHyperlink(searchPath, scope);
 	scope ??= toPathList(args?.path ?? args?.paths).join(", ") || undefined;
-	return formatScopedSubject(pattern || undefined, scope, uiTheme);
+	return formatScopedSubject(subject, scope, uiTheme);
 }
 
 function grepStatusIcon(uiTheme: Theme): string {
@@ -132,7 +139,11 @@ export const grepToolRenderer = {
 				icon: "pending",
 				title: "Grep",
 				titleColor: "toolTitle",
-				description: grepSubject(args.pattern || "?", args, uiTheme),
+				description: grepSubject(
+					args.pattern ? highlightCode(replaceTabs(args.pattern), "Regular Expression", uiTheme).join("\n") : "?",
+					args,
+					uiTheme,
+				),
 				meta: grepFlagMeta(args),
 			},
 			uiTheme,
@@ -153,7 +164,10 @@ export const grepToolRenderer = {
 			isRecord(rawDetails) && typeof rawDetails.searchPath === "string"
 				? rawDetails.searchPath
 				: details?.searchPath;
-		const description = grepSubject(args?.pattern, args, uiTheme, details, searchPath);
+		const pattern = args?.pattern
+			? highlightCode(replaceTabs(args.pattern), "Regular Expression", uiTheme).join("\n")
+			: undefined;
+		const description = grepSubject(pattern, args, uiTheme, details, searchPath);
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
@@ -212,18 +226,35 @@ export const grepToolRenderer = {
 			missingPathsList.length > 0
 				? uiTheme.fg("warning", `skipped missing: ${missingPathsList.join(", ")}`)
 				: undefined;
+		const binaryNote = details?.binaryMatches?.length
+			? uiTheme.fg("warning", `binary matches: ${formatCount("file", details.binaryMatches.length)}`)
+			: undefined;
+		const extraLines = compact([missingNote, binaryNote]);
 
 		if (matchCount === 0) {
 			const header = renderStatusLine(
-				{ icon: "warning", title: "Grep", titleColor: "toolTitle", description, meta: ["0 matches"] },
+				{
+					icon: "warning",
+					title: "Grep",
+					titleColor: "toolTitle",
+					description,
+					meta: [uiTheme.fg("warning", "0 matches")],
+				},
 				uiTheme,
 			);
-			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
-			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 0, 0);
+			return new Text([header, ...extraLines].join("\n"), 0, 0);
 		}
 
-		const meta = [formatCount("match", matchCount), formatCount("file", fileCount)];
+		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
+		const allLines = textContent.split("\n");
+		// Classify the whole output so nested directory headers resolve across blank-line
+		// groups. Display paths are cwd-relative (`searchPath` for results that predate
+		// `cwd`); a single-file search's headerless lines belong to the searched file.
+		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
+		const hasScope = Boolean(details?.scopePath || toPathList(args?.path ?? args?.paths).length > 0);
+		const singleFileScope = hasScope && fileCount === 1 && !allLines.some(isGroupedHeader);
+		const meta = [formatCount("match", matchCount)];
+		if (!singleFileScope) meta.push(formatCount("file", fileCount));
 		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
 		const header = renderStatusLine(
 			{
@@ -235,13 +266,6 @@ export const grepToolRenderer = {
 			},
 			uiTheme,
 		);
-
-		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
-		const allLines = textContent.split("\n");
-		// Classify the whole output so nested directory headers resolve across blank-line
-		// groups. Display paths are cwd-relative (`searchPath` for results that predate
-		// `cwd`); a single-file search's headerless lines belong to the searched file.
-		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
 		const styleCodeFrame = createCodeFrameStyler(allLines, contexts, "toolOutput", uiTheme);
 		const styleLine = createGroupedRowStyler(allLines, contexts, uiTheme, {
 			linkTarget: groupedLinkTargets(contexts, textContent, details, rawDetails),
@@ -258,9 +282,6 @@ export const grepToolRenderer = {
 		const compactGroups = marked
 			? matchGroups.map(group => group.filter(index => contexts[index]!.kind === "file" || isMatch(index)))
 			: matchGroups;
-
-		const extraLines: string[] = [];
-		if (missingNote) extraLines.push(missingNote);
 
 		return createCachedComponent(
 			() => options.expanded,
@@ -300,6 +321,9 @@ export const grepToolRenderer = {
 		const textContent = details?.displayContent ?? resultText(result);
 		const missing = details?.missingPaths ?? [];
 		const missingNote = missing.length > 0 ? `skipped missing: ${missing.join(", ")}` : undefined;
+		const binaryNote = details?.binaryMatches?.length
+			? `binary matches: ${formatCount("file", details.binaryMatches.length)}`
+			: undefined;
 		const scope = details?.scopePath ? `in ${details.scopePath}` : undefined;
 		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
 		const matchCount = details?.matchCount ?? 0;
@@ -307,7 +331,7 @@ export const grepToolRenderer = {
 			(!hasDetailedData && (!textContent || textContent === "No matches found")) ||
 			(hasDetailedData && matchCount === 0)
 		) {
-			const foot = footnoteText(compact([missingNote]));
+			const foot = footnoteText(compact([missingNote, binaryNote]));
 			return {
 				tool: grepNativeHead(args, compact([scope, "0 matches"])),
 				tone: "warning",
@@ -318,21 +342,25 @@ export const grepToolRenderer = {
 		const truncated = Boolean(
 			details?.truncated || details?.meta?.truncation || details?.meta?.limits?.columnTruncated,
 		);
+		const lines = textContent.split("\n");
 		const fileCount = details?.fileCount ?? 0;
+		const singleFileScope = Boolean(scope) && fileCount === 1 && !lines.some(isGroupedHeader);
 		const counts = hasDetailedData
-			? `${formatCount("match", matchCount)} · ${formatCount("file", fileCount)}`
+			? singleFileScope
+				? formatCount("match", matchCount)
+				: `${formatCount("match", matchCount)} · ${formatCount("file", fileCount)}`
 			: undefined;
 		const head = grepNativeHead(args, compact([scope, counts]));
 		const hiddenFiles = options.expanded ? 0 : Math.max(0, fileCount - NATIVE_COLLAPSED_FILES);
 		const foot = footnoteText(
-			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote]),
+			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote, binaryNote]),
 			details?.meta,
 		);
 		return {
 			tool: truncated ? { ...head, badges: [{ text: "truncated", tone: "warning" }] } : head,
 			inline: true,
 			body: compact<NativeChild>([
-				...describeGroupedOutput(textContent.split("\n"), {
+				...describeGroupedOutput(lines, {
 					maxFiles: options.expanded ? undefined : NATIVE_COLLAPSED_FILES,
 					file: details?.files?.length === 1 ? details.files[0] : undefined,
 				}),
@@ -352,5 +380,9 @@ function grepNativeHead(args: GrepRenderArgs | undefined, meta?: readonly string
 		if (paths.length) parts.push(`in ${paths.join(", ")}`);
 		parts.push(...grepFlagMeta(args));
 	}
-	return { title: "Grep", target: args?.pattern || "?", targetKind: "pattern", meta: parts };
+	ensureThemeSync();
+	const target = args?.pattern
+		? compactText(styledSpans(highlightCode(args.pattern, "Regular Expression").join("\n")))
+		: "?";
+	return { title: "Grep", target, targetKind: "pattern", meta: parts };
 }

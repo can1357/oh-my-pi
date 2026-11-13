@@ -2837,6 +2837,89 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).errorMessage).toContain(modelDenial);
 	});
 
+	it("falls back instead of waiting on siblings that only lack the requested model", async () => {
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const fallbackModel = getBundledModel("openai", "gpt-5.5");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled primary and fallback test models to exist");
+		}
+		const providerSessionId = "model-denied-siblings-usage-limit";
+		const waitSpy = mockSchedulerWaitWithClock();
+		// Two accounts the provider refuses this model to, and one entitled
+		// account whose quota is spent for days. No account can serve the model
+		// before the spent one resets, so the short model-policy blocks on the
+		// refused siblings must not pace another try at the same accounts.
+		const deniedKeys = ["denied-model-A", "denied-model-B"];
+		const spentKey = "entitled-spent";
+		await authStorage.credentials.set("openai-codex", [
+			...deniedKeys.map(key => ({ type: "api_key" as const, key })),
+			{ type: "api_key" as const, key: spentKey },
+		]);
+		authStorage.keys.setRuntime("openai", "openai-fallback-key");
+		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
+		const modelDenial = `Codex error event: The '${primaryModel.id}' model is not supported when using Codex with a ChatGPT account. (code=model_not_found)`;
+		const usageLimit = "Codex error event: The usage limit has been reached (code=usage_limit_reached)";
+		const requestedKeys: string[] = [];
+		const primaryMock = createMockModel({
+			id: primaryModel.id,
+			provider: primaryModel.provider,
+			handler: (_context, options) => {
+				const key = resolveInitialApiKey(options?.apiKey);
+				requestedKeys.push(key);
+				// A hard cap makes the unfixed loop fail assertions rather than hang.
+				if (requestedKeys.length > 3 * (deniedKeys.length + 1)) {
+					return { content: ["unexpected retry past the account walk"], stopReason: "stop" };
+				}
+				return { stopReason: "error", errorMessage: key === spentKey ? usageLimit : modelDenial };
+			},
+		});
+		const fallbackMock = createMockModel({
+			responses: [{ content: ["recovered on fallback"], stopReason: "stop" }],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model =>
+				model.provider === primaryModel.provider
+					? modelRegistry.getApiKey(model, providerSessionId)
+					: "openai-fallback-key",
+			sessionId: providerSessionId,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return aiStream.streamSimple(
+					model.provider === primaryModel.provider ? primaryMock.model : fallbackMock.model,
+					context,
+					options,
+				);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			providerSessionId,
+		});
+
+		await session.prompt("Test usage limit with model-denied siblings");
+		await session.waitForIdle();
+
+		expect(new Set(requestedKeys)).toEqual(new Set([...deniedKeys, spentKey]));
+		expect(requestedKeys).toHaveLength(deniedKeys.length + 1);
+		// Long sleeps arrive as one-second slices; bound their sum.
+		const waitedMs = waitSpy.mock.calls.reduce((total, call) => total + (call[0] ?? 0), 0);
+		expect(waitedMs).toBeLessThan(30_000);
+		expect(requestedModels.at(-1)).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
+		expect(lastAssistant(session).stopReason).toBe("stop");
+	});
+
 	it("tries sibling Codex accounts before advisor model fallback on cyber-policy denials", async () => {
 		const mainModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const advisorModel = getBundledModel("openai-codex", "gpt-5.6-sol");
@@ -2899,7 +2982,6 @@ describe("AgentSession retry delay cap", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorConfigs: [{ name: "cyber-policy", model: advisorSelector }],
 			advisorStreamFn: (requestedModel, context, options) => {
 				requestedAdvisorModels.push(`${requestedModel.provider}/${requestedModel.id}`);
@@ -4170,6 +4252,70 @@ describe("AgentSession retry delay cap", () => {
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after empty reasonless abort" });
+	});
+
+	it("stops same-model retries after three consecutive generic aborts", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{ stopReason: "aborted", errorMessage: "Request was aborted" },
+				{ stopReason: "aborted", errorMessage: "Request was aborted" },
+				{ stopReason: "aborted", errorMessage: "Request was aborted" },
+				{ content: ["unused success"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		await session.prompt("Trigger consecutive generic aborts");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 2 });
+		expect(fallbackEvents).toHaveLength(0);
+		const last = lastAssistant(session);
+		expect(last.errorMessage).toBe("Retry budget exhausted after 2 retries: Request was aborted");
+		expect(session.isRetrying).toBe(false);
 	});
 
 	it("does not retry reasonless aborted turns that have partial content", async () => {

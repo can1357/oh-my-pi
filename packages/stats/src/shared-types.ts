@@ -568,6 +568,18 @@ export interface SpotlightGapCount {
 	holdout: number;
 }
 
+/**
+ * Failed results by why their Spotlight calls failed: `no_credential` (no Stencil sign-in), `timeout`, `transport`,
+ * `rate_limited`, `bad_reply`, `http_<status>`, or `unrecorded` for results journaled before pi recorded causes.
+ */
+export interface SpotlightFailureCause {
+	cause: string;
+	/** Results with a call that failed this way (a result with calls failing two ways counts under both). */
+	results: number;
+	/** Of the results that called Spotlight. */
+	share: number;
+}
+
 /** What shaping costs in time and reliability (all evaluated results, held-out ones included). */
 export interface SpotlightOverhead {
 	results: number;
@@ -579,6 +591,8 @@ export interface SpotlightOverhead {
 	spotlightMsP90: number | null;
 	/** Results whose Spotlight calls failed or timed out (shaped by the no-score fallback). */
 	failureRate: number | null;
+	/** The failed results by cause, most first. */
+	failureCauses: SpotlightFailureCause[];
 	/** Wall time tool calls spent shaping results whose Spotlight calls failed (mostly the 5 s timeout per call). */
 	failedWaitMs: number;
 	spotlightUsd: number;
@@ -1104,9 +1118,10 @@ export interface SessionTrace {
 	/** Root transcript mtime, or recorded root activity/header time for offline snapshots. */
 	mtimeMs: number;
 	/**
-	 * Conditional-request fingerprint `"<rootMs>:<childHighMs>"` (see
-	 * traceFingerprintForEtag): the server ETag is built from this, so a
-	 * subagent-only append changes the ETag even when the root is untouched.
+	 * Conditional-request fingerprint `"<rootMs>:<rootSize>:<digest>"` (see
+	 * traceFingerprintForEtag): the digest folds the child-transcript set into a
+	 * fixed-size key, so a subagent-only append changes the ETag even when the
+	 * root is untouched without making `If-None-Match` unbounded.
 	 * Offline snapshots use "snapshot" and do not support HTTP revalidation.
 	 */
 	etag: string;

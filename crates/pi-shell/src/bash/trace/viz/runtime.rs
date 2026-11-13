@@ -33,6 +33,8 @@ pub(crate) struct SourceUnit<'a> {
 	pub syntax:     Option<&'a UnitSyntax>,
 	pub projection: u32,
 	pub nodes:      &'a [trace::Node],
+	/// See [`trace::Unit::callout`].
+	pub callout:    bool,
 }
 #[derive(Debug)]
 pub(crate) struct Observation<'a> {
@@ -258,6 +260,18 @@ impl<'a> Runtime<'a> {
 					producers.insert(command, key);
 				}
 			}
+			let producer = event
+				.command
+				.and_then(|command| producers.get(&command).copied());
+			// A callout's script is host-generated ([`trace::Unit::callout`]):
+			// its setters are not the command's.
+			let generated = || {
+				[key, producer].into_iter().flatten().any(|key| {
+					source
+						.unit(key.unit as usize)
+						.is_some_and(|unit| unit.callout)
+				})
+			};
 			match &event.data {
 				HistoryData::Branch { construct, taken, status } => {
 					if let Some(owner) = key
@@ -311,19 +325,12 @@ impl<'a> Runtime<'a> {
 						stack.pop();
 					}
 				},
-				HistoryData::IterStart { name, value, .. } if !name.is_empty() => {
+				HistoryData::IterStart { name, value, .. } if !name.is_empty() && !generated() => {
 					let committed = previous.is_some_and(|previous| {
 						previous.vpid == event.vpid && matches!(&previous.data, HistoryData::Assign { name: assigned, value: observed, .. } if assigned == name && observed == value)
 					});
 					if !committed {
-						let location = setter_key(
-							source,
-							&analysis,
-							key,
-							event
-								.command
-								.and_then(|command| producers.get(&command).copied()),
-						);
+						let location = setter_key(source, &analysis, key, producer);
 						let binding = Binding::Iteration(
 							event.vpid,
 							if event.vpid.is_some() { 0 } else { event.seq },
@@ -339,7 +346,7 @@ impl<'a> Runtime<'a> {
 						});
 					}
 				},
-				HistoryData::Assign { name, value, full_len, scope } => {
+				HistoryData::Assign { name, value, full_len, scope } if !generated() => {
 					let vpid = event
 						.vpid
 						.or_else(|| event.command.map(|command| command.vpid));
@@ -352,21 +359,15 @@ impl<'a> Runtime<'a> {
 						AssignScope::Global | AssignScope::Subshell => {
 							vpid.map(|pid| Binding::Process(*scope, pid))
 						},
-						// Assign reports a category, not the dynamic-scope binding owner.
+						// Assign reports a category, not the dynamic-scope binding
+						// owner.
 						AssignScope::Local => {
 							Some(vpid.map_or(Binding::UnlocatedLocal, |pid| Binding::Process(*scope, pid)))
 						},
 						AssignScope::Env => event.command.map(Binding::Env),
 					}
 					.unwrap_or(Binding::Unknown(*scope, event.seq));
-					let node = setter_key(
-						source,
-						&analysis,
-						key,
-						event
-							.command
-							.and_then(|command| producers.get(&command).copied()),
-					);
+					let node = setter_key(source, &analysis, key, producer);
 					setters.insert((binding, name.as_slice()), Setter {
 						name,
 						value,

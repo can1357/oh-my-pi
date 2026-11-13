@@ -226,6 +226,8 @@ Practical interpretation:
 
 A batch containing a note at or above `advisor.continueSeverity` can request at most one permitted continuation, even when several advisors report findings together. Stop/abort suppression, concern cooldown, plan-mode policy, and client preservation constraints apply to both buffered and live delivery. Otherwise the notes remain visible without restarting the primary. A continuation an advisor delivery starts does not schedule another review or advance cadence; its updates are captured and sent with the next review, without feeding advisor notes back into them.
 
+Starting that continuation cancels every advisor review of the work it revises that has not finished yet, except the review whose note started it. A cancelled review emits nothing, so it cannot raise the issue again while the agent is fixing it. Each advisor that lost a review reviews once at the continuation's final boundary instead, whatever its `reviewInterval`, covering the original work and the fix together.
+
 Keep turn reviews asynchronous while waiting for final reviews:
 
 ```yaml

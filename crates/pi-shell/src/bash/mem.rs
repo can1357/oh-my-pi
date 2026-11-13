@@ -147,9 +147,11 @@ impl File for PipeReader {
 			return Poll::Pending;
 		}
 		let n = buf.len().min(s.buf.len());
-		for (dst, src) in buf.iter_mut().zip(s.buf.drain(..n)) {
-			*dst = src;
-		}
+		let (front, back) = s.buf.as_slices();
+		let split = n.min(front.len());
+		buf[..split].copy_from_slice(&front[..split]);
+		buf[split..n].copy_from_slice(&back[..n - split]);
+		s.buf.drain(..n);
 		s.wake_all();
 		Poll::Ready(Ok(n))
 	}
@@ -163,7 +165,7 @@ impl File for PipeReader {
 	}
 
 	fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
-		Err(io::Error::from_raw_os_error(29))
+		Err(espipe())
 	}
 
 	fn kind(&self) -> FileKind {
@@ -209,7 +211,7 @@ impl File for PipeWriter {
 	}
 
 	fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
-		Err(io::Error::from_raw_os_error(29))
+		Err(espipe())
 	}
 
 	fn kind(&self) -> FileKind {
@@ -542,7 +544,7 @@ impl File for Capture {
 	}
 
 	fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
-		Err(io::Error::from_raw_os_error(29))
+		Err(espipe())
 	}
 
 	fn kind(&self) -> FileKind {
@@ -603,4 +605,12 @@ mod tests {
 		assert_eq!(&buf, b"ll");
 		assert_eq!(a.seek(SeekFrom::Current(-1)).unwrap(), 3);
 	}
+}
+
+/// `ESPIPE`: a pipe cannot seek.
+fn espipe() -> io::Error {
+	#[cfg(unix)]
+	return io::Error::from_raw_os_error(29);
+	#[cfg(not(unix))]
+	return io::Error::from(io::ErrorKind::NotSeekable);
 }

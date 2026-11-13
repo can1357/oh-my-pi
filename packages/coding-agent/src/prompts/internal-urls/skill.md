@@ -1,1 +1,1 @@
-`skill://<name>`: instructions; append `/<path>` for a file.
+skill://<name>: instructions; append /<path> for a file.

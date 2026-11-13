@@ -16,6 +16,7 @@
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, parseCodeStatus } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
@@ -345,7 +346,15 @@ export async function attemptEditAutoRepair(options: {
 	if (!cfgEditAutoRepairEnabled.get(session.settings)) return undefined;
 	const registry = session.modelRegistry;
 	if (!registry) return undefined;
-	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;
+	const offline = cfgOffline.get(session.settings);
+	const activeProvider = session.getActiveModel?.()?.provider;
+	if (offline && !activeProvider) return undefined;
+	const availableModels = registry.getAvailable();
+	const model = resolveRoleSelection(
+		["smol"],
+		session.settings,
+		offline ? availableModels.filter(candidate => candidate.provider === activeProvider) : availableModels,
+	)?.model;
 	if (!model) return undefined;
 	const sessionId = session.getSessionId?.() ?? undefined;
 	// Resolve the key eagerly so the session-sticky credential is recorded and
@@ -371,10 +380,10 @@ export async function attemptEditAutoRepair(options: {
 	const timeout = AbortSignal.timeout(REPAIR_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	const complete = async (builtPrompt: string): Promise<string> => {
-		session.costGate?.admit();
 		const response = await retryTransientCompletion(
-			() =>
-				completeSimple(
+			async () => {
+				session.costGate?.admit();
+				const attempt = await completeSimple(
 					model,
 					{ messages: [{ role: "user", content: builtPrompt, timestamp: Date.now() }] },
 					{
@@ -384,10 +393,12 @@ export async function attemptEditAutoRepair(options: {
 						disableReasoning: true,
 						signal,
 					},
-				),
+				);
+				session.costGate?.record(attempt.usage.cost.total);
+				return attempt;
+			},
 			{ signal, provider: model.provider },
 		);
-		session.costGate?.record(response.usage.cost.total);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage ?? "auto-repair completion failed");
 		}

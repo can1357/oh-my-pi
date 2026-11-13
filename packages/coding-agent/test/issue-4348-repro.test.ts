@@ -80,6 +80,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 			sessionManager: {
 				getEntries: vi.fn(() => []),
 				getCwd: vi.fn(() => "/tmp"),
+				getConversationTip: () => undefined,
 			},
 		},
 		sessionManager: {

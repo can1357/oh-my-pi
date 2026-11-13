@@ -24,7 +24,7 @@ use super::{
 };
 use crate::bash::{
 	fs::{PwEntry, PwQuery, Stat, StatKind},
-	ids::IntrinsicId,
+	ids::{IntrinsicId, Platform},
 	vm::{
 		fsprobe::{FsAns, FsErr, FsReq, FsResult},
 		probe::absolute,
@@ -184,8 +184,30 @@ pub(super) fn host_path(ctx: &Ctx<'_, '_>, name: &[u8]) -> BString {
 	if crate::bash::fs::url_root_len(&abs).is_some() {
 		return abs;
 	}
-	let mut out = BString::from("/");
-	for part in abs.split(|&c| c == b'/') {
+	normalize_on(
+		&abs,
+		if cfg!(windows) {
+			Platform::Windows
+		} else {
+			Platform::Linux
+		},
+	)
+}
+
+/// [`host_path`]'s cleanup of an absolute name for `platform`. The root is
+/// `/`, or on Windows a drive (`C:/`) or UNC (`//`) root; either slash
+/// separates there.
+fn normalize_on(abs: &[u8], platform: Platform) -> BString {
+	let windows = platform == Platform::Windows;
+	let is_sep = |c: &u8| *c == b'/' || (windows && *c == b'\\');
+	let (mut out, rest) = match abs {
+		[drive, b':', sep, rest @ ..] if windows && drive.is_ascii_alphabetic() && is_sep(sep) => {
+			(BString::from([*drive, b':', b'/'].as_slice()), rest)
+		},
+		[a, b, rest @ ..] if windows && is_sep(a) && is_sep(b) => (BString::from("//"), rest),
+		_ => (BString::from("/"), abs),
+	};
+	for part in rest.split(is_sep) {
 		if part.is_empty() || part == b"." {
 			continue;
 		}
@@ -194,7 +216,7 @@ pub(super) fn host_path(ctx: &Ctx<'_, '_>, name: &[u8]) -> BString {
 		}
 		out.extend_from_slice(part);
 	}
-	if abs.ends_with(b"/") && !out.ends_with(b"/") {
+	if abs.last().is_some_and(is_sep) && !out.ends_with(b"/") {
 		out.push(b'/');
 	}
 	out
@@ -277,12 +299,11 @@ fn mkdir(
 	let mut mode = 0o777 & !umask;
 	if ops.isset(b'm') {
 		let s = ops.arg(b'm').unwrap_or_default();
-		match octal(s) {
-			Some(m) => mode = m,
-			None => {
-				ctx.usage(format!("invalid mode `{}'", nice(cs, s)));
-				return Ok(1);
-			},
+		if let Some(m) = octal(s) {
+			mode = m;
+		} else {
+			ctx.usage(format!("invalid mode `{}'", nice(cs, s)));
+			return Ok(1);
 		}
 	}
 	let mut err = 0;
@@ -341,10 +362,7 @@ fn domkdir(
 			break;
 		}
 		match q.stat(&rpath, true)? {
-			Err(se) if se.is(enoent()) => {
-				err = Some(e);
-				continue;
-			},
+			Err(se) if se.is(enoent()) => err = Some(e),
 			Err(se) => {
 				err = Some(se);
 				break;
@@ -361,12 +379,12 @@ fn domkdir(
 	Ok(1)
 }
 
-/// `EEXIST` (0 off Unix, where errors carry no errno).
+/// `EEXIST`.
 const fn eexist() -> i32 {
 	#[cfg(unix)]
 	return libc::EEXIST;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::EEXIST;
 }
 
 /// `ENOENT` (as [`eexist`]).
@@ -374,7 +392,7 @@ const fn enoent() -> i32 {
 	#[cfg(unix)]
 	return libc::ENOENT;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::ENOENT;
 }
 
 /// zsh `bin_rmdir`.
@@ -430,35 +448,32 @@ impl Recursive<'_, '_> {
 			}
 			// `-s`: change to the directory holding the last component (no
 			// symbolic link followed there), then act on the component.
-			match safe_split(arg) {
-				Some((dir, leaf)) => {
-					let d = host_path(ctx, &dir);
-					let failed = match self.q.stat(&d, true)? {
-						Ok(st) if st.kind == StatKind::Dir => None,
-						Ok(_) => Some(FsErr::of(&io::ErrorKind::NotADirectory.into())),
-						Err(e) => Some(e),
-					};
-					match failed {
-						None => {
-							let mut rp = d;
-							if !rp.ends_with(b"/") {
-								rp.push(b'/');
-							}
-							rp.extend_from_slice(&leaf);
-							err |= self.doone(ctx, arg, &rp)?;
-						},
-						Some(e) => {
-							err |= 1;
-							if !self.noerr {
-								ctx.usage(format!("{}: {}", nice(self.cs, arg), errmsg(&e)));
-							}
-						},
-					}
-				},
-				None => {
-					let rp = host_path(ctx, arg);
-					err |= self.doone(ctx, arg, &rp)?;
-				},
+			if let Some((dir, leaf)) = safe_split(arg) {
+				let d = host_path(ctx, &dir);
+				let failed = match self.q.stat(&d, true)? {
+					Ok(st) if st.kind == StatKind::Dir => None,
+					Ok(_) => Some(FsErr::of(&io::ErrorKind::NotADirectory.into())),
+					Err(e) => Some(e),
+				};
+				match failed {
+					None => {
+						let mut rp = d;
+						if !rp.ends_with(b"/") {
+							rp.push(b'/');
+						}
+						rp.extend_from_slice(&leaf);
+						err |= self.doone(ctx, arg, &rp)?;
+					},
+					Some(e) => {
+						err |= 1;
+						if !self.noerr {
+							ctx.usage(format!("{}: {}", nice(self.cs, arg), errmsg(&e)));
+						}
+					},
+				}
+			} else {
+				let rp = host_path(ctx, arg);
+				err |= self.doone(ctx, arg, &rp)?;
 			}
 		}
 		Ok(i32::from(err != 0))
@@ -466,15 +481,16 @@ impl Recursive<'_, '_> {
 
 	/// zsh `recursivecmd_doone`.
 	fn doone(&mut self, ctx: &mut Ctx<'_, '_>, arg: &[u8], rp: &[u8]) -> Result<i32, Need> {
-		let mut sp = None;
-		if self.recurse
+		let sp = if self.recurse
 			&& let Ok(st) = self.q.stat(rp, false)?
 		{
 			if st.kind == StatKind::Dir {
 				return self.dorec(ctx, arg, rp, st);
 			}
-			sp = Some(st);
-		}
+			Some(st)
+		} else {
+			None
+		};
 		self.leaf(ctx, arg, rp, sp)
 	}
 
@@ -630,7 +646,7 @@ impl Recursive<'_, '_> {
 	}
 }
 
-/// `NAME: remove `ARG'? ` (with `, overriding mode NNNN` for a file the
+/// ``NAME: remove `ARG'? `` (with `, overriding mode NNNN` for a file the
 /// user cannot write).
 fn remove_prompt(ctx: &Ctx<'_, '_>, cs: Charset, arg: &[u8], mode: Option<u32>) -> Vec<u8> {
 	let mut p = niceformat(ctx.name.as_bytes(), false, cs);
@@ -739,7 +755,7 @@ fn chown(
 ) -> Result<i32, Need> {
 	let spec: &[u8] = &args[0];
 	let mut uid = None;
-	let gid;
+
 	// The group part to look up, if any.
 	let group: Option<&[u8]>;
 	if chgrp {
@@ -753,12 +769,13 @@ fn chown(
 			let mut pw = q.user(PwQuery::UserName(user.into()))?.cloned();
 			let id = match &pw {
 				Some(p) => p.id,
-				None => match getnumeric(user) {
-					Some(n) => n,
-					None => {
+				None => {
+					if let Some(n) = getnumeric(user) {
+						n
+					} else {
 						ctx.usage(format!("{}: no such user", nice(cs, user)));
 						return Ok(1);
-					},
+					}
 				},
 			};
 			uid = Some(id);
@@ -788,16 +805,17 @@ fn chown(
 			}
 		}
 	}
-	gid = match group {
+	let gid = match group {
 		None => None,
 		Some(g) => match q.user(PwQuery::GroupName(g.into()))? {
 			Some(gr) => Some(gr.id),
-			None => match getnumeric(g) {
-				Some(n) => Some(n),
-				None => {
+			None => {
+				if let Some(n) = getnumeric(g) {
+					Some(n)
+				} else {
 					ctx.usage(format!("{}: no such group", nice(cs, g)));
 					return Ok(1);
-				},
+				}
 			},
 		},
 	};
@@ -985,7 +1003,7 @@ fn domove(
 	Ok(0)
 }
 
-/// `NAME: replace `Q'? ` (with `, overriding mode NNNN`).
+/// ``NAME: replace `Q'? `` (with `, overriding mode NNNN`).
 fn replace_prompt(ctx: &Ctx<'_, '_>, cs: Charset, qn: &[u8], mode: Option<u32>) -> Vec<u8> {
 	let mut p = niceformat(ctx.name.as_bytes(), false, cs);
 	p.extend_from_slice(b": replace `");
@@ -1016,5 +1034,15 @@ mod tests {
 		assert_eq!(safe_split(b"d/x"), Some(("d".into(), "x".into())));
 		assert_eq!(safe_split(b"/x"), Some(("/".into(), "x".into())));
 		assert_eq!(safe_split(b"dir/"), Some(("/".into(), "ir".into())));
+	}
+
+	#[test]
+	fn host_paths_keep_windows_roots() {
+		let win = |p: &str| normalize_on(p.as_bytes(), Platform::Windows);
+		assert_eq!(win("C:/Users/me/./a//b/"), "C:/Users/me/a/b/");
+		assert_eq!(win("C:\\Users\\me\\a"), "C:/Users/me/a");
+		assert_eq!(win("//srv/share/./x"), "//srv/share/x");
+		assert_eq!(win("/tmp//x"), "/tmp/x");
+		assert_eq!(normalize_on(b"/tmp/./a//b/", Platform::Linux), "/tmp/a/b/");
 	}
 }

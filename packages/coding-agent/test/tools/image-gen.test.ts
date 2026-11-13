@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
@@ -104,6 +104,34 @@ function collectPaths(result: CustomToolResult<{ imagePaths: string[] }>): void 
 }
 
 describe("imageGenTool catalog routing", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("offline skips a foreign image backend and uses a same-provider fallback", async () => {
+		const foreign = catalogModel("deepinfra", "foreign-image", "openai-images");
+		const local = catalogModel("xai", "same-image", "openai-images");
+		const active = catalogModel("xai", "active-chat", "openai-responses", "chat");
+		const urls: string[] = [];
+		const settings = Settings.isolated({
+			"models.offline": true,
+			modelRoles: { image: "deepinfra/foreign-image" },
+			"retry.fallbackChains": { image: ["xai/same-image"] },
+		});
+		const ctx = createContext({
+			models: [foreign, local, active],
+			settings,
+			activeModel: active,
+			fetch: async input => {
+				urls.push(input.toString());
+				return imageResponse();
+			},
+		});
+
+		const result = await imageGenTool.execute("offline", { subject: "a harbor" }, undefined, ctx);
+		collectPaths(result);
+		expect(urls).toEqual(["https://xai.example/v1/images/generations"]);
+		expect(result.details?.model).toBe("same-image");
+	});
+
 	it("registers without resolving credentials", async () => {
 		const registry = createRegistry([]);
 		expect(await getImageGenTools(registry)).toEqual([imageGenTool]);
@@ -228,12 +256,23 @@ describe("imageGenTool catalog routing", () => {
 		collectPaths(result);
 		expect(result.details?.model).toBe("second-image");
 
-		const failingFetch: FetchImpl = async () =>
-			new Response(JSON.stringify({ error: { message: "failed" } }), { status: 503 });
+		const gatewayPage = `<!DOCTYPE html>\n<html>\n<body>\n${"<p>Bad gateway</p>\n".repeat(500)}</body>\n</html>`;
+		const failingFetch: FetchImpl = async input =>
+			input.toString().startsWith("https://deepinfra.example")
+				? new Response(JSON.stringify({ error: { message: "Duplicate parameter: 'image'." } }), { status: 400 })
+				: new Response(gatewayPage, { status: 502 });
 		const failingContext = createContext({ models: [first, second], settings, fetch: failingFetch });
-		await expect(
-			imageGenTool.execute("aggregate", { subject: "fails" }, undefined, failingContext),
-		).rejects.toBeInstanceOf(AggregateError);
+		const failure = await imageGenTool
+			.execute("aggregate", { subject: "fails" }, undefined, failingContext)
+			.catch((error: unknown) => error);
+		if (!(failure instanceof AggregateError)) throw new Error("Expected an exhausted image chain");
+		expect(failure.errors).toHaveLength(2);
+		expect(failure.message).toContain(
+			"deepinfra/first-image image request failed (400): Duplicate parameter: 'image'",
+		);
+		expect(failure.message).toContain("openrouter/second-image image request failed (502)");
+		expect(failure.message).not.toContain("\n");
+		expect(failure.message.length).toBeLessThan(gatewayPage.length / 4);
 	});
 
 	it("propagates transport I/O failures without trying the next model", async () => {

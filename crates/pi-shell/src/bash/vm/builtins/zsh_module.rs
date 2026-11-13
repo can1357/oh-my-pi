@@ -169,10 +169,10 @@ impl ModDef {
 
 /// The modules of [`TABLE`], in name order.
 pub fn defs() -> impl Iterator<Item = ModDef> {
-	TABLE.lines().filter_map(|line| {
+	TABLE.lines().map(|line| {
 		let (name, rest) = line.split_once(' ').unwrap_or((line, ""));
 		let (flags, list) = rest.split_once(' ').unwrap_or((rest, ""));
-		Some(ModDef { name, provided: flags.starts_with('+'), features: !flags.ends_with('!'), list })
+		ModDef { name, provided: flags.starts_with('+'), features: !flags.ends_with('!'), list }
 	})
 }
 
@@ -488,7 +488,7 @@ impl Tables {
 	}
 
 	/// The autoload list for feature type `c`.
-	fn autos(&mut self, c: u8) -> &mut Vec<Auto> {
+	const fn autos(&mut self, c: u8) -> &mut Vec<Auto> {
 		match c {
 			b'b' => &mut self.bins,
 			b'c' | b'C' => &mut self.conds,
@@ -669,7 +669,7 @@ impl Tables {
 					self.mods[i]
 						.autoloads
 						.as_ref()
-						.is_some_and(|a| a.iter().any(|x| *x == feature))
+						.is_some_and(|a| a.contains(&feature))
 				});
 				let Some(m) = found else {
 					if flags & IGNORE == 0 {
@@ -701,7 +701,7 @@ impl Tables {
 				}
 				let list = self.mods[m].autoloads.get_or_insert_with(Vec::new);
 				if let Err(p) = list.binary_search_by(|x| x.as_slice().cmp(feature.as_slice())) {
-					list.insert(p, feature.clone());
+					list.insert(p, feature);
 				}
 			} else if let Some(list) = self.mods[m].autoloads.as_mut() {
 				if let Some(p) = list.iter().position(|x| *x == feature) {
@@ -711,7 +711,7 @@ impl Tables {
 				}
 			}
 			if subret == 0 {
-				let module_name = module.map(BString::from).unwrap_or_default();
+				let module_name = module.map_or_default(BString::from);
 				subret = if add {
 					self.add_auto(fchar, &module_name, fnam, flags)
 				} else {
@@ -1115,17 +1115,14 @@ impl Tables {
 			}
 			return 0;
 		};
-		let in_use = self.mods.iter().any(|d| {
-			d.loaded
-				&& d
-					.deps
-					.as_ref()
-					.is_some_and(|deps| deps.iter().any(|x| *x == mname))
-		});
+		let in_use = self
+			.mods
+			.iter()
+			.any(|d| d.loaded && d.deps.as_ref().is_some_and(|deps| deps.contains(&mname)));
 		if in_use {
 			msgs.push(Msg::Nam(
 				nam.into(),
-				format!("module {} is in use by another module and cannot be unloaded", mname),
+				format!("module {mname} is in use by another module and cannot be unloaded"),
 			));
 			return 1;
 		}
@@ -1606,12 +1603,11 @@ pub fn run_stub(ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> R {
 		return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
 	}
 	// The module defined it after all: a builtin of the engine runs.
-	match IntrinsicId::lookup(name, ctx.vp.mode) {
-		Some(id) => super::run(id, ctx, argv),
-		None => {
-			ctx.diag(Diag::CommandNotFound { name: name.clone() });
-			done(127)
-		},
+	if let Some(id) = IntrinsicId::lookup(name, ctx.vp.mode) {
+		super::run(id, ctx, argv)
+	} else {
+		ctx.diag(Diag::CommandNotFound { name: name.clone() });
+		done(127)
 	}
 }
 
@@ -1642,7 +1638,7 @@ fn has_stub(
 		Some(Record::Misc(bytes)) => bytes.find(name).is_some(),
 		Some(_) => true,
 	};
-	Ok(maybe && tables(store, vp)?.auto(c, name).is_some())
+	Ok(maybe && read_tables(store, vp, |t| t.auto(c, name).is_some())?)
 }
 
 /// [`resolve_builtin`] for the builtin named `name`.
@@ -1952,13 +1948,46 @@ pub fn call_math(
 }
 
 /// Whether module `name` is loaded (zsh `module_loaded`), for modules
-/// whose effect is not a feature (`zsh/nearcolor`).
+/// whose effect is not a feature (`zsh/nearcolor`). Asked on every
+/// `local`.
 ///
 /// # Errors
 /// A store failure.
 pub fn loaded(store: &mut dyn StateStore, vp: &Vproc, name: &[u8]) -> Result<bool, StoreError> {
-	let t = tables(store, vp)?;
-	Ok(t.find(name, true).is_some_and(|(i, _)| t.is_loaded(i)))
+	read_tables(store, vp, |t| t.find(name, true).is_some_and(|(i, _)| t.is_loaded(i)))
+}
+
+/// `f` of the module tables as `vp` sees them, read in place (no tool
+/// flag: [`tables`] for that): the default tables, or a stored record
+/// decoded once per change ([`DECODED`]), not on every question.
+///
+/// # Errors
+/// A store failure.
+fn read_tables<R>(
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	f: impl FnOnce(&Tables) -> R,
+) -> Result<R, StoreError> {
+	let Some(Record::Misc(bytes)) = state::record(store, vp, Key::Misc(MiscKey::ZshModules))? else {
+		return Ok(f(&DEFAULT));
+	};
+	Ok(DECODED.with_borrow_mut(|cache| {
+		if cache
+			.as_ref()
+			.is_none_or(|(b, _)| b.as_slice() != bytes.as_slice())
+		{
+			let t = postcard::from_bytes(bytes).unwrap_or_else(|_| DEFAULT.clone());
+			*cache = Some((bytes.to_vec(), t));
+		}
+		let (_, t) = cache.as_ref().expect("decoded just above");
+		f(t)
+	}))
+}
+
+thread_local! {
+	/// The module tables [`read_tables`] last decoded, with the record
+	/// bytes they came from.
+	static DECODED: std::cell::RefCell<Option<(Vec<u8>, Tables)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// `$modules` (zsh `scanpmmodules`): every module loaded, aliased or
@@ -2078,7 +2107,7 @@ pub fn zmodload(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		ctx.usage("-e cannot be combined with other options");
 		return done(1);
 	}
-	for c in [b'l', b'P'] {
+	for c in *b"lP" {
 		if o(c) && !o(b'F') {
 			ctx.usage(format!("-{} is only allowed with -F", char::from(c)));
 			return done(1);
@@ -2591,8 +2620,7 @@ fn zmodload_features(
 		msgs.push(Msg::Nam(nam, "-F requires a module name".into()));
 		return Ok(1);
 	};
-	let mut pats: Option<Vec<ZPat>> = None;
-	if o(b'm') {
+	let pats: Option<Vec<ZPat>> = if o(b'm') {
 		let mut v = Vec::with_capacity(args.len());
 		for a in args {
 			let a = match a.first() {
@@ -2604,19 +2632,20 @@ fn zmodload_features(
 			};
 			v.push(p);
 		}
-		pats = Some(v);
-	}
+		Some(v)
+	} else {
+		None
+	};
 	let fmatch = |iarg: usize, f: &str| -> bool {
 		let arg = &args[iarg];
-		match &pats {
-			Some(p) => p[iarg].matches(f.as_bytes()),
-			None => {
-				let a = match arg.first() {
-					Some(b'+' | b'-') => &arg[1..],
-					_ => arg.as_slice(),
-				};
-				a == f.as_bytes()
-			},
+		if let Some(p) = &pats {
+			p[iarg].matches(f.as_bytes())
+		} else {
+			let a = match arg.first() {
+				Some(b'+' | b'-') => &arg[1..],
+				_ => arg.as_slice(),
+			};
+			a == f.as_bytes()
 		}
 	};
 	if o(b'l') || o(b'L') || o(b'e') {

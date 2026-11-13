@@ -5,8 +5,9 @@
 //! progress, `ulimit` values, cwd) and the kernel's counters (`next_vpid`,
 //! `next_job`, `$RANDOM`, `$SECONDS` base) and child-process table are in
 //! the store at all times; restore reads them there, with or without a
-//! blob. A subshell vproc's scopes, overlay and fields are execution
-//! position and are in the blob.
+//! blob. A forked vproc's scopes, global state (its [`crate::bash::Image`],
+//! as what it changed from the root's) and fields are execution position
+//! and are in the blob.
 //!
 //! Layout: a postcard [`Header`] (magic `OBF1`, IR version, frames version,
 //! engine build id, ids of the scripts in flight) followed by a postcard
@@ -33,7 +34,7 @@ use super::{
 		PendingWrite, Probe, ProbeResult, RedirProgress, Run, Saved, Scratch, ScratchIo, ScratchZsh,
 		ScriptKind, Stage, Target, Vproc,
 	},
-	state::{self, Overlay, Root, Scope},
+	state::{self, Root, Scope},
 };
 use crate::bash::{
 	engine::Engine,
@@ -43,6 +44,7 @@ use crate::bash::{
 	fs::FileKind,
 	host::{Host, StdFd},
 	ids::{CallId, ModeId, RunId, UnitId, Vpid},
+	image::ImageDiff,
 	ir::{
 		AssignVal, CondIr, IR_VERSION, Op, OpIr, Opcode, Part, RedirTargetIr, SpawnKind, SubIr, Unit,
 		materialize,
@@ -56,7 +58,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -248,6 +250,9 @@ struct ProcImage {
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
+	/// This vproc's EXIT trap has already been started (a forked subshell
+	/// has no `Run` to keep the flag on).
+	exit_trap_run: bool,
 	procsubs:      Vec<(u32, i32)>,
 	coprocs:       Vec<super::proc::Coproc>,
 	restore_opts:  Vec<BString>,
@@ -281,7 +286,9 @@ struct Fields {
 	cwd:        BString,
 	status:     i32,
 	pipestatus: Vec<i32>,
-	overlay:    Overlay,
+	/// Its global state, against the root's when saved
+	/// ([`crate::bash::Image::diff`]).
+	image:      ImageDiff,
 	jobs:       super::proc::JobTable,
 	last_bg:    super::proc::LastBg,
 	getopts:    super::proc::GetoptsState,
@@ -501,8 +508,16 @@ impl Shell {
 				funcs.push(*unit);
 			}
 		})?;
-		for ov in self.procs.iter().filter_map(|p| p.overlay.as_ref()) {
-			for rec in ov.records.values().flatten() {
+		// A forked vproc's global state, as what it changed from the
+		// root's: shared records cost nothing.
+		let base = cx.store.snapshot()?;
+		let mut diffs: Vec<Option<ImageDiff>> = self
+			.procs
+			.iter()
+			.map(|p| p.image.as_ref().map(|image| image.diff(&base)))
+			.collect();
+		for diff in diffs.iter().flatten() {
+			for rec in diff.records() {
 				if let Record::Func { unit, .. } = rec {
 					funcs.push(*unit);
 				}
@@ -514,18 +529,18 @@ impl Shell {
 			{
 				let bytes = postcard::to_stdvec(&*unit).map_err(ExtError::Encode)?;
 				cx.store.put_blob(BlobSlot::Unit(id), &bytes)?;
-				self.k.written.insert(id);
+				self.k.note_written(id);
 				report.units_written += 1;
 			}
 		}
 		let mut procs = Vec::with_capacity(self.procs.len());
 		let mut runs = Vec::new();
 		let mut fds = FdImager::default();
-		for p in &mut self.procs {
+		for (p, diff) in self.procs.iter_mut().zip(&mut diffs) {
 			let mut frames = Vec::with_capacity(p.frames.len());
 			for f in &mut p.frames {
 				if let Some(unit) = &f.unit
-					&& self.k.written.insert(unit.id)
+					&& self.k.note_written(unit.id)
 				{
 					let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 					cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
@@ -574,7 +589,7 @@ impl Shell {
 			runs.extend(p.runs.iter().map(|r| r.id));
 			let command = match &p.command {
 				Some((unit, node)) => {
-					if self.k.written.insert(unit.id) {
+					if self.k.note_written(unit.id) {
 						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
 						report.units_written += 1;
@@ -583,16 +598,16 @@ impl Shell {
 				},
 				None => None,
 			};
-			let fields = p.overlay.as_ref().map(|overlay| Fields {
-				scopes:     p.scopes.clone(),
-				cwd:        p.cwd.clone(),
-				status:     p.status,
+			let fields = diff.take().map(|image| Fields {
+				scopes: p.scopes.clone(),
+				cwd: p.cwd.clone(),
+				status: p.status,
 				pipestatus: p.pipestatus.clone(),
-				overlay:    overlay.clone(),
-				jobs:       p.jobs.clone(),
-				last_bg:    p.last_bg,
-				getopts:    p.getopts.clone(),
-				rlimits:    p.rlimits.clone(),
+				image,
+				jobs: p.jobs.clone(),
+				last_bg: p.last_bg,
+				getopts: p.getopts.clone(),
+				rlimits: p.rlimits.clone(),
 			});
 			procs.push(ProcImage {
 				vpid: p.vpid,
@@ -605,6 +620,7 @@ impl Shell {
 				pending_traps: p.pending_traps,
 				stopped: p.stopped,
 				transient: p.transient,
+				exit_trap_run: p.exit_trap_run,
 				procsubs: p.procsubs.clone(),
 				coprocs: p.coprocs.clone(),
 				restore_opts: p.restore_opts.clone(),
@@ -690,14 +706,20 @@ impl Shell {
 		k.next_vpid = parse_misc(cx.store, MiscKey::NextVpid)?.unwrap_or(base + 1);
 		k.written_vpid = k.next_vpid;
 		k.next_job = parse_misc(cx.store, MiscKey::NextJob)?.unwrap_or(1);
-		k.rand = state::root_misc(cx.store, MiscKey::Random)?
-			.and_then(state::Random::decode)
-			.unwrap_or_default();
+		k.rand = if opts.reseed_random {
+			let rand = state::Random::new((cx.host.random() & 0xffff_ffff) as u32);
+			k.root.set_misc(cx.store, MiscKey::Random, rand.encode());
+			rand
+		} else {
+			state::root_misc(cx.store, MiscKey::Random)?
+				.and_then(state::Random::decode)
+				.unwrap_or_default()
+		};
 		k.start_ns = match parse_misc(cx.store, MiscKey::StartNs)? {
 			Some(ns) => ns,
 			None => cx.host.now_ns(),
 		};
-		// The overlays restored below may hold DEBUG/ERR/RETURN actions a
+		// The images restored below may hold DEBUG/ERR/RETURN actions a
 		// subshell set: `start_trap` takes its full path for them.
 		k.pseudo_traps.note_all();
 		let mut stdio = [None, None, None];
@@ -795,6 +817,9 @@ impl Shell {
 			built,
 			stdio,
 		};
+		// The root's global state as saved: a forked vproc's image is what
+		// it changed from it.
+		let base = cx.store.snapshot()?;
 		let mut procs = Vec::with_capacity(img.procs.len());
 		for p in img.procs {
 			let vpid = p.vpid;
@@ -808,7 +833,8 @@ impl Shell {
 				}
 			}
 			let mut vp = if let Some(f) = p.fields {
-				let mut vp = Vproc::new(vpid, p.parent, fds, f.cwd, Some(f.overlay), p.transient);
+				let image = crate::bash::Image::patched(base.clone(), f.image);
+				let mut vp = Vproc::new(vpid, p.parent, fds, f.cwd, Some(image), p.transient);
 				vp.scopes = f.scopes;
 				vp.status = f.status;
 				vp.pipestatus = f.pipestatus;
@@ -830,6 +856,7 @@ impl Shell {
 			vp.out = p.out.into();
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
+			vp.exit_trap_run = p.exit_trap_run;
 			vp.procsubs = p.procsubs;
 			vp.coprocs = p.coprocs;
 			vp.restore_opts = p.restore_opts;
@@ -847,7 +874,7 @@ impl Shell {
 					id,
 					k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
 				)?;
-				k.written.insert(unit.id);
+				k.note_written(unit.id);
 				vp.command = Some((unit, node));
 			}
 			// Waits on engine objects whose wake-ups were restored (child
@@ -894,7 +921,7 @@ impl Shell {
 							id,
 							k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
 						)?;
-						k.written.insert(unit.id);
+						k.note_written(unit.id);
 						let in_range = |pc: u32| (pc as usize) < unit.ops.len();
 						if !in_range(f.pc)
 							|| !f.loops.iter().all(|l| in_range(l.exit) && in_range(l.cont))

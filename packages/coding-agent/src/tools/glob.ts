@@ -99,7 +99,7 @@ export interface GlobToolOptions {
 	operations?: GlobOperations;
 	/** Remap slash-only paths to the session cwd before root-search validation. */
 	rootPathAlias?: boolean;
-	/** Native glob binding. Override only in tests. */
+	/** Glob backend (`natives.glob`). Override only in tests. */
 	nativeGlob?: typeof natives.glob;
 	/** Filesystem stat used before native scans. Override only in tests. */
 	stat?: typeof fs.promises.stat;
@@ -213,7 +213,10 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
 			const rawPatternInputs = this.#customOps
 				? effectivePaths
-				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, { splitter: parseFindPattern });
+				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+						splitter: parseFindPattern,
+						mixedLocalPaths: true,
+					});
 			const rawPatterns = rawPatternInputs.map(input => normalizePathLikeInput(input).replace(/\\/g, "/"));
 			const aliasResolvedPatterns = this.#rootPathAlias
 				? rawPatterns.map(pattern => (/^\/+$/.test(pattern) ? "." : pattern))

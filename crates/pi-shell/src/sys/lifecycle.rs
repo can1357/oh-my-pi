@@ -30,6 +30,7 @@ pub struct Lifecycle {
 	collected: bool,
 	/// A stop or continue the waiter observed that [`Lifecycle::poll_event`]
 	/// has not reported yet (the later of two unseen ones).
+	#[cfg_attr(not(unix), expect(dead_code, reason = "stop/continue events are unix job control"))]
 	change:    Option<ProcEvent>,
 	/// Output pumps that have not reached end of file yet: the command is
 	/// complete only once its output has been delivered.
@@ -99,6 +100,7 @@ impl Lifecycle {
 
 	/// [`Lifecycle::poll`], reporting first a stop or continue observed
 	/// since the last call (once each); an exit makes it moot.
+	#[cfg_attr(not(unix), expect(dead_code, reason = "stop/continue events are unix job control"))]
 	pub fn poll_event(&mut self, cx: &Context<'_>) -> Poll<ProcEvent> {
 		if self.status.is_none()
 			&& let Some(change) = self.change.take()
@@ -110,7 +112,8 @@ impl Lifecycle {
 
 	/// The waiter observed a stop or continue of the running process.
 	/// Returns the waker to wake (outside the lock).
-	pub fn changed(&mut self, change: ProcEvent) -> Option<Waker> {
+	#[cfg_attr(not(unix), expect(dead_code, reason = "stop/continue events are unix job control"))]
+	pub const fn changed(&mut self, change: ProcEvent) -> Option<Waker> {
 		self.change = Some(change);
 		self.waker.take()
 	}
@@ -265,11 +268,13 @@ impl Tracker {
 	}
 
 	/// [`Lifecycle::poll_event`].
+	#[cfg_attr(not(unix), expect(dead_code, reason = "stop/continue events are unix job control"))]
 	pub fn poll_event(&self, cx: &Context<'_>) -> Poll<ProcEvent> {
 		self.life.lock().poll_event(cx)
 	}
 
 	/// [`Lifecycle::changed`], waking the poller.
+	#[cfg_attr(not(unix), expect(dead_code, reason = "stop/continue events are unix job control"))]
 	pub fn changed(&self, change: ProcEvent) {
 		let waker = self.life.lock().changed(change);
 		if let Some(w) = waker {

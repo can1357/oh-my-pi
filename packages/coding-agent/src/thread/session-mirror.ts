@@ -139,14 +139,6 @@ export interface SessionQueuedEntry {
 	readonly claimed: boolean;
 }
 
-/** Approvals a session holds for the rest of its conversation (backs `hasSessionApproval` / `getApprovalGrants`). */
-export interface SessionApprovalState {
-	/** Approval scope keys the session's extension runner granted. */
-	readonly scopes: readonly string[];
-	/** `always-ask-cached` grant keys of the conversation tier. */
-	readonly grants: readonly string[];
-}
-
 /** View-only data of a worker-homed session, published while main watches it (see the module doc). */
 export interface SessionViewState {
 	/** Provider-facing session id (`AgentSession.sessionId`). */
@@ -168,6 +160,7 @@ export interface SessionViewState {
 	skills: Skill[];
 	/** TTSR rules; null when the session has no TTSR manager. */
 	rules: Rule[] | null;
+	/** Published only while idle (false mid-run), the one time the retry hint reads it. */
 	hasAbortedToolCallTail: boolean;
 	isAutoThinking: boolean;
 	isCompacting: boolean;
@@ -192,7 +185,6 @@ export interface SessionViewState {
 	todoPhases: TodoPhase[];
 	queuedMessages: SessionQueuedMessages;
 	restorableQueue: SessionRestorableQueue;
-	approvals: SessionApprovalState;
 	ephemeralMaxTokensPreservesRequest: boolean;
 	settings: SessionSettingsSource;
 	/**
@@ -301,8 +293,11 @@ export type SessionBridgeProtocol = {
 	messages: RpcMethod<[key: string, delta: SessionMessagesDelta], void>;
 	event: RpcMethod<[key: string, event: AgentSessionEvent], void>;
 	runState: RpcMethod<[key: string, state: SessionRunState], void>;
-	/** Watch started: the full view state and entry list. */
-	view: RpcMethod<[key: string, state: SessionViewState, entries: SessionEntry[]], void>;
+	/**
+	 * Watch started: the full view state, and what main's entry list (kept across
+	 * watches) lacks; undefined when it is current.
+	 */
+	view: RpcMethod<[key: string, state: SessionViewState, entries: SessionEntriesDelta | undefined], void>;
 	viewPatch: RpcMethod<[key: string, patch: Partial<SessionViewState>], void>;
 	/**
 	 * Synchronous, from the agent's queued-message gate: queued entries `ids` are

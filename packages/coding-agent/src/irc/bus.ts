@@ -32,13 +32,14 @@ export interface IrcWaitFilter {
 	directOnly?: boolean;
 	/**
 	 * With `directOnly`, still take a broadcast from these agents: the waiter
-	 * asked them something, and a broadcast answers it (see {@link IrcBusApi.unansweredSends}).
+	 * asked them something, so their news interrupts its wait without settling
+	 * the outstanding direct question (see {@link IrcBusApi.unansweredSends}).
 	 */
 	repliesFrom?: readonly string[];
 }
 
 /** Whether a bus wait under `filter` consumes `msg`. */
-export function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
+function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
 	if (filter.from !== undefined && msg.from !== filter.from) return false;
 	if (!filter.directOnly || (!msg.broadcast && !msg.progress)) return true;
 	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
@@ -114,7 +115,9 @@ export class IrcBus implements IrcBusApi {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** The latest successful non-progress send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, SendMark>>();
-	/** The latest direct (non-broadcast, non-progress) send per `from` → `to`; see {@link unansweredSends}. */
+	/** The latest non-broadcast, non-progress reply per `from` → `to`, including wake relays. */
+	readonly #lastReply = new Map<string, Map<string, SendMark>>();
+	/** The latest direct (non-broadcast, non-progress, non-relay) send per `from` → `to`; see {@link unansweredSends}. */
 	readonly #lastDirect = new Map<string, Map<string, SendMark>>();
 	/** The latest progress message per `from` → `to`: a promise that a reply will follow. */
 	readonly #lastProgress = new Map<string, Map<string, SendMark>>();
@@ -153,8 +156,10 @@ export class IrcBus implements IrcBusApi {
 				this.#record(this.#lastProgress, message.from, message.to, mark);
 			} else {
 				this.#record(this.#lastSent, message.from, message.to, mark);
-				if (!message.broadcast && !message.wakeRelay)
-					this.#record(this.#lastDirect, message.from, message.to, mark);
+				if (!message.broadcast) {
+					this.#record(this.#lastReply, message.from, message.to, mark);
+					if (!message.wakeRelay) this.#record(this.#lastDirect, message.from, message.to, mark);
+				}
 			}
 		}
 		return receipt;
@@ -187,9 +192,9 @@ export class IrcBus implements IrcBusApi {
 	/**
 	 * Agents `from` messaged directly at or after `sinceTs` that have not
 	 * answered since, with when the latest of those messages went out: the
-	 * replies a `wait` can block for. A message back answers, and so does a
-	 * settled job of the agent `from` owns, which delivers its result. Progress
-	 * answers nothing; it marks the request `promised`, and from then on only
+	 * replies a `wait` can block for. A non-broadcast message back answers, and
+	 * so does a settled job of the agent `from` owns, which delivers its result.
+	 * Progress answers nothing; it marks the request `promised`, and from then on only
 	 * an explicit message answers it (a job settling the turn that sent the
 	 * progress must not). "Since" is by send order, not timestamp, so an answer
 	 * to an earlier question never settles a later one sent within the same
@@ -203,7 +208,7 @@ export class IrcBus implements IrcBusApi {
 			if (sent.ts < sinceTs) continue;
 			const after = (table: Map<string, Map<string, SendMark>>) => (table.get(to)?.get(from)?.seq ?? 0) > sent.seq;
 			const promised = after(this.#lastProgress);
-			if (after(this.#lastSent) || (!promised && after(this.#lastJobReply))) continue;
+			if (after(this.#lastReply) || (!promised && after(this.#lastJobReply))) continue;
 			unanswered.push({ to, sentAt: sent.ts, promised });
 		}
 		return unanswered;
@@ -261,9 +266,9 @@ export class IrcBus implements IrcBusApi {
 			}
 		}
 
-		// A pending `wait` from the recipient consumes the message directly —
-		// it is returned from their irc tool call and never hits the inbox or
-		// the session injection path.
+		// A pending bus wait from the recipient consumes the message directly
+		// and never hits the inbox; the `wait` tool hands it to its own session,
+		// which injects it as a user turn.
 		const waiter = this.#takeMatchingWaiter(message);
 		if (waiter) {
 			waiter.resolve(message);
@@ -434,9 +439,9 @@ export class IrcBus implements IrcBusApi {
 	/**
 	 * Surface agent↔agent traffic as a display-only card on the main session
 	 * UI. Skipped when the main agent is either endpoint: as recipient its
-	 * own `deliverIrcMessage` (or `wait` tool result) already shows the
-	 * message, and as sender the irc send tool call already rendered the
-	 * outbound body — relaying it again would duplicate it in the transcript.
+	 * own `deliverIrcMessage` already shows the message, and as sender the
+	 * irc send tool call already rendered the outbound body — relaying it
+	 * again would duplicate it in the transcript.
 	 */
 	#relayToMainUi(message: IrcMessage): void {
 		if (message.to === MAIN_AGENT_ID || message.from === MAIN_AGENT_ID) return;

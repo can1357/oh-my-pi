@@ -83,6 +83,7 @@ import {
 } from "../utils";
 import {
 	clearStreamingPartialJson,
+	demotedThinkingSource,
 	isCarriedReasoning,
 	kStreamingArgumentsDone,
 	kStreamingLastParseLen,
@@ -2179,6 +2180,73 @@ export function isColdReplayableResponsesTurn(items: ResponseInput): boolean {
 	return hasReasoning;
 }
 
+/**
+ * The native Responses history items a request for `model` would replay from
+ * this assistant turn, or `undefined` when the turn was produced by another
+ * api, model or provider and its payload cannot go back on the wire at all.
+ */
+export function getNativeResponsesHistoryItems(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+): Array<Record<string, unknown>> | undefined {
+	if (!model || message.api !== model.api || message.model !== model.id) return undefined;
+	return getOpenAIResponsesHistoryItems(message.providerPayload, model.provider, message.provider);
+}
+
+/**
+ * The history items a request for `model` puts back on the wire for this turn,
+ * after the payload sanitizer keeps the replayable output in them, or
+ * `undefined` when the turn is rebuilt from `content` instead: another api,
+ * model or provider, no payload at all, or a payload the sanitizer empties.
+ *
+ * This is the request builder's own input to the replay decision. It asks only
+ * that replayable assistant output survives ({@link
+ * sanitizeOpenAIResponsesAssistantHistoryItemsForReplay} returns `undefined`
+ * for a hidden-empty turn), never for the reasoning the tokenizer prices: an
+ * answer-only payload replays natively with no reasoning item in it.
+ */
+export function getReplayableNativeResponsesHistoryItems(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+): ResponseInput | undefined {
+	const items = getNativeResponsesHistoryItems(message, model);
+	if (!items) return undefined;
+	return sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(items);
+}
+
+/**
+ * Whether a request puts those items on the wire: a warm provider session
+ * always does, a cold one (`nativeHistoryReplay` false) only when nothing in
+ * them is bound to one connection ({@link isColdReplayableResponsesTurn}).
+ */
+export function replaysNativeResponsesTurn(replay: ResponseInput, nativeHistoryReplay: boolean): boolean {
+	return nativeHistoryReplay || isColdReplayableResponsesTurn(replay);
+}
+
+/**
+ * Whether a request for `model` replays this assistant turn's native Responses
+ * history, so the turn reaches the wire as `providerPayload` items and its
+ * `content` blocks are not sent at all. The one replay decision shared by
+ * request accounting (the tokenizer's local count) and context maintenance
+ * (`/shake`), mirroring `buildResponsesInput`'s assistant branch.
+ *
+ * How many tokens that replay costs is a separate question the tokenizer
+ * answers from the same items: a payload without a reasoning item replays
+ * without any reasoning to price.
+ *
+ * `buildResponsesInput` decides this inline; it can adopt these helpers once
+ * its extra concerns (rebuilding calls cut by the output limit, hidden-empty
+ * suppression) move with them.
+ */
+export function replaysNativeResponsesHistory(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+	options: { nativeHistoryReplay?: boolean } = {},
+): boolean {
+	const replay = getReplayableNativeResponsesHistoryItems(message, model);
+	return replay !== undefined && replaysNativeResponsesTurn(replay, options.nativeHistoryReplay ?? true);
+}
+
 export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInputOptions<TApi>): ResponseInput {
 	const messages: ResponseInput = [];
 	const systemPrompts = options.systemRole ? normalizeSystemPrompts(options.context.systemPrompt) : [];
@@ -2470,9 +2538,10 @@ function parseResponseReasoningReplayItem(signature: string | undefined): Respon
  * `reasoning_text` is empty — "The reasoning_text in the thinking mode must be
  * passed back to the API" (#8248 covered the missing case, #10690 the empty
  * one). The item's presence plus a non-empty payload is what satisfies the
- * contract; the exact text is immaterial once the source turn's reasoning is
- * gone. Kept out of `reasoning_content="."`-territory since DeepSeek rejects the
- * bare-dot synthetic placeholder on the chat-completions path.
+ * contract. Last resort only: these targets read replayed reasoning, so a
+ * placeholder repeated across many turns is a few-shot pattern the model copies
+ * into its own reasoning. Kept out of `reasoning_content="."`-territory since
+ * DeepSeek rejects the bare-dot synthetic placeholder on the chat-completions path.
  */
 export const SYNTHETIC_REASONING_REPLAY_PLACEHOLDER = "reasoning unavailable";
 
@@ -2630,6 +2699,10 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		}
 
 		if (block.type === "text") {
+			// Another model's thinking, demoted to text by `transformMessages`:
+			// its source text fills the required reasoning item below.
+			const demotedThinking = requiresReasoningItem ? demotedThinkingSource(block) : undefined;
+			if (demotedThinking) carriedReasoningTexts.push(demotedThinking);
 			const parsedSignature = parseTextSignature(block.textSignature);
 			let msgId = parsedSignature?.id;
 			if (!msgId) {
@@ -2709,6 +2782,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				...(itemId ? { id: itemId } : {}),
 				call_id: normalized.callId,
 				name: block.customWireName,
+				...(block.namespace ? { namespace: block.namespace } : {}),
 				input: rawInput,
 			} as ResponseInput[number]);
 			continue;
@@ -2722,6 +2796,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
 			name: encodeResponsesToolName(functionName, toolNaming),
+			...(block.namespace ? { namespace: block.namespace } : {}),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
@@ -2730,11 +2805,11 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		// Replay the demoted reasoning (already present in `content` as visible
 		// text) as a structured reasoning item so the thinking-mode continuation
 		// carries the `reasoning_text` the provider requires. When no thinking
-		// text survived reconstruction (source turn minted by another model, or
-		// reasoning dropped by compaction/archive budget) the carried text is
-		// empty — and DeepSeek-family targets reject an empty `reasoning_text`
-		// exactly like a missing item (#10690), so substitute a non-empty
-		// placeholder. The `id` is only set when an upstream item id survived:
+		// text survived reconstruction (source turn had none, or reasoning was
+		// dropped by compaction/archive budget) the carried text is empty — and
+		// DeepSeek-family targets reject an empty `reasoning_text` exactly like a
+		// missing item (#10690), so substitute a non-empty placeholder. The
+		// `id` is only set when an upstream item id survived:
 		// providers that validate reasoning ids against their own store (Meta via
 		// OpenRouter) reject a fabricated `rs_…` with "Referenced reasoning item
 		// … was not found or has expired", and the targets that need the item
@@ -3614,6 +3689,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: encodeResponsesToolCallId(item.call_id, item.id),
 					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: {},
+					...(item.namespace ? { namespace: item.namespace } : {}),
 					[kStreamingPartialJson]: item.arguments || "",
 				};
 				pushContentBlock(block);
@@ -3648,6 +3724,7 @@ export async function processResponsesStream<TApi extends Api>(
 					name: item.name,
 					arguments: { input: item.input ?? "" },
 					customWireName: item.name,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 					// Custom tools stream a raw string, but we reuse `partialJson` as the
 					// accumulation buffer so later code that inspects the field still works.
 					[kStreamingPartialJson]: item.input ?? "",
@@ -3838,6 +3915,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: encodeResponsesToolCallId(item.call_id, item.id),
 					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: args,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 				};
 				let contentIndex: number;
 				if (block) {
@@ -3846,6 +3924,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// leaving block.arguments stale (often `{}`); the emitted toolCall
 					// and the persisted block must agree.
 					block.arguments = args;
+					if (item.namespace) block.namespace = item.namespace;
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
@@ -3903,12 +3982,14 @@ export async function processResponsesStream<TApi extends Api>(
 					name: item.name,
 					arguments: { input: rawInput },
 					customWireName: item.name,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 				};
 				let contentIndex: number;
 				if (block) {
 					// Persist the final input on the stored block and drop the transient
 					// accumulation buffer, mirroring the function_call branch above.
 					block.arguments = { input: rawInput };
+					if (item.namespace) block.namespace = item.namespace;
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {

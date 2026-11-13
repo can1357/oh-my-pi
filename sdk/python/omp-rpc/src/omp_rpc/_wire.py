@@ -93,8 +93,8 @@ _MESSAGE_UPDATES_VALUES: Final[frozenset[str]] = frozenset({"full", "delta"})
 _decode_message_updates = cast("Decoder[MessageUpdates]", literal(_MESSAGE_UPDATES_VALUES))
 
 
-TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned", "blocked"]
-_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned", "blocked"})
+TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
+_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned"})
 _decode_todo_status = cast("Decoder[TodoStatus]", literal(_TODO_STATUS_VALUES))
 
 
@@ -277,10 +277,15 @@ class Usage(TypedDict):
     credits: NotRequired[JsonObject]
 
 
+ParentIrc = TypedDict("ParentIrc", {"from": "str", "body": "str"})
+"""Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope."""
+
+
 class UserMessage(TypedDict):
     role: Literal["user"]
     content: MessageContent
     timestamp: float
+    parentIrc: NotRequired[ParentIrc]
     synthetic: NotRequired[bool]
     steering: NotRequired[bool]
     liveSteered: NotRequired[bool]
@@ -552,8 +557,6 @@ class ModelInfo:
 class TodoItem:
     content: str
     status: TodoStatus
-    blocker: str | None = None
-    """What a `blocked` task is waiting on."""
     details: str | None = None
     notes: tuple[str, ...] | None = None
 
@@ -1267,6 +1270,8 @@ class ReadyEvent:
     supported_protocol_versions: tuple[int, ...] | None = None
     max_frame_bytes: int | None = None
     max_reassembled_frame_bytes: int | None = None
+    supports_bash_exclude_from_context: bool | None = None
+    """`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1499,6 +1504,14 @@ class SelectUiRequest:
     title: str
     options: tuple[str, ...]
     option_details: tuple[SelectOptionDetail, ...] | None = None
+    initial_index: int | None = None
+    """Index into `options` to focus first."""
+    selection_marker: Literal["radio", "checkbox"] | None = None
+    """Marker style for the first `markableCount` options."""
+    checked_indices: tuple[int, ...] | None = None
+    """For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."""
+    markable_count: int | None = None
+    """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
 
 
@@ -1535,7 +1548,7 @@ class EditorUiRequest:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskUiRequest:
-    """Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it."""
+    """Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."""
     type: Literal["extension_ui_request"] = "extension_ui_request"
     id: str
     method: Literal["ask"] = "ask"
@@ -1616,6 +1629,14 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     title: str | None = None
     options: tuple[str, ...] | None = None
     option_details: tuple[SelectOptionDetail, ...] | None = None
+    initial_index: int | None = None
+    """Index into `options` to focus first."""
+    selection_marker: Literal["radio", "checkbox"] | None = None
+    """Marker style for the first `markableCount` options."""
+    checked_indices: tuple[int, ...] | None = None
+    """For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."""
+    markable_count: int | None = None
+    """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
     message: str | None = None
     placeholder: str | None = None
@@ -1639,7 +1660,7 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskAnswer:
-    """Answer to one `ask` question: exact option labels, plus optional free text."""
+    """Answer to one `ui.askDialog` question: exact option labels, plus optional free text."""
     id: str
     selected_options: tuple[str, ...]
     custom_input: str | None = None
@@ -1750,6 +1771,10 @@ parse_usage_cost = cast("Decoder[UsageCost]", open_record(None, None))
 
 parse_usage = cast("Decoder[Usage]", open_record(None, None))
 """Decodes a `Usage` open record: checks the discriminator and keeps every key."""
+
+
+parse_parent_irc = cast("Decoder[ParentIrc]", open_record(None, None))
+"""Decodes a `ParentIrc` open record: checks the discriminator and keeps every key."""
 
 
 parse_user_message = cast("Decoder[UserMessage]", open_record("role", frozenset({"user"})))
@@ -1926,7 +1951,6 @@ def parse_todo_item(value: object, path: str = "TodoItem") -> TodoItem:
     return TodoItem(
         content=required(payload, "content", decode_str, path),
         status=required(payload, "status", _decode_todo_status, path),
-        blocker=optional(payload, "blocker", decode_str, path),
         details=optional(payload, "details", decode_str, path),
         notes=optional(payload, "notes", array(decode_str), path),
     )
@@ -2714,6 +2738,7 @@ def parse_ready_event(value: object, path: str = "ReadyEvent") -> ReadyEvent:
         supported_protocol_versions=optional(payload, "supportedProtocolVersions", array(decode_int), path),
         max_frame_bytes=optional(payload, "maxFrameBytes", decode_int, path),
         max_reassembled_frame_bytes=optional(payload, "maxReassembledFrameBytes", decode_int, path),
+        supports_bash_exclude_from_context=optional(payload, "supportsBashExcludeFromContext", decode_bool, path),
     )
 
 
@@ -2974,6 +2999,10 @@ def parse_select_ui_request(value: object, path: str = "SelectUiRequest") -> Sel
         title=required(payload, "title", decode_str, path),
         options=required(payload, "options", array(decode_str), path),
         option_details=optional(payload, "optionDetails", array(parse_select_option_detail), path),
+        initial_index=optional(payload, "initialIndex", decode_int, path),
+        selection_marker=optional(payload, "selectionMarker", cast('Decoder[Literal["radio", "checkbox"]]', literal(frozenset({"radio", "checkbox"}))), path),
+        checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
+        markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
     )
 
@@ -3111,6 +3140,10 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         title=optional(payload, "title", decode_str, path),
         options=optional(payload, "options", array(decode_str), path),
         option_details=optional(payload, "optionDetails", array(parse_select_option_detail), path),
+        initial_index=optional(payload, "initialIndex", decode_int, path),
+        selection_marker=optional(payload, "selectionMarker", cast('Decoder[Literal["radio", "checkbox"]]', literal(frozenset({"radio", "checkbox"}))), path),
+        checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
+        markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
         message=optional(payload, "message", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
@@ -3596,10 +3629,12 @@ class WireClient:
         params: dict[str, object] = {}
         self._command("abort_retry", params)
 
-    def bash(self, command: str) -> BashResult:
-        """Run a shell command."""
+    def bash(self, command: str, *, exclude_from_context: bool | None = None) -> BashResult:
+        """Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true."""
         params: dict[str, object] = {}
         params["command"] = command
+        if exclude_from_context is not None:
+            params["excludeFromContext"] = exclude_from_context
         return parse_bash_result(self._command("bash", params), "bash")
 
     def abort_bash(self) -> None:
@@ -4107,6 +4142,7 @@ __all__ = [
     "NotifyUiRequest",
     "OpenSessionResult",
     "OpenUrlUiRequest",
+    "ParentIrc",
     "PromoteQueuedMessageResult",
     "PromptAck",
     "PromptError",
@@ -4290,6 +4326,7 @@ __all__ = [
     "parse_notify_ui_request",
     "parse_open_session_result",
     "parse_open_url_ui_request",
+    "parse_parent_irc",
     "parse_promote_queued_message_result",
     "parse_prompt_ack",
     "parse_prompt_error",

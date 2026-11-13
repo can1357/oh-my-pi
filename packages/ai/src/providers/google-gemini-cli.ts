@@ -14,7 +14,7 @@ import {
 	getAntigravityModelWireProfile,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { oauthAccountKey } from "../auth/types";
 import type {
@@ -27,7 +27,6 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TextContent,
-	ThinkingContent,
 	ToolCall,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
@@ -45,7 +44,10 @@ import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./googl
 import {
 	convertMessages,
 	convertTools,
+	CONTINUATION_MAX_ATTEMPTS,
 	EMPTY_STREAM_BASE_DELAY_MS,
+	followGoogleContinuations,
+	GoogleTextBlocks,
 	type GoogleThinkingLevel,
 	hasMeaningfulGoogleContent,
 	isThinkingPart,
@@ -54,10 +56,8 @@ import {
 	mapStopReasonString,
 	mapToolChoice,
 	nextToolCallId,
-	pushBlockEndEvent,
 	pushToolCallEvents,
 	retainThoughtSignature,
-	startTextOrThinkingBlock,
 } from "./google-shared";
 
 /**
@@ -444,6 +444,8 @@ interface CloudCodeAssistRequest {
 			};
 		};
 		labels?: Record<string, string>;
+		/** Resumes a generation Google split into segments (`followGoogleContinuations`). */
+		continuationToken?: string;
 	};
 	requestType?: string;
 	userAgent?: string;
@@ -674,6 +676,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 			const streamResponse = async (
 				activeResponse: Response,
+				streamUrl: string,
 			): Promise<{ meaningful: boolean; strippedPlanningLeak: boolean }> => {
 				if (!activeResponse.body) {
 					throw new AIError.ProviderResponseError("No response body", {
@@ -686,72 +689,25 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				// response id into the next request's last_execution_id.
 				lastResponseId = undefined;
 
-				let currentBlock: TextContent | ThinkingContent | null = null;
+				const textBlocks = new GoogleTextBlocks(output, stream, "verbatim", ensureStarted);
 				const blocks = output.content;
 				const blockIndex = () => blocks.length - 1;
 				const visibleTextHealing = new StreamMarkupHealing({ pattern: "thinking" });
 
+				// Reply text passes two holding stages before it reaches `textBlocks`: the
+				// planning-leak buffer (flash models) and markup healing. Anything that ends
+				// a run of reply text must settle both first, or the next block lands ahead
+				// of text that streamed before it.
 				let isBuffering = false;
 				let textBuffer = "";
 				let bufferedTextSignature: string | undefined;
 				let strippedPlanningLeak = false;
 
-				const endCurrentBlock = (): void => {
-					if (!currentBlock) return;
-					pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
-					currentBlock = null;
-				};
-
-				const startTextBlock = (): TextContent => {
-					let block = currentBlock;
-					if (block?.type !== "text") {
-						endCurrentBlock();
-						block = startTextOrThinkingBlock(false, output, stream, ensureStarted);
-						currentBlock = block;
-					}
-					return block;
-				};
-
-				const startThinkingBlock = (): ThinkingContent => {
-					let block = currentBlock;
-					if (block?.type !== "thinking") {
-						endCurrentBlock();
-						block = startTextOrThinkingBlock(true, output, stream, ensureStarted);
-						currentBlock = block;
-					}
-					return block;
-				};
-
-				const emitVisibleText = (delta: string, thoughtSignature?: string): void => {
-					if (!delta) return;
-					const block = startTextBlock();
-					block.text += delta;
-					block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta,
-						partial: output,
-					});
-				};
-
-				const emitVisibleThinking = (delta: string): void => {
-					if (!delta) return;
-					const block = startThinkingBlock();
-					block.thinking += delta;
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta,
-						partial: output,
-					});
-				};
-
 				const emitHealingEvent = (event: StreamMarkupHealingEvent, thoughtSignature?: string): void => {
 					if (event.type === "text") {
-						emitVisibleText(event.text, thoughtSignature);
+						if (event.text) textBlocks.appendText(event.text, thoughtSignature);
 					} else if (event.type === "thinking") {
-						emitVisibleThinking(event.thinking);
+						if (event.thinking) textBlocks.appendThinking(event.thinking);
 					}
 				};
 
@@ -761,20 +717,35 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 				};
 
-				const flushVisibleText = (thoughtSignature?: string): void => {
+				const flushVisibleText = (): void => {
 					for (const event of visibleTextHealing.flushEvents()) {
-						emitHealingEvent(event, thoughtSignature);
+						emitHealingEvent(event);
 					}
 				};
 
-				const retainCurrentBlockThoughtSignature = (thoughtSignature: string): void => {
-					const block = currentBlock;
-					if (!block) return;
-					if (block.type === "thinking") {
-						block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, thoughtSignature);
-					} else {
-						block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
+				// Lands all held reply text; the signature the buffered text carried signs where it landed.
+				const settleVisibleText = (): void => {
+					const signature = bufferedTextSignature;
+					if (isBuffering) {
+						const buffered = consumePlanningBuffer(textBuffer, toolNames, true);
+						isBuffering = false;
+						textBuffer = "";
+						bufferedTextSignature = undefined;
+						if (buffered.kind === "leak") strippedPlanningLeak = true;
+						if (buffered.kind !== "incomplete") feedVisibleText(buffered.visibleText);
 					}
+					flushVisibleText();
+					if (signature) textBlocks.sign(signature, false);
+				};
+
+				// An unmarked signature-only part signs the reply text before it, which may still be held.
+				const signVisibleText = (thoughtSignature: string): void => {
+					if (isBuffering) {
+						bufferedTextSignature = retainThoughtSignature(bufferedTextSignature, thoughtSignature);
+						return;
+					}
+					flushVisibleText();
+					textBlocks.sign(thoughtSignature, false);
 				};
 
 				const responseAbortController = new AbortController();
@@ -782,15 +753,54 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					? AbortSignal.any([options.signal, responseAbortController.signal])
 					: responseAbortController.signal;
 				const onSseEvent = options?.onSseEvent;
+				// Attach the observer only when a diagnostic listener exists: any
+				// observer turns on per-line raw capture in `readSseJson`.
+				const sseObserver: SseEventObserver | undefined = onSseEvent
+					? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+					: undefined;
+				const resumeSegment = async (continuationToken: string) => {
+					// Same transport contract as the initial POST (retry schedule, no absolute
+					// fetch timeout that would cut off a segment still decoding), with
+					// `CONTINUATION_MAX_ATTEMPTS` and a pre-response watchdog per attempt,
+					// cleared once headers arrive.
+					let clearWatchdog: (() => void) | undefined;
+					let resumed: Response;
+					try {
+						resumed = await fetchWithRetry(streamUrl, {
+							method: "POST",
+							headers: requestHeaders,
+							body: JSON.stringify({ ...requestBody, request: { ...requestBody.request, continuationToken } }),
+							signal: responseSignal,
+							prepareInit: () => {
+								clearWatchdog?.();
+								const watchdog = armPreResponseTimeout(responseSignal, firstEventTimeoutMs);
+								clearWatchdog = watchdog.clear;
+								return { signal: watchdog.signal };
+							},
+							maxAttempts: CONTINUATION_MAX_ATTEMPTS,
+							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+							fetch: options?.fetch,
+							timeout: false,
+						});
+						if (!resumed.ok || !resumed.body) {
+							const errorText = await resumed.text();
+							throw new AIError.GeminiCliApiError(
+								`Cloud Code Assist API error (${resumed.status}) resuming a long generation: ${errorText}`,
+								resumed.status,
+								{ headers: resumed.headers },
+							);
+						}
+					} finally {
+						clearWatchdog?.();
+					}
+					return readSseJson<CloudCodeAssistResponseChunk>(resumed.body, responseSignal, sseObserver);
+				};
 				const chunks = iterateWithIdleTimeout(
-					// Attach the observer only when a diagnostic listener exists: any
-					// observer turns on per-line raw capture in `readSseJson`.
-					readSseJson<CloudCodeAssistResponseChunk>(
-						activeResponse.body,
-						responseSignal,
-						onSseEvent
-							? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
-							: undefined,
+					followGoogleContinuations(
+						readSseJson<CloudCodeAssistResponseChunk>(activeResponse.body, responseSignal, sseObserver),
+						chunk => chunk.response,
+						resumeSegment,
 					),
 					{
 						firstItemTimeoutMs: firstEventTimeoutMs,
@@ -830,58 +840,48 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const candidate = responseData.candidates?.[0];
 					if (candidate?.content?.parts) {
 						for (const part of candidate.content.parts) {
-							if (part.text !== undefined && part.text !== "") {
-								const isThinking = isThinkingPart(part);
-								if (isThinking) {
-									flushVisibleText();
-									const block = startThinkingBlock();
-									block.thinking += part.text;
-									block.thinkingSignature = retainThoughtSignature(
-										block.thinkingSignature,
-										part.thoughtSignature,
-									);
-									stream.push({
-										type: "thinking_delta",
-										contentIndex: blockIndex(),
-										delta: part.text,
-										partial: output,
-									});
+							const { text, thoughtSignature } = part;
+							// A signature-only part carries no text, only a `thoughtSignature`.
+							const signatureOnly = text === "" && !part.functionCall ? thoughtSignature : undefined;
+							if (isThinkingPart(part)) {
+								if (text || signatureOnly) {
+									settleVisibleText();
+									textBlocks.push(part);
+								}
+							} else if (text) {
+								if (isBuffering) {
+									textBuffer += text;
+									bufferedTextSignature = retainThoughtSignature(bufferedTextSignature, thoughtSignature);
+								} else if (isFlashLeakModel && text.trimStart().startsWith("{")) {
+									isBuffering = true;
+									textBuffer = text;
+									bufferedTextSignature = thoughtSignature;
 								} else {
-									if (isBuffering) {
-										textBuffer += part.text;
-										bufferedTextSignature = retainThoughtSignature(
-											bufferedTextSignature,
-											part.thoughtSignature,
-										);
-									} else if (isFlashLeakModel && part.text.trimStart().startsWith("{")) {
-										isBuffering = true;
-										textBuffer = part.text;
-										bufferedTextSignature = part.thoughtSignature;
-									} else {
-										feedVisibleText(part.text, part.thoughtSignature);
-									}
+									feedVisibleText(text, thoughtSignature);
+								}
 
-									if (isBuffering) {
-										const buffered = consumePlanningBuffer(textBuffer, toolNames);
-										if (buffered.kind !== "incomplete") {
-											if (buffered.kind === "leak") strippedPlanningLeak = true;
-											const visibleSignature = bufferedTextSignature;
-											isBuffering = false;
-											textBuffer = "";
-											bufferedTextSignature = undefined;
-											feedVisibleText(buffered.visibleText, visibleSignature);
-										}
+								if (isBuffering) {
+									const buffered = consumePlanningBuffer(textBuffer, toolNames);
+									if (buffered.kind !== "incomplete") {
+										if (buffered.kind === "leak") strippedPlanningLeak = true;
+										const visibleSignature = bufferedTextSignature;
+										isBuffering = false;
+										textBuffer = "";
+										bufferedTextSignature = undefined;
+										feedVisibleText(buffered.visibleText, visibleSignature);
 									}
 								}
-							} else if (part.text === "" && part.thoughtSignature && !part.functionCall) {
-								retainCurrentBlockThoughtSignature(part.thoughtSignature);
+							} else if (signatureOnly) {
+								signVisibleText(signatureOnly);
 							}
 
 							if (part.functionCall) {
+								// Text still buffered here is the planning leak that precedes the call.
 								flushVisibleText();
-								endCurrentBlock();
+								textBlocks.close();
 								isBuffering = false;
 								textBuffer = "";
+								bufferedTextSignature = undefined;
 								const providedId = part.functionCall.id;
 								const needsNewId =
 									!providedId || output.content.some(b => b.type === "toolCall" && b.id === providedId);
@@ -923,20 +923,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 				}
 
-				if (isBuffering && textBuffer !== "") {
-					const buffered = consumePlanningBuffer(textBuffer, toolNames, true);
-
-					if (buffered.kind !== "incomplete") {
-						if (buffered.kind === "leak") strippedPlanningLeak = true;
-						feedVisibleText(buffered.visibleText, bufferedTextSignature);
-					}
-					bufferedTextSignature = undefined;
-					isBuffering = false;
-					textBuffer = "";
-				}
-
-				flushVisibleText(bufferedTextSignature);
-				endCurrentBlock();
+				settleVisibleText();
+				textBlocks.close();
 
 				return {
 					meaningful: hasMeaningfulGoogleContent(output),
@@ -953,6 +941,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
+				const streamUrl = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
 				const isLastEndpoint = i === endpoints.length - 1;
 				try {
 					started = false;
@@ -964,7 +953,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
 					let response: Response;
 					try {
-						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+						response = await fetchWithRetry(() => streamUrl, {
 							method: "POST",
 							headers: requestHeaders,
 							body: requestBodyJson,
@@ -1038,7 +1027,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							}
 						}
 
-						const streamed = await streamResponse(currentResponse);
+						const streamed = await streamResponse(currentResponse, streamUrl);
 						// Eventless silence may fail over to the alternate Antigravity
 						// endpoint. Once thinking has streamed, the endpoint is already
 						// committed downstream; Advisor mode may accept that silence,

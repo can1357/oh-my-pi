@@ -3,6 +3,7 @@ import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizP
 import { defaultShellVizPreferences, readShellPresentation, shellVisualization } from "../tools/shell-viz";
 import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
 import { ShellVisualizer } from "../apps/shell-visualizer";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
@@ -460,6 +461,7 @@ export class ToolExecutionComponent extends Container {
 	// Memoized #getTextOutput(), keyed by every input it reads: the result
 	// (versioned by #resultVersion), #showImages, and the image protocol.
 	#textOutput = "";
+	#textOutputTrimmed: string | undefined;
 	#textOutputKey: string | undefined;
 	#tool?: AgentTool;
 	#renderer?: ToolRenderer;
@@ -550,7 +552,7 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
-		shellPresentation?: ShellVizPresentation;
+		readonly shellPresentation?: ShellVizPresentation;
 		shellTrace?: ShellTrace;
 		shellReplayEpoch?: number;
 		/** Live: read at render time, so a ticking spinner advances it. */
@@ -574,6 +576,10 @@ export class ToolExecutionComponent extends Container {
 		super();
 		Object.defineProperty(this.#renderState, "elapsedMs", {
 			get: () => this.#elapsedMs(this.#nativeStatus()),
+			enumerable: true,
+		});
+		Object.defineProperty(this.#renderState, "shellPresentation", {
+			get: () => (this.#toolName === "bash" ? this.#getShellPresentation() : undefined),
 			enumerable: true,
 		});
 		ensureThemeSync();
@@ -640,7 +646,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	#getShellPresentation(): ShellVizPresentation | undefined {
-		if (this.#toolName !== "bash") return undefined;
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return undefined;
 		const script =
 			this.#shellTrace?.script ??
 			(isRecord(this.#args) && typeof this.#args.command === "string" ? this.#args.command : undefined);
@@ -655,6 +661,11 @@ export class ToolExecutionComponent extends Container {
 		const source = this.#shellTrace
 			? shellVisualization(this.#shellTrace)
 			: (this.#shellPendingTrace ??= new RunTrace(script));
+		// An unrestorable stored trace renders like visualization-off: plain command and output.
+		if (!source) {
+			this.#shellPresentation = undefined;
+			return undefined;
+		}
 		this.#shellPresentation = readShellPresentation(
 			source,
 			this.#shellPreferences,
@@ -681,7 +692,7 @@ export class ToolExecutionComponent extends Container {
 
 	/** Handle exactly the shared native action vocabulary; inspector uses this same controller. */
 	shellVizAction(action: string): void {
-		if (this.#toolName !== "bash") return;
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return;
 		if (action === "inspect") {
 			this.openShellVisualizer();
 			return;
@@ -727,7 +738,8 @@ export class ToolExecutionComponent extends Container {
 
 	/** Open the focused inspector without intercepting composer input while it is closed. */
 	openShellVisualizer(): void {
-		if (this.#toolName !== "bash" || !this.#ui.showOverlay) return;
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization || !this.#ui.showOverlay)
+			return;
 		if (this.#shellInspector) return;
 		const inspector = new ShellVisualizer({
 			presentation: () => this.#getShellPresentation(),
@@ -1198,7 +1210,7 @@ export class ToolExecutionComponent extends Container {
 
 	/** Mirrors the card collapsed or expanded in the terminal, so `Ctrl+O` and native toggles share one state. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.#toolName === "bash") {
+		if (this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization) {
 			const action = shellVizEventAction(event, this.#shellPreferences);
 			if (action) {
 				this.shellVizAction(action);
@@ -1320,6 +1332,7 @@ export class ToolExecutionComponent extends Container {
 			this.#sealed,
 			this.#parkedBackground,
 			this.#showImages,
+			this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization,
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
 			host.media,
@@ -1629,12 +1642,24 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	override releaseRenderCaches(): void {
+		super.releaseRenderCaches();
+		this.#textOutput = "";
+		this.#textOutputTrimmed = undefined;
+		this.#textOutputKey = undefined;
+		this.#shellPresentation = undefined;
+		this.#shellPresentationKey = undefined;
+		this.#shellPendingTrace = undefined;
+		this.#shellPendingScript = undefined;
+		this.#lateDiagnosticsBlock?.block.releaseRenderCaches();
+	}
+
 	#updateDisplay(): void {
 		// `TERMINAL.imageProtocol` is resolved by an async capability probe during
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}|${this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -2178,22 +2203,25 @@ export class ToolExecutionComponent extends Container {
 			context.rawDetails = this.#rawDetails;
 		}
 		if (this.#toolName === "bash") {
-			this.#renderState.shellPresentation = this.#getShellPresentation();
 			this.#renderState.shellTrace = this.#shellTrace;
 			this.#renderState.shellReplayEpoch = this.#shellReplayEpoch;
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.
 			if (this.#result) {
 				// Pass raw output and expanded state - renderer handles width-aware truncation
-				const output = this.#getTextOutput().trimEnd();
-				context.output = output;
+				Object.defineProperty(context, "output", {
+					get: () => this.#getTrimmedTextOutput(),
+					enumerable: true,
+				});
 			}
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
-			const output = this.#getTextOutput().trimEnd();
-			context.output = output;
+			Object.defineProperty(context, "output", {
+				get: () => this.#getTrimmedTextOutput(),
+				enumerable: true,
+			});
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
@@ -2269,7 +2297,14 @@ export class ToolExecutionComponent extends Container {
 
 		this.#textOutputKey = key;
 		this.#textOutput = output;
+		this.#textOutputTrimmed = undefined;
 		return output;
+	}
+
+	#getTrimmedTextOutput(): string {
+		const output = this.#getTextOutput();
+		this.#textOutputTrimmed ??= output.trimEnd();
+		return this.#textOutputTrimmed;
 	}
 
 	/** Re-tint (only when the tint changed) and reformat the generic #contentText card. */
