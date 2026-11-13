@@ -89,7 +89,11 @@ import {
 	sanitizeCodexCallId,
 	transformRequestBody,
 } from "./openai-codex/request-transformer";
-import { applyCodexAccessPrograms, dropRejectedCodexAccessPrograms } from "./openai-codex/access-programs";
+import {
+	applyCodexAccessPrograms,
+	dropRejectedCodexAccessPrograms,
+	reportCodexRequestAccount,
+} from "./openai-codex/access-programs";
 import {
 	type CodexAcceptedSteer,
 	type CodexSteerAck,
@@ -1259,6 +1263,7 @@ function createCodexRequestContext(
 	}
 
 	const accountId = getCodexAccountId(apiKey);
+	reportCodexRequestAccount(options?.sessionId, model.provider, model.id, accountId);
 	applyCodexAccessPrograms(transformedBody, model, accountId, options?.codexAccessPrograms);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);

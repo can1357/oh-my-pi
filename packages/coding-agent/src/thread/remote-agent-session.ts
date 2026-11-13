@@ -85,10 +85,12 @@ import {
 	runningJobWidgets,
 } from "../session/async-job-views";
 import { BlobStore, type BlobPutOptions, type BlobPutResult, lazyImageDataSync } from "../session/blob-store";
+import { daybreakAuthKey, selectedOAuthAccountId } from "../session/daybreak-status";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import { resolveRoleModelCycle, roleThinkingLevelForModel, serviceTierForModel } from "../session/model-controls";
 import type { ServingModel } from "../session/retry-fallback-chains";
+import { cfgProvidersOpenaiCodexDaybreak } from "../session/settings";
 import {
 	buildSessionContext,
 	type SessionContext,
@@ -201,6 +203,12 @@ function emptyViewState(): SessionViewState {
 		availableEffortSelectors: [],
 		serviceTierByFamily: {},
 		fastModeActive: false,
+		daybreakModelId: undefined,
+		daybreakProviderId: undefined,
+		daybreakEligibleAccounts: [],
+		daybreakRequestAccountId: undefined,
+		daybreakRequestAuthKey: undefined,
+		daybreakRequestSelectedOAuthAccountId: undefined,
 		anthropicSlowModeLabel: undefined,
 		prewalk: undefined,
 		goalMode: undefined,
@@ -280,6 +288,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	#tokenizer: { model: Model | undefined; tokenizer: Tokenizer } | undefined;
 	readonly #ruleSource: AgentViewRuleSource;
 	readonly #listeners = new Set<AgentSessionEventListener>();
+	readonly #daybreakListeners = new Set<() => void>();
 	readonly #runStateListeners = new Set<(state: SessionRunState) => void>();
 	#closed: string | undefined;
 
@@ -621,6 +630,30 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#view.fastModeActive;
 	}
 
+	isDaybreakSelected(): boolean {
+		const model = this.model;
+		if (!model || model.api !== "openai-codex-responses" || !cfgProvidersOpenaiCodexDaybreak.get(this.settings))
+			return false;
+		if (
+			this.#view.daybreakModelId !== model.id ||
+			this.#view.daybreakProviderId !== model.provider ||
+			this.#view.daybreakEligibleAccounts.length === 0
+		)
+			return false;
+		const auth = this.modelRegistry.authStorage;
+		const source = auth.keys.source(model.provider, { fresh: true });
+		if (!source) return false;
+		const selected =
+			source.kind === "oauth" ? selectedOAuthAccountId(auth, model.provider, this.sessionId) : undefined;
+		let accountId: string | undefined;
+		if (this.#view.daybreakRequestAuthKey === undefined) accountId = selected;
+		else if (this.#view.daybreakRequestAuthKey === daybreakAuthKey(auth, model.provider, this.sessionId))
+			accountId = this.#view.daybreakRequestAccountId;
+		else if (source.kind === "oauth" && selected !== this.#view.daybreakRequestSelectedOAuthAccountId)
+			accountId = selected;
+		return !!accountId && this.#view.daybreakEligibleAccounts.includes(accountId);
+	}
+
 	getAnthropicSlowModeLabel(): string | undefined {
 		return this.#view.anthropicSlowModeLabel;
 	}
@@ -800,12 +833,22 @@ export class RemoteAgentSession implements AgentViewSession {
 	}
 
 	subscribe(listener: AgentSessionEventListener): () => void {
-		const first = this.#listeners.size === 0;
+		const first = this.#listeners.size === 0 && this.#daybreakListeners.size === 0;
 		this.#listeners.add(listener);
 		if (first) this.#watch(true);
 		return () => {
 			if (!this.#listeners.delete(listener)) return;
-			if (this.#listeners.size === 0) this.#watch(false);
+			if (this.#listeners.size === 0 && this.#daybreakListeners.size === 0) this.#watch(false);
+		};
+	}
+
+	subscribeDaybreakChange(listener: () => void): () => void {
+		const first = this.#listeners.size === 0 && this.#daybreakListeners.size === 0;
+		this.#daybreakListeners.add(listener);
+		if (first) this.#watch(true);
+		return () => {
+			if (!this.#daybreakListeners.delete(listener)) return;
+			if (this.#listeners.size === 0 && this.#daybreakListeners.size === 0) this.#watch(false);
 		};
 	}
 
@@ -889,6 +932,25 @@ export class RemoteAgentSession implements AgentViewSession {
 		if (patch.restorableQueue) this.#pruneSettled(patch.restorableQueue);
 		if (patch.leafId !== undefined) this.#entryIndex.setLeaf(patch.leafId);
 		this.#syncViewDerived(patch);
+		if (
+			patch.daybreakEligibleAccounts !== undefined ||
+			Object.hasOwn(patch, "daybreakModelId") ||
+			Object.hasOwn(patch, "daybreakProviderId") ||
+			Object.hasOwn(patch, "daybreakRequestAccountId") ||
+			Object.hasOwn(patch, "daybreakRequestAuthKey") ||
+			Object.hasOwn(patch, "daybreakRequestSelectedOAuthAccountId")
+		) {
+			for (const listener of [...this.#daybreakListeners]) {
+				try {
+					listener();
+				} catch (error) {
+					logger.warn("RemoteAgentSession Daybreak listener threw", {
+						key: this.instanceKey,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		}
 	}
 
 	/** Bridge only: apply an entry-list change; locally appended entries give way to the worker's. */
@@ -953,6 +1015,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#settledQueued.clear();
 		this.#withdrawnQueued.clear();
 		this.#listeners.clear();
+		this.#daybreakListeners.clear();
 		this.#runStateListeners.clear();
 	}
 

@@ -8,8 +8,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import {
+	dropRejectedCodexAccessPrograms,
+	reportCodexRequestAccount,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
+import type { RequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -23,9 +29,11 @@ import { statusLineHost } from "../../src/modes/status-line-host";
 import type { InteractiveModeContext } from "../../src/modes/types";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import { AgentSession } from "../../src/session/agent-session";
 import type { AgentSessionEvent } from "../../src/session/agent-session-events";
 import type { AgentViewSession } from "../../src/session/agent-session-handle";
 import { AuthStorage } from "../../src/session/auth-storage";
+import { SessionManager } from "../../src/session/session-manager";
 import type { RestoredQueuedMessage } from "../../src/session/agent-session-types";
 import type { SessionEntriesDelta, SessionRestorableQueue } from "../../src/thread/session-mirror";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
@@ -123,6 +131,7 @@ function textOf(message: AgentMessage | null | undefined): string {
 
 interface FocusHarness {
 	controller: SessionFocusController;
+	renderRequests(): number;
 	events: AgentSessionEvent[];
 	/** Mirror `isStreaming` as each `agent_start` reached the view (the state patch must precede the event). */
 	streamingAtAgentStart: boolean[];
@@ -133,6 +142,7 @@ interface FocusHarness {
 
 /** The focus controller over a minimal interactive context that records what the view received. */
 function focusHarness(): FocusHarness {
+	let renderRequests = 0;
 	const events: AgentSessionEvent[] = [];
 	const streamingAtAgentStart: boolean[] = [];
 	const transcripts: Array<Array<{ role: string; text: string }>> = [];
@@ -186,14 +196,27 @@ function focusHarness(): FocusHarness {
 		updatePendingMessagesDisplay() {},
 		updateEditorBorderColor() {},
 		syncIdleMaintenanceView() {},
-		ui: { requestRender() {}, requestComponentRender() {} },
+		ui: {
+			requestRender() {
+				renderRequests++;
+			},
+			requestComponentRender() {},
+		},
 		showStatus() {},
 		collabGuest: undefined,
 	} as unknown as InteractiveModeContext;
 	const controller = new SessionFocusController(ctx, AgentRegistry.global(), () => AgentLifecycleManager.global());
 	focus.controller = controller;
 	cleanups.push(() => controller.dispose());
-	return { controller, events, streamingAtAgentStart, transcripts, statusSessions, todoSources };
+	return {
+		controller,
+		renderRequests: () => renderRequests,
+		events,
+		streamingAtAgentStart,
+		transcripts,
+		statusSessions,
+		todoSources,
+	};
 }
 
 /** The composer's submit path with `view` focused, as `InputController` dispatches it. */
@@ -354,6 +377,199 @@ describe("focused view of a worker-homed agent session", () => {
 		expect(render()).not.toBe(before);
 	});
 
+	it("shows Daybreak for the account resolved by a worker request", async () => {
+		const model = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!model) throw new Error("bundled Codex model missing");
+		const registry = await mainRegistry();
+		registry.authStorage.keys.setRuntime("openai-codex", "runtime-test-token");
+		const probe = await startWorker();
+		await probe.open(
+			"W1",
+			registry,
+			{},
+			{
+				...model,
+				accountAccess: {
+					"account-daybreak-runtime-worker": { cyberPrograms: ["daybreak_blue"] },
+					"account-daybreak-oauth-worker-a": { cyberPrograms: ["daybreak_blue"] },
+					"account-daybreak-oauth-worker-c": { cyberPrograms: ["daybreak_blue"] },
+				},
+			},
+		);
+		const remote = mirrorOf("W1");
+		const view = focusHarness();
+		await view.controller.focusAgent("W1");
+		const statusLine = new StatusLineComponent(remote, statusLineHost);
+		cleanups.push(() => statusLine.dispose());
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["model"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		const render = (): string => stripVTControlCharacters(statusLine.getTopBorder(160).content);
+		expect(render()).not.toContain("☼");
+		await probe.reportRequestAccount("W1", "account-daybreak-runtime-worker");
+		await waitFor(() => remote.isDaybreakSelected());
+		expect(render()).toContain("☼");
+		registry.authStorage.keys.setRuntime("openai-codex", "replacement-runtime-token");
+		expect(remote.isDaybreakSelected()).toBe(false);
+		await probe.reportRequestAccount("W1", "account-daybreak-runtime-worker");
+		await waitFor(() => remote.isDaybreakSelected());
+		registry.authStorage.keys.removeRuntime("openai-codex");
+		expect(remote.isDaybreakSelected()).toBe(false);
+		expect(render()).not.toContain("☼");
+		await registry.authStorage.credentials.set("openai-codex", [
+			{
+				type: "oauth",
+				access: "access-a",
+				refresh: "refresh-a",
+				expires: Date.now() + 60_000,
+				accountId: "account-daybreak-oauth-worker-a",
+			},
+			{
+				type: "oauth",
+				access: "access-c",
+				refresh: "refresh-c",
+				expires: Date.now() + 60_000,
+				accountId: "account-daybreak-oauth-worker-c",
+			},
+		]);
+		const accounts = registry.authStorage.oauth.accounts("openai-codex", remote.sessionId);
+		const first = accounts.find(account => account.accountId === "account-daybreak-oauth-worker-a");
+		const second = accounts.find(account => account.accountId === "account-daybreak-oauth-worker-c");
+		if (!first || !second) throw new Error("stored Codex accounts missing");
+		registry.authStorage.sessions.pin("openai-codex", remote.sessionId, first.credentialId);
+		expect(render()).toContain("☼");
+		await probe.reportRequestAccount("W1", "account-daybreak-env-standard-worker");
+		await waitFor(() => !remote.isDaybreakSelected());
+		expect(render()).not.toContain("☼");
+		await registry.authStorage.credentials.set("anthropic", { type: "api_key", key: "unrelated-credential" });
+		expect(render()).not.toContain("☼");
+		registry.authStorage.sessions.pin("openai-codex", remote.sessionId, second.credentialId);
+		expect(render()).toContain("☼");
+		registry.authStorage.sessions.pin("openai-codex", remote.sessionId, first.credentialId);
+		expect(render()).not.toContain("☼");
+		await probe.reportRequestAccount("W1", "account-daybreak-oauth-worker-a");
+		await waitFor(() => remote.isDaybreakSelected());
+		registry.authStorage.sessions.pin("openai-codex", remote.sessionId, second.credentialId);
+		expect(render()).toContain("☼");
+		await view.controller.unfocus();
+		await view.controller.focusAgent("W1");
+		registry.authStorage.sessions.pin("openai-codex", remote.sessionId, first.credentialId);
+		expect(render()).toContain("☼");
+	});
+
+	it("removes Daybreak from the focused status line when a worker stream rejects it", async () => {
+		const model = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!model) throw new Error("bundled Codex model missing");
+		const registry = await mainRegistry();
+		await registry.authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "test-access",
+			refresh: "test-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-daybreak-test",
+		});
+		vi.spyOn(registry.authStorage.keys, "get").mockResolvedValue("test-key");
+		const probe = await startWorker();
+		await probe.open(
+			"W1",
+			registry,
+			{},
+			{
+				...model,
+				accountAccess: { "account-daybreak-test": { cyberPrograms: ["daybreak_blue"] } },
+			},
+		);
+		const remote = mirrorOf("W1");
+		const view = focusHarness();
+		await view.controller.focusAgent("W1");
+		const statusLine = new StatusLineComponent(remote, statusLineHost);
+		cleanups.push(() => statusLine.dispose());
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["model"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		const render = (): string => stripVTControlCharacters(statusLine.getTopBorder(160).content);
+		expect(render()).not.toContain("☼");
+		const account = registry.authStorage.oauth.accounts("openai-codex", remote.sessionId)[0];
+		if (!account) throw new Error("stored Codex account missing");
+		registry.authStorage.sessions.pin("openai-codex", remote.sessionId, account.credentialId);
+		expect(render()).toContain("☼");
+		const turn = probe.prompt("W1", "[reject-daybreak]");
+		await waitFor(() => view.events.some(event => event.type === "message_start"));
+		expect(render()).toContain("☼");
+		await probe.release();
+		await waitFor(() =>
+			view.events.some(event => event.type === "message_update" && event.assistantMessageEvent.type === "start"),
+		);
+		await waitFor(() => !remote.isDaybreakSelected());
+		expect(render()).not.toContain("☼");
+		await probe.release();
+		await turn;
+	});
+
+	it("refreshes an idle focused session when another worker session loses Daybreak", async () => {
+		const model = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!model) throw new Error("bundled Codex model missing");
+		const registry = await mainRegistry();
+		await registry.authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "test-access",
+			refresh: "test-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-daybreak-test",
+		});
+		vi.spyOn(registry.authStorage.keys, "get").mockResolvedValue("test-key");
+		const probe = await startWorker();
+		const eligible = { ...model, accountAccess: { "account-daybreak-test": { cyberPrograms: ["daybreak_blue"] } } };
+		await probe.open("W1", registry, {}, eligible);
+		await probe.open("W2", registry, {}, eligible);
+		const first = mirrorOf("W1");
+		const focused = mirrorOf("W2");
+		const account = registry.authStorage.oauth.accounts("openai-codex", focused.sessionId)[0];
+		if (!account) throw new Error("stored Codex account missing");
+		registry.authStorage.sessions.pin("openai-codex", first.sessionId, account.credentialId);
+		registry.authStorage.sessions.pin("openai-codex", focused.sessionId, account.credentialId);
+		const view = focusHarness();
+		await view.controller.focusAgent("W2");
+		const statusLine = new StatusLineComponent(focused, statusLineHost);
+		cleanups.push(() => statusLine.dispose());
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["model"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		const render = (): string => stripVTControlCharacters(statusLine.getTopBorder(160).content);
+		expect(render()).toContain("☼");
+		const selectedModel = focused.model;
+		if (!selectedModel) throw new Error("focused model missing");
+		focused.applyPatch({ model: { ...selectedModel, id: "ineligible-codex-model" } });
+		expect(render()).not.toContain("☼");
+		focused.applyPatch({ model: selectedModel });
+		expect(render()).toContain("☼");
+		focused.applyPatch({ model: { ...selectedModel, provider: "other-codex" } });
+		expect(render()).not.toContain("☼");
+		focused.applyPatch({ model: selectedModel });
+		expect(render()).toContain("☼");
+		const rendersBeforeRejection = view.renderRequests();
+		const turn = probe.prompt("W1", "[reject-daybreak]");
+		await waitFor(() => first.agent.state.streamMessage?.role === "assistant");
+		await probe.release();
+		await waitFor(() => !focused.isDaybreakSelected());
+		await waitFor(() => view.renderRequests() > rendersBeforeRejection);
+		expect(render()).not.toContain("☼");
+		await probe.release();
+		await turn;
+	}, 15_000);
+
 	it("persists todo HUD writes into the worker session and serves the child's settings on main", async () => {
 		const probe = await startWorker();
 		await probe.open("W1", await mainRegistry(), { "tasks.todoClearDelay": 7 });
@@ -486,5 +702,205 @@ describe("queued messages of a focused worker-homed session", () => {
 		await probe.release();
 		await running;
 		expect((await probe.report("W1")).userTexts).toEqual(["[hold] working"]);
+	});
+});
+describe("main-thread Daybreak status", () => {
+	it("follows the request bearer after OAuth falls back, then follows a new pin", async () => {
+		const bundled = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!bundled) throw new Error("bundled Codex model missing");
+		const model = {
+			...bundled,
+			id: "gpt-6-sol-pinned-fallback-test",
+			accountAccess: {
+				"account-daybreak-pinned-a": { cyberPrograms: ["daybreak_blue"] },
+				"account-daybreak-pinned-c": { cyberPrograms: ["daybreak_blue"] },
+				"account-daybreak-config-fallback": { cyberPrograms: ["daybreak_blue"] },
+			},
+		};
+		const registry = await mainRegistry();
+		await registry.authStorage.credentials.set("openai-codex", [
+			{
+				type: "oauth",
+				access: "access-a",
+				refresh: "refresh-a",
+				expires: Date.now() + 60_000,
+				accountId: "account-daybreak-pinned-a",
+			},
+			{
+				type: "oauth",
+				access: "access-c",
+				refresh: "refresh-c",
+				expires: Date.now() + 60_000,
+				accountId: "account-daybreak-pinned-c",
+			},
+		]);
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: registry,
+		});
+		cleanups.push(() => session.dispose());
+		const accounts = registry.authStorage.oauth.accounts("openai-codex", session.sessionId);
+		const first = accounts.find(account => account.accountId === "account-daybreak-pinned-a");
+		const second = accounts.find(account => account.accountId === "account-daybreak-pinned-c");
+		if (!first || !second) throw new Error("stored Codex accounts missing");
+		registry.authStorage.sessions.pin("openai-codex", session.sessionId, first.credentialId);
+		expect(session.isDaybreakSelected()).toBe(true);
+		reportCodexRequestAccount(session.sessionId, model.provider, model.id, "account-daybreak-env-standard");
+		expect(session.isDaybreakSelected()).toBe(false);
+		await registry.authStorage.credentials.set("anthropic", { type: "api_key", key: "unrelated-credential" });
+		expect(session.isDaybreakSelected()).toBe(false);
+		registry.authStorage.keys.setConfig("openai-codex", "fallback-token-a", { fallback: true });
+		expect(session.isDaybreakSelected()).toBe(false);
+		reportCodexRequestAccount(session.sessionId, model.provider, model.id, "account-daybreak-config-fallback");
+		expect(session.isDaybreakSelected()).toBe(true);
+		registry.authStorage.keys.setConfig("openai-codex", "fallback-token-b", { fallback: true });
+		expect(session.isDaybreakSelected()).toBe(false);
+		registry.authStorage.sessions.pin("openai-codex", session.sessionId, second.credentialId);
+		expect(session.isDaybreakSelected()).toBe(true);
+	});
+
+	it("uses a reported fallback account only while the auth state still matches", async () => {
+		const bundled = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!bundled) throw new Error("bundled Codex model missing");
+		const fallbackAccountId = "account-daybreak-fallback-test";
+		const model = {
+			...bundled,
+			id: "gpt-6-sol-auth-fallback-test",
+			accountAccess: { [fallbackAccountId]: { cyberPrograms: ["daybreak_blue"] } },
+		};
+		const registry = await mainRegistry();
+		await registry.authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "test-access",
+			refresh: "test-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-daybreak-stored-test",
+		});
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: registry,
+		});
+		cleanups.push(() => session.dispose());
+		expect(session.isDaybreakSelected()).toBe(false);
+		reportCodexRequestAccount(session.sessionId, model.provider, model.id, fallbackAccountId);
+		expect(session.isDaybreakSelected()).toBe(true);
+		await registry.authStorage.credentials.remove("openai-codex");
+		expect(session.isDaybreakSelected()).toBe(false);
+		await registry.authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "replacement-access",
+			refresh: "replacement-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-daybreak-replacement-test",
+		});
+		expect(session.isDaybreakSelected()).toBe(false);
+		reportCodexRequestAccount(session.sessionId, model.provider, model.id, fallbackAccountId);
+		expect(session.isDaybreakSelected()).toBe(true);
+	});
+
+	it("uses the resolved request account when runtime auth overrides a stored OAuth account", async () => {
+		const bundled = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!bundled) throw new Error("bundled Codex model missing");
+		const oauthAccountId = "account-daybreak-oauth-override-test";
+		const runtimeAccountId = "account-daybreak-runtime-override-test";
+		const model = {
+			...bundled,
+			id: "gpt-6-sol-runtime-override-test",
+			accountAccess: {
+				[runtimeAccountId]: { cyberPrograms: ["daybreak_blue"] },
+			},
+		};
+		const registry = await mainRegistry();
+		await registry.authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "test-access",
+			refresh: "test-refresh",
+			expires: Date.now() + 60_000,
+			accountId: oauthAccountId,
+		});
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: registry,
+		});
+		cleanups.push(() => session.dispose());
+		const account = registry.authStorage.oauth.accounts("openai-codex", session.sessionId)[0];
+		if (!account) throw new Error("stored Codex account missing");
+		registry.authStorage.sessions.pin("openai-codex", session.sessionId, account.credentialId);
+		registry.authStorage.keys.setRuntime("openai-codex", "runtime-test-token");
+		expect(session.isDaybreakSelected()).toBe(false);
+		reportCodexRequestAccount(session.sessionId, model.provider, model.id, runtimeAccountId);
+		expect(session.isDaybreakSelected()).toBe(true);
+		registry.authStorage.keys.setRuntime("openai-codex", "replacement-runtime-token");
+		expect(session.isDaybreakSelected()).toBe(false);
+		reportCodexRequestAccount(session.sessionId, model.provider, model.id, runtimeAccountId);
+		expect(session.isDaybreakSelected()).toBe(true);
+		registry.authStorage.keys.setConfig("openai-codex", "config-token-a");
+		registry.authStorage.keys.removeRuntime("openai-codex");
+		expect(session.isDaybreakSelected()).toBe(false);
+		reportCodexRequestAccount(session.sessionId, model.provider, model.id, runtimeAccountId);
+		expect(session.isDaybreakSelected()).toBe(true);
+		registry.authStorage.keys.setConfig("openai-codex", "config-token-b");
+		expect(session.isDaybreakSelected()).toBe(false);
+		registry.authStorage.keys.setRuntime("other-codex", "other-provider-token");
+		session.agent.setModel({ ...model, provider: "other-codex" });
+		expect(session.isDaybreakSelected()).toBe(false);
+		reportCodexRequestAccount(session.sessionId, "other-codex", model.id, "account-daybreak-standard-other");
+		expect(session.isDaybreakSelected()).toBe(false);
+	});
+
+	it("notifies only for the selected account and clears the icon after rejection", async () => {
+		const bundled = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!bundled) throw new Error("bundled Codex model missing");
+		const model = {
+			...bundled,
+			id: "gpt-6-sol-daybreak-main-test",
+			accountAccess: {
+				"account-daybreak-main": { cyberPrograms: ["daybreak_blue"] },
+				"account-daybreak-other": { cyberPrograms: ["daybreak_blue"] },
+			},
+		};
+		const registry = await mainRegistry();
+		await registry.authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "test-access",
+			refresh: "test-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-daybreak-main",
+		});
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: registry,
+		});
+		cleanups.push(() => session.dispose());
+		const account = registry.authStorage.oauth.accounts("openai-codex", session.sessionId)[0];
+		if (!account) throw new Error("stored Codex account missing");
+		registry.authStorage.sessions.pin("openai-codex", session.sessionId, account.credentialId);
+		expect(session.isDaybreakSelected()).toBe(true);
+		let notifications = 0;
+		const unsubscribe = session.subscribeDaybreakChange(() => notifications++);
+		cleanups.push(unsubscribe);
+		const reject = (accountId: string): void => {
+			const body = { access_programs: { cyber: "daybreak_blue" } } as RequestBody;
+			dropRejectedCodexAccessPrograms(
+				body,
+				model as Model<"openai-codex-responses">,
+				accountId,
+				new Error("access program is not authorized"),
+			);
+		};
+		reject("account-daybreak-other");
+		expect(notifications).toBe(0);
+		expect(session.isDaybreakSelected()).toBe(true);
+		reject("account-daybreak-main");
+		expect(notifications).toBe(1);
+		expect(session.isDaybreakSelected()).toBe(false);
 	});
 });

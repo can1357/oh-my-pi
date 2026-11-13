@@ -105,6 +105,7 @@ export class CredentialPool implements CredentialsApi {
 	 */
 	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
 	#generation = 1;
+	#providerGenerations: Map<string, number> = new Map();
 	#generationListeners: Set<(generation: number) => void> = new Set();
 	#closed = false;
 
@@ -122,6 +123,10 @@ export class CredentialPool implements CredentialsApi {
 
 	get generation(): number {
 		return this.#generation;
+	}
+
+	generationOf(provider: string): number {
+		return this.#providerGenerations.get(provider) ?? 0;
 	}
 
 	providers(): IterableIterator<string> {
@@ -219,6 +224,17 @@ export class CredentialPool implements CredentialsApi {
 		this.#pendingDisabledEvents = previous.#pendingDisabledEvents;
 		previous.#pendingDisabledEvents = [];
 		this.#generation = previous.#generation;
+		for (const provider of new Set([
+			...previous.#providerGenerations.keys(),
+			...previous.#data.keys(),
+			...this.#data.keys(),
+		])) {
+			const changed = !storedCredentialArraysEqual(
+				previous.#data.get(provider) ?? [],
+				this.#data.get(provider) ?? [],
+			);
+			this.#providerGenerations.set(provider, previous.generationOf(provider) + Number(changed));
+		}
 	}
 
 	onGeneration(listener: (generation: number) => void): () => void {
@@ -356,6 +372,7 @@ export class CredentialPool implements CredentialsApi {
 		} else {
 			this.#data.set(provider, credentials);
 		}
+		this.#providerGenerations.set(provider, this.generationOf(provider) + 1);
 		this.bump("credentials");
 	}
 

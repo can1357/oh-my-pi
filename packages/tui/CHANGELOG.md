@@ -4,6 +4,7 @@
 
 ### Added
 
+- The model status line can display a Daybreak icon in Unicode, Nerd Font, and ASCII modes ([#18730](https://github.com/can1357/oh-my-pi/pull/18730) by [@fabian-lu-ha](https://github.com/fabian-lu-ha))
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 

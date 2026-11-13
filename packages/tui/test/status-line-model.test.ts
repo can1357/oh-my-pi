@@ -1,5 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { StatusLineComponent } from "../src/status-line/component";
+import type { StatusLineHost } from "../src/status-line/host";
 import type { SegmentContext } from "../src/status-line/segments";
 import { renderSegment } from "../src/status-line/segments";
 import { initTheme, theme } from "../src/theme";
@@ -136,6 +138,62 @@ describe("status line model segment advisor badge", () => {
 		const rendered = renderSegment("model", createModelContext(false));
 		expect(rendered.content).toContain("Test Model");
 		expect(rendered.content).not.toContain(theme.icon.advisor);
+	});
+});
+
+describe("status line Daybreak indicator", () => {
+	it("updates both cached renderers when Daybreak selection changes", () => {
+		let selected = true;
+		const session = createModelContext(false).session;
+		Object.assign(session, {
+			state: { ...session.state, messages: [] },
+			model: session.state.model,
+			messages: [],
+			isStreaming: false,
+			sessionManager: {
+				getSessionName: () => undefined,
+				getSessionId: () => "",
+				getUsageStatistics: () => ({}),
+			},
+			modelRegistry: { isUsingSubscription: () => false },
+			getContextUsage: () => undefined,
+			getAsyncJobSnapshot: () => null,
+			getGoalModeState: () => undefined,
+			isDaybreakSelected: () => selected,
+		});
+		const host = {
+			getSettings: () => ({ preset: "custom", leftSegments: ["model"], rightSegments: [] }),
+			gitEnabled: () => false,
+			codexResetFireworksEnabled: () => false,
+			getSettingsRevision: () => 0,
+			getSessionSettingsIdentity: () => undefined,
+			getSessionSettingsRevision: () => 0,
+			goalStatusInFooter: () => false,
+			activeAccount: () => undefined,
+			canFetchUsageReports: () => false,
+			fetchUsageReports: async () => null,
+			resolveActiveRepo: () => null,
+			lookupPullRequest: async () => ({ stdout: "", exitCode: 1 }),
+			calculateTokensPerSecond: () => null,
+			limitMatchesActiveAccount: () => false,
+			computeCompactionBoundaries: () => null,
+		} as unknown as StatusLineHost;
+		const line = new StatusLineComponent(session, host);
+		try {
+			expect(line.renderBottomBar(120, "full")).toContain(theme.icon.daybreak);
+			expect(line.describeComposerFacts().model.spans).toContainEqual({
+				t: ` ${theme.icon.daybreak}`,
+				s: "warning",
+			});
+			selected = false;
+			expect(line.renderBottomBar(120, "full")).not.toContain(theme.icon.daybreak);
+			expect(line.describeComposerFacts().model.spans).not.toContainEqual({
+				t: ` ${theme.icon.daybreak}`,
+				s: "warning",
+			});
+		} finally {
+			line.dispose();
+		}
 	});
 });
 

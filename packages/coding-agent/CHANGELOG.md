@@ -4,6 +4,7 @@
 
 ### Added
 
+- The model status line shows a Daybreak icon when the selected Codex account will request Daybreak Blue, and clears it if access is rejected ([#18730](https://github.com/can1357/oh-my-pi/pull/18730) by [@fabian-lu-ha](https://github.com/fabian-lu-ha))
 - Subagents now preserve @upstream provider pinning on inherited models
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.

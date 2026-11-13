@@ -26,6 +26,43 @@ const REJECTION_PATTERN = /\baccess[ _]programs?\b|\breduced refusals\b/i;
 
 /** `${accountId}\0${modelId}` pairs whose program the backend rejected this process. */
 const droppedPrograms = new Set<string>();
+const rejectionListeners = new Set<(modelId: string, accountId: string) => void>();
+const requestAccountListeners = new Set<
+	(sessionId: string, provider: string, modelId: string, accountId: string | undefined) => void
+>();
+
+/** Observe the account resolved from the bearer for a Codex session request. */
+export function onCodexRequestAccount(
+	listener: (sessionId: string, provider: string, modelId: string, accountId: string | undefined) => void,
+): () => void {
+	requestAccountListeners.add(listener);
+	return () => requestAccountListeners.delete(listener);
+}
+
+/** Publish only the non-secret account id, never the bearer. */
+export function reportCodexRequestAccount(
+	sessionId: string | undefined,
+	provider: string,
+	modelId: string,
+	accountId: string | undefined,
+): void {
+	if (!sessionId) return;
+	for (const listener of Array.from(requestAccountListeners)) {
+		try {
+			listener(sessionId, provider, modelId, accountId);
+		} catch (error) {
+			logger.warn("Codex request account listener failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+}
+
+/** Subscribe to newly rejected account/model pairs in this process. */
+export function onCodexAccessProgramRejected(listener: (modelId: string, accountId: string) => void): () => void {
+	rejectionListeners.add(listener);
+	return () => rejectionListeners.delete(listener);
+}
 
 /** Process-wide default for requests without `codexAccessPrograms`; see {@link configureCodexAccessPrograms}. */
 let accessProgramsDefault = true;
@@ -40,6 +77,20 @@ export function configureCodexAccessPrograms(enabled: boolean): void {
 	accessProgramsDefault = enabled;
 }
 
+/** Whether a request would include Daybreak Blue for this account and model. */
+export function wouldRequestCodexAccessProgram(
+	model: Model,
+	accountId: string | undefined,
+	requested: boolean | undefined,
+): boolean {
+	return (
+		(requested ?? accessProgramsDefault) &&
+		!!accountId &&
+		model.accountAccess?.[accountId]?.cyberPrograms?.includes(DAYBREAK_BLUE) === true &&
+		!droppedPrograms.has(`${accountId}\0${model.id}`)
+	);
+}
+
 /**
  * Request Daybreak Blue on `body` when `requested` (else the process default)
  * allows it, `accountId` may use it on `model`, and no earlier rejection
@@ -51,9 +102,7 @@ export function applyCodexAccessPrograms(
 	accountId: string | undefined,
 	requested: boolean | undefined,
 ): void {
-	if (!(requested ?? accessProgramsDefault) || !accountId) return;
-	if (!model.accountAccess?.[accountId]?.cyberPrograms?.includes(DAYBREAK_BLUE)) return;
-	if (droppedPrograms.has(`${accountId}\0${model.id}`)) return;
+	if (!wouldRequestCodexAccessProgram(model, accountId, requested)) return;
 	body.access_programs = { cyber: DAYBREAK_BLUE };
 }
 
@@ -70,7 +119,21 @@ export function dropRejectedCodexAccessPrograms(
 ): boolean {
 	if (body.access_programs === undefined || !isAccessProgramRejection(error)) return false;
 	delete body.access_programs;
-	if (accountId) droppedPrograms.add(`${accountId}\0${model.id}`);
+	if (accountId) {
+		const pair = `${accountId}\0${model.id}`;
+		if (!droppedPrograms.has(pair)) {
+			droppedPrograms.add(pair);
+			for (const listener of Array.from(rejectionListeners)) {
+				try {
+					listener(model.id, accountId);
+				} catch (listenerError) {
+					logger.warn("Codex access program rejection listener failed", {
+						error: listenerError instanceof Error ? listenerError.message : String(listenerError),
+					});
+				}
+			}
+		}
+	}
 	logger.warn("Codex rejected the requested access program; retrying without it", {
 		model: model.id,
 		accountId,

@@ -85,6 +85,11 @@ import type {
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
+import {
+	onCodexAccessProgramRejected,
+	onCodexRequestAccount,
+	wouldRequestCodexAccessProgram,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -382,6 +387,7 @@ import {
 } from "./codex-auto-reset";
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
+import { daybreakAuthKey, selectedOAuthAccountId } from "./daybreak-status";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
@@ -545,6 +551,7 @@ import {
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
+	cfgProvidersOpenaiCodexDaybreak,
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
@@ -1087,6 +1094,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
 	#unsubscribeQueueChange?: () => void;
+	/** Account from the last bearer actually resolved for a Codex request by this session. */
+	#lastCodexRequestAccount:
+		| {
+				modelId: string;
+				authKey: string | undefined;
+				accountId: string | undefined;
+				selectedOAuthAccountId: string | undefined;
+		  }
+		| undefined;
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -3105,6 +3121,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
 		this.addDisposer(this.agent.onPauseChange(paused => this.#onAgentPauseChange(paused)));
+		this.addDisposer(
+			onCodexRequestAccount((sessionId, provider, modelId, accountId) => {
+				const model = this.model;
+				if (sessionId === this.sessionId && model?.provider === provider && model.id === modelId) {
+					this.#lastCodexRequestAccount = {
+						modelId,
+						authKey: daybreakAuthKey(this.#modelRegistry.authStorage, model.provider, sessionId),
+						accountId,
+						selectedOAuthAccountId: selectedOAuthAccountId(
+							this.#modelRegistry.authStorage,
+							model.provider,
+							sessionId,
+						),
+					};
+				}
+			}),
+		);
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
@@ -12693,6 +12726,72 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Reports whether priority service is realized by the active model. */
 	isFastModeActive(): boolean {
 		return this.#models.isFastModeActive();
+	}
+
+	/** Whether the active Codex credential can request Daybreak Blue. */
+	isDaybreakSelected(): boolean {
+		const model = this.model;
+		if (!model || model.api !== "openai-codex-responses" || !cfgProvidersOpenaiCodexDaybreak.get(this.settings))
+			return false;
+		// Avoid an OAuth storage lookup when no account can still request it.
+		if (
+			!Object.keys(model.accountAccess ?? {}).some(accountId =>
+				wouldRequestCodexAccessProgram(model, accountId, true),
+			)
+		)
+			return false;
+		return wouldRequestCodexAccessProgram(model, this.#daybreakAccountId(model), true);
+	}
+
+	#daybreakAccountId(model: Model): string | undefined {
+		const auth = this.#modelRegistry.authStorage;
+		const source = auth.keys.source(model.provider, { fresh: true });
+		if (!source) return undefined;
+		const request = this.#lastCodexRequestAccount;
+		const selected =
+			source.kind === "oauth" ? selectedOAuthAccountId(auth, model.provider, this.sessionId) : undefined;
+		if (!request || request.modelId !== model.id) return selected;
+		if (request.authKey === daybreakAuthKey(auth, model.provider, this.sessionId)) return request.accountId;
+		return source.kind === "oauth" && selected !== request.selectedOAuthAccountId ? selected : undefined;
+	}
+
+	/** Account from this model's most recent request; the mirror validates it against its stamp. */
+	daybreakRequestAccountId(): string | undefined {
+		const request = this.#lastCodexRequestAccount;
+		const model = this.model;
+		if (!request || !model || request.modelId !== model.id) return undefined;
+		return request.accountId;
+	}
+
+	daybreakRequestAuthKey(): string | undefined {
+		return this.#lastCodexRequestAccount?.modelId === this.model?.id
+			? this.#lastCodexRequestAccount?.authKey
+			: undefined;
+	}
+
+	daybreakRequestSelectedOAuthAccountId(): string | undefined {
+		return this.#lastCodexRequestAccount?.modelId === this.model?.id
+			? this.#lastCodexRequestAccount?.selectedOAuthAccountId
+			: undefined;
+	}
+
+	subscribeDaybreakChange(listener: () => void): () => void {
+		const unsubscribeRequest = onCodexRequestAccount((sessionId, provider, modelId) => {
+			if (sessionId === this.sessionId && this.model?.provider === provider && this.model.id === modelId) listener();
+		});
+		const unsubscribe = onCodexAccessProgramRejected((modelId, accountId) => {
+			const model = this.model;
+			if (model?.api !== "openai-codex-responses" || model.id !== modelId) return;
+			if (this.#daybreakAccountId(model) === accountId) listener();
+		});
+		const dispose = () => {
+			unsubscribe();
+			unsubscribeRequest();
+			const index = this.#disposers.indexOf(dispose);
+			if (index !== -1) this.#disposers.splice(index, 1);
+		};
+		this.addDisposer(dispose);
+		return dispose;
 	}
 
 	/** Reports whether a fresh session on `model` realizes a fast tier from configured `tier.*` settings. */

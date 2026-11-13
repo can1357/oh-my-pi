@@ -361,8 +361,8 @@ const modelSegment: StatusLineSegment = {
 		const modelIcon = compact ? leadingGlyph(thinkingDisplay) : theme.icon.model;
 
 		// Fast-mode icon and thinking-level suffix trail the model name and are
-		// colored together with it as `statusLineModel`. The advisor symbol sits
-		// between the name and that tail, so it reads as a distinct marker.
+		// colored together with it as `statusLineModel`. Advisor and Daybreak markers
+		// sit between the name and that tail, so they read as distinct markers.
 		// theme.fg resets only the fg, so the spans are concatenated (not
 		// nested) to keep each color intact.
 		let tail = "";
@@ -379,6 +379,7 @@ const modelSegment: StatusLineSegment = {
 		// Per-advisor detail lives in `/advisor status`.
 		const advisor = modelAdvisorBadge(ctx);
 		if (advisor) content += theme.fg(advisor.color, ` ${advisor.icon}`);
+		if (ctx.session.isDaybreakSelected?.()) content += theme.fg("warning", ` ${theme.icon.daybreak}`);
 		if (tail) {
 			content += accentFg(ctx, "statusLineModel", tail);
 		}
@@ -396,6 +397,7 @@ const modelSegment: StatusLineSegment = {
 		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
 		const advisor = modelAdvisorBadge(ctx);
 		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
+		if (ctx.session.isDaybreakSelected?.()) spans.push(span(` ${theme.icon.daybreak}`, "warning"));
 		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
 		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));

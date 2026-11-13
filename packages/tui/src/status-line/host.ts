@@ -102,6 +102,8 @@ export interface StatusLineSession {
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number | null } | undefined;
 	autoResolvedThinkingLevel(): string | undefined;
 	isFastModeActive(): boolean;
+	/** Whether the active Codex credential can request Daybreak Blue. */
+	isDaybreakSelected?(): boolean;
 	/** Anthropic usage-limit label (`limit reached · wrapping up · resets 14:30`, `low priority until 14:30 · 62% left`). */
 	getAnthropicSlowModeLabel?(): string | undefined;
 	getPrewalkState?(): unknown;

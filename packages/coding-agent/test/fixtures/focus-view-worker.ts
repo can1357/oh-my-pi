@@ -11,6 +11,11 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import {
+	dropRejectedCodexAccessPrograms,
+	reportCodexRequestAccount,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
+import type { RequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -42,9 +47,11 @@ export interface FocusSessionReport {
 /** Operations the test drives on the worker. */
 export interface FocusProbe {
 	/** Build, register, and return the key of a session homed here, over main's `registry`. */
-	open(id: string, registry: ModelRegistry, settings: Record<string, unknown>): Promise<string>;
+	open(id: string, registry: ModelRegistry, settings: Record<string, unknown>, model?: Model<Api>): Promise<string>;
 	/** Prompt the session on its home thread; resolves when the run settles. */
 	prompt(id: string, text: string): Promise<void>;
+	/** Simulate a provider request whose bearer resolves to this account. */
+	reportRequestAccount(id: string, accountId: string): Promise<void>;
 	/** Release the reply held between its two deltas. */
 	release(): Promise<void>;
 	report(id: string): Promise<FocusSessionReport>;
@@ -79,6 +86,7 @@ function heldStream(model: Model<Api>, context: Context, _options?: SimpleStream
 	const stream = new AssistantMessageEventStream();
 	const lastUser = context.messages.findLast(message => message.role === "user");
 	const hold = textOf(lastUser?.content).includes("[hold]");
+	const rejectDaybreak = textOf(lastUser?.content).includes("[reject-daybreak]");
 	void (async () => {
 		const text: TextContent = { type: "text", text: "" };
 		const partial: AssistantMessage = {
@@ -92,6 +100,18 @@ function heldStream(model: Model<Api>, context: Context, _options?: SimpleStream
 			timestamp: Date.now(),
 		};
 		stream.push({ type: "start", partial });
+		if (rejectDaybreak && model.api === "openai-codex-responses") {
+			await gate.promise;
+			const body = { access_programs: { cyber: "daybreak_blue" } } as RequestBody;
+			dropRejectedCodexAccessPrograms(
+				body,
+				model as Model<"openai-codex-responses">,
+				"account-daybreak-test",
+				new Error("access program is not authorized"),
+			);
+			stream.push({ type: "start", partial });
+			await gate.promise;
+		}
 		partial.content.push(text);
 		stream.push({ type: "text_start", contentIndex: 0, partial });
 		if (hold) {
@@ -128,8 +148,8 @@ function textOf(content: unknown): string {
 }
 
 const probe: FocusProbe = {
-	open: async (id, registry, overrides) => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	open: async (id, registry, overrides, requestedModel) => {
+		const model = requestedModel ?? getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("bundled model missing");
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -153,6 +173,11 @@ const probe: FocusProbe = {
 	},
 	prompt: async (id, text) => {
 		await local(id).prompt(text);
+	},
+	reportRequestAccount: async (id, accountId) => {
+		const session = local(id);
+		if (!session.model) throw new Error("session model missing");
+		reportCodexRequestAccount(session.sessionId, session.model.provider, session.model.id, accountId);
 	},
 	release: async () => {
 		gate.resolve();

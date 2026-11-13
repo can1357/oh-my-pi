@@ -48,6 +48,11 @@
  */
 import type { AgentMessage, AgentTool, QueuedMessageGate } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import {
+	onCodexAccessProgramRejected,
+	onCodexRequestAccount,
+	wouldRequestCodexAccessProgram,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import type { OverlayLayers, Settings } from "../config/settings";
@@ -221,6 +226,8 @@ export class SessionPublisher {
 	readonly #unsubscribe: () => void;
 	readonly #unsubscribeRunState: () => void;
 	readonly #unsubscribeIrcWakeHolds: () => void;
+	readonly #unsubscribeDaybreakRejections: () => void;
+	readonly #unsubscribeDaybreakRequests: () => void;
 
 	constructor(session: AgentSession, bridge: SessionBridgeClient) {
 		this.session = session;
@@ -253,6 +260,19 @@ export class SessionPublisher {
 		this.#unsubscribeRunState = session.subscribeRunState(state => this.#onRunState(state));
 		// `ircWakesPending` gates main's idle parking and changes without an event.
 		this.#unsubscribeIrcWakeHolds = session.subscribeIrcWakeHolds(() => this.schedule());
+		this.#unsubscribeDaybreakRejections = onCodexAccessProgramRejected((modelId, accountId) => {
+			if (!this.#watched || this.session.model?.id !== modelId) return;
+			if (this.#view?.daybreakEligibleAccounts.includes(accountId)) this.schedule();
+		});
+		this.#unsubscribeDaybreakRequests = onCodexRequestAccount((sessionId, provider, modelId) => {
+			if (
+				this.#watched &&
+				sessionId === this.session.sessionId &&
+				this.session.model?.provider === provider &&
+				this.session.model.id === modelId
+			)
+				this.schedule();
+		});
 		session.addDisposer(() => this.close());
 	}
 
@@ -300,6 +320,8 @@ export class SessionPublisher {
 		this.#unsubscribe();
 		this.#unsubscribeRunState();
 		this.#unsubscribeIrcWakeHolds();
+		this.#unsubscribeDaybreakRejections();
+		this.#unsubscribeDaybreakRequests();
 		this.#bridge.remote.notify("closed", this.#key);
 	}
 
@@ -442,6 +464,15 @@ export class SessionPublisher {
 		if (changed) this.#bridge.remote.notify("viewPatch", this.#key, patch);
 	}
 
+	#daybreakEligibleAccounts(): string[] {
+		const model = this.session.model;
+		return model?.api === "openai-codex-responses"
+			? Object.keys(model.accountAccess ?? {}).filter(accountId =>
+					wouldRequestCodexAccessProgram(model, accountId, true),
+				)
+			: [];
+	}
+
 	#captureView(): DiffedViewState {
 		const session = this.session;
 		const manager = session.sessionManager;
@@ -503,6 +534,12 @@ export class SessionPublisher {
 			availableEffortSelectors: session.getAvailableEffortSelectors(),
 			serviceTierByFamily: toWireData(session.serviceTierByFamily),
 			fastModeActive: session.isFastModeActive(),
+			daybreakModelId: session.model?.api === "openai-codex-responses" ? session.model.id : undefined,
+			daybreakProviderId: session.model?.api === "openai-codex-responses" ? session.model.provider : undefined,
+			daybreakEligibleAccounts: this.#daybreakEligibleAccounts(),
+			daybreakRequestAccountId: session.daybreakRequestAccountId(),
+			daybreakRequestAuthKey: session.daybreakRequestAuthKey(),
+			daybreakRequestSelectedOAuthAccountId: session.daybreakRequestSelectedOAuthAccountId(),
 			anthropicSlowModeLabel: session.getAnthropicSlowModeLabel(),
 			prewalk: toWireData(session.getPrewalkState()),
 			goalMode: toWireData(session.getGoalModeState()),

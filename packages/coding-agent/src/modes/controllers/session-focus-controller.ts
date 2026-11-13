@@ -227,7 +227,7 @@ export class SessionFocusController {
 			// reads of `target` already show, so nothing is drawn twice or into a replaced chat.
 			let arrivals = 0;
 			let shown: ShownByRebuild | undefined;
-			this.ctx.unsubscribe = target.subscribe(event => {
+			const unsubscribeEvents = target.subscribe(event => {
 				const arrival = ++arrivals;
 				const streamMessage = target.agent.state.streamMessage;
 				return this.#runSerialized(generation, async () => {
@@ -260,6 +260,13 @@ export class SessionFocusController {
 					await this.ctx.eventController.handleEvent(event);
 				});
 			});
+			const unsubscribeDaybreak = target.subscribeDaybreakChange?.(() => {
+				if (generation === this.#attachGeneration) this.ctx.ui.requestRender();
+			});
+			this.ctx.unsubscribe = () => {
+				unsubscribeEvents();
+				unsubscribeDaybreak?.();
+			};
 			let restored: Promise<void> | undefined;
 			await this.#runSerialized(generation, async () => {
 				const rebuilt = await this.#rebuild(target, generation, () => arrivals, restoreAssistant);

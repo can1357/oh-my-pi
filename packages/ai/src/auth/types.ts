@@ -736,6 +736,8 @@ export interface AuthSourceOptions {
 	 * `"none"`: ignore env vars entirely.
 	 */
 	env?: "dedicated" | "aliases" | "none";
+	/** Read the current source instead of a worker's availability snapshot. */
+	fresh?: boolean;
 }
 
 /** Options for {@link KeysApi.peek}. */
@@ -841,6 +843,8 @@ export type OAuthLoginController = OAuthController & {
 export interface CredentialsApi {
 	/** Read the current credential snapshot generation. */
 	readonly generation: number;
+	/** Generation of one provider's credential rows. */
+	generationOf(provider: string): number;
 	/** Subscribe to credential snapshot generation changes. */
 	onGeneration(listener: (generation: number) => void): () => void;
 	/**
@@ -998,6 +1002,8 @@ export interface KeysApi {
 	peek(provider: string, options?: AuthPeekOptions): Promise<string | undefined>;
 	/** Resolve the first active auth source by precedence without refreshing credentials. */
 	source(provider: string, options?: AuthSourceOptions): AuthSource | undefined;
+	/** Revision of runtime and config key overrides for this provider. */
+	overrideRevision(provider: string): number;
 	/**
 	 * True when the provider has stored credentials but none of them carries
 	 * auth — i.e. its only credential is the KDL `empty-fallback` keyless-mode

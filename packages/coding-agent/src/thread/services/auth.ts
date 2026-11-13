@@ -191,6 +191,7 @@ function authAvailability(storage: AuthStorage, providers: readonly string[]): A
 function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStorageProtocol> {
 	return {
 		"credentials.generation": storage => storage.credentials.generation,
+		"credentials.generationOf": (storage, provider) => storage.credentials.generationOf(provider),
 		"credentials.onGeneration": (storage, listener) =>
 			trackWorkerSubscription(
 				state.subscriptions,
@@ -223,6 +224,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 			storage.keys.getWithCredential(provider, sessionId, options),
 		"keys.peek": (storage, provider, options) => storage.keys.peek(provider, options),
 		"keys.source": (storage, provider, options) => storage.keys.source(provider, options),
+		"keys.overrideRevision": (storage, provider) => storage.keys.overrideRevision(provider),
 		"keys.availability": (storage, providers) => authAvailability(storage, providers),
 		"keys.availabilityOf": (storage, provider) => providerAvailability(storage, provider),
 		"keys.describe": (storage, provider, sessionId) => storage.keys.describe(provider, sessionId),
