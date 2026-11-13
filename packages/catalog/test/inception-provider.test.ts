@@ -32,11 +32,31 @@ describe("Inception model discovery", () => {
 			cacheDbPath: temp.join("models.db"),
 		};
 		const online = await resolveProviderModels(options, "online");
-		expect(online.models.map(model => model.id)).toEqual(["mercury-3"]);
+		// The chat roster replaces the bundle, but the authored Decisions row is
+		// appended back: its endpoint is never listed among chat models.
+		expect(online.models.map(model => model.id)).toEqual(["mercury-3", "mercury-decide"]);
 
 		unavailable = true;
 		const fallback = await resolveProviderModels(options, "online");
-		expect(fallback.models.map(model => model.id)).toEqual(["mercury-3"]);
+		expect(fallback.models.map(model => model.id)).toEqual(["mercury-3", "mercury-decide"]);
+	});
+
+	test("keeps the Mercury Decide judge row out of the chat filter", async () => {
+		const options = inceptionModelManagerOptions({
+			apiKey: "inception-test-key",
+			fetch: async () => Response.json({ data: [{ ...chatMetadata, id: "mercury-3" }] }),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.map(model => `${model.id}:${model.api}`)).toEqual([
+			"mercury-3:openai-completions",
+			"mercury-decide:inception-decisions",
+		]);
+		expect(buildModel(models![1])).toMatchObject({
+			kind: "judge",
+			input: ["text", "image"],
+			contextWindow: 65_536,
+			cost: { input: 0.02, output: 0 },
+		});
 	});
 
 	test("retains context and output limits for newly discovered chat models", async () => {
@@ -75,7 +95,7 @@ describe("Inception model discovery", () => {
 				}),
 		});
 		const models = await options.fetchDynamicModels?.();
-		expect(models?.map(model => model.id)).toEqual(["mercury-2"]);
+		expect(models?.map(model => model.id)).toEqual(["mercury-2", "mercury-decide"]);
 		const model = buildModel(models![0]);
 		expect(model).toMatchObject({
 			contextWindow: 256_000,

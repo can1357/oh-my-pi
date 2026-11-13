@@ -5,7 +5,11 @@ provider "inception" {
 	dynamic-models-authoritative #true
 	discovery label="Inception"
 
-	seed api="openai-completions" base-url="https://api.inceptionlabs.ai/v1" bundle="fallback" {
+	// `bundle="always"`: the Decisions row below is never discovered (the live
+	// roster's Decisions-only entry is dropped by the chat filter), so a
+	// fallback-only seed would lose it whenever a regeneration can reach
+	// `/v1/models`. Same-id discovery rows still win dedup for the chat rows.
+	seed api="openai-completions" base-url="https://api.inceptionlabs.ai/v1" bundle="always" {
 		model "mercury-3" name="Mercury 3" {
 			reasoning #true
 			input "text"
@@ -24,6 +28,27 @@ provider "inception" {
 			cost input=0.25 output=0.75 cache-read=0.025 cache-write=0
 			limits context=128000 max-tokens=50000
 		}
+		// Mercury Voice is the voice-agent chat model (docs.inceptionlabs.ai/
+		// get-started/models): text in and out, 128K context, 50K output, and
+		// low/medium/high effort. It is enterprise-gated, so only a live roster
+		// that carries it grants access.
+		model "mercury-voice" name="Mercury Voice" {
+			reasoning #true
+			input "text"
+			cost input=0.2 output=0.75 cache-read=0.02 cache-write=0
+			limits context=128000 max-tokens=50000
+		}
+		// Mercury Decide answers typed questions at `POST /v1/decisions` with the
+		// System One body. OpenRouter's inception/mercury-decide card gives its
+		// 65,536-token window and input-only $0.02 billing; the endpoint takes
+		// text and image state and reports output tokens without charging them.
+		model "mercury-decide" name="Mercury Decide" api="inception-decisions" base-url="https://api.inceptionlabs.ai" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.02 output=0 cache-read=0 cache-write=0
+			limits context=65536
+			supports-tools #false
+		}
 	}
 
 	supports-developer-role #false
@@ -41,6 +66,18 @@ provider "inception" {
 		thinking-default-level "medium"
 		supports-reasoning-effort #true
 		reasoning-disable-mode "lowest-effort"
+	}
+	// Mercury Voice exposes low/medium/high effort only: no `instant` tier.
+	models "mercury-voice" {
+		thinking-upgrade-neutral #true
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high"
+		supports-reasoning-effort #true
+	}
+	// The Decisions row is a judge, not a chat model (docs.inceptionlabs.ai/
+	// capabilities/decisions: no chat completions, streaming, or tool calling).
+	models "mercury-decide" {
+		kind "judge"
 	}
 	models "mercury-3" priority=1 {
 		thinking-default-level "low"

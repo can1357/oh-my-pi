@@ -4836,39 +4836,53 @@ export function togetherModelManagerOptions(
 
 /**
  * Builds Inception's authenticated model-discovery manager. A successful
- * `/v1/models` fetch is the complete roster, keeping only rows that advertise
- * `chat.completions` (the shared roster also lists FIM/edit and Decisions-only
- * models); without an API key the bundled Mercury seeds are served.
+ * `/v1/models` fetch is the complete chat roster, keeping only rows that
+ * advertise `chat.completions` (the shared roster also lists FIM/edit and
+ * Decisions-only models), and `dynamicModelsAuthoritative` lets it replace the
+ * bundled rows. Mercury Decide answers on its own `/v1/decisions` endpoint and
+ * never appears in that chat roster, so the authored runner rows are appended
+ * back after discovery; without an API key the bundled Mercury seeds are served.
  */
-export function inceptionModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+export function inceptionModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<Api> {
+	const options = createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "inception",
+		defaultBaseUrl: "https://api.inceptionlabs.ai/v1",
+		config,
+		requireApiKey: true,
+		dynamicModelsAuthoritative: true,
+		mapModel: (entry, defaults, reference) => {
+			// The shared roster also contains FIM/edit and Decisions-only models;
+			// `supported_endpoints` is required, so a row without it is not chat.
+			if (!Array.isArray(entry.supported_endpoints) || !entry.supported_endpoints.includes("chat.completions")) {
+				return null;
+			}
+			const model = mapWithBundledReference(entry, defaults, reference);
+			return {
+				...model,
+				input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
+				cost: isRecord(entry.pricing) ? perTokenPricingCost(entry.pricing) : model.cost,
+				contextWindow: toPositiveNumber(entry.context_length, model.contextWindow),
+				maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
+				...(Array.isArray(entry.supported_features) && {
+					supportsTools: entry.supported_features.includes("tools"),
+				}),
+			};
+		},
+	});
+	const staticModels = seedModels<Api>("inception");
+	const fetchDiscovered = options.fetchDynamicModels;
+	if (!fetchDiscovered) return { ...options, staticModels };
 	return {
-		...createOpenAICompatibleModelManagerOptions({
-			api: "openai-completions",
-			providerId: "inception",
-			defaultBaseUrl: "https://api.inceptionlabs.ai/v1",
-			config,
-			requireApiKey: true,
-			dynamicModelsAuthoritative: true,
-			mapModel: (entry, defaults, reference) => {
-				// The shared roster also contains FIM/edit and Decisions-only models;
-				// `supported_endpoints` is required, so a row without it is not chat.
-				if (!Array.isArray(entry.supported_endpoints) || !entry.supported_endpoints.includes("chat.completions")) {
-					return null;
-				}
-				const model = mapWithBundledReference(entry, defaults, reference);
-				return {
-					...model,
-					input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
-					cost: isRecord(entry.pricing) ? perTokenPricingCost(entry.pricing) : model.cost,
-					contextWindow: toPositiveNumber(entry.context_length, model.contextWindow),
-					maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
-					...(Array.isArray(entry.supported_features) && {
-						supportsTools: entry.supported_features.includes("tools"),
-					}),
-				};
-			},
-		}),
-		staticModels: seedModels<"openai-completions">("inception"),
+		...options,
+		staticModels,
+		fetchDynamicModels: async () => {
+			const discovered = await fetchDiscovered();
+			if (!discovered) return null;
+			const known = new Set(discovered.map(model => model.id));
+			const runners = staticModels.filter(seed => runnerApiKind(seed.api) !== undefined && !known.has(seed.id));
+			return runners.length === 0 ? discovered : [...discovered, ...runners.map(seed => ({ ...seed }))];
+		},
 	};
 }
 

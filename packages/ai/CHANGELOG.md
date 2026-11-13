@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `inception-decisions` judgment API for Inception's Mercury Decide model, which posts the System One body to `POST /v1/decisions` and forwards images as `image_url` parts inside `state` ([#19139](https://github.com/can1357/oh-my-pi/pull/19139) by [@iacore](https://github.com/iacore)).
+
 ### Changed
 
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))

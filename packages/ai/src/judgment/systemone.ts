@@ -22,6 +22,9 @@
  *   go in a top-level array of base64 data URLs. Drex also rejects any text
  *   holding a base64 media data URL, so each one in `state`, `instructions` or
  *   `criteria` is replaced by a description (see {@link describeMediaDataUrls}).
+ * - `inception-decisions`: Inception's `POST {baseUrl}/v1/decisions`
+ *   (`mercury-decide`). Same body, verbatim model; images join `state` as
+ *   `image_url` data URL parts, and criteria carry no images.
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
@@ -276,4 +279,47 @@ export const naceWire: JudgmentWire = {
 			},
 			model,
 		),
+};
+
+/**
+ * Inception's Decisions route (`mercury-decide`). The body is System One, but
+ * images travel as `image_url` parts inside `state`, never as assets or a
+ * top-level array (https://docs.inceptionlabs.ai/capabilities/decisions).
+ */
+export const inceptionDecisionsWire: JudgmentWire = {
+	...systemOneWire("/v1/decisions"),
+	// https://docs.inceptionlabs.ai/capabilities/decisions#send-images: up to 16
+	// PNG/JPEG/WebP/GIF data URLs of at most 10 MiB each, with the whole JSON
+	// request under the gateway's 20 MiB body limit. 14 MB of images is ~18.7 MB
+	// as base64, leaving room for state and questions.
+	images: {
+		mimeTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+		maxCount: 16,
+		maxBytes: 10 * 1024 * 1024,
+		maxTotalBytes: 14_000_000,
+	},
+	// The endpoint has no image-detail control.
+	ignoresImageDetail: true,
+	encode(request, model) {
+		const images = request.images ?? [];
+		if (images.length === 0) {
+			return { state: request.state, model, questions: wireQuestions(request.questions) };
+		}
+		const parts: JsonValue[] = images.map(image => ({
+			type: "image_url",
+			image_url: { url: embeddedImageDataUrl(image) },
+		}));
+		// An image part must sit where `state` holds parts, so a string or JSON
+		// root becomes a parts array rather than gaining a synthetic key.
+		const state: JsonValue[] = Array.isArray(request.state)
+			? [...request.state, ...parts]
+			: [
+					{
+						type: "text",
+						text: typeof request.state === "string" ? request.state : JSON.stringify(request.state),
+					},
+					...parts,
+				];
+		return { state, model, questions: wireQuestions(request.questions) };
+	},
 };

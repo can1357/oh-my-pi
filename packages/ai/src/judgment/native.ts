@@ -40,6 +40,7 @@ import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { googleDecisionsWire } from "./google-decisions";
 import { openaiDecisionsWire } from "./openai-decisions";
 import {
+	inceptionDecisionsWire,
 	liquidWire,
 	naceWire,
 	openrouterDecisionsWire,
@@ -70,6 +71,7 @@ const JUDGMENT_WIRES = {
 	"openai-decisions": openaiDecisionsWire,
 	"google-decisions": googleDecisionsWire,
 	"liquid-systemone": liquidWire,
+	"inception-decisions": inceptionDecisionsWire,
 	"nace-systemone": naceWire,
 } as const satisfies Partial<Record<Api, JudgmentWire>>;
 
