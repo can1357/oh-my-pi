@@ -6,6 +6,7 @@ import { completeSimple, Effort, type Model, retryTransientCompletion } from "@o
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
@@ -103,6 +104,7 @@ export async function runSharpshooterConsolidation(options: {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sessionId: string;
+	getSessionProvider?: () => string | undefined;
 	force?: boolean;
 }): Promise<SharpshooterConsolidationResult> {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
@@ -179,6 +181,7 @@ async function consolidateLocked(
 		settings: Settings;
 		modelRegistry: ModelRegistry;
 		sessionId: string;
+		getSessionProvider?: () => string | undefined;
 		force?: boolean;
 	},
 	bankDir: string,
@@ -199,8 +202,14 @@ async function consolidateLocked(
 			return { ran: false, reason: "empty" };
 		}
 
-		const model = await resolveSharpshooterModel(options.settings, options.modelRegistry);
-		if (!model) return { ran: false, reason: "no_model" };
+		const model = await resolveSharpshooterModel(
+			options.settings,
+			options.modelRegistry,
+			options.getSessionProvider?.(),
+		);
+		if (!model || (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider)) {
+			return { ran: false, reason: "no_model" };
+		}
 
 		const currentFiles = await readCurrentMemoryFiles(options.agentDir, options.cwd);
 		const projectDocs = await readProjectDocs(options.cwd);
@@ -217,9 +226,15 @@ async function consolidateLocked(
 		});
 
 		const maxTokens = sharpshooterConsolidationMaxTokens(model, new Tokenizer(model).countTokens([system, input]));
+		if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
+			return { ran: false, reason: "no_model" };
+		}
 		const response = await retryTransientCompletion(
-			() =>
-				completeSimple(
+			() => {
+				if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
+					throw new Error("Sharpshooter model provider differs from the active session provider");
+				}
+				return completeSimple(
 					model,
 					{
 						systemPrompt: [system],
@@ -233,7 +248,8 @@ async function consolidateLocked(
 						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 						toolChoice: "required",
 					},
-				),
+				);
+			},
 			{ provider: model.provider },
 		);
 		if (response.stopReason === "error") {
