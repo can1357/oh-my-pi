@@ -207,6 +207,17 @@ type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<number>;
 type RunRpcMode = (session: AgentSession, options?: RpcModeOptions) => Promise<never>;
 
+/** What an embedder's session host receives besides the session; see {@link RunRootCommandDependencies.runSessionHost}. */
+export interface SessionHostContext {
+	/** Install the host's tool UI (dialogs, notifications); the session starts with `hasUI` as under `--mode rpc-ui`. */
+	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	eventBus: EventBus;
+	subagentEventBus: EventBus;
+	mcpManager: MCPManager | undefined;
+}
+
+export type RunSessionHost = (session: AgentSession, host: SessionHostContext) => Promise<void>;
+
 /** Interactive-only graph boundary; login dialogs and overlays load on first real use. */
 async function loadInteractiveModeConstructor() {
 	return (await import("./modes/interactive-mode")).InteractiveMode;
@@ -1818,6 +1829,13 @@ interface RunRootCommandDependencies {
 	discoverAuthStorage?: typeof discoverAuthStorage;
 	selectSession?: SessionPicker;
 	runAcpMode?: RunAcpMode;
+	/**
+	 * Run the session in an embedder's own host instead of the TUI, print or RPC modes. The launch goes through
+	 * the normal startup (settings, auth, `--resume`/`--model`/`--tools`, extensions, MCP, session creation) with
+	 * the protocol-host behavior of `--mode rpc-ui`: stdin is left to the host, the tool UI is enabled, and a
+	 * session without a model still starts. The process ends when the returned promise settles.
+	 */
+	runSessionHost?: RunSessionHost;
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
@@ -1925,7 +1943,8 @@ export async function runRootCommand(
 		// Classify the host before opening auth or settings storage so every
 		// session-critical database connection picks the right busy timeout.
 		// See getDbBusyTimeoutMs().
-		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+		const sessionHost = deps.runSessionHost;
+		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp" || sessionHost !== undefined;
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 		// Without a terminal on stdin the TUI cannot run, so such a launch is always
@@ -1934,8 +1953,12 @@ export async function runRootCommand(
 		// exiting silently.
 		const stdinIsTerminal = process.stdin.isTTY === true;
 		const autoPrint =
-			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
-		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+			(pipedInput !== undefined || !stdinIsTerminal) &&
+			!parsedArgs.print &&
+			parsedArgs.mode === undefined &&
+			sessionHost === undefined;
+		const isInteractive =
+			!parsedArgs.print && !autoPrint && parsedArgs.mode === undefined && sessionHost === undefined;
 		// The TUI owns the Tern pane or cmux workspace it draws in; an omp its commands start sees the claim and
 		// keeps its browser tabs out of this session's pane.
 		if (isInteractive) claimTerminal();
@@ -2002,7 +2025,7 @@ export async function runRootCommand(
 		// Runtime overrides (not persisted): the session's cost gate reads its thresholds from settings.
 		if (parsedArgs.warnCost !== undefined) cfgSessionWarnCost.override(settingsInstance, parsedArgs.warnCost);
 		if (parsedArgs.maxCost !== undefined) cfgSessionMaxCost.override(settingsInstance, parsedArgs.maxCost);
-		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
+		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || sessionHost) {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {
 			applyProtocolDefaults("acp", settingsInstance);
@@ -2023,13 +2046,14 @@ export async function runRootCommand(
 		const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
 			modelRegistry.hydrateCredentialScopedModelCaches(),
 		);
-		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
+		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui" || sessionHost) {
 			Bun.env.PI_NO_PTY = "1";
 		}
 		if (
 			parsedArgs.noTitle ||
 			parsedArgs.mode === "rpc" ||
 			parsedArgs.mode === "rpc-ui" ||
+			sessionHost ||
 			parsedArgs.mode === "acp"
 		) {
 			Bun.env.PI_NO_TITLE = "1";
@@ -2401,7 +2425,7 @@ export async function runRootCommand(
 			);
 			options.authStorage = authStorage;
 			options.modelRegistry = modelRegistry;
-			options.hasUI = isInteractive || mode === "rpc-ui";
+			options.hasUI = isInteractive || mode === "rpc-ui" || sessionHost !== undefined;
 			options.allowSessionModelFallback = isInteractive;
 			options.settingsApproval = isInteractive;
 			options.tuiTranscript = isInteractive;
@@ -2793,7 +2817,8 @@ export async function runRootCommand(
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
 
-			if (!isInteractive && !session.model) {
+			// An embedder's host lets its user pick a model or log in, as the TUI does.
+			if (!isInteractive && !sessionHost && !session.model) {
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
 				}
@@ -2837,7 +2862,7 @@ export async function runRootCommand(
 				process.exit(1);
 			}
 
-			if (mode === "rpc" || mode === "rpc-ui" || isInteractive) {
+			if (mode === "rpc" || mode === "rpc-ui" || sessionHost || isInteractive) {
 				// Long-lived hosts apply on-disk config edits (config.yml, project
 				// settings, `--config` overlays) live. No-op unless this is the
 				// persisting process-global instance.
@@ -2845,7 +2870,11 @@ export async function runRootCommand(
 				postmortem.register("settings-file-watcher", () => settingsInstance.stopWatching(), { exitOnly: true });
 			}
 
-			if (mode === "rpc" || mode === "rpc-ui") {
+			if (sessionHost) {
+				stopStartupWatchdog();
+				logger.endTiming();
+				await sessionHost(session, { setToolUIContext, eventBus, subagentEventBus, mcpManager });
+			} else if (mode === "rpc" || mode === "rpc-ui") {
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
