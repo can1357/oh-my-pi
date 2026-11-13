@@ -136,6 +136,15 @@
 - Anthropic official-API sessions use message threads, sending only new messages per turn for faster first tokens; toggle with `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0`/`1`
 - Added `devin-cli` (Devin CLI seat key) and `devin-windsurf` (Windsurf Enterprise sign-in) logins, both stored as a `devin` API key ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov), [#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Factory Droid Gemini 4 Argon requests now match Droid's request and conversation handling ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
+- Added opt-in standard Responses WebSockets for catalog-supported models, with incremental turns and session-scoped HTTP/SSE fallback; OMP enables them through settings ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
+- Added `AuthStorage.keys.generation(provider)`, a counter that moves on every change to a provider's runtime key, config key or config fallback (and on a resolver swap), and `keys.batch(change)`, which counts a group of writes once per provider they actually changed ([#18017](https://github.com/can1357/oh-my-pi/pull/18017) by [@sjawhar](https://github.com/sjawhar))
+- Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
+
+### Fixed
+
+- Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
+- Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
 
 ### Changed
 

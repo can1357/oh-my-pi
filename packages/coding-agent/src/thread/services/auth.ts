@@ -232,6 +232,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"keys.removeConfig": (storage, provider) => storage.keys.removeConfig(provider),
 		"keys.clearConfig": storage => storage.keys.clearConfig(),
 		"keys.setResolver": (storage, resolver) => storage.keys.setResolver(resolver),
+		"keys.generation": (storage, provider) => storage.keys.generation(provider),
 		"keys.resolver": (storage, provider, options) => storage.keys.resolver(provider, options),
 
 		"oauth.login": (storage, provider, ctrl) => storage.oauth.login(provider, ctrl),

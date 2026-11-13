@@ -347,6 +347,13 @@ class RemoteKeys implements KeysApi {
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
 		this.#remote.notify("keys.setResolver", resolver);
 	}
+	generation(provider: string): number {
+		return this.#remote.callSync("keys.generation", provider);
+	}
+	/** Each write inside `change` is its own notify, so main counts each on its own (see `KeysApi.batch`). */
+	batch(change: () => void): void {
+		change();
+	}
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
 		return this.#remote.callSync("keys.resolver", provider, options);
 	}

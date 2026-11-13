@@ -28,19 +28,102 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 	return envValue || config;
 }
 
-/** Runtime (--api-key) and config (models.yml) key overrides plus the config-value resolver. */
+/** One provider's key overrides. Replaced whole, never mutated, so `#write` sees every change. */
+interface OverrideEntry {
+	readonly runtime?: string;
+	readonly config?: string;
+	readonly fallback?: string;
+}
+
+const NO_OVERRIDES: OverrideEntry = {};
+
+function sameOverrides(a: OverrideEntry, b: OverrideEntry): boolean {
+	return a.runtime === b.runtime && a.config === b.config && a.fallback === b.fallback;
+}
+
+/**
+ * Runtime (--api-key) and config (models.yml) key overrides plus the config-value resolver.
+ *
+ * Every override lives in `#entries`, and `#write` is the only code that
+ * replaces an entry, so no change can skip `generation`: a new mutator has to
+ * go through `#write` to change anything at all.
+ */
 export class KeyOverrides {
-	#runtimeOverrides: Map<string, string> = new Map();
-	#configOverrides: Map<string, string> = new Map();
-	#configFallbacks: Map<string, string> = new Map();
+	#entries = new Map<string, OverrideEntry>();
+	/** Per-provider count of changes to its entry. */
+	#generations = new Map<string, number>();
+	/** Count of resolver swaps; a swap can change every provider's resolved key. */
+	#resolverGeneration = 0;
+	/** Each provider's entry before the open batch first wrote it; `undefined` outside a batch. */
+	#batchStart: Map<string, OverrideEntry> | undefined;
+	/**
+	 * Batches opened so far. While one is open `generation` reports `-#batchSerial`,
+	 * which no settled generation can equal (those are never negative) and no other
+	 * batch repeats, so a key resolved against the half-written entries of batch N
+	 * never matches the value its request is checked against afterwards.
+	 */
+	#batchSerial = 0;
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
 	}
 
+	#entry(provider: string): OverrideEntry {
+		return this.#entries.get(provider) ?? NO_OVERRIDES;
+	}
+
+	#write(provider: string, next: OverrideEntry): void {
+		const previous = this.#entry(provider);
+		if (this.#batchStart) {
+			if (!this.#batchStart.has(provider)) this.#batchStart.set(provider, previous);
+		} else if (!sameOverrides(previous, next)) {
+			this.#bump(provider);
+		}
+		if (next.runtime === undefined && next.config === undefined && next.fallback === undefined) {
+			this.#entries.delete(provider);
+		} else {
+			this.#entries.set(provider, next);
+		}
+	}
+
+	#bump(provider: string): void {
+		this.#generations.set(provider, (this.#generations.get(provider) ?? 0) + 1);
+	}
+
+	/** See {@link KeysApi.generation}. */
+	generation(provider: string): number {
+		// Inside a batch the entries are half written: `#write` has already replaced
+		// them while the count is held back until the batch closes. A key read here
+		// may be one the batch goes on to replace or restore, so a settled value
+		// would wrongly say nothing changed. `-#batchSerial` is unique to this batch
+		// and never a settled value, so such a read can only ever compare unequal.
+		if (this.#batchStart) return -this.#batchSerial;
+		return this.#resolverGeneration + (this.#generations.get(provider) ?? 0);
+	}
+
+	/** See {@link KeysApi.batch}. A batch opened inside another joins the outer one. */
+	batch(change: () => void): void {
+		if (this.#batchStart) {
+			change();
+			return;
+		}
+		const start = new Map<string, OverrideEntry>();
+		this.#batchStart = start;
+		this.#batchSerial++;
+		try {
+			change();
+		} finally {
+			this.#batchStart = undefined;
+			for (const [provider, previous] of start) {
+				if (!sameOverrides(previous, this.#entry(provider))) this.#bump(provider);
+			}
+		}
+	}
+
 	has(provider: string): boolean {
-		return this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider);
+		const entry = this.#entry(provider);
+		return entry.runtime !== undefined || entry.config !== undefined;
 	}
 
 	/**
@@ -51,20 +134,20 @@ export class KeyOverrides {
 	 * a pooled OAuth token there (see `KeyCascade.get`).
 	 */
 	suppressesOAuth(provider: string, restricted: boolean): boolean {
-		return restricted ? this.#configOverrides.has(provider) : this.has(provider);
+		return restricted ? this.#entry(provider).config !== undefined : this.has(provider);
 	}
 
 	runtimeKey(provider: string): string | undefined {
-		return this.#runtimeOverrides.get(provider);
+		return this.#entry(provider).runtime;
 	}
 
 	configKey(provider: string): string | undefined {
-		return this.#configOverrides.get(provider);
+		return this.#entry(provider).config;
 	}
 
 	/** Config value consulted only after stored OAuth/login credentials. */
 	fallbackKey(provider: string): string | undefined {
-		return this.#configFallbacks.get(provider);
+		return this.#entry(provider).fallback;
 	}
 
 	/** Resolve a config value (env var name, "!command", literal) to the secret. */
@@ -77,14 +160,14 @@ export class KeyOverrides {
 	 * Used for CLI --api-key flag.
 	 */
 	setRuntime(provider: string, apiKey: string): void {
-		this.#runtimeOverrides.set(provider, apiKey);
+		this.#write(provider, { ...this.#entry(provider), runtime: apiKey });
 	}
 
 	/**
 	 * Remove a runtime API key override.
 	 */
 	removeRuntime(provider: string): void {
-		this.#runtimeOverrides.delete(provider);
+		this.#write(provider, { ...this.#entry(provider), runtime: undefined });
 	}
 
 	/**
@@ -103,21 +186,18 @@ export class KeyOverrides {
 	 * resolves to its literal text) cannot shadow the key the user logged in with.
 	 */
 	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
-		if (options?.fallback) {
-			this.#configOverrides.delete(provider);
-			this.#configFallbacks.set(provider, apiKeyConfig);
-		} else {
-			this.#configFallbacks.delete(provider);
-			this.#configOverrides.set(provider, apiKeyConfig);
-		}
+		const { runtime } = this.#entry(provider);
+		this.#write(
+			provider,
+			options?.fallback ? { runtime, fallback: apiKeyConfig } : { runtime, config: apiKeyConfig },
+		);
 	}
 
 	/**
 	 * Remove a single config-sourced API key (override or fallback).
 	 */
 	removeConfig(provider: string): void {
-		this.#configOverrides.delete(provider);
-		this.#configFallbacks.delete(provider);
+		this.#write(provider, { runtime: this.#entry(provider).runtime });
 	}
 
 	/**
@@ -125,8 +205,8 @@ export class KeyOverrides {
 	 * re-parsing `models.yml` so removed entries actually disappear.
 	 */
 	clearConfig(): void {
-		this.#configOverrides.clear();
-		this.#configFallbacks.clear();
+		// A Map tolerates `#write` replacing or deleting the entry being visited.
+		for (const [provider, { runtime }] of this.#entries) this.#write(provider, { runtime });
 	}
 
 	/**
@@ -136,7 +216,9 @@ export class KeyOverrides {
 	 * independently and later attached to a registry.
 	 */
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
+		if (resolver === this.#configValueResolver) return;
 		this.#configValueResolver = resolver;
+		this.#resolverGeneration++;
 	}
 }
 
@@ -616,5 +698,13 @@ export class KeyCascade implements KeysApi {
 
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
 		this.#deps.overrides.setResolver(resolver);
+	}
+
+	generation(provider: string): number {
+		return this.#deps.overrides.generation(provider);
+	}
+
+	batch(change: () => void): void {
+		this.#deps.overrides.batch(change);
 	}
 }

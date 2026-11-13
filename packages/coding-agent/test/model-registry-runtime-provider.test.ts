@@ -402,9 +402,11 @@ describe("ModelRegistry runtime provider registration", () => {
 				},
 			}),
 		);
+		// The registration's baseUrl is where this provider's requests go, so
+		// configured discovery contacts it there too, never the models.yml one.
 		const configuredFetch: FetchImpl = async input => {
 			const url = String(input);
-			if (url === "http://127.0.0.1:4893/v1/models") {
+			if (url === "https://runtime.example.com/v1/models") {
 				return Response.json({
 					data: [{ id: "shared-runtime-model", context_length: 32_768 }],
 				});
