@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/marketplace` with no arguments (and `/marketplace install` or `/marketplace uninstall` with none) now shows `Marketplace error: …` when the plugin picker fails to load, such as when a marketplace's catalog is missing, instead of exiting the session ([#19234](https://github.com/can1357/oh-my-pi/pull/19234) by [@tuschla](https://github.com/tuschla))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
