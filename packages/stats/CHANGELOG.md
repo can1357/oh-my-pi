@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The Frustration page's per-model table counts every answered message again; since agent notices began landing before replies, about half went uncounted
+- The Frustration page's per-model table counts every answered message again; since agent notices began landing before replies, about half went uncounted ([#19114](https://github.com/can1357/oh-my-pi/pull/19114) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.20.0] - 2026-11-12
 
