@@ -87,10 +87,14 @@ export function resolveThemeColors<T extends Record<string, ColorValue>>(
 	return resolved as Record<keyof T, string | number>;
 }
 
+/** True when a status-line luma (`colorLuma`) belongs to a light background; undefined (unknown) reads as dark. */
+export function isLightLuma(luma: number | undefined): boolean {
+	return luma !== undefined && luma > 0.5;
+}
+
 /** True when `surface` is a light background; `Theme` reads its status-line background this way. */
 export function isLightSurface(surface: string | number | undefined): boolean {
-	const luma = surface === undefined ? undefined : colorLuma(surface);
-	return luma !== undefined && luma > 0.5;
+	return isLightLuma(surface === undefined ? undefined : colorLuma(surface));
 }
 
 /**
@@ -112,7 +116,8 @@ export function resolveToHex(value: string | number, isLight: boolean): string {
 export function mixThemeColors(a: string | number, b: string | number, t: number, isLight: boolean): string {
 	const hex = (value: string | number) => {
 		const resolved = resolveToHex(value, isLight);
-		// Theme colors may be CSS names or rgb() forms; `mixHex` needs `#rrggbb`.
+		// Resolved values are `#rgb`, `#rrggbb` or `#rrggbbaa`; normalize to the `#rrggbb` `mixHex` reads,
+		// and reject malformed hex, which `hexToRgb` would turn into NaN channels.
 		const normalized = Bun.color(resolved, "hex");
 		if (normalized === null) throw new Error(`Invalid color value: ${resolved}`);
 		return normalized;
