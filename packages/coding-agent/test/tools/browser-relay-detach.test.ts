@@ -178,7 +178,16 @@ class ChromeBackedExtension {
 				this.refuseAttach = undefined;
 				return this.#reply(id, {
 					result: {
-						tab: { tabId: TAB_ID, url, title: "", active: true, discarded: false, windowId: 1, pinned: false, groupId: -1 },
+						tab: {
+							tabId: TAB_ID,
+							url,
+							title: "",
+							active: true,
+							discarded: false,
+							windowId: 1,
+							pinned: false,
+							groupId: -1,
+						},
 					},
 				});
 			}
@@ -745,24 +754,28 @@ describe("relay tabs Chrome detaches omp from", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE).each([
 		{ owned: true, label: "owned tab closed" },
 		{ owned: false, label: "adopted tab left open" },
-	])("replaces a held-out tab without re-adopting ($label)", async ({ owned }) => {
-		const ext = await openRelayTab("", owned);
-		const original = page!;
-		const originalTab = getTab(name);
-		ext.refuseAttach = FOREIGN_FRAME_REFUSAL;
-		const evaluating = ext.hanging();
-		const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
-		await evaluating;
-		await ext.chromeDetach("target_closed");
-		expect(String(await stalled)).toContain("omp kept the tab open");
-		const attempts = ext.attachAttempts;
-		const started = Date.now();
-		await invoke({ action: "open", app: "relay", url: pageUrl, dialogs: "accept", timeout: 20 });
-		expect(Date.now() - started).toBeLessThan(5_000);
-		expect(ext.attachAttempts - attempts).toBe(1);
-		expect(getTab(name)).not.toBe(originalTab);
-		expect(original.isClosed()).toBe(owned);
-	}, 60_000);
+	])(
+		"replaces a held-out tab without re-adopting ($label)",
+		async ({ owned }) => {
+			const ext = await openRelayTab("", owned);
+			const original = page!;
+			const originalTab = getTab(name);
+			ext.refuseAttach = FOREIGN_FRAME_REFUSAL;
+			const evaluating = ext.hanging();
+			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+			await evaluating;
+			await ext.chromeDetach("target_closed");
+			expect(String(await stalled)).toContain("omp kept the tab open");
+			const attempts = ext.attachAttempts;
+			const started = Date.now();
+			await invoke({ action: "open", app: "relay", url: pageUrl, dialogs: "accept", timeout: 20 });
+			expect(Date.now() - started).toBeLessThan(5_000);
+			expect(ext.attachAttempts - attempts).toBe(1);
+			expect(getTab(name)).not.toBe(originalTab);
+			expect(original.isClosed()).toBe(owned);
+		},
+		60_000,
+	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE).each(["release", "release keeping the page"] as const)(
 		"lets go of a tab Chrome keeps omp out of (%s)",
