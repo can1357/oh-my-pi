@@ -265,9 +265,8 @@ pub enum DesktopKeyboardReturn {
 	/// The user's app showed no window: only its front status came back.
 	#[napi(value = "frontOnly")]
 	FrontOnly,
-	/// The input monitor had not caught up with the user's last input, so
-	/// whether they chose a window is unknown, and their window was not made
-	/// key.
+	/// macOS refused the hand-back or the user's last input was still being
+	/// read, so their window was not made key.
 	#[napi(value = "notSent")]
 	NotSent,
 }

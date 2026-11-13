@@ -596,7 +596,8 @@ async function focusReport(
 	const { frontPid, previousPid, handedBack } = report;
 	// macOS says what it did with the user's keyboard: nothing outside an app
 	// can see which of its windows is key, so it names what was sent, never a
-	// verified key window.
+	// verified key window. Keep natives type-only so the worker's readiness
+	// handshake does not load the addon.
 	const keyboard: `${DesktopKeyboardReturn}` | undefined = report.keyboard;
 	const names = await appNames(session, signal);
 	const name = (pid: number) => names.get(pid) ?? `pid ${pid}`;
@@ -610,8 +611,8 @@ async function focusReport(
 				return `handed the keyboard back to ${front}'s window`;
 			case "notSent":
 				return handedBack
-					? `handed the front back to ${front} but not its window's keyboard: the user's last input was still being read`
-					: `focus is on ${front}; the user's last input was still being read, so nothing was sent to its window`;
+					? `handed the front back to ${front} but not its window's keyboard: macOS refused the hand-back or the user's last input was still being read`
+					: `focus is on ${front}; macOS refused the hand-back or the user's last input was still being read, so nothing was sent to its window`;
 			case "frontOnly":
 				return `handed the front back to ${front}, which shows no window`;
 			case "kept":
