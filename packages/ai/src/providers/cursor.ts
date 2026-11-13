@@ -416,7 +416,6 @@ function releaseCursorH2(key: string, client: http2.ClientHttp2Session): void {
 	client.unref();
 }
 
-
 /**
  * Text for a recognised frame this client answers with its own typed error
  * variant. Phrased as a client capability statement, not a tool failure: the
