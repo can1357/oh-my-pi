@@ -14,7 +14,7 @@
 - Fixed Command Code under-reporting Grok 4.7 spend at $1.20/$3.60 per million tokens and over-reporting Claude Sonnet 5.5 cache reads at $0.20; they now follow Command Code's CLI: Grok 4.7 at $2/$6 with a 2x tier above 200K input, and Sonnet 5.5 cache reads at $0.10. With that tier, Grok 4.7's default window now starts at 200K, with `/extended-context on` opening the full 500K ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch))
 - Google Antigravity now lists Gemini 4 Hydrogen once, with selectable low, medium, high, and xhigh thinking levels, instead of a separate entry per thinking tier ([#19070](https://github.com/can1357/oh-my-pi/pull/19070) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed `opencode-go/claude-haiku-5-5` offering `minimal` and capping `--thinking max` at `xhigh`; it now offers low through max like OpenCode Zen, and thinking Off sends Anthropic's explicit `disabled` ([#19128](https://github.com/can1357/oh-my-pi/issues/19128)).
-- Devin requests now identify as Devin CLI 3000.12.57, the current stable release, instead of 3000.12.43
+- Devin requests now identify as Devin CLI 3000.12.57, the current stable release, instead of 3000.12.43 ([#19180](https://github.com/can1357/oh-my-pi/pull/19180) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.20.0] - 2026-11-12
 
