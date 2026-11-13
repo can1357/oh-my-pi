@@ -205,7 +205,10 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 			}
 		}
 		if (threw) throw thrownError;
-		return executionResult;
+		// Pass the result through unchanged. The declared `AgentToolResult` return type is the
+		// upstream one; a tool that resolves `undefined` at runtime flows out exactly as it did
+		// before this seam existed.
+		return executionResult as AgentToolResult<any, any>;
 	}
 }
 
