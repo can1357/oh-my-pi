@@ -1,7 +1,7 @@
 import { colorLuma, relativeLuminance } from "@oh-my-pi/pi-utils/color";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
+import { bgAnsi, colorToAnsi, fgAnsi, isLightSurface, resolveToHex } from "./color";
 import {
 	ANSI_COLOR_INDEX,
 	type AnsiColor,
@@ -214,7 +214,7 @@ export class Theme {
 	) {
 		this.statusLineLuminance = colorLuma(bgColors.statusLineBg);
 		this.#statusLineContrastLuminance = relativeLuminance(bgColors.statusLineBg);
-		const slIsLight = this.statusLineLuminance !== undefined && this.statusLineLuminance > 0.5;
+		const slIsLight = isLightSurface(bgColors.statusLineBg);
 
 		this.#fgColors = {} as Record<ThemeColor, string>;
 		this.#hexFgColors = {} as Record<ThemeColor, string>;
