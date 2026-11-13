@@ -89,6 +89,7 @@ import {
 	ovnfsCommand,
 	perCallModelEnabled,
 } from "./settings";
+import { encodedInheritedContext, type InheritedContext } from "./inherited-context";
 import {
 	assertPerCallModelApproved,
 	parentModelGrantPattern,
@@ -169,6 +170,11 @@ export interface StructuredSubagentRequest {
 	structured?: boolean;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
+	/**
+	 * Parent conversation tail captured when the spawn was requested (a task item's `inheritContext`).
+	 * Agents declaring `inheritContext: false` ignore it.
+	 */
+	inheritedContext?: InheritedContext;
 	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
 	solutionSpace?: string;
 	identity?: StructuredSubagentIdentity;
@@ -790,6 +796,17 @@ function buildExecutorOptions(
 	const restrictToolNames = preparedSession !== undefined || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	const steps = request.steps?.length ? renderStepPrompts(request.steps, policy.structured) : undefined;
+	// Seance children read their own source session, and agents declaring `inheritContext: false`
+	// (reviewers, independent judges) stay blind to the parent's tail. An isolated child runs in a
+	// worktree whose secret rules can differ, so it gets the tail under the parent's placeholders.
+	const inheritsContext =
+		preparedSession === undefined && request.invocationKind === "task" && policy.agent.inheritContext !== false;
+	const childInheritedContext =
+		inheritsContext && request.inheritedContext
+			? request.isolation?.requested === true
+				? encodedInheritedContext(request.inheritedContext, session.providerSecrets)
+				: request.inheritedContext
+			: undefined;
 	return {
 		cwd: session.cwd,
 		costGate: session.costGate,
@@ -863,6 +880,7 @@ function buildExecutorOptions(
 		// Autoload runs after session start, outside the seance isolation options.
 		autoloadSkills: preparedSession ? undefined : autoloadSkills,
 		workspaceTree: session.workspaceTree,
+		inheritedContext: childInheritedContext,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
 		// Root policy and module paths have separate jobs: the live policy drives

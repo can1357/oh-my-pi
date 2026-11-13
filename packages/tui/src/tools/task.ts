@@ -2272,6 +2272,8 @@ export interface TaskItem {
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: "lo" | "med" | "hi";
+	/** Start the child with the parent's recent conversation tail (`task.inheritContext`); agents declaring `inheritContext: false` ignore it. */
+	inheritContext?: boolean;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -2305,6 +2307,8 @@ export interface TaskParams {
 	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: "lo" | "med" | "hi";
+	/** See {@link TaskItem.inheritContext} (flat form). */
+	inheritContext?: boolean;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */

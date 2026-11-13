@@ -39,11 +39,11 @@ Run one agent synchronously.
   - First step carries `# Target` files/non-goals{{#if batchEnabled}} beyond `context`{{/if}}.
   - Each step: one `# Change` stage.
   - Last step adds `# Acceptance` observable result.
-  - Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via local://<path>, NEVER inline.
+  - Children start blank{{#if inheritContextEnabled}} unless `inheritContext` is set{{/if}};{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via local://<path>, NEVER inline.
   - Independent work → separate tasks.
 {{else}}
 - `task`: self-contained (`# Target` files/non-goals, `# Change` steps/APIs, `# Acceptance` observable result).
-  - Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via local://<path>, NEVER inline.
+  - Children start blank{{#if inheritContextEnabled}} unless `inheritContext` is set{{/if}};{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via local://<path>, NEVER inline.
 {{/if}}
 - `name`: CamelCase ≤32, auto-generated if omitted; address agent by name.{{#if structured}} `outputSchema` overrides agent/session schemas.{{/if}}
 - `solutionSpace`: how open-ended the child's problem is: fix or design given, or which causes or designs remain open.
@@ -55,6 +55,9 @@ Run one agent synchronously.
 {{/if}}
 {{#if effortEnabled}}
 - `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
+{{/if}}
+{{#if inheritContextEnabled}}
+- `inheritContext`: `true` starts the child with your recent conversation as background. Only when the brief cannot carry the state the child needs; still write a self-contained brief. Agents marked (ignores inheritContext) start with only their brief.
 {{/if}}
 {{#if perCallModelEnabled}}
 - `model`: one exact `provider/model-id[@upstream][:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}.
@@ -94,5 +97,5 @@ Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.
 {{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it.
-{{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (read-only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
+{{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (read-only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}{{#if noInheritContext}} (ignores inheritContext){{/if}}: {{description}}
 {{/list}}{{/if}}

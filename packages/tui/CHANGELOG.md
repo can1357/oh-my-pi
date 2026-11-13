@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `inheritContext` flag to the task tool's item and params types ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

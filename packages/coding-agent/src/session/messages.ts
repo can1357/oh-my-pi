@@ -450,6 +450,9 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 /** Custom message type for hidden interrupted-thinking continuity context. */
 export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
 
+/** Custom message type of a task child's inherited parent tail (`task/inherited-context.ts`). */
+export const INHERITED_CONTEXT_MESSAGE_TYPE = "task-inherited-context";
+
 /** Custom message type for the transient checkpoint-active reminder. */
 export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
 
@@ -1197,6 +1200,20 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
 						attribution: ircIncoming ? "agent" : "user",
+						timestamp: m.timestamp,
+					},
+				];
+			}
+			// A task child's inherited parent tail carries that parent's tool output: background
+			// authored by an agent, never developer authority. The marker lets the provider
+			// transform draw it as frames for a vision model.
+			if (m.customType === INHERITED_CONTEXT_MESSAGE_TYPE) {
+				return [
+					{
+						role: "user",
+						content: customMessageContentToLlmContent(m.content),
+						attribution: "agent",
+						inheritedContext: true,
 						timestamp: m.timestamp,
 					},
 				];

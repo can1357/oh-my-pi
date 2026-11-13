@@ -15,6 +15,7 @@ import {
 	setDisabledProviders,
 } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -596,6 +597,162 @@ describe("structured subagent primitive", () => {
 		expect(settled.result.modelRole).toBe("reviewer");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+	describe("inherited parent context", () => {
+		const inheritedContext = { text: "parent decided to ship build 40cf59cf8a\n" };
+
+		async function dispatchedContext(
+			agent: AgentDefinition,
+			overrides: Partial<StructuredSubagentRequest> = {},
+		): Promise<executorModule.ExecutorOptions["inheritedContext"]> {
+			mockDiscovery(agent);
+			const dispatched: executorModule.ExecutorOptions[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				dispatched.push(options);
+				return result();
+			});
+			const settled = await runStructuredSubagent(
+				request({ agent: agent.name, inheritedContext, retainArtifacts: true, ...overrides }),
+			);
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+			return dispatched[0]?.inheritedContext;
+		}
+
+		it("reaches a task child", async () => {
+			expect(await dispatchedContext(AGENT)).toEqual(inheritedContext);
+		});
+
+		it("is withheld from an agent that declares inheritContext: false, as the bundled reviewers do", async () => {
+			expect(getBundledAgent("reviewer")?.inheritContext).toBe(false);
+			expect(getBundledAgent("security-reviewer")?.inheritContext).toBe(false);
+			expect(await dispatchedContext({ ...AGENT, inheritContext: false })).toBeUndefined();
+		});
+
+		it("is withheld from eval agent() spawns", async () => {
+			expect(await dispatchedContext(AGENT, { invocationKind: "eval" })).toBeUndefined();
+		});
+
+		it("reaches an isolated child under the parent's placeholders", async () => {
+			mockDiscovery(AGENT);
+			const parent = session({ isolationEnabled: true });
+			parent.providerSecrets = {
+				obfuscate: (text: string) => text.replaceAll("40cf59cf8a", () => "$$BUILD_AB12:L$$"),
+				deobfuscate: (text: string) => text.replaceAll("$$BUILD_AB12:L$$", "40cf59cf8a"),
+			} as never;
+			let dispatched: executorModule.ExecutorOptions["inheritedContext"];
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
+				dispatched = baseOptions.inheritedContext;
+				// A failed run skips the merge, which needs a real repository.
+				return { ...result(), exitCode: 1, error: "agent failed" };
+			});
+			const settled = await runStructuredSubagent(
+				request({ session: parent, inheritedContext, isolation: { requested: true }, retainArtifacts: true }),
+			);
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+			expect(dispatched).toEqual({
+				text: "parent decided to ship build $$BUILD_AB12:L$$\n",
+			});
+		});
+	});
+
+	it.each([
+		{ setting: true, flagged: true, withheld: false, inherits: true },
+		{ setting: false, flagged: true, withheld: false, inherits: false },
+		{ setting: true, flagged: false, withheld: false, inherits: false },
+		// The advisor's session: its context reader is the primary's transcript.
+		{ setting: true, flagged: true, withheld: true, inherits: false },
+	])(
+		"task tool: setting=$setting flagged=$flagged withheld=$withheld → child inherits=$inherits",
+		async ({ setting, flagged, withheld, inherits }) => {
+			mockDiscovery();
+			const dispatched: executorModule.ExecutorOptions[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				dispatched.push(options);
+				return result();
+			});
+			const parent = {
+				...session({ settings: Settings.isolated({ "task.inheritContext": setting, "async.enabled": false }) }),
+				getContextMessages: () => [{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }],
+				withholdInheritedContext: withheld,
+			} as unknown as ToolSession;
+			const tool = await TaskTool.create(parent);
+			expect(JSON.stringify(tool.parameters.toJsonSchema()).includes('"inheritContext"')).toBe(setting && !withheld);
+			await tool.execute("tc-inherit", {
+				context: "Shared background.",
+				tasks: [
+					{
+						agent: "worker",
+						name: "Worker",
+						task: "Report.",
+						solutionSpace: "one fix: report given",
+						...(flagged ? { inheritContext: true } : {}),
+					},
+				],
+			} as TaskParams);
+			expect(dispatched).toHaveLength(1);
+			expect(dispatched[0]?.inheritedContext?.text.includes("PLUM-7731") ?? false).toBe(inherits);
+		},
+	);
+	it.each([true, false])(
+		"marks agents that ignore inheritContext only while the item flag exists (setting=%p)",
+		async setting => {
+			mockDiscovery({ ...AGENT, inheritContext: false });
+			const tool = await TaskTool.create(
+				session({ settings: Settings.isolated({ "task.inheritContext": setting }) }) as unknown as ToolSession,
+			);
+			expect(tool.description.includes("- `worker` (ignores inheritContext): Test worker")).toBe(setting);
+		},
+	);
+	it.each([false, true])(
+		"tells the parent which flagged children started without its conversation (async=%p)",
+		async asyncEnabled => {
+			mockDiscovery();
+			// A real run reports the id and index it was dispatched under.
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => ({
+				...result(),
+				index: options.index,
+				id: options.id,
+			}));
+			const manager = asyncEnabled ? new AsyncJobManager({ onJobComplete: () => {} }) : undefined;
+			const run = async (messages: unknown[]) => {
+				const parent = {
+					...session({
+						settings: Settings.isolated({ "task.inheritContext": true, "async.enabled": asyncEnabled }),
+					}),
+					asyncJobManager: manager,
+					// A fact, not a nudge: it must survive the advisory opt-out.
+					suppressSpawnAdvisory: true,
+					getContextMessages: () => messages,
+				} as unknown as ToolSession;
+				const tool = await TaskTool.create(parent);
+				const executed = await tool.execute("tc-inherit", {
+					context: "Shared background.",
+					tasks: [
+						// Unnamed: the note must name the id the parent sees, not the item's position.
+						{ agent: "worker", task: "Report.", solutionSpace: "one fix", inheritContext: true },
+						{ agent: "worker", name: "Plain", task: "Report.", solutionSpace: "one fix" },
+					],
+				} as TaskParams);
+				const details = executed.details!;
+				const ids = [0, 1].map(
+					index =>
+						(details.progress ?? details.results).find(entry => entry.index === index)?.id ?? `missing-${index}`,
+				);
+				await Promise.all(ids.map(id => manager?.getJob(id)?.promise));
+				return { ids, text: executed.content.map(part => (part.type === "text" ? part.text : "")).join("\n") };
+			};
+			try {
+				const dropped = await run([]);
+				const note = dropped.text.split("\n").find(line => line.includes("started without your conversation"));
+				expect(note).toContain(`\`${dropped.ids[0]}\``);
+				expect(note).not.toContain(dropped.ids[1]);
+				const inherited = await run([{ role: "user", content: "The codeword is PLUM-7731.", timestamp: 0 }]);
+				expect(inherited.text).not.toContain("started without your conversation");
+			} finally {
+				await manager?.dispose({ timeoutMs: 1000 });
+			}
+		},
+	);
 	it("does not treat a spawn handle as the HUD description", async () => {
 		mockDiscovery();
 		const dispatched: executorModule.ExecutorOptions[] = [];
@@ -1204,12 +1361,16 @@ describe("structured subagent primitive", () => {
 		// The spy's call log holds each run's whole options; keep only `kept`.
 		vi.restoreAllMocks();
 		// A WeakRef target read in a job stays alive until that job ends: yield, collect, then read.
+		// Each collection first overwrites the stack below this frame: the collector's own frames
+		// would otherwise inherit stale slots from the spawns, which its conservative scan keeps alive.
+		const clobber = (depth: number): number => (depth === 0 ? 0 : clobber(depth - 1) + 1);
 		const alive = () => spawners.filter(ref => ref.deref() !== undefined).length;
 		let remaining = alive();
 		for (let i = 0; i < 10 && remaining > 0; i++) {
 			const turn = Promise.withResolvers<void>();
 			setImmediate(turn.resolve);
 			await turn.promise;
+			clobber(5_000);
 			Bun.gc(true);
 			remaining = alive();
 		}

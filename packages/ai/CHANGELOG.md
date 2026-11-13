@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `UserMessage.inheritedContext` marker for a task subagent's inherited parent tail; a provider transform may render that turn as image frames, and provider mappers ignore the field ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
+
 ### Changed
 
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))

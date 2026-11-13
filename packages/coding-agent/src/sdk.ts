@@ -263,6 +263,7 @@ import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-
 import { CacheWarmer } from "./session/cache-warmer";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
+import { InheritedContextFrames, restoreEvictedFrames } from "./task/inherited-context";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { createSpeculativeToolExecutionConfig } from "./speculation/host";
 import { closeAllConnections } from "./ssh/connection-manager";
@@ -2734,6 +2735,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
 			getContextMessages: () => convertToLlm(session?.messages ?? []),
+			// A getter: `obfuscator` is rebuilt when secret hiding is switched on mid-session.
+			get providerSecrets() {
+				return obfuscator;
+			},
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
@@ -4718,10 +4723,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Only the main loop journals its reminders in the session.
 		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
 			const dateCwdReminder = new DateCwdReminderInjector(journal);
+			// A task child's inherited parent tail, drawn as frames for vision models (after obfuscation,
+			// before inline snapcompact). Per conversation: its render cache holds one model's frames.
+			const inheritedContextFrames = new InheritedContextFrames();
 			return async (context: Context, transformModel: Model): Promise<Context> => {
 				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
 				transformed = capArchiveFrameBytes(transformed, transformModel);
+				// Before inline snapcompact: its planner counts these frames against the image budget.
+				const unframed = transformed;
+				transformed = await inheritedContextFrames.transform(
+					transformed,
+					transformModel,
+					cfgImagesBlockImages.get(settings),
+					cfgSnapcompactShape.get(settings),
+				);
+				const framed = transformed;
 				transformed = await snapcompactInline.transform(transformed, transformModel);
 				transformed = clampProviderContextImages(transformed, transformModel);
 				transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
@@ -4732,6 +4749,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				transformed = await blobBroker.decorateContext(transformed, transformModel);
 				// Byte budget after decoration: URL/file-referenced images carry no inline bytes.
 				transformed = clampProviderContextImageBytes(transformed, transformModel);
+				// A clamp that dropped inherited frames would leave the child neither frames nor the tail.
+				const restored = restoreEvictedFrames(transformed, unframed, framed);
+				if (restored !== transformed) {
+					// The text tail is larger than the frames it replaces: clamp again so the body limit counts it.
+					transformed = clampProviderContextImageBytes(restored, transformModel);
+				}
 				// Keep per-request volatility out of the system prompt: the date/cwd
 				// reminder rides on the first user turn so open-weight providers keep
 				// their tool-schema prefix cache (#7404).
@@ -5098,6 +5121,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return toolSession.skills;
 			},
+			// The spread `getContextMessages` reads the primary's transcript, not the advisor's own, so its task spawns never inherit.
+			withholdInheritedContext: true,
 			hasEditTool: true,
 			requireYieldTool: false,
 			getSessionId: () => {

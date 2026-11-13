@@ -373,7 +373,8 @@ export interface IdealShape {
  *  gateway — a Claude served through Vertex or OpenRouter still reads best
  *  with its own shape. Classified Anthropic models use the shared catalog
  *  identity parser; remaining model lines use first-match regex rules and fall
- *  back to the API family's winner at the standard 1568px frame. */
+ *  back to the API family's winner at the standard 1568px frame. A short tail
+ *  read once as background is measured separately: {@link resolveTailShapeForText}. */
 const HIGH_RES_ANTHROPIC_VARIANT = { variant: "11on16-bw", frameSize: 1932 } as const satisfies IdealShape;
 const MODEL_VARIANTS: readonly (readonly [RegExp, IdealShape])[] = [
 	// Versionless Fable/Mythos aliases (e.g. `claude-fable-latest`) never parse
@@ -499,6 +500,46 @@ export function resolveShapeAndScan(text: string, model?: ShapeTarget, variant?:
 		if (silverScan.isSafe) return { shape: silver, ...silverScan };
 	}
 	return { shape, ...scan };
+}
+
+/** A frame shape for a short conversation tail, and whether to list its exact identifiers beside the frames. */
+export interface TailShape {
+	shape: Shape;
+	identifierList: boolean;
+}
+
+/**
+ * Two-frame tail shapes per model class, measured apart from the archive shapes in `MODEL_VARIANTS`
+ * (each fits a 27,832-char tail in exactly two 1568px frames). Claude: `8x13-bw` read 0.94 of the
+ * context vs 0.93 for `11on16-bw`, with 2.7% exact-string errors vs 2.2% (5.9% without the list), on
+ * 0.76x the prompt tokens (0.55x the text). Gemini: `11on16-bw`; the list left exact-string errors
+ * unchanged (6/93 either way), and one larger frame billed the same but lost 0.15-0.18 of the context.
+ */
+const TAIL_VARIANTS: Partial<Record<string, { variant: ShapeVariantName; identifierList: boolean }>> = {
+	anthropic: { variant: "8x13-bw", identifierList: true },
+	gemini: { variant: "11on16-bw", identifierList: false },
+};
+
+/**
+ * Pick the frame shape for a conversation tail read once as background (a
+ * subagent's inherited context). An explicit `variant` forces that geometry
+ * with the identifier list; `auto` uses the measured tail shape for the model
+ * class, keeping {@link resolveShapeForText}'s CJK grid for text the tail
+ * shapes' font cannot draw, and falls back to {@link resolveShapeForText}.
+ */
+export function resolveTailShapeForText(
+	text: string,
+	model?: ShapeTarget,
+	variant?: ShapeVariantName | "auto",
+): TailShape {
+	const shape = resolveShapeForText(text, model, variant);
+	const tail =
+		(!variant || variant === "auto") && model?.id
+			? TAIL_VARIANTS[classifyModel(model.provider ?? "", model.id, { lenient: true }).class]
+			: undefined;
+	if (!tail) return { shape, identifierList: true };
+	if (shape.font === "silver") return { shape, identifierList: tail.identifierList };
+	return { shape: resolveShape(model, tail.variant), identifierList: tail.identifierList };
 }
 
 // ============================================================================

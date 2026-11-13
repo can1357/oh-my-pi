@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `resolveTailShapeForText()` picks the frame shape for a short conversation tail read once as background, with whether to list its exact identifiers beside the frames: under `auto`, `8x13-bw` for Claude and `11on16-bw` without the list for Gemini, both at 1568px ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

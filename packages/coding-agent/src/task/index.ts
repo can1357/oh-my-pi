@@ -35,6 +35,7 @@ import taskCoordinationAdvisoryTemplate from "../prompts/tools/task-coordination
 import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" with { type: "text" };
 import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
+import taskInheritContextDroppedTemplate from "../prompts/tools/task-inherit-context-dropped.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { hasWaitTool } from "../tools/wait";
@@ -51,6 +52,7 @@ import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import { buildInheritedContext, type InheritedContext } from "./inherited-context";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
@@ -78,6 +80,7 @@ import {
 	cfgTaskBatch,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
+	cfgTaskInheritContext,
 	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
@@ -153,6 +156,7 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	inheritContextEnabled: boolean;
 	perCallModelEnabled: boolean;
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	evalToolsEnabled: boolean;
@@ -194,6 +198,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		blocking: agent.blocking === true,
 		// Marked only while `task.structured` is off; with it on, every agent's result is structured.
 		structured: !options.structured && agent.structured === true,
+		// Marked only while the item flag exists, so the description is unchanged with the setting off.
+		noInheritContext: options.inheritContextEnabled && agent.inheritContext === false,
 	}));
 	const seanceAgent = filteredAgents.find(agent => agent.name === SEANCE_AGENT_NAME);
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -206,6 +212,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		inheritContextEnabled: options.inheritContextEnabled,
 		perCallModelEnabled: options.perCallModelEnabled,
 		perCallModelAdvertisement: options.perCallModelAdvertisement,
 		evalToolsEnabled: options.evalToolsEnabled,
@@ -386,6 +393,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
+	if ("inheritContext" in params) item.inheritContext = params.inheritContext;
 	if ("isolated" in params) item.isolated = params.isolated;
 	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
 	if ("model" in params) item.model = params.model;
@@ -412,6 +420,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("inheritContext" in item) spawn.inheritContext = item.inheritContext;
 	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
 	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
@@ -492,6 +501,7 @@ interface SyncSpawnRef {
 	index: number;
 	run?: SpawnRun;
 	preAllocatedId?: string;
+	inheritedContext?: InheritedContext;
 }
 
 /** Merged view of a sync spawn set's payloads: joined text plus flattened results/usage/paths. */
@@ -845,6 +855,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			inheritContextEnabled: this.#isInheritContextEnabled(),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			steps: cfgTaskSteps.get(this.session.settings),
@@ -894,6 +905,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			inheritContextEnabled: this.#isInheritContextEnabled(),
 			perCallModelEnabled: perCallModel,
 			perCallModelAdvertisement,
 			evalToolsEnabled: evalToolsEnabled(this.session),
@@ -947,6 +959,38 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return { effort: params.effort };
 	}
 
+	/**
+	 * Flagged item while `task.inheritContext` is on, for an agent that does not opt out
+	 * (`inheritContext: false`); the setting also drops a stale `true` at spawn time.
+	 */
+	#inheritsContext(params: TaskParams, agent: { inheritContext?: boolean }): boolean {
+		return params.inheritContext === true && agent.inheritContext !== false && this.#isInheritContextEnabled();
+	}
+
+	/** `task.inheritContext`, unless this session's context reader is another agent's transcript. */
+	#isInheritContextEnabled(): boolean {
+		return !this.session.withholdInheritedContext && cfgTaskInheritContext.get(this.session.settings);
+	}
+
+	/**
+	 * The parent's conversation tail per item, captured once when the call dispatches (before any
+	 * concurrency wait or job start, so a queued child sees the context its brief was written in).
+	 * Only flagged items whose agent does not opt out (`inheritContext: false`) get it; `dropped` lists
+	 * the indices of those that wanted it but got none (no conversation text, or the capture failed closed).
+	 */
+	#captureInheritedContexts(
+		spawns: readonly TaskParams[],
+		policies: readonly { agent: { inheritContext?: boolean } }[],
+	): { contexts: (InheritedContext | undefined)[]; dropped: number[] } {
+		const wants = spawns.map((spawn, index) => this.#inheritsContext(spawn, policies[index]!.agent));
+		if (!wants.includes(true)) return { contexts: spawns.map(() => undefined), dropped: [] };
+		const context = buildInheritedContext(this.session.getContextMessages?.() ?? [], this.session.providerSecrets);
+		return {
+			contexts: wants.map(want => (want ? context : undefined)),
+			dropped: context ? [] : wants.flatMap((want, index) => (want ? [index] : [])),
+		};
+	}
+
 	#seanceSchemaFields() {
 		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
@@ -991,6 +1035,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number;
 		agentId?: string;
 		detached: boolean;
+		inheritedContext?: InheritedContext;
 	}): SpawnRun {
 		return new SpawnRun(
 			this.#permit,
@@ -1006,6 +1051,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
 					run.tools,
+					spawn.inheritedContext,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
@@ -1025,7 +1071,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
 		let blocking: boolean;
 		try {
-			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
+			const policy = await this.#resolveSpawnPreflight(spawn);
+			// The parent's still-streaming turn (usually the reason for the spawn) is not in its context
+			// yet. Refusing halts speculation for the later items too, so ids and permits stay in order.
+			if (this.#inheritsContext(spawn, policy.agent)) return undefined;
+			blocking = policy.effectiveAgent.blocking === true;
 		} catch {
 			return undefined;
 		}
@@ -1176,6 +1226,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
+		const { contexts: inheritedContexts, dropped: droppedContexts } = this.#captureInheritedContexts(
+			normalizedSpawnParams,
+			policies,
+		);
+		// The parent was told a flagged child starts with its conversation; say so, by the id it sees, when one did not.
+		const droppedContextNote = (ids: readonly string[]) =>
+			ids.length > 0 ? prompt.render(taskInheritContextDroppedTemplate, { ids }).trim() : undefined;
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -1187,11 +1244,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const asyncItems = manager ? spawnItems.filter((_, index) => !itemBlocking[index]) : [];
 		// Runs started while the call streamed. An item runs detached iff it
 		// becomes a background job here; a run launched under the other mode
-		// (settings flipped mid-stream) cannot be re-homed and starts over.
+		// (settings flipped mid-stream) cannot be re-homed and starts over. A speculative
+		// run never carries an inherited tail (speculation refuses an item that inherits), so
+		// an item that inherits now, because `task.inheritContext` turned on after it was
+		// launched, starts over with its tail too.
 		const adopted = launchSession ? await launchSession.adopt(normalizedSpawnParams) : new Map<number, SpawnRun>();
 		for (const [index, run] of adopted) {
-			if (run.identity.detached === (manager !== undefined && !itemBlocking[index])) continue;
-			run.discard("task execution mode changed after speculative launch");
+			if (this.#inheritsContext(normalizedSpawnParams[index]!, policies[index]!.agent)) {
+				run.discard("task inheritance changed after speculative launch");
+			} else if (run.identity.detached === (manager !== undefined && !itemBlocking[index])) {
+				continue;
+			} else {
+				run.discard("task execution mode changed after speculative launch");
+			}
 			adopted.delete(index);
 		}
 		const depthCapacity = canSpawnAtDepth(
@@ -1200,6 +1265,41 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		);
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 
+		const spawnAdvisory = (willRunAsync: boolean) =>
+			this.session.suppressSpawnAdvisory
+				? undefined
+				: composeSpawnAdvisory({
+						agents: resolvedAgents,
+						items: asyncItems,
+						depthCapacity,
+						ircEnabled,
+						willRunAsync,
+						scoutAvailable: isScoutSpawnable(
+							cfgTaskDisabledAgents.get(this.session.settings),
+							this.session.getSessionSpawns?.() ?? "*",
+						),
+					});
+		// Returns a fresh result (copied content array, copied text part) rather
+		// than mutating the caller's — task results are short-lived here, but an
+		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
+		const withNotes = (
+			result: AgentToolResult<TaskToolDetails>,
+			...notes: (string | undefined)[]
+		): AgentToolResult<TaskToolDetails> => {
+			const text = notes.filter(Boolean).join("\n\n");
+			if (!text) return result;
+			let appended = false;
+			const content = result.content.map(part => {
+				if (!appended && part.type === "text" && typeof part.text === "string") {
+					appended = true;
+					return { ...part, text: `${part.text}\n\n${text}` };
+				}
+				return part;
+			});
+			if (!appended) content.push({ type: "text", text });
+			return { ...result, content };
+		};
+
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
 			// wired a job manager, or every item's agent type declares
@@ -1207,72 +1307,29 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (asyncEnabled && !this.session.asyncJobManager) {
 				logger.warn("task: no AsyncJobManager registered; falling back to sync execution");
 			}
-			const advisory = this.session.suppressSpawnAdvisory
-				? undefined
-				: composeSpawnAdvisory({
-						agents: resolvedAgents,
-						items: asyncItems,
-						depthCapacity,
-						ircEnabled,
-						willRunAsync: false,
-						scoutAvailable: isScoutSpawnable(
-							cfgTaskDisabledAgents.get(this.session.settings),
-							this.session.getSessionSpawns?.() ?? "*",
-						),
-					});
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
-				spawnItems.map((item, index) => ({ item, index, run: adopted.get(index) })),
+				spawnItems.map((item, index) => ({
+					item,
+					index,
+					run: adopted.get(index),
+					inheritedContext: inheritedContexts[index],
+				})),
 				defaultAgent,
 				signal,
 				onUpdate,
 			);
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
+			const droppedIds = (result.details?.results ?? [])
+				.filter(single => droppedContexts.includes(single.index))
+				.map(single => single.id);
+			return withNotes(result, droppedContextNote(droppedIds), spawnAdvisory(false));
 		}
 
 		// Coordination only makes sense for spawns that keep running after this
 		// call returns (the async subset). Blocking items have already completed
 		// by then, so a "coordinate while they run" hint would misfire.
-		const advisory = this.session.suppressSpawnAdvisory
-			? undefined
-			: composeSpawnAdvisory({
-					agents: resolvedAgents,
-					items: asyncItems,
-					depthCapacity,
-					ircEnabled,
-					willRunAsync: asyncItems.length > 0,
-					scoutAvailable: isScoutSpawnable(
-						cfgTaskDisabledAgents.get(this.session.settings),
-						this.session.getSessionSpawns?.() ?? "*",
-					),
-				});
-		// Returns a fresh result (copied content array, copied text part) rather
-		// than mutating the caller's — task results are short-lived here, but an
-		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
-		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
-		};
+		const advisory = spawnAdvisory(asyncItems.length > 0);
 		const outputManager = this.#outputManager();
 		const callStartedAt = Date.now();
 		const spawns: Array<{
@@ -1281,6 +1338,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			index: number;
 			blocking: boolean;
 			run: SpawnRun | undefined;
+			inheritedContext: InheritedContext | undefined;
 			progress: AgentProgress;
 		}> = [];
 		for (const [index, item] of spawnItems.entries()) {
@@ -1297,6 +1355,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index,
 				blocking: itemBlocking[index],
 				run,
+				inheritedContext: inheritedContexts[index],
 				progress: {
 					index,
 					id: agentId,
@@ -1316,6 +1375,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				},
 			});
 		}
+		// After the loop: the note names each child by the id allocated above.
+		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> =>
+			withNotes(
+				result,
+				droppedContextNote(
+					spawns.filter(spawn => droppedContexts.includes(spawn.index)).map(spawn => spawn.agentId),
+				),
+				advisory,
+			);
 		const asyncSpawns = spawns.filter(spawn => !spawn.blocking);
 		const syncSpawns = spawns.filter(spawn => spawn.blocking);
 		const agentLabel = [...new Set(asyncSpawns.map(spawn => spawn.progress.agent))].join(", ");
@@ -1358,6 +1426,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
 					run: spawn.run,
+					inheritedContext: spawn.inheritedContext,
 					progress: spawn.progress,
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
@@ -1474,6 +1543,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawn.index,
 				preAllocatedId: spawn.agentId,
 				run: spawn.run,
+				inheritedContext: spawn.inheritedContext,
 			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
@@ -1535,6 +1605,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId: string;
 		/** Run already started while the call streamed; the job adopts it instead of launching. */
 		run?: SpawnRun;
+		/** Parent tail captured at dispatch; the job hands it to the run it launches. */
+		inheritedContext?: InheritedContext;
 		progress: AgentProgress;
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
@@ -1547,6 +1619,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			spawnParams,
 			agentId,
 			run,
+			inheritedContext,
 			progress,
 			ircEnabled,
 			buildDetails,
@@ -1625,6 +1698,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: progress.index,
 					agentId,
 					detached: true,
+					inheritedContext,
 				}));
 				activeRun.attach({
 					signal: runSignal,
@@ -1772,6 +1846,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: spawn.index,
 					agentId: spawn.preAllocatedId,
 					detached: false,
+					inheritedContext: spawn.inheritedContext,
 				});
 			run.attach({ signal, onUpdate });
 			return await run.result;
@@ -1850,6 +1925,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						index: spawn.index,
 						agentId: spawn.preAllocatedId,
 						detached: false,
+						inheritedContext: spawn.inheritedContext,
 					});
 				run.attach({
 					signal: workerSignal,
@@ -1903,6 +1979,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
 		tools?: TextTap,
+		inheritedContext?: InheritedContext,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = spawnAssignment(params);
@@ -1920,6 +1997,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...this.#effortParams(params),
+				...(inheritedContext ? { inheritedContext } : {}),
 				solutionSpace: params.solutionSpace,
 				...(params.tools?.length
 					? {

@@ -337,6 +337,21 @@ export const cfgTaskStructured = register({
 	},
 });
 
+export const cfgTaskInheritContext = register({
+	id: "task.inheritContext",
+	// Like task.batch: it reshapes the tool schema and sends parent conversation to children.
+	protocolDefault: ["rpc", "acp"],
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Inherit Parent Context",
+		description:
+			"Offer an inheritContext flag on each task item. A flagged subagent starts with the most recent ~28k characters of this conversation as background from another agent; secrets are redacted. Vision models receive the excerpt as up to two snapcompact image frames, other models as text. Vision models other than Gemini also get a text list of the exact hashes, paths, flags, and numbers in the framed part. Agents declaring inheritContext: false (the bundled reviewers) ignore the flag; seance and eval agent() spawns never inherit.",
+	},
+});
+
 export const cfgTaskSpeculativeLaunch = register({
 	id: "task.speculativeLaunch",
 	type: "boolean",
