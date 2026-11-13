@@ -163,7 +163,7 @@ describe("UsageDashboardComponent.describe", () => {
 			"No usage yet",
 			expect.stringContaining("Quotas show here"),
 			"Untouched",
-			"Zai",
+			"Z.AI",
 		]);
 		expect(findAll(root, n => n.p?.role === "omp.usage.stats" || n.k === "chart")).toEqual([]);
 	});

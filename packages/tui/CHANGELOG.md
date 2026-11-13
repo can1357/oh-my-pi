@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Usage views (`/usage`, `omp usage` and the usage dashboard, including Tern's) spell provider names as their brands do, such as `OpenAI Codex`, `GitHub Copilot`, `Google Gemini CLI`, `xAI OAuth`, `OpenCode Go`, `LiteLLM`, `Command Code`, `MiniMax Code CN` and `Z.AI` instead of `Openai Codex`, `Github Copilot`, `Google Gemini Cli`, `Xai Oauth`, `Opencode Go`, `Litellm`, `Commandcode`, `Minimax Code Cn` and `Zai` ([#19101](https://github.com/can1357/oh-my-pi/pull/19101) by [@a-glapinski](https://github.com/a-glapinski))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
