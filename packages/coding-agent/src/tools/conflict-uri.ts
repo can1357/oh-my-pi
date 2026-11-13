@@ -154,7 +154,7 @@ async function resolveConflict(
 	await writethroughNoop(absolutePath, newContent, signal);
 	session.bumpFileMutationVersion?.(absolutePath);
 	getEditStore(session).invalidate(absolutePath);
-	const history = session.conflictHistory;
+	const history = session.state?.conflictHistory;
 	history?.invalidate(entry.id);
 	history?.reconcilePath(absolutePath, { blocks: scanConflictLines(newContent.split("\n"), 1) });
 

@@ -2780,7 +2780,6 @@ describe("AgentSession retry delay cap", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorConfigs: [{ name: "cyber-policy", model: advisorSelector }],
 			advisorStreamFn: (requestedModel, context, options) => {
 				requestedAdvisorModels.push(`${requestedModel.provider}/${requestedModel.id}`);

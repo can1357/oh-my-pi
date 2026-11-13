@@ -195,6 +195,7 @@ import {
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { getToolConversationState, ToolConversationState } from "./tool-state";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -1019,12 +1020,6 @@ const REPEAT_READ_HINT_THRESHOLD = 3;
 /** Per-session cap on tracked read keys; the map resets when exceeded. */
 const REPEAT_READ_TRACKER_CAP = 64;
 
-const kRepeatReadTracker = Symbol("read.repeatTracker");
-
-interface SessionWithRepeatReadTracker extends ToolSession {
-	[kRepeatReadTracker]?: Map<string, { hash: bigint; count: number }>;
-}
-
 /**
  * Append a loop-breaking hint when the same read selector returns
  * byte-identical output repeatedly. Weak models re-issue an unchanged read
@@ -1047,9 +1042,9 @@ function repeatReadNotice(
 	const block = result.content?.find(entry => entry.type === "text");
 	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
 
-	const holder = session as SessionWithRepeatReadTracker;
-	holder[kRepeatReadTracker] ??= new Map();
-	const tracker = holder[kRepeatReadTracker];
+	const state = getToolConversationState(session);
+	state.repeatReads ??= new Map();
+	const tracker = state.repeatReads;
 	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
 
 	let hash = BigInt(result.content.length);
@@ -1330,14 +1325,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const absolutePath = target.resolved;
 		let snapshotDigest: string | undefined;
 		try {
+			// A fresh conversation state: snapshots this read stages land in their own
+			// store and only reach the session's when the read commits.
 			const speculativeSession = Object.create(this.session) as ToolSession;
-			Object.defineProperty(speculativeSession, "editStore", {
-				value: undefined,
-				writable: true,
-				configurable: true,
-			});
-			Object.defineProperty(speculativeSession, "conflictHistory", {
-				value: undefined,
+			Object.defineProperty(speculativeSession, "state", {
+				value: new ToolConversationState(),
 				writable: true,
 				configurable: true,
 			});
