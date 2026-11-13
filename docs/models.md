@@ -618,6 +618,8 @@ When `bifrost` has a credential (`BIFROST_API_KEY` or stored `/login bifrost` au
 
 The live roster is authoritative and cached per key and base URL, since virtual keys can restrict it. Limits, modalities, reasoning, tool support, and prices come from the row's OpenRouter-style metadata; fields the row omits fall back to the bundled model of the upstream provider named by the id prefix, then to a bundled model with the same bare id. Rows whose `architecture.output_modalities` contain neither `text` nor `decisions` are skipped, as are metadata-less embedding, speech, transcription, and image ids.
 
+When a Bifrost decision model is a judge, choose one fallback layer: omp's judge chain (`retry.fallbackChains.judge`) or Bifrost's own retries and routing-rule fallbacks. Using both multiplies upstream calls during an outage; see [Bifrost judge retries](provider-quirks.md#bifrost-bifrost).
+
 ### Generic OpenAI-compatible discovery
 
 `openai-models-list` reads `{baseUrl}/v1/models` by default (without adding a second `/v1`).
