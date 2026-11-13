@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added scheduled wakeup IDs, states and due times to the `proc://` table in terminal and native renderers
+- Added scheduled wakeup IDs, states and due times to the `proc://` table in terminal and native renderers ([#19133](https://github.com/can1357/oh-my-pi/pull/19133) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.20.0] - 2026-11-12
 

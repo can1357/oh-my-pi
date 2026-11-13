@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `executeShellStdout`, a one-shot shell run that delivers stdout as raw, undecoded bytes, discards stderr, and resolves a cancelled or timed-out run only after its processes have terminated
+- Added `executeShellStdout`, a one-shot shell run that delivers stdout as raw, undecoded bytes, discards stderr, and resolves a cancelled or timed-out run only after its processes have terminated ([#19133](https://github.com/can1357/oh-my-pi/pull/19133) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 
