@@ -5,7 +5,11 @@ mod obash_support;
 
 use std::{fmt::Write as _, fs, path::PathBuf};
 #[cfg(unix)]
-use std::{os::unix::process::CommandExt, time::UNIX_EPOCH};
+use std::{
+	ffi::CString,
+	os::unix::{ffi::OsStrExt as _, process::CommandExt},
+	time::UNIX_EPOCH,
+};
 
 use pi_shell::testkit::golden;
 
@@ -214,12 +218,16 @@ fn script_file_errors_use_the_script_name() {
 	assert_eq!(out.status.code(), Some(2));
 }
 
+/// The `PATH` here is the harness's own, not `/usr/bin:/bin`: this test
+/// cares that the shell searches the variable it is given, not that the
+/// system keeps `sh` in a particular directory, and a host that keeps it
+/// elsewhere failed this on the hardcoded pair.
 #[test]
 fn external_commands_run_through_path() {
 	let out = output(
 		obash()
 			.args(["-c", "sh -c 'exit 3'; echo s=$?"])
-			.env("PATH", "/usr/bin:/bin"),
+			.env("PATH", &*obash_support::TEST_PATH),
 	);
 	assert_eq!(out.stdout, b"s=3\n");
 }
@@ -233,11 +241,13 @@ fn external_commands_run_through_path() {
 fn background_fifo_reader_is_the_writers_only_peer() {
 	let dir = tempfile::tempdir().unwrap();
 	for name in ["f", "g"] {
-		let status = std::process::Command::new("mkfifo")
-			.arg(dir.path().join(name))
-			.status()
-			.unwrap();
-		assert!(status.success());
+		// `mkfifo(3)`, not the program of that name: the program would be
+		// looked up in whatever PATH the runner was started with, and a
+		// runner without coreutils on it failed this test before it began.
+		let path = CString::new(dir.path().join(name).as_os_str().as_bytes()).unwrap();
+		// SAFETY: `path` is a NUL-terminated string that outlives the call.
+		let rc = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+		assert_eq!(rc, 0, "mkfifo {name}: {}", std::io::Error::last_os_error());
 	}
 	let out = output(obash().current_dir(dir.path()).args([
 		"-c",
