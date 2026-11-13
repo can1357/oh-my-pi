@@ -788,8 +788,12 @@ describe("relay tabs Chrome detaches omp from", () => {
 			await evaluating;
 			await ext.chromeDetach("target_closed");
 			expect(String(await stalled)).toContain("omp kept the tab open");
+			// Chrome's close event can reach this test's Puppeteer connection after the supervisor's close reply.
+			const closed = Promise.withResolvers<void>();
+			page!.once("close", closed.resolve);
 			// No worker drives the held-out tab, so nothing waits for one to answer the release.
 			await releaseTab(name, mode === "release" ? {} : { keepPage: true });
+			if (mode === "release") await closed.promise;
 			expect(getTab(name)).toBeUndefined();
 			expect(page?.isClosed()).toBe(mode === "release");
 		},
