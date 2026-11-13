@@ -73,12 +73,17 @@ describe("exact security OAuth resolver", () => {
 	});
 
 	test("resolves and refreshes only the pinned durable row", async () => {
-		const getOAuthAccessByCredentialId = vi.fn(async (_provider, credentialId, options) => ({
-			ok: true as const,
-			accessToken: options?.forceRefresh ? "refreshed" : "initial",
-			credentialId,
-			accountId: "workspace-a",
-		}));
+		const getOAuthAccessByCredentialId = vi.fn(async (_provider, credentialId, options) => {
+			const stage = options?.forceRefresh ? "refreshed" : "initial";
+			// A structured-credential provider: the bearer wraps, and differs from, the access token.
+			return {
+				ok: true as const,
+				accessToken: `${stage}-access`,
+				apiKey: `${stage}-key`,
+				credentialId,
+				accountId: "workspace-a",
+			};
+		});
 		const authStorage = { oauth: { accessById: getOAuthAccessByCredentialId } } as unknown as AuthStorage;
 		const resolver = createExactSecurityOAuthResolver({
 			authStorage,
@@ -87,10 +92,17 @@ describe("exact security OAuth resolver", () => {
 		const apiKey = resolver(model());
 		expect(typeof apiKey).toBe("function");
 		const exact = apiKey as ApiKeyResolver;
-		expect(await exact({ lastChance: false, error: undefined })).toBe("initial");
-		expect(await exact({ lastChance: false, error: new Error("401") })).toBe("refreshed");
-		expect(await exact({ lastChance: true, error: new Error("401") })).toBeUndefined();
+		expect(await exact({ lastChance: false, error: undefined })).toBe("initial-key");
+		const unauthorized = Object.assign(new Error("401 invalid_api_key"), { status: 401 });
+		expect(await exact({ lastChance: false, error: unauthorized, previousKey: "initial-key" })).toBe("refreshed-key");
+		expect(await exact({ lastChance: true, error: unauthorized })).toBeUndefined();
 		expect(getOAuthAccessByCredentialId.mock.calls.map(call => call[1])).toEqual([42, 42]);
+		// Broker auth recovery must name the access token the rejected bearer wrapped.
+		expect(getOAuthAccessByCredentialId.mock.calls[1]?.[2]).toMatchObject({
+			forceRefresh: true,
+			refreshReason: "auth-recovery",
+			rejectedAccessToken: "initial-access",
+		});
 	});
 
 	test("rejects a model whose provider crosses the pinned OAuth boundary", async () => {

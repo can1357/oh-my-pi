@@ -59,13 +59,13 @@ fn opt(ex: &mut Expander<'_, '_>, o: ZshOpt) -> X<bool> {
 /// The options the evaluator reads (zsh `isset(OCTALZEROES)`, …), read
 /// once per top-level evaluation; also the options `convbase` takes.
 /// Remembered while no root option changes ([`state::Root::opts_gen`]):
-/// every `(( ))` asks. A subshell's own options (its overlay) are read
+/// every `(( ))` asks. A forked vproc's options (its image's) are read
 /// each time.
 ///
 /// # Errors
 /// [`Stop::Store`] when an option cannot be read.
 pub fn math_options(ex: &mut Expander<'_, '_>) -> X<Options> {
-	let cacheable = ex.vp.overlay.is_none();
+	let cacheable = ex.vp.image.is_none();
 	let now = ex.k.root.opts_gen();
 	if cacheable
 		&& let Some((g, mode, o)) = ex.k.math_opts
@@ -262,7 +262,7 @@ impl Env for ShellEnv<'_, '_, '_> {
 	}
 
 	fn pid(&mut self) -> i64 {
-		// A nested shell keeps its own `$$` in its overlay (as `$$` reads
+		// A nested shell keeps its own `$$` in its image (as `$$` reads
 		// it).
 		match state::record(
 			self.ex.cx.store,
