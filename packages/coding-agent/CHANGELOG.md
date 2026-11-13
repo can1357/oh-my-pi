@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Automatic memory recall can filter its transcripts, facts and summaries for task relevance through the `judge` role: the `mnemopi.recallRelevance` setting (`auto`, `on`, `off`; default `auto`) filters only when the judge role resolves to a native judge, so offline and local-judge sessions recall as before with no judge call, and `on` filters with any judge, asking an on-device one a single memory per request. On a relevance-check failure automatic context is omitted without caching the failure and the next turn retries; explicit searches remain available. Updates to memories a resumed session already received are reported without a new judgment. When filtering is active, a resumed session recalls afresh instead of reusing a recall block cached without it; stored history is kept
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))

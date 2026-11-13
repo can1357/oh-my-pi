@@ -8,16 +8,22 @@
  * recall replaces the block only where the transcript asks a new question:
  * another memory store, a context reset, or a branch that edits the first prompt.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { Judge } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
-import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/memory-backend/recall-entry";
+import * as judgment from "@oh-my-pi/pi-coding-agent/judgment";
+import {
+	MEMORY_RECALL_CHANGES_MESSAGE_TYPE,
+	persistRecall,
+} from "@oh-my-pi/pi-coding-agent/memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { loadMnemopiConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import {
+	getMnemopiScopedDbPaths,
 	getMnemopiSessionState,
 	loadMnemopi,
 	loadMnemopiCore,
@@ -27,6 +33,7 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { clipRecallContent } from "@oh-my-pi/pi-mnemopi";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { judgeChain, memoryRelevanceJudge } from "./helpers/memory-relevance-judge";
 
 // Mnemopi is lazy-loaded at runtime; preload it for synchronous state construction.
 await Promise.all([loadMnemopi(), loadMnemopiCore()]);
@@ -36,6 +43,7 @@ const states: MnemopiSessionState[] = [];
 const dirs: TempDir[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const state of states.splice(0)) await state.dispose({ consolidate: false });
 	for (const dir of dirs.splice(0)) await dir.remove();
 });
@@ -51,6 +59,7 @@ function startProcess(
 	storeDir: TempDir,
 	sessionManager: SessionManager,
 	overrides: Record<string, unknown> = {},
+	automaticRecallJudge: Pick<judgment.ChainJudge, "withCandidate"> = memoryRelevanceJudge(),
 ): MnemopiSessionState {
 	const settings = Settings.isolated({
 		"memory.backend": "mnemopi",
@@ -58,6 +67,7 @@ function startProcess(
 		"mnemopi.dbPath": storeDir.join("mnemopi.db"),
 		"mnemopi.noEmbeddings": true,
 		"mnemopi.llmMode": "none",
+		"mnemopi.recallRelevance": "on",
 		...overrides,
 	});
 	const session = {
@@ -69,7 +79,7 @@ function startProcess(
 			resolver: () => async () => undefined,
 		},
 		getXdevToolEntries: () => [],
-		emitNotice: () => {},
+		emitNotice: vi.fn(),
 		getHindsightSessionState: () => undefined,
 		subscribe: () => () => {},
 		refreshBaseSystemPrompt: async () => {},
@@ -78,14 +88,20 @@ function startProcess(
 		sessionId: session.sessionId,
 		config: loadMnemopiConfig(settings, storeDir.path()),
 		session: session as never,
+		automaticRecallJudge,
 	});
 	setMnemopiSessionState(session as never, state);
 	states.push(state);
 	return state;
 }
 
-async function resume(storeDir: TempDir, sessionFile: string, sessionDir: TempDir): Promise<MnemopiSessionState> {
-	return startProcess(storeDir, await SessionManager.open(sessionFile, sessionDir.join("sessions")));
+async function resume(
+	storeDir: TempDir,
+	sessionFile: string,
+	sessionDir: TempDir,
+	overrides: Record<string, unknown> = {},
+): Promise<MnemopiSessionState> {
+	return startProcess(storeDir, await SessionManager.open(sessionFile, sessionDir.join("sessions")), overrides);
 }
 
 /** Runs the first turn's recall; returns the block and the change note delivered with it. */
@@ -354,10 +370,11 @@ describe("Mnemopi recall across a resume", () => {
 	it("reports a recalled fact whose value changed in place", async () => {
 		const dir = tempDir();
 		const live = startProcess(dir, newSession(dir));
+		const sourceId = live.rememberScoped("Ops notes for the week.");
 		const insert = live.memory.beam.db.prepare(
-			"INSERT INTO facts (fact_id, session_id, subject, predicate, object) VALUES (?, ?, ?, ?, ?)",
+			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, source_msg_id) VALUES (?, ?, ?, ?, ?, ?)",
 		);
-		insert.run("fact-deploy-host", live.memory.beam.sessionId, "deploy host", "is", "zeta-5");
+		insert.run("fact-deploy-host", live.memory.beam.sessionId, "deploy host", "is", "zeta-5", sourceId);
 		const { block } = await firstTurn(live);
 		expect(block).toContain("zeta-5");
 		// Belief revision rewrites a fact's object under the same id.
@@ -432,6 +449,319 @@ describe("Mnemopi recall across a resume", () => {
 		expect(block).toContain("beta-9");
 		expect(block).not.toContain("alpha-7");
 		expect(notice).toBeUndefined();
+	});
+});
+
+describe("Mnemopi automatic recall across sessions sharing a bank", () => {
+	const FOREIGN_FACT = "orchid-42";
+	const CURATED = "Curated note: the deploy host runbook lives on the ops wiki.";
+
+	/** Two processes, one store: `foreign` wrote to the shared bank in a different session. */
+	function sharedStore() {
+		const dir = tempDir();
+		const foreign = startProcess(dir, newSession(dir));
+		return { dir, foreign };
+	}
+
+	/** Retains a transcript from `session` that answers {@link PROMPT}; returns the stored row's id. */
+	async function retainTranscript(session: MnemopiSessionState, answer: string): Promise<string> {
+		await session.retainMessages(
+			[
+				{ role: "user", content: PROMPT },
+				{ role: "assistant", content: answer },
+			],
+			"transcript-source",
+			{ extract: false },
+		);
+		const row = session.memory.beam.db
+			.prepare(
+				"SELECT id FROM working_memory WHERE source = 'coding-agent-transcript' AND json_extract(metadata_json, '$.session_id') = ?",
+			)
+			.get(session.sessionId) as { id: string } | null | undefined;
+		if (!row) throw new Error("the transcript was not stored");
+		return row.id;
+	}
+
+	/** What an explicit memory search finds, as the model would read it. */
+	async function explicitRecall(session: MnemopiSessionState): Promise<string> {
+		return (await session.recallResultsScoped(PROMPT)).map(result => result.content).join("\n");
+	}
+
+	/** The consumers of automatic recall: the prompt's first turn, the background agent_start, and compaction. */
+	const automaticRecalls: Record<string, (live: MnemopiSessionState) => Promise<string | undefined>> = {
+		"first-turn prompt": async live => (await firstTurn(live)).block,
+		"background agent_start": async live => {
+			await writeTranscript(live.session.sessionManager);
+			await live.maybeRecallOnAgentStart();
+			return live.lastRecallSnippet;
+		},
+		compaction: live => live.recallForCompaction([{ role: "user", content: PROMPT, timestamp: Date.now() }]),
+	};
+
+	for (const [path, recall] of Object.entries(automaticRecalls)) {
+		it(`recalls relevant cross-session context through ${path} without injecting unrelated matches`, async () => {
+			const { dir, foreign } = sharedStore();
+			foreign.rememberScoped(CURATED);
+			await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+			foreign.rememberScoped("The deploy host hosted a cooking class.", { source: "learn" });
+			const live = startProcess(
+				dir,
+				newSession(dir),
+				{},
+				memoryRelevanceJudge(preview => (preview.includes("cooking class") ? "irrelevant" : "relevant")),
+			);
+
+			const automatic = await recall(live);
+			expect(automatic).toContain("ops wiki");
+			expect(automatic).toContain(FOREIGN_FACT);
+			expect(automatic).not.toContain("cooking class");
+			// Explicit recall stays unrestricted.
+			const explicit = await explicitRecall(live);
+			expect(explicit).toContain(FOREIGN_FACT);
+			expect(explicit).toContain("ops wiki");
+			expect(explicit).toContain("cooking class");
+		});
+	}
+
+	it("still recalls the session's own transcript automatically", async () => {
+		const { dir } = sharedStore();
+		const live = startProcess(dir, newSession(dir));
+		await retainTranscript(live, `The deploy host is ${FOREIGN_FACT}.`);
+
+		expect((await firstTurn(live)).block).toContain(FOREIGN_FACT);
+	});
+
+	it("recalls relevant extracted facts from the shared store", async () => {
+		const { dir, foreign } = sharedStore();
+		foreign.rememberScoped(CURATED);
+		const live = startProcess(dir, newSession(dir));
+		live.memory.beam.db
+			.prepare("INSERT INTO facts (fact_id, session_id, subject, predicate, object) VALUES (?, ?, ?, ?, ?)")
+			.run("fact-foreign", live.memory.beam.sessionId, "deploy host", "is", "zeta-5");
+
+		expect(await explicitRecall(live)).toContain("zeta-5");
+		const { block } = await firstTurn(live);
+		expect(block).toContain("ops wiki");
+		expect(block).toContain("zeta-5");
+	});
+
+	it("recalls a relevant episode consolidated from another session's transcript", async () => {
+		const { dir, foreign } = sharedStore();
+		foreign.rememberScoped(CURATED);
+		const transcriptId = await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		foreign.memory.beam.consolidateToEpisodic(
+			`Consolidated session notes: the deploy host is ${FOREIGN_FACT}.`,
+			[transcriptId],
+			"sleep_consolidation",
+		);
+		// Age out only the working copy; explicit invalidation retires its summaries too.
+		foreign.memory.beam.db
+			.prepare("UPDATE working_memory SET valid_until = ? WHERE id = ?")
+			.run("2000-01-01T00:00:00.000Z", transcriptId);
+		const live = startProcess(dir, newSession(dir));
+
+		expect(await explicitRecall(live)).toContain("Consolidated session notes");
+		const { block } = await firstTurn(live);
+		expect(block).toContain("ops wiki");
+		expect(block).toContain(FOREIGN_FACT);
+		expect(block).toContain("Consolidated session notes");
+	});
+
+	it("refreshes a block cached before relevance filtering", async () => {
+		const { dir, foreign } = sharedStore();
+		foreign.rememberScoped(CURATED);
+		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		const sessionManager = newSession(dir);
+		const live = startProcess(dir, sessionManager);
+		const [dbPath] = getMnemopiScopedDbPaths(live.config);
+		const banks = (live.config.recallBanks ?? []).map(bank => [bank, dbPath]);
+		persistRecall(sessionManager, JSON.stringify(["mnemopi", banks]), {
+			text: "<memories>Obsolete recall policy context</memories>",
+			memories: [],
+		});
+		const sessionFile = await writeTranscript(sessionManager);
+
+		const resumed = await resume(dir, sessionFile, dir);
+		const { block } = await firstTurn(resumed);
+		expect(block).toContain("ops wiki");
+		expect(block).toContain(FOREIGN_FACT);
+		expect(block).not.toContain("Obsolete recall policy context");
+	});
+
+	it("keeps reusing a cached block when relevance filtering is inactive", async () => {
+		const { dir, foreign } = sharedStore();
+		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		const sessionManager = newSession(dir);
+		const live = startProcess(dir, sessionManager, { "mnemopi.recallRelevance": "off" });
+		const [dbPath] = getMnemopiScopedDbPaths(live.config);
+		const banks = (live.config.recallBanks ?? []).map(bank => [bank, dbPath]);
+		persistRecall(sessionManager, JSON.stringify(["mnemopi", banks]), {
+			text: "<memories>Cached unfiltered context</memories>",
+			memories: [],
+		});
+		const sessionFile = await writeTranscript(sessionManager);
+
+		const resumed = await resume(dir, sessionFile, dir, { "mnemopi.recallRelevance": "off" });
+		const { block } = await firstTurn(resumed);
+		expect(block).toContain("Cached unfiltered context");
+		expect(block).not.toContain(FOREIGN_FACT);
+	});
+
+	const unavailable: Judge = {
+		label: "unavailable",
+		judge: async () => {
+			throw new Error("unavailable");
+		},
+	};
+
+	it("does not persist a failed relevance check as a successful empty recall", async () => {
+		const { dir, foreign } = sharedStore();
+		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		const live = startProcess(dir, newSession(dir), {}, judgeChain(unavailable));
+		expect(await live.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+		expect(recallEntryCount(live.session.sessionManager)).toBe(0);
+		expect(await explicitRecall(live)).toContain(FOREIGN_FACT);
+		const sessionFile = await writeTranscript(live.session.sessionManager);
+		expect((await firstTurn(await resume(dir, sessionFile, dir))).block).toContain(FOREIGN_FACT);
+	});
+
+	it("retries the first turn's recall on the next turn after a failed relevance check", async () => {
+		const { dir, foreign } = sharedStore();
+		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		const available = memoryRelevanceJudge();
+		let failing = true;
+		const flaky: Judge = {
+			label: "flaky",
+			judge: (request, options) =>
+				failing ? unavailable.judge(request, options) : available.judge(request, options),
+		};
+		const live = startProcess(dir, newSession(dir), {}, judgeChain(flaky));
+		expect(await live.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+		expect(live.hasRecalledForFirstTurn).toBe(false);
+		failing = false;
+		const retried = await live.beforeAgentStartPrompt(PROMPT);
+		expect(retried?.context).toContain(FOREIGN_FACT);
+		expect(retried?.commit()).toBe(true);
+		expect(live.hasRecalledForFirstTurn).toBe(true);
+	});
+
+	it("excludes uncertain memories without falling back to the raw search results", async () => {
+		const { dir, foreign } = sharedStore();
+		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		const live = startProcess(
+			dir,
+			newSession(dir),
+			{},
+			memoryRelevanceJudge(() => "uncertain"),
+		);
+		expect((await firstTurn(live)).block).toBeUndefined();
+		expect(await explicitRecall(live)).toContain(FOREIGN_FACT);
+	});
+
+	it("does not inject or persist a judgment that finishes after cancellation", async () => {
+		const { dir, foreign } = sharedStore();
+		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const allowed = memoryRelevanceJudge();
+		const delayed: Judge = {
+			label: "delayed",
+			async judge(request, options) {
+				entered.resolve();
+				await release.promise;
+				return allowed.judge(request, options);
+			},
+		};
+		const live = startProcess(dir, newSession(dir), {}, judgeChain(delayed));
+		const controller = new AbortController();
+		const preparation = live.beforeAgentStartPrompt(PROMPT, controller.signal);
+		await entered.promise;
+		controller.abort();
+		release.resolve();
+		const result = await preparation;
+		expect(result?.context).toBeUndefined();
+		result?.commit();
+		expect(recallEntryCount(live.session.sessionManager)).toBe(0);
+		expect(live.lastRecallSnippet).toBeUndefined();
+	});
+
+	it("asks an on-device judge one memory at a time", async () => {
+		const { dir, foreign } = sharedStore();
+		foreign.rememberScoped(CURATED);
+		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
+		const local = memoryRelevanceJudge(() => "relevant", "local");
+		const live = startProcess(dir, newSession(dir), {}, local);
+		const { block } = await firstTurn(live);
+		expect(block).toContain("ops wiki");
+		expect(block).toContain(FOREIGN_FACT);
+		expect(local.requests.length).toBeGreaterThan(1);
+		expect(local.requests.every(questions => questions === 1)).toBe(true);
+	});
+
+	describe("mnemopi.recallRelevance", () => {
+		/** A store holding one relevant memory and one the relevance judge would drop. */
+		function mixedStore() {
+			const { dir, foreign } = sharedStore();
+			foreign.rememberScoped(CURATED);
+			foreign.rememberScoped("The deploy host hosted a cooking class.", { source: "learn" });
+			const judge = memoryRelevanceJudge(preview => (preview.includes("cooking class") ? "irrelevant" : "relevant"));
+			return { dir, judge };
+		}
+
+		it.each([
+			["off", true],
+			["auto", false],
+		])("recalls every match without a judge call when %s and no native judge is available", async (mode, native) => {
+			vi.spyOn(judgment, "hasNativeJudge").mockReturnValue(native);
+			const { dir, judge } = mixedStore();
+			const live = startProcess(dir, newSession(dir), { "mnemopi.recallRelevance": mode }, judge);
+			const { block } = await firstTurn(live);
+			expect(block).toContain("ops wiki");
+			expect(block).toContain("cooking class");
+			expect(judge.requests).toEqual([]);
+			expect(live.session.emitNotice).not.toHaveBeenCalled();
+		});
+
+		it("filters through the judge when auto finds a native judge", async () => {
+			vi.spyOn(judgment, "hasNativeJudge").mockReturnValue(true);
+			const { dir, judge } = mixedStore();
+			const live = startProcess(dir, newSession(dir), { "mnemopi.recallRelevance": "auto" }, judge);
+			const { block } = await firstTurn(live);
+			expect(block).toContain("ops wiki");
+			expect(block).not.toContain("cooking class");
+			expect(judge.requests).toEqual([2]);
+		});
+	});
+
+	describe("on a resume", () => {
+		it("reports a memory updated in place without consulting the relevance judge", async () => {
+			const { dir, live, id, block, sessionFile } = await recalledTranscript("The deploy host is alpha-7.");
+			live.editScopedMemory("update", id, { content: "The deploy host is beta-9." });
+			const judge = memoryRelevanceJudge(() => "irrelevant");
+			const resumed = startProcess(dir, await SessionManager.open(sessionFile, dir.join("sessions")), {}, judge);
+			const result = await firstTurn(resumed);
+			expect(result.block).toBe(block);
+			expect(result.notice?.content).toContain("beta-9");
+			expect(result.notice?.details).toMatchObject({ memories: [{ id, text: "The deploy host is beta-9." }] });
+			expect(judge.requests).toEqual([]);
+		});
+
+		it("keeps an updated memory tracked when the relevance judge is unavailable", async () => {
+			const { dir, live, id, block, sessionFile } = await recalledTranscript("The deploy host is alpha-7.");
+			live.editScopedMemory("update", id, { content: "The deploy host is beta-9." });
+			const resumed = startProcess(
+				dir,
+				await SessionManager.open(sessionFile, dir.join("sessions")),
+				{},
+				judgeChain(unavailable),
+			);
+			const result = await firstTurn(resumed);
+			expect(result.block).toBe(block);
+			expect(result.notice?.content).toContain("beta-9");
+			expect(result.notice?.content).not.toContain("no longer current");
+			expect(result.notice?.details).toMatchObject({ memories: [{ id }] });
+			expect(resumed.session.emitNotice).not.toHaveBeenCalled();
+		});
 	});
 });
 
