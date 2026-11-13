@@ -2,9 +2,10 @@
 //!
 //! A popup's options are the `AXMenuItem`s of its `AXMenu`, and its `AXValue`
 //! is not settable. `AppKit` builds that menu's accessibility items only while
-//! the menu is open, so a closed native popup publishes no options at all:
-//! choosing one means opening the menu, pressing the item, ending the menu
-//! with `AXCancel`, and reading the popup's `AXValue` back as the verdict.
+//! the menu is open, so a closed native popup publishes no options at all, and
+//! a closed Chromium `<select>` publishes only its chosen one: choosing one
+//! means opening the menu, pressing the item, ending the menu, and reading the
+//! popup's `AXValue` back as the verdict.
 
 use std::{
 	thread,
@@ -16,7 +17,7 @@ use objc2_core_foundation::CFRetained;
 
 use super::{
 	CoreResult, DesktopError, control, copy_bool, copy_elements_optional, copy_string,
-	copy_strings_from_action_names, perform_action,
+	copy_strings_from_action_names, element_pid, input, perform_action,
 };
 
 /// How long a popup has to publish its menu items after the open action.
@@ -25,9 +26,11 @@ const MENU_OPEN_WAIT: Duration = Duration::from_millis(1000);
 const CHOICE_SETTLE_WAIT: Duration = Duration::from_millis(1000);
 /// How long a cancelled menu has to leave the popup's children.
 const MENU_CLOSE_WAIT: Duration = Duration::from_millis(300);
-/// How long a pressed option's menu has to close: one that refuses
-/// `AXCancel` flashes the item and fades out for about 340 ms.
-const PRESSED_MENU_CLOSE_WAIT: Duration = Duration::from_millis(1000);
+/// How long a pressed option's menu has to close before Escape is sent: one
+/// that refuses `AXCancel` flashes the item and fades out for about 340 ms.
+const PRESSED_MENU_FADE_WAIT: Duration = Duration::from_millis(500);
+/// How long a menu has to close after Escape: it fades out for about 270 ms.
+const ESCAPED_MENU_CLOSE_WAIT: Duration = Duration::from_millis(1000);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Chooses the option of `popup` titled exactly `value` and confirms it by
@@ -43,14 +46,12 @@ pub(super) fn choose(popup: &AXUIElement, value: &str) -> CoreResult<()> {
 		return Err(DesktopError::ax_failed("popup button is disabled; nothing was selected"));
 	}
 	let mut items = menu_items(popup);
-	let opened = items.is_empty();
+	let mut titles = option_titles(&items);
+	let opened = needs_menu(&titles, value, open_menu_element(popup).is_some());
 	if opened {
 		items = open_menu(popup)?;
+		titles = option_titles(&items);
 	}
-	let titles: Vec<String> = items
-		.iter()
-		.map(|item| copy_string(item, "AXTitle").unwrap_or_default())
-		.collect();
 	let result = choose_option(&titles, value)
 		.map_err(|refusal| DesktopError::ax_failed(refusal_message(&refusal, value, &titles)))
 		.and_then(|index| press_option(popup, &items[index], value));
@@ -74,6 +75,31 @@ enum Refusal {
 	Missing,
 	/// Several options share the title, so the value cannot say which.
 	Ambiguous,
+}
+
+/// Whether the options `popup` publishes now lack `requested` and its menu,
+/// which lists them all, is still to be opened: a closed popup publishes no
+/// options (`AppKit`) or only its chosen one (Chromium).
+fn needs_menu(titles: &[String], requested: &str, menu_open: bool) -> bool {
+	!menu_open && choose_option(titles, requested) == Err(Refusal::Missing)
+}
+
+/// Each option's title as it reads ([`option_title`]).
+fn option_titles(items: &[CFRetained<AXUIElement>]) -> Vec<String> {
+	items
+		.iter()
+		.map(|item| option_title(copy_string(item, "AXTitle"), || copy_string(item, "AXValue")))
+		.collect()
+}
+
+/// An option's title: its `AXTitle`, or for an untitled one its `AXValue`,
+/// where Chromium puts an `<option>`'s text. An item with neither is a
+/// separator. The value is read only for an untitled item.
+fn option_title(title: Option<String>, value: impl FnOnce() -> Option<String>) -> String {
+	title
+		.filter(|title| !title.is_empty())
+		.or_else(value)
+		.unwrap_or_default()
 }
 
 /// The index of the option titled exactly `requested`. Matching is exact:
@@ -139,9 +165,16 @@ fn open_menu_element(popup: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 		.find(|child| copy_string(child, "AXRole").as_deref() == Some("AXMenu"))
 }
 
+/// The items of an open menu once the app has built them; `None` while no
+/// menu is open, even when the closed popup publishes its chosen option.
+fn built_menu<T>(menu: Option<Vec<T>>) -> Option<Vec<T>> {
+	menu.filter(|items| !items.is_empty())
+}
+
 /// Opens a closed popup's menu with the control's own action and returns its
-/// items once `AppKit` has built them. `AXPress` is what a click does;
-/// `AXShowMenu` is the fallback for popups the first leaves without options.
+/// items once the app has built them ([`built_menu`]). `AXPress` is what a
+/// click does; `AXShowMenu` is the fallback for popups the first leaves
+/// without options.
 fn open_menu(popup: &AXUIElement) -> CoreResult<Vec<CFRetained<AXUIElement>>> {
 	let actions = copy_strings_from_action_names(popup)?;
 	let mut attempts = Vec::new();
@@ -158,8 +191,10 @@ fn open_menu(popup: &AXUIElement) -> CoreResult<Vec<CFRetained<AXUIElement>>> {
 			continue;
 		}
 		let published = poll(MENU_OPEN_WAIT, || {
-			let items = menu_items(popup);
-			(!items.is_empty()).then_some(items)
+			built_menu(
+				open_menu_element(popup)
+					.map(|menu| copy_elements_optional(&menu, "AXChildren").unwrap_or_default()),
+			)
 		});
 		if let Some(items) = published {
 			return Ok(items);
@@ -202,41 +237,43 @@ fn press_option(popup: &AXUIElement, item: &AXUIElement, title: &str) -> CoreRes
 	}
 	settle_choice(
 		title,
-		(PRESSED_MENU_CLOSE_WAIT, CHOICE_SETTLE_WAIT),
+		CHOICE_SETTLE_WAIT,
 		|| {
 			control::intervention::check_press()?;
 			perform_action(item, "AXPress")
 		},
 		|| {
-			if let Some(menu) = open_menu_element(popup) {
-				let _ = perform_action(&menu, "AXCancel");
-			}
+			let Some(menu) = open_menu_element(popup) else {
+				return true;
+			};
+			end_menu(
+				(PRESSED_MENU_FADE_WAIT, ESCAPED_MENU_CLOSE_WAIT),
+				|| perform_action(&menu, "AXCancel").is_ok(),
+				|| element_pid(popup).and_then(input::post_escape).is_ok(),
+				|| open_menu_element(popup).is_some(),
+			)
 		},
-		|| open_menu_element(popup).is_some(),
 		|| copy_string(popup, "AXValue"),
 	)
 }
 
-/// Runs `press` on the option titled `title`, then `cancel`s its menu and
-/// waits up to `closing` for the menu to be gone (`menu_open`), then up to
-/// `taking` for the popup's `value` to read `title`. A pressed item flashes
-/// and its menu fades out for about 340 ms, and until the menu is gone
-/// `WindowServer` sends the user's keys to the target, which types them into
-/// its own key window once it closes; `AXCancel` right behind the press ends
-/// the menu within a few milliseconds, and `AppKit` still sends the item's
-/// action. A menu that refuses the cancel closes after its fade, and the
-/// choice is not reported until it has: one still open then fails.
+/// Runs `press` on the option titled `title`, then `close`s its menu
+/// ([`end_menu`]), then waits up to `taking` for the popup's `value` to read
+/// `title`. A pressed item flashes and its menu fades out for about 340 ms,
+/// and until the menu is gone `WindowServer` sends the user's keys to the
+/// target, which types them into its own key window once it closes;
+/// `AXCancel` right behind the press ends the menu within a few milliseconds,
+/// and `AppKit` still sends the item's action. The choice is not reported
+/// until the menu is gone: one still open fails.
 fn settle_choice(
 	title: &str,
-	(closing, taking): (Duration, Duration),
+	taking: Duration,
 	press: impl FnOnce() -> CoreResult<()>,
-	cancel: impl FnOnce(),
-	mut menu_open: impl FnMut() -> bool,
+	close: impl FnOnce() -> bool,
 	mut value: impl FnMut() -> Option<String>,
 ) -> CoreResult<()> {
 	press()?;
-	cancel();
-	if poll(closing, || (!menu_open()).then_some(())).is_none() {
+	if !close() {
 		return Err(DesktopError::ax_failed(format!(
 			"pressed popup option \"{title}\" but its menu did not close, and an open menu keeps the \
 			 keyboard from the user's app; inspect the popup before retrying"
@@ -262,15 +299,35 @@ fn settle_choice(
 	}))
 }
 
-/// Cancels the popup's open menu. `true` once no menu is open.
+/// Cancels the popup's open menu ([`end_menu`]). `true` once no menu is open.
 fn close_menu(popup: &AXUIElement) -> bool {
 	let Some(menu) = open_menu_element(popup) else {
 		return true;
 	};
-	if perform_action(&menu, "AXCancel").is_err() {
-		return false;
+	end_menu(
+		(MENU_CLOSE_WAIT, ESCAPED_MENU_CLOSE_WAIT),
+		|| perform_action(&menu, "AXCancel").is_ok(),
+		|| element_pid(popup).and_then(input::post_escape).is_ok(),
+		|| open_menu_element(popup).is_some(),
+	)
+}
+
+/// Ends an open menu: `cancel`, and wait up to `cancelled` for it to be gone
+/// (`menu_open`), long enough for a menu that refuses the cancel to fade out;
+/// when the cancel fails or the menu stays, `escape` and wait up to
+/// `escaped`. A Chromium `<select>`'s menu accepts `AXCancel` and stays open;
+/// Escape closes it. `true` once no menu is open.
+fn end_menu(
+	(cancelled, escaped): (Duration, Duration),
+	cancel: impl FnOnce() -> bool,
+	escape: impl FnOnce() -> bool,
+	mut menu_open: impl FnMut() -> bool,
+) -> bool {
+	let mut closed = |wait: Duration| poll(wait, || (!menu_open()).then_some(())).is_some();
+	if cancel() && closed(cancelled) {
+		return true;
 	}
-	poll(MENU_CLOSE_WAIT, || open_menu_element(popup).is_none().then_some(())).is_some()
+	escape() && closed(escaped)
 }
 
 /// Runs `probe` every `POLL_INTERVAL` until it yields a value or `wait` has
@@ -292,7 +349,10 @@ pub(super) fn poll<T>(wait: Duration, mut probe: impl FnMut() -> Option<T>) -> O
 mod tests {
 	use std::{cell::RefCell, time::Duration};
 
-	use super::{Refusal, choose_option, option_list, settle_choice};
+	use super::{
+		Refusal, built_menu, choose_option, end_menu, needs_menu, option_list, option_title,
+		settle_choice,
+	};
 
 	fn titles(names: &[&str]) -> Vec<String> {
 		names.iter().map(ToString::to_string).collect()
@@ -327,75 +387,129 @@ mod tests {
 	#[test]
 	fn a_pressed_option_ends_its_menu_before_the_choice_is_read() {
 		let log = RefCell::new(Vec::new());
-		let open = std::cell::Cell::new(true);
 		let chosen = settle_choice(
 			"Large",
-			(Duration::ZERO, Duration::ZERO),
+			Duration::ZERO,
 			|| {
 				log.borrow_mut().push("press");
 				Ok(())
 			},
 			|| {
-				log.borrow_mut().push("cancel");
-				open.set(false);
+				log.borrow_mut().push("close");
+				true
 			},
-			|| open.get(),
 			|| {
 				log.borrow_mut().push("value");
 				Some("Large".to_string())
 			},
 		);
 		assert!(chosen.is_ok(), "{chosen:?}");
-		// Read before the cancel, the menu would still be fading with the
+		// Read before the close, the menu would still be fading with the
 		// keyboard.
-		assert_eq!(*log.borrow(), ["press", "cancel", "value"]);
+		assert_eq!(*log.borrow(), ["press", "close", "value"]);
 	}
 
 	#[test]
-	fn a_choice_waits_for_a_menu_that_refuses_cancel_to_fade_out() {
-		// The menu ignores `AXCancel` and closes on its own after its fade:
-		// the choice is reported only once it is gone.
-		let reads = std::cell::Cell::new(0);
-		let fading = || {
-			reads.update(|v| v + 1);
-			reads.get() < 4
-		};
-		let chosen = settle_choice(
-			"Large",
-			(Duration::from_secs(5), Duration::ZERO),
-			|| Ok(()),
-			|| {},
-			fading,
-			|| {
-				assert_eq!(reads.get(), 4, "the choice is read once the menu is gone");
-				Some("Large".to_string())
-			},
-		);
-		assert!(chosen.is_ok(), "{chosen:?}");
-		// A menu that never closes fails even though the app took the choice.
-		let error = settle_choice(
-			"Large",
-			(Duration::ZERO, Duration::ZERO),
-			|| Ok(()),
-			|| {},
-			|| true,
-			|| Some("Large".to_string()),
-		)
-		.expect_err("the menu is still open");
+	fn a_choice_whose_menu_stays_open_fails() {
+		// The app took the choice, but the menu still holds the keyboard.
+		let error =
+			settle_choice("Large", Duration::ZERO, || Ok(()), || false, || Some("Large".to_string()))
+				.expect_err("the menu is still open");
 		assert!(error.message.contains("its menu did not close"), "{}", error.message);
 	}
 
 	#[test]
-	fn a_choice_the_app_did_not_take_is_reported_after_the_cancel() {
-		let error = settle_choice(
-			"Large",
-			(Duration::ZERO, Duration::ZERO),
-			|| Ok(()),
-			|| {},
-			|| false,
-			|| Some("Small".to_string()),
-		)
-		.expect_err("the popup still reads Small");
+	fn a_menu_that_refuses_cancel_fades_out_without_escape() {
+		let reads = std::cell::Cell::new(0);
+		let closed = end_menu(
+			(Duration::from_secs(5), Duration::ZERO),
+			|| true,
+			|| panic!("no Escape for a menu that fades out within the wait"),
+			|| {
+				reads.update(|v| v + 1);
+				reads.get() < 4
+			},
+		);
+		assert!(closed);
+	}
+
+	#[test]
+	fn a_choice_the_app_did_not_take_is_reported_after_the_close() {
+		let error =
+			settle_choice("Large", Duration::ZERO, || Ok(()), || true, || Some("Small".to_string()))
+				.expect_err("the popup still reads Small");
 		assert!(error.message.contains("still reads \"Small\""), "{}", error.message);
+	}
+
+	#[test]
+	fn an_untitled_option_is_matched_by_its_value() {
+		// Chromium's `<option>` items carry their text as `AXValue` with an
+		// empty title.
+		let menu: Vec<String> = [("", "Low"), ("", "Mediocre"), ("", "Medium")]
+			.iter()
+			.map(|(title, value)| {
+				option_title(Some((*title).to_string()), || Some((*value).to_string()))
+			})
+			.collect();
+		assert_eq!(choose_option(&menu, "Medium"), Ok(2));
+		assert_eq!(option_list(&menu), "\"Low\", \"Mediocre\", \"Medium\"");
+		// A title wins over the value; an item with neither is a separator.
+		assert_eq!(
+			option_title(Some("Large".to_string()), || panic!("a titled option's value is not read")),
+			"Large"
+		);
+		assert_eq!(option_title(Some(String::new()), || None), "");
+		assert_eq!(option_title(None, || None), "");
+	}
+
+	#[test]
+	fn a_closed_popup_without_the_requested_option_opens_its_menu() {
+		// `AppKit` publishes no options while closed; Chromium only the chosen
+		// one.
+		assert!(needs_menu(&titles(&["Low"]), "Medium", false));
+		// An open menu already lists them all.
+		assert!(!needs_menu(&titles(&["Low"]), "Medium", true));
+	}
+
+	#[test]
+	fn a_menu_counts_as_open_once_it_has_items_whatever_the_closed_popup_published() {
+		// A one-option menu opened from a popup that published that option
+		// while closed is ready: its count does not grow.
+		assert_eq!(built_menu(Some(vec!["Low"])), Some(vec!["Low"]));
+		// Closed, or open but not yet built, it is not.
+		assert_eq!(built_menu::<&str>(None), None);
+		assert_eq!(built_menu::<&str>(Some(vec![])), None);
+	}
+
+	#[test]
+	fn a_menu_that_stays_open_after_its_cancel_is_closed_with_escape() {
+		let log = RefCell::new(Vec::new());
+		let open = std::cell::Cell::new(true);
+		let closed = end_menu(
+			(Duration::ZERO, Duration::ZERO),
+			|| {
+				log.borrow_mut().push("cancel");
+				true
+			},
+			|| {
+				log.borrow_mut().push("escape");
+				open.set(false);
+				true
+			},
+			|| open.get(),
+		);
+		assert!(closed);
+		assert_eq!(*log.borrow(), ["cancel", "escape"]);
+		// A menu the cancel closes gets no Escape, which would reach the app's
+		// key window.
+		let closed = end_menu(
+			(Duration::ZERO, Duration::ZERO),
+			|| true,
+			|| panic!("no Escape after a cancel that closed the menu"),
+			|| false,
+		);
+		assert!(closed);
+		// A menu neither closes is reported open.
+		assert!(!end_menu((Duration::ZERO, Duration::ZERO), || false, || true, || true));
 	}
 }
