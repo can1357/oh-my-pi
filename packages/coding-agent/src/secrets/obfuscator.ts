@@ -32,7 +32,7 @@ import {
 	trailingOutsidePreservedPlaceholderChunk,
 	transformOutsidePlaceholdersTracked,
 } from "./placeholder-scan";
-import { compileSecretRegex } from "./regex";
+import { compileSecretRegex, requiredLiteral } from "./regex";
 import { RegistryRevision, TrackedMap, TrackedSet } from "./registry-revision";
 import {
 	ensureDistinctReplacement,
@@ -68,8 +68,20 @@ interface CompiledRegexEntry {
 	mode: "obfuscate" | "replace";
 	replacement?: string;
 	friendlyName?: string;
-	/** Pre-folded probes (lower-cased when the regex is case-insensitive); null = always scan. */
-	probes: readonly string[] | null;
+	/** Gate from `literalPrefixes`, checked before every scan of this entry; null = always scan. */
+	probe: RegExp | null;
+	/**
+	 * Literals one of which every match contains: `literalPrefixes`, else the
+	 * one {@link requiredLiteral} reads from the pattern; null = none known.
+	 */
+	scanProbes: readonly string[] | null;
+	/**
+	 * Finds any of `scanProbes`. Exact only before running the regex on that
+	 * same text, as value collection does: redaction matches a
+	 * placeholder-expanded view, where an expanded secret can supply the
+	 * literal, so it is gated by `probe` alone.
+	 */
+	scanProbe: RegExp | null;
 	ignoreCase: boolean;
 }
 
@@ -90,16 +102,39 @@ const NON_ASCII_RE = /[^\x00-\x7F]/;
 /** Distinct placeholder prefixes whose regex verdict is memoized; forged prefixes beyond this are just re-tested. */
 const MAX_PREFIX_REGEX_MEMO = 4096;
 
-/** Per-string results reused within one {@link SecretObfuscator.batch}. */
+/** Distinct shared-values contents remembered at once; see `#sharedEpoch`. */
+const MAX_SHARED_EPOCHS = 64;
+
+/**
+ * Batches a {@link TextScan} may sit unread before it is dropped. A request
+ * runs a few batches over the same history, so history texts stay cached
+ * while texts that left the context are released.
+ */
+const SCAN_RETENTION_BATCHES = 8;
+
+/**
+ * Per-string results reused across {@link SecretObfuscator.batch} calls. Each
+ * field records what it depends on, so a registry write invalidates only what
+ * it can change.
+ */
 interface TextScan {
-	/** Registry revision the entry was computed under; stale entries are recomputed. */
-	revision: number;
+	/** Batch that last read this entry; idle entries are swept. */
+	batch: number;
 	/** Regex values in the raw text (a pure function of the text: regex entries never change). */
 	initialValues: readonly string[];
+	/** Literal-mapping version `literalFree` was computed under. */
+	literalVersion: number;
 	/** No configured literal and no `$$` occurs (depends on the literal mappings). */
 	literalFree: boolean;
+	/** Registry revision `collectedValues` was computed under. */
+	collectedRevision: number;
 	/** Standalone collection result, i.e. after replace simulation; filled on first use. */
 	collectedValues: readonly string[] | undefined;
+	/** Registry revision and shared-values epoch `output` was computed under. */
+	outputRevision: number;
+	outputEpoch: number;
+	/** Last {@link SecretObfuscator.obfuscate} result for this text. */
+	output: string | undefined;
 }
 
 interface RegexScanMemo {
@@ -120,8 +155,48 @@ interface RegexScanMemo {
  */
 function buildLiteralDetector(literals: readonly string[], flags?: string): RegExp | undefined {
 	if (literals.length === 0) return undefined;
-	const sorted = [...new Set(literals)].sort((a, b) => b.length - a.length);
-	return new RegExp(sorted.map(literal => RegExp.escape(literal)).join("|"), flags);
+	return new RegExp(literalTrie(literals.map(literal => [...literal])), flags);
+}
+
+/**
+ * Alternation of code-point sequences with shared prefixes factored out, so
+ * the engine compares a common prefix (`SECRET_1`, `SECRET_2`, …) once per
+ * position instead of once per literal. A sequence that ends where others
+ * continue makes them redundant for an existence test, so they are dropped.
+ */
+function literalTrie(words: readonly string[][]): string {
+	const branches = new Map<string, string[][]>();
+	for (const word of words) {
+		if (word.length === 0) return "";
+		const rest = branches.get(word[0]!);
+		if (rest === undefined) branches.set(word[0]!, [word.slice(1)]);
+		else rest.push(word.slice(1));
+	}
+	const alternatives: string[] = [];
+	for (const [head, rests] of branches) {
+		const tail = rests.length === 1 ? RegExp.escape(rests[0]!.join("")) : literalTrie(rests);
+		alternatives.push(RegExp.escape(head) + (tail === "" || rests.length === 1 ? tail : `(?:${tail})`));
+	}
+	return alternatives.join("|");
+}
+
+function isUnicode(regex: RegExp): boolean {
+	return regex.unicode || regex.unicodeSets;
+}
+
+/**
+ * `probes` when a literal search can gate `regex`: always for a
+ * case-sensitive entry; for a case-insensitive one only when every probe is
+ * ASCII, where an `i`/`iu` search finds every case variant the entry itself
+ * can match. Null means the entry is always scanned.
+ */
+function gateableProbes(regex: RegExp, probes: readonly string[]): readonly string[] | null {
+	return regex.ignoreCase && probes.some(probe => NON_ASCII_RE.test(probe)) ? null : probes;
+}
+
+/** One search for any of `probes`, in `regex`'s case mode. */
+function probeDetector(regex: RegExp, probes: readonly string[]): RegExp {
+	return buildLiteralDetector(probes, regex.ignoreCase ? (isUnicode(regex) ? "iu" : "i") : undefined)!;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -132,11 +207,11 @@ function buildLiteralDetector(literals: readonly string[], flags?: string): RegE
  * Invariant: every piece of state redaction reads either never changes after
  * construction (regex entries, a readonly field of a readonly array) or lives
  * in a collection bound to `#revision` (`TrackedMap`, `TrackedSet`,
- * `SecretValueSet` with a revision), whose writes bump it. The short-lived
- * reuse inside one batch or call (per-string scans, the regex scan memo,
- * sorted literal caches) is keyed by `#revision.value`, so a mint partway
- * through can never leave a stale result in use. No redaction result is kept
- * across batches.
+ * `SecretValueSet` with a revision), whose writes bump it. Every reused result
+ * (per-string scans and `obfuscate` outputs across batches, the regex scan
+ * memo, sorted literal caches) is keyed by `#revision.value` or by the
+ * narrower version it depends on, so a mint partway through can never leave a
+ * stale result in use.
  */
 export class SecretObfuscator {
 	/** Registry version; see the class invariant. Declared first: the tracked fields below bind to it. */
@@ -204,14 +279,19 @@ export class SecretObfuscator {
 
 	/** Probes of case-sensitive probed regex entries. */
 	readonly #rawProbes: readonly string[];
-	/** Matches any probe of a case-sensitive / case-insensitive (folded) probed regex entry; undefined when there are none. */
-	#rawProbeDetector: RegExp | undefined;
-	#foldedProbeDetector: RegExp | undefined;
-	/** `i`-flag form of the folded probes, set only when every folded probe is ASCII; see {@link #foldedProbeHit}. */
-	#asciiFoldedProbeDetector: RegExp | undefined;
+	/** Matches any probe of a case-sensitive / case-insensitive probed regex entry; undefined when there are none. */
+	readonly #rawProbeDetector: RegExp | undefined;
+	readonly #caselessProbeDetector: RegExp | undefined;
 
-	/** Per-string scan results of the {@link batch} in progress, if any; dropped when it ends. */
-	#batchScans: Map<string, TextScan> | undefined;
+	/** Per-string results kept across batches; only read and written while a {@link batch} is open. */
+	readonly #scans = new Map<string, TextScan>();
+	/** Whether a {@link batch} is open. */
+	#inBatch = false;
+	/** Outermost batches started so far; stamps {@link TextScan.batch}. */
+	#batchCount = 0;
+	/** Shared-values {@link SecretValueSet.contentKey} → epoch, so equal sets from different batches share memoized outputs. */
+	readonly #epochByContent = new Map<string, number>();
+	#epochCount = 0;
 
 	/** Placeholder ranges and expanded scan view of the last text `#collectRegexMatches` scanned. */
 	#lastRegexScan: RegexScanMemo | undefined;
@@ -275,33 +355,37 @@ export class SecretObfuscator {
 				) {
 					continue;
 				}
-				const ignoreCase = regex.ignoreCase;
 				const prefixes = entry.literalPrefixes;
 				// An empty list would skip everything; treat it like "no metadata".
-				const probes =
+				const declared =
 					prefixes !== undefined && prefixes.length > 0 && prefixes.every(prefix => prefix.length > 0)
-						? prefixes.map(prefix => (ignoreCase ? prefix.toLowerCase() : prefix))
+						? gateableProbes(regex, prefixes)
 						: null;
+				const derived = declared === null ? requiredLiteral(regex) : undefined;
+				const scanProbes = derived === undefined ? declared : gateableProbes(regex, [derived]);
 				regexEntries.push({
 					regex,
 					mode,
 					replacement: entry.replacement,
 					friendlyName: entry.friendlyName,
-					probes,
-					ignoreCase,
+					probe: declared && probeDetector(regex, declared),
+					scanProbes,
+					scanProbe: scanProbes && probeDetector(regex, scanProbes),
+					ignoreCase: regex.ignoreCase,
 				});
 			} catch {
 				// Invalid regex — skip silently (validation happens at load time)
 			}
 		}
 		this.#regexEntries = regexEntries;
-		this.#rawProbes = regexEntries.flatMap(entry => (entry.ignoreCase ? [] : (entry.probes ?? [])));
+		this.#rawProbes = regexEntries.flatMap(entry => (entry.ignoreCase ? [] : (entry.scanProbes ?? [])));
 		this.#rawProbeDetector = buildLiteralDetector(this.#rawProbes);
-		const foldedProbes = regexEntries.flatMap(entry => (entry.ignoreCase ? (entry.probes ?? []) : []));
-		this.#foldedProbeDetector = buildLiteralDetector(foldedProbes);
-		if (!foldedProbes.some(probe => NON_ASCII_RE.test(probe))) {
-			this.#asciiFoldedProbeDetector = buildLiteralDetector(foldedProbes, "i");
-		}
+		const caseless = regexEntries.filter(entry => entry.ignoreCase && entry.scanProbes !== null);
+		// `iu` folding matches a superset of what `i` does on ASCII probes, so one detector covers both kinds.
+		this.#caselessProbeDetector = buildLiteralDetector(
+			caseless.flatMap(entry => entry.scanProbes!),
+			caseless.some(entry => isUnicode(entry.regex)) ? "iu" : "i",
+		);
 		let index = 0;
 		let hasRealSec = regexEntries.length > 0;
 		for (const entry of entries) {
@@ -376,6 +460,11 @@ export class SecretObfuscator {
 		this.#literalCacheReplaceVersion = replaceVersion;
 	}
 
+	/** Changes whenever the plain or replace literal mappings do. */
+	get #literalVersion(): number {
+		return this.#plainMappings.version + this.#replaceMappings.version;
+	}
+
 	get #configuredLiterals(): string[] {
 		return [...[...this.#replaceMappings.keys()].filter(secret => secret.length > 0), ...this.#plainMappings.keys()];
 	}
@@ -414,20 +503,6 @@ export class SecretObfuscator {
 		this.#syncLiteralCaches();
 		this.#cleanDetector ??= buildLiteralDetector(["$$", ...this.#configuredLiterals, ...this.#rawProbes])!;
 		return this.#cleanDetector.test(text);
-	}
-
-	/**
-	 * Whether any case-insensitive probe occurs in the lower-cased text. On
-	 * ASCII text with ASCII probes an `i`-flag regex gives the same answer
-	 * without copying the text; anything else (where `toLowerCase` and regex
-	 * case-insensitivity can disagree, e.g. `K` U+212A) folds as before.
-	 */
-	#foldedProbeHit(text: string, folded: () => string): boolean {
-		if (this.#foldedProbeDetector === undefined) return false;
-		if (this.#asciiFoldedProbeDetector !== undefined && !NON_ASCII_RE.test(text)) {
-			return this.#asciiFoldedProbeDetector.test(text);
-		}
-		return this.#foldedProbeDetector.test(folded());
 	}
 
 	/** Whether this pass will mint a keyed placeholder from a regex match. */
@@ -532,10 +607,51 @@ export class SecretObfuscator {
 		return matches;
 	}
 
-	/** Obfuscate all secrets in text. Bidirectional placeholders for obfuscate mode, one-way for replace. */
+	/**
+	 * Obfuscate all secrets in text. Bidirectional placeholders for obfuscate mode, one-way for replace.
+	 * Inside a {@link batch}, the result is reused while the registry and the shared values are unchanged.
+	 */
 	obfuscate(text: string, sharedRegexSecretValues?: ReadonlySet<string>): string {
 		if (!this.obfuscates()) return text;
 		const sharedValues = sharedRegexSecretValues ?? EMPTY_SECRET_VALUES;
+		if (!this.#inBatch) return this.#obfuscateNow(text, sharedValues);
+		const epoch = this.#sharedEpoch(sharedValues);
+		const revision = this.#revision.value;
+		const memo = this.#scans.get(text);
+		if (memo !== undefined && memo.outputRevision === revision && memo.outputEpoch === epoch) {
+			memo.batch = this.#batchCount;
+			return memo.output!;
+		}
+		const result = this.#obfuscateNow(text, sharedValues);
+		// A call that minted is recomputed next time: its result may differ once the mint is known.
+		const scan = this.#scans.get(text);
+		if (scan !== undefined && epoch !== undefined && this.#revision.value === revision) {
+			scan.output = result;
+			scan.outputRevision = revision;
+			scan.outputEpoch = epoch;
+		}
+		return result;
+	}
+
+	/**
+	 * Identifies the contents of a shared-values set: 0 when empty, equal for
+	 * equal {@link SecretValueSet}s, undefined (not memoizable) for other sets.
+	 */
+	#sharedEpoch(values: ReadonlySet<string>): number | undefined {
+		if (values.size === 0) return 0;
+		if (!(values instanceof SecretValueSet)) return undefined;
+		const key = values.contentKey;
+		let epoch = this.#epochByContent.get(key);
+		if (epoch === undefined) {
+			// Epochs only grow, so a cleared key gets a fresh epoch and never aliases an old one.
+			if (this.#epochByContent.size >= MAX_SHARED_EPOCHS) this.#epochByContent.clear();
+			epoch = ++this.#epochCount;
+			this.#epochByContent.set(key, epoch);
+		}
+		return epoch;
+	}
+
+	#obfuscateNow(text: string, sharedValues: ReadonlySet<string>): string {
 		const { values: currentValues, literalFree } = this.#collectStandalone(text);
 		// Clean (no regex value, no literal, no placeholder candidate) text came
 		// back from collection as the empty raw scan.
@@ -602,10 +718,9 @@ export class SecretObfuscator {
 		}
 		PLACEHOLDER_RE.lastIndex = 0;
 
-		const folded = this.#foldedOnce(text);
 		let origin: string | undefined;
 		for (const entry of this.#regexEntries) {
-			if (!this.#entryMayMatch(entry, text, folded)) continue;
+			if (!this.#entryMayMatch(entry, text)) continue;
 			origin ??= "I".repeat(text.length);
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(text, entry.regex, entry.mode, origin, entry.replacement);
@@ -617,16 +732,25 @@ export class SecretObfuscator {
 
 	/**
 	 * Run `run` as one outbound batch (collect, then redact, over one message
-	 * list) so each string is scanned once for both. Nothing outlives the batch.
-	 * Nested calls join the outer batch.
+	 * list) so each string is scanned once for both. Per-string scans and
+	 * outputs carry to later batches, so history re-sent every request is not
+	 * rescanned; strings no batch read for {@link SCAN_RETENTION_BATCHES}
+	 * batches are dropped. Nested calls join the outer batch.
 	 */
 	batch<T>(run: () => T): T {
-		if (this.#batchScans !== undefined) return run();
-		this.#batchScans = new Map();
+		if (this.#inBatch) return run();
+		this.#inBatch = true;
+		this.#batchCount++;
 		try {
 			return run();
 		} finally {
-			this.#batchScans = undefined;
+			this.#inBatch = false;
+			if (this.#batchCount % SCAN_RETENTION_BATCHES === 0) {
+				const oldest = this.#batchCount - SCAN_RETENTION_BATCHES;
+				for (const [text, scan] of this.#scans) {
+					if (scan.batch <= oldest) this.#scans.delete(text);
+				}
+			}
 		}
 	}
 
@@ -703,9 +827,8 @@ export class SecretObfuscator {
 		}
 
 		// 3. Process regex entries — discover new matches
-		const foldedResult = this.#foldedOnce(result);
 		for (const entry of this.#regexEntries) {
-			if (!this.#entryMayMatch(entry, result, foldedResult)) continue;
+			if (!this.#entryMayMatch(entry, result)) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(result, entry.regex, entry.mode, origin, entry.replacement);
 
@@ -1063,7 +1186,7 @@ export class SecretObfuscator {
 		let currentOrigin = origin;
 		for (const entry of this.#regexEntries) {
 			if (entry.mode !== "replace" || entry.replacement !== undefined) continue;
-			if (!this.#entryMayMatch(entry, result, this.#foldedOnce(result))) continue;
+			if (!this.#entryMayMatch(entry, result)) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(result, entry.regex, entry.mode, currentOrigin, entry.replacement);
 			entry.regex.lastIndex = 0;
@@ -1104,24 +1227,13 @@ export class SecretObfuscator {
 	}
 
 	/**
-	 * Cheap literal gate before a regex scan: with prefix metadata, a text
-	 * containing none of the prefixes cannot match, and `includes` costs a
-	 * fraction of a lookbehind regex over the whole provider context. Without
-	 * metadata the regex always runs. `folded` is the caller's lower-cased
-	 * copy for case-insensitive entries, computed once per text.
+	 * Cheap literal gate before a regex scan: a text containing none of the
+	 * entry's probes cannot match, and a literal search costs a fraction of a
+	 * lookbehind regex over the whole provider context. Without probes the
+	 * regex always runs.
 	 */
-	#entryMayMatch(entry: CompiledRegexEntry, text: string, folded: () => string): boolean {
-		if (entry.probes === null) return true;
-		const haystack = entry.ignoreCase ? folded() : text;
-		for (const probe of entry.probes) {
-			if (haystack.includes(probe)) return true;
-		}
-		return false;
-	}
-
-	#foldedOnce(text: string): () => string {
-		let folded: string | undefined;
-		return () => (folded ??= text.toLowerCase());
+	#entryMayMatch(entry: CompiledRegexEntry, text: string): boolean {
+		return entry.probe === null || entry.probe.test(text);
 	}
 
 	/** Find the obfuscate index for a known secret value. */
@@ -1249,14 +1361,14 @@ export class SecretObfuscator {
 	/** `rawProbeHit`, when the caller already knows no case-sensitive probe occurs, skips that detector. */
 	#collectRegexSecretValues(text: string, rawProbeHit?: boolean): Set<string> {
 		const values = new Set<string>();
-		const folded = this.#foldedOnce(text);
-		// One combined scan per haystack rules out every probed entry at once;
+		// One combined scan per case mode rules out every probed entry at once;
 		// only when some probe occurs do entries check their own probes.
 		const rawHit = rawProbeHit ?? this.#rawProbeDetector?.test(text) ?? false;
-		const foldedProbeHit = this.#foldedProbeHit(text, folded);
+		const caselessHit = this.#caselessProbeDetector?.test(text) ?? false;
 		for (const entry of this.#regexEntries) {
-			if (entry.probes !== null && !(entry.ignoreCase ? foldedProbeHit : rawHit)) continue;
-			if (!this.#entryMayMatch(entry, text, folded)) continue;
+			if (entry.scanProbe !== null && !((entry.ignoreCase ? caselessHit : rawHit) && entry.scanProbe.test(text))) {
+				continue;
+			}
 			entry.regex.lastIndex = 0;
 			for (;;) {
 				const match = entry.regex.exec(text);
@@ -1281,19 +1393,31 @@ export class SecretObfuscator {
 	 * and redaction of the same string within a {@link batch}.
 	 */
 	#scanText(text: string): TextScan {
-		const scans = this.#batchScans;
-		const cached = scans?.get(text);
-		if (cached !== undefined && cached.revision === this.#revision.value) return cached;
+		const literalVersion = this.#literalVersion;
+		const cached = this.#inBatch ? this.#scans.get(text) : undefined;
+		if (cached !== undefined) {
+			cached.batch = this.#batchCount;
+			if (cached.literalVersion !== literalVersion) {
+				cached.literalVersion = literalVersion;
+				cached.literalFree = this.#isLiteralFree(text);
+			}
+			return cached;
+		}
 		// Clean text (the common case) is ruled out in one combined pass.
 		const mayNeedRedaction = this.#mayNeedRedaction(text);
 		const rawValues = this.#collectRegexSecretValues(text, mayNeedRedaction ? undefined : false);
 		const scan: TextScan = {
-			revision: this.#revision.value,
+			batch: this.#batchCount,
 			initialValues: rawValues.size === 0 ? NO_VALUES : [...rawValues],
+			literalVersion,
 			literalFree: !mayNeedRedaction || this.#isLiteralFree(text),
+			collectedRevision: -1,
 			collectedValues: undefined,
+			outputRevision: -1,
+			outputEpoch: -1,
+			output: undefined,
 		};
-		scans?.set(text, scan);
+		if (this.#inBatch) this.#scans.set(text, scan);
 		return scan;
 	}
 
@@ -1309,16 +1433,15 @@ export class SecretObfuscator {
 			return { values: EMPTY_SECRET_VALUES, literalFree: true };
 		const values = new Set(scan.initialValues);
 		const reusable =
-			this.#batchScans !== undefined &&
-			this.#currentRegexSecretValues.size === 0 &&
-			this.#sharedRegexSecretValues.size === 0;
-		if (reusable && scan.collectedValues !== undefined && scan.revision === this.#revision.value) {
+			this.#inBatch && this.#currentRegexSecretValues.size === 0 && this.#sharedRegexSecretValues.size === 0;
+		if (reusable && scan.collectedValues !== undefined && scan.collectedRevision === this.#revision.value) {
 			return { values: new Set(scan.collectedValues), literalFree: scan.literalFree };
 		}
 		const revision = this.#revision.value;
 		const collected = this.#collectAfterReplaceSimulation(text, values);
-		if (reusable && scan.revision === revision && this.#revision.value === revision) {
+		if (reusable && this.#revision.value === revision) {
 			scan.collectedValues = [...collected];
+			scan.collectedRevision = revision;
 		}
 		return { values: collected, literalFree: scan.literalFree };
 	}
@@ -1345,7 +1468,7 @@ export class SecretObfuscator {
 		let simulatedOrigin = origin;
 		for (const entry of this.#regexEntries) {
 			if (entry.mode !== "replace") continue;
-			if (!this.#entryMayMatch(entry, simulated, this.#foldedOnce(simulated))) continue;
+			if (!this.#entryMayMatch(entry, simulated)) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(
 				simulated,

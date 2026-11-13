@@ -43,17 +43,19 @@ import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type
 import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withDownload } from "../../downloads/activity";
+import { TOOL_TIMEOUTS } from "../tool-timeouts";
 import { findUserDataDirInArgs, gracefulKillTreeOnce, probeCdpResponse } from "./attach";
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
-/**
- * Per-CDP-message timeout applied to every puppeteer launch/connect. Set above
- * `TOOL_TIMEOUTS.browser.max` (30s) so the agent-side wall-clock is the canonical
- * limit; this constant only catches genuinely stuck CDP sockets (renderer wedged,
- * connection dropped, etc.).
- */
+/** Short handshake budget for launch and registry connections. */
 export const BROWSER_PROTOCOL_TIMEOUT_MS = 60_000;
+
+/**
+ * Keep CDP requests alive through the largest browser call budget; the
+ * supervisor owns the execution deadline and recovers a stalled worker.
+ */
+export const BROWSER_PAGE_PROTOCOL_TIMEOUT_MS = TOOL_TIMEOUTS.browser.max * 1000 + 1_000;
 const ENABLE_AUTOMATION_FLAG = "--enable-automation";
 // Automation-tell launch flags that puppeteer-core adds by default. We suppress
 // them via `ignoreDefaultArgs` (the supported escape hatch) to mirror xxxx's
@@ -301,6 +303,12 @@ export function browserConnection(browser: Browser): Connection {
 
 function isCdpConnection(value: unknown): value is Connection {
 	return isRecord(value) && typeof value.send === "function" && typeof value.createSession === "function";
+}
+
+/** CDP target id; puppeteer keeps it private (`_targetId`). */
+export function privateTargetId(target: Target): string | undefined {
+	const raw = target as unknown as { _targetId?: unknown };
+	return typeof raw._targetId === "string" ? raw._targetId : undefined;
 }
 
 /** Return device descriptors from the already-loaded Puppeteer module. */

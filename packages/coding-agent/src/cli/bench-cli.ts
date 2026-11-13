@@ -1215,13 +1215,20 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 				const accounts = oauth.accounts(model.provider);
 				const account = accounts[command.flags.account - 1];
 				if (!account) {
-					throw new Error(`Invalid --account ${command.flags.account}: provider "${model.provider}" has ${accounts.length} OAuth account(s)`);
+					throw new Error(
+						`Invalid --account ${command.flags.account}: provider "${model.provider}" has ${accounts.length} OAuth account(s)`,
+					);
 				}
 				selectedResolver = async ({ error, lastChance }) => {
 					if (lastChance) return undefined;
-					const result = await oauth.accessById(model.provider, account.credentialId, { forceRefresh: error !== undefined });
-					if (!result?.ok) throw new Error(`Could not get token for account ${command.flags.account} of "${model.provider}": ${result?.error ?? "no OAuth credential available"}`);
-					return result.accessToken;
+					const result = await oauth.accessById(model.provider, account.credentialId, {
+						forceRefresh: error !== undefined,
+					});
+					if (!result?.ok)
+						throw new Error(
+							`Could not get token for account ${command.flags.account} of "${model.provider}": ${result?.error ?? "no OAuth credential available"}`,
+						);
+					return result.apiKey;
 				};
 			}
 			const preflightKey = selectedResolver
@@ -1261,7 +1268,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						// Provider-session state is still recreated by runBenchRequest and
 						// stateful Responses chaining is disabled below.
 						const credentialAffinitySessionId = pairIndex === 0 ? testSessionId : randomSessionId();
-						const credentialResolver = selectedResolver ?? runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
+						const credentialResolver =
+							selectedResolver ?? runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
 						const coldResult = await runBenchRequest(
 							model,
 							{

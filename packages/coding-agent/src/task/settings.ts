@@ -180,8 +180,8 @@ export const cfgOvnfsPath = register({
 /**
  * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
  * or `undefined` when that binary is not found. Read by the system prompt (checkout
- * guidance), the bash git guard, `grep`/`glob` (searches through the daemon), and the
- * task runner (ovnfs-backed isolation when `isolation.backend` is auto).
+ * guidance), the bash git guard, and the task runner (ovnfs-backed isolation when
+ * `isolation.backend` is auto).
  */
 export function ovnfsCommand(settings: Settings): string | undefined {
 	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";

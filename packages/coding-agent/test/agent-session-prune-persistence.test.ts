@@ -108,7 +108,6 @@ describe("AgentSession per-turn prune persistence", () => {
 				"compaction.supersedeReads": true,
 			}),
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: (streamModel, context, options) => {
 				advisorRequests.push({
 					systemPrompt: context.systemPrompt?.slice(),

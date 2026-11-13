@@ -5,9 +5,10 @@ use std::{collections::VecDeque, sync::Arc};
 use bstr::BString;
 use serde::{Deserialize, Serialize};
 
-use super::state::{Overlay, Scope};
+use super::state::Scope;
 pub use crate::bash::store::{Job, JobState};
 use crate::bash::{
+	Image,
 	event::{OriginChain, ResolvedKind, WaitKey},
 	fd::{FdRef, FdTable},
 	fs::{FsPending, Stat},
@@ -19,7 +20,7 @@ use crate::bash::{
 	syntax::Pos,
 };
 
-/// A green thread: its scripts, frames, fds, cwd and state overlay.
+/// A green thread: its scripts, frames, fds, cwd and global state.
 pub struct Vproc {
 	pub vpid:          Vpid,
 	pub parent:        Option<Vpid>,
@@ -35,8 +36,13 @@ pub struct Vproc {
 	pub status:        i32,
 	/// `PIPESTATUS` of the last pipeline.
 	pub pipestatus:    Vec<i32>,
-	/// `None` for the root vproc (writes go to the root cache).
-	pub overlay:       Option<Overlay>,
+	/// A forked vproc's global state: its parent's at the fork, then its
+	/// own writes (copy-on-write; see `state`). `None` for the root vproc,
+	/// whose global state is the store.
+	pub image:         Option<Image>,
+	/// A forked vproc's locale-variable count (`state::locale_token`): the
+	/// root's at the fork, `None` once it assigned a locale variable.
+	pub locale_gen:    Option<u64>,
 	/// Diagnostics waiting to be written to their fds.
 	pub out:           VecDeque<PendingWrite>,
 	pub blocked:       Option<Blocked>,
@@ -86,7 +92,7 @@ pub struct Vproc {
 	/// substitution.
 	pub trace_base:    u32,
 	/// `$BASH_SUBSHELL`: the subshell nesting (0 for the shell itself and a
-	/// nested shell). A field, not an overlay record: a record would cost
+	/// nested shell). A field, not an image record: a record would cost
 	/// every subshell a ~530-byte map allocation (idle vproc ≤ 2 KiB).
 	pub subshell:      u32,
 	/// The command being run (`BASH_COMMAND`): its unit and syntax node.

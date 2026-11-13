@@ -72,6 +72,9 @@ harness = false
 [[bench]]
 name = "create"
 harness = false
+[[bench]]
+name = "fork"
+harness = false
 # Safepoint overhead needs a second run with `--features no-safepoint-check`.
 [[bench]]
 name = "overhead"

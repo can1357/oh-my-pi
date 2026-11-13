@@ -22,6 +22,11 @@ pub const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SNAPSHOT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// Consecutive identical no-ops before the guard escalates.
 pub const NOOP_HARD_LIMIT: u32 = 3;
+/// Added plus removed lines past which a version change stops aligning the two
+/// texts to carry seen lines (a formatter pass, a wholesale rewrite); only the
+/// unchanged leading lines, and trailing ones when the line count holds, carry.
+/// Bounds the diff to `O(lines × CARRY_MAX_EDITS)`.
+const CARRY_MAX_EDITS: usize = 1024;
 
 /// One full-file version observed at a point in time.
 #[derive(Debug, Clone)]
@@ -121,6 +126,10 @@ pub fn seen_lines_from_body(body: &str) -> Vec<u32> {
 #[derive(Clone)]
 struct StoredSnapshot {
 	snapshot: Snapshot,
+	/// Lines carried from the version this one replaced, held back while the
+	/// version is unrestricted (no seen set, or an empty one): folding them in
+	/// would restrict it. They join the seen set once it holds a line.
+	carried:  Vec<u32>,
 }
 
 impl StoredSnapshot {
@@ -138,7 +147,11 @@ impl StoredSnapshot {
 				+ size_of::<BTreeSet<u32>>()
 				+ lines.len() * (size_of::<u32>() + 2 * size_of::<usize>())
 		});
-		snapshot.path.capacity() + snapshot.hash.capacity() + text_bytes + seen_bytes
+		snapshot.path.capacity()
+			+ snapshot.hash.capacity()
+			+ text_bytes
+			+ seen_bytes
+			+ self.carried.capacity() * size_of::<u32>()
 	}
 }
 
@@ -215,8 +228,37 @@ impl EditStore {
 	}
 
 	/// Record normalized text under a canonical path and return its tag.
+	///
+	/// Content that differs from the path's current version is a change made
+	/// outside the edit tool (formatter, build step, another writer): the lines
+	/// the current version displayed keep counting as displayed where they keep
+	/// their number and content.
 	pub fn record(&self, path: &Path, text: &str, seen_lines: Option<&[u32]>) -> String {
+		self.record_version(path, text, seen_lines, None)
+	}
+
+	/// Record `after`, which an edit wrote over `before`, and return its tag.
+	/// Lines displayed from `before` keep counting as displayed where they keep
+	/// their number and content, and restrict the new version the edit's
+	/// response rows then join. With no retained version of `before` (or an
+	/// unrestricted one) the edit could anchor anywhere, so every such line
+	/// carries.
+	pub fn record_edit(&self, path: &Path, before: &str, after: &str) -> String {
+		self.record_version(path, after, None, Some(before))
+	}
+
+	/// `parent` names the text `text` was derived from; `None` takes the
+	/// path's current version.
+	fn record_version(
+		&self,
+		path: &Path,
+		text: &str,
+		seen_lines: Option<&[u32]>,
+		parent: Option<&str>,
+	) -> String {
 		let hash = file_hash(text);
+		// Diffed outside the lock: the version change may span a large file.
+		let carried = self.carried_from_parent(path, text, parent);
 		let mut state = self.inner.lock();
 		state.clock = state.clock.wrapping_add(1);
 		let touched = state.clock;
@@ -228,29 +270,76 @@ impl EditStore {
 			.and_modify(|history| previous_bytes = history.retained_bytes(path_bytes))
 			.or_insert_with(|| PathHistory { versions: Vec::new(), touched });
 		history.touched = touched;
-		if let Some(index) = history
+		let stored = if let Some(index) = history
 			.versions
 			.iter()
 			.position(|version| version.snapshot.hash == hash && &*version.snapshot.text == text)
 		{
-			let mut snapshot = history.versions.remove(index);
-			merge_seen(&mut snapshot.snapshot, seen_lines);
+			let snapshot = history.versions.remove(index);
 			history.versions.insert(0, snapshot);
+			history.versions.first_mut()
 		} else if max_versions > 0 {
-			let mut snapshot = Snapshot {
-				path:       path.to_owned(),
-				text:       Arc::from(text),
-				hash:       hash.clone(),
-				seen_lines: None,
-			};
-			merge_seen(&mut snapshot, seen_lines);
-			history.versions.insert(0, StoredSnapshot { snapshot });
+			history.versions.insert(0, StoredSnapshot {
+				snapshot: Snapshot {
+					path:       path.to_owned(),
+					text:       Arc::from(text),
+					hash:       hash.clone(),
+					seen_lines: None,
+				},
+				carried:  Vec::new(),
+			});
 			history.versions.truncate(max_versions);
+			history.versions.first_mut()
+		} else {
+			None
+		};
+		if let Some(stored) = stored {
+			merge_seen(stored, seen_lines);
+			if parent.is_some() && !carried.is_empty() {
+				merge_seen(stored, Some(&carried));
+			} else {
+				carry_into(stored, carried);
+			}
 		}
 		let current_bytes = history.retained_bytes(path_bytes);
 		state.retained_bytes = state.retained_bytes - previous_bytes + current_bytes;
 		evict(&mut state);
 		hash
+	}
+
+	/// Lines of the parent version (`parent`, else the current version) that
+	/// `text` keeps at the same number with the same content, filtered by what
+	/// the parent displayed.
+	fn carried_from_parent(&self, path: &Path, text: &str, parent: Option<&str>) -> Vec<u32> {
+		let (head, parent_seen) = {
+			let state = self.inner.lock();
+			let versions = state
+				.histories
+				.get(path)
+				.map_or(&[][..], |history| history.versions.as_slice());
+			match parent {
+				Some(before) => (
+					None,
+					versions
+						.iter()
+						.find(|version| &*version.snapshot.text == before)
+						.and_then(|version| version.snapshot.seen_lines.clone()),
+				),
+				None => match versions.first() {
+					Some(version) => {
+						(Some(version.snapshot.text.clone()), version.snapshot.seen_lines.clone())
+					},
+					None => return Vec::new(),
+				},
+			}
+		};
+		let Some(parent) = parent.or(head.as_deref()) else {
+			return Vec::new();
+		};
+		if parent == text {
+			return Vec::new();
+		}
+		carried_seen_lines(parent, text, parent_seen.as_deref())
 	}
 
 	/// Read, normalize, and record a file if it is readable and at most 4 MiB.
@@ -278,7 +367,7 @@ impl EditStore {
 			.and_then(|h| h.versions.iter_mut().find(|v| v.snapshot.hash == hash))
 		{
 			let previous_bytes = version.retained_bytes();
-			merge_seen(&mut version.snapshot, Some(lines));
+			merge_seen(version, Some(lines));
 			let current_bytes = version.retained_bytes();
 			state.retained_bytes = state.retained_bytes - previous_bytes + current_bytes;
 			evict(&mut state);
@@ -444,10 +533,86 @@ impl EditStore {
 	}
 }
 
-fn merge_seen(snapshot: &mut Snapshot, lines: Option<&[u32]>) {
+/// Union displayed lines into a version; held-back carried lines join once the
+/// set restricts anchors.
+fn merge_seen(stored: &mut StoredSnapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
 	// Copies the set only while a lookup still holds the previous version.
-	Arc::make_mut(snapshot.seen_lines.get_or_insert_default()).extend(lines.iter().copied());
+	let seen = Arc::make_mut(stored.snapshot.seen_lines.get_or_insert_default());
+	seen.extend(lines.iter().copied());
+	if !seen.is_empty() {
+		seen.extend(std::mem::take(&mut stored.carried));
+	}
+}
+
+/// Credit a version with lines carried from the version it replaced: into a
+/// restricted seen set directly, held back on an unrestricted one.
+fn carry_into(stored: &mut StoredSnapshot, carried: Vec<u32>) {
+	if carried.is_empty() {
+		return;
+	}
+	match stored.snapshot.seen_lines.as_mut() {
+		Some(seen) if !seen.is_empty() => Arc::make_mut(seen).extend(carried),
+		_ => {
+			stored.carried.extend(carried);
+			stored.carried.sort_unstable();
+			stored.carried.dedup();
+		},
+	}
+}
+
+/// Parent lines that keep both their number and content in `child`: every
+/// unchanged run the change did not shift (the leading run, plus runs below
+/// line-neutral hunks), filtered by `seen`. A missing or empty `seen` is an
+/// unrestricted parent, whose every such line carries. Shifted lines never
+/// carry: their old numbers name other content.
+fn carried_seen_lines(parent: &str, child: &str, seen: Option<&BTreeSet<u32>>) -> Vec<u32> {
+	let seen = seen.filter(|seen| !seen.is_empty());
+	let old_lines: Vec<&str> = parent.split('\n').collect();
+	let new_lines: Vec<&str> = child.split('\n').collect();
+	let (old_ids, new_ids) = pi_diff::intern(&old_lines, &new_lines);
+	let mut unshifted = Vec::new();
+	if let Some(runs) = pi_diff::myers_diff_within(&old_ids, &new_ids, CARRY_MAX_EDITS) {
+		let (mut old_line, mut new_line) = (1_u32, 1_u32);
+		for run in runs {
+			if run.added {
+				new_line += run.count;
+			} else if run.removed {
+				old_line += run.count;
+			} else {
+				if old_line == new_line {
+					unshifted.push(old_line..old_line + run.count);
+				}
+				old_line += run.count;
+				new_line += run.count;
+			}
+		}
+	} else {
+		let prefix = old_ids
+			.iter()
+			.zip(&new_ids)
+			.take_while(|(old, new)| old == new)
+			.count() as u32;
+		unshifted.push(1..prefix + 1);
+		if old_ids.len() == new_ids.len() {
+			let len = old_ids.len() as u32;
+			let suffix = old_ids
+				.iter()
+				.rev()
+				.zip(new_ids.iter().rev())
+				.take_while(|(old, new)| old == new)
+				.count() as u32;
+			unshifted.push(len - suffix + 1..len + 1);
+		}
+	}
+	let mut carried = Vec::new();
+	for range in unshifted {
+		match seen {
+			Some(seen) => carried.extend(seen.range(range)),
+			None => carried.extend(range),
+		}
+	}
+	carried
 }
 
 fn touch(state: &mut StoreState, path: &Path) {
@@ -539,6 +704,64 @@ mod tests {
 		let head = store.head(path).unwrap();
 		assert_eq!(&*head.text, "one");
 		assert_eq!(*head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+	}
+
+	fn lines(count: u32, edit: impl Fn(u32) -> Option<String>) -> String {
+		(1..=count)
+			.map(|n| edit(n).unwrap_or_else(|| format!("line {n}")))
+			.collect::<Vec<_>>()
+			.join("\n")
+	}
+
+	#[test]
+	fn outside_change_carries_only_unshifted_unchanged_seen_lines() {
+		let path = Path::new("f.txt");
+		let partial_read: Vec<u32> = (47..=55).collect();
+		let read_after = |changed: String| {
+			let store = EditStore::new();
+			store.record(path, &lines(60, |_| None), Some(&(1..=60).collect::<Vec<_>>()));
+			store.record(path, &changed, Some(&partial_read));
+			store.head(path).unwrap().seen_lines.unwrap()
+		};
+
+		let line_50 = read_after(lines(60, |n| (n == 50).then(|| "line FIFTY".into())));
+		assert!(line_50.contains(&5) && line_50.contains(&60), "unchanged lines keep their numbers");
+
+		let shifted = read_after(format!("new top\n{}", lines(60, |_| None)));
+		assert!(!shifted.contains(&5), "an insertion above shifts line 5");
+		assert!(shifted.contains(&50), "the partial read itself still counts");
+
+		let rewritten = read_after(lines(60, |n| (n == 5).then(|| "line FIVE".into())));
+		assert!(!rewritten.contains(&5), "a changed line carries nothing");
+	}
+
+	#[test]
+	fn unrestricted_version_holds_carried_lines_until_it_is_restricted() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		store.record(path, &lines(10, |_| None), Some(&[5]));
+		let changed = lines(10, |n| (n == 9).then(|| "line NINE".into()));
+		let tag = store.record(path, &changed, Some(&[]));
+		assert!(
+			store.head(path).unwrap().seen_lines.unwrap().is_empty(),
+			"carrying must not restrict an unrestricted version"
+		);
+		store.record_seen_lines(path, &tag, &[9]);
+		assert_eq!(*store.head(path).unwrap().seen_lines.unwrap(), BTreeSet::from([5, 9]));
+	}
+
+	#[test]
+	fn rewrite_past_the_diff_bound_carries_only_the_unchanged_head_and_tail() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		let count = 3 * CARRY_MAX_EDITS as u32;
+		store.record(path, &lines(count, |_| None), Some(&(1..=count).collect::<Vec<_>>()));
+		let rewritten =
+			lines(count, |n| (n > 100 && n <= count - 100 && n % 2 == 0).then(|| format!("{n}!")));
+		store.record(path, &rewritten, Some(&[0]));
+		let seen = store.head(path).unwrap().seen_lines.unwrap();
+		let expected: BTreeSet<u32> = (0..=101).chain(count - 99..=count).collect();
+		assert_eq!(*seen, expected);
 	}
 
 	#[test]

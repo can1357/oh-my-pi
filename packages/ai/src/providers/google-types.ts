@@ -29,13 +29,16 @@ export type FinishReason =
 	| "IMAGE_RECITATION"
 	| "IMAGE_OTHER"
 	| "UNEXPECTED_TOOL_CALL"
-	| "NO_IMAGE";
+	| "NO_IMAGE"
+	// Gemini 4 Hydrogen ends each 65,536-token output segment of a longer generation with it,
+	// plus a `continuationToken` that resumes the generation (`followGoogleContinuations`).
+	| "CONTINUATION";
 
 /** Mirror of `@google/genai`'s `FunctionCallingConfigMode` string enum. */
 export type FunctionCallingConfigMode = "MODE_UNSPECIFIED" | "AUTO" | "NONE" | "ANY" | "VALIDATED";
 
-/** Mirror of `@google/genai`'s `ThinkingLevel` string enum. */
-export type ThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+/** Mirror of `@google/genai`'s `ThinkingLevel` string enum, plus the API-documented `xhigh` it lacks. */
+export type ThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 
 /** Inline base64-encoded data part. */
 export interface InlineDataPart {
@@ -159,6 +162,8 @@ export interface Candidate {
 	content?: Content;
 	finishReason?: FinishReason;
 	index?: number;
+	/** Sent with `finishReason: CONTINUATION`; resending the request with it streams the next segment. */
+	continuationToken?: string;
 }
 
 /** Cumulative token accounting attached to the trailing chunk. */

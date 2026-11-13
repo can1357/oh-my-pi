@@ -102,6 +102,11 @@ function matchesNormalizedCandidates(target: string, candidates: readonly string
  * ("Sonnet #2: bug scan" vs "Sonnet #2") still links up. The substring
  * fallback requires at least {@link TODO_DESCRIPTION_MIN_OVERLAP} chars on
  * the contained side.
+ *
+ * Display-only: the fallback deliberately over-matches (a "Review auth"
+ * subagent also lights "Review auth deployment"), and even an exact match
+ * does not show that a subagent owns a todo, so never change a todo's
+ * status from it.
  */
 export function todoMatchesAnyDescription(content: string, descriptions: readonly string[]): boolean {
 	const target = normalizeForTodoMatch(content);

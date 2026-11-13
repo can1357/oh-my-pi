@@ -11,6 +11,12 @@ import type { AuthCredential, BlocksApi, StoredCredentialBlock } from "./types";
 
 /** Default block when no provider reset time is known; used by selectors and rate limits. */
 export const DEFAULT_BLOCK_MS = 60_000;
+/**
+ * Tolerance when matching a stored block deadline to a partial usage report's reset.
+ * The block comes from the 429's reset header (epoch seconds) while `/usage`
+ * reports `resets_at` as ISO, so seconds of skew between the two are expected.
+ */
+const BLOCK_RESET_MATCH_TOLERANCE_MS = 60_000;
 
 /** Composite key for round-robin tracking: "<provider>:oauth" or "<provider>:api_key". */
 export function providerTypeKey(provider: string, type: AuthCredential["type"]): string {
@@ -348,6 +354,15 @@ export class CredentialBlocks implements BlocksApi {
 	}
 
 	/**
+	 * Whether exactly `blockScope` holds a live block for a credential, without
+	 * the protected and unscoped blocks {@link CredentialBlocks.blockedUntil} merges in.
+	 */
+	isScopeBlocked(provider: string, providerKey: string, credentialIndex: number, blockScope: string): boolean {
+		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
+		return credentialId !== undefined && this.#exactBlockedUntil(credentialId, providerKey, blockScope) !== undefined;
+	}
+
+	/**
 	 * Whether the in-memory block currently sitting at exactly `deadline` for
 	 * this credential was written with provider-stated timing. Mirrors the
 	 * scope enumeration of {@link CredentialBlocks.blockedUntil}.
@@ -537,9 +552,23 @@ export class CredentialBlocks implements BlocksApi {
 		// last-good report for hours after `/usage` starts failing, and those
 		// healthy limits describe the account before the 429 that blocked it.
 		if (!Number.isFinite(report.fetchedAt) || Date.now() - report.fetchedAt > USAGE_REPORT_TTL_MS) return;
-		for (const { blockScope, limits, healthy } of strategy?.healableBlockScopes?.(report) ?? []) {
+		for (const { blockScope, limits, healthy, resetMatchRequired } of strategy?.healableBlockScopes?.(report) ?? []) {
 			if (healthy === false || isUsageLimitReached(limits) || (healthy === undefined && limits.length === 0))
 				continue;
+			if (resetMatchRequired) {
+				const blockedUntilMs = this.#exactBlockedUntil(credentialId, providerKey, blockScope);
+				if (blockedUntilMs === undefined) continue;
+				const resetMatchesBlock = limits.some(resetLimit => {
+					if (resetLimit.scope.shared !== true) return false;
+					const resetsAt = resetLimit.window?.resetsAt;
+					return (
+						typeof resetsAt === "number" &&
+						Number.isFinite(resetsAt) &&
+						Math.abs(resetsAt - blockedUntilMs) <= BLOCK_RESET_MATCH_TOLERANCE_MS
+					);
+				});
+				if (!resetMatchesBlock) continue;
+			}
 			this.#clearHealedBlockScope(provider, providerKey, credentialId, blockScope, report.fetchedAt);
 		}
 	}

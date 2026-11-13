@@ -80,7 +80,7 @@ impl DesktopError {
 		Self::new(ErrorCode::InputBusy, message)
 	}
 
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn user_intervened(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::UserIntervened, message)
 	}
