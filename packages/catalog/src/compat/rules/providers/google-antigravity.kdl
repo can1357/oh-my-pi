@@ -22,9 +22,9 @@ provider "google-antigravity" {
 			supports-tools #false
 		}
 		// Cloud Code Assist serves no transcribe SKU (gemini-3.5-transcribe 404s);
-		// these dictate through a Gemini chat SKU with the audio inline. Neither
-		// wire id is required in `fetchAvailableModels`: gemini-3-flash is served
-		// unlisted (live, 2026-11-13), so discovery carries these rows over.
+		// these dictate through a Gemini chat SKU with the audio inline. The
+		// roster refresh carries these rows over whether or not the chat SKU is
+		// listed in `fetchAvailableModels`.
 		model "gemini-3-flash-transcribe" name="Gemini 3 Flash (transcribe)" api="google-gemini-cli-transcribe" {
 			reasoning #false
 			input "text"

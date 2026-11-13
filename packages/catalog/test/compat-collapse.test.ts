@@ -1818,7 +1818,7 @@ describe("antigravity discovery collapsing", () => {
 		expect(unreachable).toContain("claude-opus-5-5");
 	});
 
-	it("drops the retired Gemini 3.5 Flash family and its recycled alias from the Antigravity roster", async () => {
+	it("drops the retired Gemini 3.5 Flash family but keeps the answering gemini-3-flash alias", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-retired-flash-"));
 		const flash = { supportsThinking: true, supportsImages: true, maxTokens: 1_048_576, maxOutputTokens: 65_536 };
 		const fetcher = Object.assign(
@@ -1849,7 +1849,7 @@ describe("antigravity discovery collapsing", () => {
 		const ids = result.models.map(m => m.id);
 
 		expect(ids).not.toContain("gemini-3.5-flash");
-		expect(ids).not.toContain("gemini-3-flash");
+		expect(ids).toContain("gemini-3-flash");
 		expect(ids).toContain("gemini-3.5-flash-lite");
 		expect(ids).toContain("gemini-3.7-flash");
 	});

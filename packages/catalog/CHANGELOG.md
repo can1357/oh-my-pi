@@ -5,11 +5,13 @@
 ### Added
 
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added `gemini-3-flash-transcribe` and `gemini-2.5-flash-transcribe` speech-to-text rows on `google-antigravity` and `google-gemini-cli`, served by the new `google-gemini-cli-transcribe` runner API through a Gemini chat model; Antigravity roster refreshes keep them ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
 - Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 
 ### Changed
 
 - A provider's authored seed rows now survive that provider's `exclude-models` rules at generation, so a family exclusion such as xai-oauth's `prefix="grok-voice-"` no longer drops a seeded runner row ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Google Antigravity no longer excludes `gemini-3-flash`: the alias answers chat and transcription again, so only the retired `gemini-3.5-flash` stays excluded ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

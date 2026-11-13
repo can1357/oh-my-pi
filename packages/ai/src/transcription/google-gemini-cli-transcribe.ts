@@ -1,16 +1,13 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
+import { prompt } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { completeSimple } from "../stream";
 import type { Context } from "../types";
+import systemTemplate from "./gemini-cli-transcribe-system.md" with { type: "text" };
+import userTemplate from "./gemini-cli-transcribe-user.md" with { type: "text" };
 import { type TranscriptionOptions, TranscriptionApiError } from "./openai-transcriptions";
 import type { TranscriptionRequest, TranscriptionResult } from "./types";
-
-/** System instruction that turns a Gemini chat model into a verbatim transcriber. */
-export const GEMINI_CLI_TRANSCRIBE_INSTRUCTION =
-	"You are a speech-to-text engine. Transcribe the attached audio verbatim, in the language spoken. " +
-	"Output only the transcript text: no quotes, labels, timestamps, translations, summaries, or commentary. " +
-	"If the audio contains no speech, output nothing.";
 
 /**
  * Transcribe through a Gemini chat model on Cloud Code Assist
@@ -52,16 +49,12 @@ export async function transcribeGeminiCli(
 		maxTokens: null,
 		...(model.headers && { headers: model.headers }),
 	});
-	const hints = [
-		request.language && `The spoken language is most likely ${request.language}.`,
-		request.prompt && `Context that may help with spelling: ${request.prompt}`,
-	].filter(Boolean);
 	const context: Context = {
-		systemPrompt: [GEMINI_CLI_TRANSCRIBE_INSTRUCTION],
+		systemPrompt: [prompt.render(systemTemplate)],
 		messages: [
 			{
 				role: "user",
-				content: ["Transcribe this audio.", ...hints].join("\n"),
+				content: prompt.render(userTemplate, { language: request.language, prompt: request.prompt }),
 				timestamp: Date.now(),
 			},
 		],
