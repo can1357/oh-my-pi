@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed loading a session another omp process has open (e.g. ACP `session/load` from a second process) and then exiting creating a duplicate "open-elsewhere" copy of the session ([#19103](https://github.com/can1357/oh-my-pi/issues/19103))
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
