@@ -83,6 +83,7 @@ import {
 } from "../utils";
 import {
 	clearStreamingPartialJson,
+	demotedThinkingSource,
 	isCarriedReasoning,
 	kStreamingArgumentsDone,
 	kStreamingLastParseLen,
@@ -2537,9 +2538,10 @@ function parseResponseReasoningReplayItem(signature: string | undefined): Respon
  * `reasoning_text` is empty — "The reasoning_text in the thinking mode must be
  * passed back to the API" (#8248 covered the missing case, #10690 the empty
  * one). The item's presence plus a non-empty payload is what satisfies the
- * contract; the exact text is immaterial once the source turn's reasoning is
- * gone. Kept out of `reasoning_content="."`-territory since DeepSeek rejects the
- * bare-dot synthetic placeholder on the chat-completions path.
+ * contract. Last resort only: these targets read replayed reasoning, so a
+ * placeholder repeated across many turns is a few-shot pattern the model copies
+ * into its own reasoning. Kept out of `reasoning_content="."`-territory since
+ * DeepSeek rejects the bare-dot synthetic placeholder on the chat-completions path.
  */
 export const SYNTHETIC_REASONING_REPLAY_PLACEHOLDER = "reasoning unavailable";
 
@@ -2697,6 +2699,10 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		}
 
 		if (block.type === "text") {
+			// Another model's thinking, demoted to text by `transformMessages`:
+			// its source text fills the required reasoning item below.
+			const demotedThinking = requiresReasoningItem ? demotedThinkingSource(block) : undefined;
+			if (demotedThinking) carriedReasoningTexts.push(demotedThinking);
 			const parsedSignature = parseTextSignature(block.textSignature);
 			let msgId = parsedSignature?.id;
 			if (!msgId) {
@@ -2799,11 +2805,11 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		// Replay the demoted reasoning (already present in `content` as visible
 		// text) as a structured reasoning item so the thinking-mode continuation
 		// carries the `reasoning_text` the provider requires. When no thinking
-		// text survived reconstruction (source turn minted by another model, or
-		// reasoning dropped by compaction/archive budget) the carried text is
-		// empty — and DeepSeek-family targets reject an empty `reasoning_text`
-		// exactly like a missing item (#10690), so substitute a non-empty
-		// placeholder. The `id` is only set when an upstream item id survived:
+		// text survived reconstruction (source turn had none, or reasoning was
+		// dropped by compaction/archive budget) the carried text is empty — and
+		// DeepSeek-family targets reject an empty `reasoning_text` exactly like a
+		// missing item (#10690), so substitute a non-empty placeholder. The
+		// `id` is only set when an upstream item id survived:
 		// providers that validate reasoning ids against their own store (Meta via
 		// OpenRouter) reject a fabricated `rs_…` with "Referenced reasoning item
 		// … was not found or has expired", and the targets that need the item
