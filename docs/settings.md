@@ -474,7 +474,7 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 | Key                         | Type   | Default | Notes |
 | --------------------------- | ------ | ------- | ----- |
 | `judgment.attemptTimeoutMs` | number | `3000` | Positive integer milliseconds allowed for one native judge candidate, including credentials, headers, retries, and response-body reading, while a `retry.fallbackChains.judge` entry remains to try. Local image preparation is excluded; prompted and on-device judges are unchanged. |
-| `judgment.hedgeAfterMs`     | number | `0`    | Non-negative integer milliseconds after which a judge candidate that has not answered is raced against the next candidate when that one is a native judge you configured; `0` turns hedging off. |
+| `judgment.hedgeAfterMs`     | number | `0`    | Non-negative integer milliseconds after which a judge candidate that has not answered is raced against the next candidate when that one is a native judge you configured; `0` turns hedging off. Keep it below `judgment.attemptTimeoutMs`: otherwise that deadline cancels a native candidate first, so hedging never starts and a warning is logged. |
 
 The deadline only applies when you configured a judge fallback: a timed-out candidate is cancelled and the next configured fallback is tried, and its route is skipped for 30 seconds in the same session and model registry (judges without a session ID keep their own cooldown). A timeout never hands the judgment to a model you did not configure, such as a built-in default or the session model; without a configured fallback, a slow native judge runs to completion. The caller's own cancellation always ends the judgment without failover.
 

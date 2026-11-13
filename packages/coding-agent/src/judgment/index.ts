@@ -533,6 +533,7 @@ export class ChainJudge implements Judge {
 		const signal = options.signal;
 		const timeoutMs = cfgJudgmentAttemptTimeoutMs.get(this.#deps.settings);
 		const hedgeAfterMs = cfgJudgmentHedgeAfterMs.get(this.#deps.settings);
+		warnIfHedgeShadowed(hedgeAfterMs, timeoutMs);
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
 		let compatibleCandidate = false;
@@ -989,6 +990,28 @@ function nativeJudge(
 interface CandidateRejection {
 	until: number;
 	reason: string;
+}
+
+/** The `[hedgeAfterMs, attemptTimeoutMs]` pair last warned about by {@link warnIfHedgeShadowed}. */
+let shadowedHedgeWarned: string | undefined;
+
+/**
+ * Warn once per setting pair when `judgment.hedgeAfterMs` is at or past `judgment.attemptTimeoutMs`: the deadline
+ * cancels a pending native candidate before the hedge delay elapses, so hedging never starts and the chain falls
+ * through sequentially instead.
+ */
+export function warnIfHedgeShadowed(hedgeAfterMs: number, attemptTimeoutMs: number): void {
+	if (hedgeAfterMs <= 0 || hedgeAfterMs < attemptTimeoutMs) return;
+	const pair = `${hedgeAfterMs}/${attemptTimeoutMs}`;
+	if (shadowedHedgeWarned === pair) return;
+	shadowedHedgeWarned = pair;
+	logger.warn(
+		"judgment.hedgeAfterMs is not below judgment.attemptTimeoutMs; native judge candidates time out before they can be hedged",
+		{
+			hedgeAfterMs,
+			attemptTimeoutMs,
+		},
+	);
 }
 
 /**

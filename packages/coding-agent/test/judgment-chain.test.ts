@@ -12,12 +12,18 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
+import {
+	ChainJudge,
+	hasNativeJudge,
+	JudgmentCache,
+	journalJudgmentUsage,
+	warnIfHedgeShadowed,
+} from "@oh-my-pi/pi-coding-agent/judgment";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
@@ -1756,5 +1762,18 @@ describe("ChainJudge hedging", () => {
 		fixture.answerPrimary(false);
 		expect((await failed).model).toBe("typesafe/jev-1.14");
 		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-primary", "typesafe/jev-1.14"]);
+	});
+
+	it("warns once when the hedge delay is not below the attempt timeout", () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		warnIfHedgeShadowed(0, 3_000);
+		warnIfHedgeShadowed(2_999, 3_000);
+		expect(warn).not.toHaveBeenCalled();
+		warnIfHedgeShadowed(3_000, 3_000);
+		warnIfHedgeShadowed(3_000, 3_000);
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn.mock.calls[0]?.[1]).toEqual({ hedgeAfterMs: 3_000, attemptTimeoutMs: 3_000 });
+		warnIfHedgeShadowed(5_000, 3_000);
+		expect(warn).toHaveBeenCalledTimes(2);
 	});
 });
