@@ -159,9 +159,9 @@ function intendedColor(
 	terminalForeground: string | number | undefined,
 	ansiPalette: ReadonlyArray<string | number> | undefined,
 ): string | number {
-	if (value === "") return terminalForeground ?? value;
-	if (typeof value === "number" && value < 16) return ansiPalette?.[value] ?? value;
-	return value;
+	const color = value === "" ? (terminalForeground ?? value) : value;
+	if (typeof color === "number" && color < 16) return ansiPalette?.[color] ?? color;
+	return color;
 }
 
 export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = {}): Theme {
