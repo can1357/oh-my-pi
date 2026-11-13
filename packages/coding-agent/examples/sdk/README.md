@@ -64,8 +64,13 @@ const { session } = await createAgentSession({
 	modelRegistry,
 });
 
-// Read-only tools
-const { session } = await createAgentSession({ toolNames: ["read", "grep", "glob"], authStorage, modelRegistry });
+// Read-only tools, without discovered extensions or custom tools
+const { session } = await createAgentSession({
+	toolNames: ["read", "grep", "glob"],
+	restrictToolNames: true,
+	authStorage,
+	modelRegistry,
+});
 
 // In-memory
 const { session } = await createAgentSession({
@@ -134,8 +139,9 @@ await writeTool.execute("call-1", {
 | `systemPrompt`              | Discovered                    | String or `(default) => modified` |
 | `toolNames`                 | All built-in tools            | Filter which tools to include     |
 | `customTools`               | `[]`                          | Extra tools to register           |
-| `extensions`                | Discovered                    | Inline extension factories        |
+| `extensions`                | `[]` (merged with discovered extensions) | Inline extension factories        |
 | `additionalExtensionPaths`  | `[]`                          | Extension files merged with discovery |
+| `disableExtensionDiscovery` | `false`                       | Skip discovered extension files |
 | `skills`                    | Discovered                    | Skills for prompt                 |
 | `contextFiles`              | Discovered                    | AGENTS.md files                   |
 | `slashCommands`             | Discovered                    | File commands                     |

@@ -50,8 +50,8 @@ session.subscribe(event => {
 await session.prompt("List files in the current directory.");
 console.log();
 
-// Disable all extensions:
-// extensions: []
+// Disable discovered extension files (inline and explicit-path extensions still load):
+// disableExtensionDiscovery: true
 
 // Merge with discovered extensions:
 // const discovered = await discoverExtensions();

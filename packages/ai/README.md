@@ -99,7 +99,7 @@ npm install @oh-my-pi/pi-ai @oh-my-pi/pi-catalog
 import { stream, complete, Context, Tool, type } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-// Fully typed with auto-complete support for both providers and models
+// Look up a model from the bundled catalog
 const model = getBundledModel("openai", "gpt-4o-mini");
 
 // Define tools with omptype schemas for type safety and validation
@@ -684,7 +684,7 @@ import { getBundledProviders, getBundledModels, getBundledModel } from "@oh-my-p
 const providers = getBundledProviders();
 console.log(providers); // ['openai', 'anthropic', 'google', 'xai', 'groq', ...]
 
-// Get all models from a provider (fully typed)
+// Get all models from a provider
 const anthropicModels = getBundledModels("anthropic");
 for (const model of anthropicModels) {
 	console.log(`${model.id}: ${model.name}`);
@@ -694,7 +694,7 @@ for (const model of anthropicModels) {
 	console.log(`  Reasoning: ${model.reasoning}`);
 }
 
-// Get a specific model (both provider and model ID are auto-completed in IDEs)
+// Get a specific model
 const model = getBundledModel("openai", "gpt-4o-mini");
 console.log(`Using ${model.name} via ${model.api} API`);
 ```
@@ -802,13 +802,12 @@ If `compat` is not set, the library falls back to URL-based detection. If `compa
 
 ### Type Safety
 
-Models are typed by their API, ensuring type-safe options:
+Pass the model's API as an explicit type argument to type provider-specific options. `getBundledModel` does not infer the API from the provider or model ID, so the argument must match the model's `api` field:
 
 ```typescript
-// TypeScript knows this is an Anthropic model
-const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+// The explicit API type checks these options against AnthropicOptions
+const claude = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
 
-// So these options are type-checked for AnthropicOptions
 await stream(claude, context, {
 	thinkingEnabled: true, // ✓ Valid for anthropic-messages
 	thinkingBudgetTokens: 2048, // ✓ Valid for anthropic-messages
