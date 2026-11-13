@@ -8,7 +8,7 @@ import {
 
 export const processCli: TerminalLaunchCliRunner = async (argv, cwd, env) => {
 	const result = await ptree.exec([...argv], { cwd, env, allowNonZero: true });
-	return { stdout: result.stdout, exitCode: result.exitCode };
+	return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
 };
 
 export function launchError(

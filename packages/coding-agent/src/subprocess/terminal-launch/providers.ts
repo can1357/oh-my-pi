@@ -1,5 +1,6 @@
 import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { cmuxLaunchProvider } from "./cmux";
+import { herdrCoreLaunchProvider } from "./herdr-core";
 import { herdrLaunchProvider } from "./herdr";
 import { orcaLaunchProvider } from "./orca";
 import { tmuxLaunchProvider } from "./tmux";
@@ -14,6 +15,7 @@ import { zellijLaunchProvider } from "./zellij";
  */
 export const terminalLaunchProviders = {
 	herdr: herdrLaunchProvider,
+	"herdr-core": herdrCoreLaunchProvider,
 	tmux: tmuxLaunchProvider,
 	screen: {
 		capabilities: {

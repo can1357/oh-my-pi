@@ -1005,12 +1005,12 @@ editor.
 
 `ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a
 multiplexer pane or provider-native group (a tmux window, Zellij/Herdr/Orca tab, or CMUX
-workspace—not an OS window) and returns the reported native ID, plus a `warning` when
+workspace, not an OS window) and returns the reported native ID, plus a `warning` when
 the provider started the command but could not show it where requested. RPC, ACP,
 print, and headless contexts do not provide this optional method. The request type and
 supported provider set derive from canonical launch capabilities: tmux, Zellij,
-Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
-multiplexer taxonomy but are currently unsupported.
+legacy Herdr, Herdr Core, CMUX, and Orca are supported; screen and wmux remain recognized
+by the multiplexer taxonomy but are currently unsupported.
 
 Provider-specific session detection is centralized in
 `@oh-my-pi/pi-tui/terminal-multiplexer`, which registers one module per multiplexer.
@@ -1060,9 +1060,15 @@ Targets are provider-native IDs/refs, with different meanings by placement:
   An explicit pane or session target can address the CLI when `TMUX` is unset.
 - Zellij pane placement may target an existing tab ID (Zellij 0.44.1 or newer).
   New-tab creation has no target option. Both require an active `ZELLIJ` session.
-- Herdr pane placement targets a pane ID and defaults to `HERDR_PANE_ID`; tab
-  placement targets a workspace ID and defaults to `HERDR_WORKSPACE_ID`. The
-  destination must be in an active Herdr pane or workspace.
+- Legacy Herdr (`herdr`) pane placement targets a pane ID and defaults to
+  `HERDR_PANE_ID`; tab placement targets a workspace ID and defaults to
+  `HERDR_WORKSPACE_ID`. The destination must be in an active Herdr pane or workspace.
+- Herdr Core (`herdr-core`) is detected by a nonempty `HC_TERMINAL_ID`. At launch,
+  Desktop membership is determined by matching that exact terminal ID in
+  `herdr-app ls`, not by the focused pane. A Desktop member opens a native pane or
+  tab; a headless Core terminal starts the command through `hc` and returns a
+  warning that no pane or tab is visible. Herdr Core and Desktop launches are
+  supported only on Unix; Windows is not supported.
 - Orca pane splits resolve `ORCA_PANE_KEY` to the current terminal handle;
   detection requires both `ORCA_PANE_KEY` and `ORCA_WORKTREE_ID`. Tab creation
   defaults to worktree `id:<ORCA_WORKTREE_ID>`; an application label alone is
@@ -1096,11 +1102,14 @@ direct argv execution. Zellij options that need a newer CLI than the one install
 with an error naming the required version; the dispatcher checks `zellij --version`
 once per process.
 
-Herdr `pane run` types text into the destination's interactive shell, so the
+Legacy Herdr `pane run` types text into the destination's interactive shell, so the
 adapter writes the POSIX-quoted argv to a private, self-deleting `/bin/sh` script
 under the temp directory and types only its absolute path. Any interactive shell
 that runs a bare path (POSIX shells, fish, Nushell) launches the exact argv, so
-Herdr requests take no `shellGrammar`. Herdr launches are rejected on Windows.
+legacy Herdr requests take no `shellGrammar`. Legacy Herdr launches are rejected on Windows.
+Herdr Core launches use native argument arrays rather than shell command text.
+Except for explicitly supplied variables, launched children inherit Core's
+environment, which may differ from the calling process's current environment.
 
 CMUX `--command` and Orca `terminal split`/`terminal create`
 submit shell command text to the destination's interactive shell rather than
@@ -1129,7 +1138,7 @@ Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify
 split direction, and Zellij new-tab creation cannot target a tab. tmux returns
 required pane (`%...`) or window (`@...`) IDs; Zellij 0.44.0 and newer report the pane ID
 as `terminal_<id>` and tab IDs as numeric strings, while older Zellij pane launches report
-none, so `result.id` is unavailable; Herdr requires pane/tab IDs in
+none, so `result.id` is unavailable; legacy Herdr requires pane/tab IDs in
 its JSON response. CMUX reports workspace/pane IDs when present, but its JSON
 response may omit an ID, in which case `result.id` is unavailable.
 Orca returns a pane handle at `result.split.handle` or a tab handle at
