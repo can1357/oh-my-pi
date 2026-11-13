@@ -1289,6 +1289,45 @@ async fn uutils_find_display_and_actions_split_paths() {
 	let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `xargs` and `env` run an external program found on `PATH` by name (on
+/// Windows that is a `sh.exe` the shell resolves through `PATHEXT`).
+#[tokio::test(flavor = "multi_thread")]
+async fn uutils_xargs_and_env_run_external_programs() {
+	let tmp = std::env::temp_dir().join(format!("pi-xargs-env-{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&tmp);
+	std::fs::create_dir_all(&tmp).expect("temp dir");
+	let tmp_str = tmp.to_str().expect("utf8");
+
+	let config = ShellConfig {
+		session_env:   None,
+		snapshot_path: None,
+		minimizer:     None,
+		filesystem:    Fs::native(),
+		seed:          None,
+	};
+	let mut session = create_session(&config).await.expect("create_session");
+	session
+		.run_test(format!("cd {}", quote_arg(tmp_str)), &TestStdio::null())
+		.await
+		.expect("cwd");
+	let params = TestStdio::null();
+	let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+	session
+		.run_test("printf 'a\\n' | xargs sh -c 'echo \"x:$1\"' sh > xargs.txt", &params)
+		.await
+		.expect("xargs");
+	assert_eq!(read("xargs.txt"), "x:a\n", "xargs should run the external sh");
+
+	session
+		.run_test("env PI_ENV_PROBE=ok sh -c 'echo \"$PI_ENV_PROBE\"' > env.txt", &params)
+		.await
+		.expect("env");
+	assert_eq!(read("env.txt"), "ok\n", "env should run the external sh");
+
+	let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The vendored `sed` builtin must stream pipeline stdin through scripts and
 /// perform `-i` in-place edits (with backup suffix) against the shell
 /// working directory rather than the host process cwd.
