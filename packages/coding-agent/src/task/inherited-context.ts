@@ -25,6 +25,7 @@ import inheritedContextTemplate from "../prompts/system/subagent-inherited-conte
 import { obfuscateMessages } from "../secrets/message-transform";
 import { INHERITED_CONTEXT_MESSAGE_TYPE } from "../session/messages";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { providerImageRoom } from "../session/provider-image-budget";
 import { PLACEHOLDER_RE } from "../secrets/placeholder";
 
 /** Tail size measured in the inheritance experiment: two frames of the 1568px dense shape. */
@@ -333,7 +334,7 @@ export class InheritedContextFrames {
 		const index = context.messages.findIndex(isInheritedContextTurn);
 		if (index === -1) return context;
 		const message = context.messages[index] as UserMessage & { content: TextContent[] };
-		const room = snapcompact.providerImageBudget(model) - imageCount(context.messages);
+		const room = providerImageRoom(context, model);
 		const content = await this.#render(message.content[1]!.text, model, shape, room);
 		if (!content) return context;
 		const messages = context.messages.slice();

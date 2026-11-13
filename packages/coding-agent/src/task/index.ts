@@ -1235,11 +1235,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const asyncItems = manager ? spawnItems.filter((_, index) => !itemBlocking[index]) : [];
 		// Runs started while the call streamed. An item runs detached iff it
 		// becomes a background job here; a run launched under the other mode
-		// (settings flipped mid-stream) cannot be re-homed and starts over.
+		// (settings flipped mid-stream) cannot be re-homed and starts over. A speculative
+		// run never carries an inherited tail (speculation refuses an item that inherits), so
+		// an item that inherits now, because `task.inheritContext` turned on after it was
+		// launched, starts over with its tail too.
 		const adopted = launchSession ? await launchSession.adopt(normalizedSpawnParams) : new Map<number, SpawnRun>();
 		for (const [index, run] of adopted) {
-			if (run.identity.detached === (manager !== undefined && !itemBlocking[index])) continue;
-			run.discard("task execution mode changed after speculative launch");
+			if (this.#inheritsContext(normalizedSpawnParams[index]!, policies[index]!.agent)) {
+				run.discard("task inheritance changed after speculative launch");
+			} else if (run.identity.detached === (manager !== undefined && !itemBlocking[index])) {
+				continue;
+			} else {
+				run.discard("task execution mode changed after speculative launch");
+			}
 			adopted.delete(index);
 		}
 		const depthCapacity = canSpawnAtDepth(

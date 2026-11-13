@@ -19,12 +19,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createSpeculativeToolExecutionConfig } from "@oh-my-pi/pi-coding-agent/speculation/host";
+import type { Message } from "@oh-my-pi/pi-ai";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { BatchArgsScanner, type TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { cfgTaskInheritContext } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
 const taskAgent: AgentDefinition = {
@@ -41,7 +43,11 @@ const sink: SpeculativeOperationSink = {
 	close: () => {},
 };
 
-function createSession(manager: AsyncJobManager, settings: Record<string, unknown> = {}): ToolSession {
+function createSession(
+	manager: AsyncJobManager,
+	settings: Record<string, unknown> = {},
+	extra: Partial<ToolSession> = {},
+): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -50,6 +56,7 @@ function createSession(manager: AsyncJobManager, settings: Record<string, unknow
 		getSessionSpawns: () => "*",
 		getAgentId: () => null,
 		asyncJobManager: manager,
+		...extra,
 	} as unknown as ToolSession;
 }
 
@@ -134,6 +141,8 @@ describe("task speculative launch", () => {
 	const managers: AsyncJobManager[] = [];
 	const spawns = new Map<string, SpawnEvents>();
 	const startedIds = new Set<string>();
+	const runOptions: Parameters<typeof executorModule.runSubprocess>[0][] = [];
+	let secondRun = Promise.withResolvers<void>();
 	const spawn = (id: string): SpawnEvents => {
 		let events = spawns.get(id);
 		if (!events) {
@@ -149,13 +158,15 @@ describe("task speculative launch", () => {
 
 	async function openSession(
 		settings: Record<string, unknown> = {},
-	): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
+		extra: Partial<ToolSession> = {},
+	): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession; toolSession: ToolSession }> {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		managers.push(manager);
-		const tool = await TaskTool.create(createSession(manager, settings));
+		const toolSession = createSession(manager, settings, extra);
+		const tool = await TaskTool.create(toolSession);
 		const session = await tool.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
 		if (!session) throw new Error("expected a task launch session");
-		return { tool, manager, session: session as TaskLaunchSession };
+		return { tool, manager, session: session as TaskLaunchSession, toolSession };
 	}
 
 	beforeEach(() => {
@@ -163,6 +174,8 @@ describe("task speculative launch", () => {
 		AgentLifecycleManager.resetGlobalForTests();
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			runOptions.push(options);
+			if (runOptions.length === 2) secondRun.resolve();
 			const id = options.id ?? "?";
 			const events = spawn(id);
 			startedIds.add(id);
@@ -184,6 +197,8 @@ describe("task speculative launch", () => {
 		for (const events of spawns.values()) events.release.resolve();
 		spawns.clear();
 		startedIds.clear();
+		runOptions.length = 0;
+		secondRun = Promise.withResolvers<void>();
 		vi.restoreAllMocks();
 		for (const manager of managers.splice(0)) await manager.dispose({ timeoutMs: 1000 });
 		AgentLifecycleManager.resetGlobalForTests();
@@ -235,6 +250,29 @@ describe("task speculative launch", () => {
 		spawn("Beta").release.resolve();
 		await manager.getJob("Alpha")!.promise;
 		await manager.getJob("Beta")!.promise;
+	});
+
+	it("restarts a speculative run with its tail when task.inheritContext turns on before dispatch", async () => {
+		const parentMessages = [{ role: "user", content: "Remember the codeword PLUM-7731.", timestamp: 0 }] as Message[];
+		const { tool, session, toolSession } = await openSession(
+			{ "task.inheritContext": false },
+			{ getContextMessages: () => parentMessages },
+		);
+		const flagged = {
+			context: "ctx",
+			tasks: [{ name: "Alpha", agent: "task", task: "Do A.", inheritContext: true }],
+		};
+		// The setting is off while the item streams, so it launches ahead of dispatch with no tail.
+		session.update(toolCall, JSON.stringify(flagged));
+		await spawn("Alpha").started.promise;
+		expect(runOptions[0]!.inheritedContext).toBeUndefined();
+		cfgTaskInheritContext.override(toolSession.settings, true);
+		session.finalize({ toolCall, args: flagged });
+		await tool.execute(toolCall.id, flagged);
+		// The adopted run could not carry the tail: it was discarded and dispatch started the item again.
+		await secondRun.promise;
+		expect(runOptions[1]!.inheritedContext?.text).toContain("PLUM-7731");
+		spawn("Alpha").release.resolve();
 	});
 
 	it("adopts an empty model placeholder without changing the submitted arguments", async () => {

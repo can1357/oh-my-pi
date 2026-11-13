@@ -313,6 +313,41 @@ describe("inherited context turn", () => {
 		expect(await new InheritedContextFrames().transform(full, model, false)).toBe(full);
 	});
 
+	it("counts a Responses computer screenshot as a slot and leaves assistant output images free", async () => {
+		const model = visionModel(["text", "image"], { id: "gpt-5.4", api: "openai-responses", provider: "openai" });
+		const built = childContext(context);
+		const budget = providerImageBudget(model);
+		const screenshot = (index: number) =>
+			({
+				role: "toolResult",
+				toolCallId: `call_${index}|cu_${index}`,
+				toolName: "computer",
+				// The Responses wire sends the metadata copy, so the content holds no image block.
+				content: [{ type: "text", text: `result-${index}` }],
+				isError: false,
+				timestamp: index,
+				providerMetadata: {
+					type: "computer",
+					screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,AAAA" },
+					acknowledgedSafetyChecks: [],
+				},
+			}) as Message;
+		const full: Context = {
+			messages: [...built.messages, ...Array.from({ length: budget }, (_, index) => screenshot(index))],
+		};
+		expect(await new InheritedContextFrames().transform(full, model, false)).toBe(full);
+
+		const generated = {
+			role: "assistant",
+			content: Array.from({ length: budget }, () => ({ type: "image", data: "AAAA", mimeType: "image/png" })),
+			timestamp: 0,
+		} as unknown as Message;
+		const withOutputs: Context = { messages: [generated, ...built.messages] };
+		const sent = await new InheritedContextFrames().transform(withOutputs, model, false);
+		const turn = sent.messages[1]!.content as { type: string }[];
+		expect(turn.some(block => block.type === "image")).toBe(true);
+	});
+
 	it("stays text for a model without image input or with images blocked", async () => {
 		const frames = new InheritedContextFrames();
 		const built = childContext(context);

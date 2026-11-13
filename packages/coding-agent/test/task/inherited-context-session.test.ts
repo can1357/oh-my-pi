@@ -149,7 +149,7 @@ describe("inherited context through a real child session", () => {
 	it("falls back to the text tail when the inline-image byte clamp drops its frames", async () => {
 		using directory = TempDir.createSync("@omp-task-inherit-");
 		// What a host whose byte budget holds no frame does: the oldest-first clamp leaves the turn's text only.
-		vi.spyOn(imageBudget, "clampProviderContextImageBytes").mockImplementation(context => ({
+		const clamp = vi.spyOn(imageBudget, "clampProviderContextImageBytes").mockImplementation(context => ({
 			...context,
 			messages: context.messages.map(message =>
 				message.role === "user" && message.inheritedContext === true && Array.isArray(message.content)
@@ -158,6 +158,16 @@ describe("inherited context through a real child session", () => {
 			),
 		}));
 		const context = await firstChildRequest(directory, "none");
+		// The text restored over the evicted frames is measured against the byte budget again before the send.
+		const restoredPass = clamp.mock.calls.find(([measured]) =>
+			measured.messages.some(
+				message =>
+					message.role === "user" &&
+					message.inheritedContext === true &&
+					blocks(message).some(block => block.type === "text" && block.text?.includes(CODEWORD)),
+			),
+		);
+		expect(restoredPass).toBeDefined();
 		const turn = context.messages.find(message => message.role === "user" && message.inheritedContext === true);
 		const content = blocks(turn!);
 		expect(content.every(block => block.type === "text")).toBe(true);

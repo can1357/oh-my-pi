@@ -244,6 +244,15 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 }
 
 /**
+ * Input-image slots `model` has left for `context`, counted as {@link clampProviderContextImages} counts them:
+ * assistant output images take none, and a computer result on a route that sends its metadata screenshot takes one.
+ * Negative when the context is already over the budget.
+ */
+export function providerImageRoom(context: Context, model: Model): number {
+	return providerImageBudget(model) - countImages(context, sendsComputerScreenshotMetadata(model));
+}
+
+/**
  * Messages whose inline images a host with a `request-body-byte-limit` keeps past the byte budget: the newest user
  * message (summary archives excluded) and the newest tool result carrying inline image bytes, newest first, each only
  * while the kept images still fit `imageRoom`, the limit less the request's other serialized bytes. The clamp evicts
