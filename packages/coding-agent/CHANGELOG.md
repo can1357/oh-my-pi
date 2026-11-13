@@ -342,7 +342,7 @@
 - One slow or flooding collab guest no longer ends sharing for the room: the host drops that guest's backlog and asks it to rejoin, sessions larger than the send budget can be joined, and guest questions nobody received settle as unavailable ([#18629](https://github.com/can1357/oh-my-pi/pull/18629) by [@iliaal](https://github.com/iliaal))
 ### Added
 
-- SDK hosts can explicitly authorize an extension tool to invoke the enabled native task with its own approval.
+- SDK hosts can explicitly authorize an extension tool to invoke the enabled native task with its own approval. ([#19049](https://github.com/can1357/oh-my-pi/pull/19049) by [@raiscui](https://github.com/raiscui))
 
 ## [18.18.6] - 2026-11-09
 
