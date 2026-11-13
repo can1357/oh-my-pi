@@ -2,7 +2,12 @@ import { applyBackgroundToLine, padding, stripTerminalSequences, visibleWidth } 
 import type { AnimationFrame, TranscriptPresentationTarget } from "../chrome/transcript-container";
 import { type Component, Container } from "../tui";
 import { Disclosure } from "../components/disclosure";
+import { Image, type ImageBudget } from "../components/image";
 import { Markdown } from "../components/markdown";
+import { Spacer } from "../components/spacer";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
+import { resolveImageOptions } from "../render/render-utils";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -70,6 +75,10 @@ export interface UserBubbleOptions {
 	skillPath?: (name: string) => string | undefined;
 	/** When the message was sent (ms); shown beside the native hover toolbar. */
 	timestamp?: number;
+	/** Shared budget that caps how many attached images render as live graphics. */
+	imageBudget?: ImageBudget;
+	/** Schedules a repaint when an off-thread image step (Kitty PNG conversion) lands. */
+	onImageUpdate?: () => void;
 }
 
 /**
@@ -139,6 +148,12 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	readonly #timestamp: number | undefined;
 	readonly #images: readonly ImageContent[];
 	readonly #imageLinks: readonly (string | undefined)[] | undefined;
+	readonly #imageBudget: ImageBudget | undefined;
+	readonly #onImageUpdate: (() => void) | undefined;
+	/** Live image-preview children appended after the markdown (ANSI mode only; native builds its own). */
+	#previewChildren: Component[] = [];
+	/** Payload keys of in-flight Kitty PNG conversions, so one conversion runs per image. */
+	#kittyPending = new Set<string>();
 	/** Display text: image markers collapsed to chips and model mentions to their labels. */
 	readonly #text: string;
 	/** Matches the composer tokens in {@link #text} (chips, skills, this message's mentions). */
@@ -170,6 +185,8 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		this.#timestamp = options.timestamp;
 		this.#images = options.images ?? [];
 		this.#imageLinks = options.imageLinks;
+		this.#imageBudget = options.imageBudget;
+		this.#onImageUpdate = options.onImageUpdate;
 		this.#text = text;
 		this.#tokens = composerTokenRegex(mentionLabels);
 		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
@@ -178,6 +195,75 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		});
 		markdown.setIgnoreTight(true);
 		this.addChild(markdown);
+		// ANSI-mode previews for the attached images (native mode draws its own thumbnails in
+		// #describe); a terminal without a graphics protocol keeps the chip text as the whole preview.
+		this.#mountImagePreviews();
+	}
+
+	/**
+	 * Append a live preview per attached image after the markdown, the same way assistant tool
+	 * images render: graphics protocol resolved once here, Kitty's PNG-only transmit fed by the
+	 * shared conversion cache, sizing from {@link resolveImageOptions}, links following the same
+	 * policy as the chip hyperlinks. Videos and synthetic messages keep their chips only.
+	 */
+	#mountImagePreviews(): void {
+		if (!TERMINAL.imageProtocol || this.#synthetic) return;
+		this.#unmountImagePreviews();
+		let spacer = false;
+		this.#images.forEach((image, index) => {
+			if (!image.mimeType.startsWith("image/")) return;
+			let data = image.data;
+			let mimeType = image.mimeType;
+			if (TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png") {
+				const converted = cachedPngConversion(image);
+				if (!converted) {
+					this.#queueKittyConversion(image);
+					return;
+				}
+				data = converted.data;
+				mimeType = converted.mimeType;
+			}
+			if (!spacer) {
+				this.addChild(new Spacer(1));
+				spacer = true;
+			}
+			const preview = new Image(
+				data,
+				mimeType,
+				{ fallbackColor: (value: string) => theme.fg("accent", value) },
+				{
+					...resolveImageOptions(),
+					sourcePath: this.#imageLinks?.[index],
+					budget: this.#imageBudget,
+					imageKey: imagePayloadKey(image),
+					requestRender: this.#onImageUpdate,
+				},
+			);
+			this.#previewChildren.push(preview);
+			this.addChild(preview);
+		});
+	}
+
+	#unmountImagePreviews(): void {
+		for (const child of this.#previewChildren) this.removeChild(child);
+		this.#previewChildren = [];
+	}
+
+	/** Kitty transmits PNG data only; convert other formats off-thread and re-mount when it lands. */
+	#queueKittyConversion(image: ImageContent): void {
+		const key = imagePayloadKey(image);
+		if (this.#kittyPending.has(key)) return;
+		this.#kittyPending.add(key);
+		void convertImageToPngShared(image)
+			.then(() => {
+				this.#kittyPending.delete(key);
+				this.#mountImagePreviews();
+				this.#onImageUpdate?.();
+			})
+			.catch(() => {
+				// Conversion failed: the chip text stays the whole preview.
+				this.#kittyPending.delete(key);
+			});
 	}
 
 	override releaseRenderCaches(): void {
