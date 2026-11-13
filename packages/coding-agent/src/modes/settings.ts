@@ -1191,7 +1191,7 @@ export const cfgComposerPredictionAlternatives = register({
 		group: "Input",
 		label: "Prediction Alternatives",
 		get description() {
-			return `Ask for up to four distinct predictions instead of one, most likely first. The ghost text shows the first one your draft matches; after inserting one, press ${formatKeyHint("tab")} again to pick another. The same single request returns a few more output tokens`;
+			return `Ask for up to four distinct predictions instead of one, most likely first. The ghost text shows the first one your draft matches; after inserting one, press ${formatKeyHint("tab")} or ${formatKeyHint("right")} again to pick another. The same single request returns a few more output tokens`;
 		},
 		condition: "composerPredictionsEnabled",
 	},

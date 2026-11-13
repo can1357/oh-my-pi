@@ -2501,7 +2501,13 @@ export class Editor implements Component, Focusable {
 			}
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) {
 			// Right walks over the ghost prediction or word completion as if it were typed: no trailing space.
-			if (this.#acceptPrediction() || this.#acceptWordCompletion({ space: false })) return;
+			// Over an inserted prediction it opens the alternatives like Tab, so Right alone can browse them.
+			if (
+				this.#acceptPrediction() ||
+				this.#acceptWordCompletion({ space: false }) ||
+				this.#showPredictionAlternatives()
+			)
+				return;
 			this.#moveCursor(0, 1);
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorLeft")) {
 			// Left

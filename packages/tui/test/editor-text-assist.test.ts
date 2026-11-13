@@ -381,6 +381,31 @@ describe("Editor prediction", () => {
 		expect(accepted).toEqual([0, 1]);
 	});
 
+	it("inserts, opens, and picks a prediction with Right alone", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it", "show the diff"];
+
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("run the tests");
+		editor.handleInput("\x1b[C");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\x1b[C");
+
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("ship it");
+		expect(accepted).toEqual([0, 1]);
+
+		// Mid-line, Right stays cursor movement.
+		editor.handleInput("\x1b[D");
+		editor.handleInput("\x1b[D");
+		editor.handleInput("\x1b[C");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+	});
+
 	it("opens the list over an inserted prediction that prefixes a longer one instead of extending it", () => {
 		const editor = new Editor(defaultEditorTheme);
 		const accepted: number[] = [];

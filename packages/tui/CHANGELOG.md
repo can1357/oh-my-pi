@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Right arrow over an inserted composer prediction opens its alternatives the way Tab does, so Right alone inserts, browses, and picks one
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
