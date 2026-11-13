@@ -503,10 +503,52 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	return entries;
 }
 
-/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier and the Spotlight state. */
-function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): ServiceTierByFamily | undefined {
+/**
+ * Links each user message to its reply across tail reads. The agent writes non-message entries (the system-prompt
+ * digest, extension notices, side-model usage, title changes) between a user message and its reply, so the reply is
+ * the first assistant message descending from the user message through non-message entries only.
+ */
+class ReplyTracker {
+	/** User messages still awaiting a reply and the non-message entries beneath them, each to its user message. */
+	readonly #waiting: Map<string, string>;
+
+	constructor(waiting?: Record<string, string>) {
+		this.#waiting = new Map(waiting ? Object.entries(waiting) : undefined);
+	}
+
+	get state(): Record<string, string> | undefined {
+		return this.#waiting.size > 0 ? Object.fromEntries(this.#waiting) : undefined;
+	}
+
+	/** The user message `entry` answers, if `entry` is an assistant message descending from it through non-message entries. */
+	visit(entry: SessionEntry): string | undefined {
+		if (isUserMessage(entry)) {
+			this.#waiting.set(entry.id, entry.id);
+			return undefined;
+		}
+		const { id, parentId } = entry as { id?: unknown; parentId?: unknown };
+		const user = typeof parentId === "string" ? this.#waiting.get(parentId) : undefined;
+		if (!user) return undefined;
+		if (entry.type !== "message") {
+			if (typeof id === "string") this.#waiting.set(id, user);
+			return undefined;
+		}
+		for (const [waitingId, waitingUser] of this.#waiting) {
+			if (waitingUser === user) this.#waiting.delete(waitingId);
+		}
+		return isAssistantMessage(entry) ? user : undefined;
+	}
+}
+
+/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier, the awaited replies and the Spotlight state. */
+function scanPrefixState(
+	bytes: Uint8Array,
+	spotlight: SpotlightCollector,
+	replies: ReplyTracker,
+): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
+		replies.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 		else spotlight.visit(entry);
 	});
@@ -523,6 +565,8 @@ export interface SessionParserState {
 	serviceTier: ServiceTierByFamily | null;
 	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
 	spotlight?: SpotlightParserState;
+	/** Absent when no user message awaits its reply, and in cursors persisted before replies were tracked. */
+	pendingReplies?: Record<string, string>;
 }
 
 export interface ParseSessionResult {
@@ -585,9 +629,11 @@ export async function parseSessionFile(
 	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
 	const callsById = new Map<string, ToolCallStats>();
 	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
+	let replies = new ReplyTracker();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
+		const answered = replies.visit(entry);
 		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
@@ -622,12 +668,11 @@ export async function parseSessionFile(
 				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
 			}
 			// Persist links even when the user entry was ingested in an earlier tail read.
-			const parentId = entry.parentId;
 			const msg = entry.message;
-			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+			if (answered && msg.role === "assistant" && msg.model && msg.provider) {
 				userLinks.push({
 					sessionFile: sessionPath,
-					entryId: parentId,
+					entryId: answered,
 					model: msg.model,
 					provider: msg.provider,
 				});
@@ -660,9 +705,10 @@ export async function parseSessionFile(
 			if (resume) {
 				currentServiceTier = state?.serviceTier ?? undefined;
 				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+				replies = new ReplyTracker(state?.pendingReplies);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
-				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
@@ -711,6 +757,7 @@ export async function parseSessionFile(
 			checkpoint,
 			serviceTier: currentServiceTier ?? null,
 			spotlight: spotlight.state,
+			pendingReplies: replies.state,
 		},
 	};
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The Frustration page's per-model table counts every answered message again; since agent notices began landing before replies, about half went uncounted
+
 ## [18.20.0] - 2026-11-12
 
 ### Fixed
