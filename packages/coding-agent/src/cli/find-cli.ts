@@ -5,6 +5,7 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "../config/auxiliary-model-policy";
 import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesystem";
 import { openStandaloneJudge } from "../judgment/standalone";
 import { standaloneFindSpotlight } from "../spotlight/session";
@@ -21,6 +22,9 @@ export interface FindCommandArgs {
 	hidden: boolean;
 	json: boolean;
 	quiet: boolean;
+	noJudge?: boolean;
+	noSpotlight?: boolean;
+	offline?: boolean;
 }
 
 /** Ranges printed per hit. */
@@ -102,6 +106,9 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	const baseCwd = root.type === "directory" && !isUrlPath(root.path) ? root.path : cwd;
 	log("resolving judge");
 	const { judge, settings, leadJudge, close } = await openStandaloneJudge(baseCwd, "find");
+	if (cmd.noJudge) cfgNoJudge.override(settings, true);
+	if (cmd.noSpotlight) cfgNoSpotlight.override(settings, true);
+	if (cmd.offline) cfgOffline.override(settings, true);
 	const verifyModel = cfgFindVerifyModel.get(settings)?.trim();
 	const verifyJudge = verifyModel ? leadJudge(verifyModel) : undefined;
 	const spotlight = standaloneFindSpotlight(settings);

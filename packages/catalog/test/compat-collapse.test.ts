@@ -1751,6 +1751,35 @@ describe("antigravity discovery collapsing", () => {
 		expect(models?.some(model => model.id === "gemini-3.1-flash-lite")).toBe(true);
 	});
 
+	it("folds Gemini 4 Hydrogen's four SKUs into one row that routes xhigh to the -xhigh SKU", async () => {
+		const fetcher = Object.assign(
+			(input: string | URL | Request, _init?: RequestInit) =>
+				Promise.resolve(
+					String(input).includes(":fetchAvailableModels")
+						? Response.json({
+								models: Object.fromEntries(
+									["low", "medium", "high", "xhigh"].map(tier => [
+										`gemini-4-hydrogen-${tier}`,
+										{ displayName: `Gemini 4 Hydrogen (${tier})`, supportsThinking: true },
+									]),
+								),
+							})
+						: new Response("version: 2.19.1\n"),
+				),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const models = (await fetchAntigravityDiscoveryModels({ token: "t", fetcher }))?.models;
+
+		expect(models?.filter(model => model.id.includes("hydrogen")).map(model => model.id)).toEqual([
+			"gemini-4-hydrogen",
+		]);
+		const hydrogen = models?.find(model => model.id === "gemini-4-hydrogen");
+		expect(hydrogen?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.XHigh]).toBe("gemini-4-hydrogen-xhigh");
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.Low]).toBe("gemini-4-hydrogen-low");
+	});
+
 	it("drops bundled rows the account roster does not serve, and keeps them when discovery fails", async () => {
 		const roster = {
 			models: {
