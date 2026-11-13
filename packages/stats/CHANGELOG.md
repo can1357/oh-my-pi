@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `omp stats` Traces tab leaving every background job open to the end of the session, which hid all idle time and stretched each turn bar across the whole timeline ([#19115](https://github.com/can1357/oh-my-pi/pull/19115) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.0] - 2026-11-12
 
 ### Fixed
