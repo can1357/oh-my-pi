@@ -132,8 +132,6 @@ interface TtsrEntry {
 interface InjectionRecord {
 	/** Message count (turn index) when the rule was last injected. */
 	lastInjectedAt: number;
-	/** Injected since the last completed assistant turn; holds `always` rules to one firing per turn. */
-	firedThisTurn: boolean;
 }
 
 const DEFAULT_SETTINGS: TtsrSettings = {
@@ -585,27 +583,22 @@ export class TtsrManager {
 	}
 
 	/** Check if a rule can be triggered: its own `repeatMode` frontmatter wins over the global setting. */
-	#canTrigger(ruleName: string): boolean {
-		const record = this.#injectionRecords.get(ruleName);
+	#canTrigger(rule: Rule): boolean {
+		const record = this.#injectionRecords.get(rule.name);
 		if (!record) {
 			return true;
 		}
 
-		const repeatMode = this.#repeatModeOf(ruleName);
-		if (repeatMode === "always") {
-			// Once per turn: an interrupt retry that repeats the match must not re-fire and loop.
-			return !record.firedThisTurn;
-		}
+		const repeatMode = rule.repeatMode ?? this.#settings.repeatMode;
 		if (repeatMode === "once") {
 			return false;
 		}
 
-		const gap = this.#messageCount - record.lastInjectedAt;
-		return gap >= this.#settings.repeatGap;
-	}
-
-	#repeatModeOf(ruleName: string): NonNullable<Rule["repeatMode"]> {
-		return this.#rules.get(ruleName)?.rule.repeatMode ?? this.#settings.repeatMode;
+		// `always` is the minimal gap: eligible again once a turn ends after the turn the reminder landed in.
+		// Interrupt and deferred reminders land in the turn they spawn, so that turn cannot re-fire the rule
+		// and feed itself another retry or continuation.
+		const repeatGap = repeatMode === "always" ? 1 : this.#settings.repeatGap;
+		return this.#messageCount - record.lastInjectedAt >= repeatGap;
 	}
 
 	#compileConditions(rule: Rule): RegExp[] {
@@ -931,12 +924,12 @@ export class TtsrManager {
 		}
 
 		const candidates: TtsrEntry[] = [];
-		for (const [name, entry] of this.#rules) {
+		for (const entry of this.#rules.values()) {
 			if (entry.astConditions.length === 0 || entry.question) {
 				continue;
 			}
 			if (
-				!this.#canTrigger(name) ||
+				!this.#canTrigger(entry.rule) ||
 				!this.#matchesScope(entry, context) ||
 				!this.#matchesGlobalPaths(entry, context)
 			) {
@@ -1019,10 +1012,10 @@ export class TtsrManager {
 			return [];
 		}
 		const candidates: JudgedCandidate[] = [];
-		for (const [name, entry] of this.#rules) {
+		for (const entry of this.#rules.values()) {
 			if (
 				!entry.question ||
-				!this.#canTrigger(name) ||
+				!this.#canTrigger(entry.rule) ||
 				!this.#matchesScope(entry, context) ||
 				!this.#matchesGlobalPaths(entry, context) ||
 				!(await this.#passesPrefilter(entry, content, context))
@@ -1053,7 +1046,7 @@ export class TtsrManager {
 	 * concurrent judgments cannot deliver them twice.
 	 */
 	claim(rules: readonly Rule[]): Rule[] {
-		const claimed = rules.filter(rule => this.#canTrigger(rule.name));
+		const claimed = rules.filter(rule => this.#canTrigger(rule));
 		this.markInjected(claimed);
 		return claimed;
 	}
@@ -1064,7 +1057,7 @@ export class TtsrManager {
 		}
 		const matches: Rule[] = [];
 		for (const [name, entry] of this.#rules) {
-			if (entry.question || !this.#canTrigger(name)) {
+			if (entry.question || !this.#canTrigger(entry.rule)) {
 				continue;
 			}
 			if (!this.#matchesScope(entry, context)) {
@@ -1110,8 +1103,12 @@ export class TtsrManager {
 		this.markInjectedByNames(rulesToMark.map(rule => rule.name));
 	}
 
-	/** Mark rule names as injected (won't trigger again until conditions allow). */
-	markInjectedByNames(ruleNames: string[]): void {
+	/**
+	 * Mark rule names as injected (won't trigger again until conditions allow). `deliveryTurn` is the
+	 * turn the reminder lands in when that is a later turn than the current one (an interrupt's retry).
+	 */
+	markInjectedByNames(ruleNames: string[], deliveryTurn = this.#messageCount): void {
+		const lastInjectedAt = Math.max(deliveryTurn, this.#messageCount);
 		for (const rawName of ruleNames) {
 			const ruleName = rawName.trim();
 			if (ruleName.length === 0) {
@@ -1119,16 +1116,12 @@ export class TtsrManager {
 			}
 			const record = this.#injectionRecords.get(ruleName);
 			if (!record) {
-				this.#injectionRecords.set(ruleName, { lastInjectedAt: this.#messageCount, firedThisTurn: true });
+				this.#injectionRecords.set(ruleName, { lastInjectedAt });
 			} else {
-				record.lastInjectedAt = this.#messageCount;
-				record.firedThisTurn = true;
+				// Never lower a record: a later-landing reminder (an interrupt's retry) must keep its exemption.
+				record.lastInjectedAt = Math.max(record.lastInjectedAt, lastInjectedAt);
 			}
-			logger.debug("TTSR rule marked as injected", {
-				ruleName,
-				messageCount: this.#messageCount,
-				repeatMode: this.#repeatModeOf(ruleName),
-			});
+			logger.debug("TTSR rule marked as injected", { ruleName, lastInjectedAt });
 		}
 	}
 
@@ -1140,7 +1133,7 @@ export class TtsrManager {
 	/** Restore injected state from a list of rule names. */
 	restoreInjected(ruleNames: string[]): void {
 		for (const name of ruleNames) {
-			this.#injectionRecords.set(name, { lastInjectedAt: 0, firedThisTurn: false });
+			this.#injectionRecords.set(name, { lastInjectedAt: 0 });
 		}
 		if (ruleNames.length > 0) {
 			logger.debug("TTSR injected state restored", { ruleNames });
@@ -1215,13 +1208,6 @@ export class TtsrManager {
 	/** Increment message counter (call after each turn). */
 	incrementMessageCount(): void {
 		this.#messageCount++;
-	}
-
-	/** Re-arm `repeatMode: always` rules; call when an assistant turn completes without abort or error. */
-	completeTurn(): void {
-		for (const record of this.#injectionRecords.values()) {
-			record.firedThisTurn = false;
-		}
 	}
 
 	/** Get current message count. */

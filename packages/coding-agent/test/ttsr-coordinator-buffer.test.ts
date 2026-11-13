@@ -63,8 +63,6 @@ function assistantMessage(content: unknown[] = []): AgentMessage {
 	return { role: "assistant", content, timestamp: Date.now() } as AgentMessage;
 }
 
-const completedTurn = { ...assistantMessage(), stopReason: "stop" } as AgentMessage;
-
 function update(message: AgentMessage, assistantMessageEvent: AssistantMessageEvent): AgentEvent {
 	return {
 		type: "message_update",
@@ -173,14 +171,14 @@ describe("TTSR stream buffers", () => {
 		if (delivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
 		coordinator.markInjectedFromDetails(delivery.details);
 
-		for (let turn = 0; turn < 5; turn++) coordinator.onTurnEnd(completedTurn);
+		for (let turn = 0; turn < 5; turn++) coordinator.onTurnEnd();
 		const beforeGap = assistantMessage();
 		coordinator.onAssistantMessageStart();
 		await coordinator.checkMessageUpdate(textDelta(beforeGap, CONDITION));
 		coordinator.onAssistantMessageEnd({ ...beforeGap, stopReason: "stop" } as AssistantMessage);
 		expect(host.agent.followUp).toHaveBeenCalledTimes(1);
 
-		coordinator.onTurnEnd(completedTurn);
+		coordinator.onTurnEnd();
 		const afterGap = assistantMessage();
 		coordinator.onAssistantMessageStart();
 		await coordinator.checkMessageUpdate(textDelta(afterGap, CONDITION));
@@ -214,7 +212,7 @@ describe("TTSR stream buffers", () => {
 		expect(host.agent.followUp).toHaveBeenCalledTimes(2);
 
 		coordinator.markInjectedFromDetails(firstDelivery.details);
-		for (let turn = 0; turn < 6; turn++) coordinator.onTurnEnd(completedTurn);
+		for (let turn = 0; turn < 6; turn++) coordinator.onTurnEnd();
 		await queueMatch();
 		expect(host.agent.followUp).toHaveBeenCalledTimes(2);
 	});

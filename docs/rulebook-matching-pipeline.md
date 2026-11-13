@@ -48,6 +48,7 @@ interface Rule {
 	scope?: string[];
 	agents?: string[];
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
+	repeatMode?: "once" | "after-gap" | "always";
 	_source: SourceMeta;
 }
 ```
@@ -272,7 +273,7 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
    agents: main
    ```
 
-### `condition`, `astCondition`, `question`, `scope`, and `interruptMode`
+### `condition`, `astCondition`, `question`, `scope`, `interruptMode`, and `repeatMode`
 
 - `condition` is the regex TTSR trigger field; legacy `ttsr_trigger` / `ttsrTrigger` are accepted as fallback inputs during parsing. A leading `(?i)`, `(?m)`, or `(?s)` inline flag group is translated to the equivalent JavaScript `RegExp` flags.
 - `astCondition` is the ast-grep trigger field: a string or YAML sequence of structural patterns, kept verbatim (no glob inference). It matches finalized source snapshots from tools exposing `matcherEntries` or `matcherDigest` (built-in edit/write do), with language inferred from the file path. It does not run on partial streaming deltas. A rule may set `condition`, `astCondition`, or both.
@@ -310,6 +311,7 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 
 - A `condition` token that looks like a file glob becomes `tool:edit(<glob>)` and `tool:write(<glob>)` scope entries plus catch-all condition `.*`; `astCondition` tokens never trigger this shorthand.
 - `interruptMode` can override the global TTSR interrupt mode for the rule.
+- `repeatMode` can override the global TTSR repeat mode for the rule; `always` (rule-level only) re-arms the rule after each turn but never fires on the retry or continuation its own reminder spawned (see `ttsr-injection-lifecycle.md` §5).
 
 ## 7. System prompt inclusion path
 
