@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `composer.showLastReply` setting (off by default): when on, Ctrl+G shows the latest assistant reply below the draft in your external editor, under a git-style scissors line that is stripped when you save ([#19171](https://github.com/can1357/oh-my-pi/pull/19171) by [@a-lavis](https://github.com/a-lavis))
 - Subagents now preserve @upstream provider pinning on inherited models
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.

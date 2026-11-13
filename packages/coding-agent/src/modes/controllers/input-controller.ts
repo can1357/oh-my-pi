@@ -86,6 +86,7 @@ import { cfgCycleOrder } from "../../config/model-settings";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
+	cfgComposerShowLastReply,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -3192,10 +3193,13 @@ export class InputController {
 		}
 
 		const currentText = this.ctx.editor.getExpandedText?.() ?? this.ctx.editor.getText();
+		const context = cfgComposerShowLastReply.get(this.ctx.settings)
+			? this.ctx.session.getLastAssistantText()
+			: undefined;
 
 		try {
 			this.ctx.ui.stop();
-			const result = await openInEditor(editorCmd, currentText, { extension: ".omp.md" });
+			const result = await openInEditor(editorCmd, currentText, { extension: ".omp.md", context });
 			if (result !== null) {
 				this.ctx.editor.setText(result);
 			}

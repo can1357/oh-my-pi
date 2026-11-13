@@ -46,6 +46,28 @@ export interface OpenInEditorOptions {
 	extension?: string;
 	/** Keep the file's trailing newline instead of trimming it from the returned text. */
 	trimTrailingNewline?: boolean;
+	/**
+	 * Read-only reference text shown below a scissors line, like `git commit`'s
+	 * diff. It is discarded from the returned text, so edits to it are ignored.
+	 */
+	context?: string;
+}
+
+const SCISSORS_LINE = `# ${"-".repeat(24)} >8 ${"-".repeat(24)}`;
+const SCISSORS_HEADER = `${SCISSORS_LINE}
+# Do not modify or remove the line above.
+# Everything below it will be ignored.`;
+const SCISSORS_LINE_PATTERN = new RegExp(`^${SCISSORS_LINE}[ \\t]*\\r?$`, "m");
+
+/**
+ * Cuts the scissors line and everything after it, along with the blank lines
+ * that separated it from the draft. Text without the line is returned as-is:
+ * removing it is a deliberate edit.
+ */
+export function stripEditorContext(text: string): string {
+	const match = SCISSORS_LINE_PATTERN.exec(text);
+	if (!match) return text;
+	return text.slice(0, match.index).replace(/(?:\r?\n)+$/, "");
 }
 
 /** Subprocess argv and Windows quoting mode used to launch an external editor. */
@@ -73,6 +95,11 @@ export function resolveEditorSpawnCommand(
  * Opens `content` in the user's external editor and returns the edited text.
  * Returns `null` if the editor exits with a non-zero code.
  *
+ * With `options.context`, the reference text is appended below a scissors line
+ * and cut from the result (see {@link stripEditorContext}); trailing newlines
+ * of the draft are then always trimmed. A draft that already contains the
+ * scissors line gets no context, so the cut can never truncate it.
+ *
  * The caller is responsible for stopping/starting the TUI around this call.
  */
 export async function openInEditor(
@@ -82,12 +109,14 @@ export async function openInEditor(
 ): Promise<string | null> {
 	const ext = options?.extension ?? ".md";
 	const tmpFile = path.join(os.tmpdir(), `omp-editor-${Snowflake.next()}${ext}`);
+	const context = options?.context && !SCISSORS_LINE_PATTERN.test(content) ? options.context : undefined;
 
 	try {
-		await Bun.write(tmpFile, content);
+		await Bun.write(tmpFile, context ? `${content}\n\n${SCISSORS_HEADER}\n\n${context}\n` : content);
 		const exitCode = await openEditorOnPath(editorCmd, tmpFile);
 		if (exitCode === 0) {
-			const text = await Bun.file(tmpFile).text();
+			const raw = await Bun.file(tmpFile).text();
+			const text = context ? stripEditorContext(raw) : raw;
 			if (options?.trimTrailingNewline === false) {
 				return text;
 			}
