@@ -5,7 +5,7 @@
 ### Added
 
 - Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
-- Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults
+- Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -15,7 +15,7 @@
 - Fixed Command Code under-reporting Grok 4.7 spend at $1.20/$3.60 per million tokens and over-reporting Claude Sonnet 5.5 cache reads at $0.20; they now follow Command Code's CLI: Grok 4.7 at $2/$6 with a 2x tier above 200K input, and Sonnet 5.5 cache reads at $0.10. With that tier, Grok 4.7's default window now starts at 200K, with `/extended-context on` opening the full 500K ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch))
 - Google Antigravity now lists Gemini 4 Hydrogen once, with selectable low, medium, high, and xhigh thinking levels, instead of a separate entry per thinking tier ([#19070](https://github.com/can1357/oh-my-pi/pull/19070) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed `opencode-go/claude-haiku-5-5` offering `minimal` and capping `--thinking max` at `xhigh`; it now offers low through max like OpenCode Zen, and thinking Off sends Anthropic's explicit `disabled` ([#19128](https://github.com/can1357/oh-my-pi/issues/19128)).
-- Factory Droid's Muse Spark 1.3 accepts image input and is listed without its retired feature flag
+- Factory Droid's Muse Spark 1.3 accepts image input and is listed without its retired feature flag ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.20.0] - 2026-11-12
 
