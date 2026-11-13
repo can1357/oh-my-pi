@@ -360,6 +360,10 @@ export class GuestClient {
 			this.#applyFrame(frame);
 		} catch (err) {
 			console.warn("collab: failed to apply frame", frame.t, err);
+			// Its chunks must not complete a welcome that threw partway: the guest
+			// would go live on state from before it. A rejoin's welcome timer
+			// retries the hello instead.
+			if (frame.t === "welcome") this.#pendingSnapshot = null;
 			if (frame.t === "welcome" && !this.#welcomed) {
 				this.#end(`failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`);
 				return;

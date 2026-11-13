@@ -514,6 +514,38 @@ describe("GuestClient frame apply", () => {
 		}
 	});
 
+	it("says hello again when a rejoin's welcome fails to apply, ignoring its snapshot chunks", () => {
+		vi.useFakeTimers();
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const e1 = messageEntry("e1", { role: "user", content: "hi", timestamp: 1 });
+			const client = liveClient([e1]);
+			client.applyFrameForTest({ t: "event", event: { type: "agent_start" } });
+			const hellos = () => sent.filter(frame => frame.t === "hello").length;
+			client.applyFrameForTest({ t: "error", message: "rejoin to resync", resync: true });
+			expect(hellos()).toBe(1);
+			// Throws once the snapshot is primed, before the state from before the shed is reset.
+			client.applyFrameForTest({ ...welcomeFrame(1), agents: undefined } as unknown as HostFrame);
+			client.applyFrameForTest(snapshotChunk([e1]));
+			expect(client.getSnapshot().phase).toBe("reconnecting");
+			vi.advanceTimersByTime(30_000);
+			expect(hellos()).toBe(2);
+			client.applyFrameForTest(welcomeFrame(1));
+			client.applyFrameForTest(snapshotChunk([e1]));
+			expect(client.getSnapshot().phase).toBe("live");
+			expect(client.getSnapshot().working).toBe(false);
+			client.close();
+		} finally {
+			warnSpy.mockRestore();
+			sendSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
 	it("tracks host UI requests and sends responses", () => {
 		const sent: GuestFrame[] = [];
 		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
