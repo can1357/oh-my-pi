@@ -531,7 +531,8 @@ describe("model thinking derivation", () => {
 		});
 		expect(mapEffortToGoogleThinkingLevel(Effort.Low)).toBe("LOW");
 		expect(mapEffortToGoogleThinkingLevel(Effort.High)).toBe("HIGH");
-		expect(mapEffortToGoogleThinkingLevel(Effort.XHigh)).toBe("HIGH");
+		// The ladder, not the wire mapper, keeps `xhigh` off models that reject it.
+		expect(() => requireSupportedEffort(model, Effort.XHigh)).toThrow(/not supported/);
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 

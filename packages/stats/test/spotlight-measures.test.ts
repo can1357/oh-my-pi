@@ -361,3 +361,147 @@ describe("Spotlight needs backfill", () => {
 		expect(stats.ranking.position.find(p => p.label === "line 1")?.meanHeat).toBe(9);
 	});
 });
+
+describe("Spotlight list reads' windows", () => {
+	/** A shaped `a.py;b.py` read: `a.py` (10 lines) first, then `b.py` (`bLines` lines), each its own window. */
+	function listRead(
+		b: SpotlightSessionBuilder,
+		opts: { kept: [number, number][]; bLines?: number; heat?: string; bWhole?: true },
+	): string {
+		const bLines = opts.bLines ?? 40;
+		return shaped(
+			b,
+			"read",
+			{ path: "a.py;b.py" },
+			{
+				inTokens: 3000,
+				outTokens: 1000,
+				costUsd: 0.001,
+				original: {
+					url: "artifact://0",
+					lines: 10 + bLines,
+					kept: opts.kept,
+					...(opts.heat ? { heat: opts.heat } : {}),
+					windows: [
+						{ at: 0, lines: 10, start: 1, path: "a.py" },
+						{ at: 10, lines: bLines, start: 1, path: "b.py", ...(opts.bWhole ? { wholeFile: opts.bWhole } : {}) },
+					],
+				},
+			},
+		);
+	}
+
+	async function need(id: string): Promise<{ open: number; reread: string; edit: string } | null> {
+		const db = await initDb();
+		return db
+			.query<{ open: number; reread: string; edit: string }, [string]>(
+				"SELECT open, reread, edit FROM spotlight_needs WHERE tool_call_id = ?",
+			)
+			.get(id);
+	}
+
+	it("ranks a list's cut window as that read alone, and needs nothing of a window shown unchanged", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// `a.py` shown whole (unscored); `b.py` cut to its two hottest lines, as `src/good.ts` alone above.
+		listRead(b, {
+			kept: [
+				[1, 10],
+				[11, 12],
+			],
+			heat: `${"-".repeat(10)}99${"0".repeat(38)}`,
+		});
+		call(b, "read", { path: "b.py:1-2" });
+		call(b, "read", { path: "a.py:1-6" });
+		await write("list-rank.jsonl", b);
+
+		const cell = (await dashboard()).ranking.cells.find(c => c.group === "applied");
+		expect(cell).toMatchObject({ results: 1, neededLines: 2, auc: { value: 1 } });
+		expect(cell?.topLift.value).toBeCloseTo(10, 12);
+		expect(cell?.keptLift.value).toBeCloseTo(20, 12);
+	});
+
+	it("fetches back a list's whole-file part on a tail read of its file", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		listRead(b, {
+			kept: [
+				[1, 10],
+				[11, 20],
+			],
+			bWhole: true,
+		});
+		call(b, "read", { path: "b.py:-5" });
+		await write("list-tail.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.fetchBack.find(c => c.tool === "read" && c.group === "applied")).toMatchObject({
+			results: 1,
+			rate: { value: 1 },
+		});
+	});
+
+	it("locates an edit's Find in its own window and records it past the windows before", async () => {
+		// Both windows hold the same ten lines: only `b.py`'s own window places the Find once.
+		await Bun.write(sessionPath("list-edit/0.spotlight-read.log"), [...TEN_LINES, ...TEN_LINES].join("\n"));
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b, {
+			kept: [
+				[1, 2],
+				[11, 12],
+			],
+			bLines: 10,
+		});
+		edit(b, "b.py", ["line 7", "line 8"]);
+		await write("list-edit.jsonl", b);
+		await dashboard();
+
+		expect(JSON.parse((await need(list))?.edit ?? "null")).toEqual([[17, 18]]);
+	});
+
+	it("keeps a list's needs open until its last window stops collecting", async () => {
+		const file = sessionPath("list-open.jsonl");
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b, {
+			kept: [
+				[1, 2],
+				[11, 12],
+			],
+		});
+		call(b, "read", { path: "a.py" });
+		const written = b.text();
+		await Bun.write(file, written);
+		await syncAllSessions({ workers: 1 });
+		expect((await need(list))?.open).toBe(1);
+
+		call(b, "read", { path: "b.py" });
+		await fs.appendFile(file, b.text().slice(written.length));
+		await syncAllSessions({ workers: 1 });
+		expect((await need(list))?.open).toBe(0);
+	});
+
+	it("reads an open read persisted before windows as one at the original's start", async () => {
+		const file = sessionPath("list-state.jsonl");
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const read = shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 2]] });
+		const written = b.text();
+		await Bun.write(file, written);
+		await syncAllSessions({ workers: 1 });
+		// The cursor as a stats build before windows wrote it: its open reads carry no `at`.
+		const db = await initDb();
+		const row = db
+			.query<{ parser_state: string }, [string]>("SELECT parser_state FROM file_offsets WHERE session_file = ?")
+			.get(file);
+		const state = JSON.parse(row?.parser_state ?? "null", (key, value) => (key === "at" ? undefined : value));
+		db.query("UPDATE file_offsets SET parser_state = ? WHERE session_file = ?").run(JSON.stringify(state), file);
+
+		call(b, "read", { path: "src/x.ts:3-4" });
+		await fs.appendFile(file, b.text().slice(written.length));
+		await syncAllSessions({ workers: 1 });
+
+		expect(JSON.parse((await need(read))?.reread ?? "null")).toEqual([[3, 4]]);
+	});
+});

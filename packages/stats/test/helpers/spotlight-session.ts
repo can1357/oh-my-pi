@@ -33,6 +33,8 @@ export interface OriginalSpec {
 	kept: [number, number][];
 	/** Spotlight's per-line heat (`0`–`9`, `-` unscored); default none. */
 	heat?: string;
+	/** A `;`/`,` list read's windows (`start`/`path` then left at 1/absent). */
+	windows?: { at: number; lines: number; start: number; path?: string; wholeFile?: true }[];
 }
 
 /** What the experiment did to one result. */
@@ -351,6 +353,7 @@ export class SpotlightSessionBuilder {
 											lines: shape.original.lines,
 											start: shape.original.start ?? 1,
 											...(shape.original.path ? { path: shape.original.path } : {}),
+											...(shape.original.windows ? { windows: shape.original.windows } : {}),
 											heat: shape.original.heat ?? "",
 											kept: shape.original.kept,
 											...(shape.holdout ? { shapedUrl: shape.holdout.shapedUrl } : {}),

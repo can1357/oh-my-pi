@@ -66,7 +66,9 @@ describe("registered conflicts follow live marker blocks", () => {
 		await expect(write.execute("stale", { path: "conflict://1", content: "@ours" })).rejects.toThrow("not found");
 		expect(await Bun.file(file).text()).toBe(changed);
 		await read.execute("reregister", { path: "changed.ts:conflicts" });
-		expect(session.conflictHistory?.entries().map(entry => [entry.id, entry.oursLines])).toEqual([[2, ["new-ours"]]]);
+		expect(session.state?.conflictHistory?.entries().map(entry => [entry.id, entry.oursLines])).toEqual([
+			[2, ["new-ours"]],
+		]);
 	});
 
 	it("keeps an unchanged block's id when lines above it shift", async () => {
@@ -89,7 +91,7 @@ describe("registered conflicts follow live marker blocks", () => {
 		await expect(write.execute("bulk", { path: "conflict://*", content: "@ours" })).rejects.toThrow(
 			/nothing to resolve/,
 		);
-		expect(session.conflictHistory?.entries()).toEqual([]);
+		expect(session.state?.conflictHistory?.entries()).toEqual([]);
 	});
 
 	it("keeps and resolves a block registered past a capped :conflicts scan", async () => {
@@ -111,7 +113,7 @@ describe("registered conflicts follow live marker blocks", () => {
 		await read.execute("register", { path: "framing.ts:conflicts" });
 		await Bun.write(file, `\uFEFFshifted\r\n${[...lines, ">>>>>>> topic"].join("\r\n")}`);
 
-		const history = session.conflictHistory!;
+		const history = session.state?.conflictHistory!;
 		await reconcileRegisteredConflicts(history);
 
 		expect(history.entries().map(entry => [entry.id, entry.startLine, entry.endLine])).toEqual([[1, 2, 8]]);
