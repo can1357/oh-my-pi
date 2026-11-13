@@ -189,10 +189,11 @@ await win.click(120, 48, button="right")
     - To select web page text in the background, click where it starts and shift-click where it ends, or double- or triple-click it.
     - Prefer the app's menu command (Font Book: File ▸ New Collection from Selection) or AX.
   - An open menu takes the user's keyboard, so a background right-click or Control-click,
-    or a click, `press()` or `perform("AXShowMenu")` on a menu button or popup button, never leaves its menu open.
+    or a click, `press()`, `perform("AXShowMenu")`, Space or an up or down arrow key on a menu button or popup button, never leaves its menu open.
     - To use a menu item, name its path in the same call: `win.click(x, y, {button: "right", menu: ["Add to", "Fonts"]})`,
       `el.click({button: "right", menu: […]})`, `el.press({menu: ["New Folder"]})`; labels match like `win.menu.select`.
     - Without `menu` the menu closes and the call throws a partial-delivery `InputFailed` listing its items; inspect, then repeat with `menu`.
+      Keys take no `menu`: press or click the control with it instead.
   - A right-button or Control drag, `holdMouse` or multi-click has no background route,
     nor does a drag, `holdMouse` or multi-click on a menu button or popup button: click it once with `menu` instead.
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.

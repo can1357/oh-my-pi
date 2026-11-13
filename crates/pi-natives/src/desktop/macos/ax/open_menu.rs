@@ -5,7 +5,8 @@
 //! user's frontmost application until it closes, with no change of front
 //! application to show for it. A press that can open one (a right-click or
 //! Control-click, a click or `AXPress` on a menu button or popup button,
-//! `AXShowMenu`) therefore never returns with that menu open. Given an item
+//! `AXShowMenu`, Space or an up or down arrow key on a focused one) therefore
+//! never returns with that menu open. Given an item
 //! path, the call presses that item and ends the menu with `AXCancel` at once,
 //! since a pressed item flashes and its menu fades out for about 340 ms with
 //! the keyboard; otherwise it closes the menu with nothing chosen and reports
@@ -32,6 +33,7 @@ use super::{
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
+	keys::KeyName,
 	menus::{DesktopMenuItem, format_menu_item, match_index, require_enabled},
 	types::DesktopWindow,
 };
@@ -44,6 +46,10 @@ pub(crate) const CONTEXT_MENU_TIMEOUT: Duration = Duration::from_millis(250);
 /// after its press: Finder's Action menu, validated for an application made
 /// active for it, appeared 450 ms after `AXPress` returned.
 pub(crate) const CONTROL_MENU_TIMEOUT: Duration = Duration::from_millis(1000);
+/// How long the menu of a focused menu button or popup button may take to
+/// appear after the key press that opens it: `AppKit`, `SwiftUI` and Chrome
+/// menus appeared 10 to 131 ms after the key call began, Chrome's the latest.
+pub(crate) const KEY_MENU_TIMEOUT: Duration = Duration::from_millis(250);
 /// How long a menu may take to close after Escape; it fades out for about
 /// 270 ms.
 const MENU_CLOSE_TIMEOUT: Duration = Duration::from_millis(600);
@@ -71,6 +77,29 @@ pub(crate) fn may_open(action: &str, role: impl FnOnce() -> Option<String>) -> b
 /// Whether a control of `role` opens a menu when pressed.
 fn opens_menu(role: Option<&str>) -> bool {
 	matches!(role, Some("AXMenuButton" | "AXPopUpButton"))
+}
+
+/// Whether `keys` can open the menu of the element holding keyboard focus:
+/// Space or an up or down arrow, modified or not, on a menu button or popup
+/// button; Return opens none. `role` is read only for those keys, so every
+/// other key pays nothing for the check.
+pub(crate) fn keys_may_open(keys: &[KeyName], role: impl FnOnce() -> Option<String>) -> bool {
+	keys
+		.iter()
+		.any(|key| matches!(key, KeyName::Space | KeyName::Up | KeyName::Down | KeyName::Char(' ')))
+		&& opens_menu(role().as_deref())
+}
+
+/// The accessibility role of `element`.
+pub(crate) fn role_of(element: &AXUIElement) -> Option<String> {
+	copy_string(element, "AXRole")
+}
+
+/// The accessibility role of the element of `pid` that holds keyboard focus.
+pub(crate) fn focused_role(pid: libc::pid_t) -> Option<String> {
+	let app: CFRetained<AXUIElement> = probe_application(pid)?;
+	let focused: CFRetained<AXUIElement> = copy_element(&app, "AXFocusedUIElement")?;
+	role_of(&focused)
 }
 
 /// Whether a click at global point `(x, y)` lands on a menu button or popup
@@ -124,6 +153,8 @@ pub(crate) enum Press<'a> {
 	Pointer { kind: &'a str, window: &'a DesktopWindow },
 	/// An accessibility action, such as `AXPress`.
 	Action(&'a str),
+	/// A key chord, such as "down", delivered to `window`'s focused element.
+	Keys { chord: &'a str, window: &'a DesktopWindow },
 }
 
 /// What became of a menu a press may have opened.
@@ -196,6 +227,12 @@ fn opened(press: Press<'_>) -> String {
 			format!("the {kind} reached window {} ({}) and opened a menu", window.id, window.app)
 		},
 		Press::Action(action) => format!("{action} opened a menu"),
+		Press::Keys { chord, window } => {
+			format!(
+				"the key press {chord} reached window {} ({}) and opened a menu",
+				window.id, window.app
+			)
+		},
 	}
 }
 
@@ -207,6 +244,9 @@ fn aftermath(press: Press<'_>) -> String {
 			)
 		},
 		Press::Action(_) => String::new(),
+		Press::Keys { .. } => "; the key press may already have taken effect, so inspect the window \
+		                       before retrying"
+			.to_string(),
 	}
 }
 
@@ -218,13 +258,26 @@ fn listed(items: &str) -> String {
 	}
 }
 
+/// How an item is chosen in the background: keys carry no item path, so a
+/// key press names the press or click that does.
+const fn choose_route(press: Press<'_>) -> &'static str {
+	match press {
+		Press::Pointer { .. } | Press::Action(_) => "pass its path as the menu option",
+		Press::Keys { .. } => {
+			"press or click the control instead of sending keys, with the item's path as the menu \
+			 option"
+		},
+	}
+}
+
 fn unchosen_message(press: Press<'_>, refusal: Option<&str>, items: &str) -> String {
 	let (opened, aftermath, listed) = (opened(press), aftermath(press), listed(items));
 	match refusal {
 		None => format!(
 			"{opened}, which takes the keyboard from the user's app, so it was closed with nothing \
-			 chosen{aftermath}. To choose an item in the background, pass its path as the menu \
-			 option, e.g. menu: [\"<item>\", \"<subitem>\"].{listed}"
+			 chosen{aftermath}. To choose an item in the background, {}, e.g. menu: [\"<item>\", \
+			 \"<subitem>\"].{listed}",
+			choose_route(press)
 		),
 		Some(refusal) => format!(
 			"{opened}, but {refusal}, so nothing was chosen and the menu was \
@@ -252,6 +305,12 @@ fn no_menu_message(press: Press<'_>) -> String {
 		),
 		Press::Action(action) => format!(
 			"{action} opened no menu, so nothing was chosen; the action may already have taken effect"
+		),
+		Press::Keys { chord, window } => format!(
+			"the key press {chord} reached window {} ({}) but opened no menu, so nothing was chosen{}",
+			window.id,
+			window.app,
+			aftermath(press)
 		),
 	}
 }
@@ -1153,6 +1212,27 @@ mod tests {
 		// An element's own spelling in another case means the same action.
 		assert!(may_open("axshowmenu", unread));
 		assert!(may_open("axpress", || Some("AXPopUpButton".to_string())));
+	}
+
+	#[test]
+	fn only_keys_that_open_a_focused_menu_control_watch_for_a_menu() {
+		let unread = || -> Option<String> { panic!("the role is read only for a menu key") };
+		for keys in [&[KeyName::Char('a')][..], &[KeyName::Tab], &[KeyName::Enter], &[
+			KeyName::Meta,
+			KeyName::Char('s'),
+		]] {
+			assert!(!keys_may_open(keys, unread), "{keys:?}");
+		}
+		for keys in
+			[&[KeyName::Down][..], &[KeyName::Up], &[KeyName::Space], &[KeyName::Char(' ')], &[
+				KeyName::Alt,
+				KeyName::Down,
+			]] {
+			assert!(keys_may_open(keys, || Some("AXPopUpButton".to_string())), "{keys:?}");
+			assert!(keys_may_open(keys, || Some("AXMenuButton".to_string())), "{keys:?}");
+			assert!(!keys_may_open(keys, || Some("AXTextField".to_string())), "{keys:?}");
+			assert!(!keys_may_open(keys, || None), "{keys:?}");
+		}
 	}
 
 	#[test]

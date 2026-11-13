@@ -354,13 +354,16 @@ impl MacInput {
 					entry_front,
 					|to, guard| {
 						element_keys(pid, element, || {
-							press_chord(&self.source, &chord, gap, |event| {
-								let guard = || {
-									guard()?;
-									physical.as_mut().map_or(Ok(()), |check| check())
-								};
-								post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
-							})
+							let press = || {
+								press_chord(&self.source, &chord, gap, |event| {
+									let guard = || {
+										guard()?;
+										physical.as_mut().map_or(Ok(()), |check| check())
+									};
+									post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
+								})
+							};
+							guard_key_menu(window, keys, (pid, to), element, press)
 						})
 					},
 				)?;
@@ -443,6 +446,12 @@ impl MacInput {
 							&window,
 							entry_front,
 							|to, guard| {
+								refuse_key_menu_hold(
+									&window,
+									keys,
+									|| skylight::front_pid() != Some(pid),
+									|| ax::open_menu::focused_role(to),
+								)?;
 								hold_presses(
 									&self.source,
 									&held,
@@ -2178,6 +2187,108 @@ fn menu_watch(
 		)));
 	}
 	Ok((menu || on_control).then_some(ax::open_menu::CONTROL_MENU_TIMEOUT))
+}
+
+/// Runs `press`, background keys for `window` of `pid` that go to process
+/// `to` ([`key_process`]), with the element holding keyboard focus (`element`
+/// when the call names one) as the guard for a menu they open
+/// ([`key_menu_guarded`]).
+fn guard_key_menu(
+	window: &DesktopWindow,
+	keys: &[KeyName],
+	(pid, to): (libc::pid_t, libc::pid_t),
+	element: Option<&AXUIElement>,
+	press: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	key_menu_guarded(
+		window,
+		keys,
+		|| skylight::front_pid() != Some(pid),
+		|| element.map_or_else(|| ax::open_menu::focused_role(to), ax::open_menu::role_of),
+		|| capture::menu_windows(to),
+		press,
+		|before| {
+			ax::open_menu::settle(to, pid, before, None, ax::open_menu::KEY_MENU_TIMEOUT, || Ok(()))
+		},
+	)
+}
+
+/// Background keys never leave a menu open, as a background click on a menu
+/// button or popup button does not: Space or an up or down arrow on such a
+/// control (`role`, read only for those keys) opens its menu, which takes the
+/// user's keyboard while it is open. When another application is frontmost
+/// (`background`), the target's menu windows are listed (`menus`) before
+/// `press` and a menu it opened is closed again (`settle`); the call then
+/// fails as a partial delivery that lists the items and names the press or
+/// click that chooses one, since keys carry no item path. A frontmost
+/// application's menu stays open for the next call, as the user's would, and
+/// every other key is posted as before, with nothing read.
+fn key_menu_guarded(
+	window: &DesktopWindow,
+	keys: &[KeyName],
+	background: impl FnOnce() -> bool,
+	role: impl FnOnce() -> Option<String>,
+	menus: impl FnOnce() -> Option<Vec<u32>>,
+	press: impl FnOnce() -> CoreResult<()>,
+	settle: impl FnOnce(&[u32]) -> CoreResult<ax::open_menu::Settled>,
+) -> CoreResult<()> {
+	if !ax::open_menu::keys_may_open(keys, || if background() { role() } else { None }) {
+		return press();
+	}
+	let before = menus().ok_or_else(|| {
+		DesktopError::background_unavailable(format!(
+			"cannot list the open menus of window {} ({}), so a menu this key press opens could not \
+			 be closed; nothing was sent",
+			window.id, window.app,
+		))
+	})?;
+	let chord = chord_label(keys);
+	ax::open_menu::guard(
+		ax::open_menu::Press::Keys { chord: &chord, window },
+		Some(&before),
+		None,
+		press,
+		|before, _| settle(before),
+	)
+}
+
+/// `keys` as a chord's name in errors, such as "alt+down".
+fn chord_label(keys: &[KeyName]) -> String {
+	keys
+		.iter()
+		.map(|key| match key {
+			KeyName::Char(' ') => "space".to_string(),
+			KeyName::Char(character) => character.to_string(),
+			key => format!("{key:?}").to_lowercase(),
+		})
+		.collect::<Vec<_>>()
+		.join("+")
+}
+
+/// Keys held in the background on a focused menu button or popup button
+/// would open its menu on the first press and keep the keyboard from the
+/// user's app until the hold ends, as a mouse hold on one would
+/// ([`menu_watch`]): such a hold (`keys` that can open the menu of the
+/// focused control's `role`, read only when another application is frontmost,
+/// `background`) is refused before anything is sent.
+fn refuse_key_menu_hold(
+	window: &DesktopWindow,
+	keys: &[KeyName],
+	background: impl FnOnce() -> bool,
+	role: impl FnOnce() -> Option<String>,
+) -> CoreResult<()> {
+	if !ax::open_menu::keys_may_open(keys, || if background() { role() } else { None }) {
+		return Ok(());
+	}
+	Err(DesktopError::background_unavailable(format!(
+		"window {} ({}) has keyboard focus on a menu button or popup button, and holding {} would \
+		 open its menu on the first press and keep the keyboard from the user's app until the hold \
+		 ends, so nothing was sent; to choose an item in the background, click the control once \
+		 with the item's path as the menu option, e.g. menu: [\"<item>\"]",
+		window.id,
+		window.app,
+		chord_label(keys),
+	)))
 }
 
 /// Roles of controls that track a left-button drag themselves and never begin
@@ -7521,6 +7632,159 @@ mod tests {
 			menu_watch(&window, &right, false, true, unasked).expect("front with menu"),
 			Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
 		);
+	}
+
+	#[test]
+	fn a_background_key_that_opens_a_menu_closes_it_and_fails_listing_its_items() {
+		use ax::open_menu::Settled;
+		let window = background_window("Fixture");
+		let pressed = std::cell::Cell::new(0);
+		let settled = std::cell::Cell::new(false);
+		let error = key_menu_guarded(
+			&window,
+			&[KeyName::Down],
+			|| true,
+			|| Some("AXPopUpButton".to_string()),
+			|| Some(vec![7]),
+			|| {
+				pressed.set(pressed.get() + 1);
+				Ok(())
+			},
+			|before| {
+				assert_eq!(before, [7]);
+				settled.set(true);
+				Ok(Settled::Unchosen {
+					refusal: None,
+					items:   "\"Alpha\", \"Beta\"".to_string(),
+					closed:  true,
+				})
+			},
+		)
+		.expect_err("the menu was closed");
+		assert_eq!((pressed.get(), settled.get()), (1, true));
+		// The key was delivered, so it is a partial delivery, never one a
+		// takeover rerun would repeat.
+		assert_eq!(error.code.as_str(), "InputFailed");
+		assert!(
+			error.message.starts_with(
+				"the key press down reached window 42 (Fixture) and opened a menu, which takes the \
+				 keyboard from the user's app, so it was closed with nothing chosen"
+			),
+			"{}",
+			error.message
+		);
+		assert!(
+			error
+				.message
+				.contains("press or click the control instead of sending keys")
+		);
+		assert!(error.message.ends_with("Items: \"Alpha\", \"Beta\"."), "{}", error.message);
+		// A menu Escape could not close fails whatever the keys returned.
+		let error = key_menu_guarded(
+			&window,
+			&[KeyName::Alt, KeyName::Up],
+			|| true,
+			|| Some("AXMenuButton".to_string()),
+			|| Some(Vec::new()),
+			|| Err(DesktopError::cancelled("cancelled")),
+			|_| Ok(Settled::Unchosen { refusal: None, items: String::new(), closed: false }),
+		)
+		.expect_err("left open");
+		assert!(
+			error
+				.message
+				.starts_with("the key press alt+up reached window 42"),
+			"{}",
+			error.message
+		);
+		assert!(error.message.contains("still open after Escape"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_menu_key_lists_no_menus_off_a_menu_control_or_with_its_app_in_front() {
+		let window = background_window("Fixture");
+		// The focused element opens no menu, or the user's app is not in front.
+		for (background, focused) in
+			[(true, Some("AXTextField")), (true, None), (false, Some("AXPopUpButton"))]
+		{
+			let role = || {
+				assert!(background, "the role is read only behind the user's app");
+				focused.map(str::to_string)
+			};
+			key_menu_guarded(
+				&window,
+				&[KeyName::Space],
+				|| background,
+				role,
+				|| panic!("no menu listing"),
+				|| Ok(()),
+				|_| panic!("nothing to settle"),
+			)
+			.expect("posted");
+		}
+	}
+
+	#[test]
+	fn a_background_hold_of_a_menu_key_on_a_menu_control_is_refused_before_anything_is_sent() {
+		let window = background_window("Fixture");
+		let error = refuse_key_menu_hold(
+			&window,
+			&[KeyName::Space],
+			|| true,
+			|| Some("AXPopUpButton".to_string()),
+		)
+		.expect_err("refused");
+		assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+		assert!(error.message.contains("holding space"), "{}", error.message);
+		assert!(error.message.contains("nothing was sent"), "{}", error.message);
+		// Off a menu control, with the user's app behind the target, or for a
+		// key that opens no menu, the hold goes ahead.
+		for (keys, background, role) in [
+			(vec![KeyName::Down], true, Some("AXTextField")),
+			(vec![KeyName::Down], false, Some("AXMenuButton")),
+			(vec![KeyName::Shift], true, Some("AXPopUpButton")),
+		] {
+			refuse_key_menu_hold(
+				&window,
+				&keys,
+				|| background,
+				|| {
+					assert!(background, "the role is read only behind the user's app");
+					role.map(str::to_string)
+				},
+			)
+			.expect("held");
+		}
+	}
+
+	#[test]
+	fn a_menu_key_on_a_control_that_opens_nothing_succeeds_and_an_unlisted_one_sends_nothing() {
+		use ax::open_menu::Settled;
+		let window = background_window("Fixture");
+		for key in [KeyName::Space, KeyName::Up, KeyName::Down, KeyName::Char(' ')] {
+			key_menu_guarded(
+				&window,
+				&[key],
+				|| true,
+				|| Some("AXPopUpButton".to_string()),
+				|| Some(Vec::new()),
+				|| Ok(()),
+				|_| Ok(Settled::NoMenu),
+			)
+			.expect("no menu opened");
+		}
+		let error = key_menu_guarded(
+			&window,
+			&[KeyName::Down],
+			|| true,
+			|| Some("AXPopUpButton".to_string()),
+			|| None,
+			|| panic!("nothing is sent when its menu could not be closed"),
+			|_| panic!("nothing to settle"),
+		)
+		.expect_err("refused");
+		assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+		assert!(error.message.ends_with("nothing was sent"), "{}", error.message);
 	}
 
 	#[test]
