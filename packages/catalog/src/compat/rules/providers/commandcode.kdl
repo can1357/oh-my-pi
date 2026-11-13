@@ -187,9 +187,11 @@ provider "commandcode" {
 	// another provider's rates, so this table is the only pricing source.
 	// Base rates are Command Code's per-1M-token USD display rates. They follow
 	// `getDisplayRates` in command-code@1.67.0, read on 2026-09-29. That table
-	// prices 83 of the 84 ids the live catalog served that day; it has no
-	// `claude-sonnet-5-5`. DeepSeek V4 Flash and its vision-exp variant bill on
-	// the V4.1 Flash gateway slug.
+	// prices 83 of the 84 ids the live catalog served that day. Two rows follow
+	// the command-code@1.88.5 model list instead, read on 2026-11-12:
+	// `claude-sonnet-5-5`, absent from 1.67.0, and `xai/grok-4.7`, repriced
+	// since. DeepSeek V4 Flash and its vision-exp variant bill on the V4.1
+	// Flash gateway slug.
 	// A missing cache-write rate means 0. Standing deals (MiniMax M3 50% off,
 	// MiMo discounts) use their current effective rates.
 	// Free models (`poolside/laguna-s-2.1-free`,
