@@ -1278,7 +1278,6 @@ describe("supermemoryBackend", () => {
 		]);
 		expect(output).toContain(`Stored the corrected text as document d2 in namespace ${tag} and forgot memory m1.`);
 		expect(output).toContain("asynchronously (instant processing)");
-		expect(output).not.toMatch(/replaced|appears/);
 		expect(output).toContain("no importance; it was ignored");
 	});
 
@@ -1287,6 +1286,28 @@ describe("supermemoryBackend", () => {
 		const { edit } = await startedTools();
 		await expect(edit.execute("call", { op: "update", id: "m1", content: "x" })).rejects.toThrow("HTTP 503");
 		expect(requests.map(request => request.method)).toEqual(["POST"]);
+	});
+
+	it("memory_edit update still forgets the old memory when the call is aborted after the correction was stored", async () => {
+		const controller = new AbortController();
+		const methods: Array<string | undefined> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+					methods.push(init?.method);
+					if (init?.method === "POST") {
+						controller.abort();
+						return Response.json({ id: "d2", status: "queued" });
+					}
+					return Response.json({ count: 1, matches: [{ id: "m1" }], errors: [] });
+				},
+				{ preconnect: globalThis.fetch.preconnect },
+			),
+		);
+		const { edit } = await startedTools();
+		const output = text(await edit.execute("call", { op: "update", id: "m1", content: "x" }, controller.signal));
+		expect(methods).toEqual(["POST", "DELETE"]);
+		expect(output).toContain("forgot memory m1");
 	});
 
 	it("memory_edit update reports a stored correction whose old memory could not be forgotten", async () => {

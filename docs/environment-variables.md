@@ -556,7 +556,8 @@ Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips 
 
 The API key, origin and namespace override are read from the process environment only; there is no
 `supermemory.*` setting for them, so a project-local config file cannot redirect the key to another origin,
-replace the account, or point the session at another namespace of your account.
+replace the account, or choose an arbitrary namespace of your account (`supermemory.scoping` only switches
+between `omp-global` and the per-repository namespace).
 
 | Variable                | Accepted value / built-in default                                                                                                                                                                  |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

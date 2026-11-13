@@ -157,7 +157,9 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 				"Supermemory forms the new memory from the document asynchronously (instant processing), so it may take a moment and may be worded differently.";
 			let outcome: { already: boolean } | { failure: string };
 			try {
-				outcome = forgetOutcome(id, await state.forgetMemory(id, signal), location);
+				// No signal: the corrected document is stored, so finish the swap even if the call was
+				// aborted; otherwise both the old and the new memory stay. Bounded by the client timeout.
+				outcome = forgetOutcome(id, await state.forgetMemory(id), location);
 			} catch (error) {
 				outcome = { failure: error instanceof Error ? error.message : String(error) };
 			}

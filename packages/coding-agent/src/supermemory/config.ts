@@ -4,8 +4,9 @@
  * The API key, origin and namespace override come from `SUPERMEMORY_API_KEY` /
  * `SUPERMEMORY_BASE_URL` / `SUPERMEMORY_NAMESPACE` only, never from settings: project-local config
  * files merge into settings, so a cloned repository could otherwise point the user's bearer token
- * at another origin, swap in its own key and collect the user's transcripts, or read and write
- * another namespace of the user's account. Tuning fields read the `supermemory.*` setting handles.
+ * at another origin, swap in its own key and collect the user's transcripts, or read and write an
+ * arbitrary namespace of the user's account (`supermemory.scoping` only picks `omp-global` or the
+ * per-repository namespace). Tuning fields read the `supermemory.*` setting handles.
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { clamp } from "@oh-my-pi/pi-utils";

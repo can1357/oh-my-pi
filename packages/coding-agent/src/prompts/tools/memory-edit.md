@@ -7,7 +7,7 @@ Operations:
 - `invalidate`: same soft forget. `replacement_id` accepted but not recorded (Supermemory keeps no forget reason).
 - `preview_forget`: `query` (required, no `id`) describes what to forget in natural language; lists matching memories with ids. Changes nothing: then `forget` each id you are sure about, one call per id.
 
-Prefer `update` for a memory whose content changed; `forget` for memory that should no longer be recalled. Neither hard-deletes.
+Prefer `update` for a memory whose content changed; `forget` for memory that should no longer be recalled. Neither hard-deletes. Source documents and conversation windows stay: their old text can still come back from `{{toolRefs.recall}}` as `[document chunk]` results.
 
 `{{toolRefs.recall}}` shows full memory content; pass the complete merged text in `content`. `read memory://<id>` shows its versions and source.
 {{else}}
