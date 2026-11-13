@@ -91,11 +91,11 @@ describe("SupermemoryClient", () => {
 		]);
 	});
 
-	it("reads profile entries as { id, memory } objects or plain strings (no id) from an empty-body request", async () => {
+	it("reads profile entries as { id, memory } objects from an empty-body request", async () => {
 		const captured = serve(() =>
 			Response.json({
 				profile: {
-					static: [{ id: "s1", memory: "works in design" }, "legacy string", { id: "s2" }],
+					static: [{ id: "s1", memory: "works in design" }, { id: "s2" }],
 					dynamic: [{ id: "aggregated_1", memory: "[2026-10-01] preparing a launch" }],
 					buckets: { preferences: [] },
 				},
@@ -109,7 +109,7 @@ describe("SupermemoryClient", () => {
 			{},
 		]);
 		expect(profile).toEqual({
-			static: [{ id: "s1", memory: "works in design" }, { memory: "legacy string" }],
+			static: [{ id: "s1", memory: "works in design" }],
 			dynamic: [{ id: "aggregated_1", memory: "[2026-10-01] preparing a launch" }],
 		});
 	});

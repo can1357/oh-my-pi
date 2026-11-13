@@ -22,7 +22,7 @@ export interface SupermemorySearchItem {
 	inferred?: boolean;
 }
 
-/** A profile fact; plain-string entries carry no id. Ids starting `aggregated_` are synthesized summaries. */
+/** A profile fact. Ids starting `aggregated_` are synthesized summaries. */
 export interface SupermemoryProfileFact {
 	id?: string;
 	memory: string;
@@ -94,6 +94,8 @@ export interface SupermemoryDocumentInput {
 	/** Caller id: a later write with the same id adds to (diffs into) that document. */
 	id?: string;
 	metadata?: Record<string, string | number | boolean>;
+	/** Memory extraction timing; the server default is `dynamic`, `instant` forms memories quickly. */
+	dreaming?: "dynamic" | "instant";
 }
 
 export interface SupermemorySearchInput {
@@ -103,11 +105,10 @@ export interface SupermemorySearchInput {
 	threshold: number;
 }
 
-/** Profile entries are `{ id, memory }` objects; plain strings are tolerated (no id). */
+/** Profile entries are `{ id, memory }` objects. */
 function profileMemories(value: unknown): SupermemoryProfileFact[] {
 	if (!Array.isArray(value)) return [];
 	return value.flatMap(entry => {
-		if (typeof entry === "string") return entry ? [{ memory: entry }] : [];
 		const record = asRecord(entry);
 		const memory = record?.memory;
 		if (typeof memory !== "string" || !memory) return [];

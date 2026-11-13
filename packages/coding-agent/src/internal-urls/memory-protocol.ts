@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, isEnoent, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, sanitizeText, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { replaceTabs, singleLine } from "@oh-my-pi/pi-tui/utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionStateApi } from "../mnemopi/state";
@@ -330,39 +330,45 @@ function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): Int
 	});
 }
 
+/** One line of server text: terminal controls stripped, line breaks collapsed. */
+function serverLine(text: string): string {
+	return singleLine(sanitizeText(text));
+}
+
 function relatedSection(title: string, items: readonly SupermemoryRelatedMemory[]): string {
 	if (items.length === 0) return "";
-	return `\n\n## ${title}\n${items.map(item => `- ${singleLine(item.memory)} (id: ${item.id})`).join("\n")}`;
+	return `\n\n## ${title}\n${items.map(item => `- ${serverLine(item.memory)} (id: ${serverLine(item.id)})`).join("\n")}`;
 }
 
 /**
  * Render a Supermemory memory as text/markdown, mirroring {@link renderMnemopiMemory}: frontmatter,
  * the memory text, then its earlier/later versions, linked memories and source document when present.
+ * Every server string is stripped of terminal controls; frontmatter values stay on one line.
  */
 function renderSupermemoryMemory(url: InternalUrl, namespace: string, memory: SupermemoryMemory): InternalResource {
 	const meta = Object.keys(memory.metadata).length > 0 ? `metadata: ${JSON.stringify(memory.metadata)}\n` : "";
 	const header =
 		"---\n" +
-		`id: ${memory.id}\n` +
+		`id: ${serverLine(memory.id)}\n` +
 		`namespace: ${namespace}\n` +
 		(memory.version !== undefined ? `version: ${memory.version}\n` : "") +
 		`isStatic: ${memory.isStatic}\n` +
 		`isInference: ${memory.isInference}\n` +
 		`isLatest: ${memory.isLatest}\n` +
 		`isForgotten: ${memory.isForgotten}\n` +
-		(memory.createdAt ? `createdAt: ${memory.createdAt}\n` : "") +
-		(memory.updatedAt ? `updatedAt: ${memory.updatedAt}\n` : "") +
+		(memory.createdAt ? `createdAt: ${serverLine(memory.createdAt)}\n` : "") +
+		(memory.updatedAt ? `updatedAt: ${serverLine(memory.updatedAt)}\n` : "") +
 		meta +
 		"---\n\n";
 	const { document } = memory;
 	const source = document
-		? `\n\n## Source document\n- id: ${document.id}` +
-			(document.title ? `\n- title: ${singleLine(document.title)}` : "") +
-			(document.summary ? `\n- summary: ${singleLine(document.summary)}` : "")
+		? `\n\n## Source document\n- id: ${serverLine(document.id)}` +
+			(document.title ? `\n- title: ${serverLine(document.title)}` : "") +
+			(document.summary ? `\n- summary: ${serverLine(document.summary)}` : "")
 		: "";
 	const content = replaceTabs(
 		header +
-			memory.memory +
+			sanitizeText(memory.memory) +
 			relatedSection("Earlier versions", memory.parents) +
 			relatedSection("Later versions", memory.children) +
 			relatedSection("Linked memories", memory.siblings) +
@@ -553,6 +559,14 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 				value: "<memory-id>",
 				description: "Full mnemopi memory by id (from recall)",
 			});
+		}
+		if (
+			!caller.legacy &&
+			caller.backend === "supermemory" &&
+			caller.session !== undefined &&
+			callerSupermemoryState(caller.session) !== undefined
+		) {
+			completions.push({ value: "<memory-id>", description: "Full Supermemory memory by id (from recall)" });
 		}
 		return completions;
 	}

@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, untilAborted, toError } from "@oh-my-pi/pi-utils";
+import { logger, prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
@@ -8,6 +8,7 @@ import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
 
 import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
+import { recallNote } from "../supermemory/state";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
 const memoryRecallSchema = type({
@@ -59,11 +60,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 				}
 				// Memory ids feed `memory_edit`; chunk ids address documents and are not editable.
 				const formatted = formatMemories(
-					results.map(item =>
-						item.kind === "memory"
-							? { text: `${item.content} (id: ${item.id})`, type: item.inferred ? "inferred" : undefined }
-							: { text: item.content, type: "document chunk" },
-					),
+					results.map(item => ({ text: sanitizeText(item.content + recallNote(item)) })),
 				);
 				return {
 					content: [

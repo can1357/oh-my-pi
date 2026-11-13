@@ -26,7 +26,7 @@ const RETRY_MAX_MS = 30 * 60 * 1000;
 /** Fields every published event carries. Never rewritten, so its file mtime is its enqueue time. */
 export interface MemoryOutboxEvent {
 	version: 1;
-	/** Also the server-side upsert key, so a resend replaces instead of duplicating. */
+	/** Also the server-side document id, so a resend of the same event lands in the same server document instead of a new one. */
 	id: string;
 }
 

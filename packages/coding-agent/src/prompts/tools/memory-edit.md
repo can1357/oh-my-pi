@@ -2,8 +2,8 @@
 Edit Supermemory long-term memories by id. Only `(id: …)` values returned by `{{toolRefs.recall}}`, the `<supermemory_profile>` block, or `preview_forget`; `[document chunk]` results have no editable id.
 
 Operations:
-- `update`: `content` (required) replaces the memory wholesale. Stored as a new document, then the old memory is forgotten; the new memory appears after Supermemory processes the document. `importance` unsupported.
-- `forget`: soft-forget; hidden from recall, kept server-side.
+- `update`: `content` (required) is the corrected text. Stored as document D, then memory X forgotten. Supermemory forms the new memory from D asynchronously (instant processing): may take a moment, may be worded differently. `importance` unsupported.
+- `forget`: soft-forget; hidden from recall, kept server-side. Already forgotten counts as done.
 - `invalidate`: same soft forget. `replacement_id` accepted but not recorded (Supermemory keeps no forget reason).
 - `preview_forget`: `query` (required, no `id`) describes what to forget in natural language; lists matching memories with ids. Changes nothing: then `forget` each id you are sure about, one call per id.
 

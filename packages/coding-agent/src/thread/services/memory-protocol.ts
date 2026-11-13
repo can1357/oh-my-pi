@@ -51,6 +51,7 @@ import type {
 } from "../../mnemopi/state";
 import type {
 	SupermemoryDocument,
+	SupermemoryDocumentInput,
 	SupermemoryForgetResult,
 	SupermemoryMemory,
 	SupermemoryMemoryMatch,
@@ -147,7 +148,12 @@ export type SupermemorySessionStateProtocol = {
 	search: RpcMethod<[query: string, limit: number | undefined, signal?: AbortSignal], SupermemorySearchItem[]>;
 	enqueueRetain: RpcMethod<[toolCallId: string, items: SupermemoryRetainInput[]], void>;
 	save: RpcMethod<
-		[content: string, metadata: Record<string, string | number | boolean>, id?: string],
+		[
+			content: string,
+			metadata: Record<string, string | number | boolean>,
+			id?: string,
+			dreaming?: SupermemoryDocumentInput["dreaming"],
+		],
 		SupermemoryDocument
 	>;
 	forgetMemory: RpcMethod<[id: string, signal?: AbortSignal], SupermemoryForgetResult>;

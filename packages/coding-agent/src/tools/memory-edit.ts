@@ -1,5 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import memoryEditDescription from "../prompts/tools/memory-edit.md" with { type: "text" };
 import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
@@ -11,13 +11,20 @@ import { cfgMemoryBackend } from "../memory-backend/settings";
 import type { SupermemoryForgetResult } from "../supermemory/client";
 import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
 
-/** Why memory `id` was not forgotten, from a forget result's per-id `errors`; `undefined` when it was. */
-function forgetFailure(id: string, result: SupermemoryForgetResult, location: string): string | undefined {
-	if (result.matches.includes(id)) return undefined;
+/**
+ * Whether memory `id` is forgotten after a forget: `already` when an earlier forget did it (a
+ * retried forget reached the desired state), otherwise `failure` says why it was not.
+ */
+function forgetOutcome(
+	id: string,
+	result: SupermemoryForgetResult,
+	location: string,
+): { already: boolean } | { failure: string } {
+	if (result.matches.includes(id)) return { already: false };
 	const error = result.errors.find(item => item.id === id)?.error ?? "";
-	if (/not found/i.test(error)) return `Memory ${id} was not found ${location}.`;
-	if (/already forgotten/i.test(error)) return `Memory ${id} is already forgotten ${location}.`;
-	return `Memory ${id} was not forgotten ${location}: ${noticeErrorText(error) || "no reason given"}.`;
+	if (/already forgotten/i.test(error)) return { already: true };
+	if (/not found/i.test(error)) return { failure: `Memory ${id} was not found ${location}.` };
+	return { failure: `Memory ${id} was not forgotten ${location}: ${noticeErrorText(error) || "no reason given"}.` };
 }
 
 const memoryEditSchema = type({
@@ -93,9 +100,10 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 	}
 
 	/**
-	 * `forget`/`invalidate` → soft forget by id (hidden from search, kept server-side). Supermemory has
-	 * no memory update, hard delete, importance, or forget reason: `update` stores the corrected text
-	 * as a document first, so a failure never loses the fact, then forgets the old memory.
+	 * `forget`/`invalidate` → soft forget by id (hidden from search, kept server-side); an already
+	 * forgotten memory counts as done. Supermemory has no memory update, hard delete, importance, or
+	 * forget reason: `update` stores the corrected text as a document with instant processing first,
+	 * then forgets the old memory; Supermemory forms the new memory from the document asynchronously.
 	 * `preview_forget` only lists what a semantic forget would match; the model forgets reviewed ids.
 	 */
 	async #editSupermemory(params: MemoryEditParams, signal?: AbortSignal): Promise<AgentToolResult> {
@@ -116,7 +124,9 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 					useless: true,
 				};
 			}
-			const listed = formatMemories(matches.map(match => ({ text: `${match.memory} (id: ${match.id})` })));
+			const listed = formatMemories(
+				matches.map(match => ({ text: sanitizeText(`${match.memory} (id: ${match.id})`) })),
+			);
 			return {
 				content: [
 					{
@@ -137,39 +147,46 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 		}
 		const { id } = params;
 		if (params.op === "update") {
-			const document = await state.save(params.content ?? "", {
-				source: "coding-agent-memory-edit",
-				replaces: id,
-			});
-			const pending = "The new memory appears after Supermemory processes the document.";
-			let failure: string | undefined;
+			const document = await state.save(
+				params.content ?? "",
+				{ source: "coding-agent-memory-edit", replaces: id },
+				undefined,
+				"instant",
+			);
+			const pending =
+				"Supermemory forms the new memory from the document asynchronously (instant processing), so it may take a moment and may be worded differently.";
+			let outcome: { already: boolean } | { failure: string };
 			try {
-				failure = forgetFailure(id, await state.forgetMemory(id, signal), location);
+				outcome = forgetOutcome(id, await state.forgetMemory(id, signal), location);
 			} catch (error) {
-				failure = error instanceof Error ? error.message : String(error);
+				outcome = { failure: error instanceof Error ? error.message : String(error) };
 			}
-			if (failure) {
+			if ("failure" in outcome) {
 				throw new Error(
-					`Stored the corrected text as document ${document.id} ${location}, but memory ${id} remains: it could not be forgotten. ${failure} ${pending}`,
+					`Stored the corrected text as document ${document.id} ${location}, but memory ${id} could not be forgotten. ${outcome.failure} ${pending}`,
 				);
 			}
+			const forgot = outcome.already ? `memory ${id} was already forgotten` : `forgot memory ${id}`;
 			const ignored =
 				params.importance === undefined ? "" : " Supermemory memories have no importance; it was ignored.";
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Memory ${id} replaced ${location}: the corrected text was stored as document ${document.id} and the old memory forgotten. ${pending}${ignored}`,
+						text: `Stored the corrected text as document ${document.id} ${location} and ${forgot}. ${pending}${ignored}`,
 					},
 				],
 				details: { status: "updated", namespace, documentId: document.id },
 			};
 		}
-		const failure = forgetFailure(id, await state.forgetMemory(id, signal), location);
-		if (failure) throw new Error(failure);
+		const outcome = forgetOutcome(id, await state.forgetMemory(id, signal), location);
+		if ("failure" in outcome) throw new Error(outcome.failure);
 		const status = params.op === "forget" ? "forgotten" : "invalidated";
+		const text = outcome.already
+			? `Memory ${id} was already forgotten ${location}.`
+			: `Memory ${id} ${status} ${location}.`;
 		return {
-			content: [{ type: "text", text: `Memory ${id} ${status} ${location}.` }],
+			content: [{ type: "text", text }],
 			details: { status, namespace },
 		};
 	}

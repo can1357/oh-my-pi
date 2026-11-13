@@ -200,12 +200,57 @@ describe("supermemoryBackend", () => {
 		expect(tag).toBe("team:notes");
 		expect(requests.map(request => request.url)).toEqual(["http://127.0.0.1:1/ns/team%3Anotes/search"]);
 
+		vi.restoreAllMocks();
+		const fetchSpy = denyNetwork();
 		Bun.env.SUPERMEMORY_NAMESPACE = "../other";
 		const session = makeSession();
 		await start(session);
 		expect(session.getSupermemorySessionState()).toBeUndefined();
 		expect(MemoryEditTool.createIf(session as never)).toBeNull();
 		expect(MemoryRecallTool.createIf(session as never)).toBeNull();
+		expect(await supermemoryBackend.beforeAgentStartPrompt!(session as never, "first", undefined)).toBeUndefined();
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("sends the recall limit as is, including 1", async () => {
+		const requests = serve([200, { results: [{ id: "m1", memory: "uses bun" }] }]);
+		const session = makeSession({ settings: { "supermemory.recallLimit": 1 } });
+		await start(session);
+		const results = await session.getSupermemorySessionState()!.search("bun", undefined);
+		expect(requests[0]?.body).toMatchObject({ limit: 1 });
+		expect(results).toHaveLength(1);
+	});
+
+	it("switching namespaces A→B→A on one transcript sends no turn to the other namespace", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 2 } });
+		const switchTo = async (namespace: string) => {
+			await session.getSupermemorySessionState()?.dispose();
+			Bun.env.SUPERMEMORY_NAMESPACE = namespace;
+			await start(session);
+		};
+		await switchTo("ns-a");
+		session.addTurn("alpha-one");
+		await session.endTurn();
+		await switchTo("ns-b");
+		session.addTurn("beta-one");
+		session.addTurn("beta-two");
+		await session.endTurn();
+		session.addTurn("beta-three");
+		await switchTo("ns-a");
+		session.addTurn("alpha-two");
+		session.addTurn("alpha-three");
+		await session.endTurn();
+
+		const sent = create.mock.calls.map(([namespace, input]) => [namespace, input.content] as const);
+		expect(sent.map(([namespace]) => namespace)).toEqual(["ns-b", "ns-a"]);
+		for (const [namespace, content] of sent) {
+			expect(content).not.toContain(namespace === "ns-a" ? "beta-" : "alpha-");
+		}
+		expect(sent[0]?.[1]).toContain("beta-two");
+		expect(sent[1]?.[1]).toContain("alpha-three");
 	});
 
 	it("stages first-turn recall, commits it once, and rejects a superseded preparation", async () => {
@@ -999,6 +1044,7 @@ describe("supermemoryBackend", () => {
 		const create = vi.spyOn(SupermemoryClient.prototype, "addDocument");
 		const forget = vi.spyOn(SupermemoryClient.prototype, "forgetMemories");
 		const preview = vi.spyOn(SupermemoryClient.prototype, "previewForget");
+		const read = vi.spyOn(SupermemoryClient.prototype, "getMemory");
 		const session = makeSession();
 		await start(session);
 		const state = session.getSupermemorySessionState();
@@ -1006,7 +1052,8 @@ describe("supermemoryBackend", () => {
 		await expect(state!.save("x", { source: "t" })).rejects.toThrow("memory NOT stored");
 		await expect(state!.forgetMemory("m1")).rejects.toThrow("memory NOT stored");
 		await expect(state!.previewForget("old")).rejects.toThrow("state is closed");
-		expect([create, forget, preview].map(spy => spy.mock.calls.length)).toEqual([0, 0, 0]);
+		await expect(state!.getMemory("m1")).rejects.toThrow("nothing read");
+		expect([create, forget, preview, read].map(spy => spy.mock.calls.length)).toEqual([0, 0, 0, 0]);
 	});
 
 	it("repeated /memory enqueue tails re-send one open window instead of adding documents", async () => {
@@ -1044,7 +1091,7 @@ describe("supermemoryBackend", () => {
 		expect(output).not.toContain("c1");
 	});
 
-	it("first-turn recall shows editable profile ids, none for aggregated summaries, and marks inferred memories", async () => {
+	it("first-turn recall shows editable ids, none for aggregated summaries or chunks, and marks inferred memories", async () => {
 		vi.spyOn(SupermemoryClient.prototype, "profile").mockResolvedValue({
 			static: [{ id: "s1", memory: "works in <design>" }, { memory: "legacy fact" }],
 			dynamic: [{ id: "aggregated_7", memory: "summary of older work" }],
@@ -1061,9 +1108,10 @@ describe("supermemoryBackend", () => {
 		expect(lines).toContain("- works in &lt;design&gt; (id: s1)");
 		expect(lines).toContain("- legacy fact");
 		expect(lines).toContain("- summary of older work");
-		expect(lines).toContain("- likes bun [inferred]");
-		expect(lines).toContain("- uses biome");
-		expect(lines).toContain("- doc text");
+		expect(lines).toContain("- likes bun (id: m1) [inferred]");
+		expect(lines).toContain("- uses biome (id: m2)");
+		expect(lines).toContain("- doc text [document chunk]");
+		expect(context).not.toContain("c1");
 		expect(context).not.toContain("aggregated_7");
 	});
 
@@ -1084,6 +1132,32 @@ describe("supermemoryBackend", () => {
 		expect(output).toContain("- uses biome (id: m2)\n");
 		expect(output).toContain("- doc text [document chunk]");
 		expect(output.match(/\[inferred\]/g)).toHaveLength(1);
+	});
+
+	it("recall, the first-turn block and preview_forget strip terminal controls from server text", async () => {
+		const evil = "uses \x1b[31mbun\x1b[0m\x07";
+		serve(
+			[200, { results: [{ id: "m1", memory: evil }] }],
+			[200, { count: 1, matches: [{ id: "m9", memory: evil }], errors: [] }],
+		);
+		const { recall, edit } = await startedTools();
+		const recalled = text(await recall.execute("call", { query: "bun" }));
+		const previewed = text(await edit.execute("call", { op: "preview_forget", query: "bun" }));
+		expect(recalled).toContain("- uses bun (id: m1)");
+		expect(previewed).toContain("- uses bun (id: m9)");
+
+		vi.restoreAllMocks();
+		vi.spyOn(SupermemoryClient.prototype, "profile").mockResolvedValue({
+			static: [{ id: "s1", memory: evil }],
+			dynamic: [],
+		});
+		vi.spyOn(SupermemoryClient.prototype, "search").mockResolvedValue([{ id: "m1", kind: "memory", content: evil }]);
+		const session = makeSession();
+		await start(session);
+		const context = (await supermemoryBackend.beforeAgentStartPrompt!(session as never, "first", undefined))?.context;
+		expect(context).toContain("- uses bun (id: s1)");
+		expect(context).toContain("- uses bun (id: m1)");
+		for (const output of [recalled, previewed, context]) expect(output).not.toMatch(/[\x07\x1b]/);
 	});
 
 	it("memory_edit preview_forget lists matches from a redacted dry run and forgets nothing", async () => {
@@ -1112,7 +1186,7 @@ describe("supermemoryBackend", () => {
 		});
 	});
 
-	it("memory_edit update stores the redacted text as a document first, then forgets the old memory", async () => {
+	it("memory_edit update stores the redacted text as an instant-processing document first, then forgets the old memory", async () => {
 		const requests = serve([200, { id: "d2", status: "queued" }], [200, { count: 1, matches: [{ id: "m1" }] }]);
 		const { edit, tag } = await startedTools();
 		const output = text(
@@ -1130,12 +1204,14 @@ describe("supermemoryBackend", () => {
 				body: {
 					content: "uses bun; key [REDACTED]",
 					metadata: { source: "coding-agent-memory-edit", replaces: "m1" },
+					dreaming: "instant",
 				},
 			},
 			{ url: `http://127.0.0.1:1/ns/${tag}/memories`, method: "DELETE", body: { ids: ["m1"] } },
 		]);
-		expect(output).toContain("stored as document d2");
-		expect(output).toContain("appears after Supermemory processes the document");
+		expect(output).toContain(`Stored the corrected text as document d2 in namespace ${tag} and forgot memory m1.`);
+		expect(output).toContain("asynchronously (instant processing)");
+		expect(output).not.toMatch(/replaced|appears/);
 		expect(output).toContain("no importance; it was ignored");
 	});
 
@@ -1151,7 +1227,7 @@ describe("supermemoryBackend", () => {
 		const { edit } = await startedTools();
 		const error = await edit.execute("call", { op: "update", id: "m1", content: "x" }).catch((e: Error) => e);
 		expect(String(error)).toContain("Stored the corrected text as document d2");
-		expect(String(error)).toContain("memory m1 remains");
+		expect(String(error)).toContain("memory m1 could not be forgotten");
 		expect(String(error)).toContain("HTTP 500");
 	});
 
@@ -1176,17 +1252,36 @@ describe("supermemoryBackend", () => {
 			return edit.execute("call", { op: "forget", id: "m1" });
 		};
 		await expect(forget("Memory not found")).rejects.toThrow(`Memory m1 was not found in namespace ${tag}.`);
-		await expect(forget("Memory already forgotten")).rejects.toThrow(
-			`Memory m1 is already forgotten in namespace ${tag}.`,
-		);
 		await expect(forget("Memory is in another namespace")).rejects.toThrow(
 			`Memory m1 was not forgotten in namespace ${tag}: Memory is in another namespace.`,
 		);
 	});
 
-	it("memory_edit rejects update without content before any request", async () => {
+	it("memory_edit treats an already forgotten memory as done for forget, invalidate and update", async () => {
+		const { edit, tag } = await startedTools();
+		const already = { count: 0, matches: [], errors: [{ id: "m1", error: "Memory already forgotten" }] };
+		serve([200, already]);
+		const forgot = text(await edit.execute("call", { op: "forget", id: "m1" }));
+		const invalidated = text(await edit.execute("call", { op: "invalidate", id: "m1" }));
+		expect([forgot, invalidated]).toEqual([
+			`Memory m1 was already forgotten in namespace ${tag}.`,
+			`Memory m1 was already forgotten in namespace ${tag}.`,
+		]);
+
+		vi.restoreAllMocks();
+		serve([200, { id: "d2", status: "queued" }], [200, already]);
+		const updated = text(await edit.execute("call", { op: "update", id: "m1", content: "x" }));
+		expect(updated).toContain(
+			`Stored the corrected text as document d2 in namespace ${tag} and memory m1 was already forgotten.`,
+		);
+	});
+
+	it("memory_edit rejects id-less edits and update without content before any request", async () => {
 		const { edit } = await startedTools();
 		const fetchSpy = denyNetwork();
+		for (const op of ["forget", "invalidate", "update"] as const) {
+			await expect(edit.execute("call", { op, content: "x" })).rejects.toThrow(`memory_edit ${op} requires id.`);
+		}
 		await expect(edit.execute("call", { op: "update", id: "m1" })).rejects.toThrow(
 			"memory_edit update requires content.",
 		);

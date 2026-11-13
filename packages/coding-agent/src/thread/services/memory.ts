@@ -106,7 +106,7 @@ const serveSupermemoryState: RpcServe<SupermemorySessionState, SupermemorySessio
 	lastRecallSnippet: state => state.lastRecallSnippet,
 	search: (state, query, limit, signal) => state.search(query, limit, signal),
 	enqueueRetain: (state, toolCallId, items) => state.enqueueRetain(toolCallId, items),
-	save: (state, content, metadata, id) => state.save(content, metadata, id),
+	save: (state, content, metadata, id, dreaming) => state.save(content, metadata, id, dreaming),
 	forgetMemory: (state, id, signal) => state.forgetMemory(id, signal),
 	previewForget: (state, query, signal) => state.previewForget(query, signal),
 	getMemory: (state, id, signal) => state.getMemory(id, signal),

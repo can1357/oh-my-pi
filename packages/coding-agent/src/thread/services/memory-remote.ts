@@ -50,6 +50,7 @@ import type {
 } from "../../mnemopi/state";
 import type {
 	SupermemoryDocument,
+	SupermemoryDocumentInput,
 	SupermemoryForgetResult,
 	SupermemoryMemory,
 	SupermemoryMemoryMatch,
@@ -328,8 +329,9 @@ export class RemoteSupermemorySessionState implements SupermemorySessionStateApi
 		content: string,
 		metadata: Record<string, string | number | boolean>,
 		id?: string,
+		dreaming?: SupermemoryDocumentInput["dreaming"],
 	): Promise<SupermemoryDocument> {
-		return this.#remote.call("save", content, metadata, id);
+		return this.#remote.call("save", content, metadata, id, dreaming);
 	}
 
 	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult> {

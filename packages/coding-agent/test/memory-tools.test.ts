@@ -2204,6 +2204,18 @@ describe("memory_edit.execute (Mnemopi backend)", () => {
 		expect((result.content[0] as { text: string }).text).toContain("not found");
 	});
 
+	it("rejects id-less forget, invalidate and update before touching the banks", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const edit = vi.spyOn(registerMnemopiState(), "editScopedMemory");
+		const tool = MemoryEditTool.createIf(makeSession(settings))!;
+		for (const op of ["forget", "invalidate", "update"] as const) {
+			await expect(tool.execute("call-memory-edit-no-id", { op, content: "x" })).rejects.toThrow(
+				`memory_edit ${op} requires id.`,
+			);
+		}
+		expect(edit).not.toHaveBeenCalled();
+	});
+
 	it("rejects preview_forget, naming recall then forget by id, and changes nothing", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		registerMnemopiState();

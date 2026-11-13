@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { escapeXmlText, logger, prompt, truncate } from "@oh-my-pi/pi-utils";
+import { escapeXmlText, logger, prompt, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { redactMemorySecrets } from "../memory-backend/redact";
 import { type HindsightMessage, prepareRetentionTranscript } from "../hindsight/content";
 import { countUserTurns, extractMessages } from "../hindsight/transcript";
@@ -19,6 +19,7 @@ import type { AgentSession } from "../session/agent-session";
 import {
 	type SupermemoryClient,
 	type SupermemoryDocument,
+	type SupermemoryDocumentInput,
 	type SupermemoryForgetResult,
 	SupermemoryHttpError,
 	type SupermemoryMemory,
@@ -148,6 +149,7 @@ export interface SupermemorySessionStateApi {
 		content: string,
 		metadata: Record<string, string | number | boolean>,
 		id?: string,
+		dreaming?: SupermemoryDocumentInput["dreaming"],
 	): Promise<SupermemoryDocument>;
 	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult>;
 	previewForget(query: string, signal?: AbortSignal): Promise<SupermemoryMemoryMatch[]>;
@@ -167,12 +169,19 @@ interface RecallLine {
 	note: string;
 }
 
+/** Recall note of a search result: memories carry their editable id and `[inferred]`, chunks are marked. */
+export function recallNote(item: SupermemorySearchItem): string {
+	if (item.kind === "chunk") return " [document chunk]";
+	return ` (id: ${item.id})${item.inferred ? " [inferred]" : ""}`;
+}
+
 /** Escaped bullet lines for `items` within `budget` chars; an item that does not fit is skipped, not the rest. */
 function renderLines(items: readonly RecallLine[], budget: number): string {
 	const lines: string[] = [];
 	let remaining = budget;
 	for (const item of items) {
-		const line = `- ${escapeXmlText(truncate(item.text.trim(), MAX_RECALL_ITEM_CHARS) + item.note)}`;
+		const text = truncate(sanitizeText(item.text).trim(), MAX_RECALL_ITEM_CHARS) + sanitizeText(item.note);
+		const line = `- ${escapeXmlText(text)}`;
 		if (line.length > remaining) continue;
 		remaining -= line.length + 1;
 		lines.push(line);
@@ -276,7 +285,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	 * same document. A transcript without a cursor predates them: its complete windows are assumed
 	 * retained and retention starts at the open window, so resuming an old session never bulk-uploads
 	 * it. An open window keeps its start-based document id, so completing it later re-sends a superset
-	 * into that document.
+	 * into that document. A latest cursor from another scope (namespace, account or server switch)
+	 * means every turn so far belongs to that scope: retention here starts at the current turn.
 	 */
 	#resumeRetention(): void {
 		const scope = this.#scope();
@@ -287,18 +297,26 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 					entry.type === "custom" &&
 					entry.customType === RETENTION_CURSOR_ENTRY_TYPE &&
 					isRetentionCursor(entry.data) &&
-					entry.data.scope === scope &&
 					entry.data.transcriptId === this.transcriptId,
 			);
-		this.#hasCursor = cursor?.type === "custom" && isRetentionCursor(cursor.data);
-		if (cursor?.type === "custom" && isRetentionCursor(cursor.data)) {
-			this.lastRetainedTurn = cursor.data.turn;
-			this.#retainedMessages = cursor.data.messages;
-			this.#windowStart = cursor.data.windowStart;
+		const data = cursor?.type === "custom" && isRetentionCursor(cursor.data) ? cursor.data : undefined;
+		this.#hasCursor = data !== undefined;
+		if (data?.scope === scope) {
+			this.lastRetainedTurn = data.turn;
+			this.#retainedMessages = data.messages;
+			this.#windowStart = data.windowStart;
+			return;
+		}
+		const turns = countUserTurns(this.session.sessionManager);
+		if (data) {
+			this.lastRetainedTurn = turns;
+			this.#retainedMessages = 0;
+			this.#windowStart = turns;
+			this.#appendCursor(turns, 0, turns);
 			return;
 		}
 		const every = this.#config.retainEveryNTurns;
-		this.lastRetainedTurn = Math.floor(countUserTurns(this.session.sessionManager) / every) * every;
+		this.lastRetainedTurn = Math.floor(turns / every) * every;
 		this.#retainedMessages = 0;
 		this.#windowStart = this.lastRetainedTurn;
 	}
@@ -373,13 +391,17 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		return this.#track(this.#local().outbox.flush());
 	}
 
-	/** Stores one document in this state's namespace (redacted); tracked so {@link flush} awaits it. */
+	/**
+	 * Stores one document in this state's namespace (redacted); tracked so {@link flush} awaits it.
+	 * `dreaming` omitted keeps the server default.
+	 */
 	save(
 		content: string,
 		metadata: Record<string, string | number | boolean>,
 		id?: string,
+		dreaming?: SupermemoryDocumentInput["dreaming"],
 	): Promise<SupermemoryDocument> {
-		if (this.aliasOf) return this.aliasOf.save(content, metadata, id);
+		if (this.aliasOf) return this.aliasOf.save(content, metadata, id, dreaming);
 		if (this.#disposed) return Promise.reject(closedError());
 		return this.#track(
 			this.#local().client.addDocument(this.namespace, {
@@ -391,6 +413,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 						typeof value === "string" ? this.#redact(value) : value,
 					]),
 				),
+				dreaming,
 			}),
 		);
 	}
@@ -414,25 +437,24 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** `memory://<id>`: one memory with its versions, links and source document. */
 	getMemory(id: string, signal?: AbortSignal): Promise<SupermemoryMemory> {
 		if (this.aliasOf) return this.aliasOf.getMemory(id, signal);
+		if (this.#disposed) return Promise.reject(closedError("nothing read"));
 		return this.#local().client.getMemory(this.namespace, id, signal);
 	}
 
-	async search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
+	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
 		if (this.aliasOf) return this.aliasOf.search(query, limit, signal);
 		const config = this.#config;
 		const resultLimit = Math.max(1, Math.min(limit ?? config.recallLimit, config.recallLimit));
-		const results = await this.#local().client.search(
+		return this.#local().client.search(
 			this.namespace,
 			{
 				query: this.#redact(query),
 				searchMode: config.searchMode,
-				// The search API rejects limit < 2; ask for at least 2 and trim locally.
-				limit: Math.max(2, resultLimit),
+				limit: resultLimit,
 				threshold: config.threshold,
 			},
 			signal,
 		);
-		return results.slice(0, resultLimit);
 	}
 
 	async beforeAgentStartPrompt(
@@ -482,7 +504,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				: [];
 		const found =
 			memories.status === "fulfilled"
-				? memories.value.map(item => ({ text: item.content, note: item.inferred ? " [inferred]" : "" }))
+				? memories.value.map(item => ({ text: item.content, note: recallNote(item) }))
 				: [];
 		const text = prompt
 			.render(recallTemplate, { profile: renderLines(facts, half), memories: renderLines(found, half) })
