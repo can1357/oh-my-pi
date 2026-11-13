@@ -866,8 +866,13 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
-	test("routes live Zen Argon and Carbon to the native Google endpoint with thinking levels (#15977)", async () => {
-		const ids = ["gemini-4-argon", "gemini-4-carbon"];
+	test("routes live Zen Gemini 4 models to the native Google endpoint with thinking levels (#15977)", async () => {
+		const efforts: Record<string, string[]> = {
+			"gemini-4-argon": ["low", "medium", "high"],
+			"gemini-4-carbon": ["low", "medium", "high"],
+			"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+		};
+		const ids = Object.keys(efforts);
 		const baseUrl = "https://opencode.ai/inference/google/v1beta";
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-zen");
 		const options = opencodeZenModelManagerOptions({
@@ -885,7 +890,7 @@ describe("OpenCode provider discovery", () => {
 			expect(spec).toMatchObject({ api: "google-generative-ai", baseUrl });
 			expect(buildModel(spec)).toMatchObject({
 				reasoning: true,
-				thinking: { mode: "google-level", efforts: ["low", "medium", "high"] },
+				thinking: { mode: "google-level", efforts: efforts[id] },
 			});
 			expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
 		}
