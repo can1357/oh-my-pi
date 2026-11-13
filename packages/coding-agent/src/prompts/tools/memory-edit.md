@@ -3,7 +3,7 @@ Edit Supermemory long-term memories by id. Only `(id: …)` values returned by `
 
 Operations:
 - `update`: `content` (required) is the corrected text. Stored as document D, then memory X forgotten. Supermemory forms the new memory from D asynchronously (instant processing): may take a moment, may be worded differently. `importance` unsupported.
-- `forget`: soft-forget; hidden from recall, kept server-side. Already forgotten counts as done.
+- `forget`: soft-forget; hidden from memory recall, kept server-side (source document chunks may still surface). Already forgotten counts as done.
 - `invalidate`: same soft forget. `replacement_id` accepted but not recorded (Supermemory keeps no forget reason).
 - `preview_forget`: `query` (required, no `id`) describes what to forget in natural language; lists matching memories with ids. Changes nothing: then `forget` each id you are sure about, one call per id.
 
