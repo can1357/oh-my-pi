@@ -26,6 +26,7 @@ import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
 let received: http2.IncomingHttpHeaders = {};
+let receivedSessions: http2.ServerHttp2Session[] = [];
 
 function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	const frame = Buffer.alloc(5 + data.length);
@@ -69,6 +70,8 @@ async function startServer(): Promise<string> {
 	server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
 		stream.on("data", () => {});
 		received = headers;
+		if (!stream.session) throw new Error("expected an HTTP/2 session for the request");
+		receivedSessions.push(stream.session);
 		stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 		stream.write(textDeltaFrame("ok"));
 		stream.write(turnEndedFrame());
@@ -113,18 +116,19 @@ function makeModel(baseUrl: string): Model<"cursor-agent"> {
 const context: Context = { messages: [{ role: "user", content: "headers", timestamp: 1 }] };
 
 /** Drive one request to completion and hand back the headers the server saw. */
-async function send(headers: Record<string, string>): Promise<http2.IncomingHttpHeaders> {
-	const baseUrl = await startServer();
+async function send(headers: Record<string, string>, baseUrl?: string): Promise<http2.IncomingHttpHeaders> {
+	baseUrl ??= await startServer();
 	const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token", headers });
 	for await (const _event of stream) {
 		// drain
 	}
-	await stream.result();
+	expect((await stream.result()).stopReason).toBe("stop");
 	return received;
 }
 
 afterEach(async () => {
 	received = {};
+	receivedSessions = [];
 	await stopServer();
 });
 
@@ -185,5 +189,32 @@ describe("Cursor caller headers reach the wire", () => {
 		expect(sent[":authority"]).toContain("127.0.0.1");
 		expect(sent.host).toBeUndefined();
 		expect(sent["x-trace"]).toBe("kept");
+	});
+});
+
+describe("Cursor HTTP/2 connection reuse", () => {
+	it("completes consecutive turns on the same server session", async () => {
+		const baseUrl = await startServer();
+		await send({}, baseUrl);
+		await send({}, baseUrl);
+
+		expect(receivedSessions).toHaveLength(2);
+		expect(receivedSessions[1]).toBe(receivedSessions[0]);
+	});
+
+	it("opens a new session for the next turn after an idle peer sends GOAWAY", async () => {
+		const baseUrl = await startServer();
+		await send({}, baseUrl);
+		const [firstSession] = receivedSessions;
+		if (!firstSession) throw new Error("expected the first turn to reach the server");
+
+		const closed = Promise.withResolvers<void>();
+		firstSession.once("close", closed.resolve);
+		firstSession.goaway();
+		await closed.promise;
+		await send({}, baseUrl);
+
+		expect(receivedSessions).toHaveLength(2);
+		expect(receivedSessions[1]).not.toBe(firstSession);
 	});
 });
