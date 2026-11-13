@@ -8655,17 +8655,19 @@ mod tests {
 			after_web_drag(0.0, 2.0, 75.0, (0.0, 100.0), 1.0, || None, || Some(40.0), |_| {}),
 			AfterWebDrag::Unconfirmed(40.0),
 		);
-		// A non-linear slider's thumb reached the release: its own value is
-		// done, not stepped toward the linear estimate.
-		assert_eq!(
-			after_web_drag(0.0, 2.0, 75.0, (0.0, 100.0), 1.0, || Some(0.0), || Some(40.0), |_| {}),
-			AfterWebDrag::Done,
-		);
 		// Unmoved and far from the value under the press (a slider that runs
 		// right to left, pressed on its thumb): not stepped.
 		assert_eq!(
 			after_web_drag(98.0, 2.0, 75.0, (0.0, 100.0), 1.0, || None, || Some(98.0), |_| {}),
 			AfterWebDrag::Unsure,
+		);
+	}
+
+	#[test]
+	fn a_non_linear_web_slider_the_pointer_completed_is_not_stepped() {
+		assert_eq!(
+			after_web_drag(0.0, 2.0, 75.0, (0.0, 100.0), 1.0, || Some(0.0), || Some(10.0), |_| {}),
+			AfterWebDrag::Done,
 		);
 	}
 
