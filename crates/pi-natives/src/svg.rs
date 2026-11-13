@@ -7,17 +7,83 @@ use std::sync::{Arc, LazyLock};
 
 use napi::{Result, bindgen_prelude::Uint8Array};
 use napi_derive::napi;
-use resvg::{tiny_skia, usvg};
+use resvg::{
+	tiny_skia,
+	usvg::{
+		self,
+		fontdb::{Database, Family, Query},
+	},
+};
 
 use crate::task;
 
 const MAX_RENDER_PIXELS: u64 = 16 * 1024 * 1024;
 
-static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
-	let mut database = usvg::fontdb::Database::new();
+static FONT_DB: LazyLock<Arc<Database>> = LazyLock::new(|| {
+	let mut database = Database::new();
 	database.load_system_fonts();
+	repoint_dangling_generic_families(&mut database);
 	Arc::new(database)
 });
+
+/// Common families to stand in for a dangling generic, best match first.
+const SERIF_FAMILIES: &[&str] =
+	&["DejaVu Serif", "Noto Serif", "Liberation Serif", "FreeSerif", "Tinos", "Times New Roman"];
+const SANS_FAMILIES: &[&str] =
+	&["DejaVu Sans", "Noto Sans", "Liberation Sans", "FreeSans", "Arimo", "Arial"];
+const MONO_FAMILIES: &[&str] =
+	&["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "FreeMono", "Cousine", "Courier New"];
+
+/// Point each generic family that names no installed font at one that exists.
+///
+/// fontdb copies these names from the first `<prefer>` entry of fontconfig's
+/// aliases, or from Windows defaults, without checking that the font is
+/// installed. usvg's only last resort for a missing `font-family` is the serif
+/// generic, so one dangling name drops every such `<text>` even on a system
+/// with plenty of other fonts. Cursive and fantasy need no entry: they fall
+/// through to serif.
+fn repoint_dangling_generic_families(database: &mut Database) {
+	if let Some(family) = substitute_family(database, Family::Serif, SERIF_FAMILIES, false) {
+		database.set_serif_family(family);
+	}
+	if let Some(family) = substitute_family(database, Family::SansSerif, SANS_FAMILIES, false) {
+		database.set_sans_serif_family(family);
+	}
+	if let Some(family) = substitute_family(database, Family::Monospace, MONO_FAMILIES, true) {
+		database.set_monospace_family(family);
+	}
+}
+
+fn is_installed(database: &Database, family: Family) -> bool {
+	database
+		.query(&Query { families: &[family], ..Query::default() })
+		.is_some()
+}
+
+/// A stand-in for `generic` when the family it names is not installed: the
+/// first installed `preferred` family, else the alphabetically first installed
+/// family, favouring faces with the requested spacing.
+fn substitute_family(
+	database: &Database,
+	generic: Family,
+	preferred: &[&str],
+	monospace: bool,
+) -> Option<String> {
+	if is_installed(database, generic) {
+		return None;
+	}
+	if let Some(name) = preferred
+		.iter()
+		.find(|name| is_installed(database, Family::Name(name)))
+	{
+		return Some((*name).to_owned());
+	}
+	database
+		.faces()
+		.filter_map(|face| Some((face.monospaced != monospace, face.families.first()?.0.as_str())))
+		.min()
+		.map(|(_, name)| name.to_owned())
+}
 
 /// Terminal cell size in device pixels, for [`rasterize_svg`] canvases a
 /// terminal shows over whole cells.
@@ -118,7 +184,66 @@ fn rasterize_svg_sync(
 
 #[cfg(test)]
 mod tests {
+	use resvg::usvg::fontdb::{FaceInfo, ID, Language, Source, Stretch, Style, Weight};
+
 	use super::*;
+
+	fn face(name: &str, monospaced: bool) -> FaceInfo {
+		FaceInfo {
+			id: ID::dummy(),
+			source: Source::Binary(Arc::new(Vec::<u8>::new())),
+			index: 0,
+			families: vec![(name.to_owned(), Language::English_UnitedStates)],
+			post_script_name: name.to_owned(),
+			style: Style::Normal,
+			weight: Weight::NORMAL,
+			stretch: Stretch::Normal,
+			monospaced,
+		}
+	}
+
+	#[test]
+	fn text_survives_a_generic_family_naming_a_missing_font() {
+		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><text y="15">label</text></svg>"#;
+		// A text node can survive parsing and still paint nothing; the
+		// consumer sees the rendered PNG, so count the pixels it inks.
+		let draws_text = |database: Database| {
+			let options = usvg::Options { fontdb: Arc::new(database), ..usvg::Options::default() };
+			let tree = usvg::Tree::from_data(svg, &options).expect("SVG should parse");
+			let mut pixmap = tiny_skia::Pixmap::new(80, 20).expect("pixmap should allocate");
+			resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+			pixmap.pixels().iter().any(|pixel| pixel.alpha() > 0)
+		};
+		let mut database = Database::new();
+		database.load_font_data(include_bytes!("fonts/Silver.ttf").to_vec());
+		database.set_serif_family("Not Installed");
+		assert!(!draws_text(database.clone()), "usvg drops text whose fallback font is missing");
+
+		repoint_dangling_generic_families(&mut database);
+		assert!(draws_text(database));
+	}
+
+	#[test]
+	fn repoints_only_dangling_generics_to_the_closest_installed_family() {
+		let mut database = Database::new();
+		for (name, monospaced) in
+			[("Aardvark", false), ("Courier Prime", true), ("DejaVu Serif", false)]
+		{
+			database.push_face_info(face(name, monospaced));
+		}
+		database.set_serif_family("Not Installed");
+		database.set_sans_serif_family("Aardvark");
+		database.set_monospace_family("Not Installed Mono");
+
+		repoint_dangling_generic_families(&mut database);
+
+		// A known family beats the alphabetically first installed one.
+		assert_eq!(database.family_name(&Family::Serif), "DejaVu Serif");
+		// A generic that already resolves is left alone.
+		assert_eq!(database.family_name(&Family::SansSerif), "Aardvark");
+		// With no known family installed, spacing picks the substitute.
+		assert_eq!(database.family_name(&Family::Monospace), "Courier Prime");
+	}
 
 	#[test]
 	fn rasterizes_svg_at_intrinsic_size() {

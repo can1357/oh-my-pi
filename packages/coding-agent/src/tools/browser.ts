@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -13,15 +13,21 @@ import {
 	type BrowserKindTag,
 	holdBrowser,
 	normalizeConnectedCdpUrl,
+	type PuppeteerBrowserKind,
 	releaseBrowser,
 } from "./browser/registry";
-import { ensureChromiumExecutable } from "./browser/launch";
+import { chromiumNeedsDownload, ensureChromiumExecutable } from "./browser/launch";
+import { sameAddress } from "./browser/navigation";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
 import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
+import { ownsTerminal } from "./browser/terminal-owner";
+import { WebKitUnavailableError } from "./browser/webkit/host";
+import { installWebKitEngine } from "./browser/webkit/install";
+import { resolveWebKitKind, VIEWER_PLATFORMS, webKitEngineToInstall } from "./browser/webkit/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -37,13 +43,14 @@ import {
 	releaseIdleTabsForOwner,
 	releaseTab,
 	runInTab,
+	setWebKitTabsShown,
 	type TabSession,
 	type TernTabSession,
 	ternBlocksTaken,
 } from "./browser/tab-supervisor";
 import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
-import { renderCallChain, renderFunctionRun } from "./run-code";
+import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -57,6 +64,8 @@ import {
 	cfgBrowserRelay,
 	cfgBrowserRelayUrl,
 	cfgBrowserTern,
+	cfgBrowserWebKit,
+	cfgBrowserWebKitPath,
 } from "./browser/settings";
 import { cfgToolsMaxTimeout } from "./settings";
 
@@ -93,23 +102,17 @@ export {
 } from "./browser/snapshot-plus";
 export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
 export { type TernKind, resolveTernKind } from "./browser/tern/kind";
+export { resolveWebKitKind, type WebKitKind } from "./browser/webkit/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
 const DEFAULT_TAB_NAME = "main";
 const BROWSER_RUN_SCOPE: readonly string[] = ["tab", "page", "browser", "wait", "assert"];
 
-const appSchema = type({
-	"path?": type("string").describe("binary path to spawn"),
-	"cdp_url?": type("string").describe("existing cdp endpoint"),
-	"relay?": type("boolean").describe(
-		"true drives the user's own tabs via the omp browser relay; false skips a relay the settings enable",
-	),
-	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
-	"args?": type("string[]").describe("extra cli args"),
-	"target?": type("string").describe(
-		"URL/title substring picking the page to drive; inside Tern, adopts the user's browser block (or its id)",
-	),
-});
+/** Browsers `app` names by keyword; any other `app` is a CDP endpoint URL or an executable path. */
+const APP_KEYWORDS: readonly string[] = ["relay", "tern", "webkit", "chromium", "own", "auto"];
+
+/** A `scheme://` string names a CDP endpoint to attach to; Windows drive paths (`C:\`) do not match. */
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 const tabCallStepSchema = type({
 	method: "string",
@@ -120,7 +123,13 @@ const browserSchema = type({
 	action: type("'open' | 'close' | 'run' | 'call' | 'tabs' | 'targets'").describe("operation"),
 	"name?": type("string").describe("tab id (default 'main')"),
 	"url?": type("string").describe("url to open"),
-	"app?": appSchema,
+	"app?": type("string").describe(
+		"browser to drive: 'relay' (the user's Chrome), 'tern' (Tern picture-in-picture), 'webkit', 'chromium' (managed), 'own' (omp's own browser: WebKit if installed, else Chromium), 'auto' (default choice without the relay), a CDP endpoint URL to attach to, or an executable path to spawn",
+	),
+	"argv?": type("string[]").describe("extra cli args when app is an executable path"),
+	"target?": type("string").describe(
+		"URL/title substring picking the page to drive; inside Tern, adopts the user's browser block (or its id)",
+	),
 	"viewport?": {
 		width: "number",
 		height: "number",
@@ -134,9 +143,8 @@ const browserSchema = type({
 	"init_scripts?": type("string[]").describe("document-start JavaScript sources or cwd-relative file paths"),
 	"downloads?": type("string").describe("cwd-relative download directory"),
 	"user_agent?": type("string").describe("tab user agent override"),
-	"ignore_https_errors?": type("boolean").describe("ignore invalid HTTPS certificates"),
-	"allow_file_access?": type("boolean").describe("allow file URLs to read local files"),
-	"headed?": type("boolean").describe("override the configured Chromium display mode"),
+	"insecure?": type("boolean").describe("ignore invalid HTTPS certificates"),
+	"headed?": type("boolean").describe("override the configured display mode: a window for the tab (true) or none"),
 	"code?": type("string").describe("js body to run in tab"),
 	"fn?": type("string").describe("serialized JavaScript function to run in tab"),
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
@@ -163,11 +171,14 @@ interface BrowserPreludeDetails {
 }
 
 /**
- * The browser an open drives, by precedence: explicit `app.*` options, the
- * relay, `browser.cdpUrl`, Tern (inside a Tern pane, unless `app.tern: false`;
- * `app.tern: true` forces it, `app.target` selects it over the `browser.tern`
- * setting to adopt a block; `headed` does not opt out), a cmux surface, then
- * Chromium.
+ * The browser an open drives, by precedence: an explicit `app` (an executable
+ * path or CDP URL, or a keyword: `relay`, `tern`, `webkit`, `chromium`, `own`),
+ * the relay, `browser.cdpUrl`, Tern (inside a Tern pane; `target` selects it
+ * over the `browser.tern` setting to adopt a block; `headed` does not opt out),
+ * a cmux surface, then omp's own browser ({@link ownBrowserKind}). `app: "auto"`
+ * is that chain without the relay. Tern and cmux are automatic only while no
+ * other omp owns the terminal. `app: "tern"` and `app: "webkit"` are explicit:
+ * they throw when Tern or omp's WebKit host is unavailable.
  */
 export function resolveBrowserKind(
 	params: BrowserParams,
@@ -175,41 +186,55 @@ export function resolveBrowserKind(
 	env: Record<string, string | undefined> = process.env,
 ): BrowserKind {
 	const app = params.app;
-	if (app?.cdp_url) {
-		return { kind: "connected", cdpUrl: app.cdp_url.replace(/\/+$/, "") };
+	if (app !== undefined && URL_SCHEME.test(app)) {
+		return { kind: "connected", cdpUrl: app.replace(/\/+$/, "") };
 	}
-	if (app?.path) {
-		const exe = resolveToCwd(app.path, session.cwd);
-		const args = resolveSpawnArgs(exe, app.args, session.cwd);
-		if (params.ignore_https_errors && !args.includes("--ignore-certificate-errors")) {
+	if (app && !APP_KEYWORDS.includes(app)) {
+		const exe = resolveToCwd(app, session.cwd);
+		const args = resolveSpawnArgs(exe, params.argv, session.cwd);
+		if (params.insecure && !args.includes("--ignore-certificate-errors")) {
 			args.push("--ignore-certificate-errors");
 		}
-		if (params.allow_file_access && !args.includes("--allow-file-access-from-files")) {
+		if (!args.includes("--allow-file-access-from-files")) {
 			args.push("--allow-file-access-from-files");
 		}
 		return { kind: "spawned", path: exe, args };
 	}
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
-	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
+	// Explicit app: "relay" wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
-	if (app?.relay) {
+	if (app === "relay") {
 		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl }, env);
 		if (relayKind) return relayKind;
 	}
-	if (app?.tern === true) {
+	if (app === "tern") {
 		const ternKind = resolveTernKind({ settingEnabled: true }, env);
 		if (!ternKind) {
 			throw new ToolError(
-				"app.tern:true requires running inside a Tern pane (TERN_PANE_SOCKET and TERN_PANE are not set) with PI_BROWSER_TERN not set to 0.",
+				'app: "tern" requires running inside a Tern pane (TERN_PANE_SOCKET and TERN_PANE are not set) with PI_BROWSER_TERN not set to 0.',
 			);
 		}
 		return ternKind;
 	}
+	if (app === "webkit") {
+		const webkitKind = resolveWebKitKind(
+			{ settingEnabled: true, settingPath: cfgBrowserWebKitPath.get(session.settings) },
+			env,
+		);
+		if (!webkitKind) {
+			throw new ToolError(
+				`app: "webkit" requires omp's WebKit engine, and none is installed: its host executable must be ${getWebKitHostPath()}, or be named by PI_BROWSER_WEBKIT_PATH or the browser.webkitPath setting, with PI_BROWSER_WEBKIT not set to 0.`,
+			);
+		}
+		return webkitKind;
+	}
+	if (app === "chromium") return chromiumKind(params, session);
+	if (app === "own") return ownBrowserKind(params, session, env);
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
-	// endpoint. A configured endpoint is a default, not an override: explicit
-	// app options win.
-	if (app?.relay !== false) {
+	// endpoint. A configured endpoint is a default, not an override: an
+	// explicit app wins.
+	if (app !== "auto") {
 		const relayKind = resolveRelayKind(
 			{
 				settingEnabled: cfgBrowserRelay.get(session.settings),
@@ -223,34 +248,65 @@ export function resolveBrowserKind(
 	if (configuredCdpUrl) {
 		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
 	}
-	if (app?.tern !== false) {
-		// `app.target` inside Tern names a browser block to adopt: an explicit request, like `app.tern: true`.
-		const ternKind = resolveTernKind(
-			{ settingEnabled: app?.target !== undefined || cfgBrowserTern.get(session.settings) },
-			env,
-		);
-		if (ternKind) return ternKind;
-	}
+	// Tern and cmux show the tab beside the omp drawn in that terminal. An omp started from that
+	// session's commands (`omp -p` from its bash tool, a script an eval cell runs) inherited the
+	// pane env, and its tabs would float over the other session's work.
+	const ownsPane = ownsTerminal(env);
+	// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
+	const ternKind = resolveTernKind(
+		{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
+		env,
+	);
+	if (ternKind) return ternKind;
 	const cmuxKind = resolveCmuxKind(
 		{
-			settingEnabled: cfgBrowserCmux.get(session.settings),
+			settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings),
 		},
 		env,
 	);
 	if (cmuxKind) {
 		return cmuxKind;
 	}
-	return chromiumKind(params, session);
+	return ownBrowserKind(params, session, env);
 }
 
-/** The Chromium browser an open launches when no attach/app mode applies. */
-function chromiumKind(params: BrowserParams, session: ToolSession): BrowserKind {
+/**
+ * omp's own browser, where an open ends when nothing else takes it: its
+ * WebKit host when that backend is on (`browser.webkit`,
+ * `PI_BROWSER_WEBKIT`; `app: "chromium"` opts one open out) and its
+ * executable is installed (`PI_BROWSER_WEBKIT_PATH`, `browser.webkitPath`,
+ * else `~/.o2/lib/abkit/ABHost`), and managed Chromium otherwise and for a
+ * visible window (`headed: true`, or `browser.headless` off) where the engine
+ * ships no viewer to show one.
+ */
+function ownBrowserKind(
+	params: BrowserParams,
+	session: ToolSession,
+	env: Record<string, string | undefined> = process.env,
+): BrowserKind {
+	const chromium = chromiumKind(params, session);
+	const webkit = resolveWebKitKind(
+		{
+			settingEnabled: cfgBrowserWebKit.get(session.settings),
+			settingPath: cfgBrowserWebKitPath.get(session.settings),
+		},
+		env,
+	);
+	// A window is the viewer's to show: an engine without one leaves visible tabs to Chromium.
+	if (!webkit || (!chromium.headless && !webkit.viewer)) return chromium;
+	return webkit;
+}
+
+/** The Chromium browser an open launches when no attach/app mode applies and omp's WebKit host does not take it. */
+function chromiumKind(
+	params: BrowserParams,
+	session: ToolSession,
+): Extract<PuppeteerBrowserKind, { kind: "headless" }> {
 	const headless = params.headed === undefined ? cfgBrowserHeadless.get(session.settings) : !params.headed;
 	return {
 		kind: "headless",
 		headless,
-		ignoreHttpsErrors: params.ignore_https_errors,
-		allowFileAccess: params.allow_file_access,
+		insecure: params.insecure,
 	};
 }
 
@@ -263,10 +319,10 @@ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinitio
 		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
 		status: describeBrowserCall,
 		// The documentation promises omp's own browser for an open without `app`; while
-		// the relay takes that open, the prompt names where `app.relay: false` goes instead.
+		// the relay takes that open, the prompt names where `app: "auto"` goes instead.
 		relayFallback:
 			resolveBrowserKind({ action: "open" }, session).kind === "relay"
-				? resolveBrowserKind({ action: "open", app: { relay: false } }, session)
+				? resolveBrowserKind({ action: "open", app: "auto" }, session)
 				: undefined,
 	});
 }
@@ -285,8 +341,10 @@ function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknow
 			return parsed.all ? "close all" : `close ${name}`;
 		case "run":
 			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
-		case "call":
-			return `${name}.${renderCallChain(parsed.chain ?? [])}`;
+		case "call": {
+			const chain = parsed.chain ?? [];
+			return `${name}.${renderStatusCallChain(chain, (step, index) => browserTextStart(step.method, chain[index - 1]?.method))}`;
+		}
 		case "tabs":
 			return "tabs";
 		case "targets":
@@ -294,9 +352,35 @@ function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknow
 	}
 }
 
-/** Drop headless tabs so a browser mode change applies to the next open. */
-export async function restartBrowserForModeChange(): Promise<void> {
-	await dropHeadlessTabs();
+/**
+ * Where the text a browser helper enters starts in its arguments: after the selector of a tab or
+ * frame `fill`/`type`, first on an element handle and for clipboard and dialog text.
+ */
+function browserTextStart(method: string, previous: string | undefined): number | undefined {
+	switch (method) {
+		case "fill":
+		case "type":
+			return previous === undefined || previous === "frame" ? 1 : 0;
+		case "clipboardWrite":
+		case "handleDialog":
+			return 0;
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * Apply a change of the browser mode (`/browser headless|visible`). WebKit
+ * tabs change now: each gains or loses its window, the page going on
+ * untouched. A Chromium cannot change mode while it runs, so its headless
+ * tabs are dropped and the next open launches it in the new mode.
+ */
+export async function applyBrowserModeChange(headless: boolean): Promise<void> {
+	try {
+		await setWebKitTabsShown(!headless);
+	} finally {
+		await dropHeadlessTabs();
+	}
 }
 
 /**
@@ -342,7 +426,11 @@ async function invokeBrowser(
 
 	try {
 		throwIfAborted(context.signal);
-		const requested = parsed.timeout ?? (parsed.action === "call" ? tabCallBudgetSeconds(parsed.chain) : undefined);
+		const requested =
+			parsed.timeout ??
+			(parsed.action === "call" || parsed.action === "run"
+				? tabCallBudgetSeconds(parsed.chain, context.cellTimeoutMs)
+				: undefined);
 		const timeoutSeconds = clampTimeout("browser", requested, cfgToolsMaxTimeout.get(session.settings));
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
@@ -372,11 +460,17 @@ async function invokeBrowser(
 }
 
 /**
- * Open (or reuse) a tab. A Tern PiP chosen automatically (not forced with
- * `app.tern: true`) falls back to Chromium when Tern cannot host it — no
- * window, an unsupported platform, a refused or failed connection — and the
- * result says so; a tab that already fell back keeps its browser. Adopting a
- * Tern block (`app.target`) never falls back: Chromium would ignore the target.
+ * Open (or reuse) a tab, falling back when the browser chosen automatically
+ * cannot host it, and saying so in the result:
+ * - A Tern PiP (not forced with `app: "tern"`) that Tern cannot show — no
+ *   window, an unsupported platform, a refused or failed connection — goes to
+ *   omp's own browser, as an open outside Tern would. Adopting a Tern block
+ *   (`target`) never falls back: no other browser has that page.
+ * - omp's WebKit host (not forced with `app: "webkit"`) that cannot start,
+ *   cannot open its first tab, or could not be downloaded
+ *   ({@link installWebKitForOpen}) goes to managed Chromium.
+ *
+ * A tab that already fell back keeps its browser.
  */
 async function openBrowser(
 	session: ToolSession,
@@ -386,31 +480,98 @@ async function openBrowser(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
+	const webkitDownloadFailure = await installWebKitForOpen(session, params, signal);
 	const resolved = resolveBrowserKind(params, session);
-	const autoTern = resolved.kind === "tern" && params.app?.tern !== true && params.app?.target === undefined;
+	const autoTern = resolved.kind === "tern" && params.app !== "tern" && params.target === undefined;
+	const autoWebKit = params.app !== "webkit";
 	const existing = getTab(name);
-	const kind = autoTern && existing && existing.kindTag !== "tern" ? existing.browser.kind : resolved;
+	let kind = resolved;
+	if (autoTern && existing && existing.kindTag !== "tern") {
+		kind = existing.browser.kind;
+	} else if (resolved.kind === "webkit" && autoWebKit && existing) {
+		// A tab that fell back to Chromium keeps it, as does one opened while the WebKit host was not installed.
+		const chromium = chromiumKind(params, session);
+		if (browserKey(existing.browser.kind) === browserKey(chromium)) kind = chromium;
+	}
 	const startedAt = performance.now();
-	try {
-		return await openOnKind(session, name, params, details, kind, timeoutMs, [], signal);
-	} catch (error) {
-		if (kind.kind !== "tern" || !autoTern || !isTernUnavailable(error) || signal?.aborted) throw error;
-		// A Tern tab under this name whose window went away still holds the name: release
-		// that one (and only that one) so the Chromium tab can take it.
-		if (getTab(name)?.kindTag === "tern") await releaseTab(name, { kill: false, timeoutMs }).catch(() => false);
-		const note = `Tern cannot show a browser here (${error.message}); opened Chromium instead. Pass app.tern:false to skip Tern, or app.tern:true to require it.`;
-		logger.debug("Tern browser unavailable; falling back to Chromium", { error: error.message });
-		const remainingMs = Math.max(1, timeoutMs - (performance.now() - startedAt));
-		return await openOnKind(
-			session,
-			name,
-			params,
-			details,
-			chromiumKind(params, session),
-			remainingMs,
-			[note],
-			signal,
+	/** Why each browser tried before `kind` could not take the open. */
+	const failures: Array<{ backend: "tern" | "webkit"; reason: string }> =
+		webkitDownloadFailure === undefined ? [] : [{ backend: "webkit", reason: webkitDownloadFailure }];
+	for (;;) {
+		const opened = kind.kind === "webkit" ? "omp's WebKit browser" : "Chromium";
+		const notes = failures.map(failure =>
+			failure.backend === "tern"
+				? `Tern cannot show a browser here (${failure.reason}); opened ${opened} instead. Pass app: "own" to skip Tern, or app: "tern" to require it.`
+				: `omp's WebKit browser could not start (${failure.reason}); opened Chromium instead. Pass app: "chromium" to skip it, or app: "webkit" to require it.`,
 		);
+		const remainingMs = Math.max(1, timeoutMs - (performance.now() - startedAt));
+		try {
+			return await openOnKind(session, name, params, details, kind, remainingMs, notes, signal);
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			let next: BrowserKind;
+			if (kind.kind === "tern" && autoTern && isTernUnavailable(error)) {
+				failures.push({ backend: "tern", reason: error.message });
+				next = ownBrowserKind(params, session);
+			} else if (kind.kind === "webkit" && autoWebKit && error instanceof WebKitUnavailableError) {
+				failures.push({ backend: "webkit", reason: error.message });
+				next = chromiumKind(params, session);
+			} else {
+				throw error;
+			}
+			// A Tern or WebKit tab under this name whose window or host went away still holds the
+			// name: release that one (and only that one) so the next browser's tab can take it.
+			if (getTab(name)?.kindTag === kind.kind) {
+				await releaseTab(name, { kill: false, timeoutMs }).catch(() => false);
+			}
+			logger.debug("Browser backend unavailable; falling back", {
+				backend: kind.kind,
+				next: next.kind,
+				error: error.message,
+			});
+			kind = next;
+		}
+	}
+}
+
+/**
+ * Download omp's WebKit engine before an open that needs it while it is
+ * missing from its default location ({@link webKitEngineToInstall}): an open
+ * with `app: "webkit"`, or one that otherwise ends at managed Chromium
+ * (headless, or visible where released engines ship a viewer) while Chromium
+ * itself would first be downloaded. With no browser installed, omp's own engine
+ * comes before Chrome for Testing. Like that download, it runs before the
+ * open's deadline starts.
+ *
+ * Returns why an automatic download failed, for the open to go on to Chromium
+ * saying so; for `app: "webkit"` a failed download throws.
+ */
+async function installWebKitForOpen(
+	session: ToolSession,
+	params: BrowserParams,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const explicit = params.app === "webkit";
+	const engineDir = webKitEngineToInstall({
+		settingEnabled: explicit || cfgBrowserWebKit.get(session.settings),
+		settingPath: cfgBrowserWebKitPath.get(session.settings),
+	});
+	if (engineDir === null) return undefined;
+	if (!explicit) {
+		const kind = resolveBrowserKind(params, session);
+		if (kind.kind !== "headless" || params.app === "chromium") return undefined;
+		if (!kind.headless && !VIEWER_PLATFORMS.includes(process.platform)) return undefined;
+		if (!(await chromiumNeedsDownload())) return undefined;
+	}
+	try {
+		await untilAborted(signal, () => installWebKitEngine(engineDir));
+		return undefined;
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		const cause = error instanceof Error ? error.message : String(error);
+		if (explicit)
+			throw new ToolError(`app: "webkit" requires omp's WebKit engine, which could not be downloaded: ${cause}`);
+		return `its engine could not be downloaded: ${cause}`;
 	}
 }
 
@@ -435,9 +596,9 @@ async function openOnKind(
 		);
 	}
 	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
-	if (params.ignore_https_errors && kind.kind === "relay") {
+	if (params.insecure && kind.kind === "relay") {
 		throw new ToolError(
-			"ignore_https_errors is not supported through the Chrome relay: the extension debugger API does not expose the CDP Security domain. Pass app.relay:false to use omp's Chromium instead.",
+			'insecure is not supported through the Chrome relay: the extension debugger API does not expose the CDP Security domain. Pass app: "chromium" to use omp\'s Chromium instead.',
 		);
 	}
 	// Chrome never lets an extension choose where downloads go. Refused here, before an existing tab is closed to reopen.
@@ -512,7 +673,7 @@ async function openOnKind(
 				(initScripts.length > 0 ||
 					params.downloads !== undefined ||
 					params.user_agent !== undefined ||
-					params.ignore_https_errors === true)
+					params.insecure === true)
 			) {
 				stage = `closing tab ${JSON.stringify(name)} to reopen it`;
 				await untilAborted(openSignal, () => releaseTab(name, { kill: false, timeoutMs }));
@@ -529,7 +690,7 @@ async function openOnKind(
 								deviceScaleFactor: params.viewport.scale,
 							}
 						: undefined,
-					target: params.app?.target,
+					target: params.target,
 					timeoutMs,
 					deadlineStartMs: deadlineStart,
 					dialogs: params.dialogs,
@@ -537,7 +698,8 @@ async function openOnKind(
 					initScripts,
 					downloadsPath,
 					userAgent: params.user_agent,
-					ignoreHttpsErrors: params.ignore_https_errors,
+					insecure: params.insecure,
+					visible: params.headed ?? !cfgBrowserHeadless.get(session.settings),
 					signal: openSignal,
 					ownerSessionId: tabOwnerId(session),
 					// Omitted stays undefined: creation defaults it to false
@@ -566,10 +728,12 @@ async function openOnKind(
 		details.url = url;
 		details.viewport = tab.info.viewport;
 		const verb = result.created ? "Opened" : "Reused";
+		// One line: the tab and its browser, where it landed unless that is the URL the call asked for, and its title.
+		let opened = `${verb} tab ${JSON.stringify(name)} on ${describeBrowser(tab)}`;
+		if (!params.url || !sameAddress(params.url, url)) opened += `, at ${url}`;
+		if (title) opened += `, titled ${JSON.stringify(title)}`;
 		const lines = [
-			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(tab)}`,
-			`URL: ${url}`,
-			title ? `Title: ${title}` : null,
+			opened,
 			...(tab.backend === "tern" ? ternNotes(tab) : []),
 			...notes,
 			result.note,
@@ -587,8 +751,8 @@ async function openOnKind(
 }
 
 /**
- * The user's own pages `app.target` can adopt, from the browser an open with
- * `app.target` would drive: a Tern window's browser blocks, or the relay's
+ * The user's own pages `target` can adopt, from the browser an open with
+ * `target` would drive: a Tern window's browser blocks, or the relay's
  * Chrome pages. The browser is acquired as an open does (the loopback relay
  * starts on demand) and released again.
  */
@@ -600,10 +764,10 @@ async function listTargets(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
 	// Resolve as an open naming a target: inside Tern that selects Tern even when the `browser.tern` setting is off.
-	const kind = resolveBrowserKind({ ...params, app: { ...params.app, target: params.app?.target ?? "" } }, session);
+	const kind = resolveBrowserKind({ ...params, target: params.target ?? "" }, session);
 	if (kind.kind !== "tern" && kind.kind !== "relay") {
 		throw new ToolError(
-			`No pages to adopt here (the browser would be ${describeKind(kind)}): targets exist only inside a Tern pane (its browser blocks) or with the omp relay (app.relay: true or the browser.relay setting).`,
+			`No pages to adopt here (the browser would be ${describeKind(kind)}): targets exist only inside a Tern pane (its browser blocks) or with the omp relay (app: "relay" or the browser.relay setting).`,
 		);
 	}
 	details.browser = kind.kind;
@@ -741,6 +905,11 @@ function describeBrowser(tab: TabSession): string {
 		if (!adopted) return `Tern browser picture-in-picture (pane ${tab.browser.kind.pane})`;
 		return `the user's Tern browser block ${adopted.block} (${adopted.owner === null ? "docked" : "picture-in-picture"})`;
 	}
+	if (tab.backend === "webkit") {
+		return tab.browser.webkit.isShown(tab.ternTab.block)
+			? "omp's WebKit browser (in a window)"
+			: "omp's headless WebKit browser";
+	}
 	const handle = tab.browser;
 	if (!("browser" in handle)) {
 		return `cmux browser (${handle.kind.surface ?? "split"})`;
@@ -790,5 +959,7 @@ function describeKind(kind: BrowserKind): string {
 			return `cmux:${kind.surface ?? "split"}`;
 		case "tern":
 			return `tern:pane ${kind.pane}`;
+		case "webkit":
+			return "omp's headless WebKit";
 	}
 }

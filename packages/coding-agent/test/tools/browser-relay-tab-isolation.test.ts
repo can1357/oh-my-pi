@@ -295,6 +295,45 @@ const session = {
 } as unknown as ToolSession;
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
+	it("keeps another connection's cross-site frame alive when a page disables auto-attach", async () => {
+		const fixture = await launchRelayFixture();
+		let first: Browser | undefined;
+		let second: Browser | undefined;
+		try {
+			const source = await fixture.browser.newPage();
+			await source.goto(`${fixture.origin}/framed`);
+			first = await puppeteer.connect({ browserURL: fixture.cdpUrl });
+			second = await puppeteer.connect({ browserURL: fixture.cdpUrl });
+			const firstPage = (await first.pages()).find(page => page.url() === source.url())!;
+			const secondPage = (await second.pages()).find(page => page.url() === source.url())!;
+			const frame = secondPage.frames().find(frame => frame.parentFrame())!;
+			expect(
+				await frame.client.send("Runtime.evaluate", { expression: "document.title", returnByValue: true }),
+			).toMatchObject({
+				result: { value: "Download" },
+			});
+			const detached: string[] = [];
+			secondPage.mainFrame().client.on("Target.detachedFromTarget", event => detached.push(event.sessionId));
+
+			await firstPage.mainFrame().client.send("Target.setAutoAttach", {
+				autoAttach: false,
+				waitForDebuggerOnStart: false,
+				flatten: true,
+			});
+			// A command on the surviving child proves Chrome did not tear down its shared session.
+			expect(
+				await frame.client.send("Runtime.evaluate", { expression: "document.title", returnByValue: true }),
+			).toMatchObject({
+				result: { value: "Download" },
+			});
+			expect(detached).toEqual([]);
+		} finally {
+			await first?.disconnect();
+			await second?.disconnect();
+			await fixture.close();
+		}
+	});
+
 	it("opens default relay tabs in the background and closes them, leaving borrowed pages open", async () => {
 		const fixture = await launchRelayFixture();
 		const human = await fixture.browser.newPage();
@@ -345,7 +384,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			const surviving = await runInTab(names[1]!, { code: "return await tab.title();", timeoutMs: 10_000, session });
 			expect(surviving.returnValue).toBe("Second");
 
-			// `app.target` borrows the user's page; closing releases it without closing it.
+			// `target` borrows the user's page; closing releases it without closing it.
 			const borrowed = await acquireTab(names[2]!, relay, { target: "Human sentinel", timeoutMs: 15_000 });
 			expect(borrowed.tab.targetId).not.toBe(first.tab.targetId);
 			await releaseTab(names[2]!);

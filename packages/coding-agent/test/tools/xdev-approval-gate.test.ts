@@ -8,13 +8,14 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { Tool } from "@oh-my-pi/pi-coding-agent/tools";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -136,6 +137,32 @@ function mountedDevice(runner: ExtensionRunner, cwd: string): { write: AgentTool
 	return { write: new ExtensionToolWrapper(writeTool as unknown as AgentTool, runner), executed };
 }
 
+/**
+ * The same graph for `edit` in apply_patch mode, active at the top level:
+ * `write` dispatches both `xd://edit` and the wire alias `xd://apply_patch`
+ * to the one wrapped `edit`.
+ */
+function editBehindWrite(runner: ExtensionRunner, cwd: string): AgentTool {
+	const session: ToolSession = {
+		cwd,
+		hasUI: true,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		enableLsp: false,
+		settings: Settings.isolated({}),
+	};
+	const edit = new ExtensionToolWrapper(new EditTool(session, "apply_patch"), runner) as unknown as Tool;
+	const xdev: XdevState = {
+		tools: new Map([[edit.name, edit]]),
+		mountedNames: new Set(),
+		builtInNames: new Set(),
+		isActive: name => name === edit.name,
+		resolve: name => resolveXdevTool(xdev, name),
+	};
+	session.xdev = xdev;
+	return new ExtensionToolWrapper(new WriteTool(session) as unknown as AgentTool, runner);
+}
+
 function context(sessionManager: SessionManager, settings: Record<string, unknown>): AgentToolContext {
 	return {
 		sessionManager,
@@ -146,6 +173,37 @@ function context(sessionManager: SessionManager, settings: Record<string, unknow
 		abort: () => {},
 		settings: Settings.isolated(settings),
 	} as AgentToolContext;
+}
+
+/**
+ * Prompts per spelling of `edit` behind `write` under `tools.approval.edit:
+ * prompt`, in a mode that asks for every write-tier call. Each call adds its
+ * own file, so a spelling that never reached `edit` fails here instead of
+ * counting zero prompts.
+ */
+async function editPromptsBySpelling(): Promise<Record<string, number>> {
+	const cwd = root.path();
+	const sessionManager = SessionManager.inMemory(cwd);
+	const select = vi.fn(async (_title: string, options: string[]) => options[0]);
+	const write = editBehindWrite(runnerWith(sessionManager, select), cwd);
+	const settings = { "tools.approvalMode": "always-ask", "tools.approval": { edit: "prompt" } };
+	const prompts: Record<string, number> = {};
+	for (const spelling of ["edit", "apply_patch"]) {
+		const file = `prompt-${spelling}.txt`;
+		const input = ["*** Begin Patch", `*** Add File: ${file}`, "+ok", "*** End Patch"].join("\n");
+		const asked = select.mock.calls.length;
+		const result = await write.execute(
+			`call-${spelling}`,
+			{ path: `xd://${spelling}`, content: JSON.stringify({ input }) },
+			undefined,
+			undefined,
+			context(sessionManager, settings),
+		);
+		expect(result.isError).toBeUndefined();
+		expect(await Bun.file(path.join(cwd, file)).text()).toBe("ok\n");
+		prompts[spelling] = select.mock.calls.length - asked;
+	}
+	return prompts;
 }
 
 const args = { path: `xd://${DEVICE}`, content: JSON.stringify({ body: "hello" }) };
@@ -167,5 +225,11 @@ describe("write xd://<device> approval", () => {
 
 		expect(select).toHaveBeenCalledTimes(1);
 		expect(executed).toEqual([{ body: "hello" }]);
+	});
+
+	it("asks once for xd://apply_patch under tools.approval.edit: prompt, as for xd://edit", async () => {
+		// The outer gate must key the alias on `edit`: keyed on `apply_patch`, the
+		// mode asks there and the inner `edit` gate asks again for its own policy.
+		expect(await editPromptsBySpelling()).toEqual({ edit: 1, apply_patch: 1 });
 	});
 });

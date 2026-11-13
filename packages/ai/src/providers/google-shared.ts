@@ -4,7 +4,7 @@
 
 import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
@@ -66,11 +66,12 @@ function convertGoogleImagePart(image: ImageContent): Part {
 }
 
 /**
- * Thinking level for Gemini 3 models. Mirrors Google's `ThinkingLevel` enum values.
+ * Thinking level for Gemini 3+ models. Mirrors Google's `ThinkingLevel` enum values,
+ * plus the API-documented lowercase `xhigh` (Gemini 4 Hydrogen) the SDK enum lacks.
  * Defined here (not in any specific provider) so all Google providers can reference it
  * without inducing a circular dependency.
  */
-export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 
 /**
  * Sampling/thinking options shared by `streamGoogle` and `streamGoogleVertex`.
@@ -456,6 +457,8 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "STOP":
 			return "stop";
 		case "MAX_TOKENS":
+		// Only reached when a segment ends without a token to resume from: the output was cut short.
+		case "CONTINUATION":
 			return "length";
 		case "BLOCKLIST":
 		case "PROHIBITED_CONTENT":
@@ -488,6 +491,7 @@ export function mapStopReasonString(reason: string): StopReason {
 		case "STOP":
 			return "stop";
 		case "MAX_TOKENS":
+		case "CONTINUATION":
 			return "length";
 		default:
 			return "error";
@@ -502,6 +506,14 @@ export function mapStopReasonString(reason: string): StopReason {
  */
 export const MAX_EMPTY_STREAM_RETRIES = 2;
 export const EMPTY_STREAM_BASE_DELAY_MS = 500;
+
+/**
+ * Attempts per continuation request of a segmented generation (`followGoogleContinuations`).
+ * A failed resume discards every segment already streamed, so transient failures (429, 5xx,
+ * network errors, a resume that never returns headers) retry here instead of restarting the
+ * whole generation upstream.
+ */
+export const CONTINUATION_MAX_ATTEMPTS = 4;
 
 /**
  * Whether a completed Google assistant message carries content worth delivering.
@@ -535,6 +547,16 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
 	output.timestamp = Date.now();
 }
 
+/** `usageMetadata` of a generation Google split into segments, as `followGoogleContinuations` passes it on. */
+export interface ContinuedUsageMetadata extends UsageMetadata {
+	/**
+	 * Not sent by Google. The current segment's own total: its prompt is the original
+	 * prompt plus all earlier output, so it is the conversation's real size, while the
+	 * counts above are summed across the segments' requests (each is billed).
+	 */
+	contextTokenCount?: number;
+}
+
 /**
  * Maps Gemini `usageMetadata` onto {@link Usage} (cost zeroed for `calculateCost`).
  *
@@ -545,7 +567,7 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
  * and cached tokens are clamped to it: input is never negative.
  * Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
  */
-export function mapGoogleUsage(metadata: UsageMetadata): Usage {
+export function mapGoogleUsage(metadata: ContinuedUsageMetadata): Usage {
 	const candidates = metadata.candidatesTokenCount || 0;
 	const thinking = metadata.thoughtsTokenCount || 0;
 	const total = metadata.totalTokenCount || 0;
@@ -558,8 +580,91 @@ export function mapGoogleUsage(metadata: UsageMetadata): Usage {
 		cacheWrite: 0,
 		totalTokens: total,
 		...(thinking > 0 ? { reasoningTokens: thinking } : {}),
+		...(metadata.contextTokenCount !== undefined ? { contextTokens: metadata.contextTokenCount } : {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
+}
+
+const USAGE_COUNTS = [
+	"promptTokenCount",
+	"candidatesTokenCount",
+	"thoughtsTokenCount",
+	"totalTokenCount",
+	"cachedContentTokenCount",
+] as const;
+
+/**
+ * Usage of a generation split into segments: every count is summed, since each segment's
+ * request is billed in full, and `contextTokenCount` is the latest segment's own total.
+ * That segment's prompt is the original prompt plus all earlier output, so its total is
+ * what one unsplit request would report; the summed total re-counts the earlier output
+ * once per later segment and would make the conversation look several times its size.
+ */
+function addGoogleUsage(earlier: UsageMetadata, segment: UsageMetadata): ContinuedUsageMetadata {
+	const sum: ContinuedUsageMetadata = { ...segment };
+	for (const key of USAGE_COUNTS) {
+		if (earlier[key] !== undefined || segment[key] !== undefined)
+			sum[key] = (earlier[key] ?? 0) + (segment[key] ?? 0);
+	}
+	// Some chunks omit `totalTokenCount`; fall back to the segment's parts, as `mapGoogleUsage` does.
+	const segmentTotal =
+		segment.totalTokenCount ||
+		(segment.promptTokenCount ?? 0) + (segment.candidatesTokenCount ?? 0) + (segment.thoughtsTokenCount ?? 0);
+	if (segmentTotal > 0) sum.contextTokenCount = segmentTotal;
+	return sum;
+}
+
+/**
+ * Streams a generation Google splits into output segments as one stream of chunks.
+ *
+ * Gemini 4 Hydrogen ends each 65,536-token segment of a longer generation with
+ * `finishReason: CONTINUATION` and a `continuationToken`; resending the same request with
+ * that token streams the next segment. `resume` sends that request. Chunks pass through
+ * as they arrive, except that a CONTINUATION finish carrying a token is dropped (the next
+ * segment follows it), so the consumer sees one generation. From the second segment on,
+ * usage is summed across segments (see `addGoogleUsage`): each segment reports only its
+ * own request, whose prompt is the original prompt plus all output so far.
+ * A CONTINUATION without a token is passed on and ends the generation as cut short.
+ * Each resume resends the request unchanged, so Google caps the whole generation at its
+ * `maxOutputTokens`: the segment that reaches it ends with MAX_TOKENS (verified live on
+ * the Gemini API, ending at exactly the requested total), which passes through as `length`.
+ * Ref: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+ */
+export async function* followGoogleContinuations<C>(
+	firstSegment: AsyncIterable<C>,
+	responseOf: (chunk: C) =>
+		| {
+				candidates?: { finishReason?: string; continuationToken?: string }[];
+				usageMetadata?: UsageMetadata;
+		  }
+		| undefined,
+	resume: (continuationToken: string) => Promise<AsyncIterable<C>>,
+): AsyncGenerator<C> {
+	let segment: AsyncIterable<C> | undefined = firstSegment;
+	// Unset until a segment ends in CONTINUATION, so an unsplit generation keeps Google's usage as sent.
+	let earlierUsage: UsageMetadata | undefined;
+	while (segment) {
+		let continuationToken: string | undefined;
+		let segmentUsage: UsageMetadata | undefined;
+		for await (const chunk of segment) {
+			const response = responseOf(chunk);
+			const candidate = response?.candidates?.[0];
+			if (candidate?.finishReason === "CONTINUATION" && candidate.continuationToken) {
+				continuationToken = candidate.continuationToken;
+				candidate.finishReason = undefined;
+			}
+			if (response?.usageMetadata) {
+				segmentUsage = response.usageMetadata;
+				if (earlierUsage) response.usageMetadata = addGoogleUsage(earlierUsage, segmentUsage);
+			}
+			yield chunk;
+		}
+		segment = undefined;
+		if (continuationToken) {
+			earlierUsage = addGoogleUsage(earlierUsage ?? {}, segmentUsage ?? {});
+			segment = await resume(continuationToken);
+		}
+	}
 }
 
 /**
@@ -620,11 +725,18 @@ export type GoogleThoughtText = "healed" | "verbatim";
  * blocks, opening a new block whenever the part kind changes. A part's
  * `thoughtSignature` stays on the block it belongs to; the empty text part
  * Gemini sends after a reply's last chunk signs the open block.
+ *
+ * {@link push} folds whole parts. A route that rewrites visible text before it
+ * lands (Gemini CLI's planning-leak buffer and markup healing) feeds the
+ * rewritten text through {@link appendText}/{@link appendThinking} and
+ * signature-only parts through {@link sign}, so block and signature placement
+ * live only here.
  */
 export class GoogleTextBlocks {
 	readonly #output: AssistantMessage;
 	readonly #stream: AssistantMessageEventStream;
 	readonly #thoughtText: GoogleThoughtText;
+	readonly #onBlockStart: (() => void) | undefined;
 	#block: TextContent | ThinkingContent | null = null;
 	#contentIndex = -1;
 	// Heals a leaked reasoning-fence opener (```thinking / ``````thinking) that some
@@ -632,10 +744,17 @@ export class GoogleTextBlocks {
 	// stripper per thinking block; created lazily on first thinking delta.
 	#thinkingStripper: ThinkingFenceStripper | null = null;
 
-	constructor(output: AssistantMessage, stream: AssistantMessageEventStream, thoughtText: GoogleThoughtText) {
+	/** `onBlockStart` runs before each `text_start`/`thinking_start`, e.g. to emit the stream's `start` first. */
+	constructor(
+		output: AssistantMessage,
+		stream: AssistantMessageEventStream,
+		thoughtText: GoogleThoughtText,
+		onBlockStart?: () => void,
+	) {
 		this.#output = output;
 		this.#stream = stream;
 		this.#thoughtText = thoughtText;
+		this.#onBlockStart = onBlockStart;
 	}
 
 	/** Folds one response part; parts without text are ignored. */
@@ -644,31 +763,39 @@ export class GoogleTextBlocks {
 		if (text === undefined) return;
 		const isThinking = isThinkingPart(part);
 		if (text === "") {
-			// A signature-only part: an unmarked one signs the open block (Gemini's
-			// trailing part after a reply), a thought part signs thinking of its own.
-			if (!thoughtSignature || part.functionCall) return;
-			const signed = isThinking && this.#block?.type !== "thinking" ? this.#open(true) : this.#block;
-			if (signed) this.#sign(signed, thoughtSignature);
+			if (thoughtSignature && !part.functionCall) this.sign(thoughtSignature, isThinking);
 			return;
 		}
-		const block =
-			this.#block && (this.#block.type === "thinking") === isThinking ? this.#block : this.#open(isThinking);
-		this.#sign(block, thoughtSignature);
-		if (block.type === "thinking") {
-			if (this.#thoughtText === "healed") this.#thinkingStripper ??= new ThinkingFenceStripper();
-			const delta = this.#thinkingStripper ? this.#thinkingStripper.push(text) : text;
-			if (!delta) return;
-			block.thinking += delta;
-			this.#stream.push({ type: "thinking_delta", contentIndex: this.#contentIndex, delta, partial: this.#output });
-		} else {
-			block.text += text;
-			this.#stream.push({
-				type: "text_delta",
-				contentIndex: this.#contentIndex,
-				delta: text,
-				partial: this.#output,
-			});
-		}
+		if (isThinking) this.appendThinking(text, thoughtSignature);
+		else this.appendText(text, thoughtSignature);
+	}
+
+	/**
+	 * Places a signature-only part's signature: an unmarked one signs the open block
+	 * (Gemini's trailing part after a reply), a thought part signs thinking of its own.
+	 */
+	sign(signature: string, isThought: boolean): void {
+		const signed = isThought && this.#block?.type !== "thinking" ? this.#open(true) : this.#block;
+		if (signed) this.#sign(signed, signature);
+	}
+
+	/** Appends reply text to the open text block, opening one if needed. */
+	appendText(text: string, signature?: string): void {
+		const block = this.#block?.type === "text" ? this.#block : this.#open(false);
+		this.#sign(block, signature);
+		block.text += text;
+		this.#stream.push({ type: "text_delta", contentIndex: this.#contentIndex, delta: text, partial: this.#output });
+	}
+
+	/** Appends thought text to the open thinking block, opening one if needed. */
+	appendThinking(text: string, signature?: string): void {
+		const block = this.#block?.type === "thinking" ? this.#block : this.#open(true);
+		this.#sign(block, signature);
+		if (this.#thoughtText === "healed") this.#thinkingStripper ??= new ThinkingFenceStripper();
+		const delta = this.#thinkingStripper ? this.#thinkingStripper.push(text) : text;
+		if (!delta) return;
+		block.thinking += delta;
+		this.#stream.push({ type: "thinking_delta", contentIndex: this.#contentIndex, delta, partial: this.#output });
 	}
 
 	/** Ends the open block, releasing thinking text the fence stripper held back. */
@@ -692,9 +819,12 @@ export class GoogleTextBlocks {
 		pushBlockEndEvent(block, this.#contentIndex, this.#output, this.#stream);
 	}
 
+	#open(isThinking: true): ThinkingContent;
+	#open(isThinking: false): TextContent;
+	#open(isThinking: boolean): TextContent | ThinkingContent;
 	#open(isThinking: boolean): TextContent | ThinkingContent {
 		this.close();
-		const block = startTextOrThinkingBlock(isThinking, this.#output, this.#stream);
+		const block = startTextOrThinkingBlock(isThinking, this.#output, this.#stream, this.#onBlockStart);
 		this.#block = block;
 		this.#contentIndex = this.#output.content.length - 1;
 		return block;
@@ -1067,7 +1197,8 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				headers: plan.headers,
 			};
 
-			const bodyJson = JSON.stringify(paramsToWireBody(params));
+			const wireBody = paramsToWireBody(params);
+			const bodyJson = JSON.stringify(wireBody);
 			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
 			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers
@@ -1077,19 +1208,33 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
-			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
-				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
-				// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
-				const init: RequestInit & { timeout: false } = {
-					method: "POST",
-					headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
-					body: bodyJson,
-					signal: watchdog.signal,
-					timeout: false,
-				};
+			// Each attempt arms its own pre-response watchdog, cleared once headers (or a finite
+			// error body) arrive: an absolute deadline would keep aborting an actively streaming
+			// body. Stream liveness belongs to the event iterator's idle watchdog.
+			const openStreamAt = async (
+				requestUrl: string,
+				requestBody: string,
+				maxAttempts: number,
+			): Promise<ReadableStream<Uint8Array>> => {
+				let clearWatchdog: (() => void) | undefined;
 				let response: Response;
 				try {
-					response = await fetchImpl(requestUrl, init);
+					response = await fetchWithRetry(requestUrl, {
+						method: "POST",
+						headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
+						body: requestBody,
+						signal: options?.signal,
+						prepareInit: () => {
+							clearWatchdog?.();
+							const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
+							clearWatchdog = watchdog.clear;
+							return { signal: watchdog.signal };
+						},
+						maxAttempts,
+						maxDelayMs: options?.maxRetryDelayMs,
+						fetch: fetchImpl,
+						timeout: false,
+					});
 					if (!response.ok) {
 						const errorText = await response.text().catch(() => "");
 						throw new AIError.GoogleApiError(
@@ -1099,10 +1244,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 						);
 					}
 				} finally {
-					// Cleared once headers (or a finite error body) arrive: an absolute
-					// deadline would keep aborting an actively streaming body. Stream
-					// liveness belongs to the event iterator's idle watchdog.
-					watchdog.clear();
+					clearWatchdog?.();
 				}
 				if (!response.body) {
 					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
@@ -1115,13 +1257,15 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			// A regional Vertex endpoint 404s for models published only on the
 			// global endpoint; retry global once so a stale/ambient region never
 			// breaks a request that worked before regional routing existed.
-			const openStream = async (): Promise<ReadableStream<Uint8Array>> => {
-				if (!plan.fallbackUrl) return openStreamAt(plan.url);
+			// The initial request makes one attempt (its caller owns retries); a continuation
+			// resume retries transient failures itself (`CONTINUATION_MAX_ATTEMPTS`).
+			const openStream = async (requestBody = bodyJson, maxAttempts = 1): Promise<ReadableStream<Uint8Array>> => {
+				if (!plan.fallbackUrl) return openStreamAt(plan.url, requestBody, maxAttempts);
 				try {
-					return await openStreamAt(plan.url);
+					return await openStreamAt(plan.url, requestBody, maxAttempts);
 				} catch (error) {
 					if (error instanceof AIError.GoogleApiError && error.status === 404) {
-						return openStreamAt(plan.fallbackUrl);
+						return openStreamAt(plan.fallbackUrl, requestBody, maxAttempts);
 					}
 					throw error;
 				}
@@ -1140,7 +1284,16 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			// text part and no tool call. Delivered as-is the agent receives a blank message and
 			// silently halts mid-task, so retry a bounded number of times before giving up.
 			for (let emptyAttempt = 0; ; emptyAttempt++) {
-				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver);
+				const googleStream = followGoogleContinuations(
+					readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver),
+					chunk => chunk,
+					async continuationToken =>
+						readSseJson<GenerateContentResponse>(
+							await openStream(JSON.stringify({ ...wireBody, continuationToken }), CONTINUATION_MAX_ATTEMPTS),
+							options?.signal,
+							sseObserver,
+						),
+				);
 				await consumeGoogleStream({
 					googleStream,
 					output,

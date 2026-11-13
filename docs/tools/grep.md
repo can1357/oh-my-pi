@@ -48,7 +48,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - `truncated` — any file/match/native/line/output limit was reached; `truncation` and `meta.truncation` describe final byte truncation by `truncateHead()`.
    - `displayContent` — TUI-only rendering text with `│` gutters instead of model anchors.
    - `missingPaths` — multi-path entries skipped because their base path did not exist.
-- No-match result text is `No matches found` (or `No more results (...)` when `skip` points past the last file page), optionally followed by skipped missing-path, unreadable-archive, or oversized-file notes.
+   - `binaryMatches` — cwd-relative paths of files skipped as binary during directory or glob scans although their content matches.
+- No-match result text is `No matches found` (`No matches in text files` when only skipped binary files match, `No matches in searched content` when a multiline search limited large files to their first 4MB, or `No more results (<total> files total; skip=<N> is past the end)` when `skip` points past the last file page), optionally followed by skipped missing-path, unreadable-archive, oversized-file, or binary-match notes. The binary-match note names up to five matching binary files. Matching results append the same notes in the closing trailer, and `grepToolRenderer` (`packages/tui/src/tools/grep.ts`) shows a `binary matches` count in both terminal (`renderResult`) and native Tern (`describeResult`) views.
 
 ## Flow
 
@@ -99,7 +100,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
 - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes, and names the rendered files the cap trimmed in a closing line placed past the byte cap (`More than 20 matches in a.ts; grep keeps the first 20 per file when searching several. Search one file alone for up to 200.`; a single file gets `More than 200 matches; …` with a line-range hint). The page label's total reads `N+` only when native grep stopped at `INTERNAL_TOTAL_CAP`, not when a per-file cap bit;
 - round-robins selected per-file matches so one file does not monopolize the page;
-- formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` for TUI;
+- sanitizes emitted match and context lines with `sanitizeText()` (`packages/utils/src/sanitize-text.ts`, stripping ANSI escapes, NUL, and other control characters), then formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` (`packages/tui/src/render/render-utils.ts`) for TUI;
 - in hashline mode, calls `getEditStore(session).recordSnapshotFile()` for each eligible rendered file to mint the `#TAG` anchor, then records emitted lines with `recordSeenLinesFromBody()`. Archive entries, immutable external materializations, and immutable URL schemes are skipped; a mutable file-backed URL (`local://`) is snapshotted against its backing host file (`resultSnapshotPath()`). Files too large or unreadable for snapshots fall back to plain line output.
 
 14. Final text is passed through `truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER })`, so the effective cap is the default byte cap from `packages/tui/src/tools/streaming-output.ts`, not the default line cap.
@@ -108,12 +109,13 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 ## Modes / Variants
 
 1. **Single file path**
-   - `grep()` searches one file.
+   - Native `grep()` searches one file as text, including files containing NUL bytes across buffered files, streamed oversized files, and multiline searches within the leading 4 MiB window (unless answered by an `ovnfs` daemon; see Notes).
    - Output is a flat list of match/context lines.
    - Visible limit is the first `200` matches after native matching and JS per-file capping.
 2. **Single directory path or single glob-like path**
    - `parseSearchPath()` may split the input into `path` + `glob`.
    - One native `grep()` scans the directory tree with `gitignore` and `hidden:true`.
+   - Binary detection skips files with a NUL byte in the first 64 KiB and stops scanning a file when a later reported match or context line contains a NUL (keeping earlier matches); skipped files whose content matches are listed in `details.binaryMatches`.
    - Results are grouped into a 20-file page; use `skip` with the next file offset shown in the limit message.
    - JS round-robins the selected files' matches.
 3. **Multiple explicit paths/globs**
@@ -183,3 +185,4 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `gitignore:false` only affects native directory traversal. It does not disable the tool's own path normalization or explicit-file handling.
 - When `path` resolves to multiple exact files, each target gets its own native fetch cap before JS grouping (`2000` ordinarily; enlarged for line-range filters).
 - The section tag in hashline mode is a four-hex opaque snapshot tag from the session snapshot store; `grep` records whole-file snapshots when possible and prints bare line numbers beneath the header.
+- When the `ovnfs` binary is found (`ovnfs.path`, default `ovnfs` on `PATH`) and a host directory or glob root lies inside a checkout mount served by its daemon (`packages/coding-agent/src/ovnfs/search.ts`), the daemon answers `grep` instead of `@oh-my-pi/pi-natives` (falling back to native search on daemon failure). Explicitly named files always use the native scanner, so they are searched as text. `DaemonGrepReply` has no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.

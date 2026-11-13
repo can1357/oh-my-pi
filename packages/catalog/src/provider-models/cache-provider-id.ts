@@ -36,6 +36,8 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// is authoritative, so a shared namespace would serve one workspace's ids,
 	// prices, and limits to another workspace's key for the full TTL.
 	otari: true,
+	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
+	litellm: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -194,18 +196,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
-			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
 			const timeoutMs = resolveLiteLLMDiscoveryTimeoutMs(options.discoveryTimeoutMs);
-			// rich-v14 fetches every /v2/model/info page rather than caching only
-			// its first 50 models. rich-v13 moves `mode: decisions` groups off chat.
-			// rich-v12 invalidates namespaced ids that missed bare catalog references.
-			// rich-v11 excluded ClinePass gateway metadata (issue #10932). rich-v10
-			// filtered known non-conversational LiteLLM modes, unioned compat across
-			// the management endpoints, and keyed the deployment's `supports_vision`
-			// declaration into it; earlier versions invalidated rows whose
-			// `compatConfig` retained a colliding bundled model's provider-specific
-			// transport (e.g. Fireworks `wireModelIdMode`) (issue #9938).
-			return `litellm:rich-v14:${Bun.hash(`${baseUrl}\u0000${timeoutMs}`).toString(36)}`;
+			// The selectable roster is issued per virtual key. Include the deadline
+			// so a longer budget retries metadata instead of reusing a timed-out cache.
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${timeoutMs}`;
+			return `litellm:scoped-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "gmi-cloud":
 		case "siliconflow":

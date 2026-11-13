@@ -215,6 +215,67 @@ describe("Spotlight recovery detection", () => {
 	});
 });
 
+describe("Spotlight list reads", () => {
+	/** A shaped `a.py;b.py` read: `a.py` 1-10 kept whole, `b.py` 1-50 with lines 20-40 hidden. */
+	function listRead(b: SpotlightSessionBuilder): string {
+		const [id] = b.request({ cacheRead: 10_000, calls: [{ name: "read", args: { path: "a.py;b.py" } }] });
+		b.result(id, {
+			text: "a.py\n…\nb.py\n… [20-40] (read artifact://0:30-50)",
+			shape: {
+				inTokens: 3000,
+				outTokens: 1000,
+				original: {
+					url: "artifact://0",
+					lines: 60,
+					kept: [
+						[1, 29],
+						[51, 60],
+					],
+					windows: [
+						{ at: 0, lines: 10, start: 1, path: "a.py" },
+						{ at: 10, lines: 50, start: 1, path: "b.py" },
+					],
+				},
+			},
+		});
+		return id;
+	}
+
+	it("recovers a list read's hidden window by a later read of that window's file only", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b);
+		call(b, "read", { path: "c.py:25-30" });
+		const later = call(b, "read", { path: "b.py:25-30" });
+		await write("list.jsonl", b);
+
+		const stats = await dashboard();
+		const row = stats.recent.find(r => r.toolCallId === list);
+		expect(row?.hiddenLines).toBe(21);
+		expect(row?.recoveries.map(r => [r.kind, r.toolCallId])).toEqual([["reread", later]]);
+		expect(stats.clawback.events).toBe(1);
+	});
+
+	it("records a later read of a list read's window at its position in the whole original", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b);
+		call(b, "read", { path: "b.py:25-30" });
+		await write("list-needs.jsonl", b);
+		await dashboard();
+
+		const db = await initDb();
+		const need = db
+			.query<{ file: string; reread: string }, [string]>(
+				"SELECT file, reread FROM spotlight_needs WHERE tool_call_id = ?",
+			)
+			.get(list);
+		// `a.py` was shown whole: only `b.py`, the window shaping cut, collects needs.
+		expect(need?.file).toBe(path.resolve("/repo", "b.py"));
+		expect(JSON.parse(need?.reread ?? "null")).toEqual([[35, 40]]);
+	});
+});
+
 describe("Spotlight holdout", () => {
 	it("never counts a held-out result as a saving but measures its fetch-backs like a cut's", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo", "holdout").marker();
@@ -246,6 +307,38 @@ describe("Spotlight holdout", () => {
 		expect(cell("holdout")).toMatchObject({ results: 1, sessions: 1, rate: { value: 1 } });
 		expect(stats.gaps.find(g => g.tool === "read" && g.gap === "2")).toMatchObject({ applied: 0, holdout: 1 });
 		expect(stats.overhead).toMatchObject({ results: 2, spotlightUsd: 0.003 });
+	});
+});
+
+describe("Spotlight overhead", () => {
+	it("breaks failed results down by cause, as shares of the results that called Spotlight", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo", "failures").marker();
+		b.user("go");
+		const failedBash = (shape: { failures: number; failureCauses?: Record<string, number> }) => {
+			const [id] = b.request({
+				cacheRead: 10_000,
+				cacheWrite: 500,
+				calls: [{ name: "bash", args: { command: "ls" } }],
+			});
+			b.result(id, { text: "ok", shape: { inTokens: 3000, outTokens: 3000, ...shape } });
+		};
+		failedBash({ failures: 2, failureCauses: { no_credential: 2 } });
+		failedBash({ failures: 1, failureCauses: { no_credential: 1 } });
+		failedBash({ failures: 2, failureCauses: { timeout: 1, rate_limited: 1 } });
+		// Journaled before pi recorded causes.
+		failedBash({ failures: 1 });
+		shortenedRead(b);
+		await write("failures.jsonl", b);
+
+		const { overhead } = await dashboard();
+
+		expect(overhead.failureRate).toBe(4 / 5);
+		expect(overhead.failureCauses).toEqual([
+			{ cause: "no_credential", results: 2, share: 2 / 5 },
+			{ cause: "rate_limited", results: 1, share: 1 / 5 },
+			{ cause: "timeout", results: 1, share: 1 / 5 },
+			{ cause: "unrecorded", results: 1, share: 1 / 5 },
+		]);
 	});
 });
 

@@ -218,7 +218,12 @@ fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 	}
 }
 
-fn output_metadata(file: &OpenFile) -> Option<Metadata> {
+/// The identity of the file behind a handle, when the handle names one.
+///
+/// The metadata is taken from the handle itself rather than from the path it
+/// was opened by, so two descriptors onto one file compare equal however they
+/// were reached.
+fn handle_metadata(file: &OpenFile) -> Option<Metadata> {
 	match file {
 		// `Metadata::from_file` keeps the handle identity a Windows path stat
 		// drops; without it `path_is_stdout` can never match on Windows.
@@ -237,6 +242,12 @@ impl StdoutFile {
 	/// Whether `path` on `fs` is this file.
 	pub async fn is(&self, fs: &pi_vfs::Fs, path: &Path) -> bool {
 		fs.metadata(path).await.is_ok_and(|candidate| self.0.same_file(&candidate))
+	}
+
+	/// Whether `candidate` — metadata read from an already-open handle — is
+	/// this file.
+	pub fn matches(&self, candidate: &Metadata) -> bool {
+		self.0.same_file(candidate)
 	}
 }
 
@@ -656,28 +667,14 @@ mod msys {
 		if text == "/dev/null" {
 			return Some(PathBuf::from("NUL"));
 		}
-		let rest = text.strip_prefix('/')?;
-		if let Some(native) = drive(rest) {
-			return Some(native);
+		if let Some((letter, tail)) = pi_vfs::msys_drive(text.as_bytes()) {
+			// `tail` is a suffix of `text` cut after an ASCII `/`.
+			let tail = std::str::from_utf8(tail).ok()?;
+			let mut native = format!("{}:\\", char::from(letter));
+			native.extend(tail.chars().map(|ch| if ch == '/' { '\\' } else { ch }));
+			return Some(PathBuf::from(native));
 		}
-		tmp(rest, temp_dir)
-	}
-
-	/// `c/x/y` or `mnt/c/x/y` (after the leading `/`) as `C:\\x\\y`.
-	fn drive(rest: &str) -> Option<PathBuf> {
-		let rest = match rest.get(..4) {
-			Some(prefix) if prefix.eq_ignore_ascii_case("mnt/") => &rest[4..],
-			_ => rest,
-		};
-		let mut chars = rest.chars();
-		let letter = chars.next().filter(char::is_ascii_alphabetic)?;
-		let tail = chars.as_str();
-		if !(tail.is_empty() || tail.starts_with('/')) {
-			return None;
-		}
-		let mut native = format!("{}:\\", letter.to_ascii_uppercase());
-		native.extend(tail.trim_start_matches('/').chars().map(|ch| if ch == '/' { '\\' } else { ch }));
-		Some(PathBuf::from(native))
+		tmp(text.strip_prefix('/')?, temp_dir)
 	}
 
 	/// `tmp/...` (after the leading `/`) under `temp_dir()`, after resolving
@@ -876,10 +873,40 @@ impl Host {
 	/// utility did not set [`Utility::CHECKS_STDOUT_PATH`].
 	pub fn stdout_file(&self) -> Option<StdoutFile> {
 		self.stdout_metadata
-			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
 			.as_ref()
 			.filter(|stdout| stdout.is_file())
 			.map(|stdout| StdoutFile(stdout.clone()))
+	}
+
+	/// Whether the file behind an already-opened handle is the regular file
+	/// currently backing stdout.
+	///
+	/// The handle counterpart of [`Host::path_is_stdout`]: GNU grep's guard
+	/// against reading the file it writes is `SAME_INODE (st, out_stat)` —
+	/// the same inode, not merely the same path — and `st` is what the
+	/// *opened* input descriptor reports, not what the path it was opened by
+	/// reports. Comparing the handle that was opened therefore cannot be
+	/// defeated by a path that is replaced, or a symlink that is retargeted,
+	/// between the check and the open.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn opened_is_stdout(&self, opened: &Metadata) -> bool {
+		self.stdout_file().is_some_and(|stdout| stdout.matches(opened))
+	}
+
+	/// Whether standard input is the regular file currently backing stdout.
+	///
+	/// GNU grep's guard against reading the file it writes is `SAME_INODE
+	/// (st, out_stat)` — the same inode, not merely the same path — so the
+	/// comparison is made between the two handles rather than between their
+	/// paths, and a shell redirection (`< file` with `>> file`) is caught
+	/// without ever opening the file again.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdin_is_stdout(&self) -> bool {
+		let Some(stdout) = self.stdout_file() else {
+			return false;
+		};
+		handle_metadata(self.stdin.file()).is_some_and(|stdin| stdout.matches(&stdin))
 	}
 
 	/// Looks up an exported shell variable.
@@ -1291,13 +1318,26 @@ impl RunningCommand {
 	}
 }
 
-/// A command line a utility asks its [`CommandRunner`] to run (`xargs`, `find
-/// -exec`, `env`, `ifne`): `argv[0]` names the builtin or program. Stdin
-/// defaults to the null device, as GNU `xargs` and `find -exec` give their
-/// children; stdout and stderr are the utility's own.
+/// A command a utility asks its [`CommandRunner`] to run, in one of two
+/// kinds:
+///
+/// - an argv ([`ShellCommand::new`]; `xargs`, `find -exec`, `env`, `ifne`):
+///   `argv[0]` names the builtin or program, which is looked up before it
+///   runs, so a missing one fails the request itself;
+/// - a command line ([`ShellCommand::line`]; `awk`'s `system()` and pipes):
+///   shell source the invoking shell parses and runs, like `sh -c` but in the
+///   shell itself. Nothing is looked up beforehand: a missing command is the
+///   shell's own diagnostic and status 127 from the run.
+///
+/// Either way, environment changes, [`ShellCommand::current_dir`] and
+/// [`ShellCommand::stdin`] apply the same way. Stdin defaults to the null
+/// device, as GNU `xargs` and `find -exec` give their children; stdout and
+/// stderr are the utility's own.
 pub struct ShellCommand {
 	argv:  Vec<OsString>,
 	argv0: Option<OsString>,
+	/// The source of a command-line command; `argv` is then empty.
+	line:  Option<OsString>,
 	cwd:   Option<PathBuf>,
 	stdin: Option<Fd>,
 	env:   Vec<EnvChange>,
@@ -1319,13 +1359,28 @@ impl ShellCommand {
 	/// A command running `argv`; `argv[0]` names the builtin or program.
 	#[must_use]
 	pub fn new(argv: Vec<OsString>) -> Self {
-		Self { argv, argv0: None, cwd: None, stdin: None, env: Vec::new() }
+		Self { argv, argv0: None, line: None, cwd: None, stdin: None, env: Vec::new() }
 	}
 
-	/// The command line; `argv[0]` names the builtin or program to look up.
+	/// A command line `source` for the invoking shell to parse and run in a
+	/// subshell of its own, with no positional parameters (`sh -c source`).
+	#[must_use]
+	pub fn line(source: impl Into<OsString>) -> Self {
+		Self { argv: Vec::new(), argv0: None, line: Some(source.into()), cwd: None, stdin: None, env: Vec::new() }
+	}
+
+	/// The argv; `argv[0]` names the builtin or program to look up. Empty for
+	/// a command line ([`ShellCommand::source`]).
 	#[must_use]
 	pub fn args(&self) -> &[OsString] {
 		&self.argv
+	}
+
+	/// The source of a command made by [`ShellCommand::line`]; `None` for an
+	/// argv command.
+	#[must_use]
+	pub fn source(&self) -> Option<&std::ffi::OsStr> {
+		self.line.as_deref()
 	}
 
 	/// The `argv[0]` presented to the command instead of the looked-up name
@@ -1471,8 +1526,10 @@ fn cancelled_command() -> io::Error {
 /// A command runs with the utility's stdout and stderr, its own
 /// [`ShellCommand::take_stdin`] (else the null device), in
 /// [`ShellCommand::dir`] (else the invocation's working directory), with
-/// [`ShellCommand::env_changes`] applied to that command only. Side effects on
-/// shell state (`cd`, assignments) must not reach the invoking shell.
+/// [`ShellCommand::env_changes`] applied to that command only. A command line
+/// ([`ShellCommand::source`]) is parsed and run by the shell itself, with no
+/// lookup first. Side effects on shell state (`cd`, assignments) must not
+/// reach the invoking shell.
 pub trait CommandRunner: Send {
 	/// Starts `command`, resolving with how it ended.
 	///
@@ -2348,7 +2405,7 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 /// All output the body left pending is delivered before the status is
 /// settled, so a closed reader still ends it with [`SIGPIPE_EXIT_CODE`]; a
 /// cancelled command delivers nothing more.
-async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
+pub(crate) async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 	let outcome = {
 		let body = AssertUnwindSafe(async { parsed.run(host).await }).catch_unwind();
 		let mut body = pin!(body);
@@ -2556,7 +2613,7 @@ pub(crate) const INTERRUPTED_EXIT_CODE: i32 = 130;
 /// Exit status of a process builtin given arguments it cannot parse.
 pub(crate) const INVALID_USAGE_EXIT_CODE: i32 = 2;
 
-/// A process builtin (`ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`): an
+/// A process builtin (`ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`, `lsof`): an
 /// async body that needs nothing of the shell beyond a [`ProcContext`].
 pub(crate) trait Process: clap::Parser + Send + Sync + 'static {
 	/// Whether the body resolves paths through [`ProcContext::paths`]; every
@@ -3074,6 +3131,39 @@ mod testing {
 		assert_eq!(host.resolve("/tmp/probe"), std::env::temp_dir().join("probe"));
 	}
 
+	/// Contract: the identity of the output file is decided on the handle that
+	/// was opened, not on the path it was opened by.
+	///
+	/// GNU grep's guard against reading the file it writes is `SAME_INODE
+	/// (st, out_stat)`, where `st` is what the opened input descriptor
+	/// reports. A path replaced — or a symlink retargeted — between the check
+	/// and the open must therefore not be able to hide that the handle that
+	/// was opened is the output file, so the two checks have to disagree in
+	/// exactly that case.
+	#[tokio::test]
+	async fn an_opened_handle_is_recognised_as_the_output_file_after_its_path_changes() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stdout file");
+		let (mut host, _capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdout(OpenFile::File(Arc::new(stdout)));
+		// A handle opened on the output file, while the path still names it.
+		let opened = std::fs::File::open(&path).expect("open output file");
+		let opened = pi_vfs::Metadata::from_file(&opened).expect("opened metadata");
+		// A second file, written while the first still exists so the two have
+		// distinct identities, then renamed over the first: the path now names
+		// a different file, while the handle still names the output.
+		let other = tree.path().join("other.txt");
+		std::fs::write(&other, "other\n").unwrap();
+		std::fs::rename(&other, &path).unwrap();
+		assert!(!host.path_is_stdout(&path).await, "the path no longer names the output file");
+		assert!(host.opened_is_stdout(&opened), "the handle still names the output file");
+	}
+
 	/// Parses `argv` and runs `U` against an in-memory host, mirroring what the
 	/// registered builtin does: `argv[0]` is the command name, clap failures are
 	/// reported the same way, and panics are contained.
@@ -3242,7 +3332,8 @@ mod testing {
 	/// command as an extra when one has its name, else as one of the shell
 	/// builtins `echo`, `true`, `false`, `pwd`, and `cd`, else as a program
 	/// found on its `PATH`, writing to the invoking utility's stdout and
-	/// stderr. Environment changes apply to that command only.
+	/// stderr; a command line runs as `sh -c <source>`. Environment changes
+	/// apply to that command only.
 	pub(crate) struct TestRunner {
 		env:    HashMap<String, String>,
 		cwd:    PathBuf,
@@ -3308,8 +3399,11 @@ mod testing {
 				};
 				Ok::<_, io::Error>((runner, stdin))
 			})();
-			let mut argv: Vec<String> =
-				command.args().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+			// Outside the engine, a command line runs as `sh -c <source>`.
+			let mut argv: Vec<String> = match command.source() {
+				Some(source) => vec!["sh".into(), "-c".into(), source.to_string_lossy().into_owned()],
+				None => command.args().iter().map(|arg| arg.to_string_lossy().into_owned()).collect(),
+			};
 			let name = argv.first().cloned().unwrap_or_default();
 			let argv0 = command.presented_argv0().map(|argv0| argv0.to_string_lossy().into_owned());
 			Box::pin(async move {

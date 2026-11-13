@@ -619,8 +619,8 @@ describe("devin native display filtering", () => {
 			config({ uid: "gpt-6-sol-high-priority" }),
 			config({ uid: "claude-opus-5-high" }),
 			config({ uid: "claude-opus-5-high-priority", disabled: true }),
-			config({ uid: "swe-1-6-fast" }),
-			config({ uid: "swe-1-6-priority" }),
+			config({ uid: "claude-opus-5-5-high-fast" }),
+			config({ uid: "claude-opus-5-5-high-priority" }),
 			config({ uid: "swe-2-high" }),
 			config({ uid: "kimi-k3", disabled: true }),
 			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
@@ -633,7 +633,7 @@ describe("devin native display filtering", () => {
 			}),
 			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
 			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
+			pairing("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high"),
 			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
 			pairing("fusion-sidekick-swe-2-high"),
 			pairing("fusion"),
@@ -652,7 +652,7 @@ describe("devin native display filtering", () => {
 		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
 		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
 		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
-		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
+		expect(wireId("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-5-high-fast");
 		// No live lead: the composite uid is unservable, so the pairing is not listed.
 		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
 		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
@@ -838,32 +838,27 @@ describe("devin server-declared family collapsing", () => {
 });
 
 describe("devin catalog seed", () => {
-	it("seeds both live SWE-1.6 lanes so the descriptor default resolves offline", () => {
+	it("seeds the live SWE-1.6 lane so the descriptor default resolves offline", () => {
 		const descriptor = providerEntry("devin");
 		expect(descriptor?.defaultModel).toBe("swe-1-6");
-		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
-		expect(seedModels("devin").some(model => model.id === descriptor?.defaultModel)).toBe(true);
+		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6"]);
 
-		const fast = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
-		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
-		expect(fast.contextWindow).toBe(200_000);
-		expect(fast.maxTokens).toBe(128_000);
-		expect(fast.compat.supportsParallelToolCalls).toBe(true);
+		const seeded = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
+		expect(seeded.contextWindow).toBe(200_000);
+		expect(seeded.maxTokens).toBe(128_000);
+		expect(seeded.compat.supportsParallelToolCalls).toBe(true);
 		// Image-blind lanes ship text-only (see DEVIN_IMAGE_BLIND_UIDS).
-		expect(fast.input).toEqual(["text"]);
+		expect(seeded.input).toEqual(["text"]);
 		// One wire uid per lane: Cascade encodes effort in the uid, so a seeded
 		// lane reasons without exposing a selectable ladder.
-		expect(fast.thinking).toBeUndefined();
-		expect(fast.reasoning).toBe(true);
+		expect(seeded.thinking).toBeUndefined();
+		expect(seeded.reasoning).toBe(true);
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
 		expect(devinModelManagerOptions().staticModels).toBe(seedModels("devin"));
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
-		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
-			"https://cascade.internal",
-			"https://cascade.internal",
-		]);
+		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual(["https://cascade.internal"]);
 	});
 
 	it("refetches a catalog cached before context windows came from modelInfo", async () => {

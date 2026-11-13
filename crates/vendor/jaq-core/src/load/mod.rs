@@ -1,43 +1,22 @@
-//! Combined file loading, lexing, and parsing for multiple modules.
+//! Combined file loading, lexing, and parsing for multiple modules,
+//! as jq's linker (`src/linker.c`) does it.
 
-#[cfg(feature = "arbitrary")]
-mod arbitrary;
+pub mod konst;
 pub mod lex;
 pub mod parse;
-mod prec_climb;
+mod tables;
 
-use crate::{ops, path};
-#[cfg(feature = "std")]
-use alloc::boxed::Box;
 use alloc::{string::String, vec::Vec};
+pub use konst::Const;
 pub use lex::Lexer;
-use lex::Token;
 pub use parse::Parser;
-use parse::{Def, Term};
-#[cfg(feature = "std")]
-use std::path::{Path, PathBuf};
+use parse::{Body, Def, Dep, Term};
 
 #[cfg(feature = "std")]
 extern crate std;
 
 /// Storage for loaded modules.
-///
-/// Once Rust has [internal references](https://smallcultfollowing.com/babysteps/blog/2024/06/02/the-borrow-checker-within/#step-4-internal-references),
-/// this should become unnecessary.
-/// I can't wait for it to happen!
 pub type Arena = typed_arena::Arena<String>;
-
-/// Combined file loader, lexer, and parser for multiple modules.
-pub struct Loader<S, P, R> {
-    #[allow(clippy::type_complexity)]
-    mods: Vec<(File<S, P>, Result<Module<S>, Error<S>>)>,
-    /// function to read module file contents from a path
-    read: R,
-    /// currently processed modules
-    ///
-    /// This is used to detect circular dependencies between modules.
-    open: Vec<P>,
-}
 
 /// Contents `C` and path `P` of a (module) file.
 ///
@@ -51,22 +30,19 @@ pub struct File<C, P> {
 }
 
 /// Information to resolve module/data imports.
-pub struct Import<'a, S, P> {
-    /// absolute path of the module where the import/include directive appears
-    ///
-    /// This is a path `P`, not a string `S`, because it usually does not appear in the source.
+pub struct Import<'a, P> {
+    /// path of the module where the import/include directive appears
     pub parent: &'a P,
+    /// whether the directive appears in the main program
+    pub main: bool,
     /// relative path of the imported/included module, as given in the source
-    pub path: &'a S,
+    pub path: &'a str,
     /// metadata attached to the import/include directive
-    pub meta: &'a Option<Term<S>>,
+    pub meta: &'a Option<Const>,
 }
 
 impl<C, P> File<C, P> {
     /// Apply a function to the contents of a file.
-    ///
-    /// This is useful to go from a reference `&str` to an owned `String`,
-    /// in order to save the `File` without its corresponding [`Arena`].
     pub fn map_code<C2>(self, f: impl Fn(C) -> C2) -> File<C2, P> {
         File {
             code: f(self.code),
@@ -83,33 +59,48 @@ impl<C, P> File<C, P> {
     }
 }
 
+/// Name of a module file as jq reports it, in `$__loc__` and in error messages.
+pub trait FileName {
+    /// The name.
+    fn file_name(&self) -> String;
+}
+
+#[cfg(feature = "std")]
+impl FileName for std::path::PathBuf {
+    fn file_name(&self) -> String {
+        self.to_string_lossy().into_owned()
+    }
+}
+
+impl FileName for () {
+    fn file_name(&self) -> String {
+        String::new()
+    }
+}
+
 /// Error occurring during loading of a single module.
 #[derive(Debug)]
 pub enum Error<S> {
-    /// input/output errors, for example when trying to load a module that does not exist
+    /// errors that jq reports without location, such as `module not found: x`;
+    /// the string is the location of the directive in the source
     Io(Vec<(S, String)>),
-    /// lex   errors, for example when loading a module `($) (`
-    Lex(Vec<lex::Error<S>>),
-    /// parse errors, for example when loading a module `(+) *`
-    Parse(Vec<parse::Error<S>>),
+    /// syntax errors and other errors that jq reports while parsing
+    Parse(Vec<parse::Error>),
 }
 
-type Vars<S> = Vec<(S, S, Option<Term<S>>)>;
+type Vars<S> = Vec<(String, S, Option<Const>)>;
 
 /// Module containing strings `S` and a body `B`.
 #[derive(Default)]
 pub struct Module<S, B = Vec<Def<S>>> {
-    /// metadata (optional)
-    #[allow(dead_code)]
-    meta: Option<Term<S>>,
-    /// included and imported modules
+    /// included and imported modules, in source order
     ///
     /// Suppose that we have [`Modules`] `mods` and the current [`Module`] is `mods[id]`.
-    /// Then for every `(id_, name)` in `mods[id].1.mods`, we have that
+    /// Then for every `(id_, name)` in `mods[id].mods`, we have that
     /// the included/imported module is stored in `mods[id_]` (`id_ < id`), and
     /// the module is included if `name` is `None` and imported if `name` is `Some(name)`.
     pub(crate) mods: Vec<(usize, Option<S>)>,
-    /// imported variables, storing path and name (always starts with `$`)
+    /// imported data, storing path, name (always starts with `$`), and metadata
     pub(crate) vars: Vars<S>,
     /// everything that comes after metadata and includes/imports
     pub(crate) body: B,
@@ -128,58 +119,30 @@ impl<S, P> Modules<S, P> {
     }
 }
 
-/// Errors occurring during loading of multiple modules.
-///
-/// For example, suppose that we have
-/// a file `l.jq` that yields a lex error,
-/// a file `p.jq` that yields a parse error, and
-/// a file `i.jq` that includes a non-existing module.
-/// If we then include all these files in our main program,
-/// [`Errors`] will contain each file with a different [`Error`].
+/// Errors occurring during loading of multiple modules, in the order jq reports them.
 pub type Errors<S, P, E = Error<S>> = Vec<(File<S, P>, E)>;
 
-impl<S: core::ops::Deref<Target = str>, B> parse::Module<S, B> {
-    fn map(
-        self,
-        mut f: impl FnMut(&S, Option<Term<S>>) -> Result<usize, String>,
-    ) -> Result<Module<S, B>, Error<S>> {
-        // the prelude module is included implicitly in every module (except itself)
-        let mut mods = Vec::from([(0, None)]);
-        let mut vars = Vec::new();
-        let mut errs = Vec::new();
-        for (path, as_, meta) in self.deps {
-            match as_ {
-                Some(x) if x.starts_with('$') => vars.push((path, x, meta)),
-                as_ => match f(&path, meta) {
-                    Ok(mid) => mods.push((mid, as_)),
-                    Err(e) => errs.push((path, e)),
-                },
-            }
-        }
-        if errs.is_empty() {
-            Ok(Module {
-                meta: self.meta,
-                mods,
-                vars,
-                body: self.body,
-            })
-        } else {
-            Err(Error::Io(errs))
-        }
-    }
-}
-
 type ReadResult<P> = Result<File<String, P>, String>;
-type ReadFn<P> = fn(Import<&str, P>) -> ReadResult<P>;
+type ReadFn<P> = fn(Import<P>) -> ReadResult<P>;
+
+/// Combined file loader, lexer, and parser for multiple modules.
+pub struct Loader<S, P, R> {
+    /// loaded modules, `None` if they failed to load
+    mods: Vec<(File<S, P>, Option<Module<S>>)>,
+    /// function to read module file contents
+    read: R,
+    /// modules whose dependencies are being processed, to detect cycles
+    open: Vec<P>,
+    /// implicit include of the main program, such as `~/.jq`
+    implicit: Option<Dep<S>>,
+    errs: Errors<S, P>,
+}
 
 impl<'s, P: Default> Loader<&'s str, P, ReadFn<P>> {
     /// Initialise the loader with prelude definitions.
     ///
     /// The prelude is a special module that is implicitly included by all other modules
     /// (including the main module).
-    /// That means that all filters defined in the prelude can be called from any module.
-    ///
-    /// The prelude is normally initialised with filters like `map` or `true`.
     pub fn new(prelude: impl IntoIterator<Item = Def<&'s str>>) -> Self {
         let defs = [Def::new("!empty", Vec::new(), Term::empty())];
 
@@ -189,119 +152,29 @@ impl<'s, P: Default> Loader<&'s str, P, ReadFn<P>> {
         };
 
         Self {
-            // the first module is reserved for the prelude
-            mods: Vec::from([(File::default(), Ok(prelude))]),
-            read: |_path| Err("module loading not supported".into()),
+            mods: Vec::from([(File::default(), Some(prelude))]),
+            read: |_| Err("module loading not supported".into()),
             open: Vec::new(),
+            implicit: None,
+            errs: Vec::new(),
         }
     }
 }
 
-#[cfg(feature = "std")]
-impl<S: PartialEq> Term<S> {
-    fn obj_key(&self, key: S) -> Option<&Self> {
-        if let Term::Obj(kvs) = self {
-            kvs.iter().find_map(|(k, v)| {
-                if *k.as_str()? == key {
-                    v.as_ref()
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        }
-    }
-
-    fn unconcat(&self) -> Box<dyn Iterator<Item = &Self> + '_> {
-        match self {
-            Self::BinOp(l, parse::BinaryOp::Comma, r) => Box::new(l.unconcat().chain(r.unconcat())),
-            _ => Box::new(core::iter::once(self)),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-fn expand_prefix(path: &Path, pre: &str, f: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
-    let rest = path.strip_prefix(pre).ok()?;
-    let mut replace = f()?;
-    replace.push(rest);
-    Some(replace)
-}
-
-#[cfg(feature = "std")]
-impl<'a> Import<'a, &'a str, PathBuf> {
-    fn meta_paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
-        let paths = self.meta.as_ref().and_then(|meta| {
-            let v = meta.obj_key("search")?;
-            let iter = if let Term::Arr(Some(a)) = v {
-                Box::new(a.unconcat().filter_map(|v| v.as_str()))
-            } else if let Some(s) = v.as_str() {
-                Box::new(core::iter::once(s))
-            } else {
-                Box::new(core::iter::empty()) as Box<dyn Iterator<Item = _>>
-            };
-            Some(iter.map(|s| Path::new(*s).to_path_buf()))
-        });
-        paths.into_iter().flatten()
-    }
-
-    /// Try to find a file with given extension in the given search paths.
-    pub fn find(self, paths: &[PathBuf], ext: &str) -> Result<PathBuf, String> {
-        let parent = Path::new(self.parent).parent().unwrap_or(Path::new("."));
-
-        let mut rel = Path::new(self.path).to_path_buf();
-        if !rel.is_relative() {
-            Err("non-relative path")?
-        }
-        rel.set_extension(ext);
-
-        #[cfg(target_os = "windows")]
-        let home = "USERPROFILE";
-        #[cfg(not(target_os = "windows"))]
-        let home = "HOME";
-
-        use std::env;
-        let home = || env::var_os(home).map(PathBuf::from);
-        let origin = || env::current_exe().ok()?.parent().map(PathBuf::from);
-        let expand = |path: &PathBuf| {
-            let home = expand_prefix(path, "~", home);
-            let orig = expand_prefix(path, "$ORIGIN", origin);
-            home.or(orig).unwrap_or_else(|| path.clone())
-        };
-
-        // search paths given in the metadata are relative to the parent file, whereas
-        // search paths given on the command-line (`paths`, via `-L`) are not
-        let meta = self.meta_paths().map(|p| parent.join(expand(&p)));
-        meta.chain(paths.iter().map(expand))
-            .map(|path| path.join(&rel))
-            .filter_map(|path| path.canonicalize().ok())
-            .find(|path| path.is_file())
-            .ok_or_else(|| "file not found".into())
-    }
-
-    fn read(self, paths: &[PathBuf], ext: &str) -> ReadResult<PathBuf> {
-        use alloc::string::ToString;
-        let path = self.find(paths, ext)?;
-        let code = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        Ok(File { code, path })
-    }
-}
-
-/// Apply function to path of every imported data file, accumulating errors.
+/// Apply function to every imported data file, accumulating errors.
 pub fn import<S: Copy, P: Clone>(
     mods: &Modules<S, P>,
-    mut f: impl FnMut(Import<S, P>) -> Result<(), String>,
+    mut f: impl FnMut(Import<P>) -> Result<(), String>,
 ) -> Result<(), Errors<S, P>> {
     let mut errs = Vec::new();
-    let mut vals = Vec::new();
+    let main = &mods.main.0 as *const File<S, P>;
     for (mod_file, vars) in mods.file_vars() {
         let mut mod_errs = Vec::new();
-        for (path, _name, meta) in vars {
+        for (path, name, meta) in vars {
             let parent = &mod_file.path;
-            match f(Import { parent, path, meta }) {
-                Ok(v) => vals.push(v),
-                Err(e) => mod_errs.push((*path, e)),
+            let import = Import { parent, main: core::ptr::eq(mod_file, main), path, meta };
+            if let Err(e) = f(import) {
+                mod_errs.push((*name, e));
             }
         }
         if !mod_errs.is_empty() {
@@ -313,104 +186,153 @@ pub fn import<S: Copy, P: Clone>(
 
 impl<S, P, R> Loader<S, P, R> {
     /// Provide a function to return the contents of included/imported module files.
-    ///
-    /// For every included/imported module, the loader will call this function to
-    /// obtain the contents of the module.
-    /// For example, if we have `include "foo"`, the loader calls `read("foo")`.
     pub fn with_read<R2>(self, read: R2) -> Loader<S, P, R2> {
-        let Self { mods, open, .. } = self;
-        Loader { mods, read, open }
+        let Self { mods, open, implicit, errs, .. } = self;
+        Loader { mods, read, open, implicit, errs }
     }
 }
 
-#[cfg(feature = "std")]
-impl<S, R> Loader<S, PathBuf, R> {
-    /// Read the contents of included/imported module files by performing file I/O.
-    pub fn with_std_read(
-        self,
-        paths: &[PathBuf],
-    ) -> Loader<S, PathBuf, impl FnMut(Import<&str, PathBuf>) -> ReadResult<PathBuf> + '_> {
-        self.with_read(|import: Import<&str, PathBuf>| import.read(paths, "jq"))
+impl<'s, P, R> Loader<&'s str, P, R> {
+    /// Include a module implicitly in the main program, before its own directives;
+    /// the metadata `{optional: true}` makes it fail silently.
+    pub fn with_implicit_include(self, path: &'s str, meta: Const) -> Self {
+        let dep = Dep { path: path.into(), path_span: &path[..0], name: None, meta: Some(meta) };
+        Self { implicit: Some(dep), ..self }
     }
 }
 
-impl<'s, P: Clone + Eq, R: FnMut(Import<&'s str, P>) -> ReadResult<P>> Loader<&'s str, P, R> {
+fn is_optional(meta: &Option<Const>) -> bool {
+    matches!(meta.as_ref().and_then(|m| m.get("optional")), Some(Const::Bool(true)))
+}
+
+impl<'s, P: Clone + Eq + FileName, R: FnMut(Import<P>) -> ReadResult<P>> Loader<&'s str, P, R> {
     /// Load a set of modules, starting from a given file.
     pub fn load(
         mut self,
         arena: &'s Arena,
         file: File<&'s str, P>,
     ) -> Result<Modules<&'s str, P>, Errors<&'s str, P>> {
-        let result = parse_main(file.code).and_then(|m| {
-            m.map(|path, meta| {
-                let (parent, meta) = (&file.path, &meta);
-                self.find(arena, Import { parent, path, meta })
-            })
-        });
-
-        let mut main = None;
-        let mut deps = Vec::new();
-        let mut errs = Vec::new();
-
-        match result {
-            Ok(m) => main = Some((file, m)),
-            Err(e) => errs.push((file, e)),
+        let m = match parse::parse_module(file.code, "<top-level>", false) {
+            Ok(m) => m,
+            Err(e) => return Err(Vec::from([(file, Error::Parse(e))])),
         };
-        for (file, result) in self.mods {
-            match result {
-                Ok(m) => deps.push((file, m)),
-                Err(e) => errs.push((file, e)),
-            }
-        }
-
+        let Body::Main(body) = m.body else {
+            let msg = "Top-level program not given (try \".\")";
+            return Err(Vec::from([(file, Error::Parse(Vec::from([(msg.into(), None)])))]));
+        };
+        let deps = self.implicit.take().into_iter().chain(m.deps).collect();
+        let main = self.deps(arena, &file, true, deps).map(|(mods, vars)| Module { mods, vars, body });
         match main {
-            Some(main) if errs.is_empty() => Ok(Modules { main, deps }),
-            _ => Err(errs),
+            Some(main) if self.errs.is_empty() => {
+                let deps = self.mods.into_iter().map(|(f, m)| (f, m.unwrap_or_default()));
+                Ok(Modules { deps: deps.collect(), main: (file, main) })
+            }
+            _ => Err(self.errs),
         }
     }
 
-    fn find(&mut self, arena: &'s Arena, import: Import<&'s str, P>) -> Result<usize, String> {
+    /// Process the dependencies of a module, as `process_dependencies`:
+    /// in reverse order, stopping at the first one that cannot be found.
+    #[allow(clippy::type_complexity)]
+    fn deps(
+        &mut self,
+        arena: &'s Arena,
+        file: &File<&'s str, P>,
+        main: bool,
+        deps: Vec<Dep<&'s str>>,
+    ) -> Option<(Vec<(usize, Option<&'s str>)>, Vars<&'s str>)> {
+        // the prelude module is included implicitly in every module
+        let mut mods = Vec::new();
+        let mut vars = Vec::new();
+        for dep in deps.into_iter().rev() {
+            match dep.name {
+                Some(x) if x.starts_with('$') => vars.push((dep.path, x, dep.meta)),
+                name => {
+                    let import = Import { parent: &file.path, main, path: &dep.path, meta: &dep.meta };
+                    match self.find(arena, import) {
+                        Ok(Some(mid)) => mods.push((mid, name)),
+                        Ok(None) => {}
+                        Err(e) if is_optional(&dep.meta) => drop(e),
+                        Err(e) => {
+                            let err = Error::Io(Vec::from([(dep.path_span, e)]));
+                            self.errs.push((file.clone(), err));
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        mods.push((0, None));
+        mods.reverse();
+        vars.reverse();
+        Some((mods, vars))
+    }
+
+    /// Load a module, returning its index if it loaded without errors.
+    fn find(&mut self, arena: &'s Arena, import: Import<P>) -> Result<Option<usize>, String> {
         let file = (self.read)(import)?;
 
-        let mut mods = self.mods.iter();
-        if let Some(id) = mods.position(|(file_, _)| file.path == file_.path) {
-            return Ok(id);
-        };
         if self.open.contains(&file.path) {
-            return Err("circular include/import".into());
+            return Err(alloc::format!("circular import of {}", file.path.file_name()));
+        }
+        if let Some(id) = self.mods.iter().position(|(file_, _)| file.path == file_.path) {
+            return Ok(self.mods[id].1.is_some().then_some(id));
         }
 
         let code = &**arena.alloc(file.code);
-        self.open.push(file.path.clone());
-        let defs = parse_defs(code).and_then(|m| {
-            m.map(|path, meta| {
-                let (parent, meta) = (&file.path, &meta);
-                self.find(arena, Import { parent, path, meta })
-            })
-        });
-        assert!(self.open.pop().as_ref() == Some(&file.path));
+        let file = File { path: file.path, code };
+        let fname = &**arena.alloc(file.path.file_name());
+        let m = match parse::parse_module(code, fname, false) {
+            Ok(m) => m,
+            Err(e) => {
+                self.errs.push((file, Error::Parse(e)));
+                return Ok(None);
+            }
+        };
+        let Body::Defs(body) = m.body else {
+            let msg = "jq: error: library should only have function definitions, not a main expression";
+            self.errs.push((file, Error::Parse(Vec::from([(msg.into(), None)]))));
+            return Ok(None);
+        };
 
+        // a module is stored after the modules it depends on, which are compiled first
+        self.open.push(file.path.clone());
+        let deps = self.deps(arena, &file, false, m.deps);
+        self.open.pop();
+        let module = deps.map(|(mods, vars)| Module { mods, vars, body });
+        let ok = module.is_some();
         let id = self.mods.len();
-        let path = file.path;
-        self.mods.push((File { path, code }, defs));
-        Ok(id)
+        self.mods.push((file, module));
+        Ok(ok.then_some(id))
     }
 }
 
-fn parse_main(code: &str) -> Result<parse::Module<&str, Term<&str>>, Error<&str>> {
-    let tokens = lex::Lexer::new(code).lex().map_err(Error::Lex)?;
-    let conv_err = |(expected, found)| (expected, Token::opt_as_str(found, code));
-    parse::Parser::new(&tokens)
-        .parse(|p| p.module(|p| p.term()))
-        .map_err(|e| Error::Parse(e.into_iter().map(conv_err).collect()))
+/// Metadata, imports, and definitions of a module, as jq's `modulemeta` reports them.
+#[derive(Debug)]
+pub struct ModuleMeta<'s> {
+    /// metadata object of the `module` directive
+    pub meta: Option<Const>,
+    /// imports and includes, in source order
+    pub deps: Vec<Dep<&'s str>>,
+    /// top-level definitions as `name/arity`, without duplicates, in order of definition
+    pub defs: Vec<String>,
 }
 
-fn parse_defs(code: &str) -> Result<parse::Module<&str, Vec<Def<&str>>>, Error<&str>> {
-    let tokens = lex::Lexer::new(code).lex().map_err(Error::Lex)?;
-    let conv_err = |(expected, found)| (expected, Token::opt_as_str(found, code));
-    parse::Parser::new(&tokens)
-        .parse(|p| p.module(|p| p.defs()))
-        .map_err(|e| Error::Parse(e.into_iter().map(conv_err).collect()))
+/// Parse a module to obtain what `modulemeta` reports, or jq's parse errors.
+pub fn module_meta<'s>(code: &'s str, fname: &'s str) -> Result<ModuleMeta<'s>, Vec<parse::Error>> {
+    let m = parse::parse_module(code, fname, false)?;
+    let Body::Defs(body) = m.body else {
+        let msg = "jq: error: library should only have function definitions, not a main expression";
+        return Err(Vec::from([(msg.into(), None)]));
+    };
+    let mut defs: Vec<String> = Vec::new();
+    for d in body {
+        let name = alloc::format!("{}/{}", d.name, d.args.len());
+        if !defs.contains(&name) {
+            defs.push(name);
+        }
+    }
+    Ok(ModuleMeta { meta: m.meta, deps: m.deps, defs })
 }
 
 /// Lex a string and parse resulting tokens, returning [`None`] if any error occurred.
@@ -425,7 +347,7 @@ pub fn parse<'s, T: Default, F>(s: &'s str, f: F) -> Option<T>
 where
     F: for<'t> FnOnce(&mut Parser<'s, 't>) -> parse::Result<'s, 't, T>,
 {
-    Parser::new(&Lexer::new(s).lex().ok()?).parse(f).ok()
+    Parser::new(s).parse(f).ok()
 }
 
 /// Return the span of a string slice `part` relative to a string slice `whole`.

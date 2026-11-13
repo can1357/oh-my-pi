@@ -118,7 +118,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "workers-ai-systemone" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -386,8 +386,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		/**
 		 * Deadline in milliseconds for this provider's *built-in* runtime model
 		 * discovery (honoured by `litellm`, whose rich metadata walk otherwise
-		 * gives up after 10 s and degrades every model to the `/v1/models`
-		 * fallback). Providers that configure `discovery:` themselves use
+		 * gives up after 10 s and leaves authorized models with only `/v1/models`
+		 * metadata). Providers that configure `discovery:` themselves use
 		 * `discovery.timeoutMs` instead.
 		 */
 		"discoveryTimeoutMs?": "number",

@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fsp from "node:fs/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { MAX_AUTO_REJOINS } from "@oh-my-pi/pi-wire";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
 	COLLAB_PROTO,
@@ -89,7 +90,7 @@ function makeState(): CollabSessionState {
 	};
 }
 
-async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
+async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }): Promise<GuestUiHarness> {
 	const roomId = "ui-request-room";
 	const roomKey = generateRoomKey();
 	const cryptoKey = await importRoomKey(roomKey);
@@ -101,6 +102,9 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 	const presentStub = (
 		fields: Omit<DialogStub, "aborted" | "whenAborted" | "settle">,
 	): Promise<string | undefined> => {
+		// A presenter that rejects is app-supplied code, the same way the socket's
+		// frame handler is, so what it rejects with is not this library's to assume.
+		if (opts && "rejectWith" in opts) return Promise.reject(opts.rejectWith);
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		const abortGate = Promise.withResolvers<void>();
 		let settled = false;
@@ -308,7 +312,7 @@ afterEach(async () => {
 	uninstallInMemoryRelay();
 });
 
-async function openHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
+async function openHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }): Promise<GuestUiHarness> {
 	const harness = await makeHarness(opts);
 	harnessCleanups.push(harness.cleanup);
 	return harness;
@@ -928,6 +932,94 @@ describe("guest ask room ownership", () => {
 			guest.socket.close();
 			await host.stop("test done");
 			await successor.stop("test done");
+		}
+	});
+});
+
+describe("collab TUI guest resync", () => {
+	it("re-sends hello when the host drops it, up to the rejoin cap", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		const scripted = h.hostSocket.onFrame;
+		h.hostSocket.onFrame = (frame, fromPeer) => {
+			if (frame.t === "hello") hellos++;
+			scripted?.(frame, fromPeer);
+		};
+		for (let i = 1; i <= MAX_AUTO_REJOINS; i++) {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === i, `guest never re-sent hello for resync ${i}`);
+			// The scripted host welcomes the hello; settle it before the next resync.
+			await h.barrier();
+		}
+		h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+		await h.barrier();
+		expect(hellos).toBe(MAX_AUTO_REJOINS);
+	});
+
+	it("says hello again when a rejoin's snapshot stops arriving", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		h.hostSocket.onFrame = frame => {
+			if (frame.t !== "hello") return;
+			hellos++;
+			// A welcome that promises entries, then nothing: the batch was cut off.
+			h.hostSocket.send({
+				t: "welcome",
+				proto: COLLAB_PROTO,
+				header: { type: "session", id: "remote-session", timestamp: "2026-06-30T00:00:00Z", cwd: "/tmp" },
+				state: makeState(),
+				agents: [],
+				entryCount: 2,
+			});
+		};
+		const timeouts: (() => void)[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+			fn: () => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			if (ms === 30_000) timeouts.push(fn);
+			return realSetTimeout(fn, ms, ...args);
+		}) as typeof setTimeout);
+		try {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === 1, "guest never re-sent hello for the resync");
+			await h.barrier();
+			// The welcome timer, then the snapshot-progress timer the welcome armed.
+			expect(timeouts).toHaveLength(2);
+			timeouts[1]!();
+			await waitFor(() => hellos === 2, "guest stayed frozen on a snapshot that never finished");
+		} finally {
+			timerSpy.mockRestore();
+		}
+	});
+
+	it("says hello again when a rejoin's welcome never arrives", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		// The host refuses the rejoin's welcome (a full send queue): it answers nothing.
+		h.hostSocket.onFrame = frame => {
+			if (frame.t === "hello") hellos++;
+		};
+		const welcomeTimeouts: (() => void)[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+			fn: () => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			if (ms === 30_000) welcomeTimeouts.push(fn);
+			return realSetTimeout(fn, ms, ...args);
+		}) as typeof setTimeout);
+		try {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === 1, "guest never re-sent hello for the resync");
+			expect(welcomeTimeouts).toHaveLength(1);
+			welcomeTimeouts[0]!();
+			await waitFor(() => hellos === 2, "guest stayed waiting on a welcome that never came");
+		} finally {
+			timerSpy.mockRestore();
 		}
 	});
 });

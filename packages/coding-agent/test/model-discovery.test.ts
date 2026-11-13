@@ -69,6 +69,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		resetSettingsForTest();
 		if (originalOllamaBaseUrl === undefined) {
 			delete Bun.env.OLLAMA_BASE_URL;
@@ -1306,6 +1307,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(shortBudget.find("litellm", "internal/slow-reasoner")?.reasoning).toBe(false);
 
 		const cachedFallback = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await cachedFallback.refreshProvider("litellm", "offline");
 		expect(cachedFallback.find("litellm", "internal/slow-reasoner")?.reasoning).toBe(false);
 
 		writeRawModelsJson({ litellm: { baseUrl, discoveryTimeoutMs: 30_000 } });
@@ -1317,6 +1319,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 		fetchMock.mockClear();
 		const cachedRich = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await cachedRich.refreshProvider("litellm", "offline");
 		expect(cachedRich.find("litellm", "internal/slow-reasoner")).toMatchObject({
 			reasoning: true,
 			contextWindow: 200_000,
@@ -1349,7 +1352,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test.each([undefined, 30_000])(
-		"the built-in LiteLLM budget covers enrichment, the full rich walk, and fallback with deadline %s",
+		"the built-in LiteLLM budget covers catalog lookup, authorized roster, and rich metadata with deadline %s",
 		async discoveryTimeoutMs => {
 			vi.useFakeTimers();
 			try {
@@ -1358,7 +1361,7 @@ describe("ModelRegistry runtime discovery", () => {
 				writeRawModelsJson({ litellm: { baseUrl, discoveryTimeoutMs } });
 				authStorage.keys.setRuntime("litellm", "sk-litellm-test");
 				let richSignal: AbortSignal | null | undefined;
-				let fallbackStarted = false;
+				let rosterStarted = false;
 				const fetchMock: FetchImpl = async (input, init) => {
 					const url = String(input);
 					if (url === "https://catalog.stencil.so/models.json.zstd") {
@@ -1372,9 +1375,9 @@ describe("ModelRegistry runtime discovery", () => {
 						return promise;
 					}
 					if (url === `${baseUrl}/models`) {
-						fallbackStarted = true;
+						rosterStarted = true;
 						await Bun.sleep(timeoutMs - 1);
-						return Response.json({ data: [{ id: "fallback-after-full-rich-budget" }] });
+						return Response.json({ data: [{ id: "roster-after-full-discovery-budget" }] });
 					}
 					return new Response("Not Found", { status: 404 });
 				};
@@ -1383,15 +1386,17 @@ describe("ModelRegistry runtime discovery", () => {
 				for (let turn = 0; turn < 100; turn++) await Promise.resolve();
 				vi.advanceTimersByTime(9_999);
 				for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+				expect(rosterStarted).toBe(true);
+				expect(richSignal).toBeUndefined();
+				vi.advanceTimersByTime(timeoutMs - 1);
+				for (let turn = 0; turn < 100; turn++) await Promise.resolve();
 				expect(richSignal).toBeInstanceOf(AbortSignal);
 				vi.advanceTimersByTime(timeoutMs);
 				for (let turn = 0; turn < 100; turn++) await Promise.resolve();
 				expect(richSignal?.aborted).toBe(true);
-				expect(fallbackStarted).toBe(true);
-				vi.advanceTimersByTime(timeoutMs - 1);
 				await refresh;
 
-				expect(registry.find("litellm", "fallback-after-full-rich-budget")?.reasoning).toBe(false);
+				expect(registry.find("litellm", "roster-after-full-discovery-budget")?.reasoning).toBe(false);
 				expect(registry.getProviderDiscoveryState("litellm")?.status).toBe("ok");
 			} finally {
 				vi.useRealTimers();
@@ -4356,10 +4361,14 @@ describe("ModelRegistry runtime discovery", () => {
 				supports_vision: false,
 			},
 		];
+		let scopedIds = ["keep-chat-a", "keep-chat-b"];
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
 			if (url === "https://catalog.stencil.so/models.json.zstd") {
 				return Response.json({});
+			}
+			if (url === "http://127.0.0.1:4007/v1/models") {
+				return Response.json({ data: scopedIds.map(id => ({ id })) });
 			}
 			if (url === "http://127.0.0.1:4007/model_group/info") {
 				return Response.json({ data: modelGroups });
@@ -4371,7 +4380,7 @@ describe("ModelRegistry runtime discovery", () => {
 			) {
 				return new Response("Not Found", { status: 404 });
 			}
-			throw new Error(`/v1/models must not reintroduce the excluded model: ${url}`);
+			throw new Error(`Unexpected URL: ${url}`);
 		};
 
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
@@ -4386,12 +4395,13 @@ describe("ModelRegistry runtime discovery", () => {
 		await registry.refreshProvider("litellm", "online");
 		expect(getModelsForProvider(registry, "litellm").map(model => model.id)).toEqual(["keep-chat-a"]);
 
+		scopedIds = ["keep-chat-a"];
 		modelGroups = [{ model_group: "keep-chat-a", mode: "embedding" }];
 		await registry.refreshProvider("litellm", "online");
 		expect(getModelsForProvider(registry, "litellm")).toEqual([]);
 	});
 
-	test("built-in litellm discovery timeout settles pending state", async () => {
+	test("built-in litellm discovery timeout reports unavailability without leaving discovery pending", async () => {
 		vi.useFakeTimers();
 		try {
 			writeRawModelsJson({
@@ -4405,7 +4415,6 @@ describe("ModelRegistry runtime discovery", () => {
 				fetch: () => Promise.withResolvers<Response>().promise,
 			});
 			expect(registry.find("litellm", "not-yet-discovered")).toBeUndefined();
-			expect(registry.isProviderDiscoveryPending("litellm")).toBe(true);
 
 			const refresh = registry.refreshProvider("litellm", "online");
 			for (let turn = 0; turn < 10; turn++) await Promise.resolve();

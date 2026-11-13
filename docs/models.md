@@ -243,10 +243,11 @@ override matching model tags. These fields do not configure the Anthropic Messag
 - `typesafe`
 - `openrouter-decisions`
 - `openai-decisions`
+- `google-decisions`
 - `workers-ai-systemone`
 
-`typesafe`, `openrouter-decisions`, `openai-decisions`, and `workers-ai-systemone` are judgment APIs, not chat transports: a model declared with one answers judgment requests and is selected by the `judge` model role. `typesafe` posts TypeSafe's System One body to `{baseUrl}/v1/systemone` (any System One server: TypeSafe, OpenJEV, Kev, self-hosted Clef); `openrouter-decisions` posts the same body to `{baseUrl}/decisions`; `openai-decisions` translates questions and answers to OpenAI's Decisions API at `{baseUrl}/decisions` (the bundled `openai/gpt-6-luna-decisions` row sends the wire model `gpt-6-luna`); `workers-ai-systemone` posts the System One body to Cloudflare Workers AI at `{baseUrl}/{model id}`, where `<account>` in the base URL is filled from the stored credential's account id or `CLOUDFLARE_ACCOUNT_ID`. Its `headers` carry gateway routing or custom authentication headers for that traffic.
-Judgment requests can share image attachments with vision-chat requests. Native OpenAI Decisions, TypeSafe Jev, OpenRouter Jev, and Workers AI judges, plus prompted vision-chat models, support images; text-only candidates are skipped for image requests. `Judge.supportsImages` identifies compatible candidates, and a judge chain with no image-capable model fails explicitly rather than dropping images. Prompted judgments normalize images for the selected candidate, including upscaling undersized rasters and converting WebP for models with STB-backed decoders; native judges continue to receive the original image bytes. When constructing a `NativeJudge` directly for System One, set `supportsImages: true`; `createNativeJudge` derives this flag from the catalog.
+`typesafe`, `openrouter-decisions`, `openai-decisions`, `google-decisions`, and `workers-ai-systemone` are judgment APIs, not chat transports: a model declared with one answers judgment requests and is selected by the `judge` model role. `typesafe` posts TypeSafe's System One body to `{baseUrl}/v1/systemone` (any System One server: TypeSafe, OpenJEV, Kev, self-hosted Clef); `openrouter-decisions` posts the same body to `{baseUrl}/decisions`; `openai-decisions` translates questions and answers to OpenAI's Decisions API at `{baseUrl}/decisions` (the bundled `openai/gpt-6-luna-decisions` row sends the wire model `gpt-6-luna`); `google-decisions` translates them to Google's Gemini Decisions API at `{baseUrl}/decisions` with the key in `x-goog-api-key` (the bundled `google/gemini-decision-1` row); `workers-ai-systemone` posts the System One body to Cloudflare Workers AI at `{baseUrl}/{model id}`, where `<account>` in the base URL is filled from the stored credential's account id or `CLOUDFLARE_ACCOUNT_ID`. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+Judgment requests can share image attachments with vision-chat requests. Native OpenAI Decisions, Gemini Decisions, TypeSafe Jev, OpenRouter Jev, and Workers AI judges, plus prompted vision-chat models, support images; text-only candidates are skipped for image requests. `Judge.supportsImages` identifies compatible candidates, and a judge chain with no image-capable model fails explicitly rather than dropping images. Prompted judgments normalize images for the selected candidate, including upscaling undersized rasters and converting WebP for models with STB-backed decoders; native judges continue to receive the original image bytes. When constructing a `NativeJudge` directly for System One, set `supportsImages: true`; `createNativeJudge` derives this flag from the catalog.
 
 Catalog-backed native judges apply the selected model's image bounds. Direct `NativeJudge` constructors can supply `imageInput` bounds explicitly; opting into images does not inherit Jev's size limits for unrelated System One models.
 
@@ -270,7 +271,7 @@ After image filtering, the same native-only tail policy used for text judgments 
 
 #### Jev images (experimental)
 
-Native image judgments for Jev are experimental. Direct TypeSafe Jev supports `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0` (the default `judge` role uses `typesafe/jev-1.14.0`; `jev-latest` is TypeSafe's stable alias, currently `jev-1.13.0`). OpenRouter supports `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest`.
+Native image judgments for Jev are experimental. Direct TypeSafe Jev supports `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0` (the default `judge` role uses `typesafe/jev-1.14.0`; `jev-latest` is TypeSafe's stable alias and has served `jev-1.14.0` since 2026-10-22). OpenRouter supports `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest`.
 
 Images join `state` without replacing it: an object root keeps its fields and gains them under a collision-safe `__omp_judgment_images` key (with a numeric suffix if the key is taken), an array root gains them at the end, and a string root becomes `[original, ...images]`. Direct TypeSafe requests add each image as a referenced `assets` entry and put its reference in `state`, setting `TypeSafe-Danger-Zone-Images: true` only when images are attached; caller-supplied assets (auth gateway) must each be referenced in `state`, `instructions`, or `criteria`, and each split request carries only the assets it references. OpenRouter encodes each image as an `image_url` data URL part and uses neither the TypeSafe header nor a top-level `images` field.
 
@@ -353,7 +354,6 @@ Must define at least one of:
 - `requestMetadata`
 - non-empty `modelOverrides`
 - `discovery`
-- `discoveryTimeoutMs`: optional positive finite deadline in milliseconds for built-in LiteLLM discovery. This differs from `discovery.timeoutMs`, which configures the custom discovery path. Omit it to keep the 10-second default.
 - `discoveryTimeoutMs`
 - `remoteCompaction`
 
@@ -362,7 +362,6 @@ Must define at least one of:
 - `discovery.timeoutMs` overrides that provider's runtime HTTP probe timeout in milliseconds. It must be a positive finite number.
 - `discoveryTimeoutMs` overrides the built-in manager deadline (currently `litellm`) in milliseconds. It must be a positive finite number. It does not apply to providers that set `discovery:`.
 - Without an override, Ollama and llama.cpp loopback probes use short endpoint-specific budgets (150–250 ms); remote/LAN probes use 10 s. Generic model-list and proxy probes default to 10 s.
-
 - `discovery` requires provider-level `api`, except `discovery.type: proxy` (per-model wire auto-detected).
 
 ### Remote compaction
@@ -606,11 +605,11 @@ When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth),
 - base URL: explicit provider `baseUrl` / `models.yml` config, otherwise `LITELLM_BASE_URL`, otherwise `http://localhost:4000/v1`
 - auth mode: `LITELLM_API_KEY` or stored LiteLLM auth when the proxy requires a key
 
-Runtime discovery probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. The configured key must be authorized to read at least one of these routes; on deployments that restrict management endpoints, grant the route through LiteLLM's `allowed_routes` access controls or use a master/admin key for discovery.
+Built-in runtime discovery first fetches the authenticated `/v1/models` roster, then probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. Management metadata only enriches authorized roster IDs. The configured key must be authorized to read at least one management route to obtain rich metadata; deployments that restrict these routes can grant access through LiteLLM's `allowed_routes` controls.
 
-If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
+If every metadata route is unavailable, built-in discovery keeps the authorized roster without rich metadata. If the roster request fails, discovery does not substitute a management endpoint's roster. Explicit `discovery.type: litellm` retains its management-first discovery and OpenAI-compatible `GET /models` fallback. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
 
-The rich-metadata walk and the `/v1/models` fallback each receive a 10 s deadline by default. A large proxy that streams `/model/info` for several seconds can miss that budget and cache every model as `reasoning: false` for the catalog TTL. Raise the built-in deadline with provider-level `discoveryTimeoutMs` without switching onto `discovery.type: litellm`:
+The authenticated `/v1/models` roster fetch and the rich-metadata walk each receive a 10 s deadline by default. A large proxy that streams `/model/info` for several seconds can miss that budget and cache every model as `reasoning: false` for the catalog TTL. Raise the built-in deadline with provider-level `discoveryTimeoutMs` without switching onto `discovery.type: litellm`:
 
 ```yaml
 providers:
@@ -619,8 +618,8 @@ providers:
     discoveryTimeoutMs: 30000
 ```
 
-The built-in refresh budget covers models.dev enrichment (up to 10 s), then the rich
-walk and fallback with the full configured deadline each, plus processing overhead.
+The built-in refresh budget covers models.dev enrichment (up to 10 s), then the authorized roster
+fetch and rich metadata walk with the full configured deadline each, plus processing overhead.
 Changing the deadline selects a separate cache namespace so a longer deadline can
 retry discovery instead of reusing rows cached after a shorter timeout.
 

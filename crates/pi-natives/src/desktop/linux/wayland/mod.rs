@@ -19,7 +19,7 @@ use crate::desktop::{
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
-	linux::ax::{AtSpiAx, AtSpiWindow, resolve_focus},
+	linux::ax::{self, AtSpiAx, AtSpiWindow, resolve_focus},
 	types::{
 		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
 	},
@@ -148,6 +148,9 @@ pub struct WaylandBackend {
 	/// own AT-SPI frames never count as the focused application window. On
 	/// Plasma it is `kwin_wayland_wrapper`, which owns no frames.
 	compositor_pid:    Option<u32>,
+	/// Bus names of the applications that did not answer the last window
+	/// listing, whose windows it therefore left out.
+	unanswered:        Vec<String>,
 }
 
 /// Reads the compositor's PID from the peer credentials of its Wayland socket.
@@ -192,6 +195,7 @@ impl WaylandBackend {
 			input_unavailable: OnceCell::new(),
 			displays: Vec::new(),
 			compositor_pid: compositor_pid(),
+			unanswered: Vec::new(),
 		}
 	}
 
@@ -240,8 +244,8 @@ impl WaylandBackend {
 		result
 	}
 
-	fn atspi_windows(&self) -> CoreResult<Vec<AtSpiWindow>> {
-		self
+	fn atspi_windows(&mut self) -> CoreResult<Vec<AtSpiWindow>> {
+		let listed = self
 			.ax
 			.as_ref()
 			.ok_or_else(|| {
@@ -250,7 +254,9 @@ impl WaylandBackend {
 					.clone()
 					.unwrap_or_else(DesktopError::ax_unsupported)
 			})?
-			.windows()
+			.windows()?;
+		self.unanswered = listed.unanswered;
+		Ok(listed.windows)
 	}
 }
 
@@ -278,6 +284,8 @@ impl Backend for WaylandBackend {
 			applications: crate::desktop::applications::supported(),
 			menus: self.ax.is_some(),
 			held_input: !input_unavailable,
+			secure_input: false,
+			secure_input_app: None,
 			spaces: false,
 			global_escape: false,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {
@@ -330,9 +338,23 @@ impl Backend for WaylandBackend {
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
 		let mut windows = self.atspi_windows()?;
 		if let Some(ax) = self.ax.as_ref() {
-			resolve_focus(&mut windows, self.compositor_pid, |window| ax.holds_focus(window));
+			resolve_focus(&mut windows, self.compositor_pid, !self.unanswered.is_empty(), |window| {
+				ax.holds_focus(window)
+			});
 		}
 		Ok(windows.into_iter().map(|entry| entry.window).collect())
+	}
+
+	fn missing_window(&self, target: &Target) -> Option<DesktopError> {
+		// Window ids are `atspi:{bus name}:{object path}`.
+		let skipped = match target {
+			Target::Window(id) => {
+				let bus = id.strip_prefix("atspi:")?.split_once(":/")?.0;
+				self.unanswered.iter().any(|name| name == bus)
+			},
+			Target::Desktop | Target::Display(_) => !self.unanswered.is_empty(),
+		};
+		skipped.then(ax::not_answering)
 	}
 
 	/// Reads the unresolved list. A native app's frame has no known position,
@@ -345,7 +367,11 @@ impl Backend for WaylandBackend {
 			.atspi_windows()?
 			.into_iter()
 			.find(|entry| entry.window.focused)
-			.ok_or_else(|| DesktopError::invalid_target("no focused Wayland window was found"))?;
+			.ok_or_else(|| {
+				self.missing_window(&Target::Desktop).unwrap_or_else(|| {
+					DesktopError::invalid_target("no focused Wayland window was found")
+				})
+			})?;
 		if !entry.position_known {
 			return Err(DesktopError::invalid_target(
 				"the focused Wayland surface has no known global position; cannot safely target \
@@ -385,7 +411,9 @@ impl Backend for WaylandBackend {
 						.into_iter()
 						.find(|entry| &entry.window.id == id)
 						.ok_or_else(|| {
-							DesktopError::window_not_found(format!("Wayland window {id} not found"))
+							self.missing_window(target).unwrap_or_else(|| {
+								DesktopError::window_not_found(format!("Wayland window {id} not found"))
+							})
 						})?;
 					let (x, y, width, height) = geometry.window_crop(&entry)?;
 					let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
@@ -516,11 +544,82 @@ mod tests {
 			input_unavailable: OnceCell::from(None),
 			displays:          Vec::new(),
 			compositor_pid:    None,
+			unanswered:        Vec::new(),
 		}
 	}
+	/// Holds `LIBEI_ENV_LOCK` with `LIBEI_SOCKET` set to a test's value (removed
+	/// for `None`) and puts the previous value back when dropped, also while a
+	/// failing test unwinds, so no later test sees a leaked value.
+	struct LibeiSocket {
+		previous: Option<std::ffi::OsString>,
+		_lock:    std::sync::MutexGuard<'static, ()>,
+	}
+
+	impl LibeiSocket {
+		fn set(value: Option<&std::ffi::OsStr>) -> Self {
+			let lock = LIBEI_ENV_LOCK
+				.lock()
+				.unwrap_or_else(std::sync::PoisonError::into_inner);
+			let previous = std::env::var_os("LIBEI_SOCKET");
+			// SAFETY: LIBEI_ENV_LOCK is held, and every test that writes
+			// LIBEI_SOCKET or asserts on what it reads takes it first; std
+			// serializes the other env reads.
+			unsafe {
+				match value {
+					Some(value) => std::env::set_var("LIBEI_SOCKET", value),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+			Self { previous, _lock: lock }
+		}
+	}
+
+	impl Drop for LibeiSocket {
+		fn drop(&mut self) {
+			// SAFETY: as in `set`; the lock field is released only after this
+			// body.
+			unsafe {
+				match self.previous.take() {
+					Some(previous) => std::env::set_var("LIBEI_SOCKET", previous),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn a_window_of_an_application_that_did_not_answer_reports_the_timeout() {
+		use crate::desktop::error::ErrorCode;
+		let code = |backend: &WaylandBackend, target: &str| {
+			backend
+				.missing_window(&Target::parse(target))
+				.map(|error| error.code)
+		};
+		let mut backend = backend_without_services();
+		backend.unanswered = vec![":1.8".to_owned()];
+		assert_eq!(
+			code(&backend, "atspi::1.8:/org/a11y/atspi/accessible/2"),
+			Some(ErrorCode::Timeout)
+		);
+		assert_eq!(code(&backend, "atspi::1.7:/org/a11y/atspi/accessible/2"), None);
+		assert_eq!(
+			backend
+				.missing_window(&Target::Desktop)
+				.map(|error| error.code),
+			Some(ErrorCode::Timeout)
+		);
+		backend.unanswered.clear();
+		assert_eq!(code(&backend, "atspi::1.8:/org/a11y/atspi/accessible/2"), None);
+		assert_eq!(
+			backend
+				.missing_window(&Target::Desktop)
+				.map(|error| error.code),
+			None
+		);
+	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
-		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
 		let socket = std::env::temp_dir().join(format!("omp-libei-test-{}", std::process::id()));
+		let _env = LibeiSocket::set(Some(socket.as_os_str()));
 		let _ = std::fs::remove_file(&socket);
 		let listener = UnixListener::bind(&socket).expect("bind fake libei socket");
 		listener
@@ -543,16 +642,9 @@ mod tests {
 				}
 			}
 		});
-		let previous = std::env::var_os("LIBEI_SOCKET");
-		unsafe { std::env::set_var("LIBEI_SOCKET", &socket) };
 		let mut backend = WaylandBackend::new(DisplaySelector::All);
 		action(&mut backend);
 		let _ = stop_tx.send(());
-		if let Some(previous) = previous {
-			unsafe { std::env::set_var("LIBEI_SOCKET", previous) };
-		} else {
-			unsafe { std::env::remove_var("LIBEI_SOCKET") };
-		}
 		let connected = accepted.join().expect("fake libei listener");
 		let _ = std::fs::remove_file(socket);
 		connected
@@ -568,21 +660,32 @@ mod tests {
 		assert_eq!(capabilities.input_permission, "prompt-or-granted");
 	}
 
+	/// Runs `action` with `LIBEI_SOCKET` unset, under the same lock as
+	/// `with_fake_libei`: `input_unavailable` reads the variable on every call,
+	/// so a fake socket from a test on another thread would otherwise report
+	/// input as reachable.
+	fn without_libei_socket(action: impl FnOnce()) {
+		let _env = LibeiSocket::set(None);
+		action();
+	}
+
 	#[test]
 	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
-		let mut backend = backend_without_services();
-		backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
-		let capabilities = backend.capabilities();
-		assert!(!capabilities.input);
-		assert!(!capabilities.held_input);
-		assert_eq!(capabilities.input_permission, "unavailable");
-		let source = control::CancellationSource::default();
-		let error = backend
-			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
-			.unwrap_err();
-		assert_eq!(error.code.as_str(), "PermissionDenied");
-		assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
-		assert!(backend.input.is_none());
+		without_libei_socket(|| {
+			let mut backend = backend_without_services();
+			backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+			let capabilities = backend.capabilities();
+			assert!(!capabilities.input);
+			assert!(!capabilities.held_input);
+			assert_eq!(capabilities.input_permission, "unavailable");
+			let source = control::CancellationSource::default();
+			let error = backend
+				.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
+				.unwrap_err();
+			assert_eq!(error.code.as_str(), "PermissionDenied");
+			assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
+			assert!(backend.input.is_none());
+		});
 	}
 
 	#[test]

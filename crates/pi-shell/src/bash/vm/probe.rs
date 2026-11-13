@@ -20,7 +20,7 @@ use crate::bash::{
 	diag,
 	event::WaitKey,
 	fd::FdRef,
-	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind},
+	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind, msys_drive_path},
 	host::Deadline,
 	ids::Platform,
 };
@@ -655,9 +655,15 @@ pub fn absolute(cwd: &[u8], name: &[u8]) -> BString {
 	)
 }
 
-/// [`absolute`] for the configured shell platform: the Windows drive and UNC
-/// rule stays testable on any host instead of compiling only on Windows.
+/// [`absolute`] for the configured shell platform: the Windows drive, UNC
+/// and MSYS drive-alias (`/c/x` → `C:/x`) rules stay testable on any host
+/// instead of compiling only on Windows.
 pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
+	if platform == Platform::Windows
+		&& let Some(native) = msys_drive_path(name)
+	{
+		return native;
+	}
 	if name.first() == Some(&b'/') || url_root_len(name).is_some() {
 		return name.into();
 	}
@@ -815,6 +821,11 @@ mod tests {
 			absolute_on(br"C:\project", br"\\server\share\app.exe", Platform::Windows),
 			br"\\server\share\app.exe".as_slice()
 		);
+		assert_eq!(
+			absolute_on(br"C:\project", b"/d/Tools/app.exe", Platform::Windows),
+			b"D:/Tools/app.exe".as_slice()
+		);
+		assert_eq!(absolute_on(b"/", b"/c/x", Platform::Linux), b"/c/x".as_slice());
 	}
 
 	#[test]

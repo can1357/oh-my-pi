@@ -4,6 +4,8 @@ import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/
 import type { EvalDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/types";
 
 let runtime: JsRuntime;
+const cellGlobals = ["found", "ompEchoItems", "ompA", "ompEchoParen", "ompEchoAfter", "await"];
+const savedCellGlobals = new Map(cellGlobals.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 
 function collect(): {
 	hooks: RuntimeHooks;
@@ -38,6 +40,10 @@ describe("JS console output", () => {
 
 	afterAll(() => {
 		runtime.dispose();
+		for (const [name, descriptor] of savedCellGlobals) {
+			if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+			else Reflect.deleteProperty(globalThis, name);
+		}
 	});
 
 	it("prints a long plain object as inspect text and a JSON view of that exact text", async () => {
@@ -94,6 +100,45 @@ describe("JS console output", () => {
 		runtime.echo(undefined, nothing.hooks);
 		expect(nothing.texts).toEqual([]);
 		expect(nothing.displays).toEqual([]);
+	});
+
+	it.each([
+		["a trailing assignment", "const found = [1, 2, 3]; globalThis.ompEchoItems = found;"],
+		["a trailing block statement", "if (true) { 42; }"],
+		["a destructuring assignment in its required parentheses", "let ompA; ({ a: ompA } = { a: 1, b: 2 });"],
+		["a trailing sequence of assignments", "globalThis.ompEchoItems = 1, globalThis.ompA = 2"],
+		["an expression followed by a declaration", "42; const ompEchoAfter = 1;"],
+		["an assigned promise", "globalThis.ompEchoItems = Promise.resolve(42)"],
+		["an async-wrapped assigned promise", "await 0; globalThis.ompEchoItems = Promise.resolve(42)"],
+	])("returns nothing for %s", async (_label, code) => {
+		const { hooks } = collect();
+		expect(await runtime.run(code, undefined, hooks)).toBeUndefined();
+	});
+
+	it("still returns a parenthesized assignment, a string-only cell and a top-level return before the end", async () => {
+		const { hooks } = collect();
+		expect(await runtime.run("(globalThis.ompEchoParen = 9)", undefined, hooks)).toBe(9);
+		expect(await runtime.run('"hello"', undefined, hooks)).toBe("hello");
+		expect(await runtime.run("(globalThis.ompEchoItems = 1, globalThis.ompA = 2)", undefined, hooks)).toBe(2);
+		expect(await runtime.run("globalThis.ompEchoItems = 1, 3", undefined, hooks)).toBe(3);
+		expect(await runtime.run("await 0; if (true) return 7; const ompEchoAfter = 1;", undefined, hooks)).toBe(7);
+	});
+
+	it("preserves the engine completion when parsing cannot classify a valid sloppy script", async () => {
+		const { hooks } = collect();
+		await runtime.run("globalThis.await = 2", undefined, hooks);
+		expect(await runtime.run("await", undefined, hooks)).toBe(2);
+	});
+
+	it.each(["", "await 0; "])("reports rejected assigned promises as run errors with prefix %j", async prefix => {
+		const { hooks } = collect();
+		await expect(
+			runtime.run(
+				`${prefix}globalThis.ompEchoItems = Promise.reject(new Error('assignment failed'))`,
+				undefined,
+				hooks,
+			),
+		).rejects.toThrow("assignment failed");
 	});
 
 	it("prints an image record as a placeholder and emits the image with its metadata", async () => {
