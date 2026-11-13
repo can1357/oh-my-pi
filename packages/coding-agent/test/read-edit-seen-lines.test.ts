@@ -125,3 +125,38 @@ describe("read → edit seen-line guard under a stale tag", () => {
 		expect(await Bun.file(file).text()).toBe(afterFirst.replace("line 3\n", "LINE THREE\n"));
 	});
 });
+
+// Regression (#19092): a change made outside the edit tool (formatter, build
+// step, another writer) dropped every line an earlier read had displayed, so an
+// unchanged line at its old number was rejected as never displayed.
+describe("read → outside change → partial read → edit", () => {
+	let cwd: string;
+	let file: string;
+	const LINES = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`);
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-outside-seen-"));
+		file = path.join(cwd, "f.txt");
+		await Bun.write(file, `${LINES.join("\n")}\n`);
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("keeps lines that kept their number and content seen", async () => {
+		const session = createSession(cwd);
+		const read = new ReadTool(session);
+		expect(textOutput(await read.execute("read-1", { path: "f.txt" }))).toContain("5:line 5");
+		const changed = `${LINES.join("\n")}\n`.replace("line 50\n", "line FIFTY\n");
+		await Bun.write(file, changed);
+		const header = textOutput(await read.execute("read-2", { path: "f.txt:48-52" })).split("\n")[0];
+
+		const result = await new EditTool(session, "hashline").execute("edit", {
+			input: `${header}\nPUT 5.=5:\n+line FIVE\n`,
+		});
+
+		expect(textOutput(result)).not.toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(changed.replace("line 5\n", "line FIVE\n"));
+	});
+});
