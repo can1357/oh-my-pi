@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
