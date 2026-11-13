@@ -264,10 +264,6 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 			quote(&mut source, &argv0);
 			source.extend_from_slice(b" -- \"$@\"");
 			args[0] = os_bytes(path.as_os_str());
-			// The engine reads a command name as a path only when it has a `/`.
-			if cfg!(windows) {
-				args[0] = args[0].replace(b"\\", b"/").into();
-			}
 		},
 	}
 	let mut script = Script::command(source);
