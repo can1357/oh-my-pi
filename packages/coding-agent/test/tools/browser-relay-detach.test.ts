@@ -699,7 +699,9 @@ describe("relay tabs Chrome detaches omp from", () => {
 			expect(getTab(name)).toBeDefined();
 			// An open of the same tab re-adopts it too, rather than reporting it reused with no worker driving it.
 			const reopened = String(
-				await invoke({ action: "open", app: "relay", target: "case=", timeout: 20 }).catch((error: unknown) => error),
+				await invoke({ action: "open", app: "relay", target: "case=", timeout: 20 }).catch(
+					(error: unknown) => error,
+				),
 			);
 			expect(reopened).toContain("Chrome still keeps omp out of tab");
 			expect(getTab(name)).toBeDefined();
