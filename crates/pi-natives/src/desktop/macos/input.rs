@@ -2231,9 +2231,16 @@ fn key_menu_guarded(
 	settle: impl FnOnce(&[u32]) -> CoreResult<ax::open_menu::Settled>,
 ) -> CoreResult<()> {
 	// A missing focus or unreadable role is not proof that no menu can open.
-	if !ax::open_menu::keys_may_open(keys, || {
-		background().then(|| role().unwrap_or_else(|| "AXPopUpButton".to_string()))
-	}) {
+	let mut unknown_role = false;
+	let may_open = ax::open_menu::keys_may_open(keys, || {
+		if !background() {
+			return None;
+		}
+		let role = role();
+		unknown_role = role.is_none();
+		role
+	});
+	if !may_open && !unknown_role {
 		return press();
 	}
 	let before = menus().ok_or_else(|| {
