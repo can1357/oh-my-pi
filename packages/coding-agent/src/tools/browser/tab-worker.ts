@@ -2171,6 +2171,12 @@ export class WorkerCore {
 			if ((await targetIdForTarget(target).catch(() => "")) !== targetId) continue;
 			return target;
 		}
+		// The omp relay withholds a tab Chrome refused to attach, and says why beside `Target.getTargetInfo`.
+		const browser = this.#browser;
+		const refusal = await Promise.try(() => browserConnection(browser).send("Target.getTargetInfo", { targetId }))
+			.then((result: unknown) => (isRecord(result) && typeof result.refusal === "string" ? result.refusal : undefined))
+			.catch(() => undefined);
+		if (refusal) throw new ToolError(`Chrome refused to attach to target ${targetId}: ${refusal}`);
 		// Puppeteer lists a page only once its URL is non-empty, and a crashed page revived by this attach reloads
 		// with an empty URL for a moment. Wait for it while Chromium still has the target; fail at once when not.
 		if (await this.#browserHasTarget(this.#browser, targetId)) {
