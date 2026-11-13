@@ -45,8 +45,11 @@ class ChromeBackedExtension {
 	readonly #inFlight = new Map<number, number>();
 	/** Resolved by the next forwarded command each one matches. */
 	readonly #sendWaiters = new Set<{ method: string; match: (params: unknown) => boolean; resolve: () => void }>();
-	/** Answer attaches with Chrome's refusal, as while a foreign extension frame is in the tab. */
-	refuseAttach = false;
+	/**
+	 * Answer attaches with this refusal of Chrome's: {@link FOREIGN_FRAME_REFUSAL} while another extension's frame is in
+	 * the tab.
+	 */
+	refuseAttach: string | undefined;
 
 	private constructor(
 		relay: WebSocket,
@@ -146,7 +149,7 @@ class ChromeBackedExtension {
 		const id = message.id;
 		switch (message.op) {
 			case "attach": {
-				if (this.refuseAttach) return this.#reply(id, { error: FOREIGN_FRAME_REFUSAL });
+				if (this.refuseAttach) return this.#reply(id, { error: this.refuseAttach });
 				const answer = await this.#chromeSend("Target.attachToTarget", { targetId: this.targetId, flatten: true })
 					.promise;
 				const result = answer.result;
@@ -421,7 +424,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 					(error: unknown) => ({ error }),
 				);
 				await requested.promise;
-				if (mode === "refused") ext.refuseAttach = true;
+				if (mode === "refused") ext.refuseAttach = FOREIGN_FRAME_REFUSAL;
 				const tab = getTab(name);
 				if (tab?.backend !== "worker") throw new Error("expected a worker tab");
 				const terminate = tab.worker.terminate.bind(tab.worker);
@@ -681,7 +684,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 		"keeps a tab Chrome refuses to re-adopt, and re-adopts it at a later call",
 		async () => {
 			const ext = await openRelayTab();
-			ext.refuseAttach = true;
+			ext.refuseAttach = FOREIGN_FRAME_REFUSAL;
 			const evaluating = ext.hanging();
 			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
 			await evaluating;
@@ -694,11 +697,60 @@ describe("relay tabs Chrome detaches omp from", () => {
 			const refused = String(await invoke(readMark).catch((error: unknown) => error));
 			expect(refused).toContain("Chrome still keeps omp out of tab");
 			expect(getTab(name)).toBeDefined();
+			// An open of the same tab re-adopts it too, rather than reporting it reused with no worker driving it.
+			const reopened = String(
+				await invoke({ action: "open", app: "relay", target: "case=", timeout: 20 }).catch((error: unknown) => error),
+			);
+			expect(reopened).toContain("Chrome still keeps omp out of tab");
+			expect(getTab(name)).toBeDefined();
 			// Once it is gone, the next call reattaches to the same page, its state intact, and says so.
-			ext.refuseAttach = false;
+			ext.refuseAttach = undefined;
 			const later = await invoke(readMark);
 			expect(later.value).toBe("kept");
 			expect(later.text).toContain("Chrome had kept omp out of this tab");
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE).each(["release", "release keeping the page"] as const)(
+		"lets go of a tab Chrome keeps omp out of (%s)",
+		async mode => {
+			const ext = await openRelayTab();
+			ext.refuseAttach = FOREIGN_FRAME_REFUSAL;
+			const evaluating = ext.hanging();
+			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+			await evaluating;
+			await ext.chromeDetach("target_closed");
+			expect(String(await stalled)).toContain("omp kept the tab open");
+			// No worker drives the held-out tab, so nothing waits for one to answer the release.
+			await releaseTab(name, mode === "release" ? {} : { keepPage: true });
+			expect(getTab(name)).toBeUndefined();
+			expect(page?.isClosed()).toBe(false);
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"still lets go of a tab Chrome refuses for any other reason, until its address changes",
+		async () => {
+			const ext = await openRelayTab();
+			ext.refuseAttach = "Another debugger is already attached to the tab with id: 1.";
+			const evaluating = ext.hanging();
+			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+			await evaluating;
+			await ext.chromeDetach("target_closed");
+			const failure = String(await stalled);
+			expect(failure).toContain("Chrome detached omp from this tab (target_closed) during this call");
+			expect(failure).toContain("could not reattach");
+			const later = String(await invoke(readMark).catch((error: unknown) => error));
+			expect(later).toContain("could not reattach");
+			expect(later).toContain("navigate it in Chrome first");
+			// The guidance holds: once the tab's URL changed, it opens again, page state intact.
+			ext.refuseAttach = undefined;
+			await page?.evaluate("location.hash = 'moved'");
+			ext.urlChanged(`${pageUrl}#moved`);
+			await invoke({ action: "open", app: "relay", target: "case=", timeout: 20 });
+			expect((await invoke(readMark)).value).toBe("kept");
 		},
 		60_000,
 	);
