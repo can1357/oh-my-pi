@@ -15,7 +15,7 @@ use xutf::graphemes_str;
 
 use super::{
 	super::{
-		ax::require_phone_screen as require_mirror_screen,
+		ax::{AxBounds, require_phone_screen as require_mirror_screen},
 		backend::{
 			DeliveryMode, ElementDelivery, ElementInput, KeyboardFocus, Modifiers, MouseButton,
 			PointerEvent,
@@ -2404,12 +2404,89 @@ fn background_gesture(
 			if path.len() < 2 {
 				return Err(DesktopError::input_failed("drag path must contain at least two points"));
 			}
+			// The control a left drag starts on, read before anything posts.
+			let tracked = matches!(button, MouseButton::Left)
+				.then(|| ax::drag_control::pressed_at(to, path[0].x, path[0].y))
+				.flatten()
+				.and_then(|pressed| pressed.control());
+			let (start, end) = (path[0], path[path.len() - 1]);
 			let proof =
 				prepare_press(source, pid, wid, window, button, &keys, entry_front, in_overlay, visit)?;
 			before_post()?;
 			let key_guard = || held_key_check(pid, wid, proof, &before_post);
 			let post = guarded_keys(post, &key_guard);
-			background_drag(source, to, to_wid, window, &path, button, &keys, &post)
+			background_drag(source, to, to_wid, window, &path, button, &keys, &post)?;
+			let Some((control, before)) = tracked else {
+				return Ok(());
+			};
+			let drag = TrackedDrag {
+				role: &control.role,
+				before,
+				range: control.range,
+				toward_max: control.toward_max(end.x - start.x, end.y - start.y),
+				moved: (end.x - start.x).hypot(end.y - start.y) >= 1.0,
+			};
+			let steppable = control.steps.zip(control.range);
+			match drag_check(&drag, !keys.is_empty(), steppable.is_some()) {
+				DragCheck::Done => Ok(()),
+				DragCheck::Confirm => {
+					tracked_drag_outcome(window, &drag, || control.value(), control::settle)
+				},
+				DragCheck::StepOn => {
+					let Some((frame, range)) = steppable else {
+						return Ok(());
+					};
+					let target = slider_value_at(frame, range, control.vertical, end);
+					let pressed = slider_value_at(frame, range, control.vertical, start);
+					let at = match after_web_drag(
+						before,
+						pressed,
+						target,
+						range,
+						|| control.value(),
+						control::settle,
+					) {
+						AfterWebDrag::Done => return Ok(()),
+						AfterWebDrag::Short(at) => at,
+						AfterWebDrag::Unsure => {
+							return Err(DesktopError::input_failed(format!(
+								"the drag reached window {} ({}), but its outcome could not be confirmed: \
+								 the {} it started on still reads {before} after the release, so no \
+								 change was observed, and it was not stepped on: that value is far from \
+								 the one under the point pressed, so the {} may run the other way. Read \
+								 the target before retrying; takeover (takeover: true) drags it with the \
+								 pointer",
+								window.id, window.app, control.role, control.role,
+							)));
+						},
+					};
+					// The drag went out: a refusal from here on says so.
+					let recheck = || {
+						control::check()?;
+						pointer_recheck(
+							(prepared, true),
+							entry_front,
+							(pid, wid, &window.app),
+							skylight::front_pid,
+							|| visit.happened(),
+						)
+						.map_err(sent_refusal)
+					};
+					step_slider(
+						window,
+						&control.role,
+						(at, target),
+						range,
+						recheck,
+						|up| {
+							control::intervention::check_press()?;
+							control.step(up)
+						},
+						|| control.value(),
+						control::settle,
+					)
+				},
+			}
 		},
 		PointerEvent::Hold { x, y, button, keys, duration } => {
 			let at = point(x, y)?;
@@ -2476,6 +2553,16 @@ const fn rechecks_report_sent(event: &PointerEvent) -> (bool, bool) {
 		PointerEvent::Click { button: MouseButton::Left, .. } => (true, true),
 		PointerEvent::Click { .. } => (false, true),
 		_ => (false, false),
+	}
+}
+
+/// A refusal from [`pointer_recheck`] once input went out:
+/// `BackgroundUnavailable` promises nothing was sent, so a takeover could rerun
+/// the call, and becomes `InputFailed`.
+fn sent_refusal(error: DesktopError) -> DesktopError {
+	match error.code {
+		ErrorCode::BackgroundUnavailable => DesktopError::input_failed(error.message),
+		_ => error,
 	}
 }
 
@@ -2869,6 +2956,320 @@ fn drag_session_outcome(
 		 the target before retrying, and prefer the app's menu command or ax actions",
 		window.id, window.app,
 	)))
+}
+
+/// A background drag that started on a control publishing its position
+/// ([`ax::drag_control::Control`]), as [`drag_check`] and
+/// [`tracked_drag_outcome`] judge it.
+struct TrackedDrag<'a> {
+	role:       &'a str,
+	/// The control's value before the press.
+	before:     f64,
+	/// Its `AXMinValue` and `AXMaxValue`, when it publishes both.
+	range:      Option<(f64, f64)>,
+	/// The path ends toward the control's maximum; `None` when which way it
+	/// pushes the control is not known.
+	toward_max: Option<bool>,
+	/// The path ends at least a pixel from where it started.
+	moved:      bool,
+}
+
+impl TrackedDrag<'_> {
+	/// The path pushes the control against the end of its range it already
+	/// sits at, so it cannot change; at either end when the direction is not
+	/// known.
+	fn pinned(&self) -> bool {
+		self.range.is_some_and(|(min, max)| match self.toward_max {
+			Some(true) => self.before >= max,
+			Some(false) => self.before <= min,
+			None => self.before <= min || self.before >= max,
+		})
+	}
+}
+
+/// What a left drag that started on a control publishing its position does
+/// after the release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragCheck {
+	/// The control could not move: done without a read, as on `main`.
+	Done,
+	/// Its value is read back ([`tracked_drag_outcome`]).
+	Confirm,
+	/// A slider a web page draws, which takes `AXIncrement` and `AXDecrement`
+	/// (`steppable`), with no key held: read back, and stepped on when the
+	/// page left it short ([`after_web_drag`], [`step_slider`]).
+	StepOn,
+}
+
+fn drag_check(drag: &TrackedDrag<'_>, keys_held: bool, steppable: bool) -> DragCheck {
+	if !drag.moved || drag.pinned() {
+		DragCheck::Done
+	} else if steppable && !keys_held {
+		DragCheck::StepOn
+	} else {
+		DragCheck::Confirm
+	}
+}
+
+/// How long a control's value may take to follow a drag, in reads
+/// `TRACKED_POLL` apart: a web page's control reaches accessibility only after
+/// its renderer handled the change.
+const TRACKED_POLLS: u32 = 15;
+const TRACKED_POLL: Duration = Duration::from_millis(40);
+/// The most steps [`step_slider`] takes: a 0-1000 range input with its
+/// default step of 1 needs 1000, and a burst of that many takes well under a
+/// second.
+const MAX_SLIDER_STEPS: u32 = 1000;
+
+/// [`background_drag`]'s verdict for a drag that started on a control which
+/// tracks it and publishes its position, from that position as `value` reads
+/// it after the release (`wait` paces the reads; the drag is out, so a cancel
+/// does not cut them short). The drag is done once the value differs from
+/// `drag.before`, or once the control is no longer readable. Otherwise the
+/// events were delivered and nothing moved: the call throws `InputFailed` with
+/// its outcome unconfirmed, as [`drag_session_outcome`] does, instead of
+/// returning as if the control had moved.
+fn tracked_drag_outcome(
+	window: &DesktopWindow,
+	drag: &TrackedDrag<'_>,
+	mut value: impl FnMut() -> Option<f64>,
+	mut wait: impl FnMut(Duration),
+) -> CoreResult<()> {
+	if !matches!(followed(drag.before, &mut value, &mut wait), Followed::Unchanged) {
+		return Ok(());
+	}
+	Err(DesktopError::input_failed(format!(
+		"the drag reached window {} ({}), but its outcome could not be confirmed: the {} it started \
+		 on still reads {} after the release, so no change was observed. Read the target before \
+		 retrying; a control that ignores a background drag takes one in takeover (takeover: true)",
+		window.id, window.app, drag.role, drag.before,
+	)))
+}
+
+/// What [`followed`] read of a control's value.
+enum Followed {
+	/// Every read still gave the value it started from.
+	Unchanged,
+	/// The control is no longer readable.
+	Gone,
+	/// It reads this new value.
+	Moved(f64),
+}
+
+/// Reads `value` until it differs from `before`, `TRACKED_POLL` apart.
+fn followed(
+	before: f64,
+	value: &mut impl FnMut() -> Option<f64>,
+	wait: &mut impl FnMut(Duration),
+) -> Followed {
+	for read in 0..TRACKED_POLLS {
+		if read > 0 {
+			wait(TRACKED_POLL);
+		}
+		match value() {
+			Some(after) if after == before => {},
+			Some(after) => return Followed::Moved(after),
+			None => return Followed::Gone,
+		}
+	}
+	Followed::Unchanged
+}
+
+/// The value a slider spanning `frame` with values `range` takes under
+/// point `at`, clamped to its ends; a vertical slider has its maximum at the
+/// top.
+fn slider_value_at(frame: AxBounds, (min, max): (f64, f64), vertical: bool, at: CGPoint) -> f64 {
+	let fraction = if vertical {
+		(frame.y + frame.height - at.y) / frame.height
+	} else {
+		(at.x - frame.x) / frame.width
+	};
+	let fraction = if fraction.is_finite() {
+		fraction.clamp(0.0, 1.0)
+	} else {
+		0.0
+	};
+	fraction.mul_add(max - min, min)
+}
+
+/// Where a slider a web page draws stands after a background drag, as
+/// [`after_web_drag`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AfterWebDrag {
+	/// The pointer moved it, or it is no longer readable: done.
+	Done,
+	/// The page left it short at this value: it is stepped on from there.
+	Short(f64),
+	/// The page took neither the press nor the moves, and the value it reads
+	/// is far from the one under the point pressed: the slider may run the
+	/// other way (right to left), so the value under the path's end is not
+	/// known.
+	Unsure,
+}
+
+/// After a background drag on a slider a web page draws, whether to step it
+/// on. A web page may take the press of a background drag and none of its
+/// moves (on macOS 26.5, an Electron range input stayed where it was in 20 of
+/// 20 such drags, each of which returned as done): the slider then still reads
+/// `before`, or reads about `pressed`, the value under the press, rather than
+/// near `target`, the value under the path's end. A value that changed is
+/// judged once it reads the same twice, so a page still applying the drag is
+/// not caught midway.
+fn after_web_drag(
+	before: f64,
+	pressed: f64,
+	target: f64,
+	(min, max): (f64, f64),
+	mut value: impl FnMut() -> Option<f64>,
+	mut wait: impl FnMut(Duration),
+) -> AfterWebDrag {
+	let mut at = match followed(before, &mut value, &mut wait) {
+		Followed::Gone => return AfterWebDrag::Done,
+		Followed::Unchanged if (pressed - before).abs() > (max - min) / 2.0 => {
+			return AfterWebDrag::Unsure;
+		},
+		Followed::Unchanged => return AfterWebDrag::Short(before),
+		Followed::Moved(at) => at,
+	};
+	for _ in 1..TRACKED_POLLS {
+		wait(TRACKED_POLL);
+		match value() {
+			None => return AfterWebDrag::Done,
+			Some(next) if next == at => break,
+			Some(next) => at = next,
+		}
+	}
+	if (at - target).abs() < (at - pressed).abs() {
+		AfterWebDrag::Done
+	} else {
+		AfterWebDrag::Short(at)
+	}
+}
+
+/// A slider a web page draws that a background drag left at `before`, short
+/// of `target`, stepped on with `AXIncrement` or `AXDecrement` (`step(up)`)
+/// to the step nearest `target`; the steps reach it in the background. The
+/// drag already went out, so `check` (run before the first step and before the
+/// rest) and the steps report a refusal or failure with the value the slider
+/// reads then. The first step is confirmed by `value` changing and gives the
+/// slider's step size; the rest go out together, since the page applies them
+/// in order, and the value is read until it settles. When the first step
+/// changes nothing, or the slider settles short of where the steps lead and
+/// not at the end of `range`, the call throws `InputFailed` instead of
+/// returning as if the slider had moved.
+fn step_slider(
+	window: &DesktopWindow,
+	role: &str,
+	(before, target): (f64, f64),
+	(min, max): (f64, f64),
+	mut check: impl FnMut() -> CoreResult<()>,
+	mut step: impl FnMut(bool) -> CoreResult<()>,
+	mut value: impl FnMut() -> Option<f64>,
+	mut wait: impl FnMut(Duration),
+) -> CoreResult<()> {
+	let up = target > before;
+	let action = if up { "AXIncrement" } else { "AXDecrement" };
+	if target == before {
+		return Ok(());
+	}
+	// A refusal that says nothing was sent, or a failed step, would hide that
+	// the drag and maybe some steps went out.
+	let stopped = |error: DesktopError, now: Option<f64>| match error.code {
+		ErrorCode::UserIntervened | ErrorCode::Cancelled | ErrorCode::InputFailed => error,
+		_ => DesktopError::input_failed(format!(
+			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
+			 {target}, the value under the path's end, and {action} steps on from there stopped: {}; \
+			 the {role} now reads {}. Read the target before retrying",
+			window.id,
+			window.app,
+			error.message,
+			now.map_or_else(|| "nothing".to_owned(), |now| now.to_string()),
+		)),
+	};
+	check().map_err(|error| stopped(error, value()))?;
+	step(up).map_err(|error| stopped(error, value()))?;
+	let first = match followed(before, &mut value, &mut wait) {
+		Followed::Unchanged => {
+			return Err(DesktopError::input_failed(format!(
+				"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} \
+				 it started on still reads {before} after the release and an {action} step, so no \
+				 change was observed. Read the target before retrying; takeover (takeover: true) \
+				 drags it with the pointer",
+				window.id, window.app,
+			)));
+		},
+		// No longer readable: nothing left to confirm.
+		Followed::Gone => return Ok(()),
+		Followed::Moved(first) => first,
+	};
+	let size = (first - before).abs();
+	let short = |at: f64| if up { at < target } else { at > target };
+	// The rest of the steps to the one nearest the target, at most
+	// `MAX_SLIDER_STEPS` in all.
+	let needed = if short(first) {
+		((target - first).abs() / size).round() as u32
+	} else {
+		0
+	};
+	let wanted = needed.min(MAX_SLIDER_STEPS - 1);
+	if wanted == 0 {
+		// One step past the target: step back when the start was nearer.
+		if !short(first) && (first - target).abs() > (before - target).abs() {
+			check().map_err(|error| stopped(error, value()))?;
+			step(!up).map_err(|error| stopped(error, value()))?;
+			followed(first, &mut value, &mut wait);
+		}
+		return Ok(());
+	}
+	check().map_err(|error| stopped(error, value()))?;
+	for _ in 0..wanted {
+		step(up).map_err(|error| stopped(error, value()))?;
+	}
+	let expected = f64::from(wanted).mul_add(if up { size } else { -size }, first);
+	let Some(settled) = settle(expected, size / 2.0, &mut value, &mut wait) else {
+		return Ok(());
+	};
+	let at_end = if up { settled >= max } else { settled <= min };
+	if (settled - expected).abs() > size / 2.0 && !at_end {
+		return Err(DesktopError::input_failed(format!(
+			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
+			 {target}, the value under the path's end, and {action} steps on from there stopped \
+			 short: the {role} went from {before} to {settled}, where the steps lead to {expected}. \
+			 Read the target before retrying; takeover (takeover: true) drags it with the pointer",
+			window.id, window.app,
+		)));
+	}
+	if wanted < needed && !at_end {
+		return Err(DesktopError::input_failed(format!(
+			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
+			 {target}, the value under the path's end, and {action} steps on from there stopped \
+			 after {MAX_SLIDER_STEPS} steps, the most one drag takes: the {role} went from {before} \
+			 to {settled}, short of {target}. Drag again from there, or drag it with the pointer in \
+			 takeover (takeover: true)",
+			window.id, window.app,
+		)));
+	}
+	Ok(())
+}
+
+/// Reads `value`, `TRACKED_POLL` apart, until it reads within `within` of
+/// `expected` or has read the same for `TRACKED_POLLS` reads in a row: `Some`
+/// with the last value, or `None` once it is no longer readable.
+fn settle(
+	expected: f64,
+	within: f64,
+	value: &mut impl FnMut() -> Option<f64>,
+	wait: &mut impl FnMut(Duration),
+) -> Option<f64> {
+	let mut last = value()?;
+	let mut same = 1;
+	while (last - expected).abs() > within && same < TRACKED_POLLS {
+		wait(TRACKED_POLL);
+		let next = value()?;
+		same = if next == last { same + 1 } else { 1 };
+		last = next;
+	}
+	Some(last)
 }
 
 /// A background press held for `duration` at `at` for window `wid` of `pid`,
@@ -8004,6 +8405,266 @@ mod tests {
 		.unwrap();
 		assert_eq!(entry, EntryFront(Some(9)));
 		assert_eq!(front_target(entry, Some(7), 7, || true), FrontTarget::CameForward);
+	}
+
+	#[test]
+	fn a_drag_on_a_control_publishing_its_position_is_judged_only_when_it_could_move() {
+		let drag = |role, before, toward_max, moved| TrackedDrag {
+			role,
+			before,
+			range: Some((0.0, 100.0)),
+			toward_max,
+			moved,
+		};
+		let slider = |before, toward_max| drag("AXSlider", before, Some(toward_max), true);
+		// A web slider with no key held is stepped on; with a key held, or any
+		// other control, its value is only read back.
+		assert_eq!(drag_check(&slider(0.0, true), false, true), DragCheck::StepOn);
+		assert_eq!(drag_check(&slider(0.0, true), true, true), DragCheck::Confirm);
+		assert_eq!(drag_check(&slider(0.0, true), false, false), DragCheck::Confirm);
+		// Pushed against the end it sits at, or not moved at all, a control
+		// cannot change: done without a read, as on main, web slider or not.
+		for steppable in [false, true] {
+			assert_eq!(drag_check(&slider(100.0, true), false, steppable), DragCheck::Done);
+			assert_eq!(drag_check(&slider(0.0, false), false, steppable), DragCheck::Done);
+			assert_eq!(
+				drag_check(&drag("AXSlider", 40.0, Some(true), false), false, steppable),
+				DragCheck::Done
+			);
+		}
+		// At the other end, a drag away from it should have moved it.
+		assert_eq!(drag_check(&slider(100.0, false), false, false), DragCheck::Confirm);
+		// A control whose direction is unknown (a splitter) is left alone at
+		// either end, and read back between them.
+		for before in [0.0, 100.0] {
+			assert_eq!(
+				drag_check(&drag("AXSplitter", before, None, true), false, false),
+				DragCheck::Done
+			);
+		}
+		assert_eq!(
+			drag_check(&drag("AXSplitter", 40.0, None, true), false, false),
+			DragCheck::Confirm
+		);
+	}
+
+	#[test]
+	fn a_drag_that_leaves_its_control_where_it_was_reports_no_change_observed() {
+		use std::cell::Cell;
+		let window = background_window("Electron");
+		let drag = |before| TrackedDrag {
+			role: "AXSlider",
+			before,
+			range: Some((0.0, 100.0)),
+			toward_max: Some(true),
+			moved: true,
+		};
+		// `reads` are the control's values after the release, in order; the
+		// last repeats. Returns the verdict and how many reads it took.
+		let run = |drag: &TrackedDrag<'_>, reads: &[Option<f64>]| {
+			let next = Cell::new(0);
+			let waits = Cell::new(0);
+			let outcome = tracked_drag_outcome(
+				&window,
+				drag,
+				|| {
+					let value = reads[next.get().min(reads.len() - 1)];
+					next.update(|v| v + 1);
+					value
+				},
+				|gap| {
+					assert_eq!(gap, TRACKED_POLL);
+					waits.update(|v| v + 1);
+				},
+			);
+			(outcome.map_err(|error| (error.code.as_str(), error.message)), next.get(), waits.get())
+		};
+		// The page took the press and none of the drag: the slider still reads
+		// 0 after every read, so the call says so instead of returning done.
+		let (outcome, reads, waits) = run(&drag(0.0), &[Some(0.0)]);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!(code, "InputFailed");
+		assert!(message.contains("could not be confirmed"), "{message}");
+		assert!(message.contains("no change was observed"), "{message}");
+		assert!(message.contains("before retrying"), "{message}");
+		assert!(message.contains("takeover"), "{message}");
+		assert_eq!((reads, waits), (TRACKED_POLLS as usize, TRACKED_POLLS - 1));
+		// A value that follows late is still seen, and a moved one at once.
+		assert_eq!(run(&drag(0.0), &[Some(0.0), Some(0.0), Some(74.0)]), (Ok(()), 3, 2));
+		assert_eq!(run(&drag(50.0), &[Some(20.0)]), (Ok(()), 1, 0));
+		// A control that is gone after the drag is not one seen unchanged.
+		assert_eq!(run(&drag(50.0), &[None]), (Ok(()), 1, 0));
+	}
+
+	#[test]
+	fn a_web_slider_the_pointer_left_short_is_stepped_on_from_where_it_stopped() {
+		use std::cell::Cell;
+		// `reads` are the slider's values after the release, in order; the
+		// last repeats. A drag from 2 (the press) toward 75 on a 0-100 slider
+		// at `before`; returns where it stands and how many reads it took.
+		let run = |before: f64, reads: &[Option<f64>]| {
+			let next = Cell::new(0);
+			let after = after_web_drag(
+				before,
+				2.0,
+				75.0,
+				(0.0, 100.0),
+				|| {
+					let value = reads[next.get().min(reads.len() - 1)];
+					next.update(|v| v + 1);
+					value
+				},
+				|_| {},
+			);
+			(after, next.get())
+		};
+		// The page took none of it: steps start where it was.
+		assert_eq!(run(0.0, &[Some(0.0)]), (AfterWebDrag::Short(0.0), TRACKED_POLLS as usize));
+		// It took the press and none of the moves: steps start from there,
+		// once the value holds.
+		assert_eq!(run(0.0, &[Some(0.0), Some(2.0)]), (AfterWebDrag::Short(2.0), 3));
+		// The pointer moved it, to the step nearest the end or past it: done,
+		// even when the first changed read caught it at the press.
+		assert_eq!(run(0.0, &[Some(75.0)]), (AfterWebDrag::Done, 2));
+		assert_eq!(run(0.0, &[Some(80.0)]), (AfterWebDrag::Done, 2));
+		assert_eq!(run(0.0, &[Some(2.0), Some(30.0), Some(75.0)]), (AfterWebDrag::Done, 4));
+		// A slider no longer readable has nothing left to step.
+		assert_eq!(run(0.0, &[None]), (AfterWebDrag::Done, 1));
+		assert_eq!(run(0.0, &[Some(2.0), None]), (AfterWebDrag::Done, 2));
+		// Unmoved and far from the value under the press (a slider that runs
+		// right to left, pressed on its thumb): not stepped.
+		assert_eq!(run(98.0, &[Some(98.0)]).0, AfterWebDrag::Unsure);
+	}
+
+	#[test]
+	fn a_drag_on_a_web_slider_steps_it_to_the_value_under_the_paths_end() {
+		use std::cell::{Cell, RefCell};
+		let frame = AxBounds { x: 26.0, y: 221.0, width: 400.0, height: 16.0 };
+		// The kit's drag ends three quarters along a 0-100 range input.
+		let end = CGPoint::new(26.0 + 300.0, 229.0);
+		assert_eq!(slider_value_at(frame, (0.0, 100.0), false, end), 75.0);
+		assert_eq!(slider_value_at(frame, (0.0, 100.0), false, CGPoint::new(900.0, 229.0)), 100.0);
+		let tall = AxBounds { x: 0.0, y: 100.0, width: 16.0, height: 200.0 };
+		assert_eq!(slider_value_at(tall, (0.0, 10.0), true, CGPoint::new(8.0, 150.0)), 7.5);
+		let window = background_window("Electron");
+		// A 0-100 slider of step `size` that moves no further up than `stops`
+		// (100: the end of its range); `refuse` names the check (counted from
+		// 1) that refuses and `fail` the step that fails. Returns the verdict,
+		// the final value and the steps taken.
+		let run_with =
+			|before: f64, target: f64, size: f64, stops: f64, refuse: usize, fail: usize| {
+				let at = Cell::new(before);
+				let steps = RefCell::new(Vec::new());
+				let checks = Cell::new(0);
+				let outcome = step_slider(
+					&window,
+					"AXSlider",
+					(before, target),
+					(0.0, 100.0),
+					|| {
+						checks.update(|v| v + 1);
+						if checks.get() == refuse {
+							Err(DesktopError::background_unavailable(
+								"the front application could not be identified; no further input was sent",
+							))
+						} else {
+							Ok(())
+						}
+					},
+					|up| {
+						if steps.borrow().len() + 1 == fail {
+							return Err(DesktopError::ax_failed("AX action 'AXIncrement' failed"));
+						}
+						steps.borrow_mut().push(up);
+						let next = at.get() + if up { size } else { -size };
+						at.set(next.clamp(0.0, stops.max(at.get())));
+						Ok(())
+					},
+					|| Some(at.get()),
+					|_| {},
+				);
+				(
+					outcome.map_err(|error| (error.code.as_str(), error.message)),
+					at.get(),
+					steps.into_inner(),
+				)
+			};
+		let run = |before, target, size, stops| run_with(before, target, size, stops, 0, 0);
+		let (outcome, value, steps) = run(0.0, 75.0, 1.0, 100.0);
+		assert_eq!((outcome, value, steps.len()), (Ok(()), 75.0, 75));
+		assert!(steps.iter().all(|&up| up));
+		// Down, and to the step nearest the target: 7 is nearer 7.4 than 10.
+		assert_eq!(run(50.0, 7.4, 1.0, 100.0).1, 7.0);
+		assert_eq!(run(0.0, 7.4, 5.0, 100.0), (Ok(()), 5.0, vec![true]));
+		// One step past the target is taken back when the start was nearer.
+		assert_eq!(run(0.0, 2.0, 5.0, 100.0), (Ok(()), 0.0, vec![true, false]));
+		// Steps that run into the end of the range are not a shortfall.
+		assert_eq!(run(97.0, 100.0, 2.0, 100.0), (Ok(()), 100.0, vec![true, true]));
+		// Already there: nothing is taken.
+		assert_eq!(run(40.0, 40.0, 1.0, 100.0), (Ok(()), 40.0, vec![]));
+		// A fractional step settles without waiting out every read.
+		assert_eq!(run(0.2, 0.5, 0.1, 100.0).0, Ok(()));
+		// A slider that takes no step is reported, not passed off as moved.
+		let (outcome, value, steps) = run(0.0, 75.0, 1.0, 0.0);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!(code, "InputFailed");
+		assert!(message.contains("could not be confirmed"), "{message}");
+		assert!(message.contains("no change was observed"), "{message}");
+		assert!(message.contains("takeover"), "{message}");
+		assert_eq!((value, steps), (0.0, vec![true]));
+		// One that stops partway says where it stopped.
+		let (outcome, value, _) = run(0.0, 75.0, 1.0, 30.0);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!((code, value), ("InputFailed", 30.0));
+		assert!(message.contains("stopped short"), "{message}");
+		assert!(message.contains("from 0 to 30, where the steps lead to 75"), "{message}");
+		// Past the most steps one drag takes, it says where it stopped.
+		let (outcome, value, steps) = run(0.0, 75.0, 0.01, 100.0);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!((code, steps.len()), ("InputFailed", MAX_SLIDER_STEPS as usize));
+		assert!(f64::from(MAX_SLIDER_STEPS).mul_add(-0.01, value).abs() < 1e-6, "{value}");
+		assert!(message.contains(&format!("stopped after {MAX_SLIDER_STEPS} steps")), "{message}");
+		assert!(message.contains("short of 75"), "{message}");
+		// The check before the rest refuses: the call says the drag and the
+		// first step went out and where the slider is, not that nothing did.
+		let (outcome, value, steps) = run_with(0.0, 75.0, 1.0, 100.0, 2, 0);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!((code, value, steps.len()), ("InputFailed", 1.0, 1));
+		assert!(message.contains("now reads 1"), "{message}");
+		// A step that fails partway says so too.
+		let (outcome, value, steps) = run_with(0.0, 75.0, 1.0, 100.0, 0, 3);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!((code, value, steps.len()), ("InputFailed", 2.0, 2));
+		assert!(message.contains("AXIncrement' failed"), "{message}");
+		assert!(message.contains("now reads 2"), "{message}");
+	}
+
+	#[test]
+	fn a_recheck_after_a_drag_went_out_does_not_say_nothing_was_sent() {
+		let error = pointer_recheck(
+			(false, true),
+			EntryFront(Some(9)),
+			(7, 59, "Electron"),
+			|| None,
+			|| false,
+		)
+		.map_err(sent_refusal)
+		.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(!error.message.contains("nothing was sent"), "{}", error.message);
+		assert!(error.message.contains("may already have landed"), "{}", error.message);
+		// The user at the target stays theirs: never rerun in takeover.
+		let error = pointer_recheck(
+			(false, true),
+			EntryFront(Some(9)),
+			(7, 59, "Electron"),
+			|| Some(7),
+			|| false,
+		)
+		.map_err(sent_refusal)
+		.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(!error.message.contains("nothing was sent"), "{}", error.message);
 	}
 
 	#[test]
