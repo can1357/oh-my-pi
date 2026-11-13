@@ -381,6 +381,53 @@ describe("Editor prediction", () => {
 		expect(accepted).toEqual([0, 1]);
 	});
 
+	it("inserts, opens, and picks a prediction with Right alone", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it", "show the diff"];
+
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("run the tests");
+		editor.handleInput("\x1b[C");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\x1b[C");
+
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("ship it");
+		expect(accepted).toEqual([0, 1]);
+
+		// Mid-line, Right stays cursor movement.
+		editor.handleInput("\x1b[D");
+		editor.handleInput("\x1b[D");
+		editor.handleInput("\x1b[C");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+	});
+
+	it("settles a held Right on the open list and sends the inserted line on Enter", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const submitted: string[] = [];
+		const accepted: number[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it"];
+
+		for (let i = 0; i < 6; i++) editor.handleInput("\x1b[C");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		expect(editor.getText()).toBe("run the tests");
+		editor.handleInput("\x1b[C");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		editor.handleInput("\r");
+
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(submitted).toEqual(["run the tests"]);
+		expect(accepted).toEqual([0]);
+	});
+
 	it("opens the list over an inserted prediction that prefixes a longer one instead of extending it", () => {
 		const editor = new Editor(defaultEditorTheme);
 		const accepted: number[] = [];
@@ -423,19 +470,27 @@ describe("Editor prediction", () => {
 		expect(editor.render(60).join("\n")).toContain(" and fix failures");
 	});
 
-	it("does not report an accept when the list picks the line already in the buffer", () => {
+	it("does not report an accept when the list keeps the line already in the buffer, and Enter sends it", () => {
 		const editor = new Editor(defaultEditorTheme);
+		const submitted: string[] = [];
 		const accepted: number[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
 		editor.onPredictionAccepted = index => accepted.push(index);
 		editor.predictions = () => ["run the tests", "ship it"];
 		for (const char of "ship it") editor.handleInput(char);
 
 		editor.handleInput("\t");
 		expect(editor.isAutocompleteActive()).toBeTrue();
-		editor.handleInput("\r");
-
+		editor.handleInput("\t");
 		expect(editor.isAutocompleteActive()).toBeFalse();
 		expect(editor.getText()).toBe("ship it");
+
+		editor.handleInput("\t");
+		editor.handleInput("\r");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(submitted).toEqual(["ship it"]);
 		expect(accepted).toEqual([]);
 	});
 

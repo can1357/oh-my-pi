@@ -961,7 +961,7 @@ export class Editor implements Component, Focusable {
 	 *  its end and no autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or
 	 *  Right inserts the rest without submitting. A buffer the user typed keeps the ghost even when it
 	 *  equals a shorter prediction; once Tab, Right, or the list has inserted one of two or more
-	 *  predictions, no ghost extends it to a longer one, and Tab instead opens a list of all of them
+	 *  predictions, no ghost extends it to a longer one, and Tab or Right instead opens a list of all of them
 	 *  that swaps the whole line, also without submitting. Each must be a single line. Re-evaluated on
 	 *  every render, so hosts can derive them from live state. */
 	predictions?: () => readonly string[] | undefined;
@@ -2137,6 +2137,20 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// A prediction list still selecting the line already in the buffer: Right keeps it open, so a held
+		// Right settles on the open list instead of toggling it, and Enter closes it and sends that line.
+		if (
+			this.#autocompleteState === "assist" &&
+			this.#textAssistReplacement?.prediction &&
+			this.#autocompleteList?.getSelectedItem()?.value === this.#textAssistReplacement.original
+		) {
+			if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) return;
+			if (kb.matchesCanonical(canonical, "tui.input.submit")) {
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
+			}
+		}
+
 		// Handle autocomplete special keys first (but don't block other input)
 		if (this.#autocompleteState && this.#autocompleteList) {
 			// Escape - cancel autocomplete. A hidden popup (empty narrowed `@` list) is
@@ -2501,7 +2515,13 @@ export class Editor implements Component, Focusable {
 			}
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) {
 			// Right walks over the ghost prediction or word completion as if it were typed: no trailing space.
-			if (this.#acceptPrediction() || this.#acceptWordCompletion({ space: false })) return;
+			// Over an inserted prediction it opens the alternatives like Tab, so Right alone can browse them.
+			if (
+				this.#acceptPrediction() ||
+				this.#acceptWordCompletion({ space: false }) ||
+				this.#showPredictionAlternatives()
+			)
+				return;
 			this.#moveCursor(0, 1);
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorLeft")) {
 			// Left
@@ -5501,9 +5521,9 @@ export class Editor implements Component, Focusable {
 		if (prediction) return prediction;
 		const alternatives = this.#getPredictionAlternatives();
 		if (alternatives) {
-			// Tab opens the alternatives list from here; without a bound key there is nothing to hint.
-			const tab = editorKey("tui.input.tab");
-			if (tab) return ` ${tab} ${alternatives.choices.length - 1} more`;
+			// Tab or Right opens the alternatives list from here; without a bound key there is nothing to hint.
+			const key = editorKey("tui.input.tab") || editorKey("tui.editor.cursorRight");
+			if (key) return ` ${key} ${alternatives.choices.length - 1} more`;
 		}
 		// Fall back to provider's getInlineHint
 		if (this.#autocompleteProvider?.getInlineHint) {
@@ -5528,7 +5548,7 @@ export class Editor implements Component, Focusable {
 	/**
 	 * The prediction painted as ghost text: the first one the single-line buffer is a strict prefix of,
 	 * with the cursor at its end and no autocomplete open. None while the buffer is a prediction insert
-	 * that equals one of two or more predictions, so Tab opens their list rather than extending to a
+	 * that equals one of two or more predictions, so Tab or Right opens their list rather than extending to a
 	 * longer one; a buffer the user typed keeps its ghost.
 	 */
 	#getShownPrediction(): { index: number; suffix: string } | null {
@@ -5547,7 +5567,7 @@ export class Editor implements Component, Focusable {
 	}
 	/**
 	 * Two or more predictions, and which one the single-line buffer equals with the cursor at its end:
-	 * Tab then opens the list of all of them.
+	 * Tab or Right then opens the list of all of them.
 	 */
 	#getPredictionAlternatives(): { choices: readonly string[]; index: number } | null {
 		if (this.#autocompleteState) return null;
