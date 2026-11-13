@@ -7,7 +7,7 @@
  * `InputController.handleImagePaste` then dumped the clipboard text — the
  * file path — verbatim into the editor instead of attaching the image, so
  * the user saw "text pasted, image lost". The terminal-mediated `Cmd+V` path
- * (bracketed paste → `extractBracketedImagePastePaths` → `handleFilePathPaste`)
+ * (bracketed paste → `extractBracketedImagePastePaths` → `handleImagePathPaste`)
  * already attached the image, which produced the asymmetric "for image I need
  * control+v which is very odd" symptom.
  *
@@ -141,7 +141,7 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		// Darwin) only surfaces plain text / RTF / EPS, so it returns empty.
 		// The Darwin-only `readMacFileUrls` AppleScript bridge reaches the
 		// file-URL representation and the controller MUST route it through
-		// `handleFilePathPaste` instead of bailing with "Clipboard is empty".
+		// `handleImagePathPaste` instead of bailing with "Clipboard is empty".
 		const { ctx, spies } = createCtx();
 		const readText = vi.fn(async () => ""); // pbpaste output
 		const readMacFileUrls = vi.fn(async () => [imgPath]);

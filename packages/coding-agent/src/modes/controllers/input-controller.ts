@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -15,7 +16,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -26,7 +27,7 @@ import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { extractImagePathFromText, isPreviewableAttachmentPath } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
@@ -59,6 +60,7 @@ import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import { resolveReadPath } from "../../tools/path-utils";
+import { buildTextOutput, MAX_AUTO_READ_TEXT_BYTES } from "../../utils/file-mentions";
 import { convertFileWithMarkit, isConvertibleDocumentPath } from "../../utils/markit";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
@@ -735,7 +737,7 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
 		);
 		this.ctx.editor.onPasteImage = () => this.handleImagePaste();
-		this.ctx.editor.onPasteFilePath = path => this.handleFilePathPaste(path);
+		this.ctx.editor.onPasteImagePath = path => this.handleImagePathPaste(path);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteTextRaw",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
@@ -2597,23 +2599,44 @@ export class InputController {
 	/**
 	 * Attach a pasted document path (pdf, docx, pptx, xlsx, epub) by converting it to markdown
 	 * through markit — the same converter behind the read tool — and staging the result as a
-	 * text-attachment chip wrapped in `<attachment>` tags (#9931). Conversion failures never
-	 * eat the paste: the literal path is pasted instead, with the reason in the status.
+	 * text-attachment chip wrapped in `<attachment>` tags (#9931). Bounded like `@`-mentions of
+	 * the same formats: files over {@link MAX_AUTO_READ_TEXT_BYTES} are not converted, and the
+	 * markdown is truncated through {@link buildTextOutput}. Every failure pastes the literal
+	 * path instead, with the reason in the status, so the paste is never lost.
 	 */
 	async #insertPendingDocument(pastedPath: string): Promise<void> {
 		const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd());
-		const result = await convertFileWithMarkit(absolutePath);
-		if (!result.ok) {
+		const name = path.basename(absolutePath);
+		const fail = (reason: string) => {
 			this.ctx.editor.pasteText(pastedPath);
 			this.ctx.ui.requestRender();
 			this.ctx.showStatus(
-				`Document paste failed: ${truncateToWidth(sanitizeText(result.error ?? "conversion failed"), TRUNCATE_LENGTHS.CONTENT)}`,
+				`Document paste failed: ${truncateToWidth(sanitizeText(reason), TRUNCATE_LENGTHS.CONTENT)}`,
 			);
+		};
+		let size: number;
+		try {
+			size = (await fs.stat(absolutePath)).size;
+		} catch (error) {
+			fail(isEnoent(error) ? `${name} not found` : error instanceof Error ? error.message : String(error));
 			return;
 		}
-		this.ctx.editor.insertTextAttachment(result.content, wrapPasteInAttachmentBlock(result.content));
+		if (size > MAX_AUTO_READ_TEXT_BYTES) {
+			fail(`${name} is ${formatBytes(size)}, over the ${formatBytes(MAX_AUTO_READ_TEXT_BYTES)} paste limit`);
+			return;
+		}
+		// Keys typed behind the paste wait for it; say why the prompt pauses.
+		this.ctx.showStatus(`Converting ${name}…`);
+		const result = await convertFileWithMarkit(absolutePath);
+		if (!result.ok || result.content.trim().length === 0) {
+			fail(result.error ?? "conversion produced no text");
+			return;
+		}
+		const { body, notice } = buildTextOutput(result.content);
+		const content = body + notice;
+		this.ctx.editor.insertTextAttachment(content, wrapPasteInAttachmentBlock(content));
 		this.ctx.ui.requestRender();
-		this.ctx.showStatus(`Attached ${path.basename(absolutePath)} as markdown text`);
+		this.ctx.showStatus(`Attached ${name} as markdown text`);
 	}
 
 	/**
@@ -2689,40 +2712,21 @@ export class InputController {
 		}
 	}
 
-	handleFilePathPaste(path: string): Promise<void> {
-		return this.#pasteImageIntoFocus(sink => this.#pasteFilePath(path, sink));
+	handleImagePathPaste(path: string): Promise<void> {
+		return this.#pasteImageIntoFocus(sink => this.#pasteImagePath(path, sink));
 	}
 
-	async #pasteFilePath(path: string, sink: ImagePasteSink): Promise<void> {
-		try {
-			if (isPreviewableAttachmentPath(path)) {
-				await this.#pastePreviewablePath(path, sink);
-				return;
-			}
-			if (isConvertibleDocumentPath(path)) {
-				if (!sink.attachDocument) {
-					// Image-only prompts keep the path as text, like other unattachable pastes.
-					sink.pasteText(path);
-					this.ctx.showStatus("Document paste is not supported in this prompt");
-					return;
-				}
+	async #pasteImagePath(path: string, sink: ImagePasteSink): Promise<void> {
+		if (isConvertibleDocumentPath(path)) {
+			if (sink.attachDocument) {
 				await sink.attachDocument(path);
 				return;
 			}
-			// Plain file path or directory: keep today's text-paste outcome.
+			// Image-only prompts keep the path as text, like an unsupported video paste.
 			sink.pasteText(path);
-		} catch (error) {
-			// A failed document conversion must never eat the paste (#9931).
-			sink.pasteText(path);
-			const message = error instanceof Error ? error.message : String(error);
-			this.ctx.showStatus(
-				`Document paste failed: ${truncateToWidth(sanitizeText(message), TRUNCATE_LENGTHS.CONTENT)}`,
-			);
+			this.ctx.showStatus("Document paste is not supported in this prompt");
+			return;
 		}
-	}
-
-	/** Image and video paths: the pre-#9931 attachment pipeline, unchanged. */
-	async #pastePreviewablePath(path: string, sink: ImagePasteSink): Promise<void> {
 		try {
 			if (isVideoPath(path)) {
 				if (sink.attachVideo) {
@@ -2827,7 +2831,7 @@ export class InputController {
 			// (Finder selections, certain screenshot tools) where
 			// `arboard::get_image()` returns `ContentNotAvailable` and
 			// `pbpaste` is empty. Every image-shaped path routes through
-			// {@link #pasteFilePath}, matching the bracketed-paste
+			// {@link #pasteImagePath}, matching the bracketed-paste
 			// handler in `CustomEditor.handleInput`; multi-image Finder
 			// selections must not silently drop after the first attach.
 			// `readMacFileUrls` returns an empty list off Darwin, so on every
@@ -2838,7 +2842,7 @@ export class InputController {
 			for (const url of fileUrls) {
 				const candidate = extractImagePathFromText(url);
 				if (!candidate) continue;
-				await this.#pasteFilePath(candidate, sink);
+				await this.#pasteImagePath(candidate, sink);
 				attachedFromFileUrls = true;
 			}
 			if (attachedFromFileUrls) return true;
@@ -2882,14 +2886,14 @@ export class InputController {
 				return false;
 			}
 			// #3506: when the clipboard text is an explicit image file path,
-			// route through {@link #pasteFilePath} so the image is
+			// route through {@link #pasteImagePath} so the image is
 			// loaded and attached instead of pasting the path as literal
 			// text. Covers terminals that paste the Finder file path as
 			// plain text rather than as a `public.file-url` (most macOS
 			// terminals do this for image clipboards).
 			const imagePath = textOnlyPrompt ? null : extractImagePathFromText(text);
 			if (imagePath) {
-				await this.#pasteFilePath(imagePath, sink);
+				await this.#pasteImagePath(imagePath, sink);
 				return true;
 			}
 			// Keep the initiating prompt as the only possible modal destination.

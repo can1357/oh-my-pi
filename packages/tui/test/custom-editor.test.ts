@@ -212,13 +212,13 @@ describe("CustomEditor bracketed path paste", () => {
 	it("inserts a relative .png API address as text instead of treating it as a local image", () => {
 		const { editor } = makeEditor();
 		const address = "api/file/icon/867d45144217eec6d3c5805fd5a2d548.png";
-		const onPasteFilePath = vi.fn();
-		editor.onPasteFilePath = onPasteFilePath;
+		const onPasteImagePath = vi.fn();
+		editor.onPasteImagePath = onPasteImagePath;
 
 		editor.handleInput(bracketedPaste(address));
 
 		expect(editor.getText()).toBe(address);
-		expect(onPasteFilePath).not.toHaveBeenCalled();
+		expect(onPasteImagePath).not.toHaveBeenCalled();
 		expect(extractImagePathFromText(address)).toBeUndefined();
 	});
 
@@ -241,7 +241,7 @@ describe("CustomEditor bracketed path paste", () => {
 		]) {
 			const { editor } = makeEditor();
 			const attached: string[] = [];
-			editor.onPasteFilePath = path => {
+			editor.onPasteImagePath = path => {
 				attached.push(path);
 			};
 
@@ -257,7 +257,7 @@ describe("CustomEditor bracketed path paste", () => {
 		const { editor } = makeEditor();
 		const video = "/Users/me/Movies/launch cut.mp4";
 		const pasted: string[] = [];
-		editor.onPasteFilePath = path => {
+		editor.onPasteImagePath = path => {
 			pasted.push(path);
 		};
 
@@ -272,26 +272,13 @@ describe("CustomEditor bracketed path paste", () => {
 		const { editor } = makeEditor();
 		const doc = "/tmp/reports/q3.pdf";
 		const pasted: string[] = [];
-		editor.onPasteFilePath = path => {
+		editor.onPasteImagePath = path => {
 			pasted.push(path);
 		};
 
 		editor.handleInput(bracketedPaste(doc));
 
 		expect(pasted).toEqual([doc]);
-		expect(editor.getText()).toBe("");
-	});
-
-	it("keeps a pasted directory path on the host hook route (#9931)", () => {
-		const { editor } = makeEditor();
-		const pasted: string[] = [];
-		editor.onPasteFilePath = path => {
-			pasted.push(path);
-		};
-
-		editor.handleInput(bracketedPaste("/tmp/projects"));
-
-		expect(pasted).toEqual(["/tmp/projects"]);
 		expect(editor.getText()).toBe("");
 	});
 
@@ -582,22 +569,40 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/report.csv"))).toBeUndefined();
 	});
 
-	it("hands a non-image explicit path to the host hook, and pastes it as text when no host is wired (#9931)", () => {
+	it("inserts non-image path pastes as literal text instead of attaching them", () => {
 		const { editor } = makeEditor();
-		const pasted: string[] = [];
-		editor.onPasteFilePath = path => {
-			pasted.push(path);
+		let imagePathCalls = 0;
+		editor.onPasteImagePath = () => {
+			imagePathCalls++;
 		};
 
 		editor.handleInput(bracketedPaste("/tmp/report.csv"));
 
-		expect(pasted).toEqual(["/tmp/report.csv"]);
-		expect(editor.getText()).toBe("");
+		expect(editor.getText()).toBe("/tmp/report.csv");
+		expect(imagePathCalls).toBe(0);
+	});
 
-		// Without a host hook the paste must not vanish.
-		const orphan = makeEditor();
-		orphan.editor.handleInput(bracketedPaste("/tmp/report.csv"));
-		expect(orphan.editor.getText()).toBe("/tmp/report.csv");
+	it("pastes unattachable path payloads byte-identical, never normalized (#9931 review)", () => {
+		for (const payload of [
+			String.raw`/Users/me/My\ Docs/a.txt`,
+			"'/tmp/my file.txt'",
+			"/etc/hosts\n/etc/passwd",
+			"file:///tmp/x.md",
+			"/tmp/projects",
+			// One attachable and one plain path: a mixed drop stays text, as on main.
+			"/tmp/report.pdf /tmp/notes.txt",
+		]) {
+			const { editor } = makeEditor();
+			const pasted: string[] = [];
+			editor.onPasteImagePath = path => {
+				pasted.push(path);
+			};
+
+			editor.handleInput(bracketedPaste(payload));
+
+			expect(pasted).toEqual([]);
+			expect(editor.getText()).toBe(payload);
+		}
 	});
 
 	it("attaches a spaced screenshot path as an image instead of inserting it as literal text", () => {
@@ -607,7 +612,7 @@ describe("CustomEditor bracketed path paste", () => {
 		const { editor } = makeEditor();
 		const screenshot = "/Users/me/Desktop/Screenshot 2026-07-24 at 1.55.12 PM.png";
 		const pasted: string[] = [];
-		editor.onPasteFilePath = path => {
+		editor.onPasteImagePath = path => {
 			pasted.push(path);
 		};
 
@@ -621,13 +626,13 @@ describe("CustomEditor bracketed path paste", () => {
 		// PR #6582 review: selecting two screenshots and dropping them together
 		// emits a single space-separated payload the splitter also refuses
 		// (`PM.png` carries no directory). Fusing it into one path attaches
-		// nothing — `handleFilePathPaste` hits ENOENT and only shows a status,
+		// nothing — `handleImagePathPaste` hits ENOENT and only shows a status,
 		// never restoring the text — so the drop must degrade to a text paste.
 		const { editor } = makeEditor();
 		const dropped =
 			"/Users/me/Desktop/Screenshot 2026-07-24 at 1.55.12 PM.png /Users/me/Desktop/Screenshot 2026-07-24 at 1.56.00 PM.png";
 		const pasted: string[] = [];
-		editor.onPasteFilePath = path => {
+		editor.onPasteImagePath = path => {
 			pasted.push(path);
 		};
 

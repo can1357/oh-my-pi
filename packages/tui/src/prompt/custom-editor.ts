@@ -241,9 +241,15 @@ function isExplicitPastedPath(path: string): boolean {
 }
 
 /** A pasted local image or video can become a vision-ready image attachment. */
-export function isPreviewableAttachmentPath(path: string): boolean {
+function isPreviewableAttachmentPath(path: string): boolean {
 	return BRACKETED_IMAGE_PATH_REGEX.test(path) || isVideoPath(path);
 }
+
+/**
+ * Document extensions the host converts to markdown on paste. Mirrors markit's
+ * `CONVERTIBLE_EXTENSIONS` in coding-agent (a test there pins the two equal).
+ */
+export const DOCUMENT_PATH_REGEX = /\.(?:pdf|docx|pptx|xlsx|epub)$/i;
 
 function splitPastedPathSegments(payload: string): string[] | undefined {
 	const segments: string[] = [];
@@ -331,7 +337,7 @@ export function extractPastePathsFromText(text: string): string[] | undefined {
  * Refuses payloads carrying a second {@link INTERIOR_PATH_ANCHOR_REGEX} anchor.
  * Dragging two files at once emits `/tmp/a.png /tmp/b shot.png`, which the
  * splitter also refuses (`shot.png` is not explicit); swallowing it as one path
- * attaches nothing, and `handleFilePathPaste`'s ENOENT branch only surfaces a
+ * attaches nothing, and `handleImagePathPaste`'s ENOENT branch only surfaces a
  * status — unlike its other failure branches it never re-pastes the text — so
  * both paths would vanish. Genuinely ambiguous input lands here too (a
  * directory whose name ends in a space, as in `/tmp/odd dir /sub/x.png`); a
@@ -374,14 +380,19 @@ function bracketedPastePayload(data: string): string | undefined {
 }
 
 /**
- * Attachment-path pass for the assembled-paste router: every explicit path
- * (image, video, document, or plain file — the host decides what to attach
- * and pastes the rest back as text) plus the #6578 whole-text recovery for a
- * single spaced path the segment splitter refuses (#9931).
+ * Attachment-path pass for the assembled-paste router: the explicit paths when
+ * EVERY one is attachable (image, video, or convertible document), plus the
+ * #6578 whole-text recovery for a single spaced image or video path. Any other
+ * payload returns undefined so the router pastes it verbatim: normalized
+ * segments drop quotes, escapes, and `file://` (#9931 review).
  */
-export function extractFilePathsFromText(text: string): string[] | undefined {
+function extractAttachmentPastePathsFromText(text: string): string[] | undefined {
 	const paths = extractPastePathsFromText(text);
-	if (paths !== undefined) return paths;
+	if (paths !== undefined) {
+		return paths.every(path => isPreviewableAttachmentPath(path) || DOCUMENT_PATH_REGEX.test(path))
+			? paths
+			: undefined;
+	}
 	const wholePath = extractWholeTextAttachmentPath(text);
 	return wholePath ? [wholePath] : undefined;
 }
@@ -1489,8 +1500,8 @@ export class CustomEditor extends Editor {
 	onCopyPrompt?: () => void;
 	/** Called when the configured image-paste shortcut is pressed. */
 	onPasteImage?: () => Promise<boolean>;
-	/** Called when a bracketed paste contains one or more explicit local file paths (image, video, document, or otherwise — the host decides). */
-	onPasteFilePath?: (path: string) => void | Promise<void>;
+	/** Called when a bracketed paste contains one or more image, video, or convertible document file paths. */
+	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
@@ -1907,9 +1918,8 @@ export class CustomEditor extends Editor {
 	 * the assembled content regardless of chunk boundaries:
 	 *  - empty payload → `onPasteImage` (#3601: `Cmd+V`/`Ctrl+V` on an
 	 *    image-only macOS pasteboard the terminal stripped to `""` first);
-	 *  - explicit file paths (image, video, document, or any other anchored
-	 *    path) → `onPasteFilePath`; the host decides which kinds it can
-	 *    attach and pastes the rest back as text (#9931);
+	 *  - explicit image, video, or document paths → `onPasteImagePath`
+	 *    (#3506, #9931); a mixed or plain-file payload stays verbatim text;
 	 *  - anything else → the base editor's `pasteText` so `[Paste #N]`
 	 *    markers, autocomplete, and undo state stay intact.
 	 * True when `data` was consumed. `draft` queues trailing bytes back through
@@ -1929,11 +1939,11 @@ export class CustomEditor extends Editor {
 			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 			return true;
 		}
-		const attachmentPaths = extractFilePathsFromText(content);
-		if (attachmentPaths && this.onPasteFilePath) {
+		const attachmentPaths = extractAttachmentPastePathsFromText(content);
+		if (attachmentPaths && this.onPasteImagePath) {
 			this.#trackAsyncPaste(
 				(async () => {
-					for (const p of attachmentPaths) await this.onPasteFilePath?.(p);
+					for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
 				})(),
 			);
 			return true;
