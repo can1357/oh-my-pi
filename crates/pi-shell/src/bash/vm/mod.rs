@@ -511,6 +511,10 @@ pub struct Kernel {
 	/// Pruned there once no vproc carries the label; not imaged (callouts
 	/// do not survive a restore).
 	pub callout_labels:     Vec<(u32, Vpid)>,
+	/// The root's background jobs (their vpids) as its current script
+	/// started: an earlier script's work, which a cancel of this one spares
+	/// (`Shell::apply_requests`). Set at every root run start; not imaged.
+	pub prior_jobs:         Vec<Vpid>,
 	/// The last root run that `exit` or `set -e` ended
 	/// ([`Shell::ended_by_exit`]); not imaged.
 	pub exited:             Option<RunId>,
@@ -639,6 +643,7 @@ impl Kernel {
 			clock: None,
 			null_input: None,
 			callout_labels: Vec::new(),
+			prior_jobs: Vec::new(),
 			exited: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
@@ -649,6 +654,13 @@ impl Kernel {
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}
+	}
+
+	/// Record the root's background jobs as earlier scripts' work
+	/// ([`Kernel::prior_jobs`]), as a root script is about to start.
+	pub fn note_prior_jobs(&mut self, root: &Vproc) {
+		self.prior_jobs.clear();
+		self.prior_jobs.extend(root.jobs.iter().map(|job| job.vpid));
 	}
 
 	/// The redirections `vproc`'s command leaves to the process it spawns,
@@ -2155,9 +2167,22 @@ impl Shell {
 		if req & CANCEL != 0 {
 			let sig = self.k.ctl.cancel_signal();
 			let status = sig.exit_status(self.k.engine.config().platform);
+			if self.procs[0].runs.front().is_some_and(|run| !run.started) {
+				// The cancelled script has not started: it started no job.
+				self.k.note_prior_jobs(&self.procs[0]);
+			}
+			// A detached tree (`nohup`) outlives the cancellation, and so does
+			// a background job an earlier script left running: it is no part
+			// of the cancelled command, as bash's interrupt reaches only the
+			// foreground job.
+			let spared: Vec<Vpid> = self
+				.procs
+				.iter()
+				.filter(|p| p.lineage.detached || self.in_prior_job(p.vpid))
+				.map(|p| p.vpid)
+				.collect();
 			for i in (0..self.procs.len()).rev() {
-				// A detached tree (`nohup`) outlives the cancellation.
-				if self.procs[i].lineage.detached {
+				if spared.contains(&self.procs[i].vpid) {
 					continue;
 				}
 				let key = crate::bash::store::TrapKey::Signal(sig);
@@ -2196,13 +2221,7 @@ impl Shell {
 					self.kill(cx, i, sig, status);
 				}
 			}
-			// Calls of the cancelled vprocs are void; a detached tree's go on.
-			let detached: Vec<Vpid> = self
-				.procs
-				.iter()
-				.filter(|p| p.lineage.detached)
-				.map(|p| p.vpid)
-				.collect();
+			// Calls of the cancelled vprocs are void; the spared ones' go on.
 			let kept: Vec<CallId> = self
 				.k
 				.results
@@ -2211,13 +2230,13 @@ impl Shell {
 				.filter(|&id| {
 					self
 						.awaiting(id)
-						.is_some_and(|i| detached.contains(&self.procs[i].vpid))
+						.is_some_and(|i| spared.contains(&self.procs[i].vpid))
 				})
 				.collect();
 			self
 				.k
 				.calls_out
-				.retain(|(_, call)| detached.contains(&call.vpid));
+				.retain(|(_, call)| spared.contains(&call.vpid));
 			self.k.results.retain(|id, _| kept.contains(id));
 			self.k.paused = false;
 		}
@@ -2322,6 +2341,28 @@ impl Shell {
 			}
 		}
 		hits.sort_unstable();
+	}
+
+	/// Whether `vpid` runs in a background job an earlier root script
+	/// started ([`Kernel::prior_jobs`]): it leads one or descends from one.
+	fn in_prior_job(&self, mut vpid: Vpid) -> bool {
+		if self.k.prior_jobs.is_empty() {
+			return false;
+		}
+		loop {
+			if self.k.prior_jobs.contains(&vpid) {
+				return true;
+			}
+			let Some(parent) = self
+				.procs
+				.iter()
+				.find(|p| p.vpid == vpid)
+				.and_then(|p| p.parent)
+			else {
+				return false;
+			};
+			vpid = parent;
+		}
 	}
 
 	/// Whether `vpid` belongs to the job rooted at `root`, excluding nested

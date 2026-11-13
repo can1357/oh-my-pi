@@ -925,6 +925,106 @@ async fn tree_skip_descends_and_skip_dir_prunes() {
 	assert_eq!(seen, ["keep/file.txt", "keep", "skip/file.txt", "skip"]);
 }
 
+/// An ordered walk streams exactly what a sorted collect returns, in the same
+/// order, honouring the filter's pruning; dropping it mid-walk is clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn ordered_walk_streams_the_sorted_collection() {
+	let specs: Vec<String> = (0..40)
+		.flat_map(|i| [format!("d{i:02}/a-b"), format!("d{i:02}/a/x/y"), format!("d{i:02}/a.txt")])
+		.chain(["skip/inner/file".to_owned(), "top".to_owned()])
+		.collect();
+	let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
+	let tmp = make_tree("ordered", &specs);
+	let filter = |_: &mut Worker<'_>, entry: &mut Entry<'_>| match entry.path {
+		b"skip" => Action::SkipDir,
+		path if path.ends_with(b"/x") => Action::Skip,
+		_ => Action::Continue,
+	};
+	let opts = Options { workers: Some(4), ..Options::default() };
+	let collected = collect(&Fs::native(), tmp.path(), &opts, true, filter)
+		.await
+		.expect("collect");
+	let want: Vec<String> = collected.iter().map(|entry| lossy(&entry)).collect();
+	let mut walk = ordered(&Fs::native(), tmp.path(), &opts, filter)
+		.await
+		.expect("ordered");
+	let mut seen = Vec::new();
+	while let Some(entry) = walk.next().await {
+		seen.push(lossy(&entry));
+	}
+	assert!(walk.into_errors().await.is_empty());
+	assert_eq!(seen, want);
+	assert!(
+		!seen
+			.iter()
+			.any(|path| path.starts_with("skip") || path.ends_with("/x"))
+	);
+	assert!(seen.iter().any(|path| path.ends_with("/x/y")));
+
+	let mut walk = ordered(&Fs::native(), tmp.path(), &opts, filter)
+		.await
+		.expect("ordered");
+	assert_eq!(walk.next().await.map(|entry| lossy(&entry)), want.first().cloned());
+	drop(walk);
+}
+
+/// Reading ahead changes how listings are obtained, never what the walk
+/// reports: every option set and `skip_dir` pruning yield the serial walk's
+/// events, in the serial walk's order.
+#[tokio::test(flavor = "multi_thread")]
+async fn tree_read_ahead_reports_what_the_serial_walk_reports() {
+	let mut specs = vec![
+		".gitignore=ignored/\n*.log\n",
+		"ignored/deep/file",
+		".hidden/inner/file",
+		"node_modules/pkg/index.js",
+		"skip/a/b/c",
+		"skip/d",
+		"z.log",
+	];
+	let wide: Vec<String> = (0..24)
+		.flat_map(|i| [format!("w{i:02}/x/y/f"), format!("w{i:02}/g")])
+		.collect();
+	specs.extend(wide.iter().map(String::as_str));
+	let tmp = make_tree("tree-read-ahead", &specs);
+	#[cfg(unix)]
+	symlink("w00", &tmp.path().join("link"));
+	let walk = async |opts: &TreeOptions, ahead: bool| {
+		let opts = TreeOptions { workers: Some(if ahead { 4 } else { 1 }), ..opts.clone() };
+		let mut cursor = Tree::new(&Fs::native(), tmp.path(), &opts)
+			.await
+			.expect("tree");
+		if ahead {
+			cursor.read_ahead_always();
+		}
+		let mut seen = Vec::new();
+		while let Some(event) = cursor.next().await {
+			match event {
+				Event::Entry(entry) => {
+					seen.push(String::from_utf8_lossy(entry.path).into_owned());
+					if entry.path == b"skip" || entry.path.ends_with(b"/x") {
+						cursor.skip_dir();
+					}
+				},
+				Event::Error(error) => seen.push(format!("error {}", error.path.display())),
+			}
+		}
+		seen
+	};
+	let option_sets = [
+		TreeOptions::default(),
+		TreeOptions { hidden: false, gitignore: true, skip_node_modules: true, ..Default::default() },
+		TreeOptions { contents_first: true, emit_root: true, min_depth: 0, ..Default::default() },
+		TreeOptions { max_depth: Some(2), order: Order::Paths, ..Default::default() },
+		TreeOptions { follow: Follow::Always, ..Default::default() },
+	];
+	for opts in &option_sets {
+		let serial = walk(opts, false).await;
+		assert!(serial.len() > 24, "{opts:?}: {serial:?}");
+		assert_eq!(walk(opts, true).await, serial, "{opts:?}");
+	}
+}
+
 /// Nesting depth must not consume the call stack, and deep trees must not
 /// run out of directory handles.
 #[tokio::test(flavor = "multi_thread")]
