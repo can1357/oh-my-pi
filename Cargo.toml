@@ -23,6 +23,7 @@ members = [
    "crates/vendor/jaq-std",
    "crates/vendor/napi",
    "crates/vendor/tree-sitter-go",
+   "sdk/rust/omp-rpc",
 ]
 resolver = "3"
 
