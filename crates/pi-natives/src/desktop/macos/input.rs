@@ -8825,6 +8825,42 @@ mod tests {
 	}
 
 	#[test]
+	fn a_web_slider_target_between_two_steps_ends_on_the_nearest_step() {
+		use std::cell::{Cell, RefCell};
+		// A 0-100 slider of step 10 at `before`, stepped toward `target`, which
+		// falls between two of its steps; returns the verdict, where it ends
+		// and the steps taken.
+		let run = |before: f64, target: f64| {
+			let at = Cell::new(before);
+			let steps = RefCell::new(Vec::new());
+			let outcome = step_slider(
+				&background_window("Electron"),
+				"AXSlider",
+				(before, target),
+				(0.0, 100.0),
+				|| Ok(()),
+				|up| {
+					steps.borrow_mut().push(up);
+					at.set((at.get() + if up { 10.0 } else { -10.0 }).clamp(0.0, 100.0));
+					Ok(())
+				},
+				|| Some(at.get()),
+				|_| {},
+			);
+			(outcome.map_err(|error| error.message), at.get(), steps.into_inner())
+		};
+		// Nearer the lower step, and nearer the upper one: the drag is done
+		// there, not short of the value under the path's end.
+		assert_eq!(run(0.0, 34.0), (Ok(()), 30.0, vec![true; 3]));
+		assert_eq!(run(0.0, 36.0), (Ok(()), 40.0, vec![true; 4]));
+		assert_eq!(run(100.0, 64.0), (Ok(()), 60.0, vec![false; 4]));
+		// Within the first step: the step out is kept when it lands nearer,
+		// and taken back when the start was nearer.
+		assert_eq!(run(0.0, 6.0), (Ok(()), 10.0, vec![true]));
+		assert_eq!(run(0.0, 4.0), (Ok(()), 0.0, vec![true, false]));
+	}
+
+	#[test]
 	fn a_recheck_after_a_drag_went_out_does_not_say_nothing_was_sent() {
 		let error = pointer_recheck(
 			(false, true),
