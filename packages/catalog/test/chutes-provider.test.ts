@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { chutesModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -45,11 +50,27 @@ const FULL_ROW = {
 };
 
 describe("Chutes provider discovery", () => {
-	test("declares live reasoning and input as authoritative", () => {
-		const options = chutesModelManagerOptions({ apiKey: "cpk_test" });
-		expect(options.dynamicModelsAuthoritative).toBe(true);
-		expect(options.dynamicReasoningAuthoritative).toBe(true);
-		expect(options.dynamicInputAuthoritative).toBe(true);
+	test("a live row drops bundled reasoning and vision, fresh and from cache", async () => {
+		const bundled = getBundledModels("chutes").find(model => model.reasoning && model.input.includes("image"));
+		expect(bundled?.thinking).toBeDefined();
+		const { fetch } = chutesModelsFetch([
+			{ ...FULL_ROW, id: bundled!.id, supported_features: ["tools"], input_modalities: ["text"] },
+		]);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-chutes-authority-"));
+		try {
+			const options = {
+				...chutesModelManagerOptions({ apiKey: "cpk_test", fetch }),
+				cacheDbPath: path.join(tempDir, "models.db"),
+			};
+			for (const strategy of ["online", "offline"] as const) {
+				const { models } = await createModelManager(options).refresh(strategy);
+				const model = models.find(entry => entry.id === bundled!.id);
+				expect(model).toMatchObject({ reasoning: false, input: ["text"] });
+				expect(model?.thinking).toBeUndefined();
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	test("maps Chutes catalog metadata", async () => {

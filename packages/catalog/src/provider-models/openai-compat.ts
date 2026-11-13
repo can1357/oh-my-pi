@@ -532,6 +532,27 @@ function mapWithBundledReference<TApi extends Api>(
 }
 
 /**
+ * {@link mapWithBundledReference} plus the `input_modalities` /
+ * `max_output_length` / `supported_features` row vocabulary. Each field falls
+ * back to the reference when absent; a present feature list decides tool support.
+ */
+function mapWithFeatureListMetadata<TApi extends Api>(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<TApi>,
+	reference: ModelSpec<TApi> | undefined,
+): ModelSpec<TApi> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	return {
+		...model,
+		input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
+		maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
+		...(Array.isArray(entry.supported_features) && {
+			supportsTools: entry.supported_features.includes("tools"),
+		}),
+	};
+}
+
+/**
  * Rates from an OpenRouter-shaped `pricing` object (USD per token, as decimal
  * strings). Missing, zero, or negative legs (`-1` marks router-priced rows)
  * map to 0, which the model manager fills from its reference sources.
@@ -4840,10 +4861,6 @@ export function togetherModelManagerOptions(
 // Chutes
 // ---------------------------------------------------------------------------
 
-function chutesHasFeature(features: unknown[], feature: string): boolean {
-	return features.includes(feature);
-}
-
 /**
  * Chutes rows carry a flat `pricing` object in USD per million tokens
  * (`prompt`, `completion`, `input_cache_read`), plus `context_length`,
@@ -4856,26 +4873,24 @@ function mapChutesModel(
 	defaults: ModelSpec<"openai-completions">,
 	reference: ModelSpec<"openai-completions"> | undefined,
 ): ModelSpec<"openai-completions"> {
-	const model = mapWithBundledReference(entry, defaults, reference);
-	const features = Array.isArray(entry.supported_features) ? entry.supported_features : undefined;
-	const reasoning = features ? chutesHasFeature(features, "reasoning") : model.reasoning;
+	const model = mapWithFeatureListMetadata(entry, defaults, reference);
+	const reasoning = Array.isArray(entry.supported_features)
+		? entry.supported_features.includes("reasoning")
+		: model.reasoning;
 	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
 	return {
 		...model,
 		reasoning,
 		// A row that reports no reasoning must not carry a reference effort ladder.
 		...(reasoning ? {} : { thinking: undefined }),
-		...(features ? { supportsTools: chutesHasFeature(features, "tools") } : {}),
-		input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
 		// Chutes reports a nonzero price for every priced chute; an absent
 		// price falls back to the bundled row, so cost is not authoritative.
 		cost: {
 			input: toPositiveNumber(pricing.prompt, model.cost.input),
 			output: toPositiveNumber(pricing.completion, model.cost.output),
 			cacheRead: toPositiveNumber(pricing.input_cache_read, model.cost.cacheRead),
-			cacheWrite: 0,
+			cacheWrite: model.cost.cacheWrite,
 		},
-		maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
 	};
 }
 
@@ -4924,16 +4939,10 @@ export function inceptionModelManagerOptions(config?: ModelManagerConfig): Model
 				if (!Array.isArray(entry.supported_endpoints) || !entry.supported_endpoints.includes("chat.completions")) {
 					return null;
 				}
-				const model = mapWithBundledReference(entry, defaults, reference);
+				const model = mapWithFeatureListMetadata(entry, defaults, reference);
 				return {
 					...model,
-					input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
 					cost: isRecord(entry.pricing) ? perTokenPricingCost(entry.pricing) : model.cost,
-					contextWindow: toPositiveNumber(entry.context_length, model.contextWindow),
-					maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
-					...(Array.isArray(entry.supported_features) && {
-						supportsTools: entry.supported_features.includes("tools"),
-					}),
 				};
 			},
 		}),
