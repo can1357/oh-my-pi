@@ -67,17 +67,13 @@ export interface MnemopiBackendConfig {
 	llmModel?: string;
 }
 
-/** `p` with Windows' native `\` separators. Only separators change: normalizing would also collapse `..`, which reaches a different directory after a symlink. */
-function withNativeSeparators(p: string): string {
-	return path.sep === "\\" ? p.replaceAll("/", "\\") : p;
-}
-
 export function loadMnemopiConfig(settings: Settings, agentDir: string): MnemopiBackendConfig {
 	const configuredDbPath = cfgMnemopiDbPath.get(settings);
 	const cwd = settings.getCwd();
 	const scoping = cfgMnemopiScoping.get(settings);
+	// Separators only: `path.normalize` would also collapse `..`, which names another directory after a symlink.
 	const dbPath = configuredDbPath?.trim()
-		? withNativeSeparators(expandTilde(configuredDbPath.trim()))
+		? expandTilde(configuredDbPath.trim()).replaceAll("/", path.sep)
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
 	const scope = computeMnemopiBankScope(cfgMnemopiBank.get(settings), cwd, scoping);
 	const recallBanks =
