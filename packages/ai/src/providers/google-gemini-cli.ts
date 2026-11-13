@@ -44,6 +44,7 @@ import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./googl
 import {
 	convertMessages,
 	convertTools,
+	CONTINUATION_MAX_ATTEMPTS,
 	EMPTY_STREAM_BASE_DELAY_MS,
 	followGoogleContinuations,
 	GoogleTextBlocks,
@@ -758,31 +759,40 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
 					: undefined;
 				const resumeSegment = async (continuationToken: string) => {
-					// Same contract as the initial POST: a pre-response watchdog cleared
-					// once headers arrive, and no absolute fetch timeout that would cut
-					// off a long segment while it is still decoding.
-					const watchdog = armPreResponseTimeout(responseSignal, firstEventTimeoutMs);
-					// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
-					const init: RequestInit & { timeout: false } = {
-						method: "POST",
-						headers: requestHeaders,
-						body: JSON.stringify({ ...requestBody, request: { ...requestBody.request, continuationToken } }),
-						signal: watchdog.signal,
-						timeout: false,
-					};
+					// Same transport contract as the initial POST (retry schedule, no absolute
+					// fetch timeout that would cut off a segment still decoding), with
+					// `CONTINUATION_MAX_ATTEMPTS` and a pre-response watchdog per attempt,
+					// cleared once headers arrive.
+					let clearWatchdog: (() => void) | undefined;
 					let resumed: Response;
 					try {
-						resumed = await (options?.fetch ?? fetch)(streamUrl, init);
+						resumed = await fetchWithRetry(streamUrl, {
+							method: "POST",
+							headers: requestHeaders,
+							body: JSON.stringify({ ...requestBody, request: { ...requestBody.request, continuationToken } }),
+							signal: responseSignal,
+							prepareInit: () => {
+								clearWatchdog?.();
+								const watchdog = armPreResponseTimeout(responseSignal, firstEventTimeoutMs);
+								clearWatchdog = watchdog.clear;
+								return { signal: watchdog.signal };
+							},
+							maxAttempts: CONTINUATION_MAX_ATTEMPTS,
+							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+							fetch: options?.fetch,
+							timeout: false,
+						});
+						if (!resumed.ok || !resumed.body) {
+							const errorText = await resumed.text();
+							throw new AIError.GeminiCliApiError(
+								`Cloud Code Assist API error (${resumed.status}) resuming a long generation: ${errorText}`,
+								resumed.status,
+								{ headers: resumed.headers },
+							);
+						}
 					} finally {
-						watchdog.clear();
-					}
-					if (!resumed.ok || !resumed.body) {
-						const errorText = await resumed.text();
-						throw new AIError.GeminiCliApiError(
-							`Cloud Code Assist API error (${resumed.status}) resuming a long generation: ${errorText}`,
-							resumed.status,
-							{ headers: resumed.headers },
-						);
+						clearWatchdog?.();
 					}
 					return readSseJson<CloudCodeAssistResponseChunk>(resumed.body, responseSignal, sseObserver);
 				};

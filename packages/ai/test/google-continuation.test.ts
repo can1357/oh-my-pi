@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
-import { streamGoogleVertex } from "@oh-my-pi/pi-ai/providers/google-vertex";
+import { CONTINUATION_MAX_ATTEMPTS } from "@oh-my-pi/pi-ai/providers/google-shared";
 import type { AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -78,37 +78,20 @@ const cliModel: Model<"google-gemini-cli"> = buildModel({
 	maxTokens: 65_536,
 });
 
-const vertexModel: Model<"google-vertex"> = buildModel({
-	id: "gemini-4-hydrogen",
-	name: "Gemini 4 Hydrogen (Vertex)",
-	api: "google-vertex",
-	provider: "google-vertex",
-	baseUrl: "",
-	reasoning: true,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 1_048_576,
-	maxTokens: 65_536,
-});
-
 const cliAuth = JSON.stringify({ token: "token", projectId: "proj-123" });
 
-function recordingFetch(responses: Response[]): {
-	fetch: FetchImpl;
-	bodies: Record<string, unknown>[];
-	urls: string[];
-} {
+function recordingFetch(responses: Response[]): { fetch: FetchImpl; bodies: Record<string, unknown>[] } {
 	const bodies: Record<string, unknown>[] = [];
-	const urls: string[] = [];
-	const fetch: FetchImpl = async (input, init) => {
-		urls.push(String(input));
+	const fetch: FetchImpl = async (_input, init) => {
 		bodies.push(JSON.parse(String(init?.body)));
 		const response = responses.shift();
 		if (!response) throw new Error("unexpected request");
 		return response;
 	};
-	return { fetch, bodies, urls };
+	return { fetch, bodies };
 }
+
+const overloaded = () => new Response("overloaded", { status: 503 });
 
 /** Serves `first`, then holds every later request until its signal aborts. */
 function stalledResumeFetch(first: Response): { fetch: FetchImpl; resumeInits: RequestInit[] } {
@@ -168,35 +151,27 @@ describe("Google output continuation (Gemini API path)", () => {
 		expect(result.content.filter(block => block.type === "text").map(block => block.text)).toEqual(["Partial"]);
 	});
 
+	it("retries a resume that fails transiently instead of discarding the streamed segment", async () => {
+		const { fetch, bodies } = recordingFetch([sse(...firstSegment), overloaded(), sse(...secondSegment)]);
+		const result = await streamGoogle(genaiModel, context, { apiKey: "k", fetch, maxRetryDelayMs: 0 }).result();
+
+		expectOneGeneration(result);
+		expect(bodies).toHaveLength(3);
+		expect(bodies[2]).toEqual(bodies[1]);
+	});
+
 	it("ends with a timeout error when a resume request never returns headers", async () => {
 		const { fetch, resumeInits } = stalledResumeFetch(sse(...firstSegment));
 		const result = await streamGoogle(genaiModel, context, {
 			apiKey: "k",
 			fetch,
 			streamFirstEventTimeoutMs: 50,
+			maxRetryDelayMs: 0,
 		}).result();
 
-		expect(resumeInits).toHaveLength(1);
-		expect((resumeInits[0] as { timeout?: unknown }).timeout).toBe(false);
+		expect(resumeInits).toHaveLength(CONTINUATION_MAX_ATTEMPTS);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("timed out");
-	});
-});
-
-describe("Google output continuation (Vertex path)", () => {
-	it("resumes on the v1beta1 endpoint with the token at the top level of the request", async () => {
-		const { fetch, bodies, urls } = recordingFetch([sse(...firstSegment), sse(...secondSegment)]);
-		const result = await streamGoogleVertex(vertexModel, context, {
-			apiKey: "k",
-			location: "global",
-			fetch,
-		}).result();
-
-		expectOneGeneration(result);
-		const url =
-			"https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-4-hydrogen:streamGenerateContent?alt=sse";
-		expect(urls).toEqual([url, url]);
-		expect(bodies[1]).toEqual({ ...bodies[0], continuationToken: "tok-1" });
 	});
 });
 
@@ -223,16 +198,33 @@ describe("Google output continuation (Cloud Code Assist path)", () => {
 		expect(result.stopReason).toBe("length");
 	});
 
+	it("retries a resume that fails transiently instead of discarding the streamed segment", async () => {
+		const { fetch, bodies } = recordingFetch([
+			sse(...firstSegment.map(response => ({ response }))),
+			overloaded(),
+			sse(...secondSegment.map(response => ({ response }))),
+		]);
+		const result = await streamGoogleGeminiCli(cliModel, context, {
+			apiKey: cliAuth,
+			fetch,
+			maxRetryDelayMs: 0,
+		}).result();
+
+		expectOneGeneration(result);
+		expect(bodies).toHaveLength(3);
+		expect(bodies[2]).toEqual(bodies[1]);
+	});
+
 	it("ends with a timeout error when a resume request never returns headers", async () => {
 		const { fetch, resumeInits } = stalledResumeFetch(sse(...firstSegment.map(response => ({ response }))));
 		const result = await streamGoogleGeminiCli(cliModel, context, {
 			apiKey: cliAuth,
 			fetch,
 			streamFirstEventTimeoutMs: 50,
+			maxRetryDelayMs: 0,
 		}).result();
 
-		expect(resumeInits).toHaveLength(1);
-		expect((resumeInits[0] as { timeout?: unknown }).timeout).toBe(false);
+		expect(resumeInits).toHaveLength(CONTINUATION_MAX_ATTEMPTS);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("timed out");
 	});

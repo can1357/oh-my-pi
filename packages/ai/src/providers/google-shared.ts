@@ -4,7 +4,7 @@
 
 import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
@@ -508,6 +508,14 @@ export const MAX_EMPTY_STREAM_RETRIES = 2;
 export const EMPTY_STREAM_BASE_DELAY_MS = 500;
 
 /**
+ * Attempts per continuation request of a segmented generation (`followGoogleContinuations`).
+ * A failed resume discards every segment already streamed, so transient failures (429, 5xx,
+ * network errors, a resume that never returns headers) retry here instead of restarting the
+ * whole generation upstream.
+ */
+export const CONTINUATION_MAX_ATTEMPTS = 4;
+
+/**
  * Whether a completed Google assistant message carries content worth delivering.
  *
  * A tool call or any non-whitespace text counts as meaningful. An empty/whitespace-only
@@ -539,6 +547,16 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
 	output.timestamp = Date.now();
 }
 
+/** `usageMetadata` of a generation Google split into segments, as `followGoogleContinuations` passes it on. */
+export interface ContinuedUsageMetadata extends UsageMetadata {
+	/**
+	 * Not sent by Google. The current segment's own total: its prompt is the original
+	 * prompt plus all earlier output, so it is the conversation's real size, while the
+	 * counts above are summed across the segments' requests (each is billed).
+	 */
+	contextTokenCount?: number;
+}
+
 /**
  * Maps Gemini `usageMetadata` onto {@link Usage} (cost zeroed for `calculateCost`).
  *
@@ -549,7 +567,7 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
  * and cached tokens are clamped to it: input is never negative.
  * Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
  */
-export function mapGoogleUsage(metadata: UsageMetadata): Usage {
+export function mapGoogleUsage(metadata: ContinuedUsageMetadata): Usage {
 	const candidates = metadata.candidatesTokenCount || 0;
 	const thinking = metadata.thoughtsTokenCount || 0;
 	const total = metadata.totalTokenCount || 0;
@@ -582,13 +600,17 @@ const USAGE_COUNTS = [
  * what one unsplit request would report; the summed total re-counts the earlier output
  * once per later segment and would make the conversation look several times its size.
  */
-function addGoogleUsage(earlier: UsageMetadata, segment: UsageMetadata): UsageMetadata {
-	const sum: UsageMetadata = { ...segment };
+function addGoogleUsage(earlier: UsageMetadata, segment: UsageMetadata): ContinuedUsageMetadata {
+	const sum: ContinuedUsageMetadata = { ...segment };
 	for (const key of USAGE_COUNTS) {
 		if (earlier[key] !== undefined || segment[key] !== undefined)
 			sum[key] = (earlier[key] ?? 0) + (segment[key] ?? 0);
 	}
-	sum.contextTokenCount = segment.totalTokenCount;
+	// Some chunks omit `totalTokenCount`; fall back to the segment's parts, as `mapGoogleUsage` does.
+	const segmentTotal =
+		segment.totalTokenCount ||
+		(segment.promptTokenCount ?? 0) + (segment.candidatesTokenCount ?? 0) + (segment.thoughtsTokenCount ?? 0);
+	if (segmentTotal > 0) sum.contextTokenCount = segmentTotal;
 	return sum;
 }
 
@@ -1186,19 +1208,33 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
-			const openStreamAt = async (requestUrl: string, requestBody: string): Promise<ReadableStream<Uint8Array>> => {
-				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
-				// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
-				const init: RequestInit & { timeout: false } = {
-					method: "POST",
-					headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
-					body: requestBody,
-					signal: watchdog.signal,
-					timeout: false,
-				};
+			// Each attempt arms its own pre-response watchdog, cleared once headers (or a finite
+			// error body) arrive: an absolute deadline would keep aborting an actively streaming
+			// body. Stream liveness belongs to the event iterator's idle watchdog.
+			const openStreamAt = async (
+				requestUrl: string,
+				requestBody: string,
+				maxAttempts: number,
+			): Promise<ReadableStream<Uint8Array>> => {
+				let clearWatchdog: (() => void) | undefined;
 				let response: Response;
 				try {
-					response = await fetchImpl(requestUrl, init);
+					response = await fetchWithRetry(requestUrl, {
+						method: "POST",
+						headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
+						body: requestBody,
+						signal: options?.signal,
+						prepareInit: () => {
+							clearWatchdog?.();
+							const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
+							clearWatchdog = watchdog.clear;
+							return { signal: watchdog.signal };
+						},
+						maxAttempts,
+						maxDelayMs: options?.maxRetryDelayMs,
+						fetch: fetchImpl,
+						timeout: false,
+					});
 					if (!response.ok) {
 						const errorText = await response.text().catch(() => "");
 						throw new AIError.GoogleApiError(
@@ -1208,10 +1244,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 						);
 					}
 				} finally {
-					// Cleared once headers (or a finite error body) arrive: an absolute
-					// deadline would keep aborting an actively streaming body. Stream
-					// liveness belongs to the event iterator's idle watchdog.
-					watchdog.clear();
+					clearWatchdog?.();
 				}
 				if (!response.body) {
 					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
@@ -1224,13 +1257,15 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			// A regional Vertex endpoint 404s for models published only on the
 			// global endpoint; retry global once so a stale/ambient region never
 			// breaks a request that worked before regional routing existed.
-			const openStream = async (requestBody = bodyJson): Promise<ReadableStream<Uint8Array>> => {
-				if (!plan.fallbackUrl) return openStreamAt(plan.url, requestBody);
+			// The initial request makes one attempt (its caller owns retries); a continuation
+			// resume retries transient failures itself (`CONTINUATION_MAX_ATTEMPTS`).
+			const openStream = async (requestBody = bodyJson, maxAttempts = 1): Promise<ReadableStream<Uint8Array>> => {
+				if (!plan.fallbackUrl) return openStreamAt(plan.url, requestBody, maxAttempts);
 				try {
-					return await openStreamAt(plan.url, requestBody);
+					return await openStreamAt(plan.url, requestBody, maxAttempts);
 				} catch (error) {
 					if (error instanceof AIError.GoogleApiError && error.status === 404) {
-						return openStreamAt(plan.fallbackUrl, requestBody);
+						return openStreamAt(plan.fallbackUrl, requestBody, maxAttempts);
 					}
 					throw error;
 				}
@@ -1254,7 +1289,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					chunk => chunk,
 					async continuationToken =>
 						readSseJson<GenerateContentResponse>(
-							await openStream(JSON.stringify({ ...wireBody, continuationToken })),
+							await openStream(JSON.stringify({ ...wireBody, continuationToken }), CONTINUATION_MAX_ATTEMPTS),
 							options?.signal,
 							sseObserver,
 						),
