@@ -14,6 +14,7 @@
 - In Chromium browser tabs, a click on an element inside a frame the page removes while the mouse button is down fails as unconfirmed instead of reporting a click the element never got, and sends no remaining presses of a double-click to the exposed page; a frame that navigates on the press still counts as delivered ([#19094](https://github.com/can1357/oh-my-pi/pull/19094) by [@will-bogusz](https://github.com/will-bogusz))
 - Hashline edits from a truncated `@file` mention can no longer target rows the mention never showed, and a mention whose first line exceeds the size limit no longer offers a partial line as editable ([#19093](https://github.com/can1357/oh-my-pi/pull/19093) by [@apoc](https://github.com/apoc))
 - Long tasks and stage names in the pinned TODO panel now wrap beneath their own text with the tree lines intact, instead of restarting at the panel's left edge ([#19117](https://github.com/can1357/oh-my-pi/pull/19117) by [@chan1103](https://github.com/chan1103))
+- Fixed prompt-history search returning unrelated prompts for punctuated queries such as `a/b` ([#18762](https://github.com/can1357/oh-my-pi/issues/18762)) ([#19111](https://github.com/can1357/oh-my-pi/pull/19111) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 
 ## [18.20.0] - 2026-11-12
 
