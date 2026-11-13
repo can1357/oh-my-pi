@@ -458,6 +458,90 @@ async fn dropping_a_walk_cancels_it() {
 	assert_eq!(visits.load(Ordering::Relaxed), settled);
 }
 
+/// A collect raced against a deadline stops once the deadline is due, on a
+/// runtime its workers fill (one thread here, every thread of a busy
+/// process). Native listings never suspend, so a walk that does not give the
+/// runtime back runs to its end before anything raced against it is seen:
+/// the glob tool's 5 s deadline did not stop a walk of a large tree for
+/// minutes.
+#[tokio::test(flavor = "current_thread")]
+async fn a_collect_raced_against_a_deadline_stops_before_its_end() {
+	let tmp = TempDir::new("deadline");
+	for d in 0..300 {
+		let dir = tmp.path().join(format!("d{d:03}"));
+		std::fs::create_dir_all(&dir).expect("dir");
+		for f in 0..20 {
+			std::fs::write(dir.join(format!("f{f:02}")), "").expect("file");
+		}
+	}
+	let total = 300 * 21;
+	let seen = Arc::new(AtomicUsize::new(0));
+	let counted = Arc::clone(&seen);
+	let (due_tx, due_rx) = tokio::sync::oneshot::channel();
+	let due = parking_lot::Mutex::new(Some(due_tx));
+	// Due after the root's 300 entries, which are listed before the workers
+	// start. A stopped walk still spends the cooperative budget each of its
+	// tasks had left, a few hundred entries; a walk nothing can stop reaches
+	// `total`.
+	let filter = move |_: &mut Worker<'_>, _: &mut Entry<'_>| {
+		if counted.fetch_add(1, Ordering::Relaxed) == 500
+			&& let Some(tx) = due.lock().take()
+		{
+			let _ = tx.send(());
+		}
+		Action::Skip
+	};
+	let (fs, opts) = (Fs::native(), Options::default());
+	tokio::select! {
+		biased;
+		_ = due_rx => {},
+		_ = collect(&fs, tmp.path(), &opts, false, filter) => {
+			panic!("the walk ran to its end before its deadline was seen");
+		},
+	}
+	let stopped = seen.load(Ordering::Relaxed);
+	assert!(
+		stopped < total / 2,
+		"the walk saw {stopped} of {total} entries before its deadline was seen"
+	);
+	tokio::time::sleep(Duration::from_millis(50)).await;
+	assert_eq!(seen.load(Ordering::Relaxed), stopped, "the walk went on after it was dropped");
+}
+
+/// A collect holds a path for each entry it keeps and each directory it
+/// enters, not one for every entry it sees: walking 10,000 files to keep one
+/// held all 10,000 paths (about 360 KiB here) until the walk ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collect_holds_paths_only_for_what_it_keeps() {
+	let tmp = TempDir::new("held");
+	for d in 0..2 {
+		let dir = tmp.path().join(format!("d{d}"));
+		std::fs::create_dir_all(&dir).expect("dir");
+		for f in 0..5000 {
+			std::fs::write(dir.join(format!("a-rather-long-file-name-{f:05}.txt")), "").expect("file");
+		}
+	}
+	let opts = Options { workers: Some(2), ..Default::default() };
+	let found = collect(&Fs::native(), tmp.path(), &opts, false, |_, entry| {
+		if entry.path == b"d0/a-rather-long-file-name-00042.txt" {
+			Action::Continue
+		} else {
+			Action::Skip
+		}
+	})
+	.await
+	.expect("collect");
+	assert_eq!(found.iter().map(|e| lossy(&e)).collect::<Vec<_>>(), [
+		"d0/a-rather-long-file-name-00042.txt"
+	]);
+	// The arenas are a `_`-named field because nothing but the collection's own
+	// paths points into them; this test is the one reader.
+	#[expect(clippy::used_underscore_binding, reason = "the one reader of the collection's arenas")]
+	let held: usize = found._arenas.iter().map(arena::Arena::held).sum();
+	// One 32 KiB chunk for each of the two workers and the start's scratch.
+	assert!(held <= 3 * (32 << 10), "the walk holds {held} bytes of paths");
+}
+
 /// Signals when dropped.
 struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
