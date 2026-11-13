@@ -2155,6 +2155,8 @@ export interface ExtensionAPI {
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
 	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn.
+	 *  Text is sent as written unless `expandPromptTemplates` is set, which expands `/skill:<name>` commands
+	 *  and prompt templates.
 	 *  Rejects with `PromptDroppedError` if the message was not admitted (e.g. abort or cost cap). */
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void>;
 

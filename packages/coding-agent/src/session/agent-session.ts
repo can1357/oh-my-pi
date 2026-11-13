@@ -504,6 +504,7 @@ import {
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
+import { dispatchSkillCommand, resolveSkillInvocation } from "./skill-command";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
@@ -9196,7 +9197,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				throw new AgentBusyError();
 			}
 
-			await this.#queueCustomMessage(message, streamingBehavior, {
+			const queued = await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				prependMessages: queuedNotices,
 				onPromptAdmitted: onPromptQueuedAdmitted,
@@ -9204,8 +9205,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			});
 			// Still held only if the message was not queued (an aside whose session changed while it was prepared).
 			this.#reportDroppedCustomPrompt(message, options, followUps);
-			outcome.sessionClaimed = true;
-			return true;
+			outcome.sessionClaimed = queued;
+			return queued;
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -9245,7 +9246,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, {
+			const queued = await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
 				prependMessages: queuedNotices,
@@ -9254,8 +9255,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			});
 			// Still held only if the message was not queued (an aside whose session changed while it was prepared).
 			this.#reportDroppedCustomPrompt(message, options, followUps);
-			outcome.sessionClaimed = true;
-			return true;
+			outcome.sessionClaimed = queued;
+			return queued;
 		}
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
@@ -10764,7 +10765,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return [message, ...preparedMessages];
 	}
 
-	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery. */
+	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery.
+	 *  Resolves false when an abort or session change during image preparation dropped it. */
 	async #queueCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
@@ -10779,9 +10781,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
+		const promptGeneration = this.#promptGeneration;
 		const details =
 			options?.queueChipText !== undefined
 				? ({
@@ -10811,8 +10814,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const descriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
+		// abort() clears the steer/follow-up queues and disposal flushes every queue; a message
+		// still being prepared when either lands must not be queued afterwards (as in #queueUserMessage).
+		if (
+			this.#isDisposed ||
+			(deliverAs !== "aside" &&
+				(this.#promptGeneration !== promptGeneration || this.#sessionGeneration !== sessionGeneration))
+		) {
+			return false;
+		}
 		if (deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
@@ -10827,7 +10839,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
 			// correctly once idle, matching #queueUserMessage's aside branch.
 			this.#resumeStrandedIrcAsides();
-			return;
+			return true;
 		}
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
@@ -10843,6 +10855,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
 		onPromptAdmitted?.();
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	/**
@@ -11090,6 +11103,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
 	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
 	 * an idle session instead starts a turn, since there is no live run to inject into.
+	 *
+	 * `expandPromptTemplates` (default false) expands a registered `/skill:<name>` and
+	 * prompt templates on every delivery path. Extension, custom and file slash commands
+	 * run only through prompt() (omitted `deliverAs`, or `aside` at idle); explicit
+	 * steer/follow-up queueing sends any other `/` text to the model as written.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
@@ -11115,10 +11133,51 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (images.length === 0) images = undefined;
 		}
 
+		const expand = options?.expandPromptTemplates === true;
+		const invocation = expand ? resolveSkillInvocation(this, text) : undefined;
+		if (invocation) {
+			// Admit before reading SKILL.md so shutdown and settle checks see this send,
+			// as they see an option-off send admitted synchronously by prompt().
+			await this.#admitSubmission(async () => {
+				// abort() or a session change during the read must drop the send, like prompt()'s
+				// image preprocessing does, instead of starting a turn the user just stopped.
+				const promptGeneration = this.#promptGeneration;
+				const sessionGeneration = this.#sessionGeneration;
+				const loaded = await loadSkillPrompt(invocation.skill, this);
+				if (
+					this.#promptGeneration !== promptGeneration ||
+					this.#sessionGeneration !== sessionGeneration ||
+					this.#isDisposed
+				) {
+					return;
+				}
+				// Render (which authorizes model mentions in the args) only once the send is still current.
+				const built = this.renderUserSkillPrompt(loaded.skill, invocation, loaded.body);
+				if (options?.attribution === "agent") {
+					// The skill custom message is user-invoked by definition; an agent-attributed send
+					// stays a plain user-role message, like every other sendUserMessage path.
+					const skillContent = images
+						? [{ type: "text" as const, text: built.message }, ...images]
+						: built.message;
+					await this.sendUserMessage(skillContent, { deliverAs: options.deliverAs, attribution: "agent" });
+					return;
+				}
+				await dispatchSkillCommand(this, invocation, {
+					prebuilt: built,
+					images,
+					streamingBehavior: options?.deliverAs ?? "steer",
+					queueOnly: options?.deliverAs === "steer" || options?.deliverAs === "followUp",
+				});
+			});
+			return;
+		}
+		const queuedText = expand ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		const queueOptions = { attribution: options?.attribution, rawText: text };
+
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				if (!(await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution }))) {
+				if (!(await this.#queueUserMessage(queuedText, images, "aside", queueOptions))) {
 					throw new PromptDroppedError();
 				}
 				return;
@@ -11127,19 +11186,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			if (!(await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution }))) {
+			if (!(await this.#queueUserMessage(queuedText, images, "followUp", queueOptions))) {
 				throw new PromptDroppedError();
 			}
 			return;
 		} else if (options?.deliverAs === "steer") {
-			if (!(await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution }))) {
+			if (!(await this.#queueUserMessage(queuedText, images, "steer", queueOptions))) {
 				throw new PromptDroppedError();
 			}
 			return;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template
-		// expansion. prompt() awaits manual-compaction cleanup and (on the non-streaming path)
+		// prompt() handles commands and templates only when expandPromptTemplates is set.
+		// It awaits manual-compaction cleanup and (on the non-streaming path)
 		// image normalization/vision description before dispatching, so a stream can start in
 		// that gap; prompt() re-checks isStreaming at each await boundary and queues via
 		// `streamingBehavior` when it does. Passing "aside" through (instead of hard-coding
@@ -11147,7 +11206,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// tool-batch-aborting steer.
 		await this.prompt(text, {
 			attribution: options?.attribution,
-			expandPromptTemplates: false,
+			expandPromptTemplates: expand,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 			throwOnDrop: true,
