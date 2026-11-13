@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- When the Hindsight server does not respond, later prompts no longer each wait out the recall timeout: automatic recall pauses for `hindsight.recallCooldownMs` (also `HINDSIGHT_RECALL_COOLDOWN_MS`, default 1 minute, doubling up to 30 minutes), and a notice says when it tries again. `0` turns the pause off
+
 ## [18.22.1] - 2026-11-17
 
 ### Breaking Changes

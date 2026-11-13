@@ -841,6 +841,7 @@ describe("Hindsight recall across a resume", () => {
 		recallContextTurns: 1,
 		recallMaxQueryChars: 800,
 		recallPromptPreamble: "preamble",
+		recallCooldownMs: 60_000,
 		debug: false,
 		requestTimeoutMs: 30_000,
 		reflectTimeoutMs: 120_000,
