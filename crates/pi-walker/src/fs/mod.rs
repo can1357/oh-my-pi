@@ -24,6 +24,7 @@
 //! }
 //! ```
 
+pub(crate) mod mounts;
 mod native;
 mod provider;
 mod root;

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
+- Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 - Added native judge route editing to the model hub's Judge role: `Ctrl+R` declares the highlighted model's judgment protocol and endpoint root with a live request-URL preview (the protocol is preselected and the root prefilled from the model, the catalog or the provider's chat root), `Ctrl+N` adds an uncataloged native judge (optionally storing its API key), `Ctrl+T` tests the drafted route through the host's `onTestNativeRoute` and shows the outcome, and the status line says whether a Judge model judges natively, through prompts, or has an invalid native route, which also blocks picking it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
