@@ -479,6 +479,8 @@ The deadline only applies when you configured a judge fallback: a timed-out cand
 
 The 3-second default leaves `find`'s 20-second budget room to reach a second and third candidate. A slow but healthy candidate can time out and fall through too; the cooldown does not remove it from the chain. For consistently slower judges, raise the budget with `omp config set judgment.attemptTimeoutMs 10000`. Raising the setting does not extend an enclosing tool or caller deadline.
 
+Independently of the deadline, a judge candidate whose route rejects the account (`401`, `402`, `403`), does not serve the model (`404`), or is a gateway answering `502` with error type or code `upstream_credentials_exhausted` (every upstream key for the model failed) is skipped for 5 minutes by every judge using the same model registry. That gateway `502` is sent once rather than retried; other `5xx` answers stay transient and are retried.
+
 ### Advisor
 
 Advisors review primary turns on a configurable cadence and can inject advice. Enable them with `advisor.enabled`, `/advisor on`, or `--advisor`. For the default single advisor, `modelRoles.advisor` selects its model; when unset, resolution uses a configured `slow` role or the built-in slow-model priorities. An unavailable explicit advisor assignment does not silently select another model.

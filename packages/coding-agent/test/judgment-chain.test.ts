@@ -589,6 +589,48 @@ describe("ChainJudge", () => {
 		]);
 	});
 
+	it("sends a gateway's credentials-exhausted 502 once and skips the candidate on later calls", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (String(url).endsWith("/v1/systemone")) {
+					return Response.json(
+						{
+							type: "upstream_credentials_exhausted",
+							is_bifrost_error: false,
+							status_code: 502,
+							error: { type: "upstream_credentials_exhausted", message: "all keys failed" },
+						},
+						{ status: 502, headers: { "retry-after-ms": "1" } },
+					);
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
+
+		for (let call = 0; call < 2; call++) {
+			const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge(request);
+			expect(result.answers.level.choice).toBe("high");
+		}
+
+		expect(urls).toEqual([
+			"https://judge.example.test/v1/systemone",
+			OPENROUTER_DECISIONS_URL,
+			OPENROUTER_DECISIONS_URL,
+		]);
+	});
+
 	it("skips text-only chat and local candidates for image judgments", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${TEXT_ONLY.provider}/${TEXT_ONLY.id}` },
