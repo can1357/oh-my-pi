@@ -21,6 +21,7 @@
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
 - A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
+- The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
 
 ## [18.20.0] - 2026-11-12
 
