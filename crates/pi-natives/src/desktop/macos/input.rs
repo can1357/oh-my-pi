@@ -3156,10 +3156,14 @@ fn after_web_drag(
 ) -> AfterWebDrag {
 	let mut at = match followed(before, &mut value, &mut wait) {
 		Followed::Gone => return AfterWebDrag::Done,
-		Followed::Unchanged if (pressed - before).abs() > (max - min) / 2.0 => {
-			return AfterWebDrag::Unsure;
+		Followed::Unchanged => {
+			return match distance() {
+				Some(distance) if distance.abs() <= SLIDER_POSITION_TOLERANCE => AfterWebDrag::Done,
+				Some(_) => AfterWebDrag::Short(before),
+				None if (pressed - before).abs() > (max - min) / 2.0 => AfterWebDrag::Unsure,
+				None => AfterWebDrag::Short(before),
+			};
 		},
-		Followed::Unchanged => return AfterWebDrag::Short(before),
 		Followed::Moved(at) => at,
 	};
 	for _ in 1..TRACKED_POLLS {
@@ -8601,7 +8605,7 @@ mod tests {
 		// last repeats. A drag from 2 (the press) toward 75 on a 0-100 slider
 		// at `before`; returns where it stands and how many reads it took.
 		let run = |before: f64, reads: &[Option<f64>]| {
-			let next = Cell::new(0);
+			let next = Cell::new(0usize);
 			let after = after_web_drag(
 				before,
 				2.0,
@@ -8632,6 +8636,10 @@ mod tests {
 		// A slider no longer readable has nothing left to step.
 		assert_eq!(run(0.0, &[None]), (AfterWebDrag::Done, 1));
 		assert_eq!(run(0.0, &[Some(2.0), None]), (AfterWebDrag::Done, 2));
+		assert_eq!(
+			after_web_drag(0.0, 30.0, 75.0, (0.0, 100.0), 1.0, || None, || Some(29.0), |_| {}),
+			AfterWebDrag::Short(29.0),
+		);
 		// Without a thumb, a partial move cannot establish a linear mapping.
 		assert_eq!(
 			after_web_drag(0.0, 2.0, 75.0, (0.0, 100.0), 1.0, || None, || Some(40.0), |_| {}),
@@ -8645,7 +8653,10 @@ mod tests {
 		);
 		// Unmoved and far from the value under the press (a slider that runs
 		// right to left, pressed on its thumb): not stepped.
-		assert_eq!(run(98.0, &[Some(98.0)]).0, AfterWebDrag::Unsure);
+		assert_eq!(
+			after_web_drag(98.0, 2.0, 75.0, (0.0, 100.0), 1.0, || None, || Some(98.0), |_| {}),
+			AfterWebDrag::Unsure,
+		);
 	}
 
 	#[test]
