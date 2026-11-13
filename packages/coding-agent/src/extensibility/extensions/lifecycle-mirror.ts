@@ -48,7 +48,7 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "./types";
-import type { GoalUpdatedEvent } from "../shared-events";
+import type { AutolearnCaptureEndEvent, AutolearnCaptureStartEvent, GoalUpdatedEvent } from "../shared-events";
 
 /**
  * Clone one top-level notification field without ever returning an object
@@ -100,6 +100,8 @@ export type MappedExtensionEvent =
 	| RetryFallbackSucceededEvent
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
+	| AutolearnCaptureStartEvent
+	| AutolearnCaptureEndEvent
 	| GoalUpdatedEvent;
 /**
  * Map a session event onto the extension event `AgentSession` emits for it
@@ -229,6 +231,10 @@ export function extensionEventFromSessionEvent(
 				attempt: event.attempt,
 				maxAttempts: event.maxAttempts,
 			};
+		case "autolearn_capture_start":
+			return { type: "autolearn_capture_start" };
+		case "autolearn_capture_end":
+			return { type: "autolearn_capture_end", outcome: event.outcome };
 		case "goal_updated":
 			return { type: "goal_updated", goal: event.goal, state: event.state };
 		default:

@@ -2,7 +2,11 @@ import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
-import type { RetryErrorUpdate } from "../extensibility/shared-events";
+import type {
+	AutolearnCaptureEndEvent,
+	AutolearnCaptureStartEvent,
+	RetryErrorUpdate,
+} from "../extensibility/shared-events";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -106,7 +110,15 @@ export type AgentSessionEvent =
 	// `AgentSession.getQueuedMessages()`; `liveSteered` counts the leading
 	// `steering` entries already sent into the streaming response, which
 	// `remove_queued_message` cannot reach.
-	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
+	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number }
+	// Auto-learn capture lifecycle: `autolearn_capture_start` is emitted
+	// synchronously when a qualifying turn schedules a private capture (whether
+	// started immediately or queued behind an in-flight capture), before that
+	// turn's `agent_end` reaches later subscribers. Each start is paired 1:1 in
+	// FIFO order with an `autolearn_capture_end` so RPC hosts and extensions can
+	// count outstanding captures and wait until all scheduled captures settle.
+	| AutolearnCaptureStartEvent
+	| AutolearnCaptureEndEvent;
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

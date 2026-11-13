@@ -231,6 +231,7 @@ const unsubscribe = session.subscribe(event => {
 - `notice`
 - `goal_updated`
 - `queue_update` (displayable `steering` and `followUp` string-array snapshots)
+- `autolearn_capture_start` / `autolearn_capture_end` (private auto-learn capture turn scheduled / settled with `outcome`)
 - `cache_warming_start` / `cache_warming_end`
 - `config_warnings_changed`
 - `advisor_cost_changed` / `advisor_yielded`
