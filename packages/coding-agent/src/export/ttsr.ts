@@ -582,14 +582,18 @@ export class TtsrManager {
 		return this.#settingsSource();
 	}
 
-	/** Check if a rule can be triggered based on repeat settings. */
+	/** Check if a rule can be triggered: its own `repeatMode` frontmatter wins over the global setting. */
 	#canTrigger(ruleName: string): boolean {
 		const record = this.#injectionRecords.get(ruleName);
 		if (!record) {
 			return true;
 		}
 
-		if (this.#settings.repeatMode === "once") {
+		const repeatMode = this.#rules.get(ruleName)?.rule.repeatMode ?? this.#settings.repeatMode;
+		if (repeatMode === "always") {
+			return true;
+		}
+		if (repeatMode === "once") {
 			return false;
 		}
 
@@ -1115,7 +1119,7 @@ export class TtsrManager {
 			logger.debug("TTSR rule marked as injected", {
 				ruleName,
 				messageCount: this.#messageCount,
-				repeatMode: this.#settings.repeatMode,
+				repeatMode: this.#rules.get(ruleName)?.rule.repeatMode ?? this.#settings.repeatMode,
 			});
 		}
 	}

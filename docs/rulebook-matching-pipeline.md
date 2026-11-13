@@ -85,7 +85,7 @@ Normalization:
 - `name` = filename without `.md`/`.mdc`
 - frontmatter parsed via `parseFrontmatter`
 - `content` = body (frontmatter stripped)
-- `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` are parsed by `buildRuleFromMarkdown`
+- `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode` are parsed by `buildRuleFromMarkdown`
 - user sticky `RULES.md` is named `RULES`; project sticky `RULES.md` is named `RULES@project`; both are forced to `alwaysApply: true`
 
 The distinct sticky names allow user and project content to coexist. Native items are appended as project rules, user rules, user sticky `RULES.md`, then project sticky `RULES.md`; an earlier regular rule with either sticky name can still shadow that sticky file.
@@ -99,7 +99,7 @@ Loads from both `.agent` and `.agents` directories:
 - project: walk upward from `cwd` to repo root, loading `<ancestor>/.agent/rules/*.{md,mdc}` and `<ancestor>/.agents/rules/*.{md,mdc}`
 - user: `~/.agent/rules/*.{md,mdc}` and `~/.agents/rules/*.{md,mdc}`
 
-Normalization uses the shared `buildRuleFromMarkdown` path: filename-derived name, stripped frontmatter body, and parsed `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode`.
+Normalization uses the shared `buildRuleFromMarkdown` path: filename-derived name, stripped frontmatter body, and parsed `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode`.
 
 ### Cursor provider (`cursor.ts`)
 
@@ -113,7 +113,7 @@ Normalization (`transformMDCRule`):
 - `description`: kept only if string
 - `alwaysApply`: normalized to a boolean — `true` only when frontmatter has `alwaysApply: true` (anything else becomes `false`)
 - `globs`: accepts array (string elements only) or single string
-- `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` are parsed by shared rule helpers
+- `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode` are parsed by shared rule helpers
 - `name` from filename without extension
 
 ### Windsurf provider (`windsurf.ts`)
@@ -126,7 +126,7 @@ Loads from:
 Normalization:
 
 - `globs`: array-of-string or single string
-- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` parsed by shared rule helpers
+- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode` parsed by shared rule helpers
 - `name` is fixed to `global_rules` for the user global file and derived from filename for project rules
 
 ### Cline provider (`cline.ts`)
@@ -139,7 +139,7 @@ Searches upward from `cwd` for nearest `.clinerules`:
 Normalization:
 
 - `globs`: array-of-string or single string
-- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` parsed by shared rule helpers
+- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode` parsed by shared rule helpers
 - `name` is fixed to `clinerules` for a `.clinerules` file and derived from filename for `.clinerules/*.md`
 
 ### GitHub provider (`github.ts`)
