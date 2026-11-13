@@ -884,23 +884,28 @@ mod background {
 }
 
 mod foreground {
-	use std::time::Duration;
+	use std::{
+		ptr::null_mut,
+		time::{Duration, Instant},
+	};
 
 	use windows_sys::Win32::{
 		Foundation::{HWND, POINT},
+		System::Threading::{AttachThreadInput, GetCurrentThreadId},
 		UI::{
 			Input::KeyboardAndMouse::{
-				INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-				KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE,
-				MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-				MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-				MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW, SendInput,
-				VK_RETURN,
+				GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+				KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
+				MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+				MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+				MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+				MapVirtualKeyW, SendInput, VK_RETURN,
 			},
 			WindowsAndMessaging::{
 				GA_ROOTOWNER, GetAncestor, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
-				IsWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-				SetCursorPos, WindowFromPoint,
+				GetWindowThreadProcessId, IsHungAppWindow, IsWindow, SM_CXVIRTUALSCREEN,
+				SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos,
+				WindowFromPoint,
 			},
 		},
 	};
@@ -924,6 +929,14 @@ mod foreground {
 	const ACTIVATION_TIMEOUT: Duration = Duration::from_millis(500);
 	/// Time between drag moves.
 	const DRAG_STEP: Duration = Duration::from_millis(16);
+	/// An unassigned virtual key sent behind typed text to see when the target
+	/// has read it: it types nothing, and Cua's Windows driver sends it
+	/// behind text the same way (the `AutoHotkey` documentation names it
+	/// as an unassigned key).
+	const DRAIN_KEY: u16 = 0xe8;
+	/// Longest wait for the target to read typed text before the foreground
+	/// is handed back.
+	const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 	/// Activates the target for foreground input and hands the foreground back
 	/// to the user's window once the target has consumed it.
@@ -1525,8 +1538,104 @@ mod foreground {
 		Ok(())
 	}
 
+	/// Waits until the thread that owns `root`'s focused control has read
+	/// every key sent so far: keys still queued when the foreground moves on
+	/// go to the next foreground window, so handing it back early sends the
+	/// end of long text to the user's window. While this thread shares the
+	/// target's input queue, `GetKeyState` follows the keys that thread has
+	/// read, so a key sent behind the text shows when it got there. The
+	/// focused control's thread is the one reading keys: a UWP frame's own
+	/// thread refuses to be joined. Every packet went while `root` was in
+	/// front, so when the foreground leaves it before or during the wait and
+	/// the text ends in a Return (`closing_return`), that Return is taken to
+	/// have moved it (it opened or closed a window) and nothing is reported;
+	/// otherwise, the end of the text may have gone to the new window. A
+	/// thread Windows reports as hung is not joined: sharing its input queue
+	/// would tie this thread to it, and it would not read the marker anyway.
+	/// Returns why the target was not seen reading the text: it could not be
+	/// waited for (hung, or not joinable), the wait ran out or was cancelled,
+	/// or the foreground left it.
+	fn drain(root: HWND, name: &str, closing_return: bool) -> Option<String> {
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let in_front = || window::root(unsafe { GetForegroundWindow() }) == root;
+		let left = || {
+			(!closing_return).then(|| {
+				format!(
+					"the foreground left {name} before it had read all the typed text, so the rest may \
+					 have reached the window in front"
+				)
+			})
+		};
+		if !in_front() {
+			return left();
+		}
+		let reader = window::focused_descendant(root).unwrap_or(root);
+		// SAFETY: IsHungAppWindow only reads the window's responsiveness state.
+		if unsafe { IsHungAppWindow(reader) } != 0 {
+			return Some(format!(
+				"{name} is not responding, so omp could not wait for it to read the typed text; the \
+				 rest may reach whichever window is in front next"
+			));
+		}
+		// SAFETY: a null process-id pointer is permitted; Win32 validates the
+		// handle.
+		let target = unsafe { GetWindowThreadProcessId(reader, null_mut()) };
+		// SAFETY: no preconditions.
+		let own = unsafe { GetCurrentThreadId() };
+		// SAFETY: scalar thread ids; failure is reported and leaves nothing to
+		// undo.
+		if target == 0 || target == own || unsafe { AttachThreadInput(own, target, 1) } == 0 {
+			return Some(format!(
+				"could not wait for {name} to read the typed text (its input thread cannot be joined)"
+			));
+		}
+		// SAFETY: no preconditions.
+		let before = unsafe { GetKeyState(i32::from(DRAIN_KEY)) } & 1;
+		let marker = [key_event(DRAIN_KEY, false), key_event(DRAIN_KEY, true)];
+		// The text is out, so the marker goes even after a cancel that came
+		// since; the wait below ends on it.
+		// SAFETY: `marker` is an initialized INPUT slice copied synchronously.
+		let sent =
+			unsafe { SendInput(marker.len() as u32, marker.as_ptr(), size_of::<INPUT>() as i32) };
+		let deadline = Instant::now() + DRAIN_TIMEOUT;
+		let unread = if sent as usize == marker.len() {
+			loop {
+				// SAFETY: no preconditions.
+				if unsafe { GetKeyState(i32::from(DRAIN_KEY)) } & 1 != before {
+					break None;
+				}
+				if !in_front() {
+					break left();
+				}
+				if control::check().is_err() {
+					break Some(format!(
+						"the call was cancelled before {name} had read all the typed text"
+					));
+				}
+				if Instant::now() >= deadline {
+					break Some(format!(
+						"{name} had not read all the typed text {} s after it was sent; the rest may \
+						 reach whichever window is in front next",
+						DRAIN_TIMEOUT.as_secs()
+					));
+				}
+				std::thread::sleep(Duration::from_millis(1));
+			}
+		} else {
+			Some(format!(
+				"could not wait for {name} to read the typed text (Windows refused the key marking \
+				 its end)"
+			))
+		};
+		// SAFETY: detaches the pair attached above.
+		unsafe { AttachThreadInput(own, target, 0) };
+		unread
+	}
+
 	/// Takeover text for window `id`; `focus` runs under the foreground guard
-	/// as in [`key_chord`].
+	/// as in [`key_chord`]. The foreground goes back once the target has read
+	/// the text ([`drain`]); when that cannot be seen, the call succeeds with
+	/// the reason recorded by [`control::report_text_unconfirmed`].
 	pub(super) fn type_text(
 		id: &str,
 		text: &str,
@@ -1539,7 +1648,12 @@ mod foreground {
 		}
 		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
 			focus()?;
-			send_text(Some(target), text)
+			send_text(Some(target), text)?;
+			let closing_return = text.ends_with(['\r', '\n']);
+			if let Some(reason) = drain(target, &format!("window {id}"), closing_return) {
+				control::report_text_unconfirmed(reason);
+			}
+			Ok(())
 		})
 	}
 
