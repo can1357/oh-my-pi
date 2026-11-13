@@ -1,6 +1,6 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AuthStorage, ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, AuthStorage, ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import { parseCloudflareCredential, serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -39,6 +39,9 @@ import {
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
+import { finalizeCustomModel } from "../../config/custom-models";
+import type { ModelRegistry } from "../../config/model-registry";
+import { formatNativeJudgeProbe, probeNativeJudgeRoute } from "../../judgment/probe";
 import { settings } from "../../config/settings";
 import { createSettingsHost } from "../../config/settings-ui";
 import { createPluginSettingsHost } from "../../extensibility/plugins/settings-host";
@@ -118,7 +121,11 @@ import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
-import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tui/overlays/model-hub";
+import {
+	ModelHubComponent,
+	type ModelRoleSelectionScope,
+	type NativeJudgeRouteTest,
+} from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { createModelBrowserSource } from "../model-browser-source";
 import { formatSessionContinuationNotice } from "../persistence-failure";
 import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
@@ -224,6 +231,52 @@ function nativeJudgeKeySource(authStorage: AuthStorage, provider: string): strin
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * The credential store key for a token typed into the Ctrl+N form: the token itself, or for Workers AI a
+ * Cloudflare credential carrying the account ID (typed, inside the token, or from `CLOUDFLARE_ACCOUNT_ID`).
+ */
+function nativeJudgeCredentialKey(api: Api, credential: { token: string; accountId?: string }): string {
+	const key = credential.token.trim();
+	if (api !== "workers-ai-systemone") return key;
+	const parsed = parseCloudflareCredential(key);
+	const accountId = credential.accountId?.trim() || parsed?.accountId || $env.CLOUDFLARE_ACCOUNT_ID?.trim();
+	if (!parsed || !accountId) throw new Error("Workers AI needs a Cloudflare API token and account ID.");
+	return serializeCloudflareCredential({ ...parsed, accountId });
+}
+
+/**
+ * Send one test judgment through a drafted native route, authenticated as the saved route would be: the
+ * provider's resolved key and headers, or — for Ctrl+N — the typed token when no key source outranks it.
+ * Nothing is saved or stored, and the judge chain (cooldowns, cache, usage ledger) is bypassed.
+ */
+async function testNativeJudgeRoute(
+	registry: ModelRegistry,
+	test: NativeJudgeRouteTest,
+	signal: AbortSignal,
+): Promise<{ ok: boolean; message: string }> {
+	const { route } = test;
+	const model = test.model
+		? { ...test.model, api: route.api, baseUrl: route.baseUrl }
+		: finalizeCustomModel(
+				{ id: route.id, provider: route.provider, api: route.api, baseUrl: route.baseUrl },
+				{ useDefaults: true },
+			);
+	let apiKey: ApiKey;
+	if (test.credential?.token.trim() && !nativeJudgeKeySource(registry.authStorage, route.provider)) {
+		apiKey = nativeJudgeCredentialKey(route.api, test.credential);
+	} else {
+		if (!(await registry.getApiKey(model, undefined, { signal }))) {
+			throw new Error(`${route.provider} has no usable API key; enter one or log in first.`);
+		}
+		apiKey = registry.resolver(model);
+	}
+	const headers = test.model
+		? await registry.resolveModelHeaders(model, signal)
+		: await registry.getProviderHeaders(route.provider);
+	const result = await probeNativeJudgeRoute(model, { apiKey, headers, signal });
+	return { ok: result.ok, message: formatNativeJudgeProbe(`${route.provider}/${route.id}`, result) };
 }
 
 export class SelectorController {
@@ -1176,20 +1229,13 @@ export class SelectorController {
 					return saved;
 				},
 				onSaveNativeJudgeCredential: async (model, credential) => {
-					let key = credential.token.trim();
-					if (!key) return;
+					if (!credential.token.trim()) return;
 					const authStorage = this.ctx.session.modelRegistry.authStorage;
 					const keySource = nativeJudgeKeySource(authStorage, model.provider);
 					if (keySource) {
 						throw new Error(`${model.provider} requests use ${keySource}; a stored key would be ignored.`);
 					}
-					if (model.api === "workers-ai-systemone") {
-						const parsed = parseCloudflareCredential(key);
-						const accountId =
-							credential.accountId?.trim() || parsed?.accountId || $env.CLOUDFLARE_ACCOUNT_ID?.trim();
-						if (!parsed || !accountId) throw new Error("Workers AI needs a Cloudflare API token and account ID.");
-						key = serializeCloudflareCredential({ ...parsed, accountId });
-					}
+					const key = nativeJudgeCredentialKey(model.api, credential);
 					try {
 						// Adds a credential; the provider's existing keys stay.
 						await authStorage.credentials.upsert(model.provider, {
@@ -1204,6 +1250,7 @@ export class SelectorController {
 				},
 				nativeJudgeKeySource: provider =>
 					nativeJudgeKeySource(this.ctx.session.modelRegistry.authStorage, provider),
+				onTestNativeRoute: (test, signal) => testNativeJudgeRoute(this.ctx.session.modelRegistry, test, signal),
 
 				onLoginRequest: providerId => {
 					done();

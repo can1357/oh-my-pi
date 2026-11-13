@@ -351,6 +351,8 @@ export interface NativeJudgeConnection {
 	/** Static headers attached to judgment requests (e.g. proxy routing, gateway auth). */
 	headers?: Record<string, string>;
 	fetch?: FetchImpl;
+	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
+	timeoutMs?: number;
 }
 
 export interface NativeJudgeOptions extends NativeJudgeConnection {
@@ -362,8 +364,6 @@ export interface NativeJudgeOptions extends NativeJudgeConnection {
 	baseUrl?: string;
 	/** Wire model id; defaults to {@link typesafeModel}. */
 	model?: string;
-	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
-	timeoutMs?: number;
 	/**
 	 * Most questions per request the endpoint accepts, a positive integer; larger
 	 * requests are split. Unset: no cap.

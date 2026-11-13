@@ -154,6 +154,7 @@ function createHub(options: {
 			onCreateNativeJudgeRoute: options.callbacks?.onCreateNativeJudgeRoute,
 			onSaveNativeJudgeCredential: options.callbacks?.onSaveNativeJudgeCredential,
 			nativeJudgeKeySource: options.callbacks?.nativeJudgeKeySource,
+			onTestNativeRoute: options.callbacks?.onTestNativeRoute,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
 		},
@@ -1876,6 +1877,7 @@ describe("ModelHub", () => {
 		};
 		const CTRL_R = "\x12";
 		const CTRL_N = "\x0e";
+		const CTRL_T = "\x14";
 		const nativeJudge = (id: string, baseUrl = "https://native.example") =>
 			buildModel({ ...makeModel("fixture", id), api: "typesafe", kind: "judge", baseUrl });
 		const pickerProps = (hub: ModelHubComponent) => {
@@ -1945,6 +1947,71 @@ describe("ModelHub", () => {
 			expect(save).not.toHaveBeenCalled();
 			hub.handleInput(ESC);
 			expect(hub.describe(cx).k).toBe("picker");
+		});
+
+		test("Ctrl+T tests the drafted route without saving it and shows the outcome", async () => {
+			const chat = makeModel("fixture", "chat-judge");
+			const save = vi.fn<NonNullable<ModelHubCallbacks["onSaveNativeRoute"]>>();
+			const { promise, resolve } = Promise.withResolvers<{ ok: boolean; message: string }>();
+			const probe = vi.fn<NonNullable<ModelHubCallbacks["onTestNativeRoute"]>>(() => promise);
+			const { hub } = createHub({
+				models: [chat],
+				callbacks: { onSaveNativeRoute: save, onTestNativeRoute: probe },
+			});
+			pickJudge(hub);
+			hub.handleInput(CTRL_R);
+			hub.handleInput(CTRL_T); // protocol step: no route to test yet
+			hub.handleInput("\n");
+			type(hub, "https://native.example/v1/systemone");
+			hub.handleInput(CTRL_T);
+			expect(probe).not.toHaveBeenCalled();
+			expect(normalize(hub.render(220))).toContain("typesafe appends /v1/systemone itself");
+
+			for (let i = 0; i < "/v1/systemone".length; i++) hub.handleInput("\x7f");
+			hub.handleInput(CTRL_T);
+			expect(probe).toHaveBeenCalledTimes(1);
+			expect(probe.mock.calls[0]?.[0]).toEqual({
+				model: chat,
+				route: { provider: "fixture", id: "chat-judge", api: "typesafe", baseUrl: "https://native.example" },
+			});
+			expect(normalize(hub.render(220))).toContain("Testing native route…");
+
+			resolve({ ok: false, message: "Test of fixture/chat-judge failed · HTTP 401:\tthe API key was refused" });
+			await settle(promise);
+			expect(normalize(hub.render(220))).toContain(
+				"Test of fixture/chat-judge failed · HTTP 401: the API key was refused",
+			);
+			expect(JSON.stringify(hub.describe(cx))).toContain("the API key was refused");
+			expect(save).not.toHaveBeenCalled();
+			expect(hub.describe(cx).k).toBe("overlay");
+		});
+
+		test("Ctrl+T on the Ctrl+N key step sends the typed key with the draft", () => {
+			const probe = vi.fn<NonNullable<ModelHubCallbacks["onTestNativeRoute"]>>(async () => ({
+				ok: true,
+				message: "passed",
+			}));
+			const create = vi.fn<NonNullable<ModelHubCallbacks["onCreateNativeJudgeRoute"]>>();
+			const { hub } = createHub({
+				models: [makeModel("fixture", "chat")],
+				callbacks: { onCreateNativeJudgeRoute: create, onTestNativeRoute: probe },
+			});
+			pickJudge(hub);
+			hub.handleInput(CTRL_N);
+			for (const value of ["new-judge", "judge"]) {
+				type(hub, value);
+				hub.handleInput("\n");
+			}
+			hub.handleInput("\n"); // typesafe
+			type(hub, "https://native.example");
+			hub.handleInput("\n");
+			type(hub, "secret-key");
+			hub.handleInput(CTRL_T);
+			expect(probe.mock.calls[0]?.[0]).toEqual({
+				route: { provider: "new-judge", id: "judge", api: "typesafe", baseUrl: "https://native.example" },
+				credential: { token: "secret-key" },
+			});
+			expect(create).not.toHaveBeenCalled();
 		});
 
 		test("an invalid native route is flagged and cannot be picked; prompted and valid native judges can", () => {

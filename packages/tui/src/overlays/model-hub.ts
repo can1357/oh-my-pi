@@ -119,6 +119,21 @@ type AssignTarget =
 	| { kind: "fallback"; role: string; index: number | null }
 	| { kind: "fallbackKey" };
 
+/** A native route as the open Ctrl+R or Ctrl+N form would save it, sent by its Test route action (Ctrl+T). */
+export interface NativeJudgeRouteTest {
+	route: NativeJudgeRouteDraft;
+	/** The catalog model Ctrl+R edits; absent for a Ctrl+N declaration. */
+	model?: Model;
+	/** The key typed into Ctrl+N's key step (with its Cloudflare account ID), not yet stored. */
+	credential?: { token: string; accountId?: string };
+}
+
+/** A route test in flight, then its outcome as one status line. */
+interface NativeRouteTestState {
+	controller: AbortController;
+	result?: { ok: boolean; message: string };
+}
+
 /** Ctrl+R: set the protocol and endpoint root of an existing catalog model. */
 interface NativeRouteEditor {
 	kind: "edit";
@@ -126,6 +141,7 @@ interface NativeRouteEditor {
 	api?: JudgmentApi;
 	field: SelectFormField | TextFormField;
 	preview?: Text;
+	test?: NativeRouteTestState;
 }
 
 type NativeJudgeCreateStep = "provider" | "id" | "protocol" | "baseUrl" | "token" | "accountId";
@@ -144,6 +160,7 @@ interface NativeJudgeCreateEditor {
 	accountId?: string;
 	/** Set once the declaration is saved; a retry then stores only the credential. */
 	saved?: Model;
+	test?: NativeRouteTestState;
 }
 
 const NATIVE_PROTOCOL_ITEMS = JUDGMENT_PROTOCOLS.map(protocol => ({
@@ -270,6 +287,12 @@ export interface ModelHubCallbacks {
 	 * variable, a login), described for display; `undefined` when a key stored by Ctrl+N would be used.
 	 */
 	nativeJudgeKeySource?: (provider: string) => string | undefined;
+	/**
+	 * Send one test judgment through the drafted route (Ctrl+T in the endpoint and key steps) and describe the
+	 * outcome; nothing is saved. `signal` aborts when the form closes or a newer test starts. A rejection shows
+	 * as a failed test. Without it, the forms offer no Ctrl+T.
+	 */
+	onTestNativeRoute?: (test: NativeJudgeRouteTest, signal: AbortSignal) => Promise<{ ok: boolean; message: string }>;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
 	/** Returns the rebuilt `--models` scope for the hub to list; `undefined` keeps the current one. */
@@ -689,6 +712,7 @@ export class ModelHubComponent implements Component {
 	/** Cancel pending provider refresh timers and the spinner. Host calls this on overlay close. */
 	dispose(): void {
 		this.#disposed = true;
+		this.#nativeRouteEditor?.test?.controller.abort();
 		for (const [, timer] of this.#scheduledProviderRefreshes) clearTimeout(timer);
 		this.#scheduledProviderRefreshes.clear();
 		this.#refreshingProviders.clear();
@@ -1423,6 +1447,7 @@ export class ModelHubComponent implements Component {
 
 	#closeNativeRoute(): void {
 		const editor = this.#nativeRouteEditor;
+		editor?.test?.controller.abort();
 		this.#nativeRouteEditor = null;
 		if (editor?.kind === "create" && editor.saved) {
 			this.#judgeNotice = `${editor.saved.provider}/${editor.saved.id} is saved, but its API key was not stored.`;
@@ -1470,7 +1495,7 @@ export class ModelHubComponent implements Component {
 			empty: "reject",
 			validate: value => nativeBaseUrlError(api, value),
 			summary: [preview],
-			hint: `${editorKey("tui.input.submit")} save route · ${editorKey("tui.select.cancel")} cancel`,
+			hint: `${editorKey("tui.input.submit")} save route${this.#nativeTestHint()} · ${editorKey("tui.select.cancel")} cancel`,
 			onCancel: () => this.#closeNativeRoute(),
 			requestRender: () => this.#requestRender(),
 			onSubmit: async value => {
@@ -1486,6 +1511,7 @@ export class ModelHubComponent implements Component {
 					if (strip && strip.kind !== "name" && modelsAreEqual(strip.item.model, model)) {
 						strip.item = { provider: model.provider, id: model.id, model, selector };
 					}
+					editor.test?.controller.abort();
 					this.#nativeRouteEditor = null;
 					this.#refreshAfterMutation();
 					if (this.#assigning) {
@@ -1548,7 +1574,7 @@ export class ModelHubComponent implements Component {
 				theme: formTheme,
 				label: "Native protocol",
 				description:
-					"Choose the judgment protocol the endpoint speaks. Nothing is probed, and no role or fallback is assigned.",
+					"Choose the judgment protocol the endpoint speaks. Saving sends no request and assigns no role or fallback.",
 				items: NATIVE_PROTOCOL_ITEMS,
 				currentValue: editor.draft.api ?? preselectedJudgmentApi(editor.draft.provider ?? ""),
 				selectTheme: getSelectListTheme(),
@@ -1599,7 +1625,7 @@ export class ModelHubComponent implements Component {
 						description: `Requests to ${sanitizeDisplayWarning(editor.draft.provider ?? "")} authenticate with ${source}, which takes precedence over a stored key, so no key is asked here.`,
 						items: [{ value: "save", label: "Save model", description: `uses ${source}` }],
 						selectTheme: getSelectListTheme(),
-						hint: `${editorKey("tui.select.confirm")} save model · ${editorKey("tui.select.cancel")} cancel`,
+						hint: `${editorKey("tui.select.confirm")} save model${this.#nativeTestHint()} · ${editorKey("tui.select.cancel")} cancel`,
 						onSubmit: () => this.#saveNativeJudgeCreate(editor),
 						onCancel: () => this.#closeNativeRoute(),
 						requestRender: () => this.#requestRender(),
@@ -1648,7 +1674,7 @@ export class ModelHubComponent implements Component {
 				return undefined;
 			},
 			summary: editor.preview ? [editor.preview] : undefined,
-			hint: `${editorKey("tui.input.submit")} ${final ? (editor.saved ? "store key" : "save model") : "continue"} · ${editorKey("tui.select.cancel")} cancel`,
+			hint: `${editorKey("tui.input.submit")} ${final ? (editor.saved ? "store key" : "save model") : "continue"}${step === "id" ? "" : this.#nativeTestHint()} · ${editorKey("tui.select.cancel")} cancel`,
 			onCancel: () => this.#closeNativeRoute(),
 			requestRender: () => this.#requestRender(),
 			onSubmit: async value => {
@@ -1704,6 +1730,7 @@ export class ModelHubComponent implements Component {
 				await storeCredential(model, { token: editor.token, accountId: editor.accountId });
 			}
 			if (this.#disposed) return;
+			editor.test?.controller.abort();
 			this.#nativeRouteEditor = null;
 			this.#strip = null;
 			this.#refreshAfterMutation();
@@ -1737,6 +1764,78 @@ export class ModelHubComponent implements Component {
 		const model =
 			editor.kind === "edit" ? (editor.item.model.requestModelId ?? editor.item.id) : (editor.draft.id ?? "<model>");
 		editor.preview.setText(`POST ${root || "<base URL>"}${JUDGMENT_API_PATHS[editor.api].replace("{model}", model)}`);
+	}
+
+	/** Whether the open form has a complete route to test: past the protocol step, with a host that can test. */
+	#canTestNativeRoute(): boolean {
+		const editor = this.#nativeRouteEditor;
+		if (!editor?.api || !this.#callbacks.onTestNativeRoute) return false;
+		return editor.kind === "edit" ? editor.field instanceof TextFormField : editor.step !== "protocol";
+	}
+
+	#nativeTestHint(): string {
+		return this.#callbacks.onTestNativeRoute ? ` · ${formatKeyHint("ctrl+t")} test route` : "";
+	}
+
+	/**
+	 * Ctrl+T: send the route the form would save (the typed root on the endpoint step, the typed key on the
+	 * key steps) to the host's test, replacing any test in flight. An invalid root stays a field error.
+	 */
+	#testNativeRoute(): void {
+		const editor = this.#nativeRouteEditor;
+		const test = this.#callbacks.onTestNativeRoute;
+		const api = editor?.api;
+		if (!editor || !api || !test || !this.#canTestNativeRoute()) return;
+		const field = editor.field;
+		const typed = field instanceof TextFormField ? field.getValue() : "";
+		let baseUrl = editor.kind === "create" ? editor.draft.baseUrl : undefined;
+		if (editor.kind === "edit" || editor.step === "baseUrl") {
+			const error = nativeBaseUrlError(api, typed);
+			if (error) {
+				field.setError(error);
+				return;
+			}
+			baseUrl = validateNativeJudgeEndpointRoot(api, typed);
+		}
+		if (!baseUrl) return;
+		let request: NativeJudgeRouteTest;
+		if (editor.kind === "edit") {
+			const { model } = editor.item;
+			request = { model, route: { provider: model.provider, id: model.id, api, baseUrl } };
+		} else {
+			const { provider, id } = editor.draft;
+			if (!provider || !id) return;
+			const token = editor.step === "token" ? typed.trim() : editor.token;
+			const accountId = editor.step === "accountId" ? typed.trim() : editor.accountId;
+			request = {
+				route: { provider, id, api, baseUrl },
+				...(token ? { credential: accountId ? { token, accountId } : { token } } : {}),
+			};
+		}
+		editor.test?.controller.abort();
+		const state: NativeRouteTestState = { controller: new AbortController() };
+		editor.test = state;
+		this.#requestRender();
+		test(request, state.controller.signal)
+			.then(
+				result => {
+					state.result = result;
+				},
+				error => {
+					state.result = { ok: false, message: error instanceof Error ? error.message : String(error) };
+				},
+			)
+			.finally(() => {
+				if (!this.#disposed && editor.test === state && !state.controller.signal.aborted) this.#requestRender();
+			});
+	}
+
+	/** The route test's status line: in flight, passed, or failed. */
+	#nativeTestStatus(): { text: string; style: "accent" | "success" | "error" } | undefined {
+		const test = this.#nativeRouteEditor?.test;
+		if (!test) return undefined;
+		if (!test.result) return { text: "Testing native route…", style: "accent" };
+		return { text: sanitizeDisplayWarning(test.result.message), style: test.result.ok ? "success" : "error" };
 	}
 
 	#activateItem(item: ModelBrowserItem): void {
@@ -2499,6 +2598,10 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		if (this.#nativeRouteEditor) {
+			if (matchesKey(data, "ctrl+t") && this.#canTestNativeRoute()) {
+				this.#testNativeRoute();
+				return;
+			}
 			this.#nativeRouteEditor.field.handleInput(data);
 			this.#updateNativePreview();
 			this.#requestRender();
@@ -3072,6 +3175,8 @@ export class ModelHubComponent implements Component {
 			);
 		}
 		if (this.#nativeRouteEditor) {
+			const test = this.#nativeTestStatus();
+			if (test) return truncateToWidth(theme.fg(test.style, ` ${test.text}`), width);
 			const title =
 				this.#nativeRouteEditor.kind === "create"
 					? "Add native judge model"
@@ -3424,7 +3529,8 @@ export class ModelHubComponent implements Component {
 	#renderFooter(width: number): string {
 		const editor = this.#nativeRouteEditor;
 		if (editor) {
-			const hint = `${formatKeyHint("enter")} ${this.#nativeEditorSubmitLabel().toLowerCase()} · ${editorKey("tui.select.cancel")} cancel`;
+			const test = this.#canTestNativeRoute() ? this.#nativeTestHint() : "";
+			const hint = `${formatKeyHint("enter")} ${this.#nativeEditorSubmitLabel().toLowerCase()}${test} · ${editorKey("tui.select.cancel")} cancel`;
 			return this.#frame.renderFooter(width, hint, undefined);
 		}
 		const strip = this.#strip;
@@ -3514,6 +3620,7 @@ export class ModelHubComponent implements Component {
 		const editor = this.#nativeRouteEditor;
 		if (editor) {
 			this.#updateNativePreview();
+			const test = this.#nativeTestStatus();
 			return node(
 				"overlay",
 				{
@@ -3527,10 +3634,14 @@ export class ModelHubComponent implements Component {
 					col(
 						[
 							editor.field,
+							...(test ? [text([span(test.text, test.style)], { wrap: "word" })] : []),
 							this.#assignmentPending
 								? node("spinner", { label: "Saving native route…" })
 								: actionBar([
 										actionButton("Cancel", "nativeRouteCancel", { keys: "escape" }),
+										...(this.#canTestNativeRoute()
+											? [actionButton("Test route", "nativeRouteTest", { keys: "ctrl+t" })]
+											: []),
 										actionButton(this.#nativeEditorSubmitLabel(), "nativeRouteSubmit", {
 											keys: "enter",
 											tone: "accent",
@@ -3578,6 +3689,7 @@ export class ModelHubComponent implements Component {
 		if (editor) {
 			if (this.#assignmentPending) return;
 			if (event.type === "action" && event.act === "nativeRouteCancel") this.#closeNativeRoute();
+			else if (event.type === "action" && event.act === "nativeRouteTest") this.#testNativeRoute();
 			else if (event.type === "action" && event.act === "nativeRouteSubmit") {
 				if (editor.field instanceof TextFormField) editor.field.submit();
 				else editor.field.selectList.handleInput("\n");

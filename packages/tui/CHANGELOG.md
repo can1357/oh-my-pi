@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added native judge route editing to the model hub's Judge role: `Ctrl+R` declares the highlighted model's judgment protocol and endpoint root with a live request-URL preview (the protocol is preselected and the root prefilled from the model, the catalog or the provider's chat root), `Ctrl+N` adds an uncataloged native judge (optionally storing its API key), and the status line says whether a Judge model judges natively, through prompts, or has an invalid native route, which also blocks picking it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
+- Added native judge route editing to the model hub's Judge role: `Ctrl+R` declares the highlighted model's judgment protocol and endpoint root with a live request-URL preview (the protocol is preselected and the root prefilled from the model, the catalog or the provider's chat root), `Ctrl+N` adds an uncataloged native judge (optionally storing its API key), `Ctrl+T` tests the drafted route through the host's `onTestNativeRoute` and shows the outcome, and the status line says whether a Judge model judges natively, through prompts, or has an invalid native route, which also blocks picking it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 
