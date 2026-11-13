@@ -400,4 +400,45 @@ describe("running task progress in wait and jobs rows", () => {
 
 		expect(row).toMatch(/ — \S+ · 2 req · <\$0\.01$/);
 	});
+
+	test("#given a running task waiting on an automatic retry #when wait renders #then the row leads with the attempt, the remaining wait and the provider error", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const jobId = await registerRunningJob(manager, "task", "Limited", {
+			requests: 7,
+			retryState: {
+				attempt: 7,
+				maxAttempts: 10,
+				delayMs: 3_600_000,
+				startedAtMs: Date.now(),
+				errorMessage: "Codex error event: \x1b[31mThe usage limit\x1b[0m\nhas been reached",
+			},
+		});
+
+		const row = renderText(manager, [jobId])
+			.split("\n")
+			.find(line => line.startsWith(`- \`${jobId}\``));
+
+		expect(row).toMatch(
+			/ — \S+ · retrying 7\/10 in (59m\S*|1h\S*): Codex error event: The usage limit has been reached · 7 req$/,
+		);
+	});
+
+	test("#given a retry whose delay has elapsed and whose error runs long #when wait renders #then the row says the retry is due and cuts the error to one short line", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const jobId = await registerRunningJob(manager, "task", "Overdue", {
+			retryState: {
+				attempt: 1,
+				maxAttempts: 10,
+				delayMs: 1_000,
+				startedAtMs: Date.now() - 60_000,
+				errorMessage: "x".repeat(300),
+			},
+		});
+
+		const row = renderText(manager, [jobId])
+			.split("\n")
+			.find(line => line.startsWith(`- \`${jobId}\``));
+
+		expect(row).toMatch(new RegExp(` — \\S+ · retry 1/10 due, last error: x{79}…$`));
+	});
 });

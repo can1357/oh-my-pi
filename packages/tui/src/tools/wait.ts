@@ -82,6 +82,11 @@ export interface JobSnapshot {
 	contextTokens?: number;
 	/** Running task only: the model's context window; see `AgentProgress.contextWindow`. */
 	contextWindow?: number;
+	/**
+	 * Running task only: the automatic retry the agent is waiting on, with the
+	 * wait left when the snapshot was taken; see `AgentProgress.retryState`.
+	 */
+	retry?: { attempt: number; maxAttempts: number; remainingMs: number; errorMessage?: string };
 	/** The job's live widget, while one is being drawn; frozen at its last state once the job settles. */
 	widget?: JobWidgetView;
 	resultText?: string;

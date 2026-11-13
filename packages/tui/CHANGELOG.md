@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `wait` result's `JobSnapshot` now carries `retry` (attempt, maximum attempts, remaining wait and a one-line provider error) while a running subagent is in an automatic retry ([#19015](https://github.com/can1357/oh-my-pi/pull/19015) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

@@ -21,7 +21,8 @@ import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 import type { ToolSession } from "../tools";
 
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatDuration, formatNumber, previewLine } from "@oh-my-pi/pi-tui/render/render-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type {
 	AgentActivitySnapshot,
 	CancelOutcome,
@@ -184,6 +185,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let cost: number | undefined;
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
+		let retry: JobSnapshot["retry"];
 		if (latest.type === "task") {
 			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
 			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
@@ -216,6 +218,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 				cost = finiteNumber(progressRecord?.cost);
 				contextTokens = finiteNumber(progressRecord?.contextTokens);
 				contextWindow = finiteNumber(progressRecord?.contextWindow);
+				retry = retrySnapshot(progressRecord?.retryState, now);
 			}
 		}
 		const running = latest.status === "running";
@@ -239,6 +242,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(cost !== undefined && running ? { cost } : {}),
 			...(contextTokens !== undefined && running ? { contextTokens } : {}),
 			...(contextWindow !== undefined && running ? { contextWindow } : {}),
+			...(retry && running ? { retry } : {}),
 			...(widget ? { widget } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
@@ -254,10 +258,44 @@ function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/** Widest retry error kept on a job snapshot and its row; provider messages can run to paragraphs. */
+const RETRY_ERROR_MAX_WIDTH = 80;
+
+/**
+ * The automatic retry a task agent is in, read from its progress record's
+ * `retryState` (see `AgentProgress.retryState`). The remaining wait is fixed at
+ * snapshot time so rows built from one snapshot agree, and the provider error
+ * is sanitized, collapsed to one line and capped before it is stored.
+ */
+function retrySnapshot(state: unknown, now: number): JobSnapshot["retry"] {
+	if (!isRecord(state)) return undefined;
+	const attempt = finiteNumber(state.attempt);
+	const maxAttempts = finiteNumber(state.maxAttempts);
+	if (attempt === undefined || maxAttempts === undefined) return undefined;
+	const startedAtMs = finiteNumber(state.startedAtMs) ?? now;
+	const delayMs = finiteNumber(state.delayMs) ?? 0;
+	const errorMessage =
+		typeof state.errorMessage === "string"
+			? previewLine(sanitizeText(state.errorMessage), RETRY_ERROR_MAX_WIDTH)
+			: "";
+	return {
+		attempt,
+		maxAttempts,
+		remainingMs: Math.max(0, startedAtMs + delayMs - now),
+		...(errorMessage ? { errorMessage } : {}),
+	};
+}
+
 /**
  * Progress suffix for a running task row, e.g.
  * ` — 5h7m · 90 req · $18.40 · ctx 160K/1M · stage: implementing`, from the
  * fields {@link snapshotJobs} copies out of the task's latest progress record.
+ * A task in an automatic retry leads with it, so a row that is only
+ * re-sending a failed request does not read as work:
+ * ` — 6m15s · retrying 7/10 in 45s: usage limit reached · 7 req` while it
+ * waits, then ` — 6m16s · retry 7/10 due, last error: usage limit reached`
+ * once the delay has elapsed. The record does not say whether the retried
+ * request has gone out yet, so the row claims only that the wait is over.
  * Returns `""` for any other row and for a running task without progress
  * fields, so those rows keep their plain shape; duration alone never makes a
  * suffix. Pass `duration: false` where the row already shows the run time.
@@ -265,6 +303,14 @@ function finiteNumber(value: unknown): number | undefined {
 export function runningTaskProgressSuffix(job: JobSnapshot, options: { duration: boolean }): string {
 	if (job.type !== "task" || job.status !== "running") return "";
 	const parts: string[] = [];
+	if (job.retry) {
+		const { attempt, maxAttempts, remainingMs, errorMessage } = job.retry;
+		parts.push(
+			remainingMs > 0
+				? `retrying ${attempt}/${maxAttempts} in ${formatDuration(remainingMs)}${errorMessage ? `: ${errorMessage}` : ""}`
+				: `retry ${attempt}/${maxAttempts} due${errorMessage ? `, last error: ${errorMessage}` : ""}`,
+		);
+	}
 	if (job.requests !== undefined && job.requests > 0) parts.push(`${job.requests} req`);
 	if (job.cost !== undefined && job.cost > 0) parts.push(job.cost < 0.005 ? "<$0.01" : `$${job.cost.toFixed(2)}`);
 	if (job.contextTokens !== undefined && job.contextTokens > 0) {

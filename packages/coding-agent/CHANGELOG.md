@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Running subagent rows in `wait` and `read proc://` now show an automatic retry in progress, such as `retrying 7/10 in 45s: <provider error>`, so a subagent that is only re-sending a failed request no longer reads as working ([#19015](https://github.com/can1357/oh-my-pi/pull/19015) by [@wolfiesch](https://github.com/wolfiesch))
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
