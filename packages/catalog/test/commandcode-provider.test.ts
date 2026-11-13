@@ -21,10 +21,9 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-// Snapshot of GET /provider/v1/models ids on 2026-09-29, plus Gemini 4 Argon.
-// A newly served id without a cost-patch rule fails the pricing test instead
-// of silently billing at zero. Gemini 4 Carbon is served but left out: Command
-// Code's CLI publishes no Carbon rate yet.
+// Snapshot of GET /provider/v1/models ids on 2026-09-29. A newly served id
+// without a cost-patch rule fails the pricing test instead of silently billing
+// at zero.
 const servedIds = [
 	"MiniMaxAI/MiniMax-M2.5",
 	"MiniMaxAI/MiniMax-M2.7",
@@ -61,7 +60,6 @@ const servedIds = [
 	"google/gemini-3.6-flash",
 	"google/gemini-3.7-flash",
 	"google/gemini-3.8-flash",
-	"google/gemini-4-argon",
 	"gpt-5.3-codex",
 	"gpt-5.4",
 	"gpt-5.4-mini",
@@ -332,13 +330,11 @@ describe("Command Code provider support", () => {
 
 	test("routes effort-ladder ids to Responses with the right off switch", async () => {
 		// supported_endpoints on 2026-10-01: these ladder ids lack /responses.
-		// Gemini 4 Argon lists /responses but its route stays on chat completions.
 		// Qwen3.8 stays on chat because `enable_thinking: false` already disables it there.
 		// glm-5.3-flash left /responses later: chat-only by 2026-10-14.
 		const chatLadderIds: Record<string, true> = {
 			"deepseek/deepseek-v4-flash-fast": true,
 			"google/gemini-3.7-flash": true,
-			"google/gemini-4-argon": true,
 			"Qwen/Qwen3.8-27B": true,
 			"Qwen/Qwen3.8-Flash": true,
 			"Qwen/Qwen3.8-Max": true,
@@ -686,6 +682,9 @@ describe("Command Code provider support", () => {
 		for (const model of models) {
 			expect(model.input).toEqual(textOnlyIds[model.id] ? ["text"] : ["text", "image"]);
 		}
+		// Gemini 4 Argon postdates the snapshot; command-code@1.88.5 lists it with image input.
+		const [argon] = await discoverModels(["google/gemini-4-argon"]);
+		expect(argon?.input).toEqual(["text", "image"]);
 	});
 
 	test("applies the command-code@1.67.0 per-model output caps", async () => {
