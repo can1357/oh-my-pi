@@ -612,6 +612,46 @@ describe("Command Code provider support", () => {
 		}
 	});
 
+	test("prices ids served after the 2026-09-29 snapshot from command-code@1.88.5", async () => {
+		const laterIds = [
+			"claude-haiku-5-5",
+			"deepseek/deepseek-v4.1-flash-ultrafast",
+			"gpt-6.1-sol",
+			"gpt-6.1-terra",
+			"inclusionai/ling-3.1-flash",
+			"inclusionai/ling-3.1-flash-1019",
+			"meta/muse-spark-open",
+			"meta/muse-wonder-1.0",
+			"minimax/minimax-m3.1-flash",
+			"mistral/mistral-large-4",
+			"moonshotai/Kimi-K3.1-Pro",
+			"nvidia/nemotron-3.5-super-vl",
+			"ornith/ornith-1.5-122b",
+			"Qwen/Qwen3.8-Max-Prime",
+		];
+		const models = await discoverModels(laterIds);
+		expect(models).toHaveLength(laterIds.length);
+		for (const model of models) {
+			expect(model.cost.input).toBeGreaterThan(0);
+			expect(model.cost.output).toBeGreaterThan(0);
+		}
+		// Two-tier `contextTiers` cards land in the long-context slot at the first tier's maxContext.
+		expect(models.find(model => model.id === "claude-haiku-5-5")?.cost).toMatchObject({
+			input: 0.1,
+			output: 0.5,
+			cacheRead: 0.01,
+			cacheWrite: 0.125,
+			longContext: { inputThreshold: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
+		});
+		expect(models.find(model => model.id === "gpt-6.1-sol")?.cost).toMatchObject({
+			input: 2,
+			output: 10,
+			cacheRead: 0.1,
+			cacheWrite: 2.5,
+			longContext: { inputThreshold: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 },
+		});
+	});
+
 	test("follows the command-code@1.67.0 effort registry", async () => {
 		const models = await discoverModels([
 			"claude-opus-5-5",

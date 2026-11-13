@@ -798,4 +798,136 @@ provider "commandcode" {
 			cache-write 0.0
 		}
 	}
+	// ---------------------------------------------------------------------------
+	// Ids served after 2026-09-29 follow the model list in command-code@1.88.5,
+	// read on 2026-11-12. A two-tier `contextTiers` card becomes
+	// `long-context-cost` at the first tier's `maxContext`. Claude Fable 5.2,
+	// Muse Ember and Gemini 4 Carbon are served but absent from 1.88.5, so they
+	// keep the zero discovery default.
+	// ---------------------------------------------------------------------------
+	models "claude-haiku-5-5" {
+		cost-patch {
+			input 0.1
+			output 0.5
+			cache-read 0.01
+			cache-write 0.125
+		}
+		long-context-cost {
+			input-threshold 100000
+			input 0.5
+			output 2.5
+			cache-read 0.05
+			cache-write 0.625
+		}
+	}
+	models "gpt-6.1-sol" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
+			cache-write 2.5
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 4.0
+			output 15.0
+			cache-read 0.2
+			cache-write 5.0
+		}
+	}
+	models "gpt-6.1-terra" {
+		cost-patch {
+			input 1.0
+			output 5.0
+			cache-read 0.05
+			cache-write 1.25
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 2.0
+			output 7.5
+			cache-read 0.1
+			cache-write 2.5
+		}
+	}
+	models "deepseek/deepseek-v4.1-flash-ultrafast" {
+		cost-patch {
+			input 2.4
+			output 9.6
+			cache-read 0.048
+			cache-write 0.0
+		}
+	}
+	models "inclusionai/ling-3.1-flash" "inclusionai/ling-3.1-flash-1019" {
+		cost-patch {
+			input 0.3
+			output 0.9
+			cache-read 0.06
+			cache-write 0.0
+		}
+	}
+	models "meta/muse-spark-open" {
+		cost-patch {
+			input 1.25
+			output 4.25
+			cache-read 0.15
+			cache-write 0.0
+		}
+	}
+	models "meta/muse-wonder-1.0" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 0.0
+		}
+	}
+	models "minimax/minimax-m3.1-flash" {
+		cost-patch {
+			input 0.15
+			output 0.6
+			cache-read 0.015
+			cache-write 0.0
+		}
+	}
+	models "mistral/mistral-large-4" {
+		cost-patch {
+			input 1.36
+			output 4.18
+			cache-read 0.14
+			cache-write 0.0
+		}
+	}
+	models "moonshotai/Kimi-K3.1-Pro" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 0.0
+		}
+	}
+	models "nvidia/nemotron-3.5-super-vl" {
+		cost-patch {
+			input 0.2
+			output 0.5
+			cache-read 0.04
+			cache-write 0.0
+		}
+	}
+	models "ornith/ornith-1.5-122b" {
+		cost-patch {
+			input 0.16
+			output 0.64
+			cache-read 0.02
+			cache-write 0.0
+		}
+	}
+	models "Qwen/Qwen3.8-Max-Prime" {
+		cost-patch {
+			input 4.0
+			output 12.0
+			cache-read 0.5
+			cache-write 5.0
+		}
+	}
 }
