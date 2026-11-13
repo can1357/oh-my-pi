@@ -63,6 +63,7 @@ let registry: ModelRegistry;
 let session: SessionManager;
 let mentions: ModelMentionRegistry;
 let scoped: Model[];
+let settings: Settings;
 
 beforeEach(async () => {
 	auth = await AuthStorage.create(":memory:");
@@ -70,10 +71,15 @@ beforeEach(async () => {
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	session = SessionManager.inMemory();
 	scoped = [];
+	settings = Settings.isolated({
+		defaultThinkingLevel: "high",
+		modelRoles: { default: "d/r", smol: "a/x" },
+	});
 	mentions = new ModelMentionRegistry({
 		sessionManager: session,
 		modelRegistry: registry,
 		scopedModels: () => scoped,
+		settings,
 	});
 });
 
@@ -83,7 +89,7 @@ afterEach(() => {
 });
 
 describe("model mentions", () => {
-	test("only user prompts authorize model agents before dispatch", async () => {
+	test("only user prompts authorize typed role agents before dispatch", async () => {
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -94,12 +100,12 @@ describe("model mentions", () => {
 			agent,
 			sessionManager: session,
 			modelRegistry: registry,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({ "compaction.enabled": false, modelRoles: { smol: "b/y" } }),
 		});
 		try {
-			await agentSession.prompt("ask ^a/x", { synthetic: true });
+			await agentSession.prompt("ask ^@smol", { synthetic: true });
 			expect(agentSession.getSessionAgents()).toEqual([]);
-			await agentSession.prompt("ask ^b/y");
+			await agentSession.prompt("ask ^@smol");
 			expect(agentSession.modelMentions).toEqual([{ agent: "m1", selector: "b/y", name: "Y" }]);
 			const promptText = agent.state.messages
 				.filter(message => message.role === "user" || message.role === "developer")
@@ -111,7 +117,7 @@ describe("model mentions", () => {
 								.map(part => part.text)
 								.join(""),
 				);
-			expect(promptText).toEqual(["ask ^a/x", 'ask <model agent="m1" name="Y"/>']);
+			expect(promptText).toEqual(["ask ^@smol", 'ask <model agent="m1" name="Y"/>']);
 		} finally {
 			await agentSession.dispose();
 		}
@@ -330,6 +336,143 @@ describe("model mentions", () => {
 		const task = getBundledAgent("task");
 		if (!task) throw new Error("Missing bundled task agent");
 		expect(agents[0].systemPrompt).toBe(task.systemPrompt);
+	});
+
+	test("resolves roles with session default effort and explicit overrides", () => {
+		expect(mentions.resolve("@default")).toEqual({
+			selector: "d/r:high",
+			name: "R One · high",
+			thinkingLevel: Effort.High,
+		});
+		expect(mentions.resolve("@smol")).toEqual({ selector: "a/x", name: "X One" });
+		expect(mentions.resolve("@default:lo")).toEqual({
+			selector: "d/r:low",
+			name: "R One · low",
+			thinkingLevel: Effort.Low,
+		});
+		expect(mentions.resolve("@default:auto")).toEqual({ selector: "d/r", name: "R One" });
+	});
+
+	test("binds typed role and concrete effort spellings to the same concrete authorization", () => {
+		settings.setModelRole("smol", "d/r:high");
+		expect(mentions.expandMentions("^@smol ^d/r:hi ^@smol:low ^@smol:auto")).toBe(
+			'<model agent="m1" name="R One · high"/> <model agent="m1" name="R One · high"/> ' +
+				'<model agent="m2" name="R One · low"/> <model agent="m3" name="R One"/>',
+		);
+		expect(readModelMentions(session.getBranch())).toEqual([
+			{ agent: "m1", selector: "d/r:high", name: "R One · high", thinkingLevel: Effort.High },
+			{ agent: "m2", selector: "d/r:low", name: "R One · low", thinkingLevel: Effort.Low },
+			{ agent: "m3", selector: "d/r", name: "R One" },
+		]);
+	});
+
+	test("binds at submit and replays concrete authorizations after role settings change", () => {
+		expect(mentions.resolve("@smol")).toEqual({ selector: "a/x", name: "X One" });
+		settings.setModelRole("smol", "b/y");
+		expect(mentions.expandMentions("^@smol")).toBe('<model agent="m1" name="Y"/>');
+		settings.setModelRole("smol", "c/w");
+		const resumed = new ModelMentionRegistry({
+			sessionManager: session,
+			modelRegistry: registry,
+			scopedModels: () => scoped,
+			settings,
+		});
+		resumed.syncFromBranch();
+		expect(resumed.sessionAgents().map(agent => [agent.name, agent.model])).toEqual([["m1", ["b/y"]]]);
+		expect(resumed.expandMentions("^@smol")).toBe('<model agent="m2" name="W Three"/>');
+		expect(readModelMentions(session.getBranch())).toEqual([
+			{ agent: "m1", selector: "b/y", name: "Y" },
+			{ agent: "m2", selector: "c/w", name: "W Three" },
+		]);
+	});
+
+	test("resolves role targets only inside the mention scope", () => {
+		scoped = [models[1]];
+		expect(mentions.resolve("@smol")).toBeUndefined();
+		settings.setModelRole("smol", "b/y");
+		expect(mentions.resolve("@smol")).toEqual({ selector: "b/y", name: "Y" });
+		expect(mentions.resolve("@tiny")).toEqual({ selector: "b/y", name: "Y" });
+	});
+
+	test("rejects invalid or unsupported explicit role efforts", () => {
+		for (const selector of ["@default:minimal", "@default:off", "@default:inherit", "@default:bogus", "@default:"]) {
+			expect(mentions.resolve(selector)).toBeUndefined();
+		}
+		expect(mentions.resolve("@default:hi")).toEqual({
+			selector: "d/r:high",
+			name: "R One · high",
+			thinkingLevel: Effort.High,
+		});
+	});
+
+	test("does not bind a role effort to another model's literal id outside the mention scope", () => {
+		const literal = model("d", "r:high", "Literal High");
+		scoped = [models[3]];
+		settings.setModelRole("smol", "d/r:high");
+		vi.spyOn(registry, "getAvailable").mockReturnValue([...models, literal]);
+		expect(mentions.resolve("@smol")).toBeUndefined();
+		expect(mentions.resolve("@smol:low")).toEqual({
+			selector: "d/r:low",
+			name: "R One · low",
+			thinkingLevel: Effort.Low,
+		});
+		vi.spyOn(registry, "getAvailable").mockReturnValue(models);
+		expect(mentions.resolve("@smol")).toEqual({
+			selector: "d/r:high",
+			name: "R One · high",
+			thinkingLevel: Effort.High,
+		});
+		settings.setModelRole("smol", "d/r:max");
+		scoped = [];
+		expect(mentions.resolve("@smol")).toEqual({ selector: "d/r:max", name: "R Max" });
+	});
+
+	test("omits unsupported configured effort for a role and its inheritors without persisting the warning", () => {
+		settings.setModelRole("smol", "d/r:off");
+		for (const role of ["smol", "tiny", "memory", "widget"]) {
+			expect(mentions.resolve(`@${role}`)).toEqual({
+				selector: "d/r",
+				name: "R One",
+				warning: "off unsupported; effort omitted",
+			});
+		}
+		expect(mentions.expandMentions("^@smol")).toBe('<model agent="m1" name="R One"/>');
+		expect(readModelMentions(session.getBranch())).toEqual([{ agent: "m1", selector: "d/r", name: "R One" }]);
+		expect(mentions.resolve("@smol:off")).toBeUndefined();
+	});
+
+	test("accepts an OpenRouter route role only when its literal model is in scope", () => {
+		const base = buildModel({
+			...model("openrouter", "z-ai/glm-4.7-20251222", "GLM"),
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
+		const routed = buildModel({ ...base, id: `${base.id}:nitro`, name: "GLM Nitro" });
+		settings.setModelRole("smol", `openrouter/${routed.id}`);
+		vi.spyOn(registry, "getAvailable").mockReturnValue([base]);
+		expect(mentions.resolve("@smol")).toBeUndefined();
+		vi.spyOn(registry, "getAvailable").mockReturnValue([base, routed]);
+		expect(mentions.resolve("@smol")).toEqual({
+			selector: "openrouter/z-ai/glm-4.7-20251222:nitro",
+			name: "GLM Nitro",
+		});
+		scoped = [base];
+		expect(mentions.resolve("@smol")).toBeUndefined();
+	});
+
+	test.each([
+		["openrouter", "https://openrouter.ai/api/v1"],
+		["vercel-ai-gateway", "https://ai-gateway.vercel.sh/v1"],
+	])("rejects %s upstream-pinned roles without rejecting literal @ ids", (provider, baseUrl) => {
+		const base = buildModel({ ...model(provider, "z-ai/glm-4.7", "GLM", [Effort.Low, Effort.High]), baseUrl });
+		const literal = buildModel({ ...base, id: `${base.id}@default`, name: "Literal At" });
+		vi.spyOn(registry, "getAvailable").mockReturnValue([base, literal]);
+		settings.setModelRole("smol", `${provider}/${base.id}@cerebras:high`);
+		settings.setModelRole("slow", `${provider}/${literal.id}:auto`);
+		expect(mentions.resolve("@smol")).toBeUndefined();
+		expect(mentions.expandMentions("^@smol ^@slow")).toBe('^@smol <model agent="m1" name="Literal At"/>');
+		expect(readModelMentions(session.getBranch())).toEqual([
+			{ agent: "m1", selector: `${provider}/z-ai/glm-4.7@default`, name: "Literal At" },
+		]);
 	});
 
 	test("registers a tagged effort as its own pseudonym under one canonical spelling", () => {

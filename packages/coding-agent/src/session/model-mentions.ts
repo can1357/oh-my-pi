@@ -1,8 +1,12 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { formatModelString } from "../config/model-resolver";
+import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
+import { formatModelString, formatModelStringWithRouting, resolveModelRoleValue } from "../config/model-resolver";
+import type { Settings } from "../config/settings";
 import modelMentionDescription from "../prompts/agents/model-mention.md" with { type: "text" };
 import { getBundledAgent } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
@@ -10,10 +14,12 @@ import {
 	MODEL_MENTION_RE,
 	type ModelMention,
 	modelMentionDisplayName,
+	type ResolvedModelMention,
 	modelMentionName,
 	modelMentionTag,
 } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { AUTO_THINKING, parseEffort } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, parseConfiguredThinkingLevel, parseEffort } from "@oh-my-pi/pi-tui/thinking";
+import { cfgDefaultThinkingLevel } from "./settings";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -47,13 +53,11 @@ export function readModelMentions(entries: readonly SessionEntry[]): ModelMentio
 	return mentions;
 }
 
-/** A `^` selector resolved within the session picker's model scope. */
-export type ResolvedModelMention = Omit<ModelMention, "agent">;
-
 /** Session capabilities needed to authorize and persist model mentions. */
 export interface ModelMentionHost {
 	sessionManager: SessionManager;
-	modelRegistry: ModelRegistry;
+	modelRegistry: Pick<ModelRegistry, "getAvailable">;
+	settings: Settings;
 	scopedModels(): ReadonlyArray<Model>;
 	/** User-authorized model agents inherited from the parent session. */
 	inheritedAgents?: readonly AgentDefinition[];
@@ -92,28 +96,79 @@ export class ModelMentionRegistry {
 	}
 
 	/**
-	 * Resolve `provider/id[:level]` within the session picker's model scope. Exact ids win:
-	 * some contain colons (`qwen3:8b`) or end in a level name (`glm-4.7:max`). A level
-	 * spelling whose canonical selector is another model's id (`:ma` beside a literal
-	 * `…:max`) stays unresolved, since dispatch would run that other model.
+	 * Resolve a concrete model or `@role[:level]` within the mention scope.
+	 * Exact model ids win over effort suffixes; role efforts cannot bind a
+	 * different model whose literal id is the same as the completed selector.
 	 */
 	resolve(selector: string): ResolvedModelMention | undefined {
 		const scoped = this.#host.scopedModels();
 		const models = scoped.length > 0 ? scoped : this.#host.modelRegistry.getAvailable();
+		const isScoped = scoped.length > 0;
+		if (selector.startsWith("@")) return this.#resolveRole(selector, models, isScoped);
 		const exact = models.find(model => formatModelString(model) === selector);
-		if (exact) return { selector, name: modelMentionDisplayName(exact) };
+		if (exact) return this.#resolveModel(exact, undefined, models, isScoped);
 		const colon = selector.lastIndexOf(":");
 		if (colon <= 0) return undefined;
 		const base = selector.slice(0, colon);
 		const model = models.find(candidate => formatModelString(candidate) === base);
 		if (!model) return undefined;
 		const suffix = selector.slice(colon + 1);
-		if (suffix === AUTO_THINKING) return { selector: base, name: modelMentionDisplayName(model) };
+		if (suffix === AUTO_THINKING) return this.#resolveModel(model, undefined, models, isScoped);
 		const effort = parseEffort(suffix);
-		if (effort === undefined || !getSupportedEfforts(model).includes(effort)) return undefined;
-		const canonical = `${base}:${effort}`;
+		return effort === undefined ? undefined : this.#resolveModel(model, effort, models, isScoped);
+	}
+
+	#resolveRole(selector: string, models: ReadonlyArray<Model>, isScoped: boolean): ResolvedModelMention | undefined {
+		const colon = selector.indexOf(":");
+		const role = selector.slice(1, colon < 0 ? undefined : colon);
+		const { settings } = this.#host;
+		if (!getKnownRoleIds(settings).includes(role)) return undefined;
+		const info = getRoleInfo(role, settings);
+		if (info.hidden || info.section !== "chat") return undefined;
+		const override = colon < 0 ? undefined : selector.slice(colon + 1);
+		const overrideEffort = parseEffort(override);
+		if (override !== undefined && override !== AUTO_THINKING && overrideEffort === undefined) return undefined;
+		const resolved = resolveModelRoleValue(`@${role}`, models.filter(info.accepts), { settings });
+		if (!resolved.model) return undefined;
+		if (override !== undefined) return this.#resolveModel(resolved.model, overrideEffort, models, isScoped);
+		const thinkingLevel = resolved.explicitThinkingLevel
+			? resolved.thinkingLevel
+			: role === "default"
+				? parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings))
+				: undefined;
+		const effort = getSupportedEfforts(resolved.model).find(level => level === thinkingLevel);
+		const mention = this.#resolveModel(resolved.model, effort, models, isScoped);
+		if (
+			mention &&
+			thinkingLevel &&
+			thinkingLevel !== AUTO_THINKING &&
+			thinkingLevel !== ThinkingLevel.Inherit &&
+			!effort
+		) {
+			mention.warning = `${thinkingLevel} unsupported; effort omitted`;
+		}
+		return mention;
+	}
+
+	#resolveModel(
+		model: Model,
+		effort: Effort | undefined,
+		models: ReadonlyArray<Model>,
+		isScoped: boolean,
+	): ResolvedModelMention | undefined {
+		const identity = formatModelStringWithRouting(model);
+		// Mention dispatch cannot restore routing metadata from a bare model selector.
+		if (
+			identity !== formatModelString(model) ||
+			!models.some(candidate => formatModelString(candidate) === identity)
+		) {
+			return undefined;
+		}
+		if (effort === undefined) return { selector: identity, name: modelMentionDisplayName(model) };
+		if (!getSupportedEfforts(model).includes(effort)) return undefined;
+		const canonical = `${identity}:${effort}`;
 		const isModelId = (candidate: Model) => formatModelString(candidate) === canonical;
-		if (models.some(isModelId) || (scoped.length > 0 && this.#host.modelRegistry.getAvailable().some(isModelId))) {
+		if (models.some(isModelId) || (isScoped && this.#host.modelRegistry.getAvailable().some(isModelId))) {
 			return undefined;
 		}
 		return {
@@ -135,7 +190,8 @@ export class ModelMentionRegistry {
 				if (!mention) {
 					let next = 1;
 					while (this.#agents.has(`m${next}`)) next++;
-					mention = { agent: `m${next}`, ...resolved };
+					mention = { agent: `m${next}`, selector: resolved.selector, name: resolved.name };
+					if (resolved.thinkingLevel !== undefined) mention.thinkingLevel = resolved.thinkingLevel;
 					this.#host.sessionManager.appendCustomEntry(MODEL_MENTION_ENTRY_TYPE, mention);
 					this.#mentions.push(mention);
 					this.#bySelector.set(mention.selector, mention);

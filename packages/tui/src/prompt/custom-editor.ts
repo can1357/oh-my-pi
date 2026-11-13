@@ -637,8 +637,8 @@ export class CustomEditor extends Editor {
 	skillFilePath: (name: string) => string | undefined = () => undefined;
 
 	/**
-	 * Host-owned model probe: a mentionable `provider/id[:level]` selector's chip label and
-	 * canonical selector, so equivalent spellings (`:hi`/`:high`, bare/`:auto`) share a chip.
+	 * Host-owned model probe: a mention's chip label and editable selector.
+	 * Role selectors stay late-bound; concrete selectors use their canonical spelling.
 	 */
 	resolveModelMention: (selector: string) => { label: string; selector: string } | undefined = () => undefined;
 
@@ -650,6 +650,55 @@ export class CustomEditor extends Editor {
 		if (chip === undefined) return undefined;
 		const registered = this.atoms.get(chip.label);
 		return registered === undefined || registered === modelMentionToken(chip.selector) ? chip : undefined;
+	}
+
+	#refreshRoleMentionChips(): void {
+		let hasRole = false;
+		for (const expansion of this.atoms.values()) {
+			if (expansion.startsWith("^@")) {
+				hasRole = true;
+				break;
+			}
+		}
+		if (!hasRole) return;
+		const text = this.getText();
+		if (!allowsModelMentions(text)) return;
+		const pattern = new RegExp(
+			[...this.atoms.keys()]
+				.sort((a, b) => b.length - a.length)
+				.map(RegExp.escape)
+				.join("|"),
+			"g",
+		);
+		const changes: { start: number; end: number; label: string; expansion: string }[] = [];
+		for (const match of text.matchAll(pattern)) {
+			const expansion = this.atoms.get(match[0])!;
+			if (!expansion.startsWith("^@") || this.pendingTexts.some(attachment => attachment.label === match[0]))
+				continue;
+			const chip = this.#mentionChipFor(expansion.slice(1));
+			const label = chip?.label ?? expansion;
+			if (label !== match[0]) {
+				changes.push({ start: match.index, end: match.index + match[0].length, label, expansion });
+			}
+		}
+		if (changes.length === 0) return;
+		const caret = this.getCursor();
+		const lines = this.getLines();
+		let cursor = caret.col;
+		for (let line = 0; line < caret.line; line++) cursor += lines[line].length + 1;
+		let length = text.length;
+		for (const change of changes.reverse()) {
+			const delta = change.label.length - (change.end - change.start);
+			if (cursor >= change.end) cursor += delta;
+			else if (cursor > change.start) cursor = change.start + change.label.length;
+			if (change.label !== change.expansion) this.registerAtom(change.label, change.expansion);
+			super.applyHostEdit(
+				{ from: change.start, to: change.end, text: change.label, cursor, len: length },
+				{ recordUndo: false, verbatim: true },
+			);
+			length += delta;
+		}
+		this.#syncComposerTokenPattern();
 	}
 
 	/**
@@ -687,7 +736,7 @@ export class CustomEditor extends Editor {
 		}
 	}
 
-	/** Collapse every completed mentionable `^provider/id` selector into an atomic model chip. */
+	/** Collapse completed model and role mentions into atomic chips. */
 	#collapseModelMentions(): void {
 		const lines = this.getLines();
 		if (!lines.some(line => line.includes("^")) || !allowsModelMentions(this.getText())) return;
@@ -945,8 +994,16 @@ export class CustomEditor extends Editor {
 		);
 	};
 
+	override render(width: number): readonly string[] {
+		this.#refreshRoleMentionChips();
+		this.#collapseModelMentions();
+		return super.render(width);
+	}
+
 	/** Catch the typed word up with the caret first: its leaving the word (or a blur) re-describes the typo marks. */
 	override describe(cx: DescribeContext): NativeNode {
+		this.#refreshRoleMentionChips();
+		this.#collapseModelMentions();
 		const caret = this.getCursor();
 		if (this.#typing.update(this.textRevision, this.getLines(), caret.line, caret.col, this.focused)) {
 			this.invalidate();
@@ -1626,6 +1683,7 @@ export class CustomEditor extends Editor {
 	}
 
 	override handleInput(data: string): void {
+		this.#refreshRoleMentionChips();
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
 		if (this.#pasteInFlight > 0) {

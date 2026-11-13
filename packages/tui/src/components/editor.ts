@@ -3507,17 +3507,18 @@ export class Editor implements Component, Focusable {
 	/**
 	 * Apply an edit the terminal made over its own selection (TSP `edit`):
 	 * replace `[from, to)` of the described text with `text` and put the caret
-	 * at `cursor`, as one undo unit that leaves history browsing and updates
-	 * autocomplete like typing. A range cutting through an atomic placeholder
-	 * token takes the whole token. Stale edits (`len` no longer the text's
-	 * length) are dropped; a pure caret move only moves the caret.
+	 * at `cursor`, leaving history browsing and updating autocomplete like typing.
+	 * Display-only relabeling can preserve exact labels and skip undo snapshots.
+	 * A range cutting through an atomic placeholder token takes the whole token.
+	 * Stale edits (`len` no longer the text's length) are dropped; a pure caret
+	 * move only moves the caret.
 	 */
-	applyHostEdit(edit: NativeTextEdit): void {
+	applyHostEdit(edit: NativeTextEdit, options?: { recordUndo?: boolean; verbatim?: boolean }): void {
 		const current = this.getText();
 		const resolved = resolveTextEdit(
 			current,
 			edit,
-			text => this.#sanitizePastedText(text),
+			text => (options?.verbatim ? text : this.#sanitizePastedText(text)),
 			(from, to) => this.#widenOverAtomicTokens(current, from, to),
 		);
 		if (!resolved) return;
@@ -3525,7 +3526,7 @@ export class Editor implements Component, Focusable {
 		if (resolved.changed) {
 			if (this.#vimSession) this.#vimSession.tracked = false;
 			this.#historyIndex = -1;
-			this.#recordUndoState();
+			if (options?.recordUndo !== false) this.#recordUndoState();
 			this.#state.lines = resolved.text.split("\n");
 		}
 		const lines = this.#state.lines;
