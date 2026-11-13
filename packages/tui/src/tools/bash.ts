@@ -824,8 +824,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const presentation = options.shell === true ? options.shellPresentation : undefined;
 			// The shell node is the command pane only; the run's ordinary output
 			// segment draws what ran: the live result, or the output retained up
-			// to the replay cursor while one is held.
-			const shownOutput = presentation?.preferences.cursor !== undefined ? presentation.output.trimEnd() : output;
+			// to the replay cursor while one is held. An untraced run has nothing to
+			// replay, so a cursor set on it never hides the result.
+			const shownOutput =
+				trace !== undefined && presentation?.preferences.cursor !== undefined
+					? presentation.output.trimEnd()
+					: output;
 			// Without a trace the presentation parsed the raw command, `cd` and all.
 			const displayWorkdir = formatToolWorkingDirectory(
 				executedScriptArgs(renderArgs, trace === undefined ? undefined : details).cwd,

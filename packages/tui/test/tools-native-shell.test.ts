@@ -226,6 +226,36 @@ describe("bash native run box", () => {
 		expect(props(nodes(box?.c)[0]).cwd).toBeUndefined();
 	});
 
+	it("keeps an untraced result's output when a replay cursor was set on its presentation", () => {
+		// Reset/step in the inspector sets a cursor even with no history; the untraced engine has no
+		// replayed output, so the result text must still draw.
+		const presentation: ShellVizPresentation = {
+			preferences: {
+				view: "pseudo",
+				layers: { color: true, inline: true, idioms: true, effects: true, unwrap: false },
+				split: false,
+				cursor: 0,
+				playing: false,
+				speed: 1,
+				expandedNodes: [],
+			},
+			rows: [{ id: "r0", depth: 0, segments: [{ text: 'print("built")' }], effects: [] }],
+			original: [],
+			output: "",
+			executing: false,
+			watches: [],
+			timeline: { length: 0, cursor: 0, elapsedNs: 0, durationNs: 0 },
+		};
+		const box = nodes(
+			bashToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "built" }], details: { exitCode: 0 } },
+				{ ...done, shell: true, shellPresentation: presentation },
+				{ command: "echo built" },
+			).body,
+		)[0];
+		expect(collect(box?.c, "ansi").map(n => props(n).text)).toEqual(["built"]);
+	});
+
 	it("has no target without an intent and no foot before the command starts", () => {
 		const view = bashToolRenderer.describeCall(
 			{ command: "make test", __partialJson: '{"env":{"CI":"1"},"command":"make test' },
