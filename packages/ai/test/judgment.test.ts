@@ -2121,6 +2121,73 @@ describe("NativeJudge Nace Drex dialect", () => {
 	});
 });
 
+describe("NativeJudge Inception Decisions dialect", () => {
+	const decide = buildModel({
+		id: "mercury-decide",
+		name: "Mercury Decide",
+		api: "inception-decisions",
+		provider: "inception",
+		baseUrl: "https://api.inceptionlabs.ai",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0.02, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 65_536,
+		maxTokens: null,
+	});
+	const request = {
+		state: { message: "Please refund the duplicate charge." },
+		questions: { billing: { type: "noul", instructions: "Billing?" } },
+	} as const;
+
+	it("posts the verbatim model to /v1/decisions with image parts inside state", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = createNativeJudge(decide, {
+			apiKey: "inception_key",
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					model: "mercury-decide",
+					answers: { billing: { type: "noul", noul: 0.93 } },
+					usage: { input_tokens: 42, output_tokens: 1 },
+				});
+			},
+		});
+
+		const result = await judge.judge({ ...request, images: IMAGE_REFS });
+
+		expect(calls[0].url).toBe("https://api.inceptionlabs.ai/v1/decisions");
+		expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Bearer inception_key");
+		expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+			model: "mercury-decide",
+			state: [
+				{ type: "text", text: JSON.stringify(request.state) },
+				{ type: "image_url", image_url: { url: "data:image/png;base64,AQID" } },
+				{ type: "image_url", image_url: { url: "data:image/jpeg;base64,BAUG" } },
+			],
+			questions: request.questions,
+		});
+		expect(result.answers.billing.noul).toBe(0.93);
+	});
+
+	it("sends a text-only decision body unchanged", async () => {
+		const bodies: unknown[] = [];
+		const judge = createNativeJudge(decide, {
+			apiKey: "inception_key",
+			fetch: async (_url, init) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return Response.json({
+					answers: { billing: { type: "noul", noul: 0.5 } },
+					usage: { input_tokens: 1, output_tokens: 0 },
+				});
+			},
+		});
+
+		await judge.judge(request);
+
+		expect(bodies[0]).toEqual({ state: request.state, model: "mercury-decide", questions: request.questions });
+	});
+});
+
 describe("chat judgment backend images", () => {
 	it("sends image blocks for supported models and rejects guarded text-only models before send", async () => {
 		const chatModel = buildModel({

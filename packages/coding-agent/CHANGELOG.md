@@ -7,6 +7,10 @@
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
 - `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
 
+### Added
+
+- Added Inception's Mercury Voice chat model and its Mercury Decide judge model (`inception/mercury-voice`, `inception/mercury-decide`); the judge answers through the new `inception-decisions` API at `POST /v1/decisions` ([#19139](https://github.com/can1357/oh-my-pi/pull/19139) by [@iacore](https://github.com/iacore)).
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
