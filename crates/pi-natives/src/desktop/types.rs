@@ -234,12 +234,42 @@ pub struct HoldOptions {
 #[napi(object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopFocusReturn {
-	/// Whether the takeover handed focus back to the app front before it.
+	/// Whether the takeover handed the front back to the app front before it.
 	pub handed_back:  bool,
 	/// The process front before the takeover.
 	pub previous_pid: Option<u32>,
 	/// The process front once the takeover ended; absent when unreadable.
 	pub front_pid:    Option<u32>,
+	/// What a macOS takeover did with the user's keyboard; absent elsewhere and
+	/// when it did not reach the hand-back.
+	pub keyboard:     Option<DesktopKeyboardReturn>,
+}
+
+/// What a macOS takeover did to give the user back their keyboard. Nothing
+/// outside an app can see which of its windows is key, so these name what was
+/// sent, not a key state that was observed.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopKeyboardReturn {
+	/// The window that was key when the takeover began was made key again.
+	#[napi(value = "handedBack")]
+	HandedBack,
+	/// The user clicked, used a shortcut or switched during the takeover, so
+	/// nothing was sent over their choice.
+	#[napi(value = "leftAsChosen")]
+	LeftAsChosen,
+	/// The user's app never left the front (the target was another of its
+	/// windows) and still reported its key window, so nothing was sent.
+	#[napi(value = "kept")]
+	Kept,
+	/// The user's app showed no window: only its front status came back.
+	#[napi(value = "frontOnly")]
+	FrontOnly,
+	/// The input monitor had not caught up with the user's last input, so
+	/// whether they chose a window is unknown, and their window was not made
+	/// key.
+	#[napi(value = "notSent")]
+	NotSent,
 }
 
 /// What a drag call did: made a text selection, or posted input.
