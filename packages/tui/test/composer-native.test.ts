@@ -2,7 +2,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TspKind } from "@oh-my-pi/pi-wire";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { Container, Text } from "@oh-my-pi/pi-tui";
+import { Container, getKeybindings, setKeybindings, Text } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
@@ -147,6 +148,74 @@ describe("native composer", () => {
 		expect(input()).toMatchObject({ ghost: "run the tests", placeholder: undefined });
 		editor.setText("run");
 		expect(input()).toMatchObject({ ghost: " the tests", placeholder: undefined });
+	});
+
+	it("offers Accept for a shown prediction, inserting it as Tab would, but never for a word completion", () => {
+		const editor = composer({ running: false });
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		const accept = () => byRole(editor.describe(cx), "omp.composer.accept");
+		expect(accept()).toBeUndefined();
+
+		editor.predictions = () => ["run the tests"];
+		editor.setText("run");
+		expect(accept()?.p).toMatchObject({ text: "Accept", actions: { click: "accept" } });
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("run the tests");
+		expect(submitted).toEqual([]);
+		expect(accept()).toBeUndefined();
+
+		editor.predictions = undefined;
+		editor.setTextAssistProvider({
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+		});
+		editor.setText("The weath");
+		expect(nodes(editor.describe(cx)).find(n => n.k === "editor")?.p).toMatchObject({ ghost: "er" });
+		expect(accept()).toBeUndefined();
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("The weath");
+	});
+
+	it("names the bound Tab key in the Accept and `N more` tooltips, following a remap", () => {
+		const previous = getKeybindings();
+		try {
+			setKeybindings(KeybindingsManager.inMemory({ "tui.input.tab": "ctrl+g" }));
+			const editor = composer({ running: false });
+			editor.predictions = () => ["run the tests", "run the linter"];
+			editor.setText("run");
+			const accept = () => byRole(editor.describe(cx), "omp.composer.accept")?.p;
+			expect(accept()?.title).toMatch(/^Accept suggestion {2}\S+$/);
+			expect(accept()?.title).not.toMatch(/tab/i);
+			editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+			const more = byRole(editor.describe(cx), "omp.composer.alternatives")?.p;
+			expect(more?.title).toMatch(/^Show other suggestions {2}\S+$/);
+			expect(more?.title).not.toMatch(/tab/i);
+		} finally {
+			setKeybindings(previous);
+		}
+	});
+
+	it("offers `N more` over an accepted prediction, opening the alternatives list a tap picks from", () => {
+		const editor = composer({ running: false });
+		editor.predictions = () => ["run the tests", "run the linter", "commit it"];
+		const more = () => byRole(editor.describe(cx), "omp.composer.alternatives");
+		expect(more()).toBeUndefined();
+
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("run the tests");
+		expect(byRole(editor.describe(cx), "omp.composer.accept")).toBeUndefined();
+		expect(more()?.p).toMatchObject({ text: "2 more", actions: { click: "alternatives" } });
+
+		editor.handleNativeEvent({ type: "action", key: "bar/alternatives", act: "alternatives", mods: [] });
+		expect(more()).toBeUndefined();
+		const popup = byRole(editor.describe(cx), "omp.autocomplete");
+		const list = popup?.c?.[0] as SelectList | undefined;
+		expect(list).toBeInstanceOf(SelectList);
+		list!.handleNativeEvent({ type: "activate", key: "list", item: "commit it" });
+		expect(editor.getText()).toBe("commit it");
+		expect(byRole(editor.describe(cx), "omp.autocomplete")).toBeUndefined();
 	});
 
 	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {

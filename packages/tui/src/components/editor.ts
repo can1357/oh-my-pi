@@ -1081,6 +1081,26 @@ export class Editor implements Component, Focusable {
 		return this.#autocompleteState !== null;
 	}
 
+	/** True while the shown ghost text is the composer prediction Tab would insert; false for word completions and popup hints. */
+	hasAcceptablePrediction(): boolean {
+		return this.#autocompleteState === null && this.#getPredictionSuffix() !== null;
+	}
+
+	/** Insert the shown prediction as Tab does; false when none is shown. */
+	acceptShownPrediction(): boolean {
+		if (this.#autocompleteState !== null) return false;
+		return this.#acceptPrediction();
+	}
+	/** How many other predictions the draft's alternatives list would offer (Tab's `N more`); 0 when none. */
+	predictionAlternativeCount(): number {
+		const alternatives = this.#getPredictionAlternatives();
+		return alternatives ? alternatives.choices.length - 1 : 0;
+	}
+	/** Open the list of every prediction as Tab does over a draft that equals one of them; false when there is none. */
+	showPredictionAlternatives(): boolean {
+		return this.#showPredictionAlternatives();
+	}
+
 	/**
 	 * Get the available width for top border content given a total terminal width.
 	 * Accounts for the border characters and horizontal padding when visible.

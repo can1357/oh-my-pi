@@ -1102,6 +1102,8 @@ export class CustomEditor extends Editor {
 				chips: Component | undefined;
 				input: NativeNode;
 				rate: number | undefined;
+				accept: boolean;
+				alternatives: number;
 				controls: ComposerControls;
 				bar: NativeNode;
 				layout: NativeEditorLayout;
@@ -1114,9 +1116,10 @@ export class CustomEditor extends Editor {
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
-	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
-	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
-	 * `submit`, `interrupt` and `focus:<id>` actions; `thinking.set` (the level
+	 * the other status facts, usage, Accept while the input shows a prediction
+	 * (never for a word completion), dictation, then send (Stop while a turn runs).
+	 * Clicks come back as `status.model`, `thinking.cycle`, `accept`,
+	 * `dictation.toggle`, `submit`, `interrupt` and `focus:<id>` actions; `thinking.set` (the level
 	 * as `value`) picks a thinking level directly (a phone's effort menu).
 	 */
 	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
@@ -1127,6 +1130,8 @@ export class CustomEditor extends Editor {
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		const tabKey = getKeybindings().getKeys("tui.input.tab")[0];
+		const tabHint = tabKey ? `  ${formatTooltipKey(tabKey)}` : "";
 		const key = [
 			shell?.kind,
 			shell?.excluded,
@@ -1136,17 +1141,24 @@ export class CustomEditor extends Editor {
 			thinkingKey,
 			modelKey,
 			interruptKey,
+			tabKey,
 			state.viewing?.join("\u0001"),
 			effortGlyph,
 			state.thinkingInModel,
 		].join("\0");
 		const rate = state.rate;
+		// A touch keyboard may have no Tab key, so the prediction Tab would insert gets tappable controls.
+		// Word completions stay Tab-only: they come and go per keystroke and would blink the button.
+		const accept = this.hasAcceptablePrediction();
+		const alternatives = this.predictionAlternativeCount();
 		const chips = this.attachmentChips;
 		const memo = this.#nativeComposer;
 		if (
 			memo &&
 			memo.key === key &&
 			memo.rate === rate &&
+			memo.accept === accept &&
+			memo.alternatives === alternatives &&
 			memo.facts === facts &&
 			memo.input === input &&
 			memo.chips === chips
@@ -1157,9 +1169,12 @@ export class CustomEditor extends Editor {
 			memo?.key === key && memo.facts === facts
 				? memo.controls
 				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
-		// The rate ticks while a turn streams: only the bar follows it.
+		// The rate ticks while a turn streams and Accept and `N more` follow the ghost text: only the bar follows them.
 		const bar =
-			memo?.controls === controls && memo.rate === rate
+			memo?.controls === controls &&
+			memo.rate === rate &&
+			memo.accept === accept &&
+			memo.alternatives === alternatives
 				? memo.bar
 				: keyed(
 						row(
@@ -1176,6 +1191,32 @@ export class CustomEditor extends Editor {
 								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
 								facts?.usage,
+								accept &&
+									node(
+										"text",
+										{
+											role: "omp.composer.accept",
+											text: "Accept",
+											wrap: "none",
+											title: `Accept suggestion${tabHint}`,
+											actions: { click: "accept" },
+										},
+										undefined,
+										"accept",
+									),
+								alternatives > 0 &&
+									node(
+										"text",
+										{
+											role: "omp.composer.alternatives",
+											text: `${alternatives} more`,
+											wrap: "none",
+											title: `Show other suggestions${tabHint}`,
+											actions: { click: "alternatives" },
+										},
+										undefined,
+										"alternatives",
+									),
 								controls.dictation,
 								controls.submit,
 							]),
@@ -1193,7 +1234,7 @@ export class CustomEditor extends Editor {
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, rate, controls, bar, layout };
+		this.#nativeComposer = { key, facts, chips, input, rate, accept, alternatives, controls, bar, layout };
 		return layout;
 	};
 
@@ -1448,6 +1489,12 @@ export class CustomEditor extends Editor {
 				if (dictation !== undefined && dictation !== "transcribing") this.onToggleDictation?.();
 				return;
 			}
+			case "accept":
+				this.acceptShownPrediction();
+				return;
+			case "alternatives":
+				this.showPredictionAlternatives();
+				return;
 			case "submit":
 				if (this.nativeSendable) this.submit();
 				return;

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- The native composer bar shows Accept while the input carries a prediction as ghost text; tapping it inserts the prediction as Tab does, for touch keyboards without a Tab key (role `omp.composer.accept`, action `accept`). Word completions stay Tab-only so the button does not blink as they come and go while typing. `Editor.hasAcceptablePrediction()` and `Editor.acceptShownPrediction()` expose the same check and insertion ([#17810](https://github.com/can1357/oh-my-pi/pull/17810) by [@wolfiesch](https://github.com/wolfiesch))
+- While a draft equals one of two or more predictions, the native composer bar shows `N more`; tapping it opens the same prediction alternatives list Tab does, and tapping a row there swaps the draft (role `omp.composer.alternatives`, action `alternatives`). `Editor.predictionAlternativeCount()` and `Editor.showPredictionAlternatives()` expose the count and the opener ([#17810](https://github.com/can1357/oh-my-pi/pull/17810) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
