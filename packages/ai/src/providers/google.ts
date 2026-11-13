@@ -46,6 +46,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 				provider: model.provider,
 				providerType: model.providerType,
 				protocol: "google",
+				modelId: model.id,
 				sessionId: options?.sessionId ?? options?.promptCacheKey,
 			});
 			return { params, url, headers, fetch: options?.fetch };

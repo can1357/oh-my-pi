@@ -356,6 +356,7 @@ export function resolveOpenAIRequestSetup(
 		provider: model.provider,
 		providerType: model.providerType,
 		protocol: "openai",
+		modelId: model.id,
 		sessionId,
 		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
 	});
