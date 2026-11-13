@@ -1350,7 +1350,10 @@ export async function discoverOpenAIModelsList(
 					: {}),
 			},
 		} as ModelSpec<Api>;
-		specs.push(withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"));
+		const prepared = skipAmbiguousModel(providerConfig.provider, id, () =>
+			withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"),
+		);
+		if (prepared) specs.push(prepared);
 	}
 	// `discovery.type: "litellm"` keeps LiteLLM provider policy under any alias.
 	const build =
@@ -1359,21 +1362,29 @@ export async function discoverOpenAIModelsList(
 			: (spec: ModelSpec<Api>) => buildModel(spec);
 	const built: Model<Api>[] = [];
 	for (const spec of specs) {
-		try {
-			built.push(build(spec));
-		} catch (error) {
-			// Catalog classification stays strict, so an upstream id that names two
-			// vendors (`amazon/openai.gpt-...`) throws; skip that one model rather
-			// than losing the provider's whole list.
-			if (!(error instanceof AmbiguousIdentityError)) throw error;
-			logger.warn("Skipping discovered model with an ambiguous identity", {
-				provider: providerConfig.provider,
-				model: spec.id,
-				error: error.message,
-			});
-		}
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () => build(spec));
+		if (model) built.push(model);
 	}
 	return built;
+}
+
+/**
+ * Runs one discovered model's catalog classification. Classification stays
+ * strict, so an upstream id that names two vendors (`amazon/openai.gpt-...`)
+ * throws; skip that one model rather than losing the provider's whole list.
+ */
+function skipAmbiguousModel<T>(provider: string, id: string, classify: () => T): T | undefined {
+	try {
+		return classify();
+	} catch (error) {
+		if (!(error instanceof AmbiguousIdentityError)) throw error;
+		logger.warn("Skipping discovered model with an ambiguous identity", {
+			provider,
+			model: id,
+			error: error.message,
+		});
+		return undefined;
+	}
 }
 
 export async function discoverLiteLLMModels(

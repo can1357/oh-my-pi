@@ -2893,9 +2893,15 @@ describe("ModelRegistry runtime discovery", () => {
 				if (String(input) !== "http://127.0.0.1:9993/v3/models") {
 					throw new Error(`Unexpected URL: ${String(input)}`);
 				}
-				// Eden AI's gateway prefixes each id with the hosting vendor.
+				// Eden AI's gateway prefixes each id with the hosting vendor. Rows that
+				// advertise reasoning levels are classified while their spec is prepared.
 				const data = ["vertex/gemini-4-carbon@eu", "amazon/openai.gpt-6.1-sol", "mistral/mistral-large-latest"].map(
-					id => ({ id, object: "model", owned_by: id.split("/")[0] }),
+					id => ({
+						id,
+						object: "model",
+						owned_by: id.split("/")[0],
+						...(id.startsWith("mistral/") ? {} : { supported_reasoning_levels: ["low", "high"] }),
+					}),
 				);
 				return new Response(JSON.stringify({ object: "list", data }), {
 					status: 200,
