@@ -17,6 +17,15 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+// Restricted SDK sessions drop ambient `options.extensions` by design; hooks reach them
+// through `preloadedPreparedExtensions`, the sanctioned restricted-child channel.
+const preparedHook = (factory: ExtensionFactory) => ({
+	path: "<inline-0>",
+	resolvedPath: "<inline-0>",
+	factory,
+	error: null as null,
+});
+
 const deliveryGuidance = "Results auto-deliver; NEVER poll.";
 const sessions: AgentSession[] = [];
 const roots: TempDir[] = [];
@@ -421,39 +430,35 @@ describe("SDK async task guidance", () => {
 
 	it("persists original identity before an outer tool returns without awaiting", async () => {
 		let observations: RegisteredTaskObservation[] = [];
+		// Invoke and query share one tool name on purpose: per-tool SDK principals scope
+		// queries to the granting tool's own delegations, so a differently named query
+		// tool could never observe this tool's intents.
 		const manager: CustomTool = {
 			name: "manager_test",
 			label: "Manager",
-			description: "Delegate an inspection.",
+			description: "Delegate an inspection or query its calls.",
 			parameters: type({ agent: "string", name: "string", task: "string" }),
 			async execute(_id, args, _onUpdate, ctx) {
+				if ("outer" in (args as object)) {
+					if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
+					observations = ctx.queryRegisteredTask((args as { outer: string }).outer);
+					return { content: [{ type: "text", text: "queried" }], details: {} };
+				}
 				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
 				void ctx.invokeRegisteredTask(args as Record<string, unknown>);
 				return { content: [{ type: "text", text: "returned early" }], details: {} };
 			},
 		};
-		const queryTool: CustomTool = {
-			name: "manager_query",
-			label: "Query",
-			description: "Query the original call.",
-			parameters: type({ outer: "string" }),
-			async execute(_id, _args, _onUpdate, ctx) {
-				if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
-				observations = ctx.queryRegisteredTask("outer-early");
-				return { content: [{ type: "text", text: "queried" }], details: {} };
-			},
-		};
 		const { session } = await harness({
 			restrictToolNames: true,
 			allowRestrictedCustomTools: true,
-			toolNames: ["manager_test", "manager_query"],
-			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test", "manager_query"],
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		const tool = session.getToolForEvalBridge("manager_test");
-		const query = session.getToolForEvalBridge("manager_query");
+		const query = tool;
 		expect(tool).toBeDefined();
-		expect(query).toBeDefined();
 		let failure: unknown;
 		try {
 			await tool?.execute("outer-early", { agent: "task", name: "early", task: "Inspect" });
@@ -475,13 +480,13 @@ describe("SDK async task guidance", () => {
 			sessionManager: reopened,
 			restrictToolNames: true,
 			allowRestrictedCustomTools: true,
-			toolNames: ["manager_test", "manager_query"],
-			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test", "manager_query"],
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		observations = [];
 		await restored.session
-			.getToolForEvalBridge("manager_query")
+			.getToolForEvalBridge("manager_test")
 			?.execute("query-after-restart", { outer: "outer-early" });
 		expect(observations).toEqual([expect.objectContaining({ toolCallId: originalCallId, state: "unknown" })]);
 	});
@@ -625,35 +630,31 @@ describe("SDK async task guidance", () => {
 	it("recovers the persisted call-to-job binding without inferring state after restart", async () => {
 		let observations: RegisteredTaskObservation[] = [];
 		let originalCallId = "";
+		// One shared tool name keeps the invoke and query principals identical: per-tool
+		// SDK principals scope queries to the granting tool's own delegations.
 		const manager: CustomTool = {
 			name: "manager_test",
 			label: "Manager",
-			description: "Delegate an inspection.",
+			description: "Delegate an inspection or query its calls.",
 			parameters: type({ agent: "string", name: "string", task: "string" }),
 			async execute(_id, args, _onUpdate, ctx) {
+				if ("outer" in (args as object)) {
+					if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
+					observations = ctx.queryRegisteredTask((args as { outer: string }).outer);
+					return { content: [{ type: "text", text: "queried" }], details: {} };
+				}
 				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
 				const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
 				originalCallId = receipt.toolCallId;
 				return receipt.result;
 			},
 		};
-		const queryTool: CustomTool = {
-			name: "manager_query",
-			label: "Query",
-			description: "Query the original call.",
-			parameters: type({ outer: "string" }),
-			async execute(_id, _args, _onUpdate, ctx) {
-				if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
-				observations = ctx.queryRegisteredTask("outer-started");
-				return { content: [{ type: "text", text: "queried" }], details: {} };
-			},
-		};
 		const first = await harness({
 			restrictToolNames: true,
 			allowRestrictedCustomTools: true,
-			toolNames: ["manager_test", "manager_query"],
-			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test", "manager_query"],
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		const sessionFile = first.session.sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("missing session file");
@@ -672,12 +673,12 @@ describe("SDK async task guidance", () => {
 			sessionManager: reopened,
 			restrictToolNames: true,
 			allowRestrictedCustomTools: true,
-			toolNames: ["manager_test", "manager_query"],
-			customTools: [manager, queryTool],
-			trustedTaskDelegationTools: ["manager_test", "manager_query"],
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		await restored.session
-			.getToolForEvalBridge("manager_query")
+			.getToolForEvalBridge("manager_test")
 			?.execute("query-restarted", { outer: "outer-started" });
 		expect(observations).toEqual([
 			expect.objectContaining({
@@ -749,8 +750,10 @@ describe("SDK async task guidance", () => {
 				expect(probeState.parentSessionFile).toBe(sessionFile);
 				expect(probeState.sessionFiles).toEqual([sessionFile]);
 			}
+			// The crash probe's invoking tool was named manager_test; the restart query must
+			// reuse that exact name so its per-tool principal matches the persisted intent.
 			const queryTool: CustomTool = {
-				name: "manager_query",
+				name: "manager_test",
 				label: "Query",
 				description: "Query the original call.",
 				parameters: type({}),
@@ -765,11 +768,11 @@ describe("SDK async task guidance", () => {
 				sessionManager: reopened,
 				restrictToolNames: true,
 				allowRestrictedCustomTools: true,
-				toolNames: ["manager_query"],
+				toolNames: ["manager_test"],
 				customTools: [queryTool],
-				trustedTaskDelegationTools: ["manager_query"],
+				trustedTaskDelegationTools: ["manager_test"],
 			});
-			await restored.session.getToolForEvalBridge("manager_query")?.execute("query-crashed", {});
+			await restored.session.getToolForEvalBridge("manager_test")?.execute("query-crashed", {});
 			expect(observations).toHaveLength(1);
 			expect(observations[0]?.toolCallId).toMatch(/^extension-task-/);
 			expect(observations[0]?.state).toBe("unknown");
@@ -807,7 +810,7 @@ describe("SDK async task guidance", () => {
 			},
 		};
 		const { session } = await harness({
-			extensions: [hookExtension],
+			preloadedPreparedExtensions: [preparedHook(hookExtension)],
 			restrictToolNames: true,
 			allowRestrictedCustomTools: true,
 			toolNames: ["manager_test"],
@@ -895,7 +898,7 @@ describe("SDK async task guidance", () => {
 			},
 		};
 		const { session } = await harness({
-			extensions: [hookExtension],
+			preloadedPreparedExtensions: [preparedHook(hookExtension)],
 			restrictToolNames: true,
 			allowRestrictedCustomTools: true,
 			toolNames: ["manager_test"],
@@ -937,7 +940,7 @@ describe("SDK async task guidance", () => {
 			},
 		};
 		const { session } = await harness({
-			extensions: [hookExtension],
+			preloadedPreparedExtensions: [preparedHook(hookExtension)],
 			restrictToolNames: true,
 			allowRestrictedCustomTools: true,
 			toolNames: ["manager_test"],

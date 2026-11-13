@@ -78,7 +78,9 @@ it("aborts the process at the real host boundary for the parent test", async () 
 			"retry.enabled": false,
 			"todo.enabled": false,
 		}),
-		extensions: [hookExtension],
+		preloadedPreparedExtensions: [
+			{ path: "<inline-0>", resolvedPath: "<inline-0>", factory: hookExtension, error: null },
+		],
 		restrictToolNames: true,
 		allowRestrictedCustomTools: true,
 		customTools: [manager],
