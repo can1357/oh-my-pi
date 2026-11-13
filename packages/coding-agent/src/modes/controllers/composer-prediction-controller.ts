@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { MeterProvider } from "@opentelemetry/api";
+import { shouldDisableReasoning } from "@oh-my-pi/pi-tui/thinking";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import composerPredictionPrompt from "../../prompts/system/composer-prediction-user.md" with { type: "text" };
 import type { AgentViewSession } from "../../session/agent-session-handle";
@@ -29,6 +30,12 @@ export const MAX_PREDICTION_CHOICES = 4;
 const PREDICTION_MAX_TOKENS = 1024;
 /** A prediction that has not arrived by then is no longer worth paying for or showing. */
 const PREDICTION_DEADLINE_MS = 15_000;
+/**
+ * The deadline where the side turn reasons at the session's effort. A high-effort pass on a
+ * large context runs past 15 s (Gemini at high spends 10 to 40 s per turn), which timed out
+ * every such prediction; a late prediction is still worth offering in an empty composer.
+ */
+const PREDICTION_DEADLINE_MS_AT_SESSION_EFFORT = 45_000;
 /** Usage-ledger purpose, so session totals and `/stats` include prediction requests. */
 const USAGE_PURPOSE = "composer-prediction";
 /** One pair of double quotes or backticks around the whole reply. */
@@ -125,6 +132,33 @@ function parseReply(reply: string, alternatives: boolean): string[] | undefined 
 }
 
 /**
+ * How long a prediction on `session` may take before it is no longer worth showing. The side turn
+ * reasons at the session's effort when the session thinks and the model's transport has no
+ * per-message control to lower it (OpenAI Responses and Codex `configuration_update`, which
+ * Responses skips in pro mode; Anthropic per-message effort, which lowers only once an earlier
+ * assistant message recorded an effort), and that longer pass gets a longer deadline.
+ */
+export function composerPredictionDeadlineMs(
+	session: Pick<AgentViewSession, "model" | "thinkingLevel" | "messages">,
+): number {
+	const { model } = session;
+	if (!model?.reasoning || shouldDisableReasoning(session.thinkingLevel)) return PREDICTION_DEADLINE_MS;
+	const { compat } = model;
+	const configurationUpdate =
+		compat !== undefined && "supportsConfigurationUpdate" in compat && compat.supportsConfigurationUpdate === true;
+	const perMessageEffort =
+		compat !== undefined &&
+		"supportsPerMessageEffort" in compat &&
+		compat.supportsPerMessageEffort === true &&
+		session.messages.some(message => message.role === "assistant" && message.requestControls?.effort !== undefined);
+	const lowersEffort =
+		(model.api === "openai-responses" && configurationUpdate && model.reasoningMode !== "pro") ||
+		(model.api === "openai-codex-responses" && configurationUpdate) ||
+		perMessageEffort;
+	return lowersEffort ? PREDICTION_DEADLINE_MS : PREDICTION_DEADLINE_MS_AT_SESSION_EFFORT;
+}
+
+/**
  * Composer predictions: once a turn completes, run an ephemeral side turn on
  * the session's model and context (the same prompt prefix, so it reads the
  * prompt cache) asking for the user's likely next message, or with
@@ -133,7 +167,8 @@ function parseReply(reply: string, alternatives: boolean): string[] | undefined 
  */
 export class ComposerPredictionController {
 	readonly #ctx: PredictionContext;
-	readonly #deadlineMs: number;
+	/** Fixed deadline overriding {@link composerPredictionDeadlineMs}; tests set it. */
+	readonly #deadlineMs: number | undefined;
 	/** Metrics sink; the global provider when unset. */
 	readonly #meterProvider: MeterProvider | undefined;
 	#abort: AbortController | undefined;
@@ -141,7 +176,7 @@ export class ComposerPredictionController {
 
 	constructor(ctx: PredictionContext, options: { deadlineMs?: number; meterProvider?: MeterProvider } = {}) {
 		this.#ctx = ctx;
-		this.#deadlineMs = options.deadlineMs ?? PREDICTION_DEADLINE_MS;
+		this.#deadlineMs = options.deadlineMs;
 		this.#meterProvider = options.meterProvider;
 	}
 
@@ -231,7 +266,7 @@ export class ComposerPredictionController {
 
 	async #run(source: PredictionSource, abort: AbortController, alternatives: boolean): Promise<void> {
 		const startedAt = performance.now();
-		const deadline = AbortSignal.timeout(this.#deadlineMs);
+		const deadline = AbortSignal.timeout(this.#deadlineMs ?? composerPredictionDeadlineMs(source.session));
 		let outcome: PredictionOutcome;
 		let offered: number | undefined;
 		try {
