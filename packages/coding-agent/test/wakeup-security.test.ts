@@ -11,6 +11,7 @@ import { ProcProtocolHandler } from "../src/internal-urls/proc-protocol";
 import { initializeExtensions } from "../src/modes/runtime-init";
 import { createAgentSession, type CreateAgentSessionOptions, type CreateAgentSessionResult } from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
+import { loadEntriesFromFile } from "../src/session/session-loader";
 import { packSession, unpackSession } from "../src/session/session-transfer";
 import { SessionManager } from "../src/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "../src/session/session-storage";
@@ -1034,5 +1035,52 @@ describe("wakeups arriving in an unpacked session", () => {
 		expect(records(session).at(-1)).toMatchObject({ id: record.id, state: "cancelled" });
 		expect(await Bun.file(dir.join("unpacked.marker")).exists()).toBe(false);
 		expect(deliveries).toEqual([]);
+	}, 30_000);
+
+	it("cancels the archive's saved wakeups when the unpack lands as a fork of a diverged local copy", async () => {
+		const dir = temporaryDirectory();
+		const source = SessionManager.create(dir.path(), dir.join("sessions-source"));
+		const now = Date.now();
+		const record: WakeupRecord = {
+			version: 1,
+			id: `wake_${Bun.randomUUIDv7().replaceAll("-", "")}`,
+			owner: source.getSessionId(),
+			cwd: dir.path(),
+			delaySeconds: 1,
+			prompt: "Follow up on the archive's fixture.",
+			createdAt: now - 2000,
+			dueAt: now - 1000,
+			state: "scheduled",
+			check: { command: "touch diverged.marker", maxWaitSeconds: 3600 },
+			deadline: now - 2000 + 3_600_000,
+			baseline: "0:fixture",
+		};
+		source.appendCustomEntry(WAKEUP_ENTRY_TYPE, record);
+		await source.ensureOnDisk();
+		await source.flush();
+		const sourceFile = source.getSessionFile()!;
+		await source.close();
+		const archive = dir.join("session.omp");
+		await packSession(sourceFile, archive);
+
+		const sessionDir = dir.join("sessions-arrived");
+		const first = await unpackSession(archive, { cwd: dir.path(), sessionDir });
+		expect(first.mode).toBe("created");
+		const local = await SessionManager.open(first.sessionFile, sessionDir);
+		local.appendMessage({ role: "user", content: "local work", timestamp: Date.now() });
+		await local.flush();
+		await local.close();
+
+		const forked = await unpackSession(archive, { cwd: dir.path(), sessionDir });
+		expect(forked.mode).toBe("forked");
+		expect(forked.id).not.toBe(record.owner);
+
+		const latest = (await loadEntriesFromFile(forked.sessionFile))
+			.flatMap(entry =>
+				entry.type === "custom" && entry.customType === WAKEUP_ENTRY_TYPE ? [entry.data as WakeupRecord] : [],
+			)
+			.filter(data => data.id === record.id)
+			.at(-1);
+		expect(latest).toMatchObject({ owner: record.owner, state: "cancelled" });
 	}, 30_000);
 });

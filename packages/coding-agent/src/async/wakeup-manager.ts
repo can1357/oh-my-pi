@@ -126,14 +126,16 @@ function readRecord(value: unknown): WakeupRecord | undefined {
 }
 
 /**
- * Cancel every pending wakeup a journal carries for its own session id. A journal that arrives from
- * elsewhere (`omp session unpack`) is data, not local intent: its saved timers, and above all their
- * check commands, must never run without the local user having scheduled them. Returns the count.
+ * Cancel every pending wakeup a journal carries for `owner` (default: its own session id). A journal
+ * that arrives from elsewhere (`omp session unpack`) is data, not local intent: its saved timers, and
+ * above all their check commands, must never run without the local user having scheduled them. A fork
+ * gets a new session id but keeps the records' original owner, so callers pass that owner explicitly.
+ * Returns the count.
  */
 export function cancelPendingWakeups(
 	journal: Pick<SessionManager, "getSessionId" | "getEntries" | "appendCustomEntry">,
+	owner: string = journal.getSessionId(),
 ): number {
-	const owner = journal.getSessionId();
 	const latest = new Map<string, WakeupRecord>();
 	for (const entry of journal.getEntries()) {
 		if (entry.type !== "custom" || entry.customType !== WAKEUP_ENTRY_TYPE) continue;

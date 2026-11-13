@@ -537,11 +537,14 @@ async function removeSessionFiles(sessionFile: string): Promise<void> {
 
 /**
  * Open a session through `open`, disarm the wakeups it arrived with, record its arrival, and close it.
- * A failure after the session landed removes it again, so the caller can roll back.
+ * `archiveOwner` is the session id the archive's wakeup records were scheduled under; a fork takes a new
+ * id but keeps those records' owner. A failure after the session landed removes it again, so the caller
+ * can roll back.
  */
 async function placeSession(
 	open: () => Promise<SessionManager>,
 	arrival: SessionTransferDetails,
+	archiveOwner: string,
 ): Promise<{ sessionFile: string; id: string }> {
 	let placed: string | undefined;
 	try {
@@ -550,7 +553,7 @@ async function placeSession(
 		const id = manager.getSessionId();
 		try {
 			// Saved timers (and their shell checks) came from the archive, not from this machine's user.
-			cancelPendingWakeups(manager);
+			cancelPendingWakeups(manager, archiveOwner);
 			await appendTransferNotice(manager, arrival);
 		} finally {
 			await manager.close();
@@ -611,7 +614,7 @@ export async function unpackSession(archivePath: string, options: UnpackSessionO
 		}
 
 		if (diverged) {
-			const placed = await placeSession(() => SessionManager.forkFrom(stagedFile, cwd, sessionDir), arrival);
+			const placed = await placeSession(() => SessionManager.forkFrom(stagedFile, cwd, sessionDir), arrival, id);
 			logger.info("Unpacked session as a fork of a diverged local copy", { parent: id, ...placed });
 			return { ...placed, mode: "forked" };
 		}
@@ -625,6 +628,7 @@ export async function unpackSession(archivePath: string, options: UnpackSessionO
 				placed = await placeSession(
 					() => SessionManager.openRelocated(stagedFile, recordedCwd, cwd, sessionDir),
 					arrival,
+					id,
 				);
 			} catch (error) {
 				await restoreAside(aside);
