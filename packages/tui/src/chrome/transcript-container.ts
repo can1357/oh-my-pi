@@ -890,11 +890,12 @@ export class TranscriptContainer extends Container {
 
 	/**
 	 * Whether every live block older than `live[cursor]`, and that block itself
-	 * (as a split) when `clipped`, holds its final content, so pressure
-	 * retirement takes it into scrollback once it settles and clipping hides
-	 * nothing that can still change. A finalized block still pending (an async
-	 * figure render or image conversion in replayed history) only delays that;
-	 * a block still streaming or running would stay pinned out of view instead.
+	 * (as a split) when `clipped`, is finalized, so pressure retirement takes it
+	 * into scrollback once it settles. A finalized block still pending (an async
+	 * figure render or image conversion in replayed history) may still swap a
+	 * placeholder for its figure, but it is off screen and not yet in scrollback,
+	 * so it retires with its final rows; a block still streaming or running
+	 * would stay pinned out of view instead.
 	 */
 	#retiresThrough(live: ReadonlyArray<{ entry: TranscriptEntry }>, cursor: number, clipped: boolean): boolean {
 		const end = clipped ? cursor + 1 : cursor;
