@@ -1262,6 +1262,26 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/hugg
 - **Catalog Descriptor**: `openAiCompletionsDescriptor` in `packages/catalog/src/provider-models/openai-compat.ts` registers `huggingface` in `PROVIDER_DESCRIPTORS` targeting `https://router.huggingface.co/v1`.
 - **Catalog Discovery**: Participating in catalog generation via `catalogDiscovery`, `generate-models.ts` (`packages/catalog/scripts/generate-models.ts`) resolves API tokens via `resolveProviderApiKey` and calls `fetchOpenAICompatibleModels` (`packages/catalog/src/discovery/openai-compatible.ts`) against `https://router.huggingface.co/v1/models` to discover available Hub inference endpoints.
 
+## Keln (`keln`)
+
+### Special casings
+
+- Uses `openai-completions` at `https://api.keln.ai/v1`. Rows whose `output_modalities` lack `text`, such as decision, embedding and reranker models, cannot serve chat; discovery leaves them out of the chat roster.
+- **Thinking controls**: `reasoning.supported_efforts` lists the effort levels and `reasoning.default_effort` sets the default. `none` turns reasoning off and is not offered as a level: thinking-off sends `reasoning_effort: "none"` where the row publishes it and the lowest level where it does not, since Keln answers `reasoning_not_disableable` to `none` on those models. `reasoning.mandatory` overrides lineage rules in both directions, and a row with no effort levels offers no thinking control.
+- Keln takes `reasoning_effort` on every model, so `providers/keln.kdl` sets `thinking-format "openai"` for the Qwen class instead of the lineage's `enable_thinking`.
+- **Reasoning replay**: reasoning streams on `reasoning_content`, and `replay-reasoning-content` sends it back on assistant turns so multi-turn tool calling keeps the reasoning, as the Keln docs ask.
+- **Output cap**: `/v1/models` publishes no maximum output, so `max-tokens-fallback` supplies 32,768. `max_tokens` covers reasoning plus answer, and prompt + `max_tokens` must fit `context_length`; Keln's `context_length_exceeded` is classified as context overflow.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/keln.kdl`. Environment key: `KELN_API_KEY`. `/v1/models` is public, so validation uses `chat-completions`: a 1-token request to `zai-org/glm-5.3-flash`. A 401 or 403 rejects the key; any other probe failure keeps it.
+
+### Catalog model handling
+
+- **Provider entry (`keln`)**: `packages/catalog/src/compat/rules/providers/keln.kdl` declares default model `zai-org/glm-5.3`. Model management permits unauthenticated access, so the roster loads before a key is configured.
+- **Live catalog**: the entry has no `discovery` node and no seed, so `models.json` holds no Keln rows. Prices, context windows, and input types come from the live `/v1/models` row, and a successful fetch replaces the previous roster.
+- Runtime manager: `kelnModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
 ## Kilo Gateway (`kilo`)
 
 Kilo Gateway (`kilo`) is an AI model aggregator and proxy service (`https://api.kilo.ai/api/gateway`) using the OpenAI Chat Completions transport (`api: "openai-completions"`). It supports authentication via `KILO_API_KEY` or device-code OAuth flow (`/login kilo`), and allows unauthenticated dynamic model discovery from its OpenAI-compatible `/models` catalog endpoint.

@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added Keln as a built-in provider with API-key login and live discovery of chat models, prices, limits, and effort levels (default `zai-org/glm-5.3`) ([#18550](https://github.com/can1357/oh-my-pi/pull/18550) by [@kris-holy](https://github.com/kris-holy))
 - Added the Gemini Decision 1 judge model (`google/gemini-decision-1`, `GEMINI_API_KEY`); assign it to the `judge` role to use it ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
 - Added Gemini 4 Hydrogen (`gemini-4-hydrogen`) on Google, Vertex, OpenCode Zen, OpenRouter, Vercel AI Gateway, and Kilo, with low, medium, high, and xhigh thinking levels on the native Google transports.

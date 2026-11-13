@@ -1,0 +1,13 @@
+auth "keln" {
+	name "Keln"
+	login "api-key" {
+		auth-url "https://app.keln.ai/signup"
+		instructions "Sign up or sign in, open Keys, and choose Create key"
+		prompt "Paste your Keln API key" placeholder="sk-keln-..."
+		normalize "strip-bearer"
+		// Validate against inference: `/v1/models` is public and cannot reject a
+		// key. The 1-token probe costs a few tokens. `optional` keeps a retired
+		// probe model from blocking login, while a 401 or 403 still rejects the key.
+		validate "chat-completions" label="Keln" base-url="https://api.keln.ai/v1" model="zai-org/glm-5.3-flash" max-tokens-field="max_tokens" optional=#true
+	}
+}

@@ -1785,6 +1785,41 @@ function coralRate(value: unknown, fallback: number): number {
 }
 
 /**
+ * Effort-mode thinking from a catalog row's `reasoning` controls
+ * (`supported_efforts`, `default_effort`, `mandatory`), shared by catalogs that
+ * publish that row shape. Only levels omp knows are kept; `none` is an off
+ * switch, not a level. Returns `undefined` when no level remains.
+ *
+ * `mandatory` picks how `requiresEffort` is set: `"when-boolean"` copies the
+ * row's flag only when the row states one, leaving lineage rules in place
+ * otherwise; `"explicit"` always sets it, so a row without `mandatory: true`
+ * clears a lineage rule that marks the model mandatory.
+ */
+function effortThinkingFromControls(
+	controls: Record<string, unknown> | undefined,
+	mandatory: "when-boolean" | "explicit",
+): ThinkingConfig | undefined {
+	const wireEfforts: unknown[] = Array.isArray(controls?.supported_efforts) ? controls.supported_efforts : [];
+	const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
+	if (efforts.length === 0) {
+		return undefined;
+	}
+	const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
+	const requiresEffort =
+		mandatory === "explicit"
+			? controls?.mandatory === true
+			: typeof controls?.mandatory === "boolean"
+				? controls.mandatory
+				: undefined;
+	return {
+		mode: "effort",
+		efforts,
+		...(defaultLevel !== undefined && { defaultLevel }),
+		...(requiresEffort !== undefined && { requiresEffort }),
+	};
+}
+
+/**
  * Map one CoralBricks catalog row to a chat model spec; non-chat rows
  * (`supports_chat: false`) are dropped. Pricing arrives in Coral's own
  * per-million field names; `cached_input_per_m` is $0 on every model and a
@@ -1814,18 +1849,8 @@ function mapCoralbricksModel(
 	let thinking = reasoning ? reference?.thinking : undefined;
 	let compat = reference?.compat;
 	if (reasoning && Array.isArray(wireEfforts)) {
-		const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
 		// `none` is the server's off default, not an Effort (nor `minimal`).
-		const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
-		thinking =
-			efforts.length > 0
-				? {
-						mode: "effort",
-						efforts,
-						...(defaultLevel !== undefined && { defaultLevel }),
-						...(typeof controls?.mandatory === "boolean" && { requiresEffort: controls.mandatory }),
-					}
-				: undefined;
+		thinking = effortThinkingFromControls(controls, "when-boolean");
 	}
 	if (hasReasoningFlag || Array.isArray(wireEfforts)) {
 		// An explicit empty/unknown vocabulary must not regrow a guessed dial
@@ -8375,4 +8400,73 @@ export function otariModelManagerOptions(config?: OtariModelManagerConfig): Mode
 				}),
 		}),
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Keln
+// ---------------------------------------------------------------------------
+
+/**
+ * Keln discovery configuration: the API key plus optional base-URL and fetch
+ * overrides. Consumed by {@link kelnModelManagerOptions}, and exported for
+ * extensions and tests that construct the manager directly.
+ */
+export interface KelnModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Maps one Keln `/v1/models` row. The row is the deployment truth for limits,
+ * modalities, prices, and reasoning controls, so a row with no effort levels
+ * offers no thinking control rather than inheriting guessed levels. `none`
+ * turns reasoning off and is not a level; a model without it reasons at its
+ * lowest level when thinking is off, since Keln answers
+ * `reasoning_not_disableable` to `none`.
+ */
+function mapKelnModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	// Rows without text output, such as decision, embedding and reranker models,
+	// cannot serve chat.
+	if (!Array.isArray(entry.output_modalities) || !entry.output_modalities.includes("text")) {
+		return null;
+	}
+	const controls = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const wireEfforts: unknown[] = Array.isArray(controls?.supported_efforts) ? controls.supported_efforts : [];
+	// Explicit in both directions: class rules mark some lineages as mandatory,
+	// and the row states what this deployment does.
+	const thinking = effortThinkingFromControls(controls, "explicit");
+	return {
+		...defaults,
+		reasoning: thinking !== undefined,
+		...(thinking && { thinking }),
+		input: toInputCapabilities(entry.input_modalities),
+		contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+		cost: perTokenPricingCost(entry.pricing),
+		compat: {
+			trustExplicitThinkingOnly: true,
+			...(thinking && {
+				reasoningDisableMode: wireEfforts.includes("none") ? ("none-effort" as const) : ("lowest-effort" as const),
+			}),
+		},
+	};
+}
+
+/**
+ * Keln model manager: OpenAI-compatible chat completions at `api.keln.ai/v1`.
+ * `/v1/models` is public and carries the live prices, so discovery runs with or
+ * without a key and a successful fetch is the complete roster.
+ */
+export function kelnModelManagerOptions(config?: KelnModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "keln",
+		defaultBaseUrl: "https://api.keln.ai/v1",
+		config,
+		dynamicModelsAuthoritative: true,
+		mapModel: mapKelnModel,
+	});
 }

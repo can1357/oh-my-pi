@@ -184,6 +184,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
 | `scaleway`                       | `SCW_SECRET_KEY`, then `SCW_API_KEY`                                                |
 | `otari`                          | `OTARI_API_KEY`                                                                     |
+| `keln`                           | `KELN_API_KEY`                                                                      |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
@@ -218,6 +219,8 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 `nace` serves Nace's Drex decision models (`nace/drex-max-v1.1`, `nace/drex-max-finance` and the text-only `nace/drex-v2.0`) as `judge` models; assign one to the `judge` role to use it. `/login nace` prompts for an API key from `https://console.nace.ai/dashboard/api-keys`; to use an environment variable, set `NACE_API_KEY`. The Drex Max models take up to 8 PNG, JPEG, or WebP images per request. Drex rejects any text that holds a base64 image, audio, video, or PDF data URL, so OMP replaces each one in the state, instructions, and criteria with a description such as `[image/png base64 data URL]`.
 
 `/login snowflake` prompts for your Snowflake account identifier or account URL, then signs in through the browser with Snowflake's built-in local-application OAuth integration and stores the account with the token. To use environment variables instead, set both `SNOWFLAKE_PAT` and `SNOWFLAKE_ACCOUNT`.
+
+`keln` is an inference platform for open models with an OpenAI-compatible API. Sign up at `https://app.keln.ai/signup`, open **Keys** → **Create key**, then set `KELN_API_KEY` or run `/login keln` and select `keln/zai-org/glm-5.3`. OMP reads the chat models, context windows, input types, effort levels, and prices live from the public `/v1/models` endpoint and leaves decision models out of the chat roster. The API publishes no maximum output, so OMP requests up to 32,768 output tokens per response, covering reasoning and answer together.
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
 

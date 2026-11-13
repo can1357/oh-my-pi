@@ -127,6 +127,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `SCW_SECRET_KEY`                      | Scaleway Generative APIs auth                      | Using `scaleway` provider                                      | Serverless open-weight chat models; validated against `https://api.scaleway.ai/v1/models`; `SCW_API_KEY` is accepted as a legacy alias       |
 | `OTARI_API_KEY`                       | Otari gateway auth                                 | Using `otari` provider                                         | Workspace key; validated against `${OTARI_BASE_URL:-https://api.otari.ai/api/v1}/models` |
 | `OTARI_BASE_URL`                      | Otari self-hosted API root                         | Using `otari` provider                                         | Self-hosted deployment's API root including its prefix (`https://host.example.com/api/v1`); used by `/login otari` validation, model discovery, and requests |
+| `KELN_API_KEY`                        | Keln auth                                          | Using `keln` provider                                          | Also available via `/login keln`, which validates the key with a 1-token chat request (`/v1/models` is public)                               |
 
 ### GitHub/Copilot tokens
 
