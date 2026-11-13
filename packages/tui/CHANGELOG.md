@@ -7,6 +7,10 @@
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 
+### Changed
+
+- `CustomEditor.onPasteImagePath` also receives pasted pdf, docx, pptx, xlsx, and epub paths, so hosts can attach documents; a payload with any other path still pastes as plain text ([#9931](https://github.com/can1357/oh-my-pi/issues/9931), [#19172](https://github.com/can1357/oh-my-pi/pull/19172) by [@Skare69](https://github.com/Skare69))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
