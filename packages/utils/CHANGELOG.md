@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `pathIsWithin()` and `relativePathWithinRoot()` treating a child whose name starts with two dots, such as `..cache`, as outside its root ([#14458](https://github.com/can1357/oh-my-pi/pull/14458) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

@@ -37,6 +37,61 @@ describe("RpcClient.start", () => {
 			"--no-session",
 		]);
 	});
+
+	test("defaults an older skill diagnostic duplicate to a content match", async () => {
+		const encoder = new TextEncoder();
+		const exited = Promise.withResolvers<number>();
+		let stdout!: ReadableStreamDefaultController<Uint8Array>;
+		const proc: RpcAgentProcess = {
+			stdin: {
+				write(data: string) {
+					const request = JSON.parse(data) as { id: string; type: string };
+					if (request.type !== "get_skill_diagnostics") return data.length;
+					stdout.enqueue(
+						encoder.encode(
+							`${JSON.stringify({
+								id: request.id,
+								type: "response",
+								command: request.type,
+								success: true,
+								data: {
+									cwd: "/workspace",
+									showStartupDiagnostics: true,
+									diagnostics: [
+										{
+											name: "review",
+											reason: "source-order",
+											skills: [{ name: "review", filePath: "/a/SKILL.md", source: "native:user" }],
+											duplicates: [
+												{
+													skill: { name: "review", filePath: "/b/SKILL.md", source: "agents:user" },
+													retained: { name: "review", filePath: "/a/SKILL.md", source: "native:user" },
+												},
+											],
+										},
+									],
+								},
+							})}\n`,
+						),
+					);
+					return data.length;
+				},
+			},
+			stdout: new ReadableStream<Uint8Array>({
+				start(controller) {
+					stdout = controller;
+					controller.enqueue(encoder.encode(`${JSON.stringify({ type: "ready" })}\n`));
+				},
+			}),
+			peekStderr: () => "",
+			kill: () => exited.resolve(0),
+			exited: exited.promise,
+		};
+		using client = new RpcClient({ spawn: () => proc });
+		await client.start();
+		const snapshot = await client.getSkillDiagnostics();
+		expect(snapshot.diagnostics[0].duplicates[0].match).toBe("content");
+	});
 });
 
 describe("RpcClient stdin failures", () => {

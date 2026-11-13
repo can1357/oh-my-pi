@@ -6,6 +6,8 @@
  * a unified array of MCP servers.
  */
 
+import type { ResourceExclusions } from "../discovery/resource-exclusions";
+
 /** Extension sub-discovery mode; `explicit-only` suppresses ambient sources. */
 export type ExtensionRootMode = "merge" | "explicit-only";
 
@@ -24,6 +26,12 @@ export interface EffectiveExtensionRoots {
 	mode: ExtensionRootMode;
 	configured: readonly string[];
 	configuredLevel: "user" | "project";
+	/**
+	 * Exclusions applied to every root of this pass, explicit and ambient alike: the owning
+	 * session's user-level `diagnostics.resourceExclusions`, or a trusted host's own value.
+	 * Unset falls back to the invocation scope, then the user's global settings.
+	 */
+	resourceExclusions?: ResourceExclusions;
 }
 
 /**
@@ -131,9 +139,9 @@ export interface LoadOptions<T = unknown> {
 	 * Drop items before deduplication as if they never existed (e.g. scope
 	 * exclusions). A dropped item neither survives nor claims its dedupe key,
 	 * so it cannot shadow anything. Receives the item with its attached
-	 * `_source`.
+	 * `_source`; may be async.
 	 */
-	filter?(item: T & { _source: SourceMeta }): boolean;
+	filter?(item: T & { _source: SourceMeta }): boolean | Promise<boolean>;
 	/**
 	 * Exclude items from the results while letting them claim their dedupe key.
 	 * A suppressed higher-priority item still shadows same-key lower-priority
@@ -175,6 +183,20 @@ export interface SourceMeta {
 	 * put the version, not the plugin name, in the path segment owning `skills/`.
 	 */
 	pluginName?: string;
+	/**
+	 * Source repository a plugin or package root declares (`repository` in
+	 * `.claude-plugin/plugin.json`, `plugin.json`, or `package.json`),
+	 * normalized to `host/owner/repo[/directory]`, plus the manifest version.
+	 * Set by the plugin-backed skill providers. Self-declared: it identifies
+	 * lineage across registries and forks, not authenticity.
+	 */
+	provenance?: SourceProvenance;
+}
+
+/** See {@link SourceMeta.provenance}. */
+export interface SourceProvenance {
+	repository: string;
+	version?: string;
 }
 
 /**
