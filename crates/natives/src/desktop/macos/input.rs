@@ -3509,6 +3509,9 @@ fn step_slider_geometry(
 		let Some(next) = settle(0.0, SLIDER_POSITION_TOLERANCE, &mut position, &mut wait) else {
 			return Err(failure(value()));
 		};
+		if next.abs() <= SLIDER_POSITION_TOLERANCE {
+			return Ok(());
+		}
 		if next == distance {
 			return Err(failure(value()));
 		}
