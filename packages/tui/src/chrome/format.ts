@@ -4,11 +4,21 @@ import { theme as currentTheme, type Theme } from "../theme/theme";
 import type { NativeNode } from "../native/node";
 import { node } from "../native/describe";
 
-/** Title-case a provider id for display (`openai-codex` → `Openai Codex`). */
+/** Brand spellings for provider-id segments that plain capitalization gets wrong. */
+const PROVIDER_NAME_SEGMENTS: Record<string, string> = {
+	openai: "OpenAI",
+	github: "GitHub",
+	minimax: "MiniMax",
+	zai: "Z.AI",
+	cli: "CLI",
+	cn: "CN",
+};
+
+/** Title-case a provider id for display, keeping brand spellings (`openai-codex` → `OpenAI Codex`). */
 export function formatProviderName(provider: string): string {
 	return provider
 		.split(/[-_]/g)
-		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
+		.map(part => PROVIDER_NAME_SEGMENTS[part] ?? (part ? part[0].toUpperCase() + part.slice(1) : ""))
 		.join(" ");
 }
 
