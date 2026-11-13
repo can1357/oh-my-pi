@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `<text>` disappearing from rendered SVGs when a generic font family names a font that is not installed ([#15181](https://github.com/can1357/oh-my-pi/issues/15181)) ([#18538](https://github.com/can1357/oh-my-pi/pull/18538) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
