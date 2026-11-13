@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Rio on Windows now uses OSC 9 notifications after its MSI registers the AUMID, so omp task-completion toasts reach Rio's notifier ([#18449](https://github.com/can1357/oh-my-pi/pull/18449) by [@Rim-World](https://github.com/Rim-World))
 - Fixed `grep` tool results in ANSI and native Tern views to show a `binary matches` warning on both zero-match and matching searches ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.19.0] - 2026-11-12
