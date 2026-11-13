@@ -305,25 +305,30 @@ describe("BtwController", () => {
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
 		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
 		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
-		const promoted = Promise.withResolvers<void>();
-		ctx.handleBtwBranch = vi.fn(async () => {
-			promoted.resolve();
-		});
 		const controller = new BtwController(ctx);
+		const branch = vi.spyOn(controller, "handleBranch");
 
 		await controller.start("Question?");
 		await drainBtwRequest();
 
 		const sheet = showOverlay.mock.calls[0]?.[0];
 		if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
-		expect(Bun.stripANSI(JSON.stringify(sheet.describe()))).toContain("Branch to chat");
 
+		expect(controller.canBranch()).toBe(true);
+		expect(controller.handlesBranchKey()).toBe(true);
 		sheet.handleInput("b");
-		await promoted.promise;
+		expect(branch).toHaveBeenCalledTimes(1);
+		const result = branch.mock.results[0];
+		if (result?.type !== "return") throw new Error("expected the branch operation to return a promise");
+		expect(await result.value).toBe(true);
 		expect(ctx.handleBtwBranch).toHaveBeenCalledTimes(1);
 
+		// The branch has settled: closing, not an in-flight operation, must disable promotion.
+		expect(controller.canBranch()).toBe(true);
+		expect(controller.handlesBranchKey()).toBe(true);
 		sheet.handleInput("\x1b");
 		expect(controller.canBranch()).toBe(false);
+		expect(controller.handlesBranchKey()).toBe(false);
 
 		await controller.dispose();
 	});

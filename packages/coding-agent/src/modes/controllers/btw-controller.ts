@@ -135,13 +135,15 @@ export class BtwController {
 		return this.#branchUnavailableReason() === undefined;
 	}
 
+	/** The answer lives in the inline panel, or in Tern's open history sheet. */
+	#answerShown(): boolean {
+		return this.#visible || (this.ctx.ui.nativeRendering && this.#historyOverlay !== undefined);
+	}
+
 	/** Whether plain `b` is currently reserved for a completed or pending branch action. */
 	handlesBranchKey(): boolean {
 		if (this.#branchInFlight) return true;
-		// The answer surface is the inline panel in the text renderer, or the BTW history
-		// sheet Tern answers in; Tern never fills the inline container.
-		const answerVisible = this.#visible || (this.ctx.ui.nativeRendering && this.#historyOverlay !== undefined);
-		if (!answerVisible || this.#activeRequest?.component.isBranchable() !== true) return false;
+		if (!this.#answerShown() || this.#activeRequest?.component.isBranchable() !== true) return false;
 		// Branch promotion rewrites the main session; focused-subagent answers stay side-only.
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId) return false;
 		return (
@@ -157,10 +159,7 @@ export class BtwController {
 		if (this.#branchInFlight) return "a branch is already in progress";
 		if ([...this.#injects.values()].includes("sending")) return "a /btw prompt is still sending";
 		if (this.#transitionCount > 0) return "a session operation is in progress";
-		if (
-			!(this.#visible || (this.ctx.ui.nativeRendering && this.#historyOverlay !== undefined)) ||
-			this.#activeRequest?.component.isBranchable() !== true
-		)
+		if (!this.#answerShown() || this.#activeRequest?.component.isBranchable() !== true)
 			return "the answer is not ready";
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId)
 			return "only main-session answers can be branched";

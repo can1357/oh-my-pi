@@ -67,7 +67,7 @@ interface BtwHistoryPanelOptions {
 	onCopy: (record: BtwHistoryRecord) => void;
 	onCancel: (record: BtwHistoryRecord) => void;
 	canFollowUp?: (record: BtwHistoryRecord) => boolean;
-	/** Promote this answer into a branch; false keeps the sheets' branch hint hidden. */
+	/** Promote this answer into a branch; false keeps the sheet's branch hint hidden. */
 	canBranch?: (record: BtwHistoryRecord) => boolean;
 	onBranch?: (record: BtwHistoryRecord) => void;
 	onFollowUp?: (

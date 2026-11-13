@@ -1,6 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import type { BtwHistoryRecord } from "@oh-my-pi/pi-tui/overlays/btw-history";
+import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 
@@ -15,26 +14,24 @@ beforeEach(() => {
 	setThemeInstance(darkTheme);
 });
 
-function makeRecord(): BtwHistoryRecord {
-	return {
-		id: "topic",
-		leafId: "leaf",
-		question: "Why?",
-		answer: "Because.",
-		status: "complete",
-		createdAt: 1,
-		updatedAt: 2,
-	};
-}
-
-function makePanel(canBranch: boolean) {
+function makePanel(canBranch: () => boolean) {
 	const onBranch = vi.fn();
 	const panel = new BtwHistoryPanel({
-		records: [makeRecord()],
+		records: [
+			{
+				id: "topic",
+				leafId: "leaf",
+				question: "Why?",
+				answer: "Because.",
+				status: "complete",
+				createdAt: 1,
+				updatedAt: 2,
+			},
+		],
 		onClose: vi.fn(),
 		onCopy: vi.fn(),
 		onCancel: vi.fn(),
-		canBranch: () => canBranch,
+		canBranch,
 		onBranch,
 		requestRender: vi.fn(),
 		getHeight: () => 24,
@@ -42,42 +39,43 @@ function makePanel(canBranch: boolean) {
 	return { panel, onBranch };
 }
 
-function textActions(panel: BtwHistoryPanel): string {
-	return Bun.stripANSI(panel.render(120).join("\n"));
+function findBranchAction(root: NativeNode): NativeNode | undefined {
+	if (root.key === "branch" && root.p?.actions?.click) return root;
+	for (const child of root.c ?? []) {
+		if (!("k" in child)) continue;
+		const found = findBranchAction(child);
+		if (found) return found;
+	}
+	return undefined;
 }
-
-function described(panel: BtwHistoryPanel): string {
-	return JSON.stringify(panel.describe());
-}
-
-const branchAction = { type: "action", act: "branch" } as NativeUiEvent;
 
 describe("BtwHistoryPanel branch promotion", () => {
-	it("offers the branch action in both renderers and runs it with b", () => {
-		const { panel, onBranch } = makePanel(true);
-
-		expect(textActions(panel)).toContain("branch to chat");
-		expect(described(panel)).toContain("Branch to chat");
+	it("promotes the selected answer with b only while it is eligible", () => {
+		let eligible = true;
+		const { panel, onBranch } = makePanel(() => eligible);
 
 		panel.handleInput("b");
 		expect(onBranch).toHaveBeenCalledWith(expect.objectContaining({ id: "topic" }));
-	});
 
-	it("routes the Tern branch button to the same promotion", () => {
-		const { panel, onBranch } = makePanel(true);
-
-		panel.handleNativeEvent(branchAction);
-		expect(onBranch).toHaveBeenCalledWith(expect.objectContaining({ id: "topic" }));
-	});
-
-	it("keeps the action and the key out when the answer cannot branch", () => {
-		const { panel, onBranch } = makePanel(false);
-
-		expect(textActions(panel)).not.toContain("branch");
-		expect(described(panel)).not.toContain("Branch to chat");
-
+		eligible = false;
 		panel.handleInput("b");
-		panel.handleNativeEvent(branchAction);
-		expect(onBranch).not.toHaveBeenCalled();
+		expect(onBranch).toHaveBeenCalledTimes(1);
+	});
+
+	it("dispatches the rendered Tern button and rejects its stale action after eligibility changes", () => {
+		let eligible = true;
+		const { panel, onBranch } = makePanel(() => eligible);
+		const button = findBranchAction(panel.describe());
+		const act = button?.p?.actions?.click;
+		if (!button?.key || !act) throw new Error("expected a branch button with a click action");
+		const event: NativeUiEvent = { type: "action", key: `actions/${button.key}`, act, mods: [] };
+
+		panel.handleNativeEvent(event);
+		expect(onBranch).toHaveBeenCalledWith(expect.objectContaining({ id: "topic" }));
+
+		eligible = false;
+		expect(findBranchAction(panel.describe())).toBeUndefined();
+		panel.handleNativeEvent(event);
+		expect(onBranch).toHaveBeenCalledTimes(1);
 	});
 });

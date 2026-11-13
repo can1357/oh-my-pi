@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional Branch to chat action and `b` shortcut to the BTW history sheet ([#19135](https://github.com/can1357/oh-my-pi/pull/19135) by [@Clannad47](https://github.com/Clannad47)).
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
