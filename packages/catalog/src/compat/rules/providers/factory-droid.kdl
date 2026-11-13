@@ -996,9 +996,8 @@ provider "factory-droid" {
 		entitlement { feature-flag "garnet_0715" }
 	}
 	// Like Argon: Global-only, and promoted at half its input rate for launch.
-	// Google's list price ($2/$10 until 2026-11-30, then $4/$20) is patched onto
-	// the Gemini API row (classes/gemini.kdl); until a regen bundles that row the
-	// reference resolves to nothing and the seed's zero cost stands.
+	// Its list price is the Gemini API row's, where the Gemini class rules
+	// (classes/gemini.kdl) carry Google's $2/$10 until 2026-11-30, then $4/$20.
 	models "gemini-4-carbon" {
 		routing-family "google"
 		upstream-rotation "google"
