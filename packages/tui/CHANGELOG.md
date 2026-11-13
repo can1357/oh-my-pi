@@ -7,6 +7,10 @@
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 
+### Fixed
+
+- A `bash` call that returns as a background job right away (`async: true`) keeps showing its command in the interpreted shell view instead of switching to the raw command line ([#19202](https://github.com/can1357/oh-my-pi/pull/19202) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
