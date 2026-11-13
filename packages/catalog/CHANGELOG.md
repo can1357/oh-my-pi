@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed Factory Droid GPT-6 models failing with a 400 on the next turn after you change thinking level mid-session when the turn runs on Bedrock or Snowflake; the new level is now sent with the request there.
 - Fixed Gemini 4 Argon on Command Code reporting $0 spend and dropping image attachments; it now bills at Command Code's $2 input, $10 output and $0.10 cache-read rates per million tokens and accepts images ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed Gemini 4 Argon, Carbon and Hydrogen on the Gemini API and Vertex AI stopping long answers at 32,768 or 65,536 output tokens, often before any visible text; they now allow up to 262,144, so long answers continue past the first segment ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed 14 Command Code models reporting $0 spend, including Claude Haiku 5.5, GPT-6.1 Sol and Terra, Kimi K3.1 Pro, Muse Wonder 1.0 and Mistral Large 4; they now bill at the rates Command Code's CLI lists. Haiku 5.5 (above 100K input) and GPT-6.1 Sol and Terra (above 272K) gain a long-context tier, so their default window now starts at that threshold, with `/extended-context on` opening the full window ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch))
