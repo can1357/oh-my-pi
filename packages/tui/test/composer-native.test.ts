@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TspKind } from "@oh-my-pi/pi-wire";
-import { Container, Text } from "@oh-my-pi/pi-tui";
+import { Container, getKeybindings, setKeybindings, Text } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
@@ -163,6 +164,25 @@ describe("native composer", () => {
 		expect(accept()).toBeUndefined();
 		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
 		expect(editor.getText()).toBe("The weath");
+	});
+
+	it("names the bound Tab key in the Accept and `N more` tooltips, following a remap", () => {
+		const previous = getKeybindings();
+		try {
+			setKeybindings(KeybindingsManager.inMemory({ "tui.input.tab": "ctrl+g" }));
+			const editor = composer({ running: false });
+			editor.predictions = () => ["run the tests", "run the linter"];
+			editor.setText("run");
+			const accept = () => byRole(editor.describe(cx), "omp.composer.accept")?.p;
+			expect(accept()?.title).toMatch(/^Accept suggestion {2}\S+$/);
+			expect(accept()?.title).not.toMatch(/tab/i);
+			editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+			const more = byRole(editor.describe(cx), "omp.composer.alternatives")?.p;
+			expect(more?.title).toMatch(/^Show other suggestions {2}\S+$/);
+			expect(more?.title).not.toMatch(/tab/i);
+		} finally {
+			setKeybindings(previous);
+		}
 	});
 
 	it("offers `N more` over an accepted prediction, opening the alternatives list a tap picks from", () => {

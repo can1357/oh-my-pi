@@ -1125,6 +1125,8 @@ export class CustomEditor extends Editor {
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		const tabKey = getKeybindings().getKeys("tui.input.tab")[0];
+		const tabHint = tabKey ? `  ${formatTooltipKey(tabKey)}` : "";
 		const key = [
 			shell?.kind,
 			shell?.excluded,
@@ -1134,6 +1136,7 @@ export class CustomEditor extends Editor {
 			thinkingKey,
 			modelKey,
 			interruptKey,
+			tabKey,
 			state.viewing?.join("\u0001"),
 			effortGlyph,
 			state.thinkingInModel,
@@ -1190,7 +1193,7 @@ export class CustomEditor extends Editor {
 											role: "omp.composer.accept",
 											text: "Accept",
 											wrap: "none",
-											title: `Accept suggestion  ${formatTooltipKey("tab")}`,
+											title: `Accept suggestion${tabHint}`,
 											actions: { click: "accept" },
 										},
 										undefined,
@@ -1203,7 +1206,7 @@ export class CustomEditor extends Editor {
 											role: "omp.composer.alternatives",
 											text: `${alternatives} more`,
 											wrap: "none",
-											title: `Show other suggestions  ${formatTooltipKey("tab")}`,
+											title: `Show other suggestions${tabHint}`,
 											actions: { click: "alternatives" },
 										},
 										undefined,
