@@ -76,6 +76,17 @@ provider "anthropic" {
 			cost input=8 output=40 cache-read=0.2 cache-write=10
 			limits context=1000000 max-tokens=128000
 		}
+		// Claude Code `/voice` speech-to-text (Deepgram Nova-3 behind
+		// `wss://api.anthropic.com/api/ws/speech_to_text/voice_stream`). Claude
+		// subscription OAuth only: the runner rejects API keys before connecting.
+		// Not a public API product; the id is omp's, not Anthropic's.
+		model "claude-voice-stream" name="Claude Voice Stream (subscription)" api="anthropic-voice-stream" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 
 	// First-party provider: models served through this provider reach the
@@ -169,5 +180,8 @@ provider "anthropic" {
 		supports-long-cache-retention #true
 		supports-mid-conversation-system #false
 		supports-sampling-params #true
+	}
+	models "claude-voice-stream" {
+		kind "stt"
 	}
 }

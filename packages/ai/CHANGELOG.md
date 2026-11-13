@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `xai-stt` transcription API: `transcribeAudio` posts xAI's multipart `POST /v1/stt` (model and language before the file) and maps `{ text, language, duration, words }`; `isTranscriptionApi`/`TRANSCRIPTION_APIS` list the dispatchable transcription APIs, and the auth gateway's `/v1/audio/transcriptions` serves both ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added the `anthropic-voice-stream` transcription API: `transcribeAudio` streams a PCM16 WAV over Claude Code's subscription speech-to-text socket (`wss://api.anthropic.com/api/ws/speech_to_text/voice_stream`) in 100 ms frames with `KeepAlive`/`CloseStream` and returns the final cumulative `TranscriptText`. Server `TranscriptError`/`error` frames raise `VoiceStreamTranscriptionError`, a refused upgrade raises `TranscriptionApiError` (auth-retried), and a stall raises `StreamTimeoutError`. It accepts only Anthropic OAuth tokens; API keys fail with a `ConfigurationError` before connecting ([#XXXXX](https://github.com/can1357/oh-my-pi/pull/XXXXX) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
