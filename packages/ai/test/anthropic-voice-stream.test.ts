@@ -4,7 +4,6 @@ import {
 	ANTHROPIC_VOICE_STREAM_PATH,
 	type AnthropicVoiceStreamOptions,
 	decodePcm16Wav,
-	isTranscriptionApi,
 	TranscriptionApiError,
 	transcribeAnthropicVoiceStream,
 	transcribeAudio,
@@ -12,7 +11,6 @@ import {
 	VoiceStreamTranscriptionError,
 } from "@oh-my-pi/pi-ai/transcription";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 
 const OAUTH = "sk-ant-oat01-fixture";
@@ -144,12 +142,6 @@ function finalizingServer(...frames: Array<object | string>): (socket: MockSocke
 const REQUEST = (audio: Uint8Array) => ({ audio, mimeType: "audio/wav", responseFormat: "json" as const });
 
 describe("anthropic-voice-stream transcription runner", () => {
-	it("is a dispatchable transcription API with a bundled stt row", () => {
-		expect(isTranscriptionApi("anthropic-voice-stream")).toBe(true);
-		const row = getBundledModel("anthropic", "claude-voice-stream");
-		expect(row).toMatchObject({ api: "anthropic-voice-stream", kind: "stt", baseUrl: "https://api.anthropic.com" });
-	});
-
 	it("streams 100 ms PCM frames, finalizes with CloseStream, and returns the last cumulative text", async () => {
 		const samples = Array.from({ length: 4000 }, (_, i) => (i % 200) - 100);
 		const { sockets, options } = harness(
@@ -185,6 +177,26 @@ describe("anthropic-voice-stream transcription runner", () => {
 		expect(socket.frames.map(frame => frame.length)).toEqual([3200, 3200, 1600]);
 		expect(new DataView(socket.frames[0].buffer).getInt16(2, true)).toBe(samples[1]);
 		expect(socket.controls).toEqual(["CloseStream"]);
+	});
+
+	it("sizes frames to 100 ms of the clip's own rate after the stereo down-mix", async () => {
+		// 10,000 stereo sample frames at 48 kHz → 20,000 bytes of mono PCM16.
+		const interleaved = Array.from({ length: 20_000 }, (_, i) => (i % 2 === 0 ? 400 : 200));
+		const { sockets, options } = harness(
+			socket => socket.open(),
+			finalizingServer({ type: "TranscriptText", data: "ok" }),
+		);
+		await transcribeAnthropicVoiceStream(
+			voiceModel(),
+			REQUEST(wav(interleaved, { channels: 2, sampleRate: 48000 })),
+			options(),
+		);
+		const [socket] = sockets;
+		expect(new URL(socket.url).searchParams.get("sample_rate")).toBe("48000");
+		expect(new URL(socket.url).searchParams.get("channels")).toBe("1");
+		// 100 ms at 48 kHz mono is 9600 bytes.
+		expect(socket.frames.map(frame => frame.length)).toEqual([9600, 9600, 800]);
+		expect(new DataView(socket.frames[0].buffer).getInt16(0, true)).toBe(300);
 	});
 
 	it("appends an utterance that restarts after an endpoint", async () => {

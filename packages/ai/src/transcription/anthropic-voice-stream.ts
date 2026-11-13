@@ -8,8 +8,8 @@ import type { TranscriptionRequest, TranscriptionResult } from "./types";
 
 /** Path of Claude Code's `/voice` speech-to-text socket, relative to the Anthropic API origin. */
 export const ANTHROPIC_VOICE_STREAM_PATH = "/api/ws/speech_to_text/voice_stream";
-/** PCM16 bytes per frame: 100 ms of 16 kHz mono audio. */
-const FRAME_BYTES = 3200;
+/** Frames carry 100 ms of audio, as Claude Code's `/voice` sends them. */
+const FRAMES_PER_SECOND = 10;
 /** Claude Code sends a KeepAlive every 8 s so a silent or slow session is not reaped. */
 const KEEP_ALIVE_INTERVAL_MS = 8_000;
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -103,7 +103,7 @@ export async function transcribeAnthropicVoiceStream(
 				"x-app": "cli",
 				"anthropic-client-platform": "claude_code_cli",
 			};
-			return streamVoice(url.toString(), headers, audio.samples, model, options);
+			return streamVoice(url.toString(), headers, audio, model, options);
 		},
 		{ signal: options.signal },
 	);
@@ -113,11 +113,14 @@ export async function transcribeAnthropicVoiceStream(
 function streamVoice(
 	url: string,
 	headers: Record<string, string>,
-	pcm: Uint8Array,
+	audio: Pcm16Audio,
 	model: Model<Api>,
 	options: AnthropicVoiceStreamOptions,
 ): Promise<string> {
 	const label = `${model.provider}/${model.id}`;
+	const { samples: pcm } = audio;
+	// 100 ms of PCM16 mono at the clip's own rate (3200 bytes at 16 kHz).
+	const frameBytes = Math.max(2, Math.floor(audio.sampleRate / FRAMES_PER_SECOND) * 2);
 	const provider = model.provider;
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const signal = options.signal;
@@ -171,8 +174,8 @@ function streamVoice(
 			} catch {}
 		}, options.keepAliveIntervalMs ?? KEEP_ALIVE_INTERVAL_MS);
 		try {
-			for (let offset = 0; offset < pcm.length; offset += FRAME_BYTES) {
-				ws.send(pcm.subarray(offset, offset + FRAME_BYTES));
+			for (let offset = 0; offset < pcm.length; offset += frameBytes) {
+				ws.send(pcm.subarray(offset, offset + frameBytes));
 			}
 			ws.send(CLOSE_STREAM);
 		} catch (error) {
@@ -276,10 +279,7 @@ const KEEP_ALIVE = JSON.stringify({ type: "KeepAlive" });
 const CLOSE_STREAM = JSON.stringify({ type: "CloseStream" });
 
 function defaultWebSocketFactory(url: string, headers: Record<string, string>): VoiceStreamWebSocketLike {
-	return new (WebSocket as unknown as new (url: string, options: Bun.WebSocketOptions) => VoiceStreamWebSocketLike)(
-		url,
-		{ headers },
-	);
+	return new WebSocket(url, { headers });
 }
 
 /**
