@@ -518,6 +518,11 @@ async fn run_shell_session(
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
+			// A run that wound down by itself leaves the session usable, with
+			// the background jobs earlier commands left running (a cancel
+			// spares them). One that had to be dropped, or that failed, leaves
+			// the session in an unknown state: end it.
+			let usable = matches!(graceful, Ok(Ok(Ok(_))));
 			if graceful.is_err() {
 				// Dropping the run stops the command with `KILL`.
 				run_task.abort();
@@ -527,7 +532,7 @@ async fn run_shell_session(
 			// Use try_lock to avoid deadlocking if another task holds the session.
 			// If we can't acquire the lock, the session will be cleaned up when the
 			// holding task finishes.
-			if let Ok(mut guard) = session.try_lock() {
+			if !usable && let Ok(mut guard) = session.try_lock() {
 				*guard = None;
 				*active.lock() = None;
 			}

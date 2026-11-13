@@ -3,6 +3,7 @@ import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
@@ -229,6 +230,7 @@ export class PrewalkCoordinator {
 	}
 
 	async #restoreSource(handoff: PrewalkHandoff): Promise<void> {
+		if (cfgOffline.get(this.#host.settings) && handoff.source.provider !== this.#host.model()?.provider) return;
 		try {
 			await this.#host.setModelTemporary(handoff.source, handoff.sourceThinkingLevel);
 			// Temporary selection treats undefined as "keep/default"; restoration must preserve
@@ -326,6 +328,16 @@ export class PrewalkCoordinator {
 	async advanceAtTurnEnd(liveMessages: AgentMessage[], context: AgentTurnEndContext | undefined): Promise<void> {
 		const prewalk = this.#prewalk;
 		if (!prewalk || context?.message.role !== "assistant") return;
+		if (cfgOffline.get(this.#host.settings) && prewalk.target.provider !== this.#host.model()?.provider) {
+			this.#scrubPlanNudge(liveMessages);
+			this.#clearPrewalkState();
+			this.#host.emitNotice(
+				"warning",
+				"Prewalk disarmed: offline mode restricts handoffs to the active provider.",
+				"prewalk",
+			);
+			return;
+		}
 		if (this.#isNoop(prewalk)) {
 			this.#scrubPlanNudge(liveMessages);
 			this.#disarmNoop(prewalk);
@@ -566,6 +578,9 @@ export class PrewalkCoordinator {
 		const planYolo = this.#planYolo;
 		const state = this.#host.getPlanModeState();
 		if (!planYolo || !state?.enabled) throw new ToolError("Plan mode is not active.");
+		if (cfgOffline.get(this.#host.settings) && planYolo.target.provider !== this.#host.model()?.provider) {
+			throw new ToolError("Offline mode restricts plan handoffs to the active provider.");
+		}
 		const {
 			planFilePath,
 			planContent,
