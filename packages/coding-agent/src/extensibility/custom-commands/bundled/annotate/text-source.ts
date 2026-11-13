@@ -147,7 +147,16 @@ export async function selectSessionTextReviewSource(
 				onPick: (content, label, source) => done({ content, label, ...source }),
 				onCancel: () => done(undefined),
 			}),
-		{ overlay: true },
+		{
+			overlay: true,
+			overlayOptions: {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			},
+		},
 	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
 }

@@ -422,7 +422,7 @@ describe("/annotate contracts", () => {
 		expect(pasteToEditor.mock.calls[0]?.[0]).not.toContain(latestText);
 	});
 
-	it("mounts the session picker in the native layer and returns an older assistant reply", async () => {
+	it.each([true, false])("selects an older reply and restores the draft (native=%s)", async native => {
 		const older = makeAssistantEntry("older", "Older answer");
 		const { ctx } = createContext({
 			branch: [
@@ -435,10 +435,13 @@ describe("/annotate contracts", () => {
 		editor.setText("Unsent draft");
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const h = await TspHarness.start(tui => {
-			tui.addChild(editorContainer);
-			tui.setFocus(editor);
-		});
+		const h = await TspHarness.start(
+			tui => {
+				tui.addChild(editorContainer);
+				tui.setFocus(editor);
+			},
+			{ reply: native },
+		);
 		const controller = new ExtensionUiController({
 			ui: h.tui,
 			editor,
@@ -448,17 +451,32 @@ describe("/annotate contracts", () => {
 		ctx.ui.custom = controller.showHookCustom.bind(controller);
 		try {
 			const pending = selectSessionTextReviewSource(ctx);
-			await Promise.resolve();
-			await Promise.resolve();
-			h.flush();
-			const picker = h.region("layer")?.c?.[0];
-			expect(picker?.k).toBe("picker");
+			await h.until(() => {
+				// Advance the manual clock for the classic renderer's throttled paints.
+				h.flush(100);
+				return native ? h.region("layer")?.c?.[0]?.k === "picker" : h.terminal.rowBytes.includes("\x1b[?1049h");
+			});
 			expect(editorContainer.children).toEqual([editor]);
-			if (!picker) throw new Error("Native annotation picker was not mounted");
-			h.event({ ev: "activate", sf: h.terminal.surface!, id: picker.id, item: "older" });
+			if (native) {
+				const picker = h.region("layer")?.c?.[0];
+				expect(picker?.k).toBe("picker");
+				if (!picker) throw new Error("Native annotation picker was not mounted");
+				h.event({ ev: "activate", sf: h.terminal.surface!, id: picker.id, item: "older" });
+			} else {
+				h.terminal.send(UP);
+				h.flush();
+				h.terminal.send(ENTER);
+				h.flush();
+			}
 			expect(await pending).toMatchObject({ text: "Older answer", kind: "message" });
-			h.flush();
-			expect(h.region("layer")?.c ?? []).toEqual([]);
+			h.flush(100);
+			if (native) {
+				expect(h.region("layer")?.c ?? []).toEqual([]);
+				expect(h.terminal.rowBytes).not.toContain("\x1b[?1049h");
+				expect(h.terminal.rowBytes).not.toContain("\x1b[?1049l");
+			} else {
+				expect(h.terminal.rowBytes).toContain("\x1b[?1049l");
+			}
 			expect(h.tui.getFocused()).toBe(editor);
 			expect(editor.getText()).toBe("Unsent draft");
 		} finally {
