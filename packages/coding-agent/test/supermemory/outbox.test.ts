@@ -140,7 +140,7 @@ describe("Supermemory retain outbox", () => {
 		expect(requests).toHaveLength(sent);
 	});
 
-	it.each([422, 410])("quarantines a memory the server refuses (HTTP %d) and never resends it", async refused => {
+	it.each([422, 410, 404])("quarantines a memory the server refuses (HTTP %d) and never resends it", async refused => {
 		status = refused;
 		const { tool, state, notices } = await startSession();
 		await tool.execute("refused", { items: [{ content: "invalid server input" }] });

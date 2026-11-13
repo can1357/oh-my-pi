@@ -774,7 +774,7 @@ describe("supermemoryBackend", () => {
 		expect(docs[0]?.id).toBe(failed?.id);
 	});
 
-	it.each([422, 410])(
+	it.each([422, 410, 404])(
 		"skips a window the server refuses for good (HTTP %d), keeps retaining later ones, and never retries it",
 		async status => {
 			const create = vi

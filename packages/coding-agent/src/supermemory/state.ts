@@ -83,12 +83,14 @@ function closedError(): Error {
 }
 
 /**
- * Outcome of a failed write: 410 Gone (retired route or namespace) is as permanent as a refused body.
- * Mapped here, not in the shared `sendFailure`, which Hindsight also uses.
+ * Outcome of a failed write. On the v5 write routes a namespace needs no prior creation, so 404
+ * means the route itself is gone, and 410 Gone says so outright: both are as permanent as a
+ * refused body, so they quarantine instead of retrying for days. Mapped here, not in the shared
+ * `sendFailure`, which Hindsight also uses.
  */
 function writeFailure(error: unknown): OutboxSendOutcome {
 	const status = error instanceof SupermemoryHttpError ? error.status : undefined;
-	return status === 410 ? "rejected" : sendFailure(error, status);
+	return status === 404 || status === 410 ? "rejected" : sendFailure(error, status);
 }
 
 function isRetentionCursor(data: unknown): data is RetentionCursorData {
