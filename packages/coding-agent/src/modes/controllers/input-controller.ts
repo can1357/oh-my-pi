@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -15,7 +16,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -59,6 +60,8 @@ import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import { resolveReadPath } from "../../tools/path-utils";
+import { buildTextOutput, MAX_AUTO_READ_TEXT_BYTES } from "../../utils/file-mentions";
+import { convertFileWithMarkit, isConvertibleDocumentPath } from "../../utils/markit";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
 import {
@@ -159,6 +162,8 @@ interface ImagePasteSink {
 	pasteText(text: string): void;
 	/** Main editor only; without it a video path lands as text. */
 	attachVideo?(path: string): Promise<void>;
+	/** Main editor only; without it a document path lands as text. */
+	attachDocument?(path: string): Promise<void>;
 }
 
 /** One paste into an image-accepting prompt; `finish` delivers what it collected, in order. */
@@ -359,6 +364,7 @@ export class InputController {
 			this.ctx.ui.requestRender();
 		},
 		attachVideo: path => this.#insertPendingVideoPreview(path),
+		attachDocument: path => this.#insertPendingDocument(path),
 	};
 
 	#abortStreamingTurn(): void {
@@ -2591,6 +2597,49 @@ export class InputController {
 	}
 
 	/**
+	 * Attach a pasted document path (pdf, docx, pptx, xlsx, epub) by converting it to markdown
+	 * through markit — the same converter behind the read tool — and staging the result as a
+	 * text-attachment chip wrapped in `<attachment>` tags (#9931). Bounded like `@`-mentions of
+	 * the same formats: files over {@link MAX_AUTO_READ_TEXT_BYTES} are not converted, and the
+	 * markdown is truncated through {@link buildTextOutput}. Every failure pastes the literal
+	 * path instead, with the reason in the status, so the paste is never lost.
+	 */
+	async #insertPendingDocument(pastedPath: string): Promise<void> {
+		const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd());
+		const name = path.basename(absolutePath);
+		const fail = (reason: string) => {
+			this.ctx.editor.pasteText(pastedPath);
+			this.ctx.ui.requestRender();
+			this.ctx.showStatus(
+				`Document paste failed: ${truncateToWidth(sanitizeText(reason), TRUNCATE_LENGTHS.CONTENT)}`,
+			);
+		};
+		let size: number;
+		try {
+			size = (await fs.stat(absolutePath)).size;
+		} catch (error) {
+			fail(isEnoent(error) ? `${name} not found` : error instanceof Error ? error.message : String(error));
+			return;
+		}
+		if (size > MAX_AUTO_READ_TEXT_BYTES) {
+			fail(`${name} is ${formatBytes(size)}, over the ${formatBytes(MAX_AUTO_READ_TEXT_BYTES)} paste limit`);
+			return;
+		}
+		// Keys typed behind the paste wait for it; say why the prompt pauses.
+		this.ctx.showStatus(`Converting ${name}…`);
+		const result = await convertFileWithMarkit(absolutePath);
+		if (!result.ok || result.content.trim().length === 0) {
+			fail(result.error ?? "conversion produced no text");
+			return;
+		}
+		const { body, notice } = buildTextOutput(result.content);
+		const content = body + notice;
+		this.ctx.editor.insertTextAttachment(content, wrapPasteInAttachmentBlock(content));
+		this.ctx.ui.requestRender();
+		this.ctx.showStatus(`Attached ${name} as markdown text`);
+	}
+
+	/**
 	 * Route an image paste to the focused destination. A focused prompt that did not opt into
 	 * images refuses, so the image never lands in the hidden main editor (#6057).
 	 */
@@ -2668,6 +2717,16 @@ export class InputController {
 	}
 
 	async #pasteImagePath(path: string, sink: ImagePasteSink): Promise<void> {
+		if (isConvertibleDocumentPath(path)) {
+			if (sink.attachDocument) {
+				await sink.attachDocument(path);
+				return;
+			}
+			// Image-only prompts keep the path as text, like an unsupported video paste.
+			sink.pasteText(path);
+			this.ctx.showStatus("Document paste is not supported in this prompt");
+			return;
+		}
 		try {
 			if (isVideoPath(path)) {
 				if (sink.attachVideo) {

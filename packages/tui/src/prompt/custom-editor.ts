@@ -245,6 +245,12 @@ function isPreviewableAttachmentPath(path: string): boolean {
 	return BRACKETED_IMAGE_PATH_REGEX.test(path) || isVideoPath(path);
 }
 
+/**
+ * Document extensions the host converts to markdown on paste. Mirrors markit's
+ * `CONVERTIBLE_EXTENSIONS` in coding-agent (a test there pins the two equal).
+ */
+export const DOCUMENT_PATH_REGEX = /\.(?:pdf|docx|pptx|xlsx|epub)$/i;
+
 function splitPastedPathSegments(payload: string): string[] | undefined {
 	const segments: string[] = [];
 	let segment = "";
@@ -350,8 +356,8 @@ function extractWholeTextAttachmentPath(text: string): string | undefined {
 /**
  * Same shape as {@link extractBracketedImagePastePaths} but operates on a
  * payload that has already been stripped of the `\x1b[200~` / `\x1b[201~`
- * markers — used by the assembled-paste router in {@link CustomEditor.handleInput}
- * so split bracketed pastes get the same attachment-path detection as single-chunk ones.
+ * markers — used by the hook-editor and btw-panel paste routers so their
+ * image-only attachment detection matches the bracketed-paste handlers.
  *
  * When the segment splitter fails (an unescaped space in a real path breaks
  * its every-segment-is-a-path invariant), falls back to
@@ -371,6 +377,24 @@ function bracketedPastePayload(data: string): string | undefined {
 	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
 	if (endIndex === -1 || endIndex + BRACKETED_PASTE_END.length !== data.length) return undefined;
 	return data.slice(BRACKETED_PASTE_START.length, endIndex);
+}
+
+/**
+ * Attachment-path pass for the assembled-paste router: the explicit paths when
+ * EVERY one is attachable (image, video, or convertible document), plus the
+ * #6578 whole-text recovery for a single spaced image or video path. Any other
+ * payload returns undefined so the router pastes it verbatim: normalized
+ * segments drop quotes, escapes, and `file://` (#9931 review).
+ */
+function extractAttachmentPastePathsFromText(text: string): string[] | undefined {
+	const paths = extractPastePathsFromText(text);
+	if (paths !== undefined) {
+		return paths.every(path => isPreviewableAttachmentPath(path) || DOCUMENT_PATH_REGEX.test(path))
+			? paths
+			: undefined;
+	}
+	const wholePath = extractWholeTextAttachmentPath(text);
+	return wholePath ? [wholePath] : undefined;
 }
 
 export function extractBracketedPastePaths(data: string): string[] | undefined {
@@ -1476,7 +1500,7 @@ export class CustomEditor extends Editor {
 	onCopyPrompt?: () => void;
 	/** Called when the configured image-paste shortcut is pressed. */
 	onPasteImage?: () => Promise<boolean>;
-	/** Called when a bracketed paste contains one or more image or video file paths. */
+	/** Called when a bracketed paste contains one or more image, video, or convertible document file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
@@ -1894,7 +1918,8 @@ export class CustomEditor extends Editor {
 	 * the assembled content regardless of chunk boundaries:
 	 *  - empty payload → `onPasteImage` (#3601: `Cmd+V`/`Ctrl+V` on an
 	 *    image-only macOS pasteboard the terminal stripped to `""` first);
-	 *  - explicit image-file paths → `onPasteImagePath` (#3506);
+	 *  - explicit image, video, or document paths → `onPasteImagePath`
+	 *    (#3506, #9931); a mixed or plain-file payload stays verbatim text;
 	 *  - anything else → the base editor's `pasteText` so `[Paste #N]`
 	 *    markers, autocomplete, and undo state stay intact.
 	 * True when `data` was consumed. `draft` queues trailing bytes back through
@@ -1914,7 +1939,7 @@ export class CustomEditor extends Editor {
 			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 			return true;
 		}
-		const attachmentPaths = extractImagePastePathsFromText(content);
+		const attachmentPaths = extractAttachmentPastePathsFromText(content);
 		if (attachmentPaths && this.onPasteImagePath) {
 			this.#trackAsyncPaste(
 				(async () => {

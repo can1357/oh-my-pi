@@ -268,6 +268,20 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("routes a pasted document path through the attachment callback (#9931)", () => {
+		const { editor } = makeEditor();
+		const doc = "/tmp/reports/q3.pdf";
+		const pasted: string[] = [];
+		editor.onPasteImagePath = path => {
+			pasted.push(path);
+		};
+
+		editor.handleInput(bracketedPaste(doc));
+
+		expect(pasted).toEqual([doc]);
+		expect(editor.getText()).toBe("");
+	});
+
 	it("keeps video previews distinct from image chips", () => {
 		const { editor } = makeEditor();
 		editor.pendingImages = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
@@ -566,6 +580,29 @@ describe("CustomEditor bracketed path paste", () => {
 
 		expect(editor.getText()).toBe("/tmp/report.csv");
 		expect(imagePathCalls).toBe(0);
+	});
+
+	it("pastes unattachable path payloads byte-identical, never normalized (#9931 review)", () => {
+		for (const payload of [
+			String.raw`/Users/me/My\ Docs/a.txt`,
+			"'/tmp/my file.txt'",
+			"/etc/hosts\n/etc/passwd",
+			"file:///tmp/x.md",
+			"/tmp/projects",
+			// One attachable and one plain path: a mixed drop stays text, as on main.
+			"/tmp/report.pdf /tmp/notes.txt",
+		]) {
+			const { editor } = makeEditor();
+			const pasted: string[] = [];
+			editor.onPasteImagePath = path => {
+				pasted.push(path);
+			};
+
+			editor.handleInput(bracketedPaste(payload));
+
+			expect(pasted).toEqual([]);
+			expect(editor.getText()).toBe(payload);
+		}
 	});
 
 	it("attaches a spaced screenshot path as an image instead of inserting it as literal text", () => {
