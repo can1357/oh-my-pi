@@ -559,7 +559,7 @@ describe("OpenCode provider discovery", () => {
 		expect(jevRows).toHaveLength(1);
 		expect(jevRows[0]).toMatchObject({
 			name: "Jev 1.13",
-			api: "typesafe",
+			api: "openai-completions",
 			baseUrl: "https://opencode.ai/zen",
 			kind: "judge",
 			cost: { input: 0.042, output: 0 },
@@ -574,7 +574,7 @@ describe("OpenCode provider discovery", () => {
 		expect(proxiedModels.find(model => model.id === "jev-1.13")?.baseUrl).toBe("https://proxy.example/zen");
 	});
 
-	test("keeps one Zen System One jev row when the models route also lists it", async () => {
+	test("keeps one Zen jev seed row when the models route also lists it", async () => {
 		const fetchMock: FetchImpl = async () =>
 			Response.json({
 				data: [
@@ -587,7 +587,7 @@ describe("OpenCode provider discovery", () => {
 
 		const jevRows = models.filter(model => model.id === "jev-1.13");
 		expect(jevRows).toHaveLength(1);
-		expect(jevRows[0]).toMatchObject({ api: "typesafe", kind: "judge" });
+		expect(jevRows[0]).toMatchObject({ api: "openai-completions", kind: "judge" });
 	});
 
 	test("returns null from a failed Zen discovery instead of the jev seed alone", async () => {

@@ -124,8 +124,7 @@ provider "opencode-zen" {
 	}
 	// Free SKUs are gated on the OpenCode client: the gateway refuses requests
 	// that do not carry its User-Agent, a ses_-shaped session token and its
-	// prompt. Jev's free SKU stays out — it is seeded on the typesafe judge
-	// wire, which sends none of these.
+	// prompt.
 	models "*-free" {
 		opencode-client-identity #true
 	}
@@ -134,8 +133,11 @@ provider "opencode-zen" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "effort"
 	}
-	// Zen serves Jev over System One, not chat completions.
-	seed api="typesafe" bundle="always" base-url="https://opencode.ai/zen" {
+	// Jev left Zen's System One route: `/v1/systemone` answers 422 "Endpoint is
+	// unavailable" for both SKUs, while `/v1/chat/completions` and
+	// `/v1/responses` bill them normally, so they seed as chat models. Neither
+	// id is in `/v1/models`, so the seed stays bundled.
+	seed api="openai-completions" bundle="always" base-url="https://opencode.ai/zen/v1" {
 		model "jev-1.13" name="Jev 1.13" {
 			reasoning #false
 			input "text"
