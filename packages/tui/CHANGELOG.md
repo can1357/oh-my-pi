@@ -10,6 +10,7 @@
 
 ### Added
 
+- `UserMessageComponent` renders a live preview of each attached image below the message bubble in terminals with a graphics protocol (Kitty, iTerm2, SIXEL), sharing the `ImageBudget` and size limits of tool images; new `showImages`, `imageBudget`, and `onImageUpdate` options wire it up ([#9931](https://github.com/can1357/oh-my-pi/issues/9931), [#19185](https://github.com/can1357/oh-my-pi/pull/19185) by [@Skare69](https://github.com/Skare69))
 - Added handling of `features` terminal events to update UI without waiting for a new hello
 
 ### Changed
