@@ -385,7 +385,8 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Exempt Tools",
-		description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
+		description:
+			"Tool names, or xd:// device names of write dispatches (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
 	},
 });
 
@@ -484,6 +485,19 @@ export const cfgIncludeWorkspaceTree = register({
 		label: "Include Workspace Tree",
 		description:
 			"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
+	},
+});
+
+/** Whether the system prompt carries a critical rule making `edit` mandatory for file edits; off omits edit guidance. */
+export const cfgEncourageEdits = register({
+	id: "encourageEdits",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "model",
+		group: "Prompt",
+		label: "Encourage Edits",
+		description: "Require the edit tool for file edits and forbid sed/perl/python edits",
 	},
 });
 

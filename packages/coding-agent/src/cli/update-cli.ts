@@ -1439,6 +1439,25 @@ export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
 }
 
 /**
+ * Run a package-manager install on this process's stdio and return its exit
+ * code. Bun Shell pipes child output, so installers see no TTY and print every
+ * progress-bar frame as a new line instead of redrawing it in place.
+ *
+ * Matches Bun Shell otherwise: the binary resolves from PATH only (Bun.spawn
+ * searches the cwd first on Windows), and the child gets the live
+ * `process.env` (Bun.spawn without `env` gets the startup environment).
+ */
+async function runInstaller(
+	[name, ...args]: string[],
+	env: Record<string, string | undefined> = process.env,
+): Promise<number> {
+	const bin = $which(name);
+	if (!bin) throw new Error(`${name} not found in PATH`);
+	const child = Bun.spawn({ cmd: [bin, ...args], env, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+	return await child.exited;
+}
+
+/**
  * Old-name globals a rename migration removes after the new install exists:
  * the set difference between the old install's top-level globals
  * ({@link buildVersionedPackageInstallArgs} installs the agent, natives core,
@@ -1478,15 +1497,16 @@ function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseIn
 					registry: release.registry,
 					supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 				});
-				return (await $`bun ${args}`.nothrow()).exitCode;
+				return await runInstaller(["bun", ...args]);
 			}
 			const args = buildNpmInstallArgs(release.version, nativeTag, release.packages, {
 				force: true,
 				registry: release.registry,
 			});
-			return (
-				await $`npm ${args}`.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride())).nothrow()
-			).exitCode;
+			return await runInstaller(
+				["npm", ...args],
+				buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()),
+			);
 		},
 		async removeOld() {
 			// One invocation per package: a single batched remove fails wholesale
@@ -1582,9 +1602,9 @@ async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerif
 			registry: release.registry,
 			supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 		});
-		const result = await $`bun ${args}`.nothrow();
-		if (result.exitCode !== 0) {
-			throw new Error(`bun install failed with exit code ${result.exitCode}`);
+		const exitCode = await runInstaller(["bun", ...args]);
+		if (exitCode !== 0) {
+			throw new Error(`bun install failed with exit code ${exitCode}`);
 		}
 		verification = await verifyInstalledVersion(release.version);
 	}
@@ -1608,11 +1628,12 @@ async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerif
 	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
 		registry: release.registry,
 	});
-	const result = await $`npm ${args}`
-		.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()))
-		.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`npm install failed with exit code ${result.exitCode}`);
+	const exitCode = await runInstaller(
+		["npm", ...args],
+		buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()),
+	);
+	if (exitCode !== 0) {
+		throw new Error(`npm install failed with exit code ${exitCode}`);
 	}
 
 	return await verifyInstalledVersion(release.version);
@@ -1726,16 +1747,16 @@ export async function updateViaManager(
 
 async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
 	console.log(chalk.dim("Updating Homebrew formulae..."));
-	const update = await $`brew update`.nothrow();
-	if (update.exitCode !== 0) {
-		throw new Error(`brew update failed with exit code ${update.exitCode}`);
+	const updateExitCode = await runInstaller(["brew", "update"]);
+	if (updateExitCode !== 0) {
+		throw new Error(`brew update failed with exit code ${updateExitCode}`);
 	}
 
 	console.log(chalk.dim("Updating via Homebrew..."));
 	const args = buildHomebrewUpdateArgs(force);
-	const result = await $`brew ${args}`.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
+	const exitCode = await runInstaller(["brew", ...args]);
+	if (exitCode !== 0) {
+		throw new Error(`brew ${args[0]} failed with exit code ${exitCode}`);
 	}
 
 	await printVerification(expectedVersion);
@@ -1747,16 +1768,16 @@ async function updateViaMise(expectedVersion: string, force: boolean): Promise<v
 	const help = await $`mise upgrade --help`.env(env).quiet().nothrow();
 	const supportsReleaseAgeOverride = help.exitCode === 0 && /(?:--minimum-release-age|--before)\b/.test(help.text());
 	const args = buildMiseUpgradeArgs(supportsReleaseAgeOverride);
-	const result = await $`mise ${args}`.env(env).nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
+	const exitCode = await runInstaller(["mise", ...args], env);
+	if (exitCode !== 0) {
+		throw new Error(`mise upgrade failed with exit code ${exitCode}`);
 	}
 
 	if (force) {
 		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
-		const forceResult = await $`mise ${forceArgs}`.env(env).nothrow();
-		if (forceResult.exitCode !== 0) {
-			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
+		const forceExitCode = await runInstaller(["mise", ...forceArgs], env);
+		if (forceExitCode !== 0) {
+			throw new Error(`mise install --force failed with exit code ${forceExitCode}`);
 		}
 	}
 

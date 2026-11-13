@@ -28,7 +28,7 @@ import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg
 import type { XdevRenderDispatch } from "@oh-my-pi/pi-tui/tools/xdev";
 import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 
-/** Transcript-only render state a handler write attaches to the `write` tool result. */
+/** Render state and prewalk facts a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {
 	message?: CoordinationDetails;
 	proc?: ProcWriteDetails;
@@ -36,6 +36,12 @@ export interface InternalWriteDetails {
 	xdev?: XdevRenderDispatch;
 	/** Absolute file the write landed in, for the transcript card's file link (conflict://). */
 	resolvedPath?: string;
+	/**
+	 * The write changed no files (process stdin, service mode), so the prewalk gate must not read
+	 * it as implementation work. Unlike {@link SchemeWritePolicy.cancels}, the plan-mode and
+	 * device-only gates still apply.
+	 */
+	touchesNoFiles?: true;
 }
 
 /**

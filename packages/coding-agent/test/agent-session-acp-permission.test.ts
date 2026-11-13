@@ -11,6 +11,7 @@ import { Agent, type AgentTool, type AgentToolContext } from "@oh-my-pi/pi-agent
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -18,6 +19,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type {
 	ClientBridge,
 	ClientBridgePermissionOutcome,
@@ -29,6 +31,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
@@ -38,6 +41,7 @@ import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 let tempDir: TempDir;
 let session: AgentSession | undefined;
+const authStorages: AuthStorage[] = [];
 
 const boundaryCases: Array<[decision: "allow_always" | "reject_always", transition: "new" | "switch"]> = [
 	["allow_always", "new"],
@@ -118,11 +122,13 @@ async function createSession(
 
 	const toolRegistry = options?.xdev?.tools ?? new Map<string, AgentTool>();
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorages.push(authStorage);
 	const sess = new AgentSession({
 		agent,
 		sessionManager,
 		settings,
-		modelRegistry: {} as never,
+		modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
 		toolRegistry,
 		xdev: options?.xdev,
 		builtInToolNames: options?.builtInToolNames,
@@ -139,6 +145,8 @@ beforeAll(() => {
 afterEach(async () => {
 	await session?.dispose();
 	session = undefined;
+	for (const authStorage of authStorages) authStorage.close();
+	authStorages.length = 0;
 });
 
 afterAll(async () => {
@@ -572,6 +580,45 @@ it("startup-mounted destructive tools gain the ACP permission gate when the brid
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(deleteTool.executeCalls).toBe(1);
 });
+
+it("xd wire aliases keep edit's approval tier and cannot bypass ACP rejection", async () => {
+	const requests: ClientBridgePermissionToolCall[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall) {
+			requests.push(toolCall);
+			return { outcome: "selected", optionId: "reject_once", kind: "reject_once" };
+		},
+	};
+	const toolSession = makeToolSession(bridge);
+	const edit = new EditTool(toolSession);
+	const xdev: XdevState = {
+		tools: new Map([[edit.name, edit as AgentTool]]),
+		mountedNames: new Set(),
+		builtInNames: new Set(["edit"]),
+		isActive: name => session?.getActiveToolNames().includes(name) ?? false,
+	};
+	toolSession.xdev = xdev;
+	const write = new WriteTool(toolSession);
+	session = await createSession([edit as AgentTool, write as AgentTool], bridge, {}, { xdev });
+	const target = tempDir.join("xd-wire-permission.txt");
+	await Bun.write(target, "keep\n");
+	const input = ["*** Begin Patch", `*** Delete File: ${target}`, "*** End Patch"].join("\n");
+	const content = JSON.stringify({ input });
+
+	for (const name of ["edit", "apply_patch"]) {
+		expect(write.approval({ path: `xd://${name}`, content })).toEqual({ tier: "write", policyKey: "edit" });
+		const result = await write.execute(`xd-permission-${name}`, { path: `xd://${name}`, content });
+		expect(result.isError).toBe(true);
+		expect(result.content.find(entry => entry.type === "text")?.text).toContain("rejected by user");
+		expect(await Bun.file(target).text()).toBe("keep\n");
+	}
+	expect(requests.map(({ toolName, title, locations }) => ({ toolName, title, locations }))).toEqual([
+		{ toolName: "edit", title: `Delete ${target}`, locations: [{ path: target }] },
+		{ toolName: "edit", title: `Delete ${target}`, locations: [{ path: target }] },
+	]);
+});
+
 it("edit, write, and ast_edit do not request ACP permission", async () => {
 	const editTool = makeFakeTool("edit");
 	const writeTool = makeFakeTool("write");

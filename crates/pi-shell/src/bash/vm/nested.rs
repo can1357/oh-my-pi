@@ -2,7 +2,7 @@
 //! [`Resolved::SelfShell`](crate::bash::Resolved::SelfShell) (`bash`, `sh`)
 //! runs as a child vproc with a fresh shell's state instead of an OS process.
 //!
-//! The child's overlay hides everything its parent shell sees (variables,
+//! The child's image keeps nothing its parent shell sees (variables,
 //! functions, aliases, the hash table, traps, the directory stack, jobs)
 //! and holds what a new bash starts with: the exported environment of the
 //! command, bash's startup variables, the invocation's options
@@ -16,7 +16,7 @@
 //! same way ([`start_script`]): bash's `shell_execve` reinitializes the
 //! shell from the command's environment and reads the file as its script.
 
-use bstr::{BString, ByteSlice};
+use bstr::{BStr, BString, ByteSlice};
 
 use super::{
 	Cx, Kernel, builtins,
@@ -28,7 +28,7 @@ use super::{
 		Vproc,
 	},
 	startup_values,
-	state::{self, Overlay, Var},
+	state::{self, Var},
 };
 use crate::bash::{
 	event::{EventData, WaitKey},
@@ -311,45 +311,43 @@ fn fresh_shell(
 	origin: &str,
 ) -> Result<Vproc, StoreError> {
 	let vpid = k.vpid(cx.store);
-	let mut ov = Overlay::default();
+	let (mut image, _) = state::fork_image(&k.root, cx.store, vp)?;
 	// Nothing of the parent shell shows through.
-	for (key, _) in state::scan(&k.root, cx.store, vp, Table::Var)? {
-		if let KeyBuf::Var(name) = key {
-			ov.vars.insert(name, None);
-		}
-	}
-	for table in [Table::Func, Table::Alias, Table::CmdHash, Table::DirStack, Table::Job] {
-		for (key, _) in state::scan(&k.root, cx.store, vp, table)? {
-			ov.records.insert(key, None);
-		}
+	image.clear_vars();
+	let mut hidden = Vec::new();
+	for table in [Table::Func, Table::Alias, Table::CmdHash, Table::DirStack] {
+		image.each_record(table, &mut |key, _| hidden.push(key.to_buf()));
 	}
 	// Signals ignored by the parent stay ignored (a new process inherits
 	// them); every other trap is reset.
-	for (key, rec) in state::scan(&k.root, cx.store, vp, Table::Trap)? {
+	image.each_record(Table::Trap, &mut |key, rec| {
 		let ignored = matches!(
-			(&key, &rec),
-			(KeyBuf::Trap(TrapKey::Signal(_)), Record::Trap { action, .. }) if action.is_empty()
+			(key, rec),
+			(Key::Trap(TrapKey::Signal(_)), Record::Trap { action, .. }) if action.is_empty()
 		);
 		if !ignored {
-			ov.records.insert(key, None);
+			hidden.push(key.to_buf());
 		}
-	}
-	for key in [
-		MiscKey::LastBg,
-		MiscKey::LastArg,
-		MiscKey::History,
-		MiscKey::HistoryCounts,
-		MiscKey::HistoryTimes,
-		MiscKey::ZshHistory,
-		MiscKey::ZshHistoryState,
-		MiscKey::ZshHistoryLine,
-		MiscKey::ZshHistoryStack,
-		MiscKey::DisabledBuiltins,
-		MiscKey::LoadedBuiltins,
-		MiscKey::ForeignEnv,
-		MiscKey::HardIgnored,
-	] {
-		ov.records.insert(KeyBuf::Misc(key), None);
+	});
+	hidden.extend(
+		[
+			MiscKey::LastArg,
+			MiscKey::History,
+			MiscKey::HistoryCounts,
+			MiscKey::HistoryTimes,
+			MiscKey::ZshHistory,
+			MiscKey::ZshHistoryState,
+			MiscKey::ZshHistoryLine,
+			MiscKey::ZshHistoryStack,
+			MiscKey::DisabledBuiltins,
+			MiscKey::LoadedBuiltins,
+			MiscKey::ForeignEnv,
+			MiscKey::HardIgnored,
+		]
+		.map(KeyBuf::Misc),
+	);
+	for key in hidden {
+		image.del(key.as_key());
 	}
 	let vpid_text = BString::from(vpid.0.to_string());
 	let interactive = if args.interactive { "1" } else { "0" };
@@ -358,14 +356,12 @@ fn fresh_shell(
 		(MiscKey::Dollar0, BString::from(dollar0)),
 		(MiscKey::ShellPid, vpid_text.clone()),
 		(MiscKey::NestedShell, vpid_text),
-		(MiscKey::Status, BString::from("0")),
 		(MiscKey::RunOrigin, BString::from(origin)),
 		(MiscKey::Interactive, BString::from(interactive)),
 	] {
-		ov.records
-			.insert(KeyBuf::Misc(key), Some(Record::Misc(value)));
+		image.put(Key::Misc(key), Record::Misc(value));
 	}
-	ov.positional = Some(args.args.clone());
+	image.put(Key::Misc(MiscKey::Positional), Record::Words(args.args.clone()));
 	// The environment, as `Shell::create` imports it.
 	let mut foreign = Vec::new();
 	for (name, value) in env {
@@ -379,12 +375,10 @@ fn fresh_shell(
 				{
 					exec::announce(k, cx, vp.vpid, vp.runs.front(), &unit, unit.line);
 				}
-				ov.records
-					.insert(KeyBuf::Func(BString::from(func)), Some(rec));
+				image.put(Key::Func(BStr::new(func)), rec);
 			}
 		} else if is_ident(name) {
-			ov.vars
-				.insert(name.clone(), Some(Var::scalar(value.clone(), Attrs::EXPORT)));
+			image.set_var(name, Some(Var::scalar(value.clone(), Attrs::EXPORT)));
 		} else {
 			let mut entry = name.clone();
 			entry.push(b'=');
@@ -393,20 +387,17 @@ fn fresh_shell(
 		}
 	}
 	if !foreign.is_empty() {
-		ov.records
-			.insert(KeyBuf::Misc(MiscKey::ForeignEnv), Some(Record::Words(foreign)));
+		image.put(Key::Misc(MiscKey::ForeignEnv), Record::Words(foreign));
 	}
-	if !matches!(ov.vars.get(&b"PWD"[..]), Some(Some(_))) {
-		ov.vars
-			.insert(BString::from("PWD"), Some(Var::scalar(vp.cwd.clone(), Attrs::EXPORT)));
+	if image.var(b"PWD").is_none() {
+		image.set_var(b"PWD", Some(Var::scalar(vp.cwd.clone(), Attrs::EXPORT)));
 	}
 	let zsh = args.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 	let shlvl = env
 		.iter()
 		.find(|(n, _)| n.as_slice() == b"SHLVL")
 		.map_or(0, |(_, v)| super::imported_shlvl(v, zsh));
-	ov.vars
-		.insert(BString::from("SHLVL"), Some(Var::scalar((shlvl + 1).to_string(), Attrs::EXPORT)));
+	image.set_var(b"SHLVL", Some(Var::scalar((shlvl + 1).to_string(), Attrs::EXPORT)));
 	// `$PPID` is the parent shell's `$$`.
 	let ppid = match state::record(cx.store, vp, Key::Misc(MiscKey::ShellPid))? {
 		Some(Record::Misc(v)) => std::str::from_utf8(v)
@@ -415,7 +406,7 @@ fn fresh_shell(
 			.unwrap_or(k.shell_pid),
 		_ => k.shell_pid,
 	};
-	let need_shell = !matches!(ov.vars.get(&b"SHELL"[..]), Some(Some(_)));
+	let need_shell = image.var(b"SHELL").is_none();
 	let values = if args.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		super::zsh_startup_values(cx, k.engine.config().platform)
 	} else {
@@ -425,11 +416,12 @@ fn fresh_shell(
 		})
 	};
 	for (name, var, forced) in values {
-		if forced || !matches!(ov.vars.get(name), Some(Some(_))) {
-			ov.vars.insert(BString::from(name), Some(var));
+		if forced || image.var(name).is_none() {
+			image.set_var(name, Some(var));
 		}
 	}
-	let mut child = Vproc::new(vpid, Some(vp.vpid), vp.fds.clone(), vp.cwd.clone(), Some(ov), true);
+	let mut child =
+		Vproc::new(vpid, Some(vp.vpid), vp.fds.clone(), vp.cwd.clone(), Some(image), true);
 	child.rlimits.clone_from(&vp.rlimits);
 	child.lineage = vp.lineage;
 	// A new shell's options, then the invocation's.

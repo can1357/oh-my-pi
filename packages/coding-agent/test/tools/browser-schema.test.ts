@@ -118,6 +118,43 @@ describe("browser prelude", () => {
 		expect(await effectiveWait({ chain: waitChain }, 50_000)).toBe(50_000);
 	});
 
+	it("gives a run or direct call without its own timeout the eval cell's timeout", async () => {
+		const budgets: number[] = [];
+		spyOn(supervisor, "runInTab").mockImplementation(async (_name, opts) => {
+			budgets.push(opts.timeoutMs);
+			return { displays: [], returnValue: true, screenshots: [] };
+		});
+		const budget = async (
+			parameters: Record<string, unknown>,
+			cellTimeoutMs: number | undefined,
+		): Promise<number | undefined> => {
+			const session = makeSession();
+			await createBrowserPrelude(session).invoke(
+				{ name: "docs", ...parameters },
+				{ session, toolCallId: "browser-cell-budget", cellTimeoutMs },
+			);
+			return budgets.at(-1);
+		};
+		const evaluate = { action: "call", chain: [{ method: "evaluate", args: ["window.__sweep()"] }] };
+		const wait = { action: "call", chain: [{ method: "waitForSelector", args: ["#done", { timeout: 50_000 }] }] };
+
+		// A `tab.evaluate(…)` in a cell with `timeout: 300` used to run out at 30 s.
+		expect(await budget(evaluate, 300_000)).toBe(300_000);
+		expect(await budget({ action: "run", code: "return 1;" }, 120_000)).toBe(120_000);
+		// A cell without a timeout gets the tool's maximum; a call from no cell keeps the default.
+		expect(await budget(evaluate, 0)).toBe(300_000);
+		expect(await budget(evaluate, undefined)).toBe(30_000);
+		// The call's own timeout wins, the larger of the cell's and a wait's applies, and a shorter cell keeps the default.
+		expect(await budget({ action: "run", code: "return 1;", timeout: 10 }, 120_000)).toBe(10_000);
+		expect(await budget(wait, 120_000)).toBe(120_000);
+		expect(await budget(wait, 10_000)).toBe(51_000);
+		expect(await budget(evaluate, 10_000)).toBe(30_000);
+		// Closing keeps its own budget.
+		const release = spyOn(supervisor, "releaseTab").mockResolvedValue(true);
+		await budget({ action: "close" }, 300_000);
+		expect(release).toHaveBeenCalledWith("docs", { kill: false, timeoutMs: 30_000 });
+	});
+
 	it("preserves an infinite wait's bounded timeout through the rendered browser call", async () => {
 		let actualWaitMs: number | undefined;
 		spyOn(supervisor, "runInTab").mockImplementation(async (_name, opts) => {

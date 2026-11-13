@@ -633,7 +633,7 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 		}
 		Ok(())
 	})?;
-	if ctx.vp.overlay.is_none() {
+	if ctx.vp.image.is_none() {
 		ctx.k.root.set_misc(ctx.cx.store, MiscKey::Cwd, new.clone());
 	}
 	ctx.vp.cwd = new.clone();
