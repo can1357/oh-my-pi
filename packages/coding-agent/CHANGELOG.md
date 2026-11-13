@@ -6,6 +6,7 @@
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
 - `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
+- Fixed prompt-history search returning unrelated prompts for punctuated queries such as `a/b` ([#18762](https://github.com/can1357/oh-my-pi/issues/18762)) ([#19111](https://github.com/can1357/oh-my-pi/pull/19111) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 
 ## [18.20.0] - 2026-11-12
 
