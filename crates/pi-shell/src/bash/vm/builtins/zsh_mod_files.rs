@@ -18,6 +18,7 @@ use bstr::{BString, ByteSlice};
 use super::{
 	Chunk, Ctx, Need, R, done,
 	zsh_args::Ops,
+	zsh_dir::root_len,
 	zsh_mod_util::zsh_errmsg,
 	zsh_print::charset,
 	zsh_quote::{Charset, niceformat},
@@ -316,7 +317,8 @@ fn mkdir(
 		}
 		let path: &[u8] = &arg[..end];
 		if ops.isset(b'p') {
-			let mut i = 0;
+			// A Windows root (`C:/`, `//server/share/`) cannot be made.
+			let mut i = root_len(path, cfg!(windows));
 			loop {
 				while path.get(i) == Some(&b'/') {
 					i += 1;
