@@ -374,6 +374,48 @@ const CURSOR_RELAY_SESSION_STATE_KEY = "cursor-agent-relay";
 const CURSOR_RELAY_QUIET_MS = 1_000;
 
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
+const CURSOR_H2_IDLE_MS = 60_000;
+const idleCursorH2 = new Map<
+	string,
+	{ client: http2.ClientHttp2Session; timer: ReturnType<typeof setTimeout>; discard: () => void }
+>();
+
+function takeIdleCursorH2(key: string): http2.ClientHttp2Session | undefined {
+	const entry = idleCursorH2.get(key);
+	if (!entry) return;
+	idleCursorH2.delete(key);
+	clearTimeout(entry.timer);
+	entry.client.off("goaway", entry.discard);
+	entry.client.off("close", entry.discard);
+	if (!entry.client.closed && !entry.client.destroyed) {
+		entry.client.ref();
+		return entry.client;
+	}
+}
+
+function releaseCursorH2(key: string, client: http2.ClientHttp2Session): void {
+	if (client.closed || client.destroyed) return;
+	if (idleCursorH2.has(key)) {
+		client.close();
+		return;
+	}
+	const discard = () => {
+		const entry = idleCursorH2.get(key);
+		if (entry?.client !== client) return;
+		idleCursorH2.delete(key);
+		clearTimeout(entry.timer);
+		client.off("goaway", discard);
+		client.off("close", discard);
+		client.close();
+	};
+	const timer = setTimeout(discard, CURSOR_H2_IDLE_MS);
+	timer.unref();
+	idleCursorH2.set(key, { client, timer, discard });
+	client.once("goaway", discard);
+	client.once("close", discard);
+	client.unref();
+}
+
 
 /**
  * Text for a recognised frame this client answers with its own typed error
@@ -1261,6 +1303,8 @@ function streamCursorWithWireMode(
 		};
 
 		let h2Client: http2.ClientHttp2Session | null = null;
+		let h2PoolKey: string | undefined;
+		let h2ErrorListener: ((error: Error) => void) | undefined;
 		let runTransport: CursorRunTransport | null = null;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
@@ -1514,20 +1558,26 @@ function streamCursorWithWireMode(
 			if (!retryContext) stream.push({ type: "start", partial: output });
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
-				let client: http2.ClientHttp2Session;
-				if (proxyUrl) {
-					const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
-						signal: options?.signal,
-						timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
-					});
-					client = http2.connect(baseUrl, {
-						createConnection: () => tlsSocket,
-					});
-				} else {
-					client = http2.connect(baseUrl);
+				options?.signal?.throwIfAborted();
+				h2PoolKey = JSON.stringify([new URL(baseUrl).origin, proxyUrl ?? null]);
+				let client = takeIdleCursorH2(h2PoolKey);
+				if (!client) {
+					if (proxyUrl) {
+						const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
+							signal: options?.signal,
+							timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
+						});
+						client = http2.connect(baseUrl, { createConnection: () => tlsSocket });
+					} else {
+						client = http2.connect(baseUrl);
+					}
+					// An idle session can still fail after its request listener is removed.
+					const newClient = client;
+					newClient.on("error", () => newClient.destroy());
 				}
 				h2Client = client;
-				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+				h2ErrorListener = error => settleH2(mapH2TransportError(error, baseUrl));
+				client.on("error", h2ErrorListener);
 				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
 			} else {
 				runTransport = createHttp1RunTransport({
@@ -2007,6 +2057,13 @@ function streamCursorWithWireMode(
 			}
 			calculateCost(model, output.usage, output.timestamp);
 
+			if (h2Client && h2PoolKey && !options?.signal?.aborted) {
+				runTransport?.close();
+				runTransport = null;
+				if (h2ErrorListener) h2Client.off("error", h2ErrorListener);
+				releaseCursorH2(h2PoolKey, h2Client);
+				h2Client = null;
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({
