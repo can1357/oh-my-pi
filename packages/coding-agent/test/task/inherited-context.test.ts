@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { Context, Message, Model } from "@oh-my-pi/pi-ai";
-import {
-	type CustomMessage,
-	convertToLlm,
-	INHERITED_CONTEXT_MESSAGE_TYPE,
-} from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
+import { obfuscateMessages } from "@oh-my-pi/pi-coding-agent/secrets/message-transform";
+import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
@@ -179,13 +177,24 @@ describe("buildInheritedContext", () => {
 		expect(sent).not.toContain("q".repeat(64));
 	});
 
-	it("lists no fragment of a secret in the identifier sidecar", () => {
+	it("lists no fragment of a secret in the frame sidecar", async () => {
 		// The hex pattern stops at each dash, so it would pull runs out of a UUID-shaped secret.
 		const secret = ["3f2a9c1e", "4b7d", "4e2a", "9c3f", "8a1b2c3d4e5f"].join("-");
-		const parent = new SecretObfuscator([{ type: "plain", content: secret }]);
-		const context = buildInheritedContext([userMessage(`api key ${secret} for build ${HASH}`)], parent);
-		expect(context!.identifiers).toContain(HASH);
-		expect(context!.identifiers.some(token => secret.includes(token) || token.includes("$$"))).toBe(false);
+		const entries = [{ type: "plain" as const, content: secret }];
+		const context = buildInheritedContext(
+			[userMessage(`api key ${secret} for build ${HASH}`)],
+			new SecretObfuscator(entries),
+		);
+		// What the child's own boundary sends; the frames transform runs after it.
+		const encoded = { text: new SecretObfuscator(entries).obfuscate(context!.text) };
+		const sent = await new InheritedContextFrames().transform(
+			childContext(encoded),
+			visionModel(["text", "image"]),
+			false,
+		);
+		const listed = [...preambleText(sent).matchAll(/^- `(.+)`$/gm)].map(match => match[1]!);
+		expect(listed).toContain(HASH);
+		expect(listed.some(token => secret.includes(token))).toBe(false);
 	});
 
 	it("encodes secrets before the serializer truncates or escapes them", () => {
@@ -239,16 +248,12 @@ describe("buildInheritedContext", () => {
 
 /** The child's provider context for an inherited tail, built the way the session builds it. */
 function childContext(context: InheritedContext): Context {
-	const { content, details } = inheritedContextMessage(context);
-	const custom = {
-		role: "custom",
-		customType: INHERITED_CONTEXT_MESSAGE_TYPE,
-		content,
-		display: false,
-		details,
-		timestamp: 0,
-	} as CustomMessage;
-	return { messages: [...convertToLlm([custom]), userMessage("Do the assigned work.")] };
+	return { messages: [...convertToLlm([persisted(context)]), userMessage("Do the assigned work.")] };
+}
+
+/** The child's stored record, as `session.jsonl` holds it. */
+function persisted(context: InheritedContext): CustomMessage {
+	return { role: "custom", ...inheritedContextMessage(context), timestamp: 0 } as CustomMessage;
 }
 
 function preambleText(context: Context): string {
@@ -257,12 +262,24 @@ function preambleText(context: Context): string {
 }
 
 describe("inherited context turn", () => {
-	const context = { text: `Build ${HASH} passed.\n`.repeat(40), identifiers: [HASH] };
+	const context = { text: `Build ${HASH} passed.\n`.repeat(40) };
 
 	it("reaches the provider as an agent-authored user turn, never developer authority", () => {
 		const [turn] = childContext(context).messages;
 		expect(turn).toMatchObject({ role: "user", attribution: "agent", inheritedContext: true });
 		expect((turn!.content as { type: string }[]).map(block => block.type)).toEqual(["text", "text"]);
+		// A text reader has every identifier verbatim in the tail; only frames get the list.
+		expect(preambleText(childContext(context))).not.toContain(HASH);
+	});
+
+	it("has its secrets encoded by a build that predates the record type", () => {
+		const secret = ["fixture", "deploy", "token", "7731"].join("-");
+		const record = persisted({ text: `deploy with ${secret}\n` });
+		// What an older build does with an unknown custom type: the generic developer conversion.
+		const replayed = convertMessageToLlm(record)!;
+		expect(replayed.role).toBe("developer");
+		const [sent] = obfuscateMessages(new SecretObfuscator([{ type: "plain", content: secret }]), [replayed]);
+		expect(JSON.stringify(sent)).not.toContain(secret);
 	});
 
 	it("is drawn as frames with the identifier sidecar for a vision model", async () => {
@@ -310,8 +327,8 @@ describe("inherited context turn", () => {
 		// A full-size CJK tail: the CJK grid holds far less per frame than the dense Latin shape.
 		const cjk = "检查构建结果并记录每一步的输出。\n".repeat(Math.floor((INHERITED_CONTEXT_CHARS - 200) / 17));
 		const text = `start ${OLD_HASH}\n${cjk}end ${HASH}\n`;
-		const tail = { text, identifiers: extractIdentifiers(text) };
-		expect(tail.identifiers).toContain(OLD_HASH);
+		const tail = { text };
+		expect(extractIdentifiers(text)).toContain(OLD_HASH);
 		const sent = await new InheritedContextFrames().transform(
 			childContext(tail),
 			visionModel(["text", "image"]),
@@ -381,7 +398,7 @@ describe("inherited context turn", () => {
 });
 
 describe("inherited frame profile", () => {
-	const context = { text: `Build ${HASH} passed.\n`.repeat(40), identifiers: [HASH] };
+	const context = { text: `Build ${HASH} passed.\n`.repeat(40) };
 	const claude = { id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic" } as const;
 	const opus = { id: "claude-opus-4-7", api: "anthropic-messages", provider: "anthropic" } as const;
 	const gemini = { id: "gemini-3.8-flash", api: "google-generative-ai", provider: "google" } as const;
@@ -431,7 +448,7 @@ describe("inherited frame profile", () => {
 	});
 
 	it("keeps auto's CJK grid for text the measured shapes' font cannot draw", async () => {
-		const cjk = { text: "检查构建结果并记录每一步的输出。\n".repeat(200), identifiers: [] };
+		const cjk = { text: "检查构建结果并记录每一步的输出。\n".repeat(200) };
 		const render = vi.spyOn(snapcompact, "renderMany");
 		try {
 			for (const target of [claude, gemini]) {

@@ -97,7 +97,7 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
-import { INHERITED_CONTEXT_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -5366,11 +5366,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			}
 			if (options.inheritedContext) {
 				// Persisted as text; the provider transform draws frames per request for a vision model.
-				const { content, details } = inheritedContextMessage(options.inheritedContext);
-				await session.sendCustomMessage(
-					{ customType: INHERITED_CONTEXT_MESSAGE_TYPE, content, display: false, details },
-					{ triggerTurn: false },
-				);
+				await session.sendCustomMessage(inheritedContextMessage(options.inheritedContext), { triggerTurn: false });
 			}
 
 			readyAt = performance.now();

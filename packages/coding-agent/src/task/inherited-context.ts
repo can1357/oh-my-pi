@@ -2,13 +2,13 @@
  * Inherited parent context for task subagents (a task item's `inheritContext: true`, offered
  * while `task.inheritContext` is on).
  *
- * The parent's most recent conversation tail rides into the child's initial context with a
- * text sidecar of the exact identifiers (hashes, paths, flags, numbers) found in it. The child
- * persists both as text, as an agent-authored user turn (background, never developer authority).
+ * The parent's most recent conversation tail rides into the child's initial context. The child
+ * persists it as text, as an agent-authored user turn (background, never developer authority).
  * On each request to a vision model, {@link InheritedContextFrames} swaps the tail for at most
- * two snapcompact frames and, for readers it helps, lists the identifiers of the part those
- * frames hold: frame readers recover gist well but misread long hashes and paths, so the sidecar
- * carries those verbatim.
+ * two snapcompact frames and, for readers it helps, adds a text sidecar of the exact identifiers
+ * (hashes, paths, flags, numbers) in the part those frames hold: frame readers recover gist well
+ * but misread long hashes and paths, so the sidecar carries those verbatim. A text reader has
+ * them verbatim in the tail already, so the text turn carries no sidecar.
  * Like other snapcompact frames, these are built per request and never reach session.jsonl, so
  * a text-only model, blocked images, or a model switch get the text instead.
  *
@@ -23,6 +23,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import inheritedContextTemplate from "../prompts/system/subagent-inherited-context.md" with { type: "text" };
 import { obfuscateMessages } from "../secrets/message-transform";
+import { INHERITED_CONTEXT_MESSAGE_TYPE } from "../session/messages";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { PLACEHOLDER_RE } from "../secrets/placeholder";
 
@@ -41,10 +42,9 @@ const IDENTIFIER_MAX_CHARS = 240;
 /** A tail cut mid-line advances to the next line start when one is this close. */
 const LINE_SNAP_CHARS = 400;
 
-/** Parent tail and its identifiers: plain data, safe to structured-clone into a worker. */
+/** Parent tail: plain data, safe to structured-clone into a worker. */
 export interface InheritedContext {
 	text: string;
-	identifiers: string[];
 }
 
 const FILE_EXTENSIONS =
@@ -186,7 +186,7 @@ function decodeForChild(encodedTail: string, secrets: SecretObfuscator): string 
 }
 
 /**
- * Serialize the parent's live context (thinking excluded) and keep the tail and its identifiers.
+ * Serialize the parent's live context (thinking excluded) and keep its tail.
  * With `secrets`, the messages are encoded block by block before serialization, as the provider
  * boundary encodes them, so the serializer's truncation and JSON escaping never see a raw secret;
  * the tail is cut on that encoded text (a secret at the cut is dropped whole, never split) and
@@ -212,10 +212,7 @@ export function buildInheritedContext(
 		logger.warn("task: inherited context dropped; its secrets would not re-encode at any tail cut");
 		return undefined;
 	}
-	// Identifiers come from the encoded text with its placeholders blanked: a pattern can match part of a
-	// secret (a UUID's hex runs) that no whole-value rule would encode again in the persisted sidecar.
-	const identifiers = extractIdentifiers(secrets ? secrets.obfuscate(text).replace(PLACEHOLDER_RE, " ") : text);
-	return { text, identifiers };
+	return { text };
 }
 
 /**
@@ -228,9 +225,7 @@ export function encodedInheritedContext(
 	context: InheritedContext,
 	secrets: SecretObfuscator | undefined,
 ): InheritedContext {
-	if (!secrets) return context;
-	const text = secrets.obfuscate(context.text);
-	return { text, identifiers: extractIdentifiers(text) };
+	return secrets ? { text: secrets.obfuscate(context.text) } : context;
 }
 
 function renderPreamble(frames: number, identifiers: readonly string[]): string {
@@ -238,18 +233,27 @@ function renderPreamble(frames: number, identifiers: readonly string[]): string 
 }
 
 export interface InheritedContextMessage {
+	customType: typeof INHERITED_CONTEXT_MESSAGE_TYPE;
 	content: TextContent[];
-	details: { chars: number; identifiers: number };
+	display: false;
+	details: { chars: number };
+	attribution: "user";
 }
 
-/** The child's persisted inherited-context turn: preamble with sidecar, then the tail as text. */
+/** The child's persisted inherited-context record: preamble, then the tail as text. */
 export function inheritedContextMessage(context: InheritedContext): InheritedContextMessage {
 	return {
+		customType: INHERITED_CONTEXT_MESSAGE_TYPE,
+		display: false,
+		// This build sends the record as an agent-attributed user turn whatever this says. A build that
+		// predates the type replays it as a developer message, and its secret boundary encodes a
+		// developer message only when user-attributed: the tail is stored decoded.
+		attribution: "user",
 		content: [
-			{ type: "text", text: renderPreamble(0, context.identifiers) },
+			{ type: "text", text: renderPreamble(0, []) },
 			{ type: "text", text: context.text },
 		],
-		details: { chars: context.text.length, identifiers: context.identifiers.length },
+		details: { chars: context.text.length },
 	};
 }
 

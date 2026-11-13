@@ -598,7 +598,7 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 	describe("inherited parent context", () => {
-		const inheritedContext = { text: "parent decided to ship build 40cf59cf8a\n", identifiers: ["40cf59cf8a"] };
+		const inheritedContext = { text: "parent decided to ship build 40cf59cf8a\n" };
 
 		async function dispatchedContext(
 			agent: AgentDefinition,
@@ -651,7 +651,6 @@ describe("structured subagent primitive", () => {
 			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 			expect(dispatched).toEqual({
 				text: "parent decided to ship build $$BUILD_AB12:L$$\n",
-				identifiers: ["$$BUILD_AB12:L$$"],
 			});
 		});
 	});
