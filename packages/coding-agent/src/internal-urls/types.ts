@@ -95,8 +95,6 @@ export interface SchemeWritePolicy {
 	tier(url: InternalUrl, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision;
 	/** Largest payload in UTF-8 bytes the scheme accepts; the shell refuses writes past it (EFBIG). Default: unbounded. */
 	maxBytes?: number;
-	/** True when `write` may omit `content` for this URL (`proc://<id>/kill`). */
-	contentOptional?(url: InternalUrl): boolean;
 	/**
 	 * True when this URL's write only cancels background work (`proc://<id>/kill`), so it
 	 * passes the plan-mode and device-only gates like a `coordination`-scoped write. Approval

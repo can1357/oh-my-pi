@@ -215,10 +215,13 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 
 const writeSchema = type({
 	path: "string",
-	"content?": "string",
+	content: "string",
 });
 
-/** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
+/**
+ * Write arguments. `content` is required even where it is ignored (`proc://<id>/kill`): strict-mode
+ * providers turn an optional property into a nullable one, and models then send `content: null`.
+ */
 export type WriteToolInput = typeof writeSchema.infer;
 
 /**
@@ -937,7 +940,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content: rawContent }: WriteParams,
+		{ path: rawPath, content }: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
@@ -958,10 +961,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const path = recovered.path;
 		const target = router.writeTarget(path);
 		const policy = target?.spec.write;
-		if (rawContent === undefined && !(target && policy?.contentOptional?.(target.url))) {
-			throw new ToolError(`content is required for ${path}.`);
-		}
-		const content = rawContent ?? "";
 		// Coordination writes (peer messages, background-work cancellation) and replies to the
 		// user touch no files, so neither gate below applies to them.
 		const touchesNoFiles =

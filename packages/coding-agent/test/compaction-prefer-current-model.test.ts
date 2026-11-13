@@ -173,6 +173,65 @@ describe("compaction prefers the current session model over modelRoles.default",
 		]);
 	});
 
+	it("keeps offline compaction fallbacks on the active provider", async () => {
+		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const sameProvider = getBundledModel("anthropic", "claude-opus-4-6");
+		const otherProvider = getBundledModel("openai", "gpt-5");
+		if (!baseModel || !sameProvider || !otherProvider) throw new Error("Expected bundled test models");
+		const currentModel = buildModel({
+			...baseModel,
+			compactionModel: `${otherProvider.provider}/${otherProvider.id}`,
+			compat: baseModel.compatConfig,
+		});
+		const settings = Settings.isolated({
+			"models.offline": true,
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+		});
+		settings.setModelRole("smol", `${sameProvider.provider}/${sameProvider.id}`);
+		settings.setModelRole("default", `${otherProvider.provider}/${otherProvider.id}`);
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.keys.setRuntime(currentModel.provider, "anthropic-token");
+		authStorage.keys.setRuntime(otherProvider.provider, "openai-token");
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+		for (const [userText, assistantText] of [
+			["first question", "first answer"],
+			["second question", "second answer"],
+		] as const) {
+			const user = userMsg(userText);
+			const assistant = assistantMsg(assistantText);
+			session.agent.appendMessage(user);
+			session.sessionManager.appendMessage(user);
+			session.agent.appendMessage(assistant);
+			session.sessionManager.appendMessage(assistant);
+		}
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.id === currentModel.id) {
+				throw new AIError.AwsCredentialsError("credential failure", "resolution");
+			}
+			return {
+				summary: "fallback",
+				shortSummary: "fallback",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 1,
+				details: { provider: model.provider },
+			};
+		});
+
+		expect((await session.compact()).summary).toBe("fallback");
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProvider.provider}/${sameProvider.id}`,
+		]);
+	});
+
 	it("uses compactionModel only for the summary call and leaves the active model unchanged", async () => {
 		const baseCurrentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const compactionModel = getBundledModel("openai", "gpt-5");

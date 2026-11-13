@@ -19,10 +19,11 @@ import { Image, type ImageBudget } from "../../components/image";
 import { clampScrollOffset, scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
 import { centerLine, sliceWithWidth, truncateToWidth, visibleWidth } from "../../utils";
 import { formatBytes } from "@oh-my-pi/pi-utils";
+import { mixHex } from "@oh-my-pi/pi-utils/color";
 import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { getLanguageFromPath } from "../../lang-from-path";
 import { createHighlightStream, getThemeEpoch, theme } from "../../theme/theme";
-import { bgAnsiHex, canvasHex, fgAnsiHex, mixHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
+import { bgAnsiHex, canvasHex, fgAnsiHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
 import { DIFF_CONTEXT_LINES, type FileAssetSide, type FileStreamUpdate } from "./state";
 
 /** Column ranges (inclusive start, exclusive end) carrying intraline emphasis. */

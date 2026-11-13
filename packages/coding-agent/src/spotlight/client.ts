@@ -59,6 +59,8 @@ export interface SpotlightClientOptions {
 	/** Budget of one {@link SpotlightClient.rank} call. */
 	timeoutMs: number;
 	credential?: StencilCredential;
+	/** Whether this request is permitted by the active session's auxiliary-model policy. */
+	allowRequest?: () => boolean;
 	fetch?: typeof fetch;
 }
 
@@ -74,6 +76,7 @@ export class SpotlightClient {
 	/** The credential was created here, so close() releases its auth store; an injected one stays the caller's. */
 	#ownsCredential: boolean;
 	#fetch: typeof fetch;
+	#allowRequest: () => boolean;
 	#warming?: Promise<void>;
 	/** The last ranking found no credential; cleared once one resolves, so a later loss is reported again. */
 	#credentialMissing = false;
@@ -90,6 +93,7 @@ export class SpotlightClient {
 		this.#credential = options.credential ?? new StencilCredential();
 		this.#ownsCredential = options.credential === undefined;
 		this.#fetch = options.fetch ?? fetch;
+		this.#allowRequest = options.allowRequest ?? (() => true);
 	}
 
 	/**
@@ -100,6 +104,7 @@ export class SpotlightClient {
 	 * score every item of every question (status 200, code `bad_reply`).
 	 */
 	async rank(request: SpotlightRequest, signal?: AbortSignal, timeoutMs = this.#timeoutMs): Promise<SpotlightReply> {
+		if (!this.#allowRequest()) throw new SpotlightError("spotlight: disabled by model policy", 0, "policy");
 		const token = await this.#credential.resolve();
 		if (!token) {
 			if (!this.#credentialMissing) {
@@ -119,6 +124,7 @@ export class SpotlightClient {
 		signal: AbortSignal | undefined,
 		timeoutMs: number,
 	): Promise<SpotlightReply> {
+		if (!this.#allowRequest()) throw new SpotlightError("spotlight: disabled by model policy", 0, "policy");
 		const questions: Record<string, { probe: string }> = {};
 		for (const id in request.questions) questions[id] = { probe: request.questions[id] };
 		const body = JSON.stringify({
@@ -184,7 +190,7 @@ export class SpotlightClient {
 	 * logged only. A missing credential is left for the first real ranking to report.
 	 */
 	warm(): void {
-		if (this.#warming) return;
+		if (this.#warming || !this.#allowRequest()) return;
 		this.#warming = this.#credential
 			.resolve()
 			.then(async token => {
