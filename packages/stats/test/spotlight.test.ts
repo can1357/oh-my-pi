@@ -215,6 +215,67 @@ describe("Spotlight recovery detection", () => {
 	});
 });
 
+describe("Spotlight list reads", () => {
+	/** A shaped `a.py;b.py` read: `a.py` 1-10 kept whole, `b.py` 1-50 with lines 20-40 hidden. */
+	function listRead(b: SpotlightSessionBuilder): string {
+		const [id] = b.request({ cacheRead: 10_000, calls: [{ name: "read", args: { path: "a.py;b.py" } }] });
+		b.result(id, {
+			text: "a.py\n…\nb.py\n… [20-40] (read artifact://0:30-50)",
+			shape: {
+				inTokens: 3000,
+				outTokens: 1000,
+				original: {
+					url: "artifact://0",
+					lines: 60,
+					kept: [
+						[1, 29],
+						[51, 60],
+					],
+					windows: [
+						{ at: 0, lines: 10, start: 1, path: "a.py" },
+						{ at: 10, lines: 50, start: 1, path: "b.py" },
+					],
+				},
+			},
+		});
+		return id;
+	}
+
+	it("recovers a list read's hidden window by a later read of that window's file only", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b);
+		call(b, "read", { path: "c.py:25-30" });
+		const later = call(b, "read", { path: "b.py:25-30" });
+		await write("list.jsonl", b);
+
+		const stats = await dashboard();
+		const row = stats.recent.find(r => r.toolCallId === list);
+		expect(row?.hiddenLines).toBe(21);
+		expect(row?.recoveries.map(r => [r.kind, r.toolCallId])).toEqual([["reread", later]]);
+		expect(stats.clawback.events).toBe(1);
+	});
+
+	it("records a later read of a list read's window at its position in the whole original", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b);
+		call(b, "read", { path: "b.py:25-30" });
+		await write("list-needs.jsonl", b);
+		await dashboard();
+
+		const db = await initDb();
+		const need = db
+			.query<{ file: string; reread: string }, [string]>(
+				"SELECT file, reread FROM spotlight_needs WHERE tool_call_id = ?",
+			)
+			.get(list);
+		// `a.py` was shown whole: only `b.py`, the window shaping cut, collects needs.
+		expect(need?.file).toBe(path.resolve("/repo", "b.py"));
+		expect(JSON.parse(need?.reread ?? "null")).toEqual([[35, 40]]);
+	});
+});
+
 describe("Spotlight holdout", () => {
 	it("never counts a held-out result as a saving but measures its fetch-backs like a cut's", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo", "holdout").marker();
