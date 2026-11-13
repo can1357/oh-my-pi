@@ -179,7 +179,7 @@ describe("fetchBuild", () => {
 		});
 
 		const release = (assetFields: Record<string, unknown> = {}) => ({
-			tag_name: "v18.20.0-int.202611130355.d2c2eff",
+			tag_name: "v18.20.0-int.202611130355.gd2c2eff",
 			assets: [
 				{
 					name: "omp-linux-x64",
@@ -191,7 +191,7 @@ describe("fetchBuild", () => {
 					name: fileName,
 					size: 205_765_664,
 					digest: `sha256:${sha("new")}`,
-					browser_download_url: `https://github.com/fork/omp/releases/download/v18.20.0-int.202611130355.d2c2eff/${fileName}`,
+					browser_download_url: `https://github.com/fork/omp/releases/download/v18.20.0-int.202611130355.gd2c2eff/${fileName}`,
 					...assetFields,
 				},
 			],
@@ -214,9 +214,9 @@ describe("fetchBuild", () => {
 
 			expect(urls).toEqual(["https://api.github.com/repos/fork/omp/releases/latest"]);
 			expect(build).toEqual({
-				version: "18.20.0-int.202611130355.d2c2eff",
+				version: "18.20.0-int.202611130355.gd2c2eff",
 				file: { name: fileName, size: 205_765_664, sha256: sha("new") },
-				download: `https://github.com/fork/omp/releases/download/v18.20.0-int.202611130355.d2c2eff/${fileName}`,
+				download: `https://github.com/fork/omp/releases/download/v18.20.0-int.202611130355.gd2c2eff/${fileName}`,
 				patch: undefined,
 			});
 		});
@@ -225,7 +225,7 @@ describe("fetchBuild", () => {
 			process.env.PI_UPDATE_REPO = "fork/omp";
 			let url = "";
 			await fetchBuild(
-				{ version: "18.20.0-int.202611130355.d2c2eff" },
+				{ version: "18.20.0-int.202611130355.gd2c2eff" },
 				{
 					host,
 					fetchImpl: async input => {
@@ -234,7 +234,7 @@ describe("fetchBuild", () => {
 					},
 				},
 			);
-			expect(url).toBe("https://api.github.com/repos/fork/omp/releases/tags/v18.20.0-int.202611130355.d2c2eff");
+			expect(url).toBe("https://api.github.com/repos/fork/omp/releases/tags/v18.20.0-int.202611130355.gd2c2eff");
 		});
 
 		it("refuses a release whose asset is missing or has no digest", async () => {
@@ -253,15 +253,18 @@ describe("fetchBuild", () => {
 		});
 
 		it("orders two builds of the same upstream base by build time, whatever their shas", () => {
-			// Fork tags are `v<upstream>-int.<UTC YYYYMMDDHHMM>.<sha7>`.
-			const older = "18.20.0-int.202611130355.d2c2eff";
-			const newer = "18.20.0-int.202611131200.0123456";
+			// Fork tags are `v<upstream>-int.<UTC YYYYMMDDHHMM>.g<sha7>`; the `g` keeps an all-digit hash
+			// such as `0123456` from being a numeric identifier with a leading zero, which strict semver forbids.
+			const older = "18.20.0-int.202611130355.gd2c2eff";
+			const newer = "18.20.0-int.202611131200.g0123456";
 			for (const order of [compareVersions, Bun.semver.order]) {
 				expect(order(newer, older)).toBe(1);
 				expect(order(older, newer)).toBe(-1);
-				expect(order("18.21.0-int.202611120000.fffffff", newer)).toBe(1);
+				expect(order(newer, newer)).toBe(0);
+				expect(order("18.21.0-int.202611120000.gfffffff", newer)).toBe(1);
 			}
 			// The installed binary reports the same string, so the post-install check matches it.
+			expect(parseReportedVersion(`omp/${older}`)).toBe(older);
 			expect(parseReportedVersion(`omp/${newer}`)).toBe(newer);
 		});
 	});
