@@ -46,12 +46,13 @@ export {
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
+import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, TextContent, Usage, UserMessage } from "@oh-my-pi/pi-ai";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
@@ -670,6 +671,44 @@ export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "sto
  */
 export function assistantTurnDelivered(message: Pick<AssistantMessage, "content">): boolean {
 	return message.content.some(isDeliverableContent);
+}
+
+/**
+ * Occupied context tokens carried by a usage record, using the same accounting
+ * as session compaction ({@link calculateContextTokens}): a provider-reported
+ * `contextTokens` wins; otherwise the billable `totalTokens` (or the bucket
+ * sum when no total is reported) minus provider-side orchestration tokens.
+ * Live `message.usage` payloads and persisted transcript records are loosely
+ * typed, so numeric fields are validated here. Returns 0 when the record
+ * carries no usage signal.
+ */
+export function usageContextTokens(raw: unknown): number {
+	if (!isRecord(raw)) return 0;
+	const field = (record: Record<string, unknown>, key: string): number => {
+		const value = record[key];
+		return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	};
+	const contextTokens = raw.contextTokens;
+	const orchestration = isRecord(raw.orchestration) ? raw.orchestration : undefined;
+	const usage: Usage = {
+		input: field(raw, "input"),
+		output: field(raw, "output"),
+		cacheRead: field(raw, "cacheRead"),
+		cacheWrite: field(raw, "cacheWrite"),
+		totalTokens: field(raw, "totalTokens"),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		...(typeof contextTokens === "number" && Number.isFinite(contextTokens) ? { contextTokens } : {}),
+		...(orchestration
+			? {
+					orchestration: {
+						input: field(orchestration, "input"),
+						cacheRead: field(orchestration, "cacheRead"),
+						output: field(orchestration, "output"),
+					},
+				}
+			: {}),
+	};
+	return calculateContextTokens(usage);
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's

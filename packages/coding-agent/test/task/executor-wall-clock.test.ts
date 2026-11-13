@@ -706,6 +706,66 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(result.contextWindow).toBeUndefined();
 	});
 
+	it("reports occupied context tokens, not summed continuation billing, on the SingleResult", async () => {
+		// A segmented Gemini response bills every continuation request, so
+		// `totalTokens` (275) counts the prompt once per segment while the
+		// provider-reported `contextTokens` (165) is the real occupied window —
+		// the same value the session's own context estimate uses. Task progress
+		// and results must show the occupied figure or the context meter hits
+		// its ceiling early.
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const fastSession: Partial<AgentSession> = {
+			...createSessionDefaults(),
+			state: { messages: [] } as never,
+			agent: { state: { systemPrompt: ["test"] } } as never,
+			extensionRunner: undefined as never,
+			sessionManager: { appendSessionInit: () => {} } as never,
+			getActiveToolNames: () => ["read", "yield"],
+			getEnabledToolNames: () => ["read", "yield"],
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				queueMicrotask(() => {
+					listener({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "ok" }],
+							usage: {
+								input: 120,
+								output: 155,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 275,
+								contextTokens: 165,
+							},
+						},
+					} as unknown as AgentSessionEvent);
+					listener({
+						type: "tool_execution_end",
+						toolCallId: "tool-ok",
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Result submitted." }],
+							details: { status: "success", data: { ok: true } },
+						},
+						isError: false,
+					} as AgentSessionEvent);
+				});
+				return () => {};
+			},
+			prompt: async () => true,
+		};
+		mockCreateAgentSession(fastSession as AgentSession);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-occupied-context-tokens",
+			settings,
+		});
+
+		expect(result.aborted).toBe(false);
+		expect(result.contextTokens).toBe(165);
+	});
+
 	it("attributes a budget hard-abort to the budget, not a timer that fires during teardown", async () => {
 		// softRequestBudget=1 -> stop at 1.5 requests, hard abort at 1.5 + grace.
 		// The child burns 8 requests immediately, so the budget kills the run at
