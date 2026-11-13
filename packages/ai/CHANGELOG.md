@@ -8,7 +8,7 @@
 - Added Google and GitHub sign-in for Kiro through Kiro's device sign-in, so it also works over SSH or on a headless machine
 - Added a Kiro usage provider: reports monthly plan credits, active bonus credits, and enabled overage from Kiro's `GetUsageLimits`, and, with several Kiro accounts, ranks them by remaining free credits, spending paid overage last. Each Kiro login has a stable identity key (`account:<login id>`) that survives refresh, so account pools and `auth.accountPolicies` can name it
 - Added a `definitive` option to `OAuthError`; `isDefinitiveOAuthFailure` now takes the error object and disables a credential marked definitive without matching its message
-- Kiro retries a model-capacity rejection once before any output, reports token usage and context size from Kiro's metadata, surfaces content-filter refusals as refusals, and disables a login whose refresh state can no longer recover
+- Kiro retries a model-capacity rejection or a response cut off mid-frame once before any output, reports token usage and context size from Kiro's metadata, surfaces content-filter refusals as refusals, and disables a login whose refresh state can no longer recover
 
 ### Changed
 

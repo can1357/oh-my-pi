@@ -362,11 +362,16 @@ function createAttempt(model: Model, stream: AssistantMessageEventStream, timest
 
 /**
  * One replay, only while nothing is visible or billed, and only for failures
- * where the identical request is known to succeed.
+ * where the identical request is known to succeed: a capacity throttle, a
+ * transient tool-format rejection, or a body cut off inside a frame.
  */
 function shouldRetry(state: AttemptState, attempt: number, error: unknown): boolean {
 	if (attempt >= MAX_ATTEMPTS || state.visible || state.metered) return false;
-	return isKiroCapacityError(error) || isKiroTransientToolFormatError(error);
+	return (
+		isKiroCapacityError(error) ||
+		isKiroTransientToolFormatError(error) ||
+		(error instanceof AIError.EventStreamFrameError && error.kind === "truncated")
+	);
 }
 
 /** The service's classifier ended the turn: a terminal, non-retryable content block. */

@@ -196,6 +196,9 @@ test.each<[string, Uint8Array[] | (() => Response), number]>([
 	["transient tool-format rejection", json(400, "ValidationException", "Invalid tool use format."), 2],
 	["other validation rejection", json(400, "ValidationException", "Missing required field."), 1],
 	["clean stream ending without output", [ev("initial-response", { requestId: "x" })], 1],
+	["frame cut off before output", [ev("initial-response", { requestId: "x" }).subarray(0, 20)], 2],
+	["frame cut off after output", [VISIBLE, VISIBLE.subarray(0, 20)], 1],
+	["corrupt frame before output", [CAPACITY_FRAME.map((byte, i) => (i === 8 ? byte ^ 1 : byte))], 1],
 ])("replay policy: %s", async (_name, first, expectedAttempts) => {
 	const { attempts, result } = await run(attempt =>
 		attempt > 1 ? recovered() : Array.isArray(first) ? framesResponse(first) : first(),
