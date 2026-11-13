@@ -4,12 +4,7 @@ import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { convertImageToPngShared } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import {
-	getCellDimensions,
-	ImageProtocol,
-	setCellDimensions,
-	TERMINAL,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";

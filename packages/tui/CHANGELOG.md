@@ -6,6 +6,7 @@
 
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- `UserMessageComponent` renders a live preview of each attached image below the message bubble in terminals with a graphics protocol (Kitty, iTerm2, SIXEL), sharing the `ImageBudget` and size limits of tool images; new `imageBudget` and `onImageUpdate` options wire it up ([#9931](https://github.com/can1357/oh-my-pi/issues/9931), [#19185](https://github.com/can1357/oh-my-pi/pull/19185) by [@Skare69](https://github.com/Skare69))
 
 ## [18.20.0] - 2026-11-12
 
