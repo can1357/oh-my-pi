@@ -33,7 +33,14 @@ import {
 import { span, text } from "../native/describe";
 import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { NativeImageCache } from "../native/blobs";
-import { imageLinksEnabled, linkedImageSpan, linkedImageText } from "../prompt/image-references";
+import {
+	imageLinksEnabled,
+	linkedImagePathText,
+	linkedImageSpan,
+	linkedImageText,
+	shouldShowImagePathCaption,
+	transcriptImagePath,
+} from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import type { DynamicBorder } from "../chrome/dynamic-border";
 
@@ -430,8 +437,10 @@ export class BashExecutionComponent extends Container {
 		// Output
 		if (availableLines.length > 0) this.#contentContainer.addChild(this.#outputPane);
 
+		let lastCaptionPath: string | undefined;
 		for (let index = 0; index < this.#images.length; index++) {
 			const image = this.#images[index]!;
+			const imagePath = this.#showImages ? transcriptImagePath(image) : undefined;
 			if (TERMINAL.imageProtocol && this.#showImages) {
 				this.#contentContainer.addChild(
 					new Image(
@@ -440,6 +449,7 @@ export class BashExecutionComponent extends Container {
 						{ fallbackColor: text => theme.fg("muted", text) },
 						{
 							...resolveImageOptions(),
+							sourcePath: imagePath,
 							budget: this.#ui.imageBudget,
 							imageKey: `be${this.#instanceId}:${index}`,
 						},
@@ -448,8 +458,16 @@ export class BashExecutionComponent extends Container {
 			} else {
 				const dimensions = getImageDimensions(image.data, image.mimeType) ?? undefined;
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", linkedImageText(imageFallback(image.mimeType, dimensions), image)), 1, 0),
+					new Text(
+						theme.fg("muted", linkedImageText(imageFallback(image.mimeType, dimensions), image, imagePath)),
+						1,
+						0,
+					),
 				);
+			}
+			if (this.#showImages && imagePath && shouldShowImagePathCaption() && imagePath !== lastCaptionPath) {
+				lastCaptionPath = imagePath;
+				this.#contentContainer.addChild(new Text(theme.fg("muted", linkedImagePathText(imagePath, image)), 1, 0));
 			}
 		}
 

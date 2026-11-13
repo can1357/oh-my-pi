@@ -26,7 +26,12 @@ import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntri
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
-import { linkedImageText } from "../prompt/image-references";
+import {
+	linkedImagePathText,
+	linkedImageText,
+	shouldShowImagePathCaption,
+	transcriptImagePath,
+} from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import { DEFAULT_SPINNER_INTERVAL_MS, spinnerAnimated, spinnerInterval } from "../spinner-clock";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
@@ -1826,7 +1831,9 @@ export class AssistantMessageComponent extends Container {
 		this.#convertImagesForKitty(entries);
 
 		if (withLeadingSpacer) this.#contentContainer.addChild(new Spacer(1));
+		let lastCaptionPath: string | undefined;
 		for (const { image, key, sourcePath } of entries) {
+			const imagePath = transcriptImagePath(image, sourcePath);
 			let displayImage: ImageContent | undefined = image;
 			if (TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png") {
 				displayImage = this.#kittyConversion(image);
@@ -1840,18 +1847,24 @@ export class AssistantMessageComponent extends Container {
 						{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
 						{
 							...resolveImageOptions(),
-							sourcePath,
+							sourcePath: imagePath,
 							budget: this.#imageBudget,
 							imageKey: key,
 							requestRender: this.#onImageUpdate,
 						},
 					),
 				);
-				continue;
+			} else {
+				this.#contentContainer.addChild(
+					new Text(theme.fg("toolOutput", linkedImageText(`[Image: ${image.mimeType}]`, image, imagePath)), 1, 0),
+				);
 			}
-			this.#contentContainer.addChild(
-				new Text(theme.fg("toolOutput", linkedImageText(`[Image: ${image.mimeType}]`, image, sourcePath)), 1, 0),
-			);
+			if (imagePath && shouldShowImagePathCaption() && imagePath !== lastCaptionPath) {
+				lastCaptionPath = imagePath;
+				this.#contentContainer.addChild(
+					new Text(theme.fg("toolOutput", linkedImagePathText(imagePath, image)), 1, 0),
+				);
+			}
 		}
 	}
 
