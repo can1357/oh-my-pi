@@ -46,7 +46,7 @@ const VIRTUAL_DIR_MODE = 0o555;
 const REPLY_FILE_MODE = 0o222;
 const ERRNO_CODE_RE = /^E[A-Z0-9]+$/;
 const DENIED_MESSAGE_RE = /\b(?:not allowed|escapes|outside)\b/i;
-const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed)\b/i;
+const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed|must be numeric)\b/i;
 const MISSING_MESSAGE_RE = /\b(?:not found|unknown|does not exist|no such|unavailable)\b/i;
 
 /** Whether `input` is spelled `scheme://…`: the only form the shell filesystem hands to URL handlers. */
@@ -743,6 +743,7 @@ export class InternalUrlFilesystem {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new UrlFsError(message.startsWith("MCP resource read error") ? "EIO" : "ENOENT", message);
 		}
+		if (resource.absent === true) throw new UrlFsError("ENOENT", `JSON path not found: ${url}`);
 		if (resource.isDirectory) {
 			return {
 				kind: "virtual",

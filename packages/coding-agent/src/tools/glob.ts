@@ -211,11 +211,18 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const formatScopePath = (targetPath: string): string => formatPathRelativeToCwd(targetPath, this.session.cwd);
 			const scopedPaths = toPathList(pathInput);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
+			const internalRouter = InternalUrlRouter.instance();
+			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
+			const urlFilesystem = new InternalUrlFilesystem({
+				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
+				tier: resolveToolTier(this, params),
+			});
 			const rawPatternInputs = this.#customOps
 				? effectivePaths
 				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
 						splitter: parseFindPattern,
 						mixedLocalPaths: true,
+						filesystem: urlFilesystem,
 					});
 			const rawPatterns = rawPatternInputs.map(input => normalizePathLikeInput(input).replace(/\\/g, "/"));
 			const aliasResolvedPatterns = this.#rootPathAlias
@@ -224,12 +231,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			if (aliasResolvedPatterns.some(pattern => /^\/+$/.test(pattern))) {
 				throw new ToolError("Searching from root directory '/' is not allowed");
 			}
-			const internalRouter = InternalUrlRouter.instance();
-			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
-			const urlFilesystem = new InternalUrlFilesystem({
-				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
-				tier: resolveToolTier(this, params),
-			});
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");

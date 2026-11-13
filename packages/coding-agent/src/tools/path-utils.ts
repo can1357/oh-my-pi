@@ -18,7 +18,7 @@ import {
 	windowsPathToWslMount,
 } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../internal-urls";
-import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
+import { InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -703,6 +703,41 @@ function isExclusionPart(part: string): boolean {
 	return part.length > 1 && part.startsWith("!") && !part.includes("://");
 }
 
+const MISSING_OR_INVALID_URL_CODES = new Set(["ENOENT", "ENOTDIR", "ENAMETOOLONG", "EINVAL"]);
+
+async function probeInternalUrlTarget(
+	url: string,
+	filesystem: InternalUrlFilesystem,
+	requireDirectory = false,
+): Promise<boolean> {
+	try {
+		const stat = await filesystem.stat(url);
+		return !requireDirectory || stat.type === "directory";
+	} catch (err) {
+		return !(err instanceof UrlFsError && MISSING_OR_INVALID_URL_CODES.has(err.code));
+	}
+}
+
+async function internalUrlEntryResolves(entry: string, filesystem: InternalUrlFilesystem): Promise<boolean> {
+	const router = InternalUrlRouter.instance();
+	const peeledUrl = router.split(expandPath(entry)).path;
+	if (router.isGlob(peeledUrl)) {
+		let parsedUrl: ParsedSearchPath | undefined;
+		try {
+			parsedUrl = parseUrlSearchPath(peeledUrl);
+		} catch {
+			return false;
+		}
+		if (parsedUrl?.glob !== undefined) {
+			const rawGlobTail = peeledUrl.slice(parsedUrl.basePath.length);
+			if (splitTopLevelDelimitedPath(rawGlobTail, "semicolon").length === 1) {
+				return probeInternalUrlTarget(parsedUrl.basePath, filesystem, true);
+			}
+		}
+	}
+	return probeInternalUrlTarget(peeledUrl, filesystem);
+}
+
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
@@ -712,11 +747,14 @@ export async function splitDelimitedPathEntry(
 		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
 		exclusionParts?: boolean;
 		/**
-		 * Split a `;` list that starts with an internal URL and also names existing
-		 * local paths (`artifact://1;notes.txt`). Search tools opt in. Rewrite tools
-		 * leave this off so a `;` inside one internal URL cannot select an extra file.
+		 * Split a `;` list that starts with an internal URL and also names local
+		 * paths or globs (`artifact://1;src/*.ts`). Search tools opt in. Rewrite
+		 * tools leave this off so a `;` inside one internal URL cannot select an
+		 * extra file.
 		 */
 		mixedLocalPaths?: boolean;
+		/** Confirm whether a semicolon-containing internal URL names one resource before splitting it. */
+		filesystem?: InternalUrlFilesystem;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -731,15 +769,17 @@ export async function splitDelimitedPathEntry(
 	}
 	if (options.mixedLocalPaths === true && isInternalUrlPath(normalizedEntry)) {
 		// Before the all-internal branch, which keeps the whole string when any
-		// part is not itself an internal URL. `splitMixedUrlPathList` declines
-		// unless every non-URL part is an existing literal path, so a URL whose
-		// own path contains `;` (`local://report;`) stays one resource.
-		const mixed = await splitMixedUrlPathList(
-			normalizedEntry,
-			cwd,
-			part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)),
-		);
-		if (mixed && mixed.length > 1) return mixed;
+		// part is not itself an internal URL. All-URL lists always split. For a
+		// mixed list, probe the range-free URL (or its non-glob base directory)
+		// and split only on confirmed missing or invalid targets so semicolons
+		// inside real URLs and read/permission/size errors stay intact.
+		const isUrlPart = (part: string): boolean =>
+			isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part));
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+		if (!parts || parts.length <= 1) return null;
+		if (parts.every(isUrlPart)) return parts;
+		const filesystem = options.filesystem ?? new InternalUrlFilesystem({ context: { cwd }, tier: "read" });
+		return (await internalUrlEntryResolves(normalizedEntry, filesystem)) ? null : parts;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
@@ -818,7 +858,12 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean; mixedLocalPaths?: boolean } = {},
+	options: {
+		splitter?: PathEntrySplitter;
+		exclusionParts?: boolean;
+		mixedLocalPaths?: boolean;
+		filesystem?: InternalUrlFilesystem;
+	} = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {

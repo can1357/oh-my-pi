@@ -282,6 +282,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 
 			const extracted = extractJsonPath(jsonValue, decodedSegments);
+			const absent = extracted === undefined;
 			if (typeof extracted === "string") {
 				// A string field (e.g. a scout's markdown `report`) reads as prose,
 				// not as a JSON-escaped single line.
@@ -296,6 +297,17 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 			notes.push(`Extracted: /${decodedSegments.join("/")}`);
 			if (parsed) notes.push(`Source: ${path.basename(extractedFrom!)}`);
+			if (absent) notes.push("JSON path not found");
+			return {
+				url: url.href,
+				content,
+				contentType,
+				size: Buffer.byteLength(content, "utf-8"),
+				sourcePath: extractedFrom,
+				notes,
+				shape: "value",
+				absent: absent || undefined,
+			};
 		}
 
 		return {
@@ -305,7 +317,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: extractedFrom,
 			notes,
-			shape: extraction ? "value" : "document",
+			shape: "document",
 		};
 	}
 
