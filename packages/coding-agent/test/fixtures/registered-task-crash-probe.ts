@@ -5,7 +5,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession, type CustomTool } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executor from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -45,7 +45,7 @@ it("供父测试在真实宿主边界中止进程", async () => {
 			return register.call(this, type, label, run, options);
 		});
 	}
-	const manager: ExtensionFactory = pi => {
+	const hookExtension: ExtensionFactory = pi => {
 		const pauseAfterResult = async () => {
 			if (stage !== "after") return;
 			await Promise.withResolvers<void>().promise;
@@ -53,16 +53,16 @@ it("供父测试在真实宿主边界中止进程", async () => {
 		pi.on("tool_result", async event => {
 			if (event.toolName === "task") await pauseAfterResult();
 		});
-		pi.registerTool({
-			name: "manager_test",
-			label: "Manager",
-			description: "Delegate an inspection.",
-			parameters: type({ agent: "string", name: "string", task: "string" }),
-			async execute(_id, args, _signal, _onUpdate, ctx) {
-				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-				return (await ctx.invokeRegisteredTask(args as Record<string, unknown>)).result;
-			},
-		});
+	};
+	const manager: CustomTool = {
+		name: "manager_test",
+		label: "Manager",
+		description: "Delegate an inspection.",
+		parameters: type({ agent: "string", name: "string", task: "string" }),
+		async execute(_id, args, _onUpdate, ctx) {
+			if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+			return (await ctx.invokeRegisteredTask(args as Record<string, unknown>)).result;
+		},
 	};
 	const auth = createInMemoryAuthStorage();
 	auth.keys.setRuntime("mock", "test-key");
@@ -78,8 +78,11 @@ it("供父测试在真实宿主边界中止进程", async () => {
 			"retry.enabled": false,
 			"todo.enabled": false,
 		}),
-		extensions: [manager],
-		trustedTaskDelegationExtensions: ["<inline-0>"],
+		extensions: [hookExtension],
+		restrictToolNames: true,
+		allowRestrictedCustomTools: true,
+		customTools: [manager],
+		trustedTaskDelegationTools: ["manager_test"],
 		disableExtensionDiscovery: true,
 		skills: [],
 		contextFiles: [],
@@ -88,7 +91,7 @@ it("供父测试在真实宿主边界中止进程", async () => {
 		enableMCP: false,
 		enableLsp: false,
 		skipPythonPreflight: true,
-		toolNames: ["task", "wait"],
+		toolNames: ["manager_test"],
 	});
 	const tool = session.getToolForEvalBridge("manager_test");
 	if (!tool) throw new Error("管理工具不可用");

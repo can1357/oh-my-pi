@@ -617,8 +617,6 @@ export interface CreateAgentSessionOptions {
 	spawns?: string;
 	/** User-authorized model agents inherited from the parent session for nested delegation. */
 	inheritedSessionAgents?: readonly AgentDefinition[];
-	/** 仅允许列出的扩展来源在自身工具调用中请求一次已启用的原生 task。 */
-	trustedTaskDelegationExtensions?: readonly string[];
 	/** 仅授予受限 SDK 会话中点名的 custom tool 隐藏原生 task 侧调用。 */
 	trustedTaskDelegationTools?: readonly string[];
 
@@ -2525,9 +2523,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
 	const trustedSideTaskTools = options.trustedTaskDelegationTools ?? [];
-	if ((options.trustedTaskDelegationExtensions ?? []).some(name => name.startsWith("<sdk>"))) {
-		throw new Error("SDK 工具必须按具体名称授予受控 task");
-	}
 	if (trustedSideTaskTools.length > 0) {
 		if (
 			!restrictToolNames ||
@@ -3979,10 +3974,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const sideTask = sideNativeTask
 			? new ExtensionToolWrapper(wrapToolWithMetaNotice(sideNativeTask), extensionRunner)
 			: undefined;
-		extensionRunner.authorizeRegisteredTaskExtensions([
-			...(options.trustedTaskDelegationExtensions ?? []),
-			...trustedSideTaskTools.map(name => `<sdk>:${name}`),
-		]);
+		extensionRunner.authorizeRegisteredTaskExtensions(trustedSideTaskTools.map(name => `<sdk>:${name}`));
 		const registeredTaskSessions = new Map<string, { sessionId: string; sessionFile: string }>();
 		const persistRegisteredTaskRecord = async (
 			record: RegisteredTaskRecord,
@@ -4043,14 +4035,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 		});
 		extensionRunner.setRegisteredTaskInvoker(async (extensionPath, outerToolCallId, params, signal) => {
-			const sideCall = extensionPath.startsWith("<sdk>:") && trustedSideTaskTools.length > 0;
-			if (
-				!extensionRunner.canInvokeRegisteredTask(extensionPath) ||
-				(!sideCall && !session.hasBuiltInTool("task"))
-			) {
+			if (!extensionRunner.canInvokeRegisteredTask(extensionPath)) {
 				throw new Error("受控 task 未获授权或不再是原生工具");
 			}
-			const task = sideCall ? sideTask && session.wrapTrustedTask(sideTask) : session.getToolForEvalBridge("task");
+			const task = sideTask && session.wrapTrustedTask(sideTask);
 			if (!task || task.name !== "task") throw new Error("原生 task 未启用");
 			const sessionFile = sessionManager.getSessionFile();
 			if (!sessionFile) throw new Error("受控 task 需要可持久化会话");

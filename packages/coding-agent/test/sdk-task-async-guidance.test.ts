@@ -317,35 +317,36 @@ describe("SDK async task guidance", () => {
 		expect(session.asyncJobManager?.getAllJobs() ?? []).toHaveLength(0);
 	});
 
-	it("returns native background receipts to an explicitly granted extension", async () => {
+	it("returns native background receipts to an explicitly granted SDK tool", async () => {
 		const receipts: Array<{ toolCallId: string; details: unknown }> = [];
 		const observations: RegisteredTaskObservation[][] = [];
 		const repeated: string[] = [];
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-					const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					receipts.push({ toolCallId: receipt.toolCallId, details: receipt.result.details });
-					if (!ctx.queryRegisteredTask) throw new Error("missing task query");
-					observations.push(ctx.queryRegisteredTask(_id));
-					try {
-						await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					} catch (error) {
-						repeated.push(String(error));
-					}
-					return receipt.result;
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+				const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				receipts.push({ toolCallId: receipt.toolCallId, details: receipt.result.details });
+				if (!ctx.queryRegisteredTask) throw new Error("missing task query");
+				observations.push(ctx.queryRegisteredTask(_id));
+				try {
+					await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				} catch (error) {
+					repeated.push(String(error));
+				}
+				return receipt.result;
+			},
 		};
 		const { session } = await harness(
 			{
-				extensions: [manager],
-				trustedTaskDelegationExtensions: ["<inline-0>"],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				toolNames: ["manager_test"],
+				customTools: [manager],
+				trustedTaskDelegationTools: ["manager_test"],
 				systemPrompt: "Test task dispatch.",
 			},
 			"off",
@@ -378,26 +379,27 @@ describe("SDK async task guidance", () => {
 			const root = TempDir.createSync("@pi-task-storage-");
 			roots.push(root);
 			let failure = "";
-			const manager: ExtensionFactory = pi => {
-				pi.registerTool({
-					name: "manager_test",
-					label: "Manager",
-					description: "Delegate an inspection.",
-					parameters: type({ agent: "string", name: "string", task: "string" }),
-					async execute(_id, args, _signal, _onUpdate, ctx) {
-						try {
-							if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-							await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-						} catch (error) {
-							failure = String(error);
-						}
-						return { content: [{ type: "text", text: "checked" }], details: {} };
-					},
-				});
+			const manager: CustomTool = {
+				name: "manager_test",
+				label: "Manager",
+				description: "Delegate an inspection.",
+				parameters: type({ agent: "string", name: "string", task: "string" }),
+				async execute(_id, args, _onUpdate, ctx) {
+					try {
+						if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+						await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+					} catch (error) {
+						failure = String(error);
+					}
+					return { content: [{ type: "text", text: "checked" }], details: {} };
+				},
 			};
 			const { session } = await harness({
-				extensions: [manager],
-				trustedTaskDelegationExtensions: ["<inline-0>"],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				toolNames: ["manager_test"],
+				customTools: [manager],
+				trustedTaskDelegationTools: ["manager_test"],
 				...(mode === "volatile" ? { sessionManager: SessionManager.inMemory(root.path()) } : {}),
 			});
 			if (mode !== "volatile") {
@@ -419,31 +421,35 @@ describe("SDK async task guidance", () => {
 
 	it("persists original identity before an outer tool returns without awaiting", async () => {
 		let observations: RegisteredTaskObservation[] = [];
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-					void ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					return { content: [{ type: "text", text: "returned early" }], details: {} };
-				},
-			});
-			pi.registerTool({
-				name: "manager_query",
-				label: "Query",
-				description: "Query the original call.",
-				parameters: type({ outer: "string" }),
-				async execute(_id, _args, _signal, _onUpdate, ctx) {
-					if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
-					observations = ctx.queryRegisteredTask("outer-early");
-					return { content: [{ type: "text", text: "queried" }], details: {} };
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+				void ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				return { content: [{ type: "text", text: "returned early" }], details: {} };
+			},
 		};
-		const { session } = await harness({ extensions: [manager], trustedTaskDelegationExtensions: ["<inline-0>"] });
+		const queryTool: CustomTool = {
+			name: "manager_query",
+			label: "Query",
+			description: "Query the original call.",
+			parameters: type({ outer: "string" }),
+			async execute(_id, _args, _onUpdate, ctx) {
+				if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
+				observations = ctx.queryRegisteredTask("outer-early");
+				return { content: [{ type: "text", text: "queried" }], details: {} };
+			},
+		};
+		const { session } = await harness({
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test", "manager_query"],
+			customTools: [manager, queryTool],
+			trustedTaskDelegationTools: ["manager_test"],
+		});
 		const tool = session.getToolForEvalBridge("manager_test");
 		const query = session.getToolForEvalBridge("manager_query");
 		expect(tool).toBeDefined();
@@ -467,8 +473,11 @@ describe("SDK async task guidance", () => {
 		const reopened = await SessionManager.open(sessionFile);
 		const restored = await harness({
 			sessionManager: reopened,
-			extensions: [manager],
-			trustedTaskDelegationExtensions: ["<inline-0>"],
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test", "manager_query"],
+			customTools: [manager, queryTool],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		observations = [];
 		await restored.session
@@ -480,31 +489,32 @@ describe("SDK async task guidance", () => {
 	it("preserves the native call identity when a later batch job registration fails", async () => {
 		let failure: unknown;
 		let observations: RegisteredTaskObservation[] = [];
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate a batch inspection.",
-				parameters: type({
-					context: "string",
-					tasks: type({ name: "string", task: "string" }).array(),
-				}),
-				async execute(id, args, _signal, _onUpdate, ctx) {
-					try {
-						if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-						await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					} catch (error) {
-						failure = error;
-					}
-					if (!ctx.queryRegisteredTask) throw new Error("missing task query");
-					observations = ctx.queryRegisteredTask(id);
-					return { content: [{ type: "text", text: "checked" }], details: {} };
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate a batch inspection.",
+			parameters: type({
+				context: "string",
+				tasks: type({ name: "string", task: "string" }).array(),
+			}),
+			async execute(id, args, _onUpdate, ctx) {
+				try {
+					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+					await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				} catch (error) {
+					failure = error;
+				}
+				if (!ctx.queryRegisteredTask) throw new Error("missing task query");
+				observations = ctx.queryRegisteredTask(id);
+				return { content: [{ type: "text", text: "checked" }], details: {} };
+			},
 		};
 		const { session, release } = await harness({
-			extensions: [manager],
-			trustedTaskDelegationExtensions: ["<inline-0>"],
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 			settings: Settings.isolated({
 				"async.enabled": true,
 				"task.batch": true,
@@ -556,25 +566,29 @@ describe("SDK async task guidance", () => {
 
 	it("reserves distinct final job IDs when an existing job and parallel calls share a name", async () => {
 		const receipts: Array<{ toolCallId: string; details: unknown; observations: RegisteredTaskObservation[] }> = [];
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(id, args, _signal, _onUpdate, ctx) {
-					if (!ctx.invokeRegisteredTask || !ctx.queryRegisteredTask) throw new Error("missing task grant");
-					const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					receipts.push({
-						toolCallId: receipt.toolCallId,
-						details: receipt.result.details,
-						observations: ctx.queryRegisteredTask(id),
-					});
-					return receipt.result;
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(id, args, _onUpdate, ctx) {
+				if (!ctx.invokeRegisteredTask || !ctx.queryRegisteredTask) throw new Error("missing task grant");
+				const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				receipts.push({
+					toolCallId: receipt.toolCallId,
+					details: receipt.result.details,
+					observations: ctx.queryRegisteredTask(id),
+				});
+				return receipt.result;
+			},
 		};
-		const { session } = await harness({ extensions: [manager], trustedTaskDelegationExtensions: ["<inline-0>"] });
+		const { session } = await harness({
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
+		});
 		const occupied = Promise.withResolvers<void>();
 		releases.push(occupied.resolve);
 		session.asyncJobManager?.register(
@@ -611,32 +625,36 @@ describe("SDK async task guidance", () => {
 	it("recovers the persisted call-to-job binding without inferring state after restart", async () => {
 		let observations: RegisteredTaskObservation[] = [];
 		let originalCallId = "";
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-					const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					originalCallId = receipt.toolCallId;
-					return receipt.result;
-				},
-			});
-			pi.registerTool({
-				name: "manager_query",
-				label: "Query",
-				description: "Query the original call.",
-				parameters: type({ outer: "string" }),
-				async execute(_id, _args, _signal, _onUpdate, ctx) {
-					if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
-					observations = ctx.queryRegisteredTask("outer-started");
-					return { content: [{ type: "text", text: "queried" }], details: {} };
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+				const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				originalCallId = receipt.toolCallId;
+				return receipt.result;
+			},
 		};
-		const first = await harness({ extensions: [manager], trustedTaskDelegationExtensions: ["<inline-0>"] });
+		const queryTool: CustomTool = {
+			name: "manager_query",
+			label: "Query",
+			description: "Query the original call.",
+			parameters: type({ outer: "string" }),
+			async execute(_id, _args, _onUpdate, ctx) {
+				if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
+				observations = ctx.queryRegisteredTask("outer-started");
+				return { content: [{ type: "text", text: "queried" }], details: {} };
+			},
+		};
+		const first = await harness({
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test", "manager_query"],
+			customTools: [manager, queryTool],
+			trustedTaskDelegationTools: ["manager_test"],
+		});
 		const sessionFile = first.session.sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("missing session file");
 		await first.session.getToolForEvalBridge("manager_test")?.execute("outer-started", {
@@ -652,8 +670,11 @@ describe("SDK async task guidance", () => {
 		const reopened = await SessionManager.open(sessionFile);
 		const restored = await harness({
 			sessionManager: reopened,
-			extensions: [manager],
-			trustedTaskDelegationExtensions: ["<inline-0>"],
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test", "manager_query"],
+			customTools: [manager, queryTool],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		await restored.session
 			.getToolForEvalBridge("manager_query")
@@ -719,24 +740,25 @@ describe("SDK async task guidance", () => {
 				expect(probeState.parentSessionFile).toBe(sessionFile);
 				expect(probeState.sessionFiles).toEqual([sessionFile]);
 			}
-			const manager: ExtensionFactory = pi => {
-				pi.registerTool({
-					name: "manager_query",
-					label: "Query",
-					description: "Query the original call.",
-					parameters: type({}),
-					async execute(_id, _args, _signal, _onUpdate, ctx) {
-						if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
-						observations = ctx.queryRegisteredTask("outer-crash");
-						return { content: [{ type: "text", text: "queried" }], details: {} };
-					},
-				});
+			const queryTool: CustomTool = {
+				name: "manager_query",
+				label: "Query",
+				description: "Query the original call.",
+				parameters: type({}),
+				async execute(_id, _args, _onUpdate, ctx) {
+					if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
+					observations = ctx.queryRegisteredTask("outer-crash");
+					return { content: [{ type: "text", text: "queried" }], details: {} };
+				},
 			};
 			const reopened = await SessionManager.open(sessionFile);
 			const restored = await harness({
 				sessionManager: reopened,
-				extensions: [manager],
-				trustedTaskDelegationExtensions: ["<inline-0>"],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				toolNames: ["manager_query"],
+				customTools: [queryTool],
+				trustedTaskDelegationTools: [],
 			});
 			await restored.session.getToolForEvalBridge("manager_query")?.execute("query-crashed", {});
 			expect(observations).toHaveLength(1);
@@ -753,29 +775,36 @@ describe("SDK async task guidance", () => {
 	it("reconciles a started job by the original call when a result hook replaces its receipt", async () => {
 		let failure: unknown;
 		let observations: RegisteredTaskObservation[] = [];
-		const manager: ExtensionFactory = pi => {
+		const hookExtension: ExtensionFactory = pi => {
 			pi.on("tool_result", event =>
 				event.toolName === "task" ? { content: [{ type: "text", text: "rewritten" }] } : undefined,
 			);
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(id, args, _signal, _onUpdate, ctx) {
-					try {
-						if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-						await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					} catch (error) {
-						failure = error;
-					}
-					if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
-					observations = ctx.queryRegisteredTask(id);
-					return { content: [{ type: "text", text: "checked" }], details: {} };
-				},
-			});
 		};
-		const { session } = await harness({ extensions: [manager], trustedTaskDelegationExtensions: ["<inline-0>"] });
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(id, args, _onUpdate, ctx) {
+				try {
+					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+					await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				} catch (error) {
+					failure = error;
+				}
+				if (!ctx.queryRegisteredTask) throw new Error("missing query grant");
+				observations = ctx.queryRegisteredTask(id);
+				return { content: [{ type: "text", text: "checked" }], details: {} };
+			},
+		};
+		const { session } = await harness({
+			extensions: [hookExtension],
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
+		});
 		await session.getToolForEvalBridge("manager_test")?.execute("outer-hook", {
 			agent: "task",
 			name: "hook-job",
@@ -796,27 +825,28 @@ describe("SDK async task guidance", () => {
 	it("propagates cancellation before a delegated task can spawn", async () => {
 		const controller = new AbortController();
 		let cancelled = false;
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					controller.abort();
-					try {
-						if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-						await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					} catch {
-						cancelled = true;
-					}
-					return { content: [{ type: "text", text: "checked" }], details: {} };
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				controller.abort();
+				try {
+					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+					await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				} catch {
+					cancelled = true;
+				}
+				return { content: [{ type: "text", text: "checked" }], details: {} };
+			},
 		};
 		const { session } = await harness({
-			extensions: [manager],
-			trustedTaskDelegationExtensions: ["<inline-0>"],
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		const tool = session.getToolForEvalBridge("manager_test");
 		expect(tool).toBeDefined();
@@ -829,35 +859,39 @@ describe("SDK async task guidance", () => {
 		const controller = new AbortController();
 		let observedCallId = "";
 		let settledCallId = "";
-		const manager: ExtensionFactory = pi => {
+		const hookExtension: ExtensionFactory = pi => {
 			pi.on("tool_call", event => {
 				if (event.toolName === "task") {
 					observedCallId = event.toolCallId;
 					controller.abort();
 				}
 			});
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					try {
-						if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-						const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-						settledCallId = receipt.toolCallId;
-					} catch (error) {
-						if (error && typeof error === "object" && "toolCallId" in error) {
-							settledCallId = String(error.toolCallId);
-						}
+		};
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				try {
+					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+					const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+					settledCallId = receipt.toolCallId;
+				} catch (error) {
+					if (error && typeof error === "object" && "toolCallId" in error) {
+						settledCallId = String(error.toolCallId);
 					}
-					return { content: [{ type: "text", text: "checked" }], details: {} };
-				},
-			});
+				}
+				return { content: [{ type: "text", text: "checked" }], details: {} };
+			},
 		};
 		const { session } = await harness({
-			extensions: [manager],
-			trustedTaskDelegationExtensions: ["<inline-0>"],
+			extensions: [hookExtension],
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		const tool = session.getToolForEvalBridge("manager_test");
 		expect(tool).toBeDefined();
@@ -872,30 +906,34 @@ describe("SDK async task guidance", () => {
 		let observedCallId = "";
 		let receiptCallId = "";
 		let receiptDetails: unknown;
-		const manager: ExtensionFactory = pi => {
+		const hookExtension: ExtensionFactory = pi => {
 			pi.on("tool_result", event => {
 				if (event.toolName === "task") {
 					observedCallId = event.toolCallId;
 					controller.abort();
 				}
 			});
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-					const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					receiptCallId = receipt.toolCallId;
-					receiptDetails = receipt.result.details;
-					return receipt.result;
-				},
-			});
+		};
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+				const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				receiptCallId = receipt.toolCallId;
+				receiptDetails = receipt.result.details;
+				return receipt.result;
+			},
 		};
 		const { session } = await harness({
-			extensions: [manager],
-			trustedTaskDelegationExtensions: ["<inline-0>"],
+			extensions: [hookExtension],
+			restrictToolNames: true,
+			allowRestrictedCustomTools: true,
+			toolNames: ["manager_test"],
+			customTools: [manager],
+			trustedTaskDelegationTools: ["manager_test"],
 		});
 		const tool = session.getToolForEvalBridge("manager_test");
 		expect(tool).toBeDefined();
@@ -910,9 +948,9 @@ describe("SDK async task guidance", () => {
 		expect(session.asyncJobManager?.getAllJobs() ?? []).toHaveLength(1);
 	});
 
-	it.each(["deny", "disabled", "rewritten", "mutated"])("does not spawn when native task is %s", async condition => {
+	it.each(["deny", "rewritten", "mutated"])("does not spawn when the native task is %s", async condition => {
 		const failures: string[] = [];
-		const manager: ExtensionFactory = pi => {
+		const hookExtension: ExtensionFactory = pi => {
 			if (condition === "rewritten") {
 				pi.on("tool_call", event =>
 					event.toolName === "task" ? { input: { ...event.input, task: "unapproved replacement" } } : undefined,
@@ -925,21 +963,21 @@ describe("SDK async task guidance", () => {
 					return { input: event.input };
 				});
 			}
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					try {
-						if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-						await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					} catch (error) {
-						failures.push(String(error));
-					}
-					return { content: [{ type: "text", text: "checked" }], details: {} };
-				},
-			});
+		};
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				try {
+					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+					await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				} catch (error) {
+					failures.push(String(error));
+				}
+				return { content: [{ type: "text", text: "checked" }], details: {} };
+			},
 		};
 		const settings = Settings.isolated({
 			"async.enabled": true,
@@ -950,9 +988,12 @@ describe("SDK async task guidance", () => {
 		});
 		const { session } = await harness(
 			{
-				extensions: [manager],
-				trustedTaskDelegationExtensions: ["<inline-0>"],
-				toolNames: condition === "disabled" ? ["wait"] : ["task", "wait"],
+				extensions: [hookExtension],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				toolNames: ["manager_test"],
+				customTools: [manager],
+				trustedTaskDelegationTools: ["manager_test"],
 				settings,
 			},
 			"off",
@@ -969,24 +1010,25 @@ describe("SDK async task guidance", () => {
 		const restrictedFile = `${root.path()}/restricted/brief.md`;
 		await Bun.write(restrictedFile, "restricted assignment");
 		const receipts: unknown[] = [];
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate a file-backed inspection.",
-				parameters: type({ agent: "string", name: "string", taskFile: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-					const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					receipts.push(receipt.result);
-					return receipt.result;
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate a file-backed inspection.",
+			parameters: type({ agent: "string", name: "string", taskFile: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+				const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				receipts.push(receipt.result);
+				return receipt.result;
+			},
 		};
 		const { session } = await harness(
 			{
-				extensions: [manager],
-				trustedTaskDelegationExtensions: ["<inline-0>"],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				toolNames: ["manager_test"],
+				customTools: [manager],
+				trustedTaskDelegationTools: ["manager_test"],
 				settings: Settings.isolated({
 					"async.enabled": true,
 					"compaction.enabled": false,
@@ -1014,24 +1056,25 @@ describe("SDK async task guidance", () => {
 
 	it("delivers inline instructions through the native approval binding", async () => {
 		const receipts: unknown[] = [];
-		const manager: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "manager_test",
-				label: "Manager",
-				description: "Delegate an inline inspection.",
-				parameters: type({ agent: "string", name: "string", task: "string" }),
-				async execute(_id, args, _signal, _onUpdate, ctx) {
-					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
-					const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
-					receipts.push(receipt.result.details);
-					return receipt.result;
-				},
-			});
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inline inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+				const receipt = await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				receipts.push(receipt.result.details);
+				return receipt.result;
+			},
 		};
 		const { session, assignments, started } = await harness(
 			{
-				extensions: [manager],
-				trustedTaskDelegationExtensions: ["<inline-0>"],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				toolNames: ["manager_test"],
+				customTools: [manager],
+				trustedTaskDelegationTools: ["manager_test"],
 				settings: Settings.isolated({
 					"async.enabled": true,
 					"compaction.enabled": false,
