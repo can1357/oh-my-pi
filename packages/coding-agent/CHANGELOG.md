@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Running subagent rows in `wait` and `read proc://` now show an automatic retry in progress, such as `retrying 7/10 in 45s: <provider error>`, so a subagent that is only re-sending a failed request no longer reads as working ([#19015](https://github.com/can1357/oh-my-pi/pull/19015) by [@wolfiesch](https://github.com/wolfiesch))
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
@@ -28,7 +32,6 @@
 - `ssh://` host listing, `ssh://` autocomplete and `/ssh list` now include the `Host` aliases from `~/.ssh/config` and `/etc/ssh/ssh_config` (following `Include`); `ssh.json` entries win on a name clash
 - Added `find.verifyModel`, a model selector whose judge answers only `find`'s passage verification while filename and sketch ranking stay on the `judge` role ([#19006](https://github.com/can1357/oh-my-pi/pull/19006) by [@alphastorm](https://github.com/alphastorm))
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
-- Running subagent rows in `wait` and `read proc://` now show an automatic retry in progress, such as `retrying 7/10 in 45s: <provider error>`, so a subagent that is only re-sending a failed request no longer reads as working ([#19015](https://github.com/can1357/oh-my-pi/pull/19015) by [@wolfiesch](https://github.com/wolfiesch))
 - Text a browser or computer call types into a page or app, such as a password, no longer appears in plain text in an eval cell's status lines or the session file ([#18981](https://github.com/can1357/oh-my-pi/pull/18981) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser page-script observations in Tern and WebKit now mask password values, including values used as accessible names or descriptions ([#18983](https://github.com/can1357/oh-my-pi/pull/18983) by [@will-bogusz](https://github.com/will-bogusz))
 - Chromium main-world `waitForFunction` calls no longer expose Puppeteer's internal ARIA query bindings to page scripts ([#18883](https://github.com/can1357/oh-my-pi/pull/18883) by [@will-bogusz](https://github.com/will-bogusz))
