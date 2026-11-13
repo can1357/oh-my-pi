@@ -753,6 +753,49 @@ async fn live_background_job_count_tracks_external_background_jobs() {
 	shell.abort().await;
 }
 
+/// A command that times out ends what it started, but a server or VM an
+/// earlier command left running with `&` lives on, and so does the session
+/// that owns it (its variables included).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_spares_background_jobs_of_earlier_commands() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	shell
+		.run(
+			ShellRunOptions { command: "sh -c 'sleep 30' & early=$!".into(), ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("start the earlier job");
+
+	let timed_out = shell
+		.run(
+			ShellRunOptions { command: "sh -c 'sleep 30' & sleep 30".into(), ..Default::default() },
+			None,
+			CancelToken::new(Some(300)),
+		)
+		.await
+		.expect("run that times out");
+	assert!(timed_out.timed_out);
+	assert_eq!(
+		shell.live_background_job_count().await,
+		1,
+		"the timed-out command's own job must end, the earlier one must not"
+	);
+
+	let probe = shell
+		.run(
+			ShellRunOptions { command: "kill -0 \"$early\"".into(), ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("probe the earlier job");
+	assert_eq!(probe.exit_code, Some(0), "the earlier job died with the timed-out command");
+}
+
 /// An exited `&` child must be waited on while the persistent shell is
 /// idle, not only when the host submits another command. Keep its status
 /// for a later explicit `wait` after the OS process has disappeared.

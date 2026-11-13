@@ -5,12 +5,19 @@
 ### Added
 
 - `ShellRunResult` carries `endedByExit`: true when `exit` or an armed `set -e` cut the run short with commands still left to run (whatever followed the abort did not run); a trailing `exit` at the end of the input, which ends the run where the input's end would have, is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+- `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
+- `DirectoryWatcher` changes say whether their entry is a directory, and `close()` returns without waiting for the watcher thread to cancel its reads (a network round trip on shares)
+- `grep()` and `glob()` below an ovnfs checkout are answered by the ovnfs daemon serving it, which searches the checkout's overlay in-process instead of paying an NFS round trip per file: the walker finds ovnfs mounts in the host mount table, and falls back to its own walk whenever the daemon cannot answer (no daemon, another protocol version, a daemon serving another mount, an error reply). Named file roots, `onMatches` streaming, `type` filters and link-following globs always walk natively
 
 ### Fixed
 
 - Fixed `<text>` disappearing from rendered SVGs when a generic font family names a font that is not installed ([#15181](https://github.com/can1357/oh-my-pi/issues/15181)) ([#18538](https://github.com/can1357/oh-my-pi/pull/18538) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 - Fixed `worktree add` failing, or leaving behind a worktree that could not be removed, when the checkout being cloned contains read-only files or directories ([#14190](https://github.com/can1357/oh-my-pi/issues/14190)) ([#18537](https://github.com/can1357/oh-my-pi/pull/18537) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 - Fixed `worktree add` deleting a file outside the new worktree when the source checkout had replaced a tracked directory with a symlink ([#18537](https://github.com/can1357/oh-my-pi/pull/18537) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- A cancelled or timed-out `Shell.run` no longer ends the `&` jobs earlier runs left running, and the shell keeps its session (variables, working directory, jobs) for the next run; only what the cancelled run started is stopped
+- Fixed shell `find`, `fd`, `rg` and the `grep`/`glob` natives spending minutes on searches of a home directory: walks rooted on a local filesystem list network mounts below them (NFS, SMB, autofs, sshfs, … such as OrbStack's `~/OrbStack`) but no longer descend into them. A search rooted on a network filesystem walks it as before, and ovnfs mounts are always walked
+- Fixed shell `find` walking network filesystems and cold caches one listing at a time: while listings are slow it now reads the next directories ahead on the blocking pool, keeping several round trips in flight (about 1.5× faster on an OrbStack NFS tree); fast local listings stay on the walk
+- Fixed shell `fd` being about twice as slow as `fd` itself: it now walks on the parallel walker, filtering on its workers and printing matches as the walk settles them, in the byte order of their paths (as `sort` orders them). `-j` sets the worker count; `.fdignore` is read by the walker, beats `.gitignore`/`.ignore` (a `!` rule re-includes) and applies from every ancestor; `--no-ignore-parent` also skips ancestors' `.gitignore`/`.ignore`; `-E`, `--prune` and `--ignore-contain` prune at every depth, `--min-depth` included; `--show-errors` lists unreadable directories with their paths after the matches; a file given as a search path is an error, as in `fd`
 
 ## [18.20.0] - 2026-11-12
 

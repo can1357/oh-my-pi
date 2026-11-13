@@ -152,6 +152,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(prompt, content='histo
 CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history BEGIN
 	INSERT INTO history_fts(rowid, prompt) VALUES (new.id, new.prompt);
 END;
+CREATE TRIGGER IF NOT EXISTS history_ad AFTER DELETE ON history BEGIN
+	INSERT INTO history_fts(history_fts, rowid, prompt) VALUES ('delete', old.id, old.prompt);
+END;
 		`);
 
 		if (rebuilt || !hadFts) {
@@ -287,6 +290,11 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#writeFailureReported = false;
 		this.#addListener?.();
 		return Promise.resolve();
+	}
+
+	/** Deletes a stored prompt and its search index entry. */
+	delete(id: number): void {
+		this.#db.query("DELETE FROM history WHERE id = ?").run(id);
 	}
 
 	/** Returns unique prompts ordered by their most recent submission. */

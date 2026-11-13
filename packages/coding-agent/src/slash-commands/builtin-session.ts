@@ -194,6 +194,7 @@ function launchSessionStatsDashboard(
 	const judge = resolveJudge({
 		settings: owner.settings,
 		registry: owner.session.modelRegistry,
+		sessionModel: owner.session.model,
 		sessionId: owner.session.sessionId,
 		purpose: "stats_frustration",
 		onUsage: journalJudgmentUsage(owner.sessionManager),
