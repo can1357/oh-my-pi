@@ -85,11 +85,8 @@ interface AntigravityEndpointResult {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
-/**
- * `UsageReport.metadata` flag set when a quota summary marks its Gemini 4
- * Argon bucket disabled, which says nothing usable about Argon's quota.
- */
-const ARGON_BUCKET_DISABLED_METADATA_KEY = "argonBucketDisabled";
+/** `UsageReport.metadata.quotaSource` of reports built from `retrieveUserQuotaSummary`. */
+const QUOTA_SUMMARY_SOURCE = "quota-summary";
 
 interface AntigravityWindowDescriptor {
 	id: string;
@@ -348,12 +345,8 @@ function buildQuotaSummaryReport(
 	if (!hasGroupedBuckets && topLevelBuckets.length === 0) return null;
 
 	const limits: UsageLimit[] = [];
-	let argonBucketDisabled = false;
 	const addBucket = (bucket: AntigravityQuotaSummaryBucket, group?: AntigravityQuotaSummaryGroup) => {
-		if (bucket.disabled === true) {
-			if (getQuotaSummaryCounterKeys(group, bucket).includes("google-argon")) argonBucketDisabled = true;
-			return;
-		}
+		if (bucket.disabled === true) return;
 		const descriptor = classifyWindow(bucket.window, bucket.displayName);
 		const window = parseWindow(
 			{
@@ -422,8 +415,8 @@ function buildQuotaSummaryReport(
 	const metadata: UsageReport["metadata"] = {
 		endpoint,
 		projectId: params.credential.projectId,
+		quotaSource: QUOTA_SUMMARY_SOURCE,
 	};
-	if (argonBucketDisabled) metadata[ARGON_BUCKET_DISABLED_METADATA_KEY] = true;
 	if (params.credential.email) metadata.email = params.credential.email;
 	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
 
@@ -669,7 +662,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 export const antigravityUsageProvider: UsageProvider = {
 	id: "google-antigravity",
-	cacheVersion: 4,
+	cacheVersion: 3,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
 };
@@ -685,15 +678,14 @@ function getAntigravityCounterLimits(report: UsageReport, counterKey: string): U
 }
 
 /**
- * Limits gating Gemini 4 Argon: its own `gemini-argon-*` bucket when the report
- * has one, else the shared Google counter. A quota summary without an Argon
- * bucket comes from a plan that meters Argon from the shared Gemini quota, and
- * legacy model-catalog reports cannot tell the buckets apart. A disabled Argon
- * bucket says nothing usable, so it leaves Argon unconstrained.
+ * Limits gating Gemini 4 Argon. The quota summary meters Argon in its own
+ * `gemini-argon-*` bucket, separately from `gemini-weekly`, so a summary
+ * without that bucket leaves Argon unconstrained. Legacy model-catalog reports
+ * cannot tell the buckets apart and only offer the shared Google counter.
  */
 function getAntigravityArgonLimits(report: UsageReport): UsageLimit[] {
 	const argonLimits = getAntigravityCounterLimits(report, "google-argon");
-	if (argonLimits.length > 0 || report.metadata?.[ARGON_BUCKET_DISABLED_METADATA_KEY] === true) return argonLimits;
+	if (argonLimits.length > 0 || report.metadata?.quotaSource === QUOTA_SUMMARY_SOURCE) return argonLimits;
 	return getAntigravityCounterLimits(report, "google");
 }
 
@@ -747,10 +739,17 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
-	// One scope per backend counter, judged by the same limits ranking uses
-	// for it. A 429 can carry a retry-after at the weekly reset while Google
-	// restores the quota days earlier; the next `/usage` fetch then lifts the
-	// block instead of the account idling until the clock runs out.
+	// One scope per backend counter. A 429 can carry a retry-after at the
+	// weekly reset while Google restores the quota days earlier; the next
+	// `/usage` fetch then lifts the block instead of the account idling until
+	// the clock runs out.
+	//
+	// Argon is judged by its own bucket when the report has one. A summary
+	// without it (an account that never used Argon, or a plan with no
+	// separate Argon bucket) leaves ranking unconstrained, but then has no
+	// limits to clear an Argon block by, and a block written under a bucket
+	// that has since disappeared would sit out its retry-after. The shared
+	// Google counter vouches for such a block instead.
 	healableBlockScopes(report) {
 		const counterKeys = new Set<string>(["google-argon"]);
 		for (const limit of report.limits) {
@@ -758,13 +757,13 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 			if (counterKey) counterKeys.add(counterKey.toLowerCase());
 		}
 		return [...counterKeys]
-			.map(counterKey => ({
-				blockScope: `counter:${counterKey}`,
-				limits:
-					counterKey === "google-argon"
-						? getAntigravityArgonLimits(report)
-						: getAntigravityCounterLimits(report, counterKey),
-			}))
+			.map(counterKey => {
+				let limits = getAntigravityCounterLimits(report, counterKey);
+				if (counterKey === "google-argon" && limits.length === 0) {
+					limits = getAntigravityCounterLimits(report, "google");
+				}
+				return { blockScope: `counter:${counterKey}`, limits };
+			})
 			.filter(scope => scope.limits.length > 0);
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
