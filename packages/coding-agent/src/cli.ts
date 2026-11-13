@@ -94,6 +94,9 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-rules": true,
 	"--no-context-files": true,
 	"--no-tools": true,
+	"--no-judge": true,
+	"--no-spotlight": true,
+	"--offline": true,
 	"--no-lsp": true,
 	"--no-title": true,
 	"--no-prewalk": true,
@@ -145,7 +148,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
  * tarball installs all exercise it on every CI run.
  */
 async function runSmokeTest(): Promise<void> {
-	const { smokeTestSyncWorker, startServer } = await import("@oh-my-pi/omp-stats");
+	const { smokeTestSpotlightWorker, smokeTestSyncWorker, startServer } = await import("@oh-my-pi/omp-stats");
 	const { smokeTestTinyTitleWorker } = await import("./tiny/title-client");
 	const { smokeTestSttWorker } = await import("./stt/asr-client");
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
@@ -161,6 +164,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
 	await smokeTestSyncWorker();
+	await smokeTestSpotlightWorker();
 	await smokeTestStatsActivityWorker();
 
 	const statsServer = await startServer(0);
@@ -194,6 +198,7 @@ async function runSmokeTest(): Promise<void> {
 
 const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
 const STATS_SYNC_WORKER_ARG = "__omp_worker_stats_sync";
+const STATS_SPOTLIGHT_WORKER_ARG = "__omp_worker_stats_spotlight";
 const TAB_WORKER_ARG = "__omp_worker_tab";
 const JS_EVAL_WORKER_ARG = "__omp_worker_js_eval";
 const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
@@ -206,12 +211,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await runTinyWorker();
 		return true;
 	}
-	if (arg === STATS_SYNC_WORKER_ARG) {
-		// The sync worker handles messages via `self.onmessage`, assigned during
+	if (arg === STATS_SYNC_WORKER_ARG || arg === STATS_SPOTLIGHT_WORKER_ARG) {
+		// The stats workers handle messages via `self.onmessage`, assigned during
 		// this *async* dynamic import. Bun flushes the worker's initial message
 		// buffer when the entry module's top-level evaluation finishes — before
 		// this dispatch completes — so anything the parent posted right after
-		// spawning (the smoke ping, the first parse request) would be dropped.
+		// spawning (the smoke ping, the first parse or build request) would be dropped.
 		// Park early events and replay them once the module's handler is live.
 		// Worker-thread entries using `parentPort` need the same sync-prefix
 		// buffering; the computer/tab/eval cases install that inbox below.
@@ -221,7 +226,8 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 			pending.push(event);
 		};
 		scope.onmessage = buffer;
-		await import("@oh-my-pi/omp-stats/sync-worker");
+		if (arg === STATS_SYNC_WORKER_ARG) await import("@oh-my-pi/omp-stats/sync-worker");
+		else await import("@oh-my-pi/omp-stats/spotlight-worker");
 		const handler = scope.onmessage;
 		if (handler && handler !== buffer) {
 			for (const event of pending) handler.call(scope, event);

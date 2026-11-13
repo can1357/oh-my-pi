@@ -109,7 +109,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 ## Modes / Variants
 
 1. **Single file path**
-   - Native `grep()` searches one file as text, including files containing NUL bytes across buffered files, streamed oversized files, and multiline searches within the leading 4 MiB window (unless answered by an `ovnfs` daemon; see Notes).
+   - Native `grep()` searches one file as text, including files containing NUL bytes across buffered files, streamed oversized files, and multiline searches within the leading 4 MiB window; named files are never answered by an ovnfs daemon (see Notes).
    - Output is a flat list of match/context lines.
    - Visible limit is the first `200` matches after native matching and JS per-file capping.
 2. **Single directory path or single glob-like path**
@@ -185,4 +185,4 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `gitignore:false` only affects native directory traversal. It does not disable the tool's own path normalization or explicit-file handling.
 - When `path` resolves to multiple exact files, each target gets its own native fetch cap before JS grouping (`2000` ordinarily; enlarged for line-range filters).
 - The section tag in hashline mode is a four-hex opaque snapshot tag from the session snapshot store; `grep` records whole-file snapshots when possible and prints bare line numbers beneath the header.
-- When the `ovnfs` binary is found (`ovnfs.path`, default `ovnfs` on `PATH`) and a host directory or glob root lies inside a checkout mount served by its daemon (`packages/coding-agent/src/ovnfs/search.ts`), the daemon answers `grep` instead of `@oh-my-pi/pi-natives` (falling back to native search on daemon failure). Explicitly named files always use the native scanner, so they are searched as text. `DaemonGrepReply` has no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.
+- Below an ovnfs checkout, native `grep()` asks the ovnfs daemon serving it instead of walking the NFS mount (`crates/pi-walker/src/ovnfs.rs`): pi-walker finds ovnfs mounts in the host mount table and the daemon's admin socket from the mount source or ovnfs's state directory, and the daemon searches the checkout's overlay in-process. No ovnfs setting or binary is involved. Named files, `onMatches` streaming, and `type` filters always use the native walker; any daemon failure (no daemon, another protocol version, a daemon serving another mount, an error reply) falls back to the native walk, and cancelling the search closes the daemon connection, which cancels its search. Daemon replies carry no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.
