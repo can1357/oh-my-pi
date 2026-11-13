@@ -191,6 +191,8 @@ class FakeAgentSession {
 	retryCalls = 0;
 	/** Backs `modelRegistry.authStorage` for `/mcp reauth` credential round-trips. */
 	authStorage?: AuthStorage;
+	backgroundRefresh?: Promise<void>;
+	onBackgroundRefreshWait?: () => void;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(
@@ -212,9 +214,17 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
+	get modelRegistry(): {
+		getApiKey: (model: Model) => Promise<string>;
+		awaitBackgroundRefresh: () => Promise<void>;
+		authStorage?: AuthStorage;
+	} {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			awaitBackgroundRefresh: async () => {
+				this.onBackgroundRefreshWait?.();
+				await this.backgroundRefresh;
+			},
 			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}
@@ -558,6 +568,10 @@ async function createHarness(
 		extensionRunners?: boolean;
 		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
 		authStorage?: AuthStorage;
+		/** Shares a pending catalog load with the sessions created by the factory. */
+		backgroundRefresh?: Promise<void>;
+		initialModels?: Model[];
+		onBackgroundRefreshWait?: () => void;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -601,8 +615,10 @@ async function createHarness(
 	const initialSession = new FakeAgentSession(cwdA);
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
-		const session = new FakeAgentSession(cwd);
+		const session = new FakeAgentSession(cwd, options.initialModels ?? TEST_MODELS);
 		if (options.authStorage) session.authStorage = options.authStorage;
+		session.backgroundRefresh = options.backgroundRefresh;
+		session.onBackgroundRefreshWait = options.onBackgroundRefreshWait;
 		if (options.extensionRunners) {
 			session.extensionRunner = new ExtensionRunner(
 				[],
@@ -689,6 +705,47 @@ describe("ACP agent", () => {
 		await harness.agent.closeSession({ sessionId: created.sessionId });
 		await harness.agent.loadSession({ sessionId: created.sessionId, cwd: harness.cwdA, mcpServers: [] });
 		expect(harness.sessions.at(-1)?.sessionId).toBe(continued);
+		await harness.agent.dispose();
+	});
+
+	it("lists discovery-backed models in the initial ACP picker", async () => {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const models = [TEST_MODELS[0]!];
+		const harness = await createHarness({
+			backgroundRefresh: promise,
+			initialModels: models,
+			onBackgroundRefreshWait: entered.resolve,
+		});
+		const createdPromise = harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await entered.promise;
+		models.push(TEST_MODELS[1]!);
+		resolve();
+		const created = await createdPromise;
+		const modelOption = created.configOptions?.find(option => option.id === "model");
+		expect(modelOption?.type).toBe("select");
+		if (modelOption?.type !== "select") throw new Error("missing model selector");
+		expect(modelOption.options.map(option => option.value)).toContain(
+			`${TEST_MODELS[1]!.provider}/${TEST_MODELS[1]!.id}`,
+		);
+		await harness.agent.dispose();
+	});
+
+	it("accepts a discovery-backed model selected while catalog refresh is pending", async () => {
+		const harness = await createHarness({ initialModels: [TEST_MODELS[0]!] });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		session.backgroundRefresh = promise;
+		const selected = harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "model",
+			value: `${TEST_MODELS[1]!.provider}/${TEST_MODELS[1]!.id}`,
+		});
+		session.getAvailableModels().push(TEST_MODELS[1]!);
+		resolve();
+		await selected;
+		expect(session.model?.id).toBe(TEST_MODELS[1]!.id);
 		await harness.agent.dispose();
 	});
 

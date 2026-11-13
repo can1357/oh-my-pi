@@ -1109,6 +1109,7 @@ export class AcpAgent implements Agent {
 	async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#createNewSessionRecord(params.cwd, params.mcpServers);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: NewSessionResponse = {
 			sessionId: record.protocolSessionId,
 			configOptions: this.#buildConfigOptions(record.session),
@@ -1122,6 +1123,7 @@ export class AcpAgent implements Agent {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#loadManagedSession(params.sessionId, params.cwd, params.mcpServers);
 		await this.#replaySessionHistory(record);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: LoadSessionResponse = {
 			configOptions: this.#buildConfigOptions(record.session),
 			modes: this.#buildModeState(record.session),
@@ -1150,6 +1152,7 @@ export class AcpAgent implements Agent {
 	async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#resumeManagedSession(params.sessionId, params.cwd, params.mcpServers ?? []);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: ResumeSessionResponse = {
 			configOptions: this.#buildConfigOptions(record.session),
 			modes: this.#buildModeState(record.session),
@@ -1161,6 +1164,7 @@ export class AcpAgent implements Agent {
 	async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#forkManagedSession(params);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: ForkSessionResponse = {
 			sessionId: record.protocolSessionId,
 			configOptions: this.#buildConfigOptions(record.session),
@@ -2515,6 +2519,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #setModelById(session: AgentSession, modelId: string): Promise<void> {
+		await session.modelRegistry.awaitBackgroundRefresh();
 		const model = session.getAvailableModels().find(candidate => this.#toModelId(candidate) === modelId);
 		if (!model) {
 			throw new Error(`Unknown ACP model: ${modelId}`);
