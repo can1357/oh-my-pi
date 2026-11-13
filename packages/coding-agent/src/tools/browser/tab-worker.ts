@@ -72,6 +72,7 @@ import {
 	loadPuppeteerInWorker,
 	loadedKnownDevices,
 	loadedNetworkConditions,
+	privateTargetId,
 	puppeteerTimeoutError,
 	readPageViewport,
 } from "./launch";
@@ -1501,11 +1502,6 @@ function replyError(payload: RunErrorPayload): Error {
 	if (payload.name) err.name = payload.name;
 	if (payload.stack) err.stack = payload.stack;
 	return err;
-}
-
-function privateTargetId(target: Target): string | undefined {
-	const raw = target as unknown as { _targetId?: unknown };
-	return typeof raw._targetId === "string" ? raw._targetId : undefined;
 }
 
 async function targetIdForTarget(target: Target): Promise<string> {

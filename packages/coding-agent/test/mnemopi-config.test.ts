@@ -101,4 +101,9 @@ describe("loadMnemopiConfig database path resolution", () => {
 			path.join(os.homedir(), "custom.db"),
 		);
 	});
+
+	it("keeps .. in a configured dbPath, which may follow a symlink", () => {
+		const viaLink = ["", "home", "me", "link", "..", "mnemopi.db"].join(path.sep);
+		expect(mnemopiConfigFor({ "mnemopi.dbPath": viaLink }).dbPath).toBe(viaLink);
+	});
 });
