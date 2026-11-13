@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An `edit` under a tag read before `write conflict://N` (or `conflict://*`) now carries over to the resolved file like after any other `write`, instead of failing with "hash is not from this session" ([#19233](https://github.com/can1357/oh-my-pi/pull/19233) by [@tuschla](https://github.com/tuschla))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
