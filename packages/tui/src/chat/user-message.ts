@@ -28,6 +28,7 @@ import { imageLinksEnabled, imageReferenceHyperlink } from "../prompt/image-refe
 import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
+import { isNativeRendering } from "../native/state";
 import { base64ImageNode, openableImageProps } from "../native/blobs";
 import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import {
@@ -79,6 +80,8 @@ export interface UserBubbleOptions {
 	imageBudget?: ImageBudget;
 	/** Schedules a repaint when an off-thread image step (Kitty PNG conversion) lands. */
 	onImageUpdate?: () => void;
+	/** Render live previews of the attached images (the `terminal.showImages` setting). Off when omitted. */
+	showImages?: boolean;
 }
 
 /**
@@ -150,7 +153,10 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	readonly #imageLinks: readonly (string | undefined)[] | undefined;
 	readonly #imageBudget: ImageBudget | undefined;
 	readonly #onImageUpdate: (() => void) | undefined;
-	/** Live image-preview children appended after the markdown (ANSI mode only; native builds its own). */
+	readonly #showImages: boolean;
+	/** The prose child; the OSC 133 zone closes on its last row, above any preview. */
+	readonly #markdown: Markdown;
+	/** Live image-preview children (spacer included) appended after the markdown, ANSI mode only. */
 	#previewChildren: Component[] = [];
 	/** Payload keys of in-flight Kitty PNG conversions, so one conversion runs per image. */
 	#kittyPending = new Set<string>();
@@ -194,6 +200,8 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 			color: userBubbleColor(options, this.#tokens),
 		});
 		markdown.setIgnoreTight(true);
+		this.#markdown = markdown;
+		this.#showImages = options.showImages === true;
 		this.addChild(markdown);
 		// ANSI-mode previews for the attached images (native mode draws its own thumbnails in
 		// #describe); a terminal without a graphics protocol keeps the chip text as the whole preview.
@@ -207,7 +215,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	 * policy as the chip hyperlinks. Videos and synthetic messages keep their chips only.
 	 */
 	#mountImagePreviews(): void {
-		if (!TERMINAL.imageProtocol || this.#synthetic) return;
+		if (!this.#showImages || !TERMINAL.imageProtocol || this.#synthetic || isNativeRendering()) return;
 		this.#unmountImagePreviews();
 		let spacer = false;
 		this.#images.forEach((image, index) => {
@@ -224,7 +232,9 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 				mimeType = converted.mimeType;
 			}
 			if (!spacer) {
-				this.addChild(new Spacer(1));
+				const gap = new Spacer(1);
+				this.#previewChildren.push(gap);
+				this.addChild(gap);
 				spacer = true;
 			}
 			const preview = new Image(
@@ -452,7 +462,10 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		const wrapped = lines.slice();
 		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(width);
 		wrapped[0] = OSC133_ZONE_START + wrapped[0];
-		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		// Close the zone on the prose's last row: an image row must keep its exact shape (a Kitty
+		// direct placement line is parsed whole), and the image is not prompt text anyway.
+		const zoneEnd = Math.min(Math.max(this.#markdown.render(width).length, 1), wrapped.length) - 1;
+		wrapped[zoneEnd] = wrapped[zoneEnd] + OSC133_ZONE_CLOSE;
 		this.#zoneSource = lines;
 		this.#zoneLines = wrapped;
 		return wrapped;

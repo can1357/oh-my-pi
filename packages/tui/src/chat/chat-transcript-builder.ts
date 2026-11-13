@@ -355,6 +355,9 @@ export class ChatTranscriptBuilder {
 								liveSteered: message.role === "user" && message.liveSteered === true,
 								timestamp: message.timestamp,
 								images: imageContent(message.content),
+								imageBudget: this.#deps.ui.imageBudget,
+								onImageUpdate: () => this.#deps.requestRender(),
+								showImages: displayPreferences.showImages,
 							}),
 						);
 					}
