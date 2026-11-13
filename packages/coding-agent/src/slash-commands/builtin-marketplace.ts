@@ -243,9 +243,9 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 			// /marketplace (no args) or /marketplace install (no args) → interactive browser
 			if ((sub === "install" && !rest) || (!args[0] && !command.args.trim())) {
 				try {
-					runtime.ctx.showPluginSelector("install");
+					await runtime.ctx.showPluginSelector("install");
 				} catch (err) {
-					runtime.ctx.showStatus(`Marketplace error: ${err}`);
+					runtime.ctx.showStatus(`Marketplace error: ${errorMessage(err)}`);
 				}
 				return;
 			}
@@ -329,7 +329,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 					case "uninstall": {
 						if (!rest) {
 							// No args → open interactive uninstall selector
-							runtime.ctx.showPluginSelector("uninstall");
+							await runtime.ctx.showPluginSelector("uninstall");
 							return;
 						}
 						const uninstArgs = parsePluginScopeArgs(
