@@ -201,9 +201,11 @@ behavior {
 		substring="realtime" substring="minilm" substring="mpnet" substring="/bge-" substring="/e5-" substring="/flux-" \
 		prefix="openai/gpt-image-" prefix="alibaba/qwen-image"
 	// SuperGrok's roster interleaves media models the chat picker cannot
-	// serve; the dedicated tool surfaces route them instead.
+	// serve; the dedicated tool surfaces route them instead. The authored
+	// `grok-voice-transcribe-*` seed rows run on `xai-stt`, so the realtime
+	// voice ids are excluded by name instead of the whole `grok-voice-` family.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
-		prefix="grok-imagine-video" prefix="grok-stt-" prefix="grok-voice-"
+		prefix="grok-imagine-video" prefix="grok-stt-" exact="grok-voice-latest" prefix="grok-voice-think-"
 	// Antigravity still advertises the Gemini 3.5 Flash wire ids, but every
 	// request to them answers with a retirement notice instead of a reply.
 	// `gemini-3-flash` is the family's recycled alias and routes to the same ids.

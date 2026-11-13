@@ -40,4 +40,27 @@ describe("xai-oauth grok-4.7 discovery", () => {
 			Effort.XHigh,
 		]);
 	});
+
+	test("voice ids never become chat rows; the transcriber is the seeded xai-stt runner", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			Response.json({
+				object: "list",
+				data: [
+					{ id: "grok-4.7" },
+					{ id: "grok-voice-transcribe-2.0" },
+					{ id: "grok-voice-transcribe-3.0" },
+					{ id: "grok-stt-1" },
+					{ id: "grok-voice-latest" },
+					{ id: "grok-voice-think-fast" },
+				],
+			}),
+		);
+		const options = xaiOAuthModelManagerOptions({ apiKey: "xai-oauth-test", fetch: fetchMock });
+		const specs = await options.fetchDynamicModels?.();
+		expect(specs?.filter(model => model.id.startsWith("grok-voice") || model.id.startsWith("grok-stt"))).toEqual([]);
+		expect(options.staticModels?.find(model => model.id === "grok-voice-transcribe-2.0")).toMatchObject({
+			api: "xai-stt",
+			baseUrl: "https://api.x.ai/v1",
+		});
+	});
 });

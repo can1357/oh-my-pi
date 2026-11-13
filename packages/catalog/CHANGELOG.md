@@ -5,6 +5,7 @@
 ### Added
 
 - Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens; on Google, Vertex AI and OpenCode Zen it offers low, medium and high.
+- Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API)
 
 ### Fixed
 
