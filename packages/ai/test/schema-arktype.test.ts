@@ -6,9 +6,9 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 
 // ---------------------------------------------------------------------------
 // Phase-1 parity gate: ArkType schemas must flow through the same wire-emission
-// + validation/coercion pipeline as Zod, with the two contracts the dispatcher
-// depends on (root-extra survival on plain objects; strip-extras on closed
-// objects) preserved.
+// + validation/coercion pipeline as Zod, with the three contracts the dispatcher
+// depends on (root-extra survival on plain objects; strip-extras on rejecting
+// objects; root-extra survival on deleting ones) preserved.
 // ---------------------------------------------------------------------------
 
 // Plain object — ArkType's default `ignore` undeclared-key behavior.
@@ -28,6 +28,17 @@ const rejectParams = type({
 	obj: type({ "+": "reject", inner: "string" }),
 });
 const rejectTool: Tool = { name: "ark-reject", description: "", parameters: rejectParams };
+
+// Closed object that deletes undeclared keys instead of rejecting them (`"+": "delete"`), applied
+// to root and the nested object. This is the shape the task tool's batch schema uses, and the only
+// one in which `preserveUnknownRootFields` decides anything: ArkType removes the root extra itself
+// and still validates, so the `keepUnknownRootKeys` repair path never runs.
+const deleteParams = type({
+	"+": "delete",
+	name: "string",
+	obj: type({ "+": "delete", inner: "string" }),
+});
+const deleteTool: Tool = { name: "ark-delete", description: "", parameters: deleteParams };
 
 describe("isArkSchema", () => {
 	it("accepts a live ArkType instance", () => {
@@ -79,10 +90,39 @@ describe("validateToolArguments — ArkType contracts", () => {
 			arguments: { name: "n", count: 2, nested: { inner: "v", extraNested: 9 }, extraRoot: 7 },
 		}) as Record<string, unknown>;
 		expect(result.name).toBe("n");
-		// Root extra survives — load-bearing (preserveUnknownRootFields), matches plain z.object.
+		// Root extra survives, matching plain z.object. ArkType's default `ignore` keeps it without
+		// help, so this row does not exercise `preserveUnknownRootFields` — Contract A2 is the one
+		// that does.
 		expect(result.extraRoot).toBe(7);
 		// Accepted divergence from plain z.object: nested extras also survive.
 		expect((result.nested as Record<string, unknown>).extraNested).toBe(9);
+	});
+
+	// The row Contract A was long believed to be. Its comment used to call the root extra
+	// "load-bearing (preserveUnknownRootFields)", but `plainParams` leaves undeclared keys in place
+	// on its own, so that row stays green with the re-attachment removed and nothing measured the
+	// pass it named. A deleting schema is the only shape where the pass decides the outcome.
+	it('Contract A2: "+": "delete" strips the root extra and validation re-attaches it', () => {
+		// What the schema alone produces.
+		expect(deleteParams({ name: "n", obj: { inner: "v", extraNested: 9 }, extraRoot: 7 })).toEqual({
+			name: "n",
+			obj: { inner: "v" },
+		});
+
+		// What the tool is handed, with no `keepUnknownRootKeys`: the root extra is back. Tools whose
+		// schema deletes read it as the caller's intent and refuse it — the task tool answers a
+		// `model`, `sourceSession`, `task`, `taskFile` or stale `schema` sent at a batch call's top
+		// level with its own message on exactly this, and every one of those goes silent if the
+		// re-attachment is narrowed to the repair path's option.
+		const result = validateToolArguments(deleteTool, {
+			type: "toolCall",
+			id: "a2",
+			name: "ark-delete",
+			arguments: { name: "n", obj: { inner: "v", extraNested: 9 }, extraRoot: 7 },
+		}) as Record<string, unknown>;
+		expect(result.extraRoot).toBe(7);
+		// Only root keys come back; the nested extra stays deleted.
+		expect((result.obj as Record<string, unknown>).extraNested).toBeUndefined();
 	});
 
 	it('Contract B: "+": "reject" strips both root and nested extras', () => {
