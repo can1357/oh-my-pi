@@ -140,26 +140,32 @@ async function holdFirstNotification(
 		});
 		await gate.promise;
 	});
-	const winner = await Promise.race([
-		entered.promise.then(held => ({ kind: "notified" as const, held })),
-		resultPromise.then(() => ({ kind: "done" as const })),
-	]);
-	expect(winner.kind).toBe("notified");
-	if (winner.kind !== "notified") throw new Error("response observer was not called");
-	let finished = false;
-	void resultPromise.then(
-		() => {
-			finished = true;
-		},
-		() => {
-			finished = true;
-		},
-	);
-	for (let i = 0; i < 100; i++) await Promise.resolve();
-	expect(finished).toBe(false);
-	expect(winner.held.delivered).toBe(false);
-	gate.resolve();
-	return { held: winner.held, result: await resultPromise };
+	try {
+		const winner = await Promise.race([
+			entered.promise.then(held => ({ kind: "notified" as const, held })),
+			resultPromise.then(() => ({ kind: "done" as const })),
+		]);
+		expect(winner.kind).toBe("notified");
+		if (winner.kind !== "notified") throw new Error("response observer was not called");
+		let finished = false;
+		void resultPromise.then(
+			() => {
+				finished = true;
+			},
+			() => {
+				finished = true;
+			},
+		);
+		for (let i = 0; i < 100; i++) await Promise.resolve();
+		expect(finished).toBe(false);
+		expect(winner.held.delivered).toBe(false);
+		gate.resolve();
+		return { held: winner.held, result: await resultPromise };
+	} finally {
+		gate.resolve();
+		// Preserve an assertion or stream error while still leaving no pending work.
+		await resultPromise.catch(() => undefined);
+	}
 }
 
 describe("direct Google response observers", () => {
@@ -211,10 +217,34 @@ describe("direct Google response observers", () => {
 		]);
 	});
 
-	it("tells the observer about the accepted Vertex fallback and skips the regional miss", async () => {
-		const saved = Bun.env.GOOGLE_VERTEX_LOCATION;
-		Bun.env.GOOGLE_VERTEX_LOCATION = "us-central1";
-		try {
+	const vertexFallbackTestName = "tells the observer about the accepted Vertex fallback and skips the regional miss";
+	it(
+		vertexFallbackTestName,
+		async () => {
+			if (Bun.env.OMP_TEST_VERTEX_RESPONSE_OBSERVER_CHILD !== "1") {
+				// Only an ambient location enables global fallback. Keep it out of this
+				// runner's shared environment by exercising that path in a child process.
+				const child = Bun.spawn(
+					[process.execPath, "test", import.meta.path, "--test-name-pattern", vertexFallbackTestName],
+					{
+						env: {
+							...process.env,
+							GOOGLE_VERTEX_LOCATION: "us-central1",
+							OMP_TEST_VERTEX_RESPONSE_OBSERVER_CHILD: "1",
+						},
+						stdout: "pipe",
+						stderr: "pipe",
+					},
+				);
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+					child.exited,
+				]);
+				expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+				return;
+			}
+
 			const urls: string[] = [];
 			const state: BodyState = { delivered: false };
 			const seen: Array<{ status: number; requestId: string | null | undefined; delivered: boolean }> = [];
@@ -240,11 +270,9 @@ describe("direct Google response observers", () => {
 			expect(assistantText(result)).toBe("ok");
 			expect(state.delivered).toBe(true);
 			expect(seen).toEqual([{ status: 200, requestId: "vertex-hit", delivered: false }]);
-		} finally {
-			if (saved === undefined) delete Bun.env.GOOGLE_VERTEX_LOCATION;
-			else Bun.env.GOOGLE_VERTEX_LOCATION = saved;
-		}
-	});
+		},
+		60_000,
+	);
 });
 
 describe("Cloud Code Assist response observers", () => {
@@ -291,33 +319,39 @@ describe("Cloud Code Assist response observers", () => {
 			},
 		}).result();
 
-		const winner = await Promise.race([
-			entered.promise.then(() => "notified" as const),
-			resultPromise.then(() => "done" as const),
-		]);
-		expect(winner).toBe("notified");
-		let finished = false;
-		void resultPromise.then(
-			() => {
-				finished = true;
-			},
-			() => {
-				finished = true;
-			},
-		);
-		for (let i = 0; i < 100; i++) await Promise.resolve();
-		expect(finished).toBe(false);
-		expect(resume.delivered).toBe(false);
-		gate.resolve();
-		const result = await resultPromise;
+		try {
+			const winner = await Promise.race([
+				entered.promise.then(() => "notified" as const),
+				resultPromise.then(() => "done" as const),
+			]);
+			expect(winner).toBe("notified");
+			let finished = false;
+			void resultPromise.then(
+				() => {
+					finished = true;
+				},
+				() => {
+					finished = true;
+				},
+			);
+			for (let i = 0; i < 100; i++) await Promise.resolve();
+			expect(finished).toBe(false);
+			expect(resume.delivered).toBe(false);
+			gate.resolve();
+			const result = await resultPromise;
 
-		expect(result.stopReason).toBe("stop");
-		expect(assistantText(result)).toBe("Hello world");
-		expect(first.delivered).toBe(true);
-		expect(resume.delivered).toBe(true);
-		expect(seen).toEqual([
-			{ status: 200, requestId: "cli-1", delivered: false },
-			{ status: 200, requestId: "cli-2", delivered: false },
-		]);
+			expect(result.stopReason).toBe("stop");
+			expect(assistantText(result)).toBe("Hello world");
+			expect(first.delivered).toBe(true);
+			expect(resume.delivered).toBe(true);
+			expect(seen).toEqual([
+				{ status: 200, requestId: "cli-1", delivered: false },
+				{ status: 200, requestId: "cli-2", delivered: false },
+			]);
+		} finally {
+			gate.resolve();
+			// Preserve an assertion or stream error while still leaving no pending work.
+			await resultPromise.catch(() => undefined);
+		}
 	});
 });
