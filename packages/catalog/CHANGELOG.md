@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens; on Google, Vertex AI and OpenCode Zen it offers low, medium and high.
+
 ### Fixed
 
 - Fixed Gemini 4 Argon on Command Code reporting $0 spend and dropping image attachments; it now bills at Command Code's $2 input, $10 output and $0.10 cache-read rates per million tokens and accepts images ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch))

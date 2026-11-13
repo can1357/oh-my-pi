@@ -32,6 +32,17 @@ afterEach(async () => {
 });
 
 describe("HistoryStorage.search", () => {
+	it("removes deleted prompts from search and permits reinserting them", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["commit one", "commit two"]);
+		const deleted = storage.search("commit one", 10)[0]!;
+		storage.delete(deleted.id);
+		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["commit two"]);
+		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit two"]);
+		await storage.add("commit one");
+		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit one", "commit two"]);
+	});
+
 	it("matches across punctuation in the query (FTS token alignment)", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["run git commit --amend now", "unrelated noise"]);

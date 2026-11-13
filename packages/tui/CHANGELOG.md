@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
