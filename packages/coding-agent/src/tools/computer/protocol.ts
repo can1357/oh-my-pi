@@ -85,6 +85,7 @@ export interface ComputerRunOk {
 	capabilities?: DesktopCapabilities;
 }
 
+/** Supervisor result: successful output, or partial output with `error` describing the failed run. */
 export type ComputerRunResult = ComputerRunOk & { error?: RunErrorPayload };
 
 /** Result of a computer call the user stopped with physical Escape during takeover input. */
