@@ -39,7 +39,7 @@ import {
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
 import { getStatsByModel, getTimeSeries } from "./rollup";
-import { getSpotlightDashboardStats, getSpotlightSessionContext } from "./spotlight-aggregator";
+import { buildSpotlightDashboardJson, getSpotlightSessionContext } from "./spotlight-aggregator";
 import {
 	buildSessionTrace,
 	getTraceEntry,
@@ -171,12 +171,19 @@ let closeHandler: (() => void) | undefined;
 /** Longest a Spotlight build serves later requests of its data version: its time range moves with the clock. */
 const SPOTLIGHT_VIEW_TTL_MS = 60_000;
 
-/** Spotlight payloads (JSON) of one live data version by `range\0agent`, with when each build started. */
+/** Spotlight payloads (JSON) of one live data version by `range\0agent`, with when each was requested. */
 let spotlightViews: { version: number; views: Map<string, { at: number; json: Promise<string> }> } | null = null;
+
+/** Aborted when the last dashboard of this process stops, ending the Spotlight builds still running for it. */
+let spotlightBuilds = new AbortController();
+
+/** Settles when the last queued Spotlight build does: builds run one at a time, as they did on the server's thread. */
+let spotlightQueue: Promise<unknown> = Promise.resolve();
 
 /**
  * The Spotlight dashboard as JSON, built once per data version and view. Every open page refetches on each version
- * bump and a build takes seconds on the thread that also ingests, so pages showing the same view share one build.
+ * bump and a build takes seconds of a worker's CPU and memory, so pages showing the same view share one build and
+ * different views wait their turn.
  */
 function spotlightView(range: string | null, agent: string | null): Promise<string> {
 	const version = statsLive().status().version;
@@ -185,7 +192,9 @@ function spotlightView(range: string | null, agent: string | null): Promise<stri
 	const key = `${range ?? ""}\0${agent ?? ""}`;
 	const cached = views.get(key);
 	if (cached && Date.now() - cached.at < SPOTLIGHT_VIEW_TTL_MS) return cached.json;
-	const json = getSpotlightDashboardStats(range, agent).then(stats => JSON.stringify(stats));
+	const { signal } = spotlightBuilds;
+	const json = spotlightQueue.then(() => buildSpotlightDashboardJson(range, agent, signal));
+	spotlightQueue = json.catch(() => {});
 	const entry = { at: Date.now(), json };
 	views.set(key, entry);
 	// A failed build is not reused.
@@ -458,6 +467,8 @@ function createDashboardServer(port: number, hostname: string): Server<undefined
 				server.timeout(req, 0);
 				return liveEventStream(dashboardHeaders, req.signal);
 			}
+			// A Spotlight build runs on a worker and can outlast the idle timeout, which counts a pending handler.
+			if (path === "/api/stats/spotlight") server.timeout(req, 0);
 
 			try {
 				let response: Response;
@@ -596,8 +607,12 @@ export async function startServer(
 				server.stop(true);
 				if (stopped) return;
 				stopped = true;
-				// The last dashboard in this process takes background ingest down with it.
-				if (--liveServers === 0) statsLive().stop();
+				// The last dashboard in this process takes background ingest and Spotlight builds down with it.
+				if (--liveServers === 0) {
+					statsLive().stop();
+					spotlightBuilds.abort(new Error("Stats dashboard stopped"));
+					spotlightBuilds = new AbortController();
+				}
 			},
 		};
 		for (const key of keys) activeServers.set(key, handle);
