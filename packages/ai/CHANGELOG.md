@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed Gemini 4 (Argon, Carbon and Hydrogen) answers longer than one 65,536-token output segment failing with finish reason `CONTINUATION`: Google, Vertex AI, Gemini CLI and Antigravity requests now resume the generation, retrying transient failures, and stream it as one reply ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
-- Fixed Google Antigravity Gemini 4 Argon quota on plans whose quota summary has no separate Argon bucket: Argon is now judged by the shared Gemini quota it draws from, so credential ranking accounts for that usage, and a stale Argon block from before a plan change heals on the next usage report instead of leaving the account unusable for Argon until the old weekly reset ([#19123](https://github.com/can1357/oh-my-pi/pull/19123) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed Google Antigravity Gemini 4 Argon quota on plans whose quota summary has no separate Argon bucket: Argon is now judged by the shared Gemini quota it draws from, so credential ranking and the status line account for that usage, and a stale Argon block from before a plan change heals on the next usage report instead of leaving the account unusable for Argon until the old weekly reset ([#19123](https://github.com/can1357/oh-my-pi/pull/19123) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.20.0] - 2026-11-12
 

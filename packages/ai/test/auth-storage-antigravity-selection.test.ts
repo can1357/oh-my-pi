@@ -360,9 +360,9 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		expect(argonKey).toBe("api-acct-recovered");
 	});
 
-	for (const { name, googleUsed, healed } of [
-		{ name: "heals", googleUsed: 0.02, healed: true },
-		{ name: "keeps", googleUsed: 1, healed: false },
+	for (const { name, fiveHourLeft, healed } of [
+		{ name: "heals", fiveHourLeft: 0.98, healed: true },
+		{ name: "keeps", fiveHourLeft: 0, healed: false },
 	]) {
 		test(`${name} a stale Argon block when the quota summary drops the Argon bucket and shared Gemini quota is ${healed ? "left" : "exhausted"}`, async () => {
 			if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
@@ -391,15 +391,32 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			ageCredentialBlockRows(dbPath);
 			store.cleanExpiredCredentialBlocks?.(Date.now() + STALE_BLOCK_GUARD_MS);
 
-			const report = createAntigravityReport({
-				accountId: "acct-upgraded",
-				projectId: "proj-upgraded",
-				windows: [{ counter: "google", usedFraction: googleUsed, resetInMs: 5 * HOUR_MS }],
-			});
-			usageByAccount.set("acct-upgraded", {
-				...report,
-				metadata: { ...report.metadata, quotaSource: "quota-summary" },
-			});
+			const summary = {
+				groups: [
+					{
+						displayName: "Gemini Models",
+						buckets: [
+							{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.98 },
+							{ bucketId: "gemini-5h", window: "5h", remainingFraction: fiveHourLeft },
+						],
+					},
+				],
+			};
+			const report = await antigravityUsageProvider.fetchUsage!(
+				{
+					provider: "google-antigravity",
+					credential: {
+						type: "oauth",
+						accessToken: "token",
+						projectId: "proj-upgraded",
+						email: "upgraded@example.com",
+						accountId: "acct-upgraded",
+					},
+				},
+				{ fetch: async () => new Response(JSON.stringify(summary), { status: 200 }) },
+			);
+			if (!report) throw new Error("expected usage report");
+			usageByAccount.set("acct-upgraded", report);
 
 			await authStorage.usage.reports();
 

@@ -85,8 +85,6 @@ interface AntigravityEndpointResult {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
-/** `UsageReport.metadata.quotaSource` of reports built from `retrieveUserQuotaSummary`. */
-const QUOTA_SUMMARY_SOURCE = "quota-summary";
 /**
  * `UsageReport.metadata` flag set when a quota summary marks its Gemini 4
  * Argon bucket disabled, which says nothing usable about Argon's quota.
@@ -424,7 +422,6 @@ function buildQuotaSummaryReport(
 	const metadata: UsageReport["metadata"] = {
 		endpoint,
 		projectId: params.credential.projectId,
-		quotaSource: QUOTA_SUMMARY_SOURCE,
 	};
 	if (argonBucketDisabled) metadata[ARGON_BUCKET_DISABLED_METADATA_KEY] = true;
 	if (params.credential.email) metadata.email = params.credential.email;
@@ -672,7 +669,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 export const antigravityUsageProvider: UsageProvider = {
 	id: "google-antigravity",
-	cacheVersion: 3,
+	cacheVersion: 4,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
 };

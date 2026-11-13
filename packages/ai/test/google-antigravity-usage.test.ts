@@ -282,6 +282,7 @@ describe("antigravity usage provider", () => {
 		// A disabled bucket says nothing about Argon's quota, so healthy shared
 		// Gemini quota must not vouch for an Argon block.
 		expect(scopeAntigravityLimitsForModel(report, argon)).toEqual([]);
+		expect(antigravityRankingStrategy.findWindowLimits(report, argon).primary).toBeUndefined();
 		expect(antigravityRankingStrategy.healableBlockScopes?.(report)?.map(scope => scope.blockScope)).toEqual([
 			"counter:google",
 		]);
