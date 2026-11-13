@@ -86,6 +86,7 @@ import { cfgCycleOrder } from "../../config/model-settings";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
+	cfgComposerShowLastReply,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -3192,7 +3193,9 @@ export class InputController {
 		}
 
 		const currentText = this.ctx.editor.getExpandedText?.() ?? this.ctx.editor.getText();
-		const context = this.ctx.session.getLastAssistantText();
+		const context = cfgComposerShowLastReply.get(this.ctx.settings)
+			? this.ctx.session.getLastAssistantText()
+			: undefined;
 
 		try {
 			this.ctx.ui.stop();

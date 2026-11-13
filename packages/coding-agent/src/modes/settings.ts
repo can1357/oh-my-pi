@@ -1049,6 +1049,20 @@ export const cfgComposerRecallClearedDrafts = register({
 	},
 });
 
+export const cfgComposerShowLastReply = register({
+	id: "composer.showLastReply",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Show Last Reply in External Editor",
+		get description() {
+			return `Show the latest assistant reply below your draft when editing with ${formatKeyHint("ctrl+g")} in $VISUAL / $EDITOR; it is ignored on save`;
+		},
+	},
+});
+
 export const cfgDoubleEscapeAction = register({
 	id: "doubleEscapeAction",
 	type: "enum",

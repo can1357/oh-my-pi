@@ -6,12 +6,15 @@ import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { cfgComposerShowLastReply } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -1647,5 +1650,61 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+});
+
+describe("InputController external editor reply context (composer.showLastReply)", () => {
+	const originalVisual = Bun.env.VISUAL;
+	const originalEditor = Bun.env.EDITOR;
+	let tempDir: TempDir;
+
+	beforeEach(() => {
+		tempDir = TempDir.createSync("@omp-editor-reply-");
+	});
+
+	afterEach(async () => {
+		if (originalVisual === undefined) delete Bun.env.VISUAL;
+		else Bun.env.VISUAL = originalVisual;
+		if (originalEditor === undefined) delete Bun.env.EDITOR;
+		else Bun.env.EDITOR = originalEditor;
+		await tempDir.remove();
+	});
+
+	/** Presses the external-editor action on draft "hello" and returns what the editor was shown and what the prompt holds afterwards. */
+	async function openEditor(showLastReply: boolean): Promise<{ shown: string; draft: string }> {
+		const context = await createContext();
+		const { ctx, editor } = context;
+		cfgComposerShowLastReply.set(ctx.settings, showLastReply);
+		Object.assign(ctx.ui, { stop: vi.fn(), start: vi.fn() });
+		Object.assign(ctx.session, { getLastAssistantText: () => "assistant says hi" });
+		const shownPath = path.join(tempDir.path(), "shown");
+		const editorPath = path.join(tempDir.path(), "edit");
+		await Bun.write(editorPath, `#!/bin/sh\ncp "$1" "${shownPath}"\n`);
+		fs.chmodSync(editorPath, 0o755);
+		delete Bun.env.VISUAL;
+		Bun.env.EDITOR = `"${editorPath}"`;
+		editor.setText("hello");
+
+		await new context.InputController(ctx).openExternalEditor();
+
+		return { shown: await Bun.file(shownPath).text(), draft: editor.getText() };
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"shows the last reply below the draft when enabled, and keeps it out of the prompt",
+		async () => {
+			const { shown, draft } = await openEditor(true);
+
+			expect(shown.startsWith("hello\n")).toBe(true);
+			expect(shown).toContain("assistant says hi");
+			expect(draft).toBe("hello");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")("opens the draft alone by default", async () => {
+		const { shown, draft } = await openEditor(false);
+
+		expect(shown).toBe("hello");
+		expect(draft).toBe("hello");
 	});
 });
