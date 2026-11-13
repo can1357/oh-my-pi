@@ -1,13 +1,14 @@
 /**
  * OpenCode Zen's free tier is gated on the OpenCode client itself. Free
- * (`*-free`) Zen models answer `FreeUsageLimitError` (HTTP 429) unless the
+ * (`*-free`, plus `big-pickle`) Zen models answer `FreeUsageLimitError` (HTTP 429) unless the
  * request carries that client's `User-Agent`, a `ses_`-shaped session id and
  * its title-generator prompt ahead of the system prompt.
  *
- * The lane is opted in by KDL (`opencode-client-identity` on `*-free` in
- * `opencode-zen.kdl`) and read from `model.compat`; the wire literals live in
- * `@oh-my-pi/pi-catalog/wire/opencode`. Jev's free SKU stays out of it: it is
- * seeded on the typesafe judge wire, which sends none of these.
+ * The lane is opted in by KDL (`opencode-client-identity` on `*-free` and
+ * `big-pickle` in `opencode-zen.kdl`) and read from `model.compat`; the wire literals live in
+ * `@oh-my-pi/pi-catalog/wire/opencode`. Jev's free SKU matches the rule but
+ * stays inert: it is seeded on the typesafe judge wire, which sends none of
+ * these.
  */
 
 import type { Context } from "../types";
@@ -27,7 +28,9 @@ export const OPENCODE_FREE_SYSTEM_PROMPT = opencodeFreePrompt.trimEnd();
  * already carries it is returned untouched, which is what the retry paths see.
  */
 export function withOpenCodeFreeSystemPrompt(context: Context): Context {
-	const prompts = context.systemPrompt;
+	// Providers accept a bare string here; normalizing keeps the prepend from
+	// spreading it into its characters.
+	const prompts = typeof context.systemPrompt === "string" ? [context.systemPrompt] : context.systemPrompt;
 	if (!prompts || prompts.length === 0) return { ...context, systemPrompt: [OPENCODE_FREE_SYSTEM_PROMPT] };
 	const [first, ...rest] = prompts;
 	if (first.startsWith(OPENCODE_FREE_SYSTEM_PROMPT)) return context;

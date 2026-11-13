@@ -124,9 +124,10 @@ provider "opencode-zen" {
 	}
 	// Free SKUs are gated on the OpenCode client: the gateway refuses requests
 	// that do not carry its User-Agent, a ses_-shaped session token and its
-	// prompt. Jev's free SKU stays out — it is seeded on the typesafe judge
-	// wire, which sends none of these.
-	models "*-free" {
+	// prompt. `big-pickle` is the one zero-cost row without the `-free` suffix
+	// and is gated the same way. Jev's free SKU matches too, but stays inert:
+	// it is seeded on the typesafe judge wire, which sends none of these.
+	models "*-free" "big-pickle" {
 		opencode-client-identity #true
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.

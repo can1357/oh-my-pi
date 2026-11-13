@@ -8,11 +8,16 @@ import {
 } from "@oh-my-pi/pi-ai/providers/opencode-free";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { OPENCODE_SESSION_TOKEN_PATTERN, toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
+import {
+	getOpenCodeUserAgent,
+	OPENCODE_SESSION_TOKEN_PATTERN,
+	toOpenCodeSessionToken,
+} from "@oh-my-pi/pi-catalog/wire/opencode";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
 const OPENCODE_SESSION_HEADER = "x-opencode-session";
-const OPENCODE_UA = "opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4";
+
+const OPENCODE_UA = getOpenCodeUserAgent();
 
 interface WireCall {
 	headers: Headers;
@@ -70,10 +75,14 @@ describe("toOpenCodeSessionToken", () => {
 		expect(toOpenCodeSessionToken("session-1")).not.toBe(toOpenCodeSessionToken("session-2"));
 	});
 
-	it("leaves an already-accepted token alone", () => {
-		const token = "ses_0123456789abABCDEFGHIJKLMN";
-		expect(token).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
-		expect(toOpenCodeSessionToken(token)).toBe(token);
+	it("leaves an accepted token alone but repairs a low head", () => {
+		const accepted = "ses_012345678fc0ABCDEFGHIJKLMN";
+		expect(toOpenCodeSessionToken(accepted)).toBe(accepted);
+		// Well shaped, head low12 0x9ab: the gateway rejects it as-is.
+		const low = "ses_0123456789abABCDEFGHIJKLMN";
+		const repaired = toOpenCodeSessionToken(low);
+		expect(repaired).not.toBe(low);
+		expect(Number.parseInt(repaired.slice(4, 16), 16) & 0xfff).toBeGreaterThanOrEqual(0xfc0);
 	});
 });
 
@@ -88,6 +97,11 @@ describe("withOpenCodeFreeSystemPrompt", () => {
 	it("keeps later system blocks in order", () => {
 		const patched = withOpenCodeFreeSystemPrompt({ systemPrompt: ["a", "b"], messages: [] });
 		expect(patched.systemPrompt).toEqual([`${OPENCODE_FREE_SYSTEM_PROMPT}\n\na`, "b"]);
+	});
+
+	it("tolerates a bare string system prompt in a cast context", () => {
+		const patched = withOpenCodeFreeSystemPrompt({ systemPrompt: "You are omp." } as unknown as Context);
+		expect(patched.systemPrompt).toEqual([`${OPENCODE_FREE_SYSTEM_PROMPT}\n\nYou are omp.`]);
 	});
 
 	it("covers a context with no system prompt", () => {
@@ -111,6 +125,22 @@ describe("free Zen request identity", () => {
 		});
 		expect(headers["User-Agent"]).toBe(OPENCODE_UA);
 		expect(headers[OPENCODE_SESSION_HEADER]).toBe(toOpenCodeSessionToken("session-1"));
+	});
+
+	it("carries the identity for the zero-cost row without the -free suffix", () => {
+		const model = makeZenModel("big-pickle");
+		expect(usesOpenCodeClientIdentity(model.compat)).toBe(true);
+	});
+
+	it("still carries the identity when the caller has no conversation id", () => {
+		const headers: Record<string, string> = {};
+		applyInferenceHeaders(headers, {
+			provider: "opencode-zen",
+			protocol: "openai",
+			compat: { opencodeClientIdentity: true },
+		});
+		expect(headers["User-Agent"]).toBe(OPENCODE_UA);
+		expect(headers[OPENCODE_SESSION_HEADER]).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
 	});
 
 	it("leaves every other Zen and Go lane on omp's identity", () => {

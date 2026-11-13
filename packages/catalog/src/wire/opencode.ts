@@ -44,6 +44,11 @@ export const OPENCODE_SESSION_TOKEN_PATTERN = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$
  */
 const SESSION_HEAD_LOW12_MIN = 0xfc0;
 
+/** Whether a well-shaped token's head also clears {@link SESSION_HEAD_LOW12_MIN}. */
+function hasAcceptedSessionHead(token: string): boolean {
+	return (Number.parseInt(token.slice(4, 16), 16) & 0xfff) >= SESSION_HEAD_LOW12_MIN;
+}
+
 /**
  * Derive a session token from a conversation id. Deterministic, so turns, retries
  * and forks keep one token, which is what the gateway's routing and prompt cache
@@ -51,7 +56,9 @@ const SESSION_HEAD_LOW12_MIN = 0xfc0;
  * identity for an already-passing head.
  */
 export function toOpenCodeSessionToken(sessionId: string): string {
-	if (OPENCODE_SESSION_TOKEN_PATTERN.test(sessionId)) return sessionId;
+	// A token-shaped id must still clear the floor: a hand-written
+	// `ses_0123456789ab…` is well shaped and still rejected.
+	if (OPENCODE_SESSION_TOKEN_PATTERN.test(sessionId) && hasAcceptedSessionHead(sessionId)) return sessionId;
 	const digest = new Bun.CryptoHasher("sha256").update(sessionId).digest("hex");
 	const rawHead = digest.slice(0, 12);
 	const low = (Number.parseInt(rawHead.slice(9, 12), 16) | SESSION_HEAD_LOW12_MIN).toString(16).padStart(3, "0");
