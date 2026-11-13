@@ -556,7 +556,6 @@ describe("Command Code provider support", () => {
 			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 1_000_000 },
 			{ id: "Qwen/Qwen3.7-Flash", name: "Qwen 3.7 Flash", context_length: 1_000_000 },
 			{ id: "xai/grok-4.6", name: "Grok 4.6", context_length: 500_000 },
-			{ id: "google/gemini-4-argon", name: "Gemini 4 Argon", context_length: 1_000_000 },
 			{ id: "poolside/laguna-s-2.1-free", name: "Laguna S 2.1", context_length: 256_000 },
 		]);
 
@@ -587,9 +586,6 @@ describe("Command Code provider support", () => {
 				cacheWrite: 0,
 				longContext: { inputThreshold: 200_000, input: 4, output: 12, cacheRead: 1, cacheWrite: 0 },
 			},
-		});
-		expect(models.find(model => model.id === "google/gemini-4-argon")).toMatchObject({
-			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
 		});
 		// Documented-free model keeps the zero discovery default.
 		expect(models.find(model => model.id === "poolside/laguna-s-2.1-free")).toMatchObject({
@@ -682,6 +678,14 @@ describe("Command Code provider support", () => {
 		for (const model of models) {
 			expect(model.input).toEqual(textOnlyIds[model.id] ? ["text"] : ["text", "image"]);
 		}
+	});
+
+	test("follows command-code@1.88.5 for Gemini 4 Argon's price and image input", async () => {
+		const [argon] = await discoverModels(["google/gemini-4-argon"]);
+		expect(argon).toMatchObject({
+			input: ["text", "image"],
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+		});
 	});
 
 	test("applies the command-code@1.67.0 per-model output caps", async () => {
