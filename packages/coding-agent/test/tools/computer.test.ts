@@ -48,6 +48,7 @@ import type {
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
+	DesktopTypeResult,
 	DesktopWindow,
 	HoldOptions as NativeHoldOptions,
 	PointerOptions,
@@ -266,7 +267,7 @@ class FakeNativeSession implements NativeDesktopSession {
 		_dy: number,
 		_opts?: PointerOptions | null,
 	): Promise<void> {}
-	async typeText(_target: string, _text: string, _opts?: PointerOptions | null): Promise<void> {}
+	async typeText(_target: string, _text: string, _opts?: PointerOptions | null): Promise<DesktopTypeResult | void> {}
 	async keyChord(_target: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
 	async raiseWindow(_windowId: string): Promise<void> {}
 	async axSnapshot(_target: string, _opts?: AxSnapshotOptions | null): Promise<{ text: string }> {
@@ -302,7 +303,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async axFocus(_ref: string): Promise<void> {}
 	async axClick(_ref: string, _opts?: PointerOptions | null): Promise<void> {}
-	async axType(_ref: string, _text: string, _opts?: PointerOptions | null): Promise<void> {}
+	async axType(_ref: string, _text: string, _opts?: PointerOptions | null): Promise<DesktopTypeResult | void> {}
 	async axKeyChord(_ref: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
 	async close(): Promise<void> {
 		this.closeCount += 1;
@@ -4330,6 +4331,45 @@ describe("computer background fallback", () => {
 			const result = await run(native, clickTarget, "takeover");
 			expect(texts(result), unsent).toEqual([`${ran}focus returned to Notes`]);
 		}
+	});
+
+	it("says when typed text went out but the target was not seen reading it, through the fallback and directly", async () => {
+		const unconfirmed =
+			"window 42 had not read all the typed text 5 s after it was sent; the rest may reach whichever window is in front next";
+		/** Refuses background typing; takeover typing resolves to `result`. */
+		class TypingSession extends RefusingSession {
+			result: DesktopTypeResult = { unconfirmed, focusReturn: this.report ?? undefined };
+			override async typeText(
+				_target: string,
+				_text: string,
+				opts?: PointerOptions | null,
+			): Promise<DesktopTypeResult> {
+				this.sent.push(opts);
+				if (opts?.takeover !== true) throw new Error(this.refusal);
+				return this.result;
+			}
+			override async axType(_ref: string, _text: string, opts?: PointerOptions | null): Promise<DesktopTypeResult> {
+				this.sent.push(opts);
+				return this.result;
+			}
+		}
+		const said = `type sent the text but could not confirm it arrived: ${unconfirmed}`;
+		const native = new TypingSession();
+		const typed = await run(native, 'await (await desktop.window("42")).type("hi")', "takeover");
+		expect(texts(typed)).toEqual([
+			`type ran in takeover because ${reason}; the input was sent, and focus returned to Notes`,
+			said,
+		]);
+		const element = await run(native, 'await (await desktop.ref("e1")).type("hi", { takeover: true })', "takeover");
+		expect(texts(element)).toEqual([said]);
+
+		// Negative control: confirmed text adds nothing, and the fallback says it
+		// was delivered.
+		native.result = { focusReturn: native.report ?? undefined };
+		expect(texts(await run(native, 'await (await desktop.ref("e1")).type("hi")', "takeover"))).toEqual([]);
+		expect(texts(await run(native, 'await (await desktop.window("42")).type("hi")', "takeover"))).toEqual([
+			`type ran in takeover because ${reason}; the input was delivered, and focus returned to Notes`,
+		]);
 	});
 
 	it("refuses without a takeover under refuse, and tells the model so without suggesting one", async () => {

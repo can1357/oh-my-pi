@@ -242,11 +242,11 @@ describe("read charges column-cut lines their displayed width", () => {
 		const [readTool] = await createTools(session, ["read"]);
 		const [writeTool] = await createTools(session, ["write"]);
 		await readTool!.execute("conflicts", { path: `${file}:conflicts` });
-		expect(session.conflictHistory?.get(1)?.oursLines).toEqual([ours]);
+		expect(session.state?.conflictHistory?.get(1)?.oursLines).toEqual([ours]);
 
 		const numbered = textOutput(await readTool!.execute("numbered", { path: file }));
 		expect(rows(numbered).get(3)).toBe(`${ours.slice(0, 768)}…`);
-		expect(session.conflictHistory?.get(1)?.oursLines).toEqual([ours]);
+		expect(session.state?.conflictHistory?.get(1)?.oursLines).toEqual([ours]);
 
 		await writeTool!.execute("resolve", { path: "conflict://1", content: "@ours" });
 		expect(await fs.readFile(file, "utf8")).toBe(["head", ours, filler, "tail", ""].join("\n"));

@@ -111,7 +111,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).toContain('`write({ path: "conflict://*", content })`');
 		expect(text).toContain("@ours");
 		// Registered on session.
-		const history = session.conflictHistory;
+		const history = session.state?.conflictHistory;
 		expect(history).toBeInstanceOf(ConflictHistory);
 		expect(history?.get(1)?.absolutePath).toBe(filePath);
 	});
@@ -126,7 +126,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 		const text = getText(result);
 		expect(text).toContain("- base = common ancestor");
 		expect(text).toContain("=== base");
-		expect(session.conflictHistory?.get(1)?.baseLines).toEqual(["base body"]);
+		expect(session.state?.conflictHistory?.get(1)?.baseLines).toEqual(["base body"]);
 	});
 
 	it("registers each block with its own id when several appear in one window", async () => {
@@ -139,8 +139,8 @@ describe("read surfaces conflicts as a warning footer", () => {
 		const text = getText(result);
 		expect(text).toContain("──── #1  L1-5 ────");
 		expect(text).toContain("──── #2  L7-11 ────");
-		expect(session.conflictHistory?.get(1)?.oursLines).toEqual(["a-ours"]);
-		expect(session.conflictHistory?.get(2)?.oursLines).toEqual(["b-ours"]);
+		expect(session.state?.conflictHistory?.get(1)?.oursLines).toEqual(["a-ours"]);
+		expect(session.state?.conflictHistory?.get(2)?.oursLines).toEqual(["b-ours"]);
 	});
 
 	it("emits no warning on clean files and does not touch the history", async () => {
@@ -154,7 +154,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).toContain("const a = 1;");
 		expect(text).not.toContain("conflict://");
 		expect(text).not.toContain("⚠");
-		expect(session.conflictHistory?.get(1)).toBeUndefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeUndefined();
 	});
 
 	it("re-reading the same file reuses the existing id rather than inflating", async () => {
@@ -165,8 +165,8 @@ describe("read surfaces conflicts as a warning footer", () => {
 
 		await read.execute("read-stable-1", { path: "stable.ts" });
 		await read.execute("read-stable-2", { path: "stable.ts" });
-		expect(session.conflictHistory?.get(1)).toBeDefined();
-		expect(session.conflictHistory?.get(2)).toBeUndefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(2)).toBeUndefined();
 	});
 
 	it("renders the full conflict block via reads of `conflict://<N>`", async () => {
@@ -256,8 +256,8 @@ describe("read surfaces conflicts as a warning footer", () => {
 		// No file body in summary mode.
 		expect(text).not.toContain("a-ours");
 		// Conflicts are registered for follow-up read/write.
-		expect(session.conflictHistory?.get(1)).toBeDefined();
-		expect(session.conflictHistory?.get(2)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(2)).toBeDefined();
 	});
 
 	it("`:conflicts` marks 3-way blocks distinctly", async () => {
@@ -407,7 +407,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		const after = await Bun.file(filePath).text();
 		expect(after).toBe("line 1\nnewApi(x);\nline N\n");
 		// History is invalidated after resolve so the id no longer works.
-		expect(session.conflictHistory?.get(1)).toBeUndefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeUndefined();
 	});
 
 	it("drops trailing lines that echo the context below the region and notes the repair", async () => {
@@ -500,8 +500,8 @@ describe("write resolves conflicts via conflict://N", () => {
 		const text = getText(result);
 		expect(text).toContain("Resolved 2 conflicts");
 		expect(await Bun.file(filePath).text()).toBe("a-ours\nmiddle\nb-theirs\ntail\n");
-		expect(session.conflictHistory?.get(1)).toBeUndefined();
-		expect(session.conflictHistory?.get(2)).toBeUndefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeUndefined();
+		expect(session.state?.conflictHistory?.get(2)).toBeUndefined();
 	});
 
 	it("directive mode resolves a subset and reports the ids left registered", async () => {
@@ -523,7 +523,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(filePath).text()).toBe(
 			["<<<<<<< A", "a-ours", "=======", "a-theirs", ">>>>>>> A", "middle", "b-ours", "tail", ""].join("\n"),
 		);
-		expect(session.conflictHistory?.get(1)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeDefined();
 	});
 
 	it("rejects directives referencing unknown ids", async () => {
@@ -561,8 +561,8 @@ describe("write resolves conflicts via conflict://N", () => {
 		// File untouched — the markers are still present, nothing leaked.
 		expect(await Bun.file(filePath).text()).toBe(original);
 		// Ids stay registered for a corrected retry.
-		expect(session.conflictHistory?.get(1)).toBeDefined();
-		expect(session.conflictHistory?.get(2)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(2)).toBeDefined();
 	});
 
 	it("rejects a per-id line whose value is not a recognized @side token", async () => {
@@ -598,8 +598,8 @@ describe("write resolves conflicts via conflict://N", () => {
 		});
 		await expect(promise).rejects.toThrow(/only accepts the tokens @ours\/@theirs\/@base\/@both/);
 		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
-		expect(session.conflictHistory?.get(1)).toBeDefined();
-		expect(session.conflictHistory?.get(2)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(2)).toBeDefined();
 	});
 
 	it("rejects an all-literal per-id block without hashline mode too", async () => {
@@ -697,8 +697,8 @@ describe("write resolves conflicts via conflict://N", () => {
 		});
 		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
 		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
-		expect(session.conflictHistory?.get(1)).toBeDefined();
-		expect(session.conflictHistory?.get(2)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(2)).toBeDefined();
 	});
 
 	it("still treats pure-literal content as a uniform bulk write (no false directive rejection)", async () => {
@@ -865,7 +865,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		await read.execute("read-bulk-A", { path: "bulkA.ts:conflicts" });
 		await read.execute("read-bulk-B", { path: "bulkB.ts:conflicts" });
 		// All 3 conflicts registered.
-		expect(session.conflictHistory?.entries()).toHaveLength(3);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(3);
 
 		const result = await write.execute("write-bulk", {
 			path: "conflict://*",
@@ -880,7 +880,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(fileA).text()).toBe("a-theirs\nmiddle\nb-theirs\ntail\n");
 		expect(await Bun.file(fileB).text()).toBe("line 1\nnewApi(x)\nline N\n");
 		// History cleared after bulk resolve.
-		expect(session.conflictHistory?.entries()).toHaveLength(0);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(0);
 	});
 
 	it("`write conflict://*` errors when no conflicts are registered", async () => {

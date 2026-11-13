@@ -348,6 +348,15 @@ export class CredentialBlocks implements BlocksApi {
 	}
 
 	/**
+	 * Whether exactly `blockScope` holds a live block for a credential, without
+	 * the protected and unscoped blocks {@link CredentialBlocks.blockedUntil} merges in.
+	 */
+	isScopeBlocked(provider: string, providerKey: string, credentialIndex: number, blockScope: string): boolean {
+		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
+		return credentialId !== undefined && this.#exactBlockedUntil(credentialId, providerKey, blockScope) !== undefined;
+	}
+
+	/**
 	 * Whether the in-memory block currently sitting at exactly `deadline` for
 	 * this credential was written with provider-stated timing. Mirrors the
 	 * scope enumeration of {@link CredentialBlocks.blockedUntil}.
