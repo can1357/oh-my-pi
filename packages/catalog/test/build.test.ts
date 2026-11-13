@@ -2324,3 +2324,31 @@ describe("explicit thinking ladders", () => {
 		).toEqual({ high: 1234 });
 	});
 });
+
+describe("Gemini 4 long decodes", () => {
+	// A request capped at a reported per-segment limit (32,768 from the Gemini
+	// API's models.get, 65,536 on Vertex) ends with MAX_TOKENS instead of a
+	// continuation token, so a long answer could never resume.
+	it("lifts the reported per-segment output cap on the Gemini API and Vertex", () => {
+		for (const id of ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"]) {
+			for (const [api, provider, reported] of [
+				["google-generative-ai", "google", 32_768],
+				["google-vertex", "google-vertex", 65_536],
+			] as const) {
+				const model = buildModel({
+					id,
+					name: id,
+					api,
+					provider,
+					baseUrl: "",
+					reasoning: true,
+					input: ["text", "image"],
+					contextWindow: 1_048_576,
+					maxTokens: reported,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				} as ModelSpec<typeof api>);
+				expect(model.maxTokens).toBe(262_144);
+			}
+		}
+	});
+});

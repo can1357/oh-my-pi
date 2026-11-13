@@ -11,7 +11,7 @@ use atspi::{
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masked, normalize_role_atspi, text_readback},
+	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masks, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	control::cancellable,
 	error::{CoreResult, DesktopError, ErrorCode},
@@ -1035,6 +1035,65 @@ fn atspi_window_id(frame: &ObjectRefOwned) -> String {
 	format!("atspi:{name}:{}", frame.path())
 }
 
+/// How long a numeric write's read-back waits for the value to arrive, for
+/// a toolkit that applies the write a moment after answering it.
+const VALUE_SETTLE: Duration = Duration::from_millis(500);
+
+/// Sets an element's numeric value and reads it back: a toolkit clamps the
+/// value to its range, rounds it to its steps or ignores it while answering
+/// the write (Qt answers every `CurrentValue` write), so the call reports
+/// what the element holds. The proxy keeps no property cache, whose
+/// `GetAll` crashes Qt 6 before 6.9.2 (QTBUG-137344).
+async fn write_value(
+	connection: &atspi::zbus::Connection,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+	value: f64,
+) -> CoreResult<()> {
+	let failed = |err: atspi::zbus::Error| DesktopError::ax_failed(format!("AT-SPI value: {err}"));
+	let proxy = atspi::proxy::value::ValueProxy::builder(connection)
+		.destination(name.clone())
+		.and_then(|b| b.path(object.path().clone()))
+		.map_err(failed)?
+		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
+		.build()
+		.await
+		.map_err(failed)?;
+	proxy.set_current_value(value).await.map_err(failed)?;
+	let deadline = tokio::time::Instant::now() + VALUE_SETTLE;
+	loop {
+		let Ok(actual) = proxy.current_value().await else {
+			return Err(DesktopError::ax_failed(format!(
+				"wrote {value}, but the control's value could not be read back; inspect the target \
+				 before writing again"
+			)));
+		};
+		// Within float precision: a toolkit that stores the value as `float`
+		// reads back 0.3 as 0.30000001192092896.
+		if (actual - value).abs() <= value.abs().max(1.0) * f64::from(f32::EPSILON) {
+			return Ok(());
+		}
+		if tokio::time::Instant::now() >= deadline {
+			// The range only where it explains the value: an unbounded control
+			// reports ±f64::MAX, hundreds of digits each.
+			let range = match futures::join!(proxy.minimum_value(), proxy.maximum_value()) {
+				(Ok(min), _) if value < min && min != -f64::MAX => {
+					format!(" (its minimum is {min})")
+				},
+				(_, Ok(max)) if value > max && max != f64::MAX => {
+					format!(" (its maximum is {max})")
+				},
+				_ => String::new(),
+			};
+			return Err(DesktopError::ax_failed(format!(
+				"wrote {value}; the control now reads {actual}{range}. The app may have clamped, \
+				 rounded or not taken it: inspect the target before writing again"
+			)));
+		}
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
+}
+
 /// Replaces an element's text and reads it back: Gecko (Firefox, Thunderbird)
 /// accepts the write and keeps the old text. A field that hides its text reads
 /// back one mask character per character, whatever its role (a GTK4 entry
@@ -1048,6 +1107,7 @@ async fn write_text(
 	name: &UniqueName<'static>,
 	object: &ObjectRefOwned,
 	value: &str,
+	emptied: &mut bool,
 ) -> CoreResult<()> {
 	let editable = atspi::proxy::editable_text::EditableTextProxy::builder(connection)
 		.destination(name.clone())
@@ -1079,20 +1139,17 @@ async fn write_text(
 		if replace("").await?.as_deref() != Some("") {
 			return text_readback(value, value, None, true);
 		}
-		let emptied = |mut error: DesktopError| {
-			error
-				.message
-				.push_str(". setValue emptied the field before this write, so it may now be empty");
-			error
-		};
-		let rewritten = replace(value).await.map_err(emptied)?;
+		// Keep the confirmed clear outside the request future so dropping the
+		// rewrite on timeout or cancellation does not lose the warning.
+		*emptied = true;
+		let rewritten = replace(value).await?;
 		if rewritten
 			.as_deref()
 			.is_some_and(|actual| masks(actual, value))
 		{
 			return Ok(());
 		}
-		return text_readback(value, value, None, true).map_err(emptied);
+		return text_readback(value, value, None, true);
 	}
 	// A role that cannot be read counts as a password field's, so what such a
 	// field reads never enters an error.
@@ -1104,13 +1161,14 @@ async fn write_text(
 	text_readback(value, value, actual.as_deref(), secure)
 }
 
-/// Whether `actual` masks `value`: one mask character per character, or per
-/// UTF-16 unit as Qt masks.
-fn masks(actual: &str, value: &str) -> bool {
-	let shown = actual.chars().count();
-	masked(actual) && (shown == value.chars().count() || shown == value.encode_utf16().count())
+fn text_write_error(mut error: DesktopError, emptied: bool) -> DesktopError {
+	if emptied {
+		error
+			.message
+			.push_str(". setValue emptied the field before this write, so it may now be empty");
+	}
+	error
 }
-
 /// The whole text of an element with the `Text` interface.
 async fn text_contents(
 	connection: &atspi::zbus::Connection,
@@ -1411,6 +1469,7 @@ impl AxBackend for AtSpiAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let object = Self::object(h).clone();
+		let mut emptied = false;
 		self
 			.request(async {
 				let name = object
@@ -1426,7 +1485,15 @@ impl AxBackend for AtSpiAx {
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI interfaces: {err}")))?;
 				if interfaces.contains(atspi::Interface::EditableText) {
-					return write_text(&self.connection, &accessible, &name, &object, value).await;
+					return write_text(
+						&self.connection,
+						&accessible,
+						&name,
+						&object,
+						value,
+						&mut emptied,
+					)
+					.await;
 				}
 				if !interfaces.contains(atspi::Interface::Value) {
 					return Err(DesktopError::ax_failed(
@@ -1439,19 +1506,9 @@ impl AxBackend for AtSpiAx {
 				if !numeric.is_finite() {
 					return Err(DesktopError::ax_failed("AT-SPI numeric value must be finite"));
 				}
-				let proxy = atspi::proxy::value::ValueProxy::builder(&self.connection)
-					.destination(name)
-					.and_then(|b| b.path(object.path().clone()))
-					.map_err(|err| DesktopError::ax_failed(err.to_string()))?
-					.build()
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))?;
-				proxy
-					.set_current_value(numeric)
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))
+				write_value(&self.connection, &name, &object, numeric).await
 			})
-			.map_err(unconfirmed)
+			.map_err(|error| text_write_error(unconfirmed(error), emptied))
 	}
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
@@ -1924,7 +1981,12 @@ mod tests {
 				let object = ObjectRefOwned::from_static_str_unchecked(PEER, path);
 				let name = object.name().unwrap().clone();
 				let accessible = object.as_accessible_proxy(&client).await.unwrap();
-				results.push(write_text(&client, &accessible, &name, &object, "new ä€😀").await);
+				let mut emptied = false;
+				results.push(
+					write_text(&client, &accessible, &name, &object, "new ä€😀", &mut emptied)
+						.await
+						.map_err(|error| text_write_error(error, emptied)),
+				);
 			}
 			drop(server);
 			results
@@ -1935,9 +1997,151 @@ mod tests {
 				(Verdict::Ok, Ok(())) => {},
 				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
 				(Verdict::Hidden, Err(err))
-					if !err.message.contains("new") && !err.message.contains(r#""old""#) => {},
+					if !err.message.contains("new")
+						&& !err.message.contains(r#""old""#)
+						&& !err.message.contains("emptied") => {},
 				(Verdict::Emptied, Err(err))
 					if err.message.contains("emptied") && !err.message.contains("new") => {},
+				(_, result) => panic!("{path}: {result:?}"),
+			}
+		}
+	}
+
+	#[test]
+	fn a_numeric_write_the_app_clamps_or_ignores_fails() {
+		use std::sync::{Arc, Mutex};
+
+		use atspi::zbus::{connection::Builder as ConnectionBuilder, interface};
+
+		/// What a control does with a write: takes it, clamps it to its range
+		/// (GTK, Qt), keeps its old value while answering (Qt), takes it after
+		/// the first read back, or stores it as `float`.
+		#[derive(Clone, Copy)]
+		enum Takes {
+			Exact,
+			Clamped,
+			Ignored,
+			Later,
+			Single,
+		}
+
+		/// `org.a11y.atspi.Value` with optional bounds.
+		struct Value {
+			current: Arc<Mutex<f64>>,
+			pending: Mutex<Option<f64>>,
+			takes:   Takes,
+			bounds:  Option<(f64, f64)>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Value")]
+		impl Value {
+			#[zbus(property)]
+			fn current_value(&self) -> f64 {
+				let current = *self.current.lock().unwrap();
+				// A write the toolkit applies late shows from the second read on.
+				let pending = self.pending.lock().unwrap().take();
+				if let Some(value) = pending {
+					*self.current.lock().unwrap() = value;
+				}
+				current
+			}
+
+			#[zbus(property)]
+			fn set_current_value(&mut self, value: f64) {
+				let mut current = self.current.lock().unwrap();
+				match self.takes {
+					Takes::Exact => *current = value,
+					Takes::Clamped => {
+						let (min, max) = self.bounds.unwrap_or((0.0, 100.0));
+						*current = value.clamp(min, max);
+					},
+					Takes::Ignored => {},
+					Takes::Later => *self.pending.get_mut().unwrap() = Some(value),
+					#[expect(clippy::cast_possible_truncation, reason = "a float-storing toolkit")]
+					Takes::Single => *current = f64::from(value as f32),
+				}
+			}
+
+			#[zbus(property)]
+			fn minimum_value(&self) -> atspi::zbus::fdo::Result<f64> {
+				self.range(|(min, _)| min)
+			}
+
+			#[zbus(property)]
+			fn maximum_value(&self) -> atspi::zbus::fdo::Result<f64> {
+				self.range(|(_, max)| max)
+			}
+		}
+
+		impl Value {
+			fn range(&self, bound: impl FnOnce((f64, f64)) -> f64) -> atspi::zbus::fdo::Result<f64> {
+				self
+					.bounds
+					.map(bound)
+					.ok_or_else(|| atspi::zbus::fdo::Error::Failed("no range".to_owned()))
+			}
+		}
+
+		const PEER: &str = ":1.7";
+		// Path, what the control does, its bounds, the value written,
+		// and the error's text (`None`: the write succeeds).
+		type Case = (&'static str, Takes, Option<(f64, f64)>, f64, Option<&'static str>);
+		let bounded = Some((0.0, 100.0));
+		let cases: [Case; 8] = [
+			("/exact", Takes::Exact, bounded, 37.25, None),
+			("/later", Takes::Later, bounded, 37.0, None),
+			("/single", Takes::Single, bounded, 0.3, None),
+			(
+				"/minimum_only",
+				Takes::Clamped,
+				Some((0.0, f64::MAX)),
+				-1.0,
+				Some("wrote -1; the control now reads 0 (its minimum is 0)."),
+			),
+			(
+				"/maximum_only",
+				Takes::Clamped,
+				Some((-f64::MAX, 100.0)),
+				150.0,
+				Some("wrote 150; the control now reads 100 (its maximum is 100)."),
+			),
+			(
+				"/clamped",
+				Takes::Clamped,
+				bounded,
+				150.0,
+				Some("wrote 150; the control now reads 100 (its maximum is 100)"),
+			),
+			("/ignored", Takes::Ignored, bounded, 37.0, Some("wrote 37; the control now reads 20.")),
+			("/unranged", Takes::Clamped, None, 150.0, Some("wrote 150; the control now reads 100.")),
+		];
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let results = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let mut builder = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p();
+			for &(path, takes, bounds, ..) in &cases {
+				let current = Arc::new(Mutex::new(20.0));
+				let control = Value { current, pending: Mutex::new(None), takes, bounds };
+				builder = builder.serve_at(path, control).unwrap();
+			}
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(builder.build(), client).unwrap();
+			let mut results = Vec::new();
+			for &(path, _, _, value, _) in &cases {
+				let object = ObjectRefOwned::from_static_str_unchecked(PEER, path);
+				let name = object.name().unwrap().clone();
+				results.push(write_value(&client, &name, &object, value).await);
+			}
+			drop(server);
+			results
+		});
+		for ((path, .., error), result) in cases.iter().zip(results) {
+			match (error, result) {
+				(None, Ok(())) => {},
+				(Some(text), Err(err)) if err.message.contains(text) => {},
 				(_, result) => panic!("{path}: {result:?}"),
 			}
 		}
@@ -2897,6 +3101,109 @@ mod tests {
 			assert_eq!(error.code, ErrorCode::Cancelled);
 		}
 
+		#[test]
+		fn interrupted_masked_text_write_warns_if_the_field_may_be_empty() {
+			use std::sync::{Arc, Mutex};
+
+			struct Accessible([&'static str; 2]);
+			#[interface(name = "org.a11y.atspi.Accessible")]
+			impl Accessible {
+				fn get_interfaces(&self) -> &[&str] {
+					&self.0
+				}
+			}
+
+			struct Text(Arc<Mutex<String>>);
+			#[interface(name = "org.a11y.atspi.Text")]
+			impl Text {
+				#[zbus(property)]
+				fn character_count(&self) -> i32 {
+					self.0.lock().unwrap().chars().count() as i32
+				}
+
+				fn get_text(&self, start_offset: i32, end_offset: i32) -> String {
+					std::iter::repeat_n('●', self.0.lock().unwrap().chars().count())
+						.skip(start_offset as usize)
+						.take((end_offset - start_offset) as usize)
+						.collect()
+				}
+			}
+
+			struct Editable {
+				text:    Arc<Mutex<String>>,
+				count:   Mutex<usize>,
+				stop_at: usize,
+				cancel:  Option<control::CancellationSource>,
+			}
+			#[interface(name = "org.a11y.atspi.EditableText")]
+			impl Editable {
+				async fn set_text_contents(&self, text: String) -> bool {
+					let count = {
+						let mut count = self.count.lock().unwrap();
+						*count += 1;
+						*count
+					};
+					if count == self.stop_at {
+						if let Some(cancel) = &self.cancel {
+							cancel.cancel();
+						}
+						return std::future::pending().await;
+					}
+					*self.text.lock().unwrap() = text;
+					true
+				}
+			}
+
+			// Before any clear, during the clear, and during the rewrite.
+			for stop_at in 1..=3 {
+				for cancelled in [false, true] {
+					let source = control::CancellationSource::default();
+					let text = Arc::new(Mutex::new("old secret".to_owned()));
+					let (mut ax, _server) = backend(HUNG_CALL_TIMEOUT, |server| {
+						server
+							.serve_at(
+								"/password",
+								Accessible(["org.a11y.atspi.EditableText", "org.a11y.atspi.Text"]),
+							)
+							.unwrap()
+							.serve_at("/password", Text(text.clone()))
+							.unwrap()
+							.serve_at("/password", Editable {
+								text: text.clone(),
+								count: Mutex::new(0),
+								stop_at,
+								cancel: cancelled.then(|| source.clone()),
+							})
+							.unwrap()
+					});
+					let element =
+						AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/password"));
+					let error = control::with_token_for_test(&source.token(), || {
+						ax.set_value(&element, "new secret")
+					})
+					.unwrap_err();
+					assert_eq!(
+						error.code,
+						if cancelled {
+							ErrorCode::Cancelled
+						} else {
+							ErrorCode::Timeout
+						}
+					);
+					assert_eq!(
+						error.message.contains("may now be empty"),
+						stop_at == 3,
+						"stop_at={stop_at}, cancelled={cancelled}: {error:?}"
+					);
+					assert!(!error.message.contains("old secret"));
+					assert!(!error.message.contains("new secret"));
+					if stop_at == 3 {
+						assert!(text.lock().unwrap().is_empty());
+					}
+				}
+			}
+		}
+
 		/// A desktop of two applications: one that answers nothing on bus
 		/// `:1.8`, listed first, and an editor whose document frame, at
 		/// `(10, 20)` on screen, has the focus when `focused`. (A peer-to-peer
@@ -3151,6 +3458,123 @@ mod tests {
 			assert_eq!(
 				ax.menu_items(&window, &[]).err().map(|error| error.code),
 				Some(ErrorCode::Timeout)
+			);
+		}
+
+		/// A menu element that names its parent, as `menu_children` checks.
+		struct MenuNode {
+			name:     &'static str,
+			role:     Role,
+			parent:   &'static str,
+			children: &'static [&'static str],
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl MenuNode {
+			#[zbus(property)]
+			fn name(&self) -> String {
+				self.name.to_owned()
+			}
+
+			#[zbus(property)]
+			fn parent(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path(self.parent))
+			}
+
+			fn get_role(&self) -> u32 {
+				self.role as u32
+			}
+
+			#[allow(clippy::unused_self, reason = "every fake menu element is enabled")]
+			fn get_state(&self) -> Vec<u32> {
+				let state = State::Enabled as u64 | State::Sensitive as u64;
+				vec![state as u32, (state >> 32) as u32]
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				self
+					.children
+					.iter()
+					.map(|child| (PEER.to_owned(), path(child)))
+					.collect()
+			}
+		}
+
+		/// Qt 5 and 6 publish a menu bar item's menu as a `PopupMenu` child of
+		/// that item, where GTK publishes a `Menu`.
+		#[test]
+		fn a_qt_menu_bar_item_opens_its_popup_menu() {
+			let (mut ax, _server) = backend(HUNG_CALL_TIMEOUT, |server| {
+				let menu = |name, role, parent, children: &'static [&'static str]| MenuNode {
+					name,
+					role,
+					parent,
+					children,
+				};
+				server
+					.serve_at("/org/a11y/atspi/accessible/root", Element {
+						delay:    Duration::ZERO,
+						name:     "main",
+						role:     Role::DesktopFrame,
+						focused:  false,
+						children: vec![(PEER.to_owned(), path("/qt"))],
+					})
+					.unwrap()
+					.serve_at("/qt", Element {
+						delay:    Duration::ZERO,
+						name:     "qtapp",
+						role:     Role::Application,
+						focused:  false,
+						children: vec![(PEER.to_owned(), path("/qt/frame"))],
+					})
+					.unwrap()
+					.serve_at("/qt/frame", Element {
+						delay:    Duration::ZERO,
+						name:     "Notes",
+						role:     Role::Frame,
+						focused:  true,
+						children: vec![(PEER.to_owned(), path("/qt/bar"))],
+					})
+					.unwrap()
+					.serve_at("/qt/bar", menu("", Role::MenuBar, "/qt/frame", &["/qt/file"]))
+					.unwrap()
+					.serve_at("/qt/file", menu("File", Role::MenuItem, "/qt/bar", &["/qt/popup"]))
+					.unwrap()
+					.serve_at(
+						"/qt/popup",
+						menu("", Role::PopupMenu, "/qt/file", &["/qt/mark", "/qt/other"]),
+					)
+					.unwrap()
+					.serve_at("/qt/mark", menu("Mark", Role::MenuItem, "/qt/popup", &[]))
+					.unwrap()
+					.serve_at("/qt/other", menu("Other", Role::MenuItem, "/qt/popup", &[]))
+					.unwrap()
+			});
+			let window = DesktopWindow {
+				id:      format!("atspi:{PEER}:/qt/frame"),
+				title:   "Notes".into(),
+				app:     "qtapp".into(),
+				pid:     None,
+				x:       0,
+				y:       0,
+				width:   300,
+				height:  200,
+				focused: true,
+			};
+			let bar = ax.menu_items(&window, &[]).unwrap();
+			assert_eq!(
+				bar.iter()
+					.map(|item| (item.title.as_str(), item.has_submenu))
+					.collect::<Vec<_>>(),
+				[("File", true)]
+			);
+			let file = ax.menu_items(&window, &["File".to_owned()]).unwrap();
+			assert_eq!(
+				file
+					.iter()
+					.map(|item| (item.path.join(" > "), item.has_submenu))
+					.collect::<Vec<_>>(),
+				[("File > Mark".to_owned(), false), ("File > Other".to_owned(), false)]
 			);
 		}
 	}
