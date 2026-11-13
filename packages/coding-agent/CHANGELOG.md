@@ -22,6 +22,7 @@
 - On Windows, `find -exec`, `xargs` and `env` no longer fail with `not found` (status 127) when running an external program such as `sh` ([#19108](https://github.com/can1357/oh-my-pi/pull/19108) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - Fixed loading a session another omp process has open (e.g. ACP `session/load` from a second process) and then exiting creating a duplicate "open-elsewhere" copy of the session ([#19103](https://github.com/can1357/oh-my-pi/issues/19103))
 - Approving a plan no longer names an untitled session when automatic titles are off (`--no-title` / `PI_NO_TITLE`) ([#19140](https://github.com/can1357/oh-my-pi/issues/19140))
+- ACP `usage_update` cost now includes what background subagents spend ([#19102](https://github.com/can1357/oh-my-pi/issues/19102)) ([#19113](https://github.com/can1357/oh-my-pi/pull/19113) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 
 ## [18.20.0] - 2026-11-12
 - With the Spotlight experiment on, a `read` with `:raw` returns the selected bytes instead of an outlined, compacted, collapsed or cut rendering ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
