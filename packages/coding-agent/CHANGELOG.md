@@ -6,6 +6,10 @@
 
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
 
+### Fixed
+
+- Fixed the `/btw` branch action being unreachable on Tern surfaces: a completed side answer can now be promoted from the BTW history sheet with `b` or Branch to chat ([#19105](https://github.com/can1357/oh-my-pi/issues/19105)).
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes

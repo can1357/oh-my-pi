@@ -275,6 +275,59 @@ describe("BtwController", () => {
 		await controller.dispose();
 	});
 
+	it("in Tern branches a completed side answer from the history sheet", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
+		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
+		const controller = new BtwController(ctx);
+
+		await controller.start("Question?");
+		await drainBtwRequest();
+
+		// The sheet is the answer surface in Tern; the inline container stays empty.
+		expect(ctx.btwContainer.children).toHaveLength(0);
+		expect(controller.canBranch()).toBe(true);
+		expect(await controller.handleBranch()).toBe(true);
+		expect(ctx.handleBtwBranch).toHaveBeenCalledTimes(1);
+
+		await controller.dispose();
+	});
+
+	it("in Tern runs the sheet's branch key and drops it once the sheet closes", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
+		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
+		const promoted = Promise.withResolvers<void>();
+		ctx.handleBtwBranch = vi.fn(async () => {
+			promoted.resolve();
+		});
+		const controller = new BtwController(ctx);
+
+		await controller.start("Question?");
+		await drainBtwRequest();
+
+		const sheet = showOverlay.mock.calls[0]?.[0];
+		if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
+		expect(Bun.stripANSI(JSON.stringify(sheet.describe()))).toContain("Branch to chat");
+
+		sheet.handleInput("b");
+		await promoted.promise;
+		expect(ctx.handleBtwBranch).toHaveBeenCalledTimes(1);
+
+		sheet.handleInput("\x1b");
+		expect(controller.canBranch()).toBe(false);
+
+		await controller.dispose();
+	});
+
 	it("opens history without a model request when invoked without a question", async () => {
 		const runEphemeralTurn = vi.fn(async () => ({
 			replyText: "n/a",
