@@ -57,6 +57,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
@@ -154,8 +155,10 @@ export function dedupeEphemeralReply(text: string, maxBytes = EPHEMERAL_REPLY_MA
  * context: in a long tool loop the recent window is all assistant notes, and
  * follow-ups ("fix all") rarely restate the goal, so without them title models
  * name the current micro-step (a file or symbol) instead of the session goal.
+ * A todo init passes the `plan` it wrote: the plan says what the session works
+ * on now, which its recent turns may not (they can be about anything else).
  */
-export function buildReplanTitleContext(messages: AgentMessage[]): string {
+export function buildReplanTitleContext(messages: AgentMessage[], plan: readonly TodoPhase[] = []): string {
 	const recent: TitleConversationTurn[] = [];
 	let i = messages.length - 1;
 	for (; i >= 0 && recent.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
@@ -180,7 +183,8 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 	// Bound anchors so a long pasted request cannot crowd the recent turns out
 	// of the shared truncation budget.
 	const bounded = anchors.map(turn => ({ ...turn, text: turn.text?.slice(0, REPLAN_TITLE_ANCHOR_CHARS) }));
-	return formatTitleConversationContext([...bounded, ...recent]);
+	const planLines = plan.flatMap(phase => phase.tasks.map(task => `${phase.name}: ${task.content}`));
+	return formatTitleConversationContext([...bounded, ...recent], planLines);
 }
 
 /**

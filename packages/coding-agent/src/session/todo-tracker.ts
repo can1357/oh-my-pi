@@ -143,20 +143,20 @@ export class TodoTracker {
 		this.#reminderAwaitingProgress = false;
 	}
 
-	/** Detects whether a successful todo result came from an init operation. */
-	onTodoResultDetails(details: Record<string, unknown>, toolCallId: string | undefined): boolean {
+	/** The plan a successful todo init wrote, or `undefined` when the result came from any other op. */
+	onTodoResultDetails(details: Record<string, unknown>, toolCallId: string | undefined): TodoPhase[] | undefined {
 		const phases = details.phases;
-		if (!Array.isArray(phases) || !phases.every(isTodoPhase)) return false;
+		if (!Array.isArray(phases) || !phases.every(isTodoPhase)) return undefined;
 		const detailOp = stringProperty(details, "op");
-		if (detailOp) return detailOp === "init";
-		if (!toolCallId) return false;
+		if (detailOp) return detailOp === "init" ? phases : undefined;
+		if (!toolCallId) return undefined;
 		for (let index = this.#host.agent.state.messages.length - 1; index >= 0; index--) {
 			const message = this.#host.agent.state.messages[index];
 			if (!message) continue;
 			const op = toolCallOpFromMessage(message, toolCallId);
-			if (op) return op === "init";
+			if (op) return op === "init" ? phases : undefined;
 		}
-		return false;
+		return undefined;
 	}
 
 	/** Builds the first-turn eager todo prelude and optional forced tool choice. */

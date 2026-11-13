@@ -1178,6 +1178,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Serialized tail of pooled-turn yield contract transitions; never rejects. */
 	#workPoolYieldTransition: Promise<void> = Promise.resolve();
 	#titleRefreshInFlight: Promise<void> | undefined = undefined;
+	/** The latest todo-init plan that arrived while a title request was in flight; it is titled once that request settles. */
+	#pendingReplan: { sessionId: string; plan: readonly TodoPhase[] } | undefined;
+	/** Bumped when a newer plan supersedes the in-flight retitle, whose reply must then not become the title. */
+	#titleRefreshGeneration = 0;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
 	 *  the session cwd changes. */
@@ -4980,9 +4984,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const details = isRecord(event.message.details) ? event.message.details : undefined;
 				const semanticResult = semanticToolResult(toolName, event.message);
 				const semanticDetails = isRecord(semanticResult?.details) ? semanticResult.details : undefined;
-				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
-					this.#scheduleTitleRefresh("replan");
-				}
+				const plan =
+					toolName === "todo" && !isError && details
+						? this.#todo.onTodoResultDetails(details, toolCallId)
+						: undefined;
+				if (plan) this.#scheduleTitleRefresh("replan", plan);
 				if (toolName === "todo" && !isError && details?.op !== "view") {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
@@ -6672,6 +6678,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
+		this.#pendingReplan = undefined;
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
 		this.yieldQueue.clear();
@@ -11640,17 +11647,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#workPoolYieldTransition;
 	}
 
-	#buildReplanTitleContext(): string {
-		return buildReplanTitleContext(this.agent.state.messages);
+	#buildReplanTitleContext(plan?: readonly TodoPhase[]): string {
+		return buildReplanTitleContext(this.agent.state.messages, plan);
 	}
 
 	/**
 	 * Retitle a generated title from recent conversation: after a todo-init
-	 * replan, or once `title.refreshAfterPrompts` operator prompts have run since
-	 * it was last refreshed and the judge finds it no longer fits. A title the
-	 * user set is never replaced.
+	 * replan, from the plan it wrote, or once `title.refreshAfterPrompts` operator
+	 * prompts have run since it was last refreshed and the judge finds it no
+	 * longer fits. A title the user set is never replaced. A plan written while a
+	 * title request is in flight waits for it, the latest plan replacing an earlier
+	 * waiting one, and a retitle it supersedes does not name the session.
 	 */
-	#scheduleTitleRefresh(trigger: SessionNameTrigger): void {
+	#scheduleTitleRefresh(trigger: SessionNameTrigger, plan?: readonly TodoPhase[]): void {
 		if ($env.PI_NO_TITLE) return;
 		// Headless subagent sessions have no operator-visible title, so a refresh
 		// only burns a tiny-model call whose result lands in JSONL and is never
@@ -11659,15 +11668,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// session name — so keep the refresh there and only skip subagents when
 		// no focusable UI exists (print/RPC/ACP/eval/SDK/CI).
 		if (this.#agentKind === "sub" && !isInteractiveHost()) return;
-		if (this.#titleRefreshInFlight) return;
 		const sessionId = this.sessionManager.getSessionId();
-		// The first title is still being named: a refreshed title landing first would
-		// make that request, which carries the card, drop its reply.
-		if (this.#titleGenerationInFlightFor === sessionId) return;
+		// A title request is in flight. A refreshed title landing first would make the first-title
+		// request, which carries the card, drop its reply, so a new plan waits for the request instead.
+		if (this.#titleRefreshInFlight || this.#titleGenerationInFlightFor === sessionId) {
+			if (trigger === "replan" && plan && this.#titleRefreshable(sessionId, trigger)) {
+				this.#pendingReplan = { sessionId, plan };
+				if (this.#titleRefreshInFlight) this.#titleRefreshGeneration++;
+			}
+			return;
+		}
 		if (!this.#titleRefreshable(sessionId, trigger)) return;
 		// A check consumes the prompts that triggered it whatever its verdict; prompts sent while it runs count toward the next.
 		if (trigger === "drift") this.#titleDrift = undefined;
-		const refresh = this.#refreshTitle(sessionId, trigger)
+		// This plan is newer than any that waited; the waiting one must not run after it and replace its title.
+		if (trigger === "replan") this.#pendingReplan = undefined;
+		const refresh = this.#refreshTitle(sessionId, trigger, plan)
 			.catch(err => {
 				logger.warn("title-generator: title refresh failed", {
 					sessionId,
@@ -11677,8 +11693,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			})
 			.finally(() => {
 				if (this.#titleRefreshInFlight === refresh) this.#titleRefreshInFlight = undefined;
+				this.#runPendingReplan();
 			});
 		this.#titleRefreshInFlight = refresh;
+	}
+
+	/** Title the plan that waited for a title request, once no title request is in flight. */
+	#runPendingReplan(): void {
+		const pending = this.#pendingReplan;
+		if (!pending || this.#isDisposed) return;
+		if (this.#titleRefreshInFlight || this.#titleGenerationInFlightFor === pending.sessionId) return;
+		this.#pendingReplan = undefined;
+		if (this.sessionManager.getSessionId() !== pending.sessionId) return;
+		this.#scheduleTitleRefresh("replan", pending.plan);
 	}
 
 	/** Whether a `trigger` refresh may still replace the title of `sessionId`. */
@@ -11811,13 +11838,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						return;
 					}
 					// A reply that broke the card form (no code, a code over 6 letters) still
-					// names the session; the request stays in flight while it gets its card.
-					const named = await this.#cardTitle(title).finally(() => {
+					// names the session. The request stays in flight while it gets its card and
+					// until its name is written, so a plan written meanwhile waits and lands after it.
+					try {
+						const named = await this.#cardTitle(title, signal);
+						// An interrupt during the card request cancels the title as it cancels the fork.
+						if (signal.aborted) return;
+						if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
+						await this.sessionManager.setSessionName(named, "auto");
+						this.#deferredTitle = undefined;
+					} finally {
 						if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
-					});
-					if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
-					await this.sessionManager.setSessionName(named, "auto");
-					this.#deferredTitle = undefined;
+					}
 				},
 				(err: unknown) => {
 					logger.debug("title-generator: fork failed", {
@@ -11834,6 +11866,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					sessionId,
 					error: err instanceof Error ? err.message : String(err),
 				});
+			})
+			// An interrupt cleared the plans that waited before it; one written since runs now, and a
+			// message whose reply began after the interrupt gets the title request this one held back.
+			.finally(() => {
+				if (signal.aborted) this.#maybeStartTitle();
+				this.#runPendingReplan();
 			});
 	}
 
@@ -11852,10 +11890,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#fallBackFromTitleFork(input: TitleInput, signal: AbortSignal): void {
-		if (signal.aborted) {
-			this.#cancelTitle(input.sessionId);
-			return;
-		}
+		if (signal.aborted) return;
 		if (this.sessionManager.getSessionId() !== input.sessionId || this.sessionName) return;
 		this.#titleWithTitleModel(input);
 	}
@@ -11874,7 +11909,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// name the current one.
 				if (this.sessionManager.getSessionId() !== sessionId) return;
 				if (!title || this.sessionName) return;
-				const named = this.#cardsAutoTitles() ? await this.#cardTitle(title) : title;
+				const named = this.#cardsAutoTitles() ? await this.#cardTitle(title, signal) : title;
+				// An interrupt during the title or its card request cancels the title.
+				if (signal.aborted) return;
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
 				await this.sessionManager.setSessionName(named, "auto");
 			})
@@ -11889,8 +11926,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.#titleGenerationInFlightFor === sessionId) {
 					this.#titleGenerationInFlightFor = undefined;
 				}
-				if (signal.aborted) this.#cancelTitle(sessionId);
+				if (signal.aborted) this.#maybeStartTitle();
 				else this.#afterTitleRequest();
+				this.#runPendingReplan();
 			});
 	}
 
@@ -11904,9 +11942,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * An interrupt cancelled `sessionId`'s title request: no title model and no
-	 * context retitle, but the operator's latest message tries again when its
-	 * next reply begins (a flushed steer or a continue).
+	 * An interrupt cancelled `sessionId`'s open title request: no title model and
+	 * no context retitle, but the operator's latest message tries again when its
+	 * next reply begins (a flushed steer or a continue). Runs at the interrupt, so
+	 * the cancelled request's late settling never resets a newer message's state.
 	 */
 	#cancelTitle(sessionId: string): void {
 		this.#deferredTitle = undefined;
@@ -12093,18 +12132,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Regenerate the title from recent conversation. A prompt-count check first
-	 * asks the judge, and regenerates only a title it finds stale.
+	 * Regenerate the title from recent conversation, and from `plan` when a todo
+	 * init wrote one. A prompt-count check first asks the judge, and regenerates
+	 * only a title it finds stale.
 	 */
-	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger): Promise<void> {
+	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger, plan?: readonly TodoPhase[]): Promise<void> {
+		const generation = this.#titleRefreshGeneration;
+		const signal = this.#titleGenerationAbortController.signal;
+		// A plan written while this refresh waits supersedes it; each wait is followed by this check,
+		// so a superseded refresh starts no further title-model request and the plan runs sooner.
+		const superseded = () => signal.aborted || generation !== this.#titleRefreshGeneration;
 		// A fitting title, one no judge could rate, or a session renamed or switched meanwhile keeps its title.
 		if (trigger === "drift" && !((await this.#titleDrifted()) && this.#titleRefreshable(sessionId, trigger))) return;
-		const context = this.#buildReplanTitleContext();
+		// An interrupt during the judgment cancels the refresh before it asks for a title.
+		if (superseded()) return;
+		const context = this.#buildReplanTitleContext(plan);
 		if (!context) return;
-		const retitled = await this.#retitle(context);
-		if (!retitled) return;
+		const retitled = await this.#retitle(context, signal);
+		if (!retitled || superseded()) return;
 		// A session first named without a card (a subagent, a title-model title) gets one here.
-		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled) : retitled;
+		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled, signal) : retitled;
+		// An interrupt during the refresh cancels it; a plan written meanwhile supersedes this reply.
+		if (superseded()) return;
 		if (!this.#titleRefreshable(sessionId, trigger) || title === this.sessionName) return;
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		await setSessionName.call(this.sessionManager, title, "auto", trigger);
@@ -12206,6 +12255,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#abortUnwinds.add(unwind.promise);
 		try {
 			this.#titleGenerationAbortController.abort();
+			// The interrupt cancels the title work open now: the waiting plan, the open title
+			// request and a retry deferred from it. Work begun after it (a plan, a message's
+			// title) waits for or follows that request as usual.
+			this.#pendingReplan = undefined;
+			this.#deferredTitle = undefined;
+			const sessionId = this.sessionManager.getSessionId();
+			if (this.#titleGenerationInFlightFor === sessionId) this.#cancelTitle(sessionId);
 			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
