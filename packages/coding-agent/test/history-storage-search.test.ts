@@ -43,6 +43,14 @@ describe("HistoryStorage.search", () => {
 		expect(results.map(r => r.prompt)).toEqual(["run git commit --amend now"]);
 	});
 
+	it("keeps a punctuated term's parts together instead of matching them anywhere", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["see a/b path", "alpha and beta note", "commit to git", "unrelated"]);
+
+		expect(storage.search("a/b", 10).map(r => r.prompt)).toEqual(["see a/b path"]);
+		expect(storage.search("git-commit", 10)).toEqual([]);
+	});
+
 	it("falls back to substring matching for infix queries FTS prefix cannot reach", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["run git commit later", "totally unrelated text"]);
