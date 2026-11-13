@@ -14,7 +14,7 @@
 //! the saved events, lending readers shared access and giving editing
 //! operations exclusive ownership. Unchanged events are not serialized
 //! again. Pending operations replay from the store, not a shared copy of
-//! the full event list; snapshots and subshell overlays still read the
+//! the full event list; snapshots and forked vprocs' images still read the
 //! authoritative saved records.
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
@@ -253,14 +253,10 @@ impl EventsCache {
 }
 
 /// Whether `vp` reads and writes the history records in the root store
-/// itself (no overlay holds them), so [`EventsCache`] speaks for it.
-fn uses_root_history(vp: &Vproc) -> bool {
-	vp.overlay.as_ref().is_none_or(|ov| {
-		!ov.records.contains_key(&KeyBuf::Misc(MiscKey::ZshHistory))
-			&& !ov
-				.records
-				.contains_key(&KeyBuf::Misc(MiscKey::ZshHistoryState))
-	})
+/// (the root vproc; a forked one has its own), so [`EventsCache`] speaks
+/// for it.
+const fn uses_root_history(vp: &Vproc) -> bool {
+	vp.image.is_none()
 }
 
 impl Hist {
@@ -292,7 +288,7 @@ impl Hist {
 	/// # Errors
 	/// [`StoreError`] when a record cannot be read.
 	pub fn take(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<Self, StoreError> {
-		Self::load_events(root, store, vp, vp.overlay.is_none())
+		Self::load_events(root, store, vp, vp.image.is_none())
 	}
 
 	fn load_events(
@@ -383,7 +379,7 @@ impl Hist {
 	/// Write the history back. Events unchanged since loading are not
 	/// written again, including after taking exclusive cache ownership.
 	pub fn save(mut self, root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
-		let cacheable = vp.overlay.is_none();
+		let cacheable = vp.image.is_none();
 		if !self.saved {
 			self.st.version = self.st.version.wrapping_add(1);
 			let events = (!self.entries.is_empty()).then(|| {
@@ -751,7 +747,7 @@ struct Expire {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::bash::{MemStore, fd::FdTable, ids::Vpid, vm::state::Overlay};
+	use crate::bash::{MemStore, StateStore, fd::FdTable, ids::Vpid};
 
 	fn shell() -> (MemStore, Root, Vproc) {
 		let mut store = MemStore::new();
@@ -788,7 +784,7 @@ mod tests {
 	}
 
 	#[test]
-	fn history_overlay_edits_stay_out_of_root_cache() {
+	fn subshell_history_edits_stay_out_of_root_cache() {
 		let (mut store, mut root, mut vp) = shell();
 		hist(&["parent"]).save(&mut root, &mut store, &mut vp);
 		let mut sub = Vproc::new(
@@ -796,10 +792,11 @@ mod tests {
 			Some(vp.vpid),
 			FdTable::default(),
 			BString::from("/"),
-			Some(Overlay::default()),
+			Some(store.snapshot().unwrap()),
 			true,
 		);
-		// A state-only save creates an overlay without changing the events.
+		// A state-only save writes the subshell's image without changing the
+		// events.
 		let h = Hist::load(&root, &mut store, &sub).unwrap();
 		h.save(&mut root, &mut store, &mut sub);
 		let mut h = Hist::take(&root, &mut store, &sub).unwrap();
