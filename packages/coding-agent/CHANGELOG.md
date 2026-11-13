@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `omp zsh` on Windows: `zsh/files` (`mkdir`, `rmdir`, `rm`, `mv`, `ln`) and `zstat` work on real directories instead of failing with "the filename, directory name, or volume label syntax is incorrect"
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
