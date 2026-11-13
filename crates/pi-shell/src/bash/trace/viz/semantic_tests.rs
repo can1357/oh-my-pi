@@ -335,6 +335,28 @@ fn embedded_documents_are_physical_rows_and_unwrap_restores_delimiters() {
 }
 
 #[test]
+fn continuation_rows_do_not_copy_the_command_detail() {
+	let mut script = String::from(": \"\n");
+	for i in 1..=50 {
+		script.push_str("line ");
+		script.push_str(&i.to_string());
+		script.push('\n');
+	}
+	script.push_str("\"\n");
+	let f = Fixture::new(&script);
+	let p = f.present(&[], &Options::default());
+	let (head, continuations) = p.rows.split_first().expect("command row");
+	assert!(
+		head
+			.detail
+			.as_deref()
+			.is_some_and(|detail| detail.contains("line 50"))
+	);
+	assert_eq!(continuations.len(), 51);
+	assert!(continuations.iter().all(|row| row.detail.is_none()));
+}
+
+#[test]
 fn guards_suppress_only_real_builtin_status_one_and_keep_leaf_identity() {
 	for guard in [
 		"[[ phase == build ]]",
