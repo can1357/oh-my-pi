@@ -338,7 +338,7 @@ describe("ACP builtin slash commands", () => {
 		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Openai Codex");
+		expect(output[0]).toContain("OpenAI Codex");
 		expect(output[0]).toContain("5 hours (prolite)");
 		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
 		expect(output[0]).toContain("resets in");

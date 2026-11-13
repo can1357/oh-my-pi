@@ -7,9 +7,14 @@ import { node } from "../native/describe";
 /** Brand spellings for provider-id segments that plain capitalization gets wrong. */
 const PROVIDER_NAME_SEGMENTS: Record<string, string> = {
 	openai: "OpenAI",
+	opencode: "OpenCode",
 	github: "GitHub",
 	minimax: "MiniMax",
+	litellm: "LiteLLM",
+	commandcode: "Command Code",
+	xai: "xAI",
 	zai: "Z.AI",
+	oauth: "OAuth",
 	cli: "CLI",
 	cn: "CN",
 };
