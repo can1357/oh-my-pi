@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added BharatCode (`bharatcode`) as a provider: `/login bharatcode` with a developer key, a flat-rate subscription gateway for coding agents serving Qwen 3.8 27B and DeepSeek V4.1 Flash over OpenAI Chat Completions
 - Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 
 ### Fixed
