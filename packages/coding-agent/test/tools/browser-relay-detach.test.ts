@@ -182,8 +182,9 @@ class ChromeBackedExtension {
 					},
 				});
 			}
-			case "closeTab": {
+			case "removeTab": {
 				await this.#chromeSend("Target.closeTarget", { targetId: this.targetId }).promise;
+				this.#relay.send(JSON.stringify({ t: "tabRemoved", tabId: TAB_ID }));
 				return this.#reply(id, { result: {} });
 			}
 			case "send": {
