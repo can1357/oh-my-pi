@@ -35,6 +35,14 @@ Extensions can combine all of the following in one module:
 - custom message rendering
 - session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
 
+Import host values from the package root, `@oh-my-pi/pi-coding-agent`. Deeper paths such as `@oh-my-pi/pi-tui/native/spans` also resolve inside the omp binary, but they name internal files: when a file moves, a static import of it stops the whole extension from loading. Besides the extension types and the theme (`theme`, `getSettingsListTheme`), the root exports these helpers:
+
+- `formTheme`, `editorKey`, `editorKeys` and `formatKeyHint` for settings dialogs and key hints
+- `styledSpans` and `compactText` to turn ANSI-styled text into `TspText`, such as a transcript presenter's `{ compact: { label, rows } }`, and `rowsText` to wrap pre-rendered rows in one native text node; `styleSpans`, `plainText`, `plainLine`, `spansLine` and `styledBackground` cover the other conversions between ANSI text and spans
+- `parseXdUrl` to read the device name from an `xd://` URL, plus `parseXdTopicUrl`, `stripXdUrlPrefix`, `couldBecomeXdUrl` and `XD_URL_PREFIX`
+- `unwrapHashlineHeaderPath` to turn a `[path#TAG]` write/edit target into its plain path
+- `cfgExtensionTranscriptPresenters`, the handle of the `extensionRenderers.transcriptPresenters` setting
+
 ## Runtime model
 
 1. Extension modules are imported concurrently; their factory functions then run sequentially in path order.

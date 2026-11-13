@@ -598,7 +598,7 @@ function detectOpenAICompat(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader: detectPromptCacheSessionHeader(baseUrl),
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,
@@ -608,6 +608,15 @@ function detectOpenAICompat(
 		retryWithoutStrictOnGrammarError: false,
 		supportsPromptCacheKey: false,
 	};
+}
+
+/** Worker-affinity header a host routes on to keep a conversation on its cached prefix. */
+function detectPromptCacheSessionHeader(
+	baseUrl: string | undefined,
+): ResolvedOpenAISharedCompat["promptCacheSessionHeader"] {
+	if (hostMatchesUrl(baseUrl, "xai")) return "x-grok-conv-id";
+	if (hostMatchesUrl(baseUrl, "morph")) return "x-session-id";
+	return undefined;
 }
 
 /**
@@ -818,7 +827,7 @@ function resolveOpenAIResponsesPolicy(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader: detectPromptCacheSessionHeader(baseUrl),
 		streamFirstEventTimeoutMs: isLocalServingBackend ? 0 : spec.compat?.streamFirstEventTimeoutMs,
 		streamIdleTimeoutMs: isLocalServingBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
@@ -983,6 +992,7 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 		trustExplicitThinkingOnly: false,
 		modelRouter: false,
 		supportsParallelToolCalls: false,
+		temperatureFloor: undefined,
 	};
 	applyWireAxes(compat, axes.wire, "devin-agent");
 	applyCompatOverrides(compat, spec.compat);

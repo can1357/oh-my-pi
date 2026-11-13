@@ -46,11 +46,6 @@ export class SessionApprovals implements ApprovalGrantStore {
 		this.#grants.add(key);
 	}
 
-	/** Every key held, in grant order. */
-	keys(): string[] {
-		return [...this.#grants];
-	}
-
 	clear(): void {
 		this.#grants.clear();
 	}
@@ -199,11 +194,6 @@ export function getApprovalGrants(agentDir: string = getAgentDir(), sessionId?: 
 		sessions.set(sessionId, session);
 	}
 	return new ApprovalGrants(session, cache);
-}
-
-/** Keys the session tier of conversation `sessionId` holds under an agent directory; never creates the tier. */
-export function sessionApprovalGrantKeys(agentDir: string, sessionId: string): string[] {
-	return sessionsByDir.get(agentDirKey(agentDir))?.get(sessionId)?.keys() ?? [];
 }
 
 /** Forget every remembered approval under an agent directory: the database and every session tier. */

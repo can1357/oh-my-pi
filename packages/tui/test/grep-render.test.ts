@@ -15,6 +15,26 @@ afterEach(() => {
 });
 
 describe("grepToolRenderer", () => {
+	it("keeps binary match warnings in empty and matching terminal and native previews", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		for (const matchCount of [0, 1]) {
+			const result = {
+				content: [{ type: "text", text: "" }],
+				details: {
+					matchCount,
+					fileCount: matchCount,
+					binaryMatches: ["a.bin", "b.bin"],
+					displayContent: matchCount ? "## src/a.ts\n*1│needle" : "",
+				},
+			};
+			const options = { expanded: false, isPartial: false };
+			const terminal = sanitizeText(grepToolRenderer.renderResult(result, options, uiTheme).render(120).join("\n"));
+			expect(terminal).toContain("binary matches: 2 files");
+			const native = grepToolRenderer.describeResult(result, options);
+			expect(JSON.stringify(native.body)).toContain("binary matches: 2 files");
+		}
+	});
+
 	it("starts grep output at the tool column and avoids accent-colored success headers", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();

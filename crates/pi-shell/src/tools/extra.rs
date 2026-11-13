@@ -10,7 +10,11 @@
 //! pi's earlier shell; any other name is searched on the
 //! command's own `PATH` (with environment changes applied; the C library's
 //! default path without one) and runs by absolute path through `exec -a`, so
-//! the program sees the name it was asked for. Environment changes (`env -i`,
+//! the program sees the name it was asked for. A command line
+//! ([`ShellCommand::line`]: `awk`'s `system()` and pipes) is not looked up:
+//! its source runs verbatim in the subshell, with no positional parameters,
+//! so pi's builtins and `scheme://` paths work in it and a missing command is
+//! the shell's own diagnostic and status 127. Environment changes (`env -i`,
 //! `-u`, `NAME=VALUE`) apply in the subshell before the command, in order.
 //!
 //! The subshell's stdin is what the utility asks for (the null device by
@@ -69,6 +73,8 @@ enum Program {
 	Builtin,
 	/// A program at this path: runs through `exec -a`.
 	Path(PathBuf),
+	/// A command line: its source runs as it is.
+	Line,
 }
 
 /// The utility, once started.
@@ -178,7 +184,8 @@ impl Drop for Extra {
 }
 
 /// The script of one command: its environment changes, then the command,
-/// with the command line as the positional parameters.
+/// with the argv as the positional parameters (a command line runs verbatim,
+/// with none).
 fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -> Script {
 	let stdin = child_stdin(command.take_stdin());
 	let mut source = Vec::new();
@@ -243,6 +250,11 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	}
 	let mut args: Vec<BString> = command.args().iter().map(|arg| os_bytes(arg)).collect();
 	match program {
+		Program::Line => {
+			if let Some(line) = command.source() {
+				source.extend_from_slice(line.as_encoded_bytes());
+			}
+		},
 		Program::Builtin => source.extend_from_slice(b"command -- \"$@\""),
 		Program::Path(path) => {
 			let argv0 = command
@@ -356,6 +368,9 @@ impl Lookup {
 	/// How `command` runs; `NotFound` when nothing has its name,
 	/// `PermissionDenied` when only files that cannot be executed have it.
 	fn program(&self, command: &ShellCommand) -> io::Result<Program> {
+		if command.source().is_some() {
+			return Ok(Program::Line);
+		}
 		let name = command
 			.args()
 			.first()

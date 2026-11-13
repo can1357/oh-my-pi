@@ -10,6 +10,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSessionContextView } from "@oh-my-pi/pi-coding-agent/session/context-view";
 import * as repoContext from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -63,12 +64,22 @@ async function expectContextReload(reset: (session: AgentSession) => Promise<unk
 		await session.refreshBaseSystemPrompt();
 		expect(session.systemPrompt.join("\n")).toContain(original);
 
+		// Attribution follows the committed prompt: the initial build, then the rebuild.
+		const instructionText = () =>
+			buildSessionContextView(session)
+				.categories.find(category => category.id === "instruction-files")!
+				.entries.map(entry => entry.text)
+				.join("\n");
+		expect(instructionText()).toContain(original);
+
 		await fs.writeFile(agentsMd, updated);
 		expect(await reset(session)).toBeTruthy();
 
 		const rebuilt = session.systemPrompt.join("\n");
 		expect(rebuilt).toContain(updated);
 		expect(rebuilt).not.toContain(original);
+		expect(instructionText()).toContain(updated);
+		expect(instructionText()).not.toContain(original);
 	} finally {
 		await session.dispose();
 		authStorage.close();

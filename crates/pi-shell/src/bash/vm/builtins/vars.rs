@@ -86,7 +86,7 @@ pub fn emit_assignment_at(
 			} else {
 				AssignScope::Env
 			}
-		} else if vp.overlay.is_some() {
+		} else if vp.image.is_some() {
 			AssignScope::Subshell
 		} else {
 			AssignScope::Global
@@ -808,7 +808,7 @@ fn set_value_plain(
 	}
 	state::store_var(&mut k.root, cx.store, vp, name, Some(var), level);
 	emit_assignment(k, cx, vp, name, level);
-	if name == b"PATH"
+	if super::names::resets_hash(k.engine.config().platform, name)
 		&& let Err(e) = super::names::flush_hash(&mut k.root, cx.store, vp)
 	{
 		k.fail(e);
@@ -919,7 +919,13 @@ fn assign_in_place(
 		.with(Attrs::NAMEREF)
 		.with(Attrs::ZSH_ONLY);
 	let name = lhs.name;
-	if name == b"BASH_ARGV0" || name == b"BASH_XTRACEFD" || is_posix_var(name) {
+	// A name whose assignment flushes the command hash table takes the
+	// general path, which does.
+	if name == b"BASH_ARGV0"
+		|| name == b"BASH_XTRACEFD"
+		|| is_posix_var(name)
+		|| super::names::resets_hash(k.engine.config().platform, name)
+	{
 		return Ok(Some(value));
 	}
 	match state::option(&mut k.root, cx.store, vp, OptId::Allexport) {
@@ -2900,7 +2906,7 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			None => {
 				let keep = ctx.option(OptId::LocalvarUnset)?;
 				state::unset_var(&mut ctx.k.root, ctx.cx.store, ctx.vp, name, keep);
-				if name == b"PATH" {
+				if super::names::resets_hash(ctx.k.engine.config().platform, name) {
 					super::names::flush_hash(&mut ctx.k.root, ctx.cx.store, ctx.vp)?;
 				}
 				if is_posix_var(name) {

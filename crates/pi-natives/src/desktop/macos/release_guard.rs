@@ -1100,7 +1100,7 @@ mod tests {
 	#[test]
 	fn release_events_keep_their_routing_fields_but_not_their_target_process() {
 		type GetWindowLocation = unsafe extern "C" fn(*mut CGEvent) -> CGPoint;
-		let fields = [(3, 1), (7, 3), (51, 77), (52, 5), (58, 99), (91, 77), (92, 77)];
+		let fields = [(3, 1), (7, 3), (51, 77), (52, 5), (91, 77), (92, 77)];
 		let event = mouse(CGEventType::RightMouseDown, 3.0);
 		skylight::set_fields(&event, &fields).expect("SkyLight fields");
 		skylight::set_fields(&event, &[(route::TARGET_PID_FIELD, 4242)]).expect("SkyLight fields");

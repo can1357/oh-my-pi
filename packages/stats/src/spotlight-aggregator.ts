@@ -44,7 +44,14 @@ import type {
 	SpotlightToolTotals,
 } from "./shared-types";
 import { BOOTSTRAP_MIN_SESSIONS, bootstrapInterval, bootstrapRatio, quantile } from "./spotlight-bootstrap";
-import { artifactIds, parseReadSelection, resolveReadPath, selectedLines } from "./spotlight-ingest";
+import {
+	artifactIds,
+	parseFailureCauses,
+	parseReadSelection,
+	resolveReadPath,
+	type SpotlightWindowFacts,
+	selectedLines,
+} from "./spotlight-ingest";
 import {
 	computeAdjusted,
 	computeCoverage,
@@ -125,6 +132,7 @@ interface ResultRow {
 	artifacts: string | null;
 	sp_calls: number | null;
 	sp_failures: number | null;
+	sp_failure_causes: string | null;
 	sp_ms: number | null;
 	sp_cost: number | null;
 	shape_ms: number | null;
@@ -135,6 +143,7 @@ interface ResultRow {
 	gated: number;
 	heat: string | null;
 	kept: string | null;
+	windows: string | null;
 	need_reread: string | null;
 	need_edit: string | null;
 }
@@ -192,14 +201,18 @@ export interface Result {
 	kept: [number, number][];
 	/** Original lines (1-based positions) later calls needed; null for results that collect none. */
 	needs: { reread: [number, number][]; edit: [number, number][] } | null;
-	path: string | null;
-	/** The original window (`details.spotlight.original`): first line and line count; 0 lines without one. */
-	start: number;
+	/** The original's line count (all its windows'); 0 without one. */
 	lines: number;
-	hidden: [number, number][];
+	/**
+	 * The windows of the original (`details.spotlight.original`): its one window, or a `;`/`,` list read's several;
+	 * none without an original.
+	 */
+	windows: SpotlightWindowFacts[];
 	hiddenLines: number;
 	spotlightCalls: number;
 	spotlightFailures: number;
+	/** Failed Spotlight calls by cause; null when none failed or the shape entry predates causes. */
+	spotlightFailureCauses: Record<string, number> | null;
 	spotlightMs: number;
 	spotlightUsd: number;
 	/** Wall time shaping took; null before its shape entry landed. */
@@ -291,17 +304,57 @@ function parseStrings(json: string | null): string[] {
 	}
 }
 
+/** The `sp_failure_causes` column, by ingest's rules; null when empty or unreadable. */
+function failureCausesColumn(json: string | null): Record<string, number> | null {
+	if (!json) return null;
+	try {
+		return parseFailureCauses(JSON.parse(json));
+	} catch {
+		return null;
+	}
+}
+
 function parseRanges(json: string | null): [number, number][] {
 	if (!json) return [];
 	try {
-		const value: unknown = JSON.parse(json);
-		if (!Array.isArray(value)) return [];
-		return value.filter(
-			(pair): pair is [number, number] =>
-				Array.isArray(pair) && typeof pair[0] === "number" && typeof pair[1] === "number",
-		);
+		return rangeList(JSON.parse(json));
 	} catch {
 		return [];
+	}
+}
+
+function rangeList(value: unknown): [number, number][] {
+	if (!Array.isArray(value)) return [];
+	return value.filter(
+		(pair): pair is [number, number] =>
+			Array.isArray(pair) && typeof pair[0] === "number" && typeof pair[1] === "number",
+	);
+}
+
+/** The `windows` column: a list read's windows; null for a single-window original (or a value with none valid). */
+function parseWindowsColumn(json: string | null): SpotlightWindowFacts[] | null {
+	if (!json) return null;
+	try {
+		const value: unknown = JSON.parse(json);
+		if (!Array.isArray(value)) return null;
+		const windows = value.flatMap((window: unknown): SpotlightWindowFacts[] => {
+			if (typeof window !== "object" || window === null) return [];
+			const { path, start, lines, at, hidden, wholeFile } = window as Record<string, unknown>;
+			if (typeof start !== "number" || typeof lines !== "number" || typeof at !== "number") return [];
+			return [
+				{
+					path: typeof path === "string" ? path : null,
+					start,
+					lines,
+					at,
+					hidden: rangeList(hidden),
+					wholeFile: wholeFile === true,
+				},
+			];
+		});
+		return windows.length > 0 ? windows : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -326,7 +379,21 @@ function parseSteps(json: string): string[] {
 }
 
 function toResult(row: ResultRow): Result {
-	const hidden = parseRanges(row.hidden);
+	// A list read's windows, else the one window the columns describe (none without an original).
+	const windows =
+		parseWindowsColumn(row.windows) ??
+		(row.lines === null
+			? []
+			: [
+					{
+						path: row.path,
+						start: row.start_line ?? 1,
+						lines: row.lines,
+						at: 0,
+						hidden: parseRanges(row.hidden),
+						wholeFile: false,
+					},
+				]);
 	const steps = parseSteps(row.steps);
 	// A cut wider than plain pi did not apply: the model got plain's text, as for a result shaping kept.
 	const capped = row.capped_tokens !== null || steps.at(-1) === "plain-cap";
@@ -360,13 +427,12 @@ function toResult(row: ResultRow): Result {
 			row.need_reread !== null || row.need_edit !== null
 				? { reread: parseRanges(row.need_reread), edit: parseRanges(row.need_edit) }
 				: null,
-		path: row.path,
-		start: row.start_line ?? 1,
 		lines: row.lines ?? 0,
-		hidden,
+		windows,
 		hiddenLines: row.hidden_lines,
 		spotlightCalls: row.sp_calls ?? 0,
 		spotlightFailures: row.sp_failures ?? 0,
+		spotlightFailureCauses: failureCausesColumn(row.sp_failure_causes),
 		spotlightMs: row.sp_ms ?? 0,
 		spotlightUsd: row.sp_cost ?? 0,
 		shapeMs: row.shape_ms,
@@ -412,8 +478,8 @@ class SessionLoader {
 		this.#results = database.query<ResultRow, [string]>(
 			`SELECT r.tool_call_id, r.timestamp, r.tool, r.in_chars, r.out_chars, r.in_tokens, r.out_tokens,
 			 r.steps, r.holdout, r.path, r.start_line, r.lines, r.hidden, r.hidden_lines, r.artifacts, r.sp_calls,
-			 r.sp_failures, r.sp_ms, r.sp_cost, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
-			 r.gated, r.heat, r.kept,
+			 r.sp_failures, r.sp_failure_causes, r.sp_ms, r.sp_cost, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
+			 r.gated, r.heat, r.kept, r.windows,
 			 n.reread AS need_reread, n.edit AS need_edit
 			 FROM spotlight_results r
 			 LEFT JOIN spotlight_needs n ON n.session_file = r.session_file AND n.tool_call_id = r.tool_call_id
@@ -603,33 +669,41 @@ export class EditLog {
 }
 
 /**
- * Whether `call` re-reads the file `source` read, unless that file was edited in between: `hidden` given, the
- * later selection must overlap it (a recovery of a cut); else it must overlap the source's own window (the
- * fetch-back rule, where a whole-file read overlaps everything).
+ * Whether `call` re-reads a file `source` read (any window of a `;`/`,` list read), unless that file was edited in
+ * between: `recovery`, the later selection must overlap the window's hidden lines (a recovery of a cut); else it must
+ * overlap the window itself (the fetch-back rule, where a whole-file read overlaps everything).
  */
-function rereads(call: Call, source: Call, analysis: SessionAnalysis, hidden?: [number, number][]): boolean {
-	const result = source.result;
-	const sourceSelection = parseReadSelection(source.target);
-	const sourcePath = result?.path ?? sourceSelection.path;
+function rereads(call: Call, source: Call, analysis: SessionAnalysis, recovery = false): boolean {
+	const windows = source.result?.windows ?? [];
+	// A list read's target (`a.py;b.txt`) is no one path: only its windows name its files and tell which are whole.
+	const sourceSelection = windows.length > 1 ? null : parseReadSelection(source.target);
 	const selection = parseReadSelection(call.target);
-	if (!sourcePath) return false;
 	const file = resolveReadPath(selection.path, analysis.cwd);
-	if (file !== resolveReadPath(sourcePath, analysis.cwd)) return false;
-	if (analysis.edits.between(source.seq, call.seq, file)) return false;
 	const later = selectedLines(selection);
-	if (later === null) return true;
-	if (hidden) {
-		if (!result) return false;
-		const end = result.start + result.lines - 1;
-		const ranges = selection.tail === null ? later : [...later, [end - selection.tail + 1, end] as [number, number]];
-		return overlaps(ranges, hidden);
-	}
-	// A tail read lands somewhere unknown in a windowed read.
-	const window = selectedLines(sourceSelection);
-	if (window === null) return true;
-	const own: [number, number][] =
-		result && result.lines > 0 ? [[result.start, result.start + result.lines - 1]] : window;
-	return overlaps(later, own);
+	const reads: (SpotlightWindowFacts | null)[] = windows.length > 0 ? windows : [null];
+	return reads.some(window => {
+		const sourcePath = window?.path ?? sourceSelection?.path;
+		if (!sourcePath || file !== resolveReadPath(sourcePath, analysis.cwd)) return false;
+		if (analysis.edits.between(source.seq, call.seq, file)) return false;
+		if (later === null) return true;
+		const wholeFile = sourceSelection ? selectedLines(sourceSelection) === null : window?.wholeFile === true;
+		if (recovery) {
+			if (!window) return false;
+			const end = window.start + window.lines - 1;
+			// A list part's tail is known only when it read its file whole.
+			const ranges: [number, number][] =
+				selection.tail !== null && (sourceSelection !== null || wholeFile)
+					? [...later, [end - selection.tail + 1, end]]
+					: later;
+			return overlaps(ranges, window.hidden);
+		}
+		// A whole-file read overlaps any later selection; a tail read lands somewhere unknown in a windowed read.
+		if (wholeFile) return true;
+		const span = sourceSelection ? (selectedLines(sourceSelection) ?? []) : [];
+		const own: [number, number][] =
+			window && window.lines > 0 ? [[window.start, window.start + window.lines - 1]] : span;
+		return overlaps(later, own);
+	});
 }
 
 /** Jaccard similarity of two token sets; 0 when both are empty. */
@@ -677,7 +751,7 @@ function recoveryKind(
 		(result?.shortened || (wouldBe && (result?.holdout || result?.gated))) &&
 		result.tool === "read"
 	) {
-		if (rereads(call, source, analysis, result.hidden)) return "reread";
+		if (rereads(call, source, analysis, true)) return "reread";
 	}
 	if (reruns(call, source, analysis)) return "rerun";
 	return null;
@@ -1612,6 +1686,9 @@ function computeGaps(evaluated: readonly Evaluated[], tools: readonly SpotlightT
 	return tools.flatMap(tool => counts.get(tool) ?? []);
 }
 
+/** The cause of failed results whose shape entry predates journaled causes. */
+const UNRECORDED_CAUSE = "unrecorded";
+
 /** Shaping time, Spotlight latency, failures and bill over every evaluated result. */
 function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 	const shapeMs: number[] = [];
@@ -1620,6 +1697,7 @@ function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 	let failedWaitMs = 0;
 	let called = 0;
 	let spotlightUsd = 0;
+	const causes = new Map<string, number>();
 	for (const { result } of evaluated) {
 		spotlightUsd += result.spotlightUsd;
 		if (result.shapeMs !== null) shapeMs.push(result.shapeMs);
@@ -1629,6 +1707,10 @@ function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 				// A failed call records no Spotlight time; its wait shows in the shaping time instead.
 				failed++;
 				failedWaitMs += result.shapeMs ?? 0;
+				const named = Object.keys(result.spotlightFailureCauses ?? {});
+				for (const cause of named.length > 0 ? named : [UNRECORDED_CAUSE]) {
+					causes.set(cause, (causes.get(cause) ?? 0) + 1);
+				}
 			} else {
 				spotlightMs.push(result.spotlightMs);
 			}
@@ -1644,6 +1726,9 @@ function computeOverhead(evaluated: readonly Evaluated[]): SpotlightOverhead {
 		spotlightMsP50: at(spotlightMs, 0.5),
 		spotlightMsP90: at(spotlightMs, 0.9),
 		failureRate: called > 0 ? failed / called : null,
+		failureCauses: [...causes]
+			.map(([cause, results]) => ({ cause, results, share: results / called }))
+			.sort((a, b) => b.results - a.results || a.cause.localeCompare(b.cause)),
 		failedWaitMs,
 		spotlightUsd,
 	};

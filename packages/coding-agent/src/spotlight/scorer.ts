@@ -23,6 +23,11 @@ export interface ScorerUsage {
 	calls: number;
 	/** Requests that failed (no credential, timeout, HTTP error); the caller fell back to unranked rules. */
 	failures: number;
+	/**
+	 * Failed requests by cause: the error code Spotlight or the client gave (`no_credential`, `timeout`, `transport`,
+	 * `bad_reply`, `rate_limited`, …), else `http_<status>`; absent while none failed.
+	 */
+	failureCauses?: Record<string, number>;
 	/** Wall time of the requests, summed. */
 	ms: number;
 	/** Prompt tokens Spotlight billed. */
@@ -99,6 +104,9 @@ export class RecordingScorer implements Scorer {
 				} catch (error) {
 					if (!(error instanceof SpotlightError)) throw error;
 					this.usage.failures++;
+					const cause = error.code ?? `http_${error.status}`;
+					this.usage.failureCauses ??= {};
+					this.usage.failureCauses[cause] = (this.usage.failureCauses[cause] ?? 0) + 1;
 					logger.debug("spotlight ranking failed", {
 						status: error.status,
 						code: error.code,

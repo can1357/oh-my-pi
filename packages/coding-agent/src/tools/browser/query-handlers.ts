@@ -139,8 +139,8 @@ export function roleRules(): RoleRules {
 	};
 	const isScoped = (element: Element, includeMain: boolean): boolean => {
 		for (let parent = parentAcrossShadowRoot(element); parent; parent = parentAcrossShadowRoot(parent)) {
-			const explicit = parent.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
-			if (!explicit && parent.tagName.toLocaleLowerCase() === "section") return true;
+			const explicit = parent.getAttribute("role")?.trim().split(/\s+/)[0]?.toLowerCase();
+			if (!explicit && parent.tagName.toLowerCase() === "section") return true;
 			// Browser ancestors have the same element interface as the queried node.
 			const ancestor = parent as Element;
 			const role = explicit || implicitRole(ancestor);
@@ -156,7 +156,7 @@ export function roleRules(): RoleRules {
 		return false;
 	};
 	const computeImplicitRole = (element: Element): string | null => {
-		const tag = element.tagName.toLocaleLowerCase();
+		const tag = element.tagName.toLowerCase();
 		if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
 		if (tag === "button") return "button";
 		if (tag === "textarea") return "textbox";
@@ -248,7 +248,7 @@ export function roleRules(): RoleRules {
 			if (editable.isContentEditable && !parent?.isContentEditable) return "textbox";
 			return ["div", "span", "b", "i", "u", "small", "label"].includes(tag) ? "generic" : null;
 		}
-		const type = ((element as unknown as { type?: string }).type || "text").toLocaleLowerCase();
+		const type = ((element as unknown as { type?: string }).type || "text").toLowerCase();
 		if (type === "hidden") return null;
 		if (type === "checkbox") return "checkbox";
 		if (type === "radio") return "radio";
@@ -308,7 +308,7 @@ export function roleRules(): RoleRules {
 				}
 				if (child.nodeType !== 1 || child === skip) continue;
 				const childElement = child as Element;
-				const tag = childElement.tagName.toLocaleLowerCase();
+				const tag = childElement.tagName.toLowerCase();
 				if (["script", "style", "template", "noscript"].includes(tag)) continue;
 				if (visibility !== "any" && childElement.getAttribute("aria-hidden") === "true") continue;
 				const style = getComputedStyle(childElement);
@@ -323,9 +323,10 @@ export function roleRules(): RoleRules {
 					value?: string;
 					selectedOptions?: ArrayLike<{ text: string }>;
 				};
-				const inputType = tag === "input" ? (control.type ?? "").toLocaleLowerCase() : "";
+				const inputType = tag === "input" ? (control.type ?? "").toLowerCase() : "";
+				const value = inputType === "password" ? "•".repeat((control.value ?? "").length) : (control.value ?? "");
 				const inputButton = ["button", "submit", "reset"].includes(inputType);
-				const childRole = childElement.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
+				const childRole = childElement.getAttribute("role")?.trim().split(/\s+/)[0]?.toLowerCase();
 				// A range reads its ARIA value text, then value, before the DOM value.
 				const range = inputType === "range" || childRole === "slider" || childRole === "spinbutton";
 				// A text field's value stands in for it; a checkbox's or radio's `value` ("on" by default) is not
@@ -339,13 +340,11 @@ export function roleRules(): RoleRules {
 				// A nested field contributes its value, not its own label.
 				if (range) {
 					text += shown
-						? childElement.getAttribute("aria-valuetext") ||
-							childElement.getAttribute("aria-valuenow") ||
-							(control.value ?? "")
+						? childElement.getAttribute("aria-valuetext") || childElement.getAttribute("aria-valuenow") || value
 						: "";
 				} else if (tag === "select") {
 					text += shown ? Array.from(control.selectedOptions ?? [], option => option.text).join(" ") : "";
-				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
+				} else if (valueIsText) text += shown ? value : "";
 				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
 				else if (inputType === "image") text += shown ? imageInputName(childElement) : "";
@@ -375,7 +374,7 @@ export function roleRules(): RoleRules {
 	};
 	/** The host-language name of an element its descendants do not name: an optgroup's label, a fieldset's legend, a table's caption. */
 	const nativeName = (element: Element, visited = new Set<Element>()): string => {
-		const tag = element.tagName.toLocaleLowerCase();
+		const tag = element.tagName.toLowerCase();
 		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
 		if (tag !== "fieldset" && tag !== "table") return "";
 		const caption = element.querySelector(
@@ -460,10 +459,10 @@ export function roleRules(): RoleRules {
 			const text = normalizeSpace(Array.from(labels, label => contentText(label, element, "visible")).join(" "));
 			if (text) return text;
 		}
-		const tag = element.tagName.toLocaleLowerCase();
+		const tag = element.tagName.toLowerCase();
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
-		const inputType = input?.type.toLocaleLowerCase();
+		const inputType = input?.type.toLowerCase();
 		if (inputType === "image") return imageInputName(element);
 		if (tag === "img" || tag === "area") {
 			const alt = normalizeSpace(element.getAttribute("alt") ?? "");
@@ -486,7 +485,7 @@ export function roleRules(): RoleRules {
 		);
 	};
 	const roleOf = (element: Element): string | null => {
-		const explicit = element.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
+		const explicit = element.getAttribute("role")?.trim().split(/\s+/)[0]?.toLowerCase();
 		if (explicit) return explicit === "presentation" ? "none" : explicit;
 		return implicitRole(element);
 	};
@@ -503,11 +502,11 @@ export function roleRules(): RoleRules {
 		}
 		// The ARIA synonyms: Chrome calls an image "image", and `presentation` is `none`.
 		const aliases: Record<string, string> = { image: "img", presentation: "none" };
-		const typedRole = parsed[1]!.toLocaleLowerCase();
+		const typedRole = parsed[1]!.toLowerCase();
 		const wantedRole = aliases[typedRole] ?? typedRole;
 		const nameText = parsed[2] ?? parsed[3] ?? parsed[4];
 		const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
-		const exact = parsed[5]?.toLocaleLowerCase() === "exact";
+		const exact = parsed[5]?.toLowerCase() === "exact";
 		const elements: Element[] = [];
 		const visit = (scope: QueryRoot): void => {
 			for (const element of Array.from(scope.querySelectorAll("*"))) {
@@ -698,6 +697,7 @@ function lookup<T>(table: Record<string, T>, key: string): T | undefined {
  * The elements below `root` that match `selector`, plus every custom element (its ElementInternals can give it any
  * role, which the page cannot read back), in document order, each followed by the candidates inside its open shadow
  * root. A shadow host root is searched through its own shadow tree too. Runs in the page.
+ * Only autonomous custom elements can attach ElementInternals; customized built-ins cannot supply roles this way.
  */
 function collectCandidates(root: unknown, selector: string, includeDocument: boolean): unknown[] {
 	// A document, element or shadow root of this page; the tool's TypeScript config has no DOM library to name them.
@@ -850,8 +850,13 @@ async function waitForRole(
 					} finally {
 						if (root !== element) await root.dispose();
 					}
-					if (found && !hidden && (!visible || (await found.isVisible()))) return found;
-					if (hidden && (!found || (await found.isHidden()))) {
+					const documentRoot =
+						found &&
+						query.role === "rootwebarea" &&
+						(visible || hidden) &&
+						(await found.evaluate(node => node.nodeType === 9));
+					if (found && !hidden && (!visible || documentRoot || (await found.isVisible()))) return found;
+					if (hidden && (!found || (!documentRoot && (await found.isHidden())))) {
 						await found?.dispose();
 						return null;
 					}

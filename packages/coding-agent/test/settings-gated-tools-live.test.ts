@@ -68,25 +68,30 @@ describe("settings-gated tools in a live session", () => {
 		await session.runToolRegistryMutation(async () => {});
 	}
 
-	const GREP_POLICY = "NEVER shell `grep`/`rg`/`awk`";
+	/** Tool names on the system prompt's `# Tool Inventory` line. */
+	function promptToolNames(session: AgentSession): string[] {
+		const prompt = session.systemPrompt.join("\n");
+		return prompt.split("\n# Tool Inventory\n")[1]?.split("\n", 1)[0]?.split(", ") ?? [];
+	}
 
 	it("removes and restores grep in the request tools and system prompt", async () => {
 		const settings = Settings.isolated({});
 		const session = await startSession(settings);
 		expect(session.getActiveToolNames()).toContain("grep");
-		expect(session.systemPrompt.join("\n")).toContain(GREP_POLICY);
+		expect(promptToolNames(session)).toContain("grep");
 
 		cfgGrepEnabled.set(settings, false);
 		await settle(session);
 		expect(session.getActiveToolNames()).not.toContain("grep");
 		expect(session.getToolByName("grep")).toBeUndefined();
-		expect(session.systemPrompt.join("\n")).not.toContain(GREP_POLICY);
+		expect(promptToolNames(session)).not.toContain("grep");
+		expect(promptToolNames(session)).toContain("read");
 		expect(session.getActiveToolNames()).toContain("read");
 
 		cfgGrepEnabled.set(settings, true);
 		await settle(session);
 		expect(session.getActiveToolNames()).toContain("grep");
-		expect(session.systemPrompt.join("\n")).toContain(GREP_POLICY);
+		expect(promptToolNames(session)).toContain("grep");
 	});
 
 	it("edit.mode none swaps edit out and keeps bash despite bash.enabled", async () => {

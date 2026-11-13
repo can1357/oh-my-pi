@@ -67,6 +67,16 @@ pub trait Host {
 	fn fallback(&mut self, _name: &BStr) -> Option<NativeRef> {
 		None
 	}
+	/// Whether a command [`Host::resolve`] answered with the host's own
+	/// ([`Resolved::Tool`] or [`Resolved::Native`]) is looked up on `PATH`
+	/// instead, because `argv` is written for the program of that name the
+	/// host's command shadows (on Windows, `find /c /v ""` is cmd's `FIND`,
+	/// not GNU `find`). When `PATH` has no such program, the host's command
+	/// runs after all. `false` (the default): the host's command always
+	/// wins.
+	fn defers_to_path(&mut self, _name: &BStr, _argv: &[BString]) -> bool {
+		false
+	}
 	/// Resume a task from the bytes its [`Task::checkpoint`] produced before a
 	/// snapshot. An error makes the task [`Lost`](crate::bash::Lost) (status
 	/// 137).

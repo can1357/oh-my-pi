@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.19.0] - 2026-11-12
+
+### Fixed
+
+- Fixed `task` tool cards so spawned tasks consistently display their name, assigned agent, and instructions, with `steps` spawns shown as numbered stages.
+
+## [18.18.8] - 2026-11-11
+
+### Changed
+
+- Ask result cards render saved notes beneath their matching selected answers ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+
 ## [18.18.3] - 2026-11-09
 
 ### Changed

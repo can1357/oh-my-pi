@@ -784,6 +784,51 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(result.stopReason).toBe("error");
 	});
 
+	it("retries every concurrent first request rejected as too old, not just the first", async () => {
+		const pinned = getClaudeCodeVersion();
+		const required = "100.0.0";
+		const pinnedUserAgent = `claude-cli/${pinned} (external, cli)`;
+		const requiredUserAgent = `claude-cli/${required} (external, cli)`;
+		const tooOld = JSON.stringify({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: `Claude Code ${pinned} does not support this model; version ${required} or newer is required.`,
+				details: { error_code: "claude_code_version_too_old" },
+			},
+		});
+		const captured = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } });
+		const concurrency = 3;
+		const requests: string[] = [];
+		let firstAttempts = 0;
+		const { promise: allFirstAttemptsSent, resolve: allFirstAttemptsSentResolve } = Promise.withResolvers<void>();
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			const userAgent = new Headers(init?.headers).get("User-Agent") ?? "";
+			requests.push(userAgent);
+			if (userAgent === pinnedUserAgent) {
+				firstAttempts++;
+				if (firstAttempts === concurrency) allFirstAttemptsSentResolve();
+				// Hold every first rejection until all concurrent requests have sent
+				// theirs, so they race on the adoption instead of serializing.
+				await allFirstAttemptsSent;
+				return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response(captured, { status: 400, headers: { "Content-Type": "application/json" } });
+		}) as typeof fetch;
+		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+		const results = await Promise.all(
+			Array.from({ length: concurrency }, () =>
+				streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result(),
+			),
+		);
+
+		expect(requests).toHaveLength(concurrency * 2);
+		for (const userAgent of requests.slice(0, concurrency)) expect(userAgent).toBe(pinnedUserAgent);
+		for (const userAgent of requests.slice(concurrency)) expect(userAgent).toBe(requiredUserAgent);
+		for (const result of results) expect(result.stopReason).toBe("error");
+	});
+
 	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {
 		let capturedBeta: string | undefined;
 		let capturedBody:

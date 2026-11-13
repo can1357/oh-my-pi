@@ -552,6 +552,18 @@ fn subst_default_assignment_before_a_substitution_runs_it_once() {
 }
 
 #[test]
+fn subst_default_assignment_expands_to_text_not_a_pattern() {
+	// p10k's `: ${_POWERLEVEL9K_CHRUBY_SHOW_ENGINE_PATTERN=*}` must not glob
+	// (`no matches found: *` in an empty directory); `:-` still does.
+	let (out, err, st) =
+		zsh("unset a b; print -r -- ${a=*} ${b:=x*} $a $b; print -r -- ${c:-/nonexistent*}");
+	assert_eq!(
+		(out.as_str(), err.as_str(), st),
+		("* x* * x*\n", "zsh:1: no matches found: /nonexistent*\n", 1)
+	);
+}
+
+#[test]
 fn subst_assignments_replay_their_state_for_later_words() {
 	// Each substitution re-runs the word: a replay that kept the end state
 	// of the previous pass (`n` = B) would skip `$(echo A)` and hand its

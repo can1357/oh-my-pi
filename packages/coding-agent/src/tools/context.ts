@@ -11,7 +11,7 @@ declare module "@oh-my-pi/pi-agent-core" {
 		toolNames?: string[];
 		toolCall?: ToolCallContext;
 		/** Set after the write tool's outer gate approves an `xd://` device call:
-		 *  the `tools.approval` key that gate resolved (the device name). While the
+		 *  the `tools.approval` key that gate resolved (the canonical tool name). While the
 		 *  input flows through unchanged, the inner wrapper skips its tier-only
 		 *  prompt and an explicit prompt policy under this same key; overrides and
 		 *  policies under other keys still apply. */

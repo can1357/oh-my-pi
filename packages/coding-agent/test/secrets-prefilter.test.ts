@@ -3,7 +3,8 @@
  * regex never changes what is redacted. For each built-in pattern, a
  * representative token of every alternative (and every case variant a
  * case-insensitive pattern accepts) is redacted identically with and without
- * the metadata; a custom regex without metadata is always scanned. The gate
+ * the metadata; a custom regex without metadata is gated only by a literal
+ * every match provably contains, so it still redacts every match. The gate
  * exists because the whole provider context is rescanned on every request,
  * and the regex pass was the dominant synchronous cost in a long session.
  */
@@ -73,6 +74,27 @@ describe("credential regex literal prefilter", () => {
 		const custom: SecretEntry = { type: "regex", content: "zq[0-9]{6}", mode: "obfuscate", friendlyName: "Custom" };
 		const obfuscator = new SecretObfuscator([custom], KEY);
 		expect(obfuscator.obfuscate("id zq123456 here")).not.toContain("zq123456");
+	});
+
+	it("still redacts custom-regex matches whose leading literal is optional, alternated or cased", () => {
+		const cases: Array<[pattern: string, flags: string | undefined, secret: string]> = [
+			// Optional character after the leading run: the gate must not require `_`.
+			["tok_?abc[0-9]{6}", undefined, "tokabc123456"],
+			// Counted character: `x{0,2}` may be absent.
+			["tokx{0,2}_[0-9]{8}", undefined, "tok_12345678"],
+			// Top-level alternation: a literal from one branch must not gate the other.
+			["foo_[0-9]{8}|bar_[0-9]{8}", undefined, "bar_12345678"],
+			// Case-insensitive rule: the gate must accept every case variant.
+			["key=[a-z0-9]{10}", "i", "KEY=ABCDEFGHIJ"],
+			// Escaped literal and a leading word boundary.
+			["\\bsecret\\.[0-9]{8}", undefined, "secret.12345678"],
+			// Repeated character: `+` keeps one copy, the rest is unconstrained.
+			["abc+def[0-9]{8}", undefined, "abccccdef12345678"],
+		];
+		for (const [content, flags, secret] of cases) {
+			const obfuscator = new SecretObfuscator([{ type: "regex", content, flags, mode: "obfuscate" }], KEY);
+			expect(obfuscator.obfuscate(`value ${secret} here`), content).not.toContain(secret);
+		}
 	});
 
 	it("treats an empty prefix list as no metadata", () => {
