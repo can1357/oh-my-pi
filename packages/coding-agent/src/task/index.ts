@@ -46,7 +46,7 @@ import { isBundledSeance, seanceTaskGuidance, seanceTaskSchemaFields, validateSe
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { AsyncJobError, AsyncJobManager, type AsyncJobManagerApi } from "../async";
+import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
@@ -1354,11 +1354,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const started: Array<{ agentId: string; jobId: string }> = [];
 		const failedSchedules: string[] = [];
 		const controlled = this.session.isRegisteredTask?.(toolCallId) === true;
-		if (controlled && !(manager instanceof AsyncJobManager)) throw new Error("受控 task 需要本机会话作业管理器");
-		const reservation =
-			controlled && manager instanceof AsyncJobManager
-				? manager.reserveTaskJobIds(asyncSpawns.map(spawn => spawn.agentId))
-				: undefined;
+		let reservation: { token: string; jobIds: string[] } | undefined;
+		if (controlled) {
+			if (typeof manager.reserveTaskJobIds !== "function") {
+				throw new Error("Controlled task delegation requires a main-thread session job manager");
+			}
+			reservation = manager.reserveTaskJobIds(asyncSpawns.map(spawn => spawn.agentId));
+		}
 		try {
 			if (reservation) {
 				if (!this.session.persistRegisteredTaskJobs) throw new Error("受控 task 持久绑定不可用");
@@ -1397,7 +1399,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			}
 		} finally {
-			if (reservation && manager instanceof AsyncJobManager) manager.releaseTaskJobIds(reservation.token);
+			if (reservation) manager.releaseTaskJobIds?.(reservation.token);
 		}
 		if (controlled && failedSchedules.length > 0) {
 			throw new Error(`受控 task 部分注册失败: ${failedSchedules.join("; ")}`);

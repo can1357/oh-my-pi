@@ -393,6 +393,16 @@ export interface AsyncJobManagerApi {
 	isDeliveryPending(jobId: string): boolean;
 	/** True when a foreground snapshot consumed this job's result while its push was still queued. */
 	isDeliverySuperseded(jobId: string): boolean;
+	/**
+	 * Optional capability: synchronously reserve final job IDs before the caller
+	 * persists anything, so controlled task delegation can durably bind identities
+	 * without racing other registrations. Returns a token plus the reserved IDs.
+	 * Only the local {@link AsyncJobManager} implements it; uncommitted
+	 * reservations can be released safely via {@link releaseTaskJobIds}.
+	 */
+	reserveTaskJobIds?(preferredIds: string[]): { token: string; jobIds: string[] };
+	/** Optional capability counterpart of {@link reserveTaskJobIds}. */
+	releaseTaskJobIds?(token: string): void;
 }
 
 export class AsyncJobManager implements AsyncJobManagerApi {
@@ -506,7 +516,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		return activeCount >= this.#maxRunningJobs;
 	}
 
-	/** 在落盘前同步预留最终 ID；未提交的预留可安全释放。 */
+	/** Synchronously reserve final IDs before persistence; uncommitted reservations release safely. */
 	reserveTaskJobIds(preferredIds: string[]): { token: string; jobIds: string[] } {
 		if (this.#disposed) throw new Error("Async job manager is disposed");
 		const token = crypto.randomUUID();
