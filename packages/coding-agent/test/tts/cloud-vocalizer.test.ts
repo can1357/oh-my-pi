@@ -111,21 +111,13 @@ describe("resamplePcm", () => {
 
 describe("cloud speech vocalizer", () => {
 	test("keeps unconfigured cloud defaults out of the chain so speech stays local", () => {
-		const settings = Settings.isolated({ "speech.cloud": true });
+		const settings = Settings.isolated();
 		const chain = resolveVocalizerSpeechChain({ settings, registry: gatewayRegistry(settings) });
-		expect(chain.every(model => model.api === "local-inference")).toBe(true);
-	});
-
-	test("stays local when the speech role names a cloud model but speech.cloud is off", () => {
-		const settings = Settings.isolated({ modelRoles: { speech: "gw/eleven" } });
-		const chain = resolveVocalizerSpeechChain({ settings, registry: gatewayRegistry(settings) });
-		expect(chain.map(model => model.id)).not.toContain("eleven");
 		expect(chain.every(model => model.api === "local-inference")).toBe(true);
 	});
 
 	test("drops a configured MP3-only model and keeps WAV-capable ones in order", () => {
 		const settings = Settings.isolated({
-			"speech.cloud": true,
 			modelRoles: { speech: "gw/mp3-tts" },
 			"retry.fallbackChains": { speech: ["gw/eleven", "gw/gemini-tts"] },
 		});
@@ -135,7 +127,6 @@ describe("cloud speech vocalizer", () => {
 
 	test("offline mode keeps cloud models from other providers out of the chain", () => {
 		const settings = Settings.isolated({
-			"speech.cloud": true,
 			"models.offline": true,
 			modelRoles: { speech: "gw/eleven" },
 		});
@@ -151,7 +142,6 @@ describe("cloud speech vocalizer", () => {
 	test("speaks through the cloud chain, failing over to the next model", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
-			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: ["gw/gemini-tts"] },
 		});
@@ -182,7 +172,6 @@ describe("cloud speech vocalizer", () => {
 	test("resamples a fallback model's audio to the rate the utterance started at", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
-			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: ["gw/gemini-tts"] },
 		});
@@ -215,7 +204,6 @@ describe("cloud speech vocalizer", () => {
 	test("skips a model that failed with 401 for the rest of the session and warns when the chain is exhausted", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
-			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: [] },
 		});
@@ -253,7 +241,6 @@ describe("cloud speech vocalizer", () => {
 	test("retries a model that failed transiently on the next utterance", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
-			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: [] },
 		});

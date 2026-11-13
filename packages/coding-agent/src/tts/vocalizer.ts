@@ -21,8 +21,8 @@
  * In both modes the synthesis session (worker, player) opens lazily on the
  * first speakable segment, and an idle timer speaks buffered text when
  * generation stalls (tool call, thinking block). The session is local Kokoro
- * streaming unless `speech.cloud` is on and the speech role chain starts with
- * an explicitly configured cloud model, which then synthesizes each segment as WAV
+ * streaming unless the speech role chain starts with an explicitly configured
+ * cloud model, which then synthesizes each segment as WAV
  * ({@link createCloudSpeechStream}). One
  * {@link StreamingAudioPlayer} per utterance plays chunks back gaplessly;
  * utterance playback is chained so sequential utterances never overlap.
@@ -55,7 +55,7 @@ import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
 
-import { cfgSpeechCloud, cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechSpeed, cfgSpeechVoice } from "./settings";
+import { cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechSpeed, cfgSpeechVoice } from "./settings";
 
 /** Quiet time on the delta stream before the buffered partial is spoken. */
 const IDLE_FLUSH_MS = 1000;
@@ -85,21 +85,21 @@ export function resolveLocalSpeechModelId(source: VocalizerModelSource): string 
 
 /**
  * Speech-role candidates the vocalizer can play, in chain order: local models,
- * plus (with `speech.cloud` on) explicitly configured cloud speech models that
- * return WAV when the source can authenticate them. With `speech.cloud` off, or
- * for unconfigured cloud defaults, speech stays on-device. `models.offline`
- * admits only the session provider's models, as for {@link resolveLocalSpeechModelId}.
+ * plus explicitly configured cloud speech models that return WAV when the
+ * source can authenticate them. Unconfigured cloud defaults are left out, so
+ * speech without a configured role stays on-device. `models.offline` admits
+ * only the session provider's models, as for {@link resolveLocalSpeechModelId}.
  */
 export function resolveVocalizerSpeechChain(source: VocalizerModelSource): Model<Api>[] {
 	const pool = roleCandidatePool("speech", source.settings, source.registry);
-	const allowCloud = cfgSpeechCloud.get(source.settings) && source.registry.resolver !== undefined;
+	const canAuthenticate = source.registry.resolver !== undefined;
 	const offline = cfgOffline.get(source.settings);
 	return resolveRoleChain("speech", source.settings, pool)
 		.filter(
 			({ model, explicit }) =>
 				(!offline || model.provider === source.getSessionProvider?.()) &&
 				(model.api === "local-inference" ||
-					(explicit && allowCloud && isSpeechApi(model.api) && speechModelSupportsFormat(model, "wav"))),
+					(explicit && canAuthenticate && isSpeechApi(model.api) && speechModelSupportsFormat(model, "wav"))),
 		)
 		.map(candidate => candidate.model);
 }
