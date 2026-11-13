@@ -2,15 +2,13 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `mixHex` for blending two hex colors ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 ### Breaking Changes
 
 - `PI_CONFIG_FILES` and `OMP_CONFIG_FILES` from a project directory's `.env` are no longer loaded into the process environment ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Added
 
+- Added `mixHex` for blending two hex colors ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 - Added `stripOmpDotenvEnv`, which removes variables loaded from omp's own `.env` files from an environment map ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [18.19.0] - 2026-11-12
