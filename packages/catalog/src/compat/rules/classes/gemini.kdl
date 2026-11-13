@@ -85,7 +85,7 @@ class "gemini" {
 		// Exact ids: a revision-wide rule would tie with the Pro low/high ladder.
 		// Gemini API discovery infers `reasoning: false` for a Gemini 4 id with no
 		// bundled reference; repair it so the ladder is selectable.
-		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" "gemini-4-carbon" "gemini-4-hydrogen" {
+		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" "gemini-4-carbon" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}
