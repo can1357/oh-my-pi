@@ -76,7 +76,10 @@ export const launchHelp = {
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
 		"no-lsp": Flags.boolean({ description: "Disable LSP tools, formatting, and diagnostics" }),
 		"no-pty": Flags.boolean({ description: "Disable PTY-based interactive bash execution" }),
-		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
+		tools: Flags.string({
+			description:
+				"Comma-separated built-in or extension tool names to enable (default: tools enabled in settings; see Built-in Tools)",
+		}),
 		thinking: Flags.string({
 			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,
 			options: [...CLI_THINKING_LEVELS],

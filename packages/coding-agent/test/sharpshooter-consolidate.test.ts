@@ -6,6 +6,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	renderSharpshooterSessions,
 	runSharpshooterConsolidation,
+	sharpshooterConsolidationMaxTokens,
+	sharpshooterNextConsolidationAt,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/consolidate";
 import {
 	readSharpshooterState,
@@ -257,6 +259,74 @@ describe("runSharpshooterConsolidation", () => {
 		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
 		expect(state.lastConsolidatedAt).toBeGreaterThan(0);
 		expect(state.lastError).toBeUndefined();
+	});
+
+	it("reports a truncated reply as truncation and backs off instead of retrying on the next tick", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-truncated-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			...completion([]),
+			stopReason: "length",
+			content: [{ type: "thinking", thinking: "Folding the backlog into architecture.md" }],
+		});
+
+		const first = await runSharpshooterConsolidation(harness);
+		expect(first.reason).toBe("error");
+		expect(first.error).toContain("truncated");
+		expect(first.error).not.toContain("exactly once");
+		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
+		expect(state.lastError?.failures).toBe(1);
+		expect(await listSharpshooterDeltas(harness.agentDir, harness.cwd)).toHaveLength(1);
+
+		const nextTick = await runSharpshooterConsolidation(harness);
+		expect(nextTick).toEqual({ ran: false, reason: "not_due" });
+		expect(completeSpy).toHaveBeenCalledTimes(1);
+
+		completeSpy.mockResolvedValue(completion(completeFiles));
+		const forced = await runSharpshooterConsolidation({ ...harness, force: true });
+		expect(forced).toEqual({ ran: true, sessions: 1, deltas: 1 });
+		expect((await readSharpshooterState(harness.agentDir, harness.cwd)).lastError).toBeUndefined();
+	});
+});
+
+describe("sharpshooterNextConsolidationAt", () => {
+	const minute = 60_000;
+
+	it("doubles the retry delay per consecutive failure up to a six-hour cap", () => {
+		const at = 1_000 * minute;
+		const failing = (failures: number) => ({
+			v: 1 as const,
+			lastConsolidatedAt: 0,
+			lastError: { at, message: "boom", failures },
+		});
+		expect(sharpshooterNextConsolidationAt(failing(1), 5)).toBe(at + 5 * minute);
+		expect(sharpshooterNextConsolidationAt(failing(3), 5)).toBe(at + 20 * minute);
+		expect(sharpshooterNextConsolidationAt(failing(40), 5)).toBe(at + 360 * minute);
+		// A zero interval still waits at least one scheduler tick after a failure.
+		expect(sharpshooterNextConsolidationAt(failing(1), 0)).toBe(at + minute);
+	});
+
+	it("ignores an error older than the last completed pass", () => {
+		const state = {
+			v: 1 as const,
+			lastConsolidatedAt: 100 * minute,
+			lastError: { at: 50 * minute, message: "boom", failures: 9 },
+		};
+		expect(sharpshooterNextConsolidationAt(state, 5)).toBe(105 * minute);
+	});
+});
+
+describe("sharpshooterConsolidationMaxTokens", () => {
+	it("caps the budget by the model output limit and by the context the prompt leaves free", () => {
+		const roomy = { maxTokens: 64_000, contextWindow: 200_000 };
+		expect(sharpshooterConsolidationMaxTokens(roomy, 10_000)).toBe(32_768);
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: 8192, contextWindow: 200_000 }, 10_000)).toBe(8192);
+		// 100k prompt reserves 110k + 1024 framing, leaving 20_976 of a 132k window.
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: 64_000, contextWindow: 132_000 }, 100_000)).toBe(20_976);
+		// A prompt that already fills the window still requests a usable floor.
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: 64_000, contextWindow: 32_000 }, 40_000)).toBe(1024);
+		expect(sharpshooterConsolidationMaxTokens({ maxTokens: null, contextWindow: null }, 500_000)).toBe(32_768);
 	});
 });
 
