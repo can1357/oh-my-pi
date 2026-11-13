@@ -119,7 +119,7 @@ export const cfgMnemopiRecallRelevance = register({
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Filter only when the judge role resolves to a native TypeSafe jev model",
+				description: "Filter only when the judge role resolves to a native judge backend",
 			},
 			{ value: "on", label: "On", description: "Always filter, whichever model the judge role resolves to" },
 			{ value: "off", label: "Off", description: "Never filter; inject every recalled memory" },

@@ -726,7 +726,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 				logger.warn("Mnemopi: automatic recall relevance check failed", { error: toError(error).message });
 				this.session.emitNotice(
 					"warning",
-					"Automatic memory recall paused for 5 minutes: the task relevance check failed or exceeded 10 seconds. Explicit memory search is still available.",
+					`Automatic memory recall paused for ${AUTOMATIC_RECALL_FAILURE_COOLDOWN_MS / 60_000} minutes: the task relevance check failed or exceeded ${AUTOMATIC_RECALL_TIMEOUT_MS / 1000} seconds. Explicit memory search is still available.`,
 					"mnemopi",
 				);
 			}
