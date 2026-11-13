@@ -27,6 +27,10 @@
  * a malformed answer is an error, a malformed `patch` is dropped so the whole
  * file still installs. `404 {"error":"no_build"}` means nothing is published
  * for the target (on the channel, or at the version).
+ *
+ * A fork that publishes its own GitHub releases sets `PI_UPDATE_REPO`
+ * ({@link updateRepo}): omp's own binary then comes from that repo's latest
+ * release ({@link parseGithubRelease}) instead, without patches.
  */
 import * as fs from "node:fs";
 import { Transform } from "node:stream";
@@ -257,6 +261,37 @@ export function parseBuildAnswer(
 	};
 }
 
+/**
+ * GitHub `owner/repo` whose releases replace the build service as the source of
+ * omp's own binary: `PI_UPDATE_REPO`, which a fork's compile bakes in, else
+ * undefined. Read as `process.env` so the compile's `define` can replace it.
+ */
+export function updateRepo(): string | undefined {
+	const repo = (process.env.PI_UPDATE_REPO ?? "").trim();
+	if (!repo) return undefined;
+	if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`PI_UPDATE_REPO must be owner/repo, not ${repo}`);
+	return repo;
+}
+
+/**
+ * Check a GitHub release for `product`'s file for `host`, as a build answer:
+ * the tag without its `v` is the version the release's binaries report, and
+ * the asset's GitHub `digest` is its SHA-256 (an asset without one is refused).
+ */
+export function parseGithubRelease(body: unknown, product: BuildProduct, host: BuildHost): BuildAnswer {
+	if (!isRecord(body) || typeof body.tag_name !== "string") throw new Error("release has no tag");
+	const version = body.tag_name.replace(/^v/, "");
+	const name = product.fileName(host, version);
+	const asset = Array.isArray(body.assets) ? body.assets.find(a => isRecord(a) && a.name === name) : undefined;
+	if (!isRecord(asset)) throw new Error(`release ${body.tag_name} has no ${name}`);
+	const digest = typeof asset.digest === "string" ? asset.digest.replace(/^sha256:/, "") : undefined;
+	return parseBuildAnswer(
+		{ build: { version }, file: { name, size: asset.size, sha256: digest }, download: asset.browser_download_url },
+		product,
+		host,
+	);
+}
+
 /** Which build to ask for: the newest on a channel, or one exact version. */
 export type BuildSelector = { channel: UpdateChannel } | { version: string };
 
@@ -275,15 +310,23 @@ export interface FetchBuildOptions {
 export async function fetchBuild(selector: BuildSelector, options: FetchBuildOptions = {}): Promise<BuildAnswer> {
 	const product = options.product ?? OMP_BUILD;
 	const host = options.host ?? (await currentBuildHost());
-	const origin = buildServiceUrl();
+	const repo = product === OMP_BUILD ? updateRepo() : undefined;
+	const origin = repo ? `https://github.com/${repo}` : buildServiceUrl();
 	const timeoutMs = options.timeoutMs ?? BUILD_CHECK_TIMEOUT_MS;
-	const route =
-		"channel" in selector
-			? `latest/${host.target}`
-			: `versions/${encodeURIComponent(selector.version)}/${host.target}`;
-	const url = new URL(`${origin}/api/products/${product.id}/${route}`);
-	if ("channel" in selector) url.searchParams.set("channel", selector.channel);
-	if (options.fromVersion) url.searchParams.set("from_version", options.fromVersion);
+	let url: URL;
+	if (repo) {
+		// shortcut: GitHub has no channels, so canary also gets the latest release; add a prerelease lookup if a fork ships canaries.
+		const release = "channel" in selector ? "latest" : `tags/v${encodeURIComponent(selector.version)}`;
+		url = new URL(`https://api.github.com/repos/${repo}/releases/${release}`);
+	} else {
+		const route =
+			"channel" in selector
+				? `latest/${host.target}`
+				: `versions/${encodeURIComponent(selector.version)}/${host.target}`;
+		url = new URL(`${origin}/api/products/${product.id}/${route}`);
+		if ("channel" in selector) url.searchParams.set("channel", selector.channel);
+		if (options.fromVersion) url.searchParams.set("from_version", options.fromVersion);
+	}
 	const what = `${product.id} ${"channel" in selector ? `${selector.channel} build` : `build ${selector.version}`} for ${host.target}`;
 
 	const mapError = (err: unknown): unknown => {
@@ -324,7 +367,9 @@ export async function fetchBuild(selector: BuildSelector, options: FetchBuildOpt
 		throw new Error(`${origin} answered ${response.status} ${response.statusText} for the ${what}`);
 	}
 	try {
-		return parseBuildAnswer(body, product, host, options.fromVersion);
+		return repo
+			? parseGithubRelease(body, product, host)
+			: parseBuildAnswer(body, product, host, options.fromVersion);
 	} catch (err) {
 		throw new Error(`Invalid answer from ${origin} for the ${what}: ${err instanceof Error ? err.message : err}`);
 	}

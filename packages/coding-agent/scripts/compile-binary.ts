@@ -54,6 +54,8 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
+				// A fork's release build names its GitHub repo as the update source; unset keeps the build service.
+				...(Bun.env.PI_UPDATE_REPO ? { "process.env.PI_UPDATE_REPO": JSON.stringify(Bun.env.PI_UPDATE_REPO) } : {}),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
 			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `PI_UPDATE_REPO=<owner>/<repo>` makes `omp update` and the startup update check of a standalone binary use that GitHub repo's latest release instead of the build service, so a fork that publishes its own binaries updates from them; a compile with it set bakes it in
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

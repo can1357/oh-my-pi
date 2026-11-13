@@ -9,7 +9,8 @@ import {
 	parseBuildAnswer,
 	resolveBuildHost,
 } from "@oh-my-pi/pi-coding-agent/cli/build-service";
-import { TempDir, VERSION } from "@oh-my-pi/pi-utils";
+import { parseReportedVersion } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
+import { compareVersions, TempDir, VERSION } from "@oh-my-pi/pi-utils";
 
 const fileName = "omp-darwin-arm64";
 const host: BuildHost = { target: "macos-arm64", asset: "darwin-arm64", windows: false };
@@ -168,6 +169,101 @@ describe("fetchBuild", () => {
 				{ host, fetchImpl: async () => Response.json({ error: "no_build" }, { status: 404 }) },
 			),
 		).rejects.toThrow("No omp stable build for macos-arm64 is published");
+	});
+
+	describe("from a fork's GitHub releases", () => {
+		const previousRepo = process.env.PI_UPDATE_REPO;
+		afterEach(() => {
+			if (previousRepo === undefined) delete process.env.PI_UPDATE_REPO;
+			else process.env.PI_UPDATE_REPO = previousRepo;
+		});
+
+		const release = (assetFields: Record<string, unknown> = {}) => ({
+			tag_name: "v18.20.0-int.202611130355.d2c2eff",
+			assets: [
+				{
+					name: "omp-linux-x64",
+					size: 1,
+					digest: `sha256:${sha("other")}`,
+					browser_download_url: "https://x.test/a",
+				},
+				{
+					name: fileName,
+					size: 205_765_664,
+					digest: `sha256:${sha("new")}`,
+					browser_download_url: `https://github.com/fork/omp/releases/download/v18.20.0-int.202611130355.d2c2eff/${fileName}`,
+					...assetFields,
+				},
+			],
+		});
+
+		it("answers the latest release's asset for the host, versioned by its tag", async () => {
+			process.env.PI_UPDATE_REPO = "fork/omp";
+			const urls: string[] = [];
+			const build = await fetchBuild(
+				{ channel: "stable" },
+				{
+					host,
+					fromVersion: "18.19.0",
+					fetchImpl: async input => {
+						urls.push(String(input));
+						return Response.json(release());
+					},
+				},
+			);
+
+			expect(urls).toEqual(["https://api.github.com/repos/fork/omp/releases/latest"]);
+			expect(build).toEqual({
+				version: "18.20.0-int.202611130355.d2c2eff",
+				file: { name: fileName, size: 205_765_664, sha256: sha("new") },
+				download: `https://github.com/fork/omp/releases/download/v18.20.0-int.202611130355.d2c2eff/${fileName}`,
+				patch: undefined,
+			});
+		});
+
+		it("asks for an exact version by its tag", async () => {
+			process.env.PI_UPDATE_REPO = "fork/omp";
+			let url = "";
+			await fetchBuild(
+				{ version: "18.20.0-int.202611130355.d2c2eff" },
+				{
+					host,
+					fetchImpl: async input => {
+						url = String(input);
+						return Response.json(release());
+					},
+				},
+			);
+			expect(url).toBe("https://api.github.com/repos/fork/omp/releases/tags/v18.20.0-int.202611130355.d2c2eff");
+		});
+
+		it("refuses a release whose asset is missing or has no digest", async () => {
+			process.env.PI_UPDATE_REPO = "fork/omp";
+			const ask = (body: unknown) =>
+				fetchBuild({ channel: "stable" }, { host, fetchImpl: async () => Response.json(body) });
+			await expect(ask(release({ digest: null }))).rejects.toThrow("invalid sha256");
+			await expect(ask({ tag_name: "v18.20.0", assets: [] })).rejects.toThrow("has no omp-darwin-arm64");
+		});
+
+		it("rejects a repo that is not owner/repo", async () => {
+			process.env.PI_UPDATE_REPO = "fork/omp/../x";
+			await expect(
+				fetchBuild({ channel: "stable" }, { host, fetchImpl: async () => Response.json({}) }),
+			).rejects.toThrow("PI_UPDATE_REPO must be owner/repo");
+		});
+
+		it("orders two builds of the same upstream base by build time, whatever their shas", () => {
+			// Fork tags are `v<upstream>-int.<UTC YYYYMMDDHHMM>.<sha7>`.
+			const older = "18.20.0-int.202611130355.d2c2eff";
+			const newer = "18.20.0-int.202611131200.0123456";
+			for (const order of [compareVersions, Bun.semver.order]) {
+				expect(order(newer, older)).toBe(1);
+				expect(order(older, newer)).toBe(-1);
+				expect(order("18.21.0-int.202611120000.fffffff", newer)).toBe(1);
+			}
+			// The installed binary reports the same string, so the post-install check matches it.
+			expect(parseReportedVersion(`omp/${newer}`)).toBe(newer);
+		});
 	});
 });
 
