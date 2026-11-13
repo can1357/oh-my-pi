@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The stats Gain tab counts the context snapcompact compactions free, beside imaged tool results, so sessions that compact with snapcompact no longer show zero savings
+- The stats Gain tab counts the context snapcompact compactions free, beside imaged tool results, so sessions that compact with snapcompact no longer show zero savings ([#19120](https://github.com/can1357/oh-my-pi/pull/19120) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.20.0] - 2026-11-12
 
