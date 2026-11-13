@@ -82,7 +82,7 @@ Single-shot result.
 - Plan-mode policy and path resolution run before mutation. An existing target that is neither a regular file nor a directory (including through a symlink) is refused; existing regular files then pass the generated-file guard, which opens and reads the file head on the main thread and could block forever on such a target.
 - If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused. This also applies to text handler-owned resources; tool-device arguments are exempt.
 - ACP bridge `writeTextFile` is tried first when available; otherwise the session writethrough writes the content. LSP settings may format, synchronize, and diagnose the write.
-- A leading shebang may add execute bits.
+- When the written (post-format) content starts with `#!` and not `#![`, adds execute bits (`mode | 0o111`, `chmod a+x`) once those bytes are on disk — after ACP `writeTextFile`, or in the writethrough before `textDocument/didSave` and LSP diagnostics (returned in the result or delivered late).
 
 11. The tool returns text plus optional diagnostics, executable, resolved-path, or device-dispatch metadata.
 
@@ -158,7 +158,7 @@ content: ""
 - `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval. Stdin and `/mode` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
 - `out://` shows `content` (Markdown, at most 64 KiB) to the user as a reply without ending the turn: the transcript draws the call as assistant prose that streams with the arguments, not as a tool card, and keeps it visible when tool activity is hidden. The URL path is ignored and the scheme is write-only. The write is read-approved and allowed in plan mode and `deviceOnlyWrite`. It is refused for subagents, and where `out.enabled` is off — by default everywhere but the interactive TUI (terminal or Tern), so print, RPC, and ACP sessions neither see nor accept it unless `out.enabled` is explicitly set. Only sessions where it is on get the system-prompt entry.
 - A registered internal handler with a `write` hook owns its resource semantics (for example, `cfg://`, `agent://`, `proc://`). File-backed schemes (`local://`, `vault://`) have no hook: the router locates the target file (`local://` in the session-local artifact sandbox, `vault://` under the vault root) and the write follows the plain-file path.
-- `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first, then pass one JSON object as `content`. Device schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved. The outer approval gate uses `tools.approval.<device>` before the generic `write` policy. `xd://report_issue` separately accepts a plain issue description.
+- `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first, then pass one JSON object as `content`. Device schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved. `xd://<name>` also accepts a tool's unambiguous `customWireName` alias (`xd://apply_patch` for `edit` in `apply_patch` mode). The outer approval gate uses `tools.approval.<tool>`, keyed by the canonical tool name, before the generic `write` policy. `xd://report_issue` separately accepts a plain issue description.
 - Unknown URI-like schemes are refused to prevent silent local-file creation. Use `./scheme://...` only when that filename is intentional.
 - Registered read-only schemes (no write policy: `artifact://`, `skill://`, `history://`, …) are denied at the approval gate (`<scheme>:// URLs are read-only`) without prompting; `edit` and `ast_edit` targets are denied the same way. A trailing line selector on a write, edit, or bash URL target (`local://notes.md:5`) is refused rather than dropped; only `:raw`/`:conflicts` are peeled.
 
@@ -180,7 +180,7 @@ content: ""
    - Explicitly creates parent directories for archive files; the plain-file backend also supports missing parents.
    - Mutates existing SQLite databases; never creates a new SQLite DB.
    - Resolves conflict markers in files for `conflict://...` writes.
-   - May chmod a shebang file executable after a successful plain-file write.
+   - Adds execute bits (`mode | 0o111`, `chmod a+x`) on plain-file writes whose final content starts with `#!` (not `#![`) when the filesystem supports chmod, before LSP diagnostics are collected.
 - Subprocesses / native bindings
    - Uses Bun SQLite bindings via `bun:sqlite`.
    - Uses the unified archive utilities in `packages/utils/src/ar`: tar serialization plus gzip/zstd framing for compressed tars, `node:zlib`-backed DEFLATE framing for ZIP, and an ASAR encoder.
@@ -191,7 +191,7 @@ content: ""
    - `xd://` dispatches a mounted tool and may therefore have that tool's documented side effects.
 - Background work / cancellation
    - Marks the tool `concurrency = "exclusive"` in `WriteTool`.
-   - The write body is wrapped with `untilAborted`; LSP writethrough can schedule deferred diagnostics fetches after a timeout.
+   - The write body is wrapped with `untilAborted`; LSP writethrough can deliver diagnostics late when its inline wait expires or schedule a deferred fetch after its `5_000` ms operation timeout, in both cases after writing the final content and applying any shebang `chmod a+x`.
 
 ## Limits & Caps
 

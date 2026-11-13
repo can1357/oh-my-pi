@@ -92,26 +92,106 @@ describe("ovnfs search fast path", () => {
 	});
 
 	it("maps grep options and the daemon reply", async () => {
-		const file = path.join(dir, "a.txt");
 		reply = {
 			ok: {
-				matches: [{ path: "/virtual/a.txt", line: 1, text: "needle", truncated: true, count: 0, column: 3 }],
+				matches: [{ path: "a.txt", line: 1, text: "needle", truncated: true, count: 0, column: 3 }],
 				total_matches: 1,
 				files_with_matches: 1,
 				files_searched: 1,
 				limit_reached: false,
 			},
 		};
-		const result = await grep({ pattern: "needle", path: file, recursive: false, exclude: [] }, null, ovnfs);
+		const result = await grep({ pattern: "needle", path: dir, recursive: false, exclude: [] }, null, ovnfs);
 		expect(received).toEqual([
 			{
 				id: expect.any(Number),
-				grep: { dir: await fs.realpath(file), pattern: "needle", anchored: true, hidden: true },
+				grep: { dir: await fs.realpath(dir), pattern: "needle", anchored: true, hidden: true },
 			},
 		]);
-		expect(result.matches).toEqual([{ path: file, lineNumber: 1, line: "needle", truncated: true, column: 3 }]);
+		expect(result.matches).toEqual([{ path: "a.txt", lineNumber: 1, line: "needle", truncated: true, column: 3 }]);
 		expect(result.totalMatches).toBe(1);
 		expect(result.filesSearched).toBe(1);
+	});
+
+	it("finds a named NUL-containing file in a mount without a daemon grep call", async () => {
+		const file = path.join(dir, "binary.txt");
+		await Bun.write(file, "needle\n\0\n");
+		try {
+			reply = { ok: { matches: [], total_matches: 0, files_with_matches: 0, files_searched: 1 } };
+			const stat = vi.spyOn(fs, "stat");
+			const seen: natives.GrepMatch[] = [];
+			const result = await grep({ pattern: "needle", path: file }, (_err, match) => seen.push(match), ovnfs);
+			expect(result.totalMatches).toBe(1);
+			expect(result.matches).toMatchObject([{ lineNumber: 1, line: "needle" }]);
+			expect(seen).toEqual(result.matches);
+			expect(received).toEqual([]);
+			expect(stat).toHaveBeenCalledTimes(1);
+			expect(stat).toHaveBeenCalledWith(file);
+		} finally {
+			await fs.rm(file);
+		}
+	});
+
+	it("keeps daemon results and native fallback when the root stat fails", async () => {
+		const file = path.join(dir, "a.txt");
+		const realStat = fs.stat;
+		vi.spyOn(fs, "stat").mockImplementation((async (target: PathLike) => {
+			if (String(target) === file) throw new Error("stat failed");
+			return realStat(target);
+		}) as typeof fs.stat);
+		reply = {
+			ok: {
+				matches: [{ path: "/virtual/a.txt", line: 1, text: "daemon needle" }],
+				total_matches: 1,
+				files_with_matches: 1,
+				files_searched: 1,
+			},
+		};
+		const result = await grep({ pattern: "needle", path: file }, null, ovnfs);
+		expect(received).toEqual([
+			{ id: expect.any(Number), grep: { dir: await fs.realpath(file), pattern: "needle", hidden: true } },
+		]);
+		expect(result.matches).toEqual([{ path: file, lineNumber: 1, line: "daemon needle" }]);
+
+		reply = { error: { code: "invalid", message: "unknown field" } };
+		const fallback = await grep({ pattern: "needle", path: file }, null, ovnfs);
+		expect(received).toHaveLength(2);
+		expect(fallback.matches).toMatchObject([{ lineNumber: 1, line: "needle here" }]);
+	});
+
+	it("keeps named-file native searches within the remaining timeout after stat", async () => {
+		const file = path.join(dir, "a.txt");
+		const realStat = fs.stat;
+		vi.spyOn(fs, "stat").mockImplementation((async (target: PathLike) => {
+			await Bun.sleep(40);
+			return realStat(target);
+		}) as typeof fs.stat);
+		let nativeTimeoutMs: number | undefined;
+		const realGrep = natives.grep;
+		vi.spyOn(natives, "grep").mockImplementation((options, onMatch) => {
+			nativeTimeoutMs = options.timeoutMs;
+			return realGrep(options, onMatch);
+		});
+
+		const timeoutMs = 5_000;
+		const result = await grep({ pattern: "needle", path: file, timeoutMs }, null, ovnfs);
+		expect(result.matches).toMatchObject([{ lineNumber: 1, line: "needle here" }]);
+		expect(nativeTimeoutMs).toBeDefined();
+		expect(nativeTimeoutMs!).toBeGreaterThan(0);
+		expect(nativeTimeoutMs!).toBeLessThanOrEqual(timeoutMs - 30);
+		await expect(grep({ pattern: "needle", path: file, timeoutMs: 1 }, null, ovnfs)).rejects.toThrow(
+			"Aborted: Timeout",
+		);
+		expect(received).toEqual([]);
+	});
+
+	it("preserves caller aborts for named-file native searches", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			grep({ pattern: "needle", path: path.join(dir, "a.txt"), signal: controller.signal }, null, ovnfs),
+		).rejects.toThrow("Aborted");
+		expect(received).toEqual([]);
 	});
 
 	it("maps glob replies and calls onMatch per match", async () => {

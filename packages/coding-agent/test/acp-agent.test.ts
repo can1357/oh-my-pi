@@ -3958,7 +3958,7 @@ describe("ACP agent", () => {
 					],
 					default: "staging",
 				},
-				target_other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
+				target__other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
 				checks: {
 					type: "array",
 					title: "Checks",
@@ -3970,7 +3970,7 @@ describe("ACP agent", () => {
 					},
 					default: ["lint"],
 				},
-				checks_other: {
+				checks__other: {
 					type: "string",
 					title: "Checks — Other",
 					description: "Another answer, added to those checked",
@@ -3996,9 +3996,9 @@ describe("ACP agent", () => {
 				action: "accept",
 				content: {
 					target: "staging",
-					target_other: " canary ",
+					target__other: " canary ",
 					checks: ["lint"],
-					checks_other: "smoke",
+					checks__other: "smoke",
 					replicas: 2,
 				},
 			}));
@@ -4209,6 +4209,25 @@ describe("ACP agent", () => {
 			expect(await ctx.confirm("X", "Y")).toBe(false);
 			expect(await ctx.input("X")).toBeUndefined();
 			expect(calls).toHaveLength(3);
+		});
+
+		it("rejects form and ask dialogs with the client's error instead of reporting a cancel", async () => {
+			const clientError = new RequestError(-32602, "Unsupported ACP elicitation form");
+			const { connection } = createElicitConnection(async () => {
+				throw clientError;
+			});
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-reject", FORM_CAPABILITIES);
+
+			const formError = await ctx.formDialog!(DEPLOY_FORM).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			expect(formError).toBeInstanceOf(Error);
+			expect((formError as Error).message).toContain("Unsupported ACP elicitation form");
+			expect((formError as Error).cause).toBe(clientError);
+			await expect(
+				ctx.askDialog!([{ id: "choice", question: "Choose", options: [{ label: "A" }] }]),
+			).rejects.toThrow("Unsupported ACP elicitation form");
 		});
 
 		it("skips the SDK call entirely when dialogOptions.signal is already aborted", async () => {

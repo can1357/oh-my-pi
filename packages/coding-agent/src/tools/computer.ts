@@ -9,7 +9,12 @@ import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
-import { type ComputerScreenshot, type ComputerSessionSnapshot, screenStateNotice } from "./computer/protocol";
+import {
+	type ComputerScreenshot,
+	type ComputerSessionSnapshot,
+	screenStateNotice,
+	secureInputNotice,
+} from "./computer/protocol";
 import {
 	type ComputerController,
 	ComputerSupervisor,
@@ -17,7 +22,7 @@ import {
 	registerComputerController,
 } from "./computer/supervisor";
 import type { ToolSession } from "./index";
-import { renderCallChain, renderFunctionRun } from "./run-code";
+import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
@@ -166,7 +171,10 @@ function describeComputerCall(parameters: unknown): string | undefined {
 	if (parsed instanceof type.errors) return undefined;
 	switch (parsed.action) {
 		case "call":
-			return `desktop.${renderCallChain(parsed.chain)}`;
+			// Text `type`, `setValue` and `clipboard.write` enter is their first argument.
+			return `desktop.${renderStatusCallChain(parsed.chain, step =>
+				step.method === "type" || step.method === "setValue" || step.method === "clipboard.write" ? 0 : undefined,
+			)}`;
 		case "run":
 			return `run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
 		case "capabilities":
@@ -279,6 +287,8 @@ async function runComputer(
 	const content: AgentToolResult<ComputerPreludeDetails>["content"] = [];
 	const notice = screenStateNotice(run.capabilities);
 	if (notice) content.push({ type: "text", text: notice });
+	const secure = secureInputNotice(run.capabilities);
+	if (secure) content.push({ type: "text", text: secure });
 	if (cappedText) content.push({ type: "text", text: cappedText });
 	for (const image of run.displays) {
 		if (image.type === "image") content.push({ ...image, detail: "original" });

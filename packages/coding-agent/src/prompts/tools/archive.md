@@ -1,4 +1,4 @@
-Read-only local history via the global `archive`: recent projects, past sessions with recaps, searchable prompt history.
+Read-only local history: recent projects, past sessions with recaps, searchable prompt history.
 
 The `archive` object exists in JavaScript and Python Eval; it is not a standalone tool.
 
