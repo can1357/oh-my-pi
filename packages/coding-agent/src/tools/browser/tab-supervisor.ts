@@ -482,6 +482,11 @@ async function acquireTabImpl(
 	// below cannot drop it to refCount 0 and dispose the instance we are about
 	// to reuse (e.g. reopening the sole tab with a different dialogs policy).
 	let tempHold = false;
+	// A tab Chrome refused over another extension's frame is re-adopted first, as a run does it.
+	const heldOut = tabs.get(name);
+	if (heldOut?.backend === "worker" && heldOut.heldOut && !heldOut.workerRecovery) {
+		readoptHeldOutTab(heldOut, opts.timeoutMs);
+	}
 	// A tab whose worker exited is being reattached: the open reuses the tab the reattach leaves, or opens a fresh
 	// one if the reattach closed it, instead of reporting a tab whose worker is gone.
 	const reattaching = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
@@ -767,6 +772,7 @@ async function navigateOpenedTab(
 		}
 		if (
 			error instanceof ToolAbortError ||
+			error instanceof TabHeldOutError ||
 			error instanceof RendererCrashedError ||
 			!(error instanceof Error) ||
 			tabs.get(name)?.state !== "alive"

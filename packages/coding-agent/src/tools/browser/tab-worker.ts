@@ -125,6 +125,7 @@ import {
 import { DownloadManager, type BrowserDownload } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
 import { applyInsecure } from "./open-options";
+import { FOREIGN_FRAME_REFUSAL } from "./relay/protocol";
 import {
 	BrowserNetworkManager,
 	type HarContentPolicy,
@@ -2171,12 +2172,18 @@ export class WorkerCore {
 			if ((await targetIdForTarget(target).catch(() => "")) !== targetId) continue;
 			return target;
 		}
-		// The omp relay withholds a tab Chrome refused to attach, and says why beside `Target.getTargetInfo`.
-		const browser = this.#browser;
-		const refusal = await Promise.try(() => browserConnection(browser).send("Target.getTargetInfo", { targetId }))
-			.then((result: unknown) => (isRecord(result) && typeof result.refusal === "string" ? result.refusal : undefined))
-			.catch(() => undefined);
-		if (refusal) throw new ToolError(`Chrome refused to attach to target ${targetId}: ${refusal}`);
+		// The omp relay withholds a tab Chrome refused to attach, and says why beside `Target.getTargetInfo`. A refusal over
+		// another extension's frame fails at once, so the supervisor can keep the tab for a later call.
+		let refusal: string | undefined;
+		try {
+			const result: unknown = await browserConnection(this.#browser).send("Target.getTargetInfo", { targetId });
+			if (isRecord(result) && typeof result.refusal === "string") refusal = result.refusal;
+		} catch {
+			// Not the omp relay, or the target is gone: decided below.
+		}
+		if (refusal && FOREIGN_FRAME_REFUSAL.test(refusal)) {
+			throw new ToolError(`Chrome refused to attach to target ${targetId}: ${refusal}`);
+		}
 		// Puppeteer lists a page only once its URL is non-empty, and a crashed page revived by this attach reloads
 		// with an empty URL for a moment. Wait for it while Chromium still has the target; fail at once when not.
 		if (await this.#browserHasTarget(this.#browser, targetId)) {
