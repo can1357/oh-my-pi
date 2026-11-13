@@ -66,7 +66,11 @@ import {
 } from "../wire/singularityapi";
 import { isXiaomiTokenPlanKey } from "../wire/xiaomi-token-plan";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
-import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
+import {
+	getDefaultModelDiscoveryBaseUrl,
+	resolveLiteLLMDiscoveryTimeoutMs,
+	resolveModelCacheProviderId,
+} from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
 import { filterModelsDevCatalogRows } from "./models-dev-policies";
@@ -5674,6 +5678,14 @@ export interface LiteLLMModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/**
+	 * Deadline in milliseconds for each of the rich metadata walk and the
+	 * `/v1/models` roster fetch. Large proxies stream `/model/info` for several
+	 * seconds; when the walk is abandoned, discovery degrades to rows without
+	 * reasoning or context metadata. Non-positive or non-finite values fall back
+	 * to {@link DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS}.
+	 */
+	discoveryTimeoutMs?: number;
 }
 
 export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
@@ -6439,12 +6451,13 @@ export async function fetchLiteLLMRichModels<TApi extends Api>(
 export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
+	const timeoutMs = resolveLiteLLMDiscoveryTimeoutMs(config?.discoveryTimeoutMs);
 	return {
 		providerId: "litellm",
 		dynamicModelsAuthoritative: true,
 		// Cache namespaces include the credential: virtual keys on one proxy
 		// can see different model rosters.
-		cacheProviderId: resolveModelCacheProviderId("litellm", { apiKey, baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("litellm", { apiKey, baseUrl, discoveryTimeoutMs: timeoutMs }),
 		// LiteLLM's authenticated /v1/models is the selectable roster; management
 		// endpoints only supply metadata for those exact ids.
 		fetchDynamicModels: async () => {
@@ -6458,6 +6471,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				mapModel: (entry, defaults) =>
 					mapLiteLLMOpenAICompatibleModel(entry, defaults, resolveReference(defaults.id)),
 				fetch: config?.fetch,
+				timeoutMs,
 			});
 			if (scopedModels === null) {
 				logger.warn("LiteLLM /v1/models unavailable; cannot determine the authorized model roster", { baseUrl });
@@ -6472,7 +6486,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				fetch: config?.fetch,
 				referenceResolver: resolveReference,
 				resolveApi: resolveLiteLLMApi,
-				timeoutMs: 10_000,
+				timeoutMs,
 			});
 			const richById = new Map(rich?.models.map(model => [model.id, model]));
 			const models = scopedModels

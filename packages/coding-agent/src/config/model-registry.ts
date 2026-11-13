@@ -43,6 +43,7 @@ import {
 	modelsDevCatalogFallback,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
+	resolveLiteLLMDiscoveryTimeoutMs,
 	resolveModelCacheProviderId,
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
@@ -117,6 +118,7 @@ import {
 	kNoAuth,
 	type ProviderDiscoveryState,
 	RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS,
+	resolveBuiltInDiscoveryBudgetMs,
 	resolveOAuthDiscoveryAccounts,
 	SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 	STARTUP_MODEL_CACHE_PROVIDER_IDS,
@@ -1670,6 +1672,13 @@ export class ModelRegistry {
 		);
 	}
 
+	#descriptorDiscoveryTimeoutMs(providerId: string): number | undefined {
+		const timeoutMs =
+			this.#runtimeProviderOverrides.get(providerId)?.discoveryTimeoutMs ??
+			this.#providerOverrides.get(providerId)?.discoveryTimeoutMs;
+		return providerId === "litellm" ? resolveLiteLLMDiscoveryTimeoutMs(timeoutMs) : timeoutMs;
+	}
+
 	/**
 	 * Credential-less cache namespace. Wrong for credential-scoped providers
 	 * (`isCredentialScopedModelCacheProvider`), whose discovery writes hash the
@@ -2141,7 +2150,7 @@ export class ModelRegistry {
 				baseUrlApis.add(providerConfig.api);
 			}
 			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis] : undefined;
-			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
+			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport/discoveryTimeoutMs are present
 			if (
 				providerConfig.baseUrl ||
 				providerConfig.headers ||
@@ -2152,7 +2161,8 @@ export class ModelRegistry {
 				providerConfig.guardrailIdentifier ||
 				providerConfig.requestMetadata ||
 				providerConfig.remoteCompaction ||
-				providerConfig.transport
+				providerConfig.transport ||
+				providerConfig.discoveryTimeoutMs !== undefined
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
@@ -2174,6 +2184,7 @@ export class ModelRegistry {
 					guardrailVersion: providerConfig.guardrailVersion,
 					guardrailTrace: providerConfig.guardrailTrace,
 					requestMetadata: providerConfig.requestMetadata,
+					discoveryTimeoutMs: providerConfig.discoveryTimeoutMs,
 				});
 			}
 
@@ -2854,6 +2865,7 @@ export class ModelRegistry {
 				hasExplicitVllmConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
+				const discoveryTimeoutMs = this.#descriptorDiscoveryTimeoutMs(descriptor.providerId);
 				// Residency belongs to the token selected for discovery, not another
 				// stored account that happens to appear first in the pool.
 				const identity = getOAuthCredentialsForProvider(this.authStorage, descriptor.providerId).find(
@@ -2870,7 +2882,10 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				const managerOptions = descriptor.createModelManagerOptions({
+					...preparedConfig,
+					...(discoveryTimeoutMs !== undefined ? { discoveryTimeoutMs } : {}),
+				});
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
@@ -2927,8 +2942,9 @@ export class ModelRegistry {
 		let failure: string | undefined;
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
-			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-				manager.refresh(strategy),
+			const result = await withModelDiscoveryTimeout(
+				resolveBuiltInDiscoveryBudgetMs(options.providerId, this.#descriptorDiscoveryTimeoutMs(options.providerId)),
+				() => manager.refresh(strategy),
 			);
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
@@ -3035,6 +3051,7 @@ export class ModelRegistry {
 			compat: override.compat ? mergeCompat(baseOverride?.compat, override.compat) : baseOverride?.compat,
 			remoteCompaction: mergeRemoteCompactionConfig(baseOverride?.remoteCompaction, override.remoteCompaction),
 			transport: override.transport ?? baseOverride?.transport,
+			discoveryTimeoutMs: override.discoveryTimeoutMs ?? baseOverride?.discoveryTimeoutMs,
 		};
 	}
 	#applyProviderTransportOverride<
@@ -4190,7 +4207,8 @@ export class ModelRegistry {
 			config.apiKey ||
 			config.authHeader !== undefined ||
 			config.remoteCompaction !== undefined ||
-			config.transport !== undefined
+			config.transport !== undefined ||
+			config.discoveryTimeoutMs !== undefined
 		) {
 			const transportOverride = {
 				baseUrl: config.baseUrl,
@@ -4199,6 +4217,7 @@ export class ModelRegistry {
 				authHeader: config.authHeader,
 				remoteCompaction: config.remoteCompaction,
 				transport: config.transport,
+				discoveryTimeoutMs: config.discoveryTimeoutMs,
 			};
 			const nextRuntimeOverride = this.#mergeProviderOverride(
 				this.#runtimeProviderOverrides.get(providerName),
@@ -4386,6 +4405,8 @@ function sameDiscoveredRows(a: readonly Model<Api>[], b: readonly Model<Api>[]):
  */
 export interface ProviderConfigInput {
 	baseUrl?: string;
+	/** Built-in LiteLLM deadline for each authorized-roster and rich-metadata stage. */
+	discoveryTimeoutMs?: number;
 	apiKey?: string;
 	api?: Api;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;

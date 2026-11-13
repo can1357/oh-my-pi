@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added provider-level `discoveryTimeoutMs` in `models.yml` so slow built-in LiteLLM proxies can retain rich reasoning and context metadata ([#11390](https://github.com/can1357/oh-my-pi/pull/11390) by [@PeterPonyu](https://github.com/PeterPonyu))
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))

@@ -1,3 +1,4 @@
+import { DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS } from "../discovery/openai-compatible";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
@@ -12,6 +13,8 @@ import {
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
 	baseUrl?: string;
+	/** LiteLLM rich-discovery deadline; part of the cache namespace so a longer budget does not reuse a stale fallback. */
+	discoveryTimeoutMs?: number;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -101,6 +104,13 @@ function jwtCredentialSubject(apiKey: string): string | undefined {
 	}
 }
 
+/** Configured LiteLLM deadline when positive and finite, otherwise the built-in default. */
+export function resolveLiteLLMDiscoveryTimeoutMs(configuredTimeoutMs: number | undefined): number {
+	return configuredTimeoutMs !== undefined && Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+		? configuredTimeoutMs
+		: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS;
+}
+
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */
 export function resolveModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions = {}): string {
 	switch (providerId) {
@@ -187,11 +197,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "litellm": {
 			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
-			// The selectable roster is issued per virtual key; old rich-only
-			// snapshots must not survive the switch to scoped discovery. Bump the
-			// version whenever the LiteLLM mappers change, or warm caches keep
-			// serving pre-change rows for the full TTL (rich-v1…v14 history in git).
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			const timeoutMs = resolveLiteLLMDiscoveryTimeoutMs(options.discoveryTimeoutMs);
+			// The selectable roster is issued per virtual key. Include the deadline
+			// so a longer budget retries metadata instead of reusing a timed-out cache.
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${timeoutMs}`;
 			return `litellm:scoped-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "gmi-cloud":

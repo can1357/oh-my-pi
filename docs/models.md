@@ -354,11 +354,13 @@ Must define at least one of:
 - `requestMetadata`
 - non-empty `modelOverrides`
 - `discovery`
+- `discoveryTimeoutMs`
 - `remoteCompaction`
 
 ### Discovery
 
 - `discovery.timeoutMs` overrides that provider's runtime HTTP probe timeout in milliseconds. It must be a positive finite number.
+- `discoveryTimeoutMs` overrides the built-in manager deadline (currently `litellm`) in milliseconds. It must be a positive finite number. It does not apply to providers that set `discovery:`.
 - Without an override, Ollama and llama.cpp loopback probes use short endpoint-specific budgets (150–250 ms); remote/LAN probes use 10 s. Generic model-list and proxy probes default to 10 s.
 - `discovery` requires provider-level `api`, except `discovery.type: proxy` (per-model wire auto-detected).
 
@@ -603,9 +605,23 @@ When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth),
 - base URL: explicit provider `baseUrl` / `models.yml` config, otherwise `LITELLM_BASE_URL`, otherwise `http://localhost:4000/v1`
 - auth mode: `LITELLM_API_KEY` or stored LiteLLM auth when the proxy requires a key
 
-Runtime discovery probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. The configured key must be authorized to read at least one of these routes; on deployments that restrict management endpoints, grant the route through LiteLLM's `allowed_routes` access controls or use a master/admin key for discovery.
+Built-in runtime discovery first fetches the authenticated `/v1/models` roster, then probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. Management metadata only enriches authorized roster IDs. The configured key must be authorized to read at least one management route to obtain rich metadata; deployments that restrict these routes can grant access through LiteLLM's `allowed_routes` controls.
 
-If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
+If every metadata route is unavailable, built-in discovery keeps the authorized roster without rich metadata. If the roster request fails, discovery does not substitute a management endpoint's roster. Explicit `discovery.type: litellm` retains its management-first discovery and OpenAI-compatible `GET /models` fallback. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
+
+The authenticated `/v1/models` roster fetch and the rich-metadata walk each receive a 10 s deadline by default. A large proxy that streams `/model/info` for several seconds can miss that budget and cache every model as `reasoning: false` for the catalog TTL. Raise the built-in deadline with provider-level `discoveryTimeoutMs` without switching onto `discovery.type: litellm`:
+
+```yaml
+providers:
+  litellm:
+    baseUrl: http://127.0.0.1:4000/v1
+    discoveryTimeoutMs: 30000
+```
+
+The built-in refresh budget covers models.dev enrichment (up to 10 s), then the authorized roster
+fetch and rich metadata walk with the full configured deadline each, plus processing overhead.
+Changing the deadline selects a separate cache namespace so a longer deadline can
+retry discovery instead of reusing rows cached after a shorter timeout.
 
 ### Generic OpenAI-compatible discovery
 
