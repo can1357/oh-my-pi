@@ -2,14 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `inheritContext` flag to the task tool's item and params types ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
 
 - The Spotlight sheet of a `;`/`,` path `read` shows each part as its own section, numbered from its file's lines with its own ranking ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
-### Added
-
-- Added an optional `inheritContext` flag to the task tool's item and params types ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 

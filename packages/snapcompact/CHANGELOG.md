@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `resolveTailShapeForText()` picks the frame shape for a short conversation tail read once as background, with whether to list its exact identifiers beside the frames: under `auto`, `8x13-bw` for Claude and `11on16-bw` without the list for Gemini, both at 1568px ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
 
-- `resolveTailShapeForText()` picks the frame shape for a short conversation tail read once as background, with whether to list its exact identifiers beside the frames: under `auto`, `8x13-bw` for Claude and `11on16-bw` without the list for Gemini, both at 1568px ([#19033](https://github.com/can1357/oh-my-pi/pull/19033) by [@wolfiesch](https://github.com/wolfiesch))
 - `resolveShapeAndScan()` returns the auto-picked shape together with its `scanRenderability()` verdict, reusing the scan auto resolution already runs; exported `ShapeScan` and `RenderabilityScan` types ([#15689](https://github.com/can1357/oh-my-pi/issues/15689), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed
