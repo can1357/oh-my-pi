@@ -803,10 +803,15 @@ export class TranscriptContainer extends Container {
 			// emergency layout consults them only where it must.
 			return this.#renderEmergency(shown, live.slice(0, unrendered), width, capacity, frame);
 		}
-		// A clipped block with an image would draw it over the rows above the
-		// viewport (iTerm2 draws upward from its image row), so it shows blank
-		// rows until its split retires the image into scrollback.
-		const blankHead = clip && filled > capacity && measuredImages[0]!;
+		// A cut through an image the terminal cannot draw in part (iTerm2 draws
+		// the whole picture upward from its image row) would paint it over the
+		// rows above the viewport, so that block shows blank rows until its
+		// split retires the image into scrollback. `filled` excludes the
+		// separator history owes the head, so the overflow is exactly the head
+		// rows clipped off the top.
+		const headClipped = filled - capacity;
+		const blankHead =
+			clip && headClipped > 0 && measuredImages[0]! && cutBelowWholeImage(blocks[0]!, headClipped) !== headClipped;
 		// The walk ran newest-first, so the images it measured claimed no
 		// display slot (see #measure). Render those blocks again oldest-first:
 		// the image budget keeps the newest images live by observation order.

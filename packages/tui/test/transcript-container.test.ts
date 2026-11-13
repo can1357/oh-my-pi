@@ -7,6 +7,7 @@ import {
 	type TranscriptStableRow,
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
@@ -865,6 +866,55 @@ describe("TranscriptContainer", () => {
 		transcript.addChild(new Block(["done1", "done2"], true));
 
 		expect(transcript.renderViewport(80, 4, frame)).toEqual(["figure2", "", "done1", "done2"]);
+	});
+
+	describe("clipped head with an inline image", () => {
+		// Two text rows, an image's three reserved rows and the row that draws it upward over them, two text rows.
+		const imageRows = [
+			"above 1",
+			"above 2",
+			"\x1b[0m",
+			"\x1b[0m",
+			"\x1b[0m",
+			"\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8",
+			"below 1",
+			"below 2",
+		];
+		/** Observes a budgeted image while rendering, as an `Image` child does. */
+		class BudgetedImageBlock extends Block {
+			readonly #budget = new ImageBudget();
+			override render(): readonly string[] {
+				this.#budget.observe(1);
+				return super.render();
+			}
+		}
+
+		for (const [protocol, capacity, painted] of [
+			// The cut lands inside an image iTerm2 would draw over the rows above the viewport.
+			[ImageProtocol.Iterm2, 7, ["", "", "", "", "", "", "tail"]],
+			// The image sits wholly below the cut, so nothing draws above the viewport.
+			[ImageProtocol.Iterm2, 9, [...imageRows.slice(1), "", "tail"]],
+			// Kitty draws the visible part of a cut image.
+			[ImageProtocol.Kitty, 7, [...imageRows.slice(3), "", "tail"]],
+		] as const) {
+			it(`blanks the head only for a cut inside an image the terminal cannot draw in part (${protocol}, ${capacity} rows)`, () => {
+				const previous = TERMINAL.imageProtocol;
+				setTerminalImageProtocol(protocol);
+				try {
+					const transcript = new TranscriptContainer();
+					const head = new BudgetedImageBlock([...imageRows], true);
+					transcript.addChild(head);
+					transcript.addChild(new Block(["tail"], true));
+
+					expect(transcript.renderViewport(80, capacity, frame)).toEqual(painted);
+					// A blanked head draws nothing, so clicks on its rows must not resolve to it.
+					const owners = transcript.getLastViewportSpans().map(span => span.component);
+					expect(owners.includes(head)).toBe(painted[0] !== "");
+				} finally {
+					setTerminalImageProtocol(previous);
+				}
+			});
+		}
 	});
 
 	it("keeps an emergency row from a block behind the bounded viewport walk", () => {
