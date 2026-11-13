@@ -5,6 +5,12 @@
 ### Fixed
 
 - A seance `task` whose `sourceSession` id belongs to another project now fails with a hint to pass that session's `.jsonl` path, which works from any project, instead of only "was not found" ([#19095](https://github.com/can1357/oh-my-pi/pull/19095) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
+- `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
+- `/annotate session` now opens the same fullscreen message picker as `/copy` in classic terminals and Tern ([#19145](https://github.com/can1357/oh-my-pi/pull/19145) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Edit responses now show inserted or replaced runs of up to 41 lines in full instead of collapsing them to `…`, so the next edit can target lines it just wrote without a "never displayed" rejection ([#19091](https://github.com/can1357/oh-my-pi/issues/19091))
+- Edit responses mark skipped lines between separate hunks with `…` instead of a blank line ([#19091](https://github.com/can1357/oh-my-pi/issues/19091))
+- After a file changes outside the edit tool (formatter, build step, another writer), lines an earlier read displayed that kept their number and content can still be edited after a partial re-read, instead of being rejected as never displayed ([#19092](https://github.com/can1357/oh-my-pi/issues/19092))
 
 ## [18.20.0] - 2026-11-12
 
