@@ -250,3 +250,24 @@ export function projectNativeRequest(
 	if (options.history) projectedBody["<history-thinking>"] = historyHasThinking(body.messages);
 	return { path, headers: projectedHeaders, body: projectedBody };
 }
+
+/**
+ * The corpus after a capture run: each declared case takes this run's capture,
+ * else keeps its entry from the previous corpus (not selected, or its capture
+ * failed); cases no longer declared drop out.
+ */
+export function mergeNativeCaptures(
+	previous: readonly NativeCapture[],
+	captured: readonly NativeCapture[],
+): NativeCapture[] {
+	return NATIVE_CASES.flatMap(testCase => {
+		const entry = [...captured, ...previous].find(
+			capture =>
+				capture.model === testCase.model &&
+				capture.upstream === testCase.upstream &&
+				capture.effort === testCase.effort &&
+				capture.prime === testCase.prime,
+		);
+		return entry ? [entry] : [];
+	});
+}

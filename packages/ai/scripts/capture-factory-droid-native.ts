@@ -13,14 +13,18 @@
  * account is not yet entitled). Each case is a real
  * tool round trip (read a file, answer with its contents), so the recording
  * covers both the opening request and the follow-up that carries the tool
- * result. A `prime` case runs that round trip at the priming effort, then
- * resumes the session at the case's effort and records the resumed request,
- * whose history the round trip made thinking-led. Only the dialect projection
- * is written, to `test/fixtures/factory-droid-native-requests.json`;
+ * result. A `prime` case runs that round trip at the priming effort, with a
+ * prompt that asks for reasoning before the tool call so the turn carries
+ * thinking, then resumes the session at the case's effort and records the
+ * resumed request, whose history the round trip made thinking-led. Only the
+ * dialect projection is written, to
+ * `test/fixtures/factory-droid-native-requests.json`;
  * credentials and conversation content never leave the process. Every case
  * spends Factory credits and creates a session on the account. With `--only`,
  * the selected model's cases are recaptured and merged into the existing file.
- * Any case that cannot be captured aborts the run before the corpus is written.
+ * A case that cannot be captured keeps its entry from the existing file; the
+ * run still writes every case it did capture, then exits non-zero naming the
+ * `--only` reruns that would finish the corpus.
  * Side effect: droid caches the rewritten feature-flag and routing response in
  * its own config, so a forced `flag` or pinned upstream can outlive the run
  * until droid next refreshes flags; run `droid` once afterwards to refetch.
@@ -30,6 +34,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import {
+	mergeNativeCaptures,
 	NATIVE_CASES,
 	type NativeCapture,
 	type NativeCase,
@@ -37,6 +42,7 @@ import {
 	projectNativeRequest,
 } from "../test/helpers/factory-droid-native";
 import capturePrompt from "./prompts/factory-droid-capture.md" with { type: "text" };
+import primePrompt from "./prompts/factory-droid-capture-prime.md" with { type: "text" };
 import resumePrompt from "./prompts/factory-droid-capture-resume.md" with { type: "text" };
 
 const { values } = parseArgs({
@@ -55,6 +61,7 @@ const droid = path.resolve(values.droid);
 
 const NONCE = "nonce-7f3a91";
 const PROMPT = capturePrompt.trim();
+const PRIME_PROMPT = primePrompt.trim();
 const RESUME_PROMPT = resumePrompt.trim();
 /** Hop-by-hop and encoding headers the proxy must not copy across. */
 const HOP_HEADERS = new Set([
@@ -166,7 +173,7 @@ async function capture(testCase: NativeCase, workdir: string): Promise<NativeReq
 			return (stderr || stdout).trim() || `${requests.length} inference requests`;
 		return [opening.request, followUp.request];
 	}
-	const primed = await run(["-m", testCase.model, "-r", testCase.prime, "-o", "json", PROMPT], workdir);
+	const primed = await run(["-m", testCase.model, "-r", testCase.prime, "-o", "json", PRIME_PROMPT], workdir);
 	const followUp = requests[1];
 	if (!primed.stdout.includes(NONCE) || !followUp)
 		return (primed.stderr || primed.stdout).trim() || `${requests.length} priming requests`;
@@ -192,31 +199,21 @@ async function capture(testCase: NativeCase, workdir: string): Promise<NativeReq
 const label = (testCase: NativeCase) =>
 	`${testCase.model}@${testCase.upstream} ${testCase.effort}${testCase.prime ? ` after ${testCase.prime}` : ""}`;
 
-const previous: NativeCapture[] = values.only ? await Bun.file(values.out).json() : [];
+const previous: NativeCapture[] = (await Bun.file(values.out).exists()) ? await Bun.file(values.out).json() : [];
 const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "droid-native-capture-"));
 await Bun.write(path.join(workdir, "probe.txt"), `${NONCE}\n`);
-const captures: NativeCapture[] = [];
-const failed: string[] = [];
+const captured: NativeCapture[] = [];
+const failed: NativeCase[] = [];
 try {
 	for (const testCase of NATIVE_CASES) {
-		if (values.only && !values.only.includes(testCase.model)) {
-			const kept = previous.find(
-				capture =>
-					capture.model === testCase.model &&
-					capture.upstream === testCase.upstream &&
-					capture.effort === testCase.effort &&
-					capture.prime === testCase.prime,
-			);
-			if (kept) captures.push(kept);
-			continue;
-		}
-		const result = await capture(testCase, workdir);
+		if (values.only && !values.only.includes(testCase.model)) continue;
+		const result = await capture(testCase, workdir).catch((error: unknown) => String(error));
 		if (typeof result === "string") {
 			console.error(`skipped ${label(testCase)}: ${result}`);
-			failed.push(label(testCase));
+			failed.push(testCase);
 			continue;
 		}
-		captures.push({ ...testCase, requests: result });
+		captured.push({ ...testCase, requests: result });
 		console.error(`captured ${label(testCase)}`);
 	}
 } finally {
@@ -224,9 +221,15 @@ try {
 	await fs.rm(workdir, { recursive: true, force: true });
 }
 
+if (captured.length > 0) {
+	const corpus = mergeNativeCaptures(previous, captured);
+	await Bun.write(values.out, `${JSON.stringify(corpus, null, "\t")}\n`);
+	console.error(
+		`wrote ${corpus.length}/${NATIVE_CASES.length} cases (${captured.length} captured now) to ${values.out}`,
+	);
+}
 if (failed.length > 0) {
-	console.error(`not writing ${values.out}: ${failed.length} case(s) failed: ${failed.join(", ")}`);
+	const reruns = [...new Set(failed.map(testCase => `--only ${testCase.model}`))].join(" ");
+	console.error(`${failed.length} case(s) failed: ${failed.map(label).join(", ")}; rerun with ${reruns}`);
 	process.exit(1);
 }
-await Bun.write(values.out, `${JSON.stringify(captures, null, "\t")}\n`);
-console.error(`wrote ${captures.length}/${NATIVE_CASES.length} cases to ${values.out}`);
