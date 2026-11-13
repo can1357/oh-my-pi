@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Usage reporting now covers every configured credential independently of inference session restrictions.
+- Usage reporting now covers every configured credential independently of inference session restrictions ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
 
 ## [18.19.0] - 2026-11-12
 

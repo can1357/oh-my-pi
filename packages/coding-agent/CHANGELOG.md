@@ -8,9 +8,9 @@
 
 ### Changed
 
-- Usage Details now shows every stored account even when inference is restricted to a session account pool.
-- Interactive `/login` now permits the added OAuth account in the current session pool without changing the saved pool or other sessions.
-- `/session pin` now hard-restricts every session to the selected provider account instead of rotating to a sibling when it becomes unavailable.
+- Usage Details now shows every stored account even when inference is restricted to a session account pool ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+- Interactive `/login` now permits the added OAuth account in the current session pool without changing the saved pool or other sessions ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+- `/session pin` now hard-restricts every session to the selected provider account instead of rotating to a sibling when it becomes unavailable ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
 
 ## [18.19.0] - 2026-11-12
 
