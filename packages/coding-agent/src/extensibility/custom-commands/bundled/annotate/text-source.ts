@@ -1,5 +1,9 @@
 import { transcriptEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { type CopyPickSource, CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import {
+	COPY_SELECTOR_OVERLAY_OPTIONS,
+	type CopyPickSource,
+	CopySelectorComponent,
+} from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { assistantText } from "@oh-my-pi/pi-tui/overlays/copy-targets";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
 import { isTranscriptEntry } from "../../../../session/session-context";
@@ -147,16 +151,7 @@ export async function selectSessionTextReviewSource(
 				onPick: (content, label, source) => done({ content, label, ...source }),
 				onCancel: () => done(undefined),
 			}),
-		{
-			overlay: true,
-			overlayOptions: {
-				anchor: "bottom-center",
-				width: "100%",
-				maxHeight: "100%",
-				margin: 0,
-				fullscreen: true,
-			},
-		},
+		{ overlay: true, overlayOptions: COPY_SELECTOR_OVERLAY_OPTIONS },
 	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
 }
