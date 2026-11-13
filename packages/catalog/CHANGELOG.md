@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed Gemini 4 Argon on Command Code reporting $0 spend; it now bills at Command Code's $2 input, $10 output and $0.10 cache-read rates per million tokens.
 - Fixed Gemini 4 Argon, Carbon and Hydrogen on the Gemini API and Vertex AI stopping long answers at 32,768 or 65,536 output tokens, often before any visible text; they now allow up to 262,144, so long answers continue past the first segment ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat)).
 
 ## [18.20.0] - 2026-11-12

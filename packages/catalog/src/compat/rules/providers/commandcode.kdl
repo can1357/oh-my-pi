@@ -682,6 +682,17 @@ provider "commandcode" {
 			cache-write 0.0
 		}
 	}
+	// Gemini 4 Argon follows command-code@1.88.5, which lists it at a flat
+	// 2/10 with 0.1 cache reads. That release has no Gemini 4 Carbon rate, so
+	// Carbon keeps the zero discovery default.
+	models "google/gemini-4-argon" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
+			cache-write 0.0
+		}
+	}
 	// Gemini 3.7 Flash is the only Gemini row with a Cache Write column.
 	models "google/gemini-3.7-flash" {
 		cost-patch {
