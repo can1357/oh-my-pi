@@ -79,20 +79,27 @@ export function copyCursorExecResolved(target: CursorExecResolvedCarrier, source
 
 /**
  * Marks a text block synthesized by cross-model thinking demotion in
- * `transformMessages`. Converters that flatten adjacent text blocks into one
- * string (openai-completions) insert a paragraph separator after marked
- * blocks; unmarked adjacent blocks keep their original byte sequence.
- * Symbol-keyed so the marker never persists across the JSONL round-trip and
- * never reaches the wire.
+ * `transformMessages`; the value is the source thinking text before dialect
+ * wrapping. Converters that flatten adjacent text blocks into one string
+ * (openai-completions) insert a paragraph separator after marked blocks;
+ * unmarked adjacent blocks keep their original byte sequence. Responses
+ * encoders that must replay a reasoning item for the turn reuse the source
+ * text (see {@link demotedThinkingSource}). Symbol-keyed so the marker never
+ * persists across the JSONL round-trip and never reaches the wire.
  */
 export const kDemotedThinking = Symbol("provider.block.demotedThinking");
 
 /** Carries the demoted-thinking marker without exposing a string-keyed property. */
-export type DemotedThinkingCarrier = object & { [kDemotedThinking]?: boolean };
+export type DemotedThinkingCarrier = object & { [kDemotedThinking]?: string };
 
 /** True for text blocks synthesized by cross-model thinking demotion. */
 export function isDemotedThinking(block: DemotedThinkingCarrier | null | undefined): boolean {
-	return block?.[kDemotedThinking] === true;
+	return typeof block?.[kDemotedThinking] === "string";
+}
+
+/** Unwrapped thinking text a demoted block was rendered from; `undefined` for ordinary text. */
+export function demotedThinkingSource(block: DemotedThinkingCarrier | null | undefined): string | undefined {
+	return block?.[kDemotedThinking];
 }
 
 /**

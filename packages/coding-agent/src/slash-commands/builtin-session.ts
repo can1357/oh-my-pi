@@ -194,6 +194,7 @@ function launchSessionStatsDashboard(
 	const judge = resolveJudge({
 		settings: owner.settings,
 		registry: owner.session.modelRegistry,
+		sessionModel: owner.session.model,
 		sessionId: owner.session.sessionId,
 		purpose: "stats_frustration",
 		onUsage: journalJudgmentUsage(owner.sessionManager),
@@ -276,12 +277,16 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				if (!sessionFile) return usage("No session file to delete (in-memory session).", runtime);
 				// Detach the live agent before deleting its file; the next prompt must
 				// belong to a fresh session with a valid header and no old history.
+				// `drop` deletes the old file and keeps the successor lazy, so deleting
+				// never leaves an empty session behind.
 				try {
-					if (!(await runtime.session.newSession())) return usage("Session deletion cancelled.", runtime);
+					if (!(await runtime.session.newSession({ drop: true })))
+						return usage("Session deletion cancelled.", runtime);
 				} catch (err) {
 					return usage(`Failed to start a new session: ${errorMessage(err)}`, runtime);
 				}
 				try {
+					// `drop` only logs a failed delete; retry here to report it (ENOENT is success).
 					await runtime.sessionManager.dropSession(sessionFile);
 				} catch (err) {
 					return usage(

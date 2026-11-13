@@ -42,6 +42,7 @@ import * as commitSettings from "../commit/settings";
 import * as cliGcSettings from "../cli/gc-settings";
 import * as telemetrySettings from "../telemetry-settings";
 import * as spotlightSettings from "../spotlight/settings";
+import * as auxiliaryModelPolicy from "./auxiliary-model-policy";
 import * as decisionSettings from "../decision/settings";
 
 const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
@@ -81,6 +82,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	commitSettings,
 	cliGcSettings,
 	spotlightSettings,
+	auxiliaryModelPolicy,
 	decisionSettings,
 ];
 
