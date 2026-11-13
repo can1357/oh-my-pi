@@ -959,9 +959,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return { effort: params.effort };
 	}
 
-	/** Flagged item while `task.inheritContext` is on; the setting also drops a stale `true` at spawn time. */
-	#wantsInheritedContext(params: TaskParams): boolean {
-		return params.inheritContext === true && this.#isInheritContextEnabled();
+	/**
+	 * Flagged item while `task.inheritContext` is on, for an agent that does not opt out
+	 * (`inheritContext: false`); the setting also drops a stale `true` at spawn time.
+	 */
+	#inheritsContext(params: TaskParams, agent: { inheritContext?: boolean }): boolean {
+		return params.inheritContext === true && agent.inheritContext !== false && this.#isInheritContextEnabled();
 	}
 
 	/** `task.inheritContext`, unless this session's context reader is another agent's transcript. */
@@ -979,9 +982,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawns: readonly TaskParams[],
 		policies: readonly { agent: { inheritContext?: boolean } }[],
 	): { contexts: (InheritedContext | undefined)[]; dropped: number[] } {
-		const wants = spawns.map(
-			(spawn, index) => this.#wantsInheritedContext(spawn) && policies[index]!.agent.inheritContext !== false,
-		);
+		const wants = spawns.map((spawn, index) => this.#inheritsContext(spawn, policies[index]!.agent));
 		if (!wants.includes(true)) return { contexts: spawns.map(() => undefined), dropped: [] };
 		const context = buildInheritedContext(this.session.getContextMessages?.() ?? [], this.session.providerSecrets);
 		return {
@@ -1073,7 +1074,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const policy = await this.#resolveSpawnPreflight(spawn);
 			// The parent's still-streaming turn (usually the reason for the spawn) is not in its context
 			// yet. Refusing halts speculation for the later items too, so ids and permits stay in order.
-			if (this.#wantsInheritedContext(spawn) && policy.agent.inheritContext !== false) return undefined;
+			if (this.#inheritsContext(spawn, policy.agent)) return undefined;
 			blocking = policy.effectiveAgent.blocking === true;
 		} catch {
 			return undefined;

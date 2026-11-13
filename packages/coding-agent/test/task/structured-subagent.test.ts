@@ -1361,12 +1361,16 @@ describe("structured subagent primitive", () => {
 		// The spy's call log holds each run's whole options; keep only `kept`.
 		vi.restoreAllMocks();
 		// A WeakRef target read in a job stays alive until that job ends: yield, collect, then read.
+		// Each collection first overwrites the stack below this frame: the collector's own frames
+		// would otherwise inherit stale slots from the spawns, which its conservative scan keeps alive.
+		const clobber = (depth: number): number => (depth === 0 ? 0 : clobber(depth - 1) + 1);
 		const alive = () => spawners.filter(ref => ref.deref() !== undefined).length;
 		let remaining = alive();
 		for (let i = 0; i < 10 && remaining > 0; i++) {
 			const turn = Promise.withResolvers<void>();
 			setImmediate(turn.resolve);
 			await turn.promise;
+			clobber(5_000);
 			Bun.gc(true);
 			remaining = alive();
 		}

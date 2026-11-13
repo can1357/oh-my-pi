@@ -522,8 +522,9 @@ export interface ToolSession {
 	 */
 	getContextMessages?: () => readonly Message[];
 	/**
-	 * The session's provider secret encoder (absent while redaction is off). An inherited task tail is
-	 * cut on encoded text, so no secret is split at the cut, then decoded for the child's own boundary.
+	 * The session's provider secret encoder: absent until secret hiding is first enabled, and passing text
+	 * through unchanged while hiding is off. An inherited task tail is cut on encoded text, so no secret
+	 * is split at the cut, then decoded for the child's own boundary.
 	 */
 	providerSecrets?: SecretObfuscator;
 	/**
