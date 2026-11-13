@@ -38,7 +38,7 @@ Color values accept:
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset/empty keeps the terminal default foreground).
+All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset/empty keeps the terminal default foreground) and `mdExtensionLink` (unset derives a muted `mdLink`).
 
 ### Core text and borders (11)
 
@@ -54,9 +54,11 @@ All tokens below are required in `colors` except `thinkingMax` (falls back to `t
 
 `assistantMessageText` colors the assistant reply's plain paragraph prose (markdown sub-elements keep their own `md*` tokens). It is the token that governs assistant prose — `text` does not: `text` is applied at explicit `theme.fg("text", …)` callsites (editor/dialog surfaces), never to assistant message bodies. When `assistantMessageText` is omitted or set to `""`, prose renders in the terminal default foreground exactly as before the token existed. An explicitly installed prose color transform (live-command output) still wins over the token.
 
-### Markdown (10)
+### Markdown (10 required, 1 optional)
 
-`mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet`
+`mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet`, optional `mdExtensionLink`
+
+`mdExtensionLink` colors the label of a link whose scheme an extension registered (for example a link that expands text in place). Such a link opens nothing in the browser, so its color sets it apart from `mdLink`, which colors links that open a URL. When it is omitted, omp blends `mdLink` with `text` (45% link, 55% text). A `""` in either token blends as the theme's `terminal.foreground` and a palette index 0–15 as its `terminal.ansi` slot. A theme that declares neither gets approximations: a stock palette for indices 0–15 and a guessed default foreground for `""`. Set the token explicitly when the guess looks wrong. `tui.colorfulMarkdown` does not change either link color.
 
 With the `tui.colorfulMarkdown` setting on (the default), headings, `**strong**`, `*emphasis*`, inline code and table headers take their colors from the theme's `terminal.ansi` palette instead of `mdHeading`/`mdCode` and plain bold/italic: H1 magenta, H2 yellow, H3–H6 blue, strong/emphasis magenta, inline code green, table headers yellow. All hues come from one palette so they stay distinct. Turning the setting off restores `mdHeading` for every level, `mdCode`, and uncolored bold/italic.
 
@@ -368,7 +370,7 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset keeps the terminal default foreground).
+- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset keeps the terminal default foreground) and `mdExtensionLink` (unset blends `mdLink` with `text`).
 - `export` and `symbols` are optional.
 - `$schema` in theme JSON is informational; custom-theme runtime validation is enforced by `@oh-my-pi/omptype` in `packages/tui/src/theme/schema-validation.ts`.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.

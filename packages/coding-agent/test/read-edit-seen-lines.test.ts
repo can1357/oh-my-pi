@@ -7,6 +7,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
+import { generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // A call whose arguments span several lines, so a structural read elides the
@@ -123,5 +126,93 @@ describe("read → edit seen-line guard under a stale tag", () => {
 
 		await edit.execute("edit-3", { input: stale });
 		expect(await Bun.file(file).text()).toBe(afterFirst.replace("line 3\n", "LINE THREE\n"));
+	});
+});
+
+// Regression (#19092): a change made outside the edit tool (formatter, build
+// step, another writer) dropped every line an earlier read had displayed, so an
+// unchanged line at its old number was rejected as never displayed.
+describe("read → outside change → partial read → edit", () => {
+	let cwd: string;
+	let file: string;
+	const LINES = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`);
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-outside-seen-"));
+		file = path.join(cwd, "f.txt");
+		await Bun.write(file, `${LINES.join("\n")}\n`);
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("keeps lines that kept their number and content seen", async () => {
+		const session = createSession(cwd);
+		const read = new ReadTool(session);
+		expect(textOutput(await read.execute("read-1", { path: "f.txt" }))).toContain("5:line 5");
+		const changed = `${LINES.join("\n")}\n`.replace("line 50\n", "line FIFTY\n");
+		await Bun.write(file, changed);
+		const header = textOutput(await read.execute("read-2", { path: "f.txt:48-52" })).split("\n")[0];
+
+		const result = await new EditTool(session, "hashline").execute("edit", {
+			input: `${header}\nPUT 5.=5:\n+line FIVE\n`,
+		});
+
+		expect(textOutput(result)).not.toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(changed.replace("line 5\n", "line FIVE\n"));
+	});
+});
+
+// Regression: an `@file` mention recorded its snapshot with no seen-line set,
+// so the guard accepted anchors on rows the truncated mention never showed,
+// and a line-1 byte prefix was numbered `1:` under a tag; replacing that row
+// from the prefix dropped the line's unseen tail.
+describe("@file mention → edit seen-line guard", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mention-seen-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	async function mention(session: ToolSession, name: string): Promise<string> {
+		const [message] = await generateFileMentionMessages([name], cwd, {
+			useHashLines: true,
+			snapshotStore: getEditStore(session),
+		});
+		if (message?.role !== "fileMention") throw new Error("expected file mention message");
+		return message.files[0]?.content ?? "";
+	}
+
+	it("rejects a hunk anchored past the rows a head-truncated mention showed", async () => {
+		const file = path.join(cwd, "long.txt");
+		const source = `${Array.from({ length: DEFAULT_MAX_LINES + 10 }, (_, i) => `line ${i + 1}`).join("\n")}\n`;
+		await Bun.write(file, source);
+		const session = createSession(cwd);
+		const content = await mention(session, "long.txt");
+		const header = content.split("\n")[0];
+		expect(header).toMatch(/^\[long\.txt#[0-9A-F]{4}\]$/);
+		// The truncation notice is not a numbered source row.
+		expect(content.split("\n").at(-1)).toMatch(/^\[Showing lines 1-\d+ of \d+/);
+
+		const result = await new EditTool(session, "hashline").execute("edit", {
+			input: `${header}\nPUT ${DEFAULT_MAX_LINES + 5}.=${DEFAULT_MAX_LINES + 5}:\n+changed\n`,
+		});
+
+		expect(textOutput(result)).toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(source);
+	});
+
+	it("emits no tag or numbered row for a line 1 cut at the byte cap", async () => {
+		await Bun.write(path.join(cwd, "wide.json"), `${"x".repeat(DEFAULT_MAX_BYTES + 1)}\nlast\n`);
+		const content = await mention(createSession(cwd), "wide.json");
+
+		expect(content).toContain("exceeds");
+		expect(content).not.toMatch(/^\[wide\.json#/);
+		expect(content).not.toMatch(/^1:/m);
 	});
 });

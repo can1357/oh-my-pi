@@ -16,7 +16,15 @@
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TspPickerColumn, TspPickerItem, TspPickerProps, TspText } from "@oh-my-pi/pi-wire";
-import { type Component, matchesKey, routeSgrMouseInput, type TUI, truncateToWidth, visibleWidth } from "../index";
+import {
+	type Component,
+	matchesKey,
+	type OverlayOptions,
+	routeSgrMouseInput,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
 import {
 	recentTranscriptEntries,
@@ -332,6 +340,15 @@ interface BlockPreview {
 	rows: string[];
 	lineCount: number;
 }
+
+/** Mount options for the picker: a fullscreen sheet on the alternate screen (classic) or native layer (Tern). */
+export const COPY_SELECTOR_OVERLAY_OPTIONS: Readonly<OverlayOptions> = {
+	anchor: "bottom-center",
+	width: "100%",
+	maxHeight: "100%",
+	margin: 0,
+	fullscreen: true,
+};
 
 export class CopySelectorComponent implements Component {
 	#builder: ChatTranscriptBuilder;
