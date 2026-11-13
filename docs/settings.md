@@ -953,6 +953,8 @@ The `cache` segment (in the `full` and `nerd` presets) shows before you send whe
 | `startup.changelogMode`        | enum    | `summary`       | `summary`, `expanded`, `hidden`: choose startup release-note presentation.                                                                                                                                                                                  |
 | `startup.setupWizard`          | boolean | `true`          | Show newly added onboarding steps once per setup version.                                                                                                                                                                                                   |
 | `update.auto`                  | boolean | `false`         | Install a newer release in the background on interactive startup, through whatever owns the install (standalone binary, Homebrew, mise, bun, npm); progress shows after the welcome banner's version and the next launch runs the new build. Ignored under Tern, Nix, and source checkouts. Status and worker log: `~/.omp/update/`. |
+| `skills.showStartupDiagnostics` | boolean | `true` | Show grouped startup notices for conflicting skill variants and redundant installations, even with `startup.quiet`. Disable in Tasks → Commands & Skills → Skill Startup Notices. `/skills diagnostics`, discovery warnings, and skill resolution remain available and unchanged. |
+| `skills.dedupeSameOrigin` | boolean | `false` | Opt in to keeping only the highest-precedence same-name plugin skill when both plugins declare the same normalized source repository. Diagnostics retain hidden variants. Repository metadata is self-declared, so this is disabled by default. |
 
 ### Providers and services
 

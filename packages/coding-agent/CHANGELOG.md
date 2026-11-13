@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- RPC hosts can inspect skill conflicts and redundant installations through typed diagnostics snapshots, receive startup and live updates, and persist the startup-notice preference ([#14148](https://github.com/can1357/oh-my-pi/pull/14148) by [@andrebrait](https://github.com/andrebrait)).
+
+### Added
+
+- Added startup notices for conflicting skill variants and redundant installations, with `/skills diagnostics` for resolution details and `skills.showStartupDiagnostics` to disable the notices ([#14148](https://github.com/can1357/oh-my-pi/pull/14148) by [@andrebrait](https://github.com/andrebrait)).
+- Added declared repository and version provenance to skill diagnostics, with opt-in `skills.dedupeSameOrigin` resolution for differing same-name plugin variants from the same source repository ([#14148](https://github.com/can1357/oh-my-pi/pull/14148) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
