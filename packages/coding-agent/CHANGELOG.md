@@ -12,6 +12,7 @@
 - After a file changes outside the edit tool (formatter, build step, another writer), lines an earlier read displayed that kept their number and content can still be edited after a partial re-read, instead of being rejected as never displayed ([#19092](https://github.com/can1357/oh-my-pi/issues/19092))
 - `omp stats` no longer freezes the dashboard for seconds each time an open Spotlight tab rebuilds after a sync ([#19118](https://github.com/can1357/oh-my-pi/pull/19118) by [@will-bogusz](https://github.com/will-bogusz))
 - In Chromium browser tabs, a click on an element inside a frame the page removes while the mouse button is down fails as unconfirmed instead of reporting a click the element never got, and sends no remaining presses of a double-click to the exposed page; a frame that navigates on the press still counts as delivered ([#19094](https://github.com/can1357/oh-my-pi/pull/19094) by [@will-bogusz](https://github.com/will-bogusz))
+- Hashline edits from a truncated `@file` mention can no longer target rows the mention never showed, and a mention whose first line exceeds the size limit no longer offers a partial line as editable ([#19093](https://github.com/can1357/oh-my-pi/pull/19093) by [@apoc](https://github.com/apoc))
 
 ## [18.20.0] - 2026-11-12
 
