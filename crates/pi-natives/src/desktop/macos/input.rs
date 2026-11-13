@@ -2444,7 +2444,11 @@ fn background_gesture(
 						target,
 						range,
 						(range.1 - range.0) * SLIDER_POSITION_TOLERANCE
-							/ if control.vertical { frame.height } else { frame.width },
+							/ if control.vertical {
+								frame.height
+							} else {
+								frame.width
+							},
 						|| control.distance_to(end.x, end.y),
 						|| control.value(),
 						control::settle,
@@ -3186,7 +3190,8 @@ fn after_web_drag(
 const SLIDER_POSITION_TOLERANCE: f64 = 4.0;
 
 /// A thumb's position, unlike its value, measures even a non-linear slider's
-/// progress toward the release. Read every step: its distance need not be linear.
+/// progress toward the release. Read every step: its distance need not be
+/// linear.
 fn step_slider_geometry(
 	window: &DesktopWindow,
 	target: f64,
@@ -3199,9 +3204,9 @@ fn step_slider_geometry(
 ) -> CoreResult<()> {
 	let failure = |now: Option<f64>| {
 		DesktopError::input_failed(format!(
-			"the drag on window {} ({}) stopped: the slider now reads {}, with path-end \
-			 estimate {target}, but its thumb did not reach the release. Read the target before \
-			 retrying; takeover (takeover: true) drags it with the pointer",
+			"the drag on window {} ({}) stopped: the slider now reads {}, with path-end estimate \
+			 {target}, but its thumb did not reach the release. Read the target before retrying; \
+			 takeover (takeover: true) drags it with the pointer",
 			window.id,
 			window.app,
 			now.map_or_else(|| "nothing".to_owned(), |now| now.to_string()),
@@ -3314,9 +3319,9 @@ fn step_slider(
 			{
 				return Err(DesktopError::input_failed(format!(
 					"the drag on window {} ({}) left the {role} it started on at {before}, short of \
-					 {target}, the value under the path's end, and the corrective step stopped: \
-					 the {role} went from {before} to {settled}, where the steps lead to {before}. \
-					 Read the target before retrying; takeover (takeover: true) drags it with the pointer",
+					 {target}, the value under the path's end, and the corrective step stopped: the \
+					 {role} went from {before} to {settled}, where the steps lead to {before}. Read \
+					 the target before retrying; takeover (takeover: true) drags it with the pointer",
 					window.id, window.app,
 				)));
 			}
@@ -8612,7 +8617,9 @@ mod tests {
 				75.0,
 				(0.0, 100.0),
 				1.0,
-				|| Some(75.0 - reads[next.get().saturating_sub(1).min(reads.len() - 1)].unwrap_or(75.0)),
+				|| {
+					Some(75.0 - reads[next.get().saturating_sub(1).min(reads.len() - 1)].unwrap_or(75.0))
+				},
 				|| {
 					let value = reads[next.get().min(reads.len() - 1)];
 					next.update(|v| v + 1);
