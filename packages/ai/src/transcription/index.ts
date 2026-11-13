@@ -16,7 +16,7 @@ export type TranscriptionApi = (typeof TRANSCRIPTION_APIS)[number];
 
 /** Whether a catalog API transcribes audio through a cloud transport (local inference streams on-device). */
 export function isTranscriptionApi(api: Api): api is TranscriptionApi {
-	return (TRANSCRIPTION_APIS as readonly Api[]).includes(api);
+	return TRANSCRIPTION_APIS.some(id => id === api);
 }
 
 /** Dispatch an audio transcription through the transport selected by the catalog model. */

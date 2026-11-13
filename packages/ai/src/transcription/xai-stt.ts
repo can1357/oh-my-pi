@@ -69,8 +69,8 @@ export async function transcribeXai(
 	for (const raw of parsed.words ?? []) {
 		const word = xaiWordSchema(raw);
 		if (word instanceof type.errors) throw malformed(model, `word ${words.length}: ${word.summary}`);
-		const { text, ...rest } = raw as Record<string, unknown> & { text: string };
-		words.push({ ...rest, word: text, start: word.start, end: word.end });
+		const { text, ...rest } = word;
+		words.push({ ...rest, word: text });
 	}
 	return {
 		text: parsed.text,
