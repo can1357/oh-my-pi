@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- ACP `usage_update.cost` includes background subagent spend without counting blocking subagents twice ([#19102](https://github.com/can1357/oh-my-pi/issues/19102)).
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

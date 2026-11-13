@@ -44,6 +44,8 @@ import {
 	type SetSessionModeResponse,
 	type Usage,
 } from "@oh-my-pi/pi-utils/acp";
+import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { disableProvider, enableProvider } from "../../capability";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -61,8 +63,11 @@ import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
+import { sumSubagentTreeCost } from "../agent-hub-runtime";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
+import { AgentRegistry } from "../../registry/agent-registry";
+import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
@@ -378,6 +383,7 @@ type ManagedSessionRecord = {
 	/** Stable ACP handle, independent of the underlying durable session. */
 	readonly protocolSessionId: string;
 	session: AgentSession;
+	subagentCostHydratedRoot: string | undefined;
 	setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined;
 	mcpManager: MCPManager | undefined;
 	// Ordered queue of MCP tool refreshes for this record. Rebuilt per
@@ -1023,6 +1029,8 @@ export class AcpAgent implements Agent {
 	#initialSession: AgentSession | undefined;
 	#createSession: CreateAcpSession;
 	#sessions = new Map<string, ManagedSessionRecord>();
+	#subagentObservers = new SessionObserverRegistry();
+	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
 	/** Serializes writes of the handle map ({@link readAcpSessionHandles}). */
 	#handleWrites: Promise<void> = Promise.resolve();
 	#disposePromise: Promise<void> | undefined;
@@ -1985,6 +1993,7 @@ export class AcpAgent implements Agent {
 		return {
 			protocolSessionId,
 			session,
+			subagentCostHydratedRoot: undefined,
 			setToolUIContext,
 			mcpManager: undefined,
 			mcpRefreshChain: undefined,
@@ -2888,13 +2897,31 @@ export class AcpAgent implements Agent {
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
 			const usageStats = record.session.sessionManager.getUsageStatistics();
+			const rootSessionFile = record.session.sessionManager.getSessionFile() ?? undefined;
+			if (rootSessionFile && record.subagentCostHydratedRoot !== rootSessionFile) {
+				try {
+					await registerPersistedSubagents(AgentRegistry.global(), rootSessionFile, {
+						shouldContinue: () => record.session.sessionManager.getSessionFile() === rootSessionFile,
+					});
+					record.subagentCostHydratedRoot = rootSessionFile;
+				} catch (error) {
+					logger.warn("ACP subagent cost hydration failed", { rootSessionFile, error: String(error) });
+				}
+			}
+			const treeCost = sumSubagentTreeCost({
+				refs: AgentRegistry.global().list(),
+				observers: this.#subagentObservers,
+				rootSessionFile,
+				sessionCosts: this.#subagentSessionCosts,
+			});
+			const cost = usageStats.cost - usageStats.subagentCost + treeCost;
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
 					sessionUpdate: "usage_update",
 					size: contextUsage.contextWindow,
 					used: contextUsage.tokens ?? 0,
-					cost: usageStats.cost > 0 ? { amount: usageStats.cost, currency: "USD" } : undefined,
+					cost: cost > 0 ? { amount: cost, currency: "USD" } : undefined,
 				},
 			});
 		}

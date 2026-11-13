@@ -30,6 +30,7 @@ import type {
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -137,6 +138,7 @@ class FakeAgentSession {
 	queuedMessageCount = 0;
 	systemPrompt = "system";
 	disposed = false;
+	contextUsage: { contextWindow: number; tokens: number } | undefined;
 	fastMode = false;
 	clientBridge: ClientBridge | undefined;
 	forcedToolChoice: string | undefined;
@@ -342,8 +344,8 @@ class FakeAgentSession {
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
 
-	getContextUsage(): undefined {
-		return undefined;
+	getContextUsage(): { contextWindow: number; tokens: number } | undefined {
+		return this.contextUsage;
 	}
 
 	readonly #sessionChangeCallbacks = new Set<() => void>();
@@ -1826,6 +1828,70 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("includes background subagent spend in ACP usage updates without double-billing blocking results", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.contextUsage = { contextWindow: 200_000, tokens: 18 };
+		await session.sessionManager.ensureOnDisk();
+		const rootFile = session.sessionManager.getSessionFile()!;
+		const registry = AgentRegistry.global();
+		const child = registry.register({
+			id: `Background-${session.sessionId}`,
+			displayName: "Background",
+			kind: "sub",
+			session: null,
+			sessionFile: path.join(rootFile.slice(0, -6), "Background.jsonl"),
+			status: "parked",
+			history: {
+				directCost: 0.2,
+				metrics: { cost: 0.2, tokens: 1, requests: 1, tools: 0, durationMs: 0 },
+			},
+		});
+		const blocked = registry.register({
+			id: `Blocking-${session.sessionId}`,
+			displayName: "Blocking",
+			kind: "sub",
+			session: null,
+			sessionFile: path.join(rootFile.slice(0, -6), "Blocking.jsonl"),
+			status: "parked",
+			history: {
+				directCost: 0.3,
+				metrics: { cost: 0.3, tokens: 1, requests: 1, tools: 0, durationMs: 0 },
+			},
+		});
+		try {
+			const rootMessage = makeAssistantMessage("parent");
+			rootMessage.usage.cost.total = 1;
+			rootMessage.usage.cost.output = 1;
+			session.sessionManager.appendMessage(rootMessage);
+			session.sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: "blocking-task",
+				toolName: "task",
+				content: [{ type: "text", text: "child complete" }],
+				details: {
+					usage: {
+						...rootMessage.usage,
+						cost: { ...rootMessage.usage.cost, output: 0.3, total: 0.3 },
+					},
+				},
+				isError: false,
+				timestamp: Date.now(),
+			});
+			await harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "continue" }] });
+			const update = harness.updates.findLast(
+				event => event.sessionId === created.sessionId && event.update.sessionUpdate === "usage_update",
+			);
+			expect(update?.update.sessionUpdate).toBe("usage_update");
+			if (update?.update.sessionUpdate === "usage_update") expect(update.update.cost?.amount).toBeCloseTo(1.5);
+		} finally {
+			registry.unregister(child.id, child);
+			registry.unregister(blocked.id, blocked);
+			harness.abortController.abort();
+		}
 	});
 
 	it("loads a session stored under a legacy/hashed project directory (#7779)", async () => {
