@@ -6,6 +6,9 @@
 
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Added the `/sandbox` panel for the OS sandbox: Overview, Filesystem (with the paths allowed this session, each removable), Network (with the hosts blocked this session, each allowable) and Effective policy pages; in Tern it renders as a native preferences sheet beside the transcript, in a plain terminal as a fullscreen panel ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Bash and eval tool cards show a `sandboxed` badge when the run was contained by the OS sandbox, with a warning note for hosts the sandbox blocked or a likely sandbox denial ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Added the sandbox access dialog for the agent's `sandbox_request` (intent, command, effect, what it does if denied; Allow for this session, Always allow, Deny, Reply with instructions), in the composer and natively in Tern, plus a `sandbox_request` tool card showing the request and your decision ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [18.20.0] - 2026-11-12
 
@@ -18,12 +21,6 @@
 - Fixed `grep` tool results in ANSI and native Tern views to show a `binary matches` warning on both zero-match and matching searches ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
 - The `/resume` picker deletes sessions through the `app.session.delete` action (default Backspace or Delete) and shows its keys in the hints, so `keybindings.yml` can replace the shortcut, for example with Ctrl+D, or disable it with `[]`; a bound key that also deletes backward, such as Backspace or Ctrl+W, still edits a typed search query ([#17938](https://github.com/can1357/oh-my-pi/issues/17938), [#18961](https://github.com/can1357/oh-my-pi/pull/18961) by [@wolfiesch](https://github.com/wolfiesch))
 - Typing `/job` lists the `jobs` command first again instead of jumping whole-hyphen-segment skill matches like `skill:…-job-…` above it: inner-segment skill hits now tie (rather than outrank) command-prefix matches, so the tie keeps the popup command-first ([#18891](https://github.com/can1357/oh-my-pi/issues/18891), [#18916](https://github.com/can1357/oh-my-pi/pull/18916) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-### Added
-
-- Added the `/sandbox` panel for the OS sandbox: Overview, Filesystem (with the paths allowed this session, each removable), Network (with the hosts blocked this session, each allowable) and Effective policy pages; in Tern it renders as a native preferences sheet beside the transcript, in a plain terminal as a fullscreen panel ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- Bash and eval tool cards show a `sandboxed` badge when the run was contained by the OS sandbox, with a warning note for hosts the sandbox blocked or a likely sandbox denial ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- Added the sandbox access dialog for the agent's `sandbox_request` (intent, command, effect, what it does if denied; Allow for this session, Always allow, Deny, Reply with instructions), in the composer and natively in Tern, plus a `sandbox_request` tool card showing the request and your decision ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [18.19.0] - 2026-11-12
 
