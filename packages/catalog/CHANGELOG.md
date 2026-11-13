@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens ([#19181](https://github.com/can1357/oh-my-pi/pull/19181) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens; on Google, Vertex AI and OpenCode Zen it offers low, medium and high.
+- Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 
 ### Fixed
 
