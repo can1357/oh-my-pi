@@ -88,7 +88,11 @@ export interface PrewalkCoordinatorHost {
 	/** Judges a new task for `prewalk.auto`; undefined when there is nothing to judge. */
 	classifyAutoPrewalk(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
-	setModelTemporary(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
+	setModelTemporary(
+		model: Model,
+		thinkingLevel?: ConfiguredThinkingLevel,
+		isCurrent?: () => boolean,
+	): Promise<boolean>;
 	setActiveToolsByName(names: string[]): Promise<void>;
 	restoreNonMCPToolPresentation(
 		nonMCPToolNames: string[],
@@ -139,6 +143,7 @@ export class PrewalkCoordinator {
 	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#planYoloArmed = false;
 	#handoff: PrewalkHandoff | undefined;
+	#selectionEpoch = 0;
 	/** The pending arm `prewalk.auto` made, as opposed to a manual or configured one. */
 	#autoArm: Prewalk | undefined;
 	/** Session-local opt-out from auto-prewalk: `/prewalk off`, or `--no-prewalk` at startup. `/new` clears it. */
@@ -191,6 +196,11 @@ export class PrewalkCoordinator {
 
 	/** A later model/effort selection owns the active model, even if its identity is unchanged. */
 	releaseHandoff(): void {
+		this.#selectionEpoch++;
+		if (this.#autoArm && this.#autoArm === this.#prewalk) {
+			this.#scrubPlanNudge(undefined, true);
+			this.#clearPrewalkState();
+		}
 		this.#handoff = undefined;
 	}
 
@@ -198,10 +208,7 @@ export class PrewalkCoordinator {
 	async resetForNewSession(enabled: boolean): Promise<void> {
 		const handoff = this.#handoff;
 		this.#autoSuppressed = false;
-		const restoreSource =
-			handoff !== undefined &&
-			(enabled || (handoff.auto && this.#autoMode() === "on")) &&
-			this.#onHandoffTarget(handoff);
+		const restoreSource = handoff !== undefined && (enabled || handoff.auto) && this.#onHandoffTarget(handoff);
 		this.#scrubPlanNudge(undefined, true);
 		this.#clearPrewalkState();
 		this.releaseHandoff();
@@ -257,12 +264,11 @@ export class PrewalkCoordinator {
 	}
 
 	/**
-	 * Starts a new user task under `prewalk.auto: on`. An auto handoff belongs to the task that armed it, so the
+	 * Starts a new user task. An auto handoff belongs to the task that armed it, so the
 	 * session returns to that task's planning model unless a later explicit selection took ownership. An auto arm
 	 * the previous task never used is dropped so this task is judged on its own. Manual and configured arms stay.
 	 */
 	async beginAutoTask(): Promise<void> {
-		if (this.#autoMode() !== "on") return;
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
 			this.#scrubPlanNudge(undefined, true);
 			this.#clearPrewalkState();
@@ -382,8 +388,10 @@ export class PrewalkCoordinator {
 		}
 
 		await this.#host.waitForSessionMessagePersistence(context.message);
+		if (this.#prewalk !== prewalk) return;
 		for (const toolResult of context.toolResults) {
 			await this.#host.waitForSessionMessagePersistence(toolResult);
+			if (this.#prewalk !== prewalk) return;
 		}
 		this.#scrubPlanNudge(liveMessages);
 		const target = prewalk.target;
@@ -394,8 +402,14 @@ export class PrewalkCoordinator {
 		const source = this.#host.model();
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		const auto = this.#autoArm === prewalk;
-		await this.#host.setModelTemporary(target, prewalk.thinkingLevel);
-		this.#clearPrewalkState();
+		const epoch = this.#selectionEpoch;
+		const switched = await this.#host.setModelTemporary(
+			target,
+			prewalk.thinkingLevel,
+			() => this.#selectionEpoch === epoch,
+		);
+		if (this.#prewalk === prewalk) this.#clearPrewalkState();
+		if (!switched) return;
 		if (source) {
 			this.#handoff = {
 				source,
