@@ -803,11 +803,53 @@ describe("TranscriptContainer", () => {
 		const blocks = Array.from({ length: 40 }, (_, index) => new CountingBlock([`row ${index}`]));
 		for (const block of blocks) transcript.addChild(block);
 
-		expect(transcript.renderViewport(80, 4, frame)).toEqual(["row 36", "row 37", "row 38", "row 39"]);
+		// The settled backlog retires into scrollback, so the tail paints at full height with its separators.
+		expect(transcript.renderViewport(80, 4, frame)).toEqual(["", "row 38", "", "row 39"]);
 		// Only the viewport tail, plus the one block that proves the overflow,
 		// costs a render; a resumed session's backlog never does.
 		expect(blocks.slice(0, 34).map(block => block.renders)).toEqual(blocks.slice(0, 34).map(() => 0));
 		expect(blocks[39]!.renders).toBeGreaterThan(0);
+	});
+
+	it("paints a draining backlog as the screen it converges to", () => {
+		const build = () => {
+			const transcript = new TranscriptContainer();
+			for (let index = 0; index < 30; index++) {
+				const rows = Array.from({ length: 1 + (index % 4) }, (_, row) => `b${index}r${row}`);
+				transcript.addChild(new Block(rows, true));
+			}
+			// Still streaming at the bottom: visible, so it does not pin retirement.
+			transcript.addChild(new Block(["live"], false));
+			return transcript;
+		};
+		const capacity = 9;
+
+		// A session switch hands over the whole settled ledger before any of it retired.
+		const first = build().renderViewport(80, capacity, frame);
+
+		const drained = build();
+		const history: string[] = [];
+		for (
+			let batch = drained.peekFinalizedBatch(80, capacity);
+			batch;
+			batch = drained.peekFinalizedBatch(80, capacity)
+		) {
+			history.push(...batch.rows);
+			drained.acknowledgeFinalizedBatch(batch.id);
+		}
+		const settled = drained.renderViewport(80, capacity, frame);
+
+		expect(first).toHaveLength(capacity);
+		expect(first).toEqual([...history, ...settled].slice(-capacity));
+	});
+
+	it("compacts instead of clipping when a running block would scroll out of view", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["run1", "run2", "run3"], false));
+		transcript.addChild(new Block(["done1", "done2"], true));
+
+		// Clipping would hide the running block, which cannot retire to scrollback.
+		expect(transcript.renderViewport(80, 3, frame)).toEqual(["run3", "done1", "done2"]);
 	});
 
 	it("keeps an emergency row from a block behind the bounded viewport walk", () => {
@@ -838,7 +880,8 @@ describe("TranscriptContainer", () => {
 		// Text blocks interleaved with empty (hidden tool-activity) blocks that
 		// render nothing but stay live until retired.
 		for (let i = 0; i < 6; i++) {
-			transcript.addChild(new Block([`t${i}a`, `t${i}b`, `t${i}c`], true));
+			// The first block is still running, so nothing can retire and the overflow must compact.
+			transcript.addChild(new Block([`t${i}a`, `t${i}b`, `t${i}c`], i > 0));
 			for (let j = 0; j < 8; j++) transcript.addChild(new Block([], true));
 		}
 		// Emergency path: more non-empty blocks than rows. Every row carries real
@@ -850,7 +893,8 @@ describe("TranscriptContainer", () => {
 
 	it("empty blocks do not reserve capacity from real text under pressure (issue 9483)", () => {
 		const transcript = new TranscriptContainer();
-		transcript.addChild(new Block(["A1", "A2", "A3", "A4"], true));
+		// Still running: retirement is pinned, so the allocator has to fit everything.
+		transcript.addChild(new Block(["A1", "A2", "A3", "A4"], false));
 		transcript.addChild(new Block([], true));
 		transcript.addChild(new Block(["B1", "B2", "B3", "B4"], true));
 		transcript.addChild(new Block([], true));

@@ -10,6 +10,7 @@
 ### Fixed
 
 - A `bash` call that returns as a background job right away (`async: true`) keeps showing its command in the interpreted shell view instead of switching to the raw command line ([#19202](https://github.com/can1357/oh-my-pi/pull/19202) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Switching to a subagent, resuming, or rebuilding a long transcript paints the newest messages at full size immediately instead of flashing a stack of one-line block stubs while older history drains into scrollback
 
 ## [18.20.0] - 2026-11-12
 

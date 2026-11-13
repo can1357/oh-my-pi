@@ -761,6 +761,11 @@ export class TranscriptContainer extends Container {
 		const blocks: (readonly string[])[] = [];
 		const measuredImages: boolean[] = [];
 		let unrendered = 0;
+		// Rows the collected blocks fill at full height, separators between them included.
+		let filled = 0;
+		let compactBelow: boolean | undefined;
+		let clipDecided = false;
+		let clip = false;
 		for (let cursor = live.length - 1; cursor >= 0; cursor--) {
 			if (shown.length > capacity) {
 				unrendered = cursor + 1;
@@ -772,6 +777,19 @@ export class TranscriptContainer extends Container {
 			shown.push(candidate);
 			blocks.push(block.rows);
 			measuredImages.push(block.images);
+			const compact = isCompact(candidate.entry.component);
+			filled += block.rows.length + (compactBelow === undefined ? 0 : separatorRows(compact, compactBelow));
+			compactBelow = compact;
+			// The newest blocks fill the screen. When pressure retirement will take
+			// everything above them, show them at full height and clip the rest off
+			// the top: that is the layout retirement converges to, so a resumed or
+			// refocused ledger still draining into scrollback over several budgeted
+			// frames paints its final tail at once instead of one-row stubs.
+			if (!clipDecided && filled >= capacity) {
+				clipDecided = true;
+				clip = this.#retiresThrough(live, cursor, filled > capacity);
+				if (clip) break;
+			}
 		}
 		shown.reverse();
 		blocks.reverse();
@@ -780,15 +798,19 @@ export class TranscriptContainer extends Container {
 			this.#lastViewportSpans = [];
 			return EMPTY_ROWS;
 		}
-		if (shown.length > capacity) {
+		if (!clip && shown.length > capacity) {
 			// Blocks the walk never reached are still transcript state: the
 			// emergency layout consults them only where it must.
 			return this.#renderEmergency(shown, live.slice(0, unrendered), width, capacity, frame);
 		}
+		// A clipped block with an image would draw it over the rows above the
+		// viewport (iTerm2 draws upward from its image row), so it shows blank
+		// rows until its split retires the image into scrollback.
+		const blankHead = clip && filled > capacity && measuredImages[0]!;
 		// The walk ran newest-first, so the images it measured claimed no
 		// display slot (see #measure). Render those blocks again oldest-first:
 		// the image budget keeps the newest images live by observation order.
-		for (let blockIndex = 0; blockIndex < shown.length; blockIndex++) {
+		for (let blockIndex = blankHead ? 1 : 0; blockIndex < shown.length; blockIndex++) {
 			if (!measuredImages[blockIndex]) continue;
 			const { entry, index } = shown[blockIndex]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, frame);
@@ -807,7 +829,7 @@ export class TranscriptContainer extends Container {
 			total += gap + blocks[blockIndex]!.length;
 			above = compact;
 		}
-		if (total <= capacity) {
+		if (clip || total <= capacity) {
 			const output: string[] = [];
 			const owners: (Component | undefined)[] = [];
 			for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
@@ -815,14 +837,16 @@ export class TranscriptContainer extends Container {
 					output.push("");
 					owners.push(undefined);
 				}
-				const component = shown[blockIndex]!.entry.component;
+				const blank = blankHead && blockIndex === 0;
+				const component = blank ? undefined : shown[blockIndex]!.entry.component;
 				for (const line of blocks[blockIndex]!) {
-					output.push(line);
+					output.push(blank ? "" : line);
 					owners.push(component);
 				}
 			}
-			this.#commitViewportSpans(owners, output.length);
-			return output;
+			const drop = Math.max(0, output.length - capacity);
+			this.#commitViewportSpans(owners.slice(drop), output.length - drop);
+			return drop > 0 ? output.slice(drop) : output;
 		}
 
 		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
@@ -862,6 +886,20 @@ export class TranscriptContainer extends Container {
 		const drop = Math.max(0, output.length - capacity);
 		this.#commitViewportSpans(owners.slice(drop), output.length - drop);
 		return drop > 0 ? output.slice(drop) : output;
+	}
+
+	/**
+	 * Whether pressure retirement can take every live block older than
+	 * `live[cursor]`, and that block itself (as a split) when `clipped`. It
+	 * advances only across settled blocks, so an active block there would stay
+	 * pinned out of view instead.
+	 */
+	#retiresThrough(live: ReadonlyArray<{ entry: TranscriptEntry }>, cursor: number, clipped: boolean): boolean {
+		const end = clipped ? cursor + 1 : cursor;
+		for (let index = 0; index < end; index++) {
+			if (live[index]!.entry.state !== "settled") return false;
+		}
+		return true;
 	}
 
 	/**
