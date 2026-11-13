@@ -27,6 +27,7 @@
  *   4xx/5xx: { error: { type, message } }
  */
 
+import { WIRE_OPTION_KEYS } from "../auth-gateway/caller-options";
 import type { AuthGatewayStreamControl } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type { AssistantMessageEventStream, Context, SimpleStreamOptions } from "../types";
@@ -37,62 +38,6 @@ export interface PiNativeParsedRequest {
 	options: SimpleStreamOptions;
 	stream: boolean;
 }
-/**
- * Subset of {@link SimpleStreamOptions} accepted from the wire. Function-valued
- * fields (`fetch`, `onPayload`, `onResponse`, `onSseEvent`, exec handlers, the
- * provider-session map) and gateway-owned controls (`apiKey`, `signal`) are
- * intentionally absent — those are server-side concerns. Anything outside this
- * allow-list is dropped silently rather than 400ing, so clients can forward
- * `SimpleStreamOptions` from older / newer omp builds without per-version
- * conditionals.
- */
-const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
-	"temperature",
-	"topP",
-	"topK",
-	"minP",
-	"presencePenalty",
-	"frequencyPenalty",
-	"repetitionPenalty",
-	"stopSequences",
-	"maxTokens",
-	"maxHttpAttempts",
-	"cacheRetention",
-	"cachedContent",
-	"userProfileId",
-	"headers",
-	"initiatorOverride",
-	"maxRetryDelayMs",
-	"metadata",
-	"sessionId",
-	"promptCacheKey",
-	"promptCache",
-	"statefulResponses",
-	"storeResponses",
-	"codexAccessPrograms",
-	"streamFirstEventTimeoutMs",
-	"streamIdleTimeoutMs",
-	"reasoning",
-	"disableReasoning",
-	"forceReasoningOff",
-	"hideThinkingSummary",
-	"thinkingBudgets",
-	"toolChoice",
-	"serviceTier",
-	"guardrailIdentifier",
-	"guardrailVersion",
-	"guardrailTrace",
-	"requestMetadata",
-	"kimiApiFormat",
-	"syntheticApiFormat",
-	"preferWebsockets",
-	"openrouterVariant",
-	"loopGuard",
-	"acceptEmptyResponse",
-	// Anthropic on-demand compaction request: the gateway constructs the
-	// top-level `compaction` parameter, so the option must survive the hop.
-	"anthropicCompaction",
-] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 
 // ---------------------------------------------------------------------------
 // parseRequest
@@ -147,7 +92,9 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 		const optsBag = options as Record<string, unknown>;
 		for (const [k, v] of Object.entries(rawOpts)) {
 			if (v === undefined || v === null) continue;
-			if (!ALLOWED_OPTION_KEYS.has(k as keyof SimpleStreamOptions)) continue;
+			// Server-owned and unknown keys are dropped rather than rejected, so
+			// clients can forward `SimpleStreamOptions` from older or newer omp builds.
+			if (!WIRE_OPTION_KEYS.has(k)) continue;
 			optsBag[k] = v;
 		}
 	}

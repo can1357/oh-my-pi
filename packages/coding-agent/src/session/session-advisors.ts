@@ -75,6 +75,7 @@ import {
 	slugifyAdvisorName,
 } from "../advisor";
 import { evictStaleToolResults } from "../advisor/tool-result-eviction";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -326,6 +327,8 @@ interface ActiveAdvisor {
 	recorder: AdvisorTranscriptRecorder;
 	recorderClosed: Promise<void>;
 	agentUnsubscribe?: () => void;
+	/** Drops this advisor's tool state when its conversation restarts. */
+	resetToolState: (() => void) | undefined;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
 	/**
@@ -425,24 +428,44 @@ export interface AdvisorCatchupOptions {
 	strictWithoutDeadline?: boolean;
 }
 
-/** Inputs that configure the advisor roster owned by a session. */
-export interface SessionAdvisorsOptions {
-	enabled: boolean;
-	tools?: AgentTool[];
+/** One advisor's tools, bound to a tool session no other advisor shares. */
+export interface AdvisorToolSlate {
+	tools: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
 	 * match cap. The advisor's tools are fixed instances carrying session
 	 * defaults, so without this an advisor running against Cursor silently
 	 * drops both fields — the same gap the primary bridge closes.
 	 */
-	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
+	createGrepTool?: (options: { context?: number; totalMatchLimit?: number }) => AgentTool | undefined;
 	/**
 	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs. The
 	 * advisor's own instance follows the configured `edit.mode` (`hashline` by
 	 * default), whose schema the frame's `old_string`/`new_string` args do not
 	 * match, so without this every native advisor edit fails validation.
 	 */
-	createEditTool?(): AgentTool | undefined;
+	createEditTool?: () => AgentTool | undefined;
+	/** Start a new conversation: drop what these tools accumulated (snapshots, repeat-read counts, …). */
+	resetState?: () => void;
+}
+
+/**
+ * Builds advisor tool slates. Each advisor is its own conversation, and tools
+ * keep per-conversation state on their tool session (repeat-read counts,
+ * hashline snapshots, conflict history), so every advisor gets a fresh slate
+ * on a fresh session rather than instances shared across the roster.
+ */
+export interface AdvisorToolFactory {
+	/** Every tool name a slate can hold. */
+	names(): readonly string[];
+	/** Build the granted `names` against a new tool session. */
+	create(names: ReadonlySet<string>): AdvisorToolSlate;
+}
+
+/** Inputs that configure the advisor roster owned by a session. */
+export interface SessionAdvisorsOptions {
+	enabled: boolean;
+	tools?: AdvisorToolFactory;
 	/**
 	 * The execute-time context for advisor loop and bridge tools.
 	 *
@@ -562,9 +585,7 @@ export interface AdvisorStatusOverviewEntry {
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
 	#advisorEnabled: boolean;
-	#advisorTools: AgentTool[] | undefined;
-	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
-	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
+	#advisorTools: AdvisorToolFactory | undefined;
 	#advisorGetToolContext: SessionAdvisorsOptions["getToolContext"];
 	#advisorMcpResources: SessionAdvisorsOptions["mcpResources"];
 	#advisorWatchdogPrompt: string | undefined;
@@ -636,8 +657,6 @@ export class SessionAdvisors {
 		this.#host = host;
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
-		this.#advisorCreateGrepTool = options.createGrepTool;
-		this.#advisorCreateEditTool = options.createEditTool;
 		this.#advisorGetToolContext = options.getToolContext;
 		this.#advisorMcpResources = options.mcpResources;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
@@ -1098,6 +1117,7 @@ export class SessionAdvisors {
 			this.#releaseRefusalPin(a);
 			// Resets the emission guard and every tool-side note state together.
 			a.adviseTool.resetDeliveredNotes();
+			a.resetToolState?.();
 			a.eligibleUpdates = 0;
 			a.reviewOwed = false;
 			this.#attachAdvisorRecorderFeed(a);
@@ -1372,7 +1392,10 @@ export class SessionAdvisors {
 			// primary. Explicit `tools` lists stay user-owned and are not widened.
 			const names =
 				config.tools === undefined ? new Set([...ADVISOR_DEFAULT_TOOL_NAMES, "recall"]) : new Set(config.tools);
-			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
+			// A fresh slate per advisor: tool state such as repeat-read counts must
+			// reflect this advisor's own reads, not its siblings' (#18834).
+			const slate = this.#advisorTools?.create(names);
+			const tools = (slate?.tools ?? []).filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			for (const tool of advisorLoopTools) {
@@ -1432,7 +1455,7 @@ export class SessionAdvisors {
 			const advisorCursorExecHandlers = new CursorExecHandlers({
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
-				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				tools: bridgeToolMap(advisorToolMap, slate?.createEditTool),
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool fails closed to
 				// `always-ask`.
@@ -1441,7 +1464,7 @@ export class SessionAdvisors {
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
 				// without `grep` a search tool it was denied.
-				createGrepTool: advisorToolMap.has("grep") ? this.#advisorCreateGrepTool : undefined,
+				createGrepTool: advisorToolMap.has("grep") ? slate?.createGrepTool : undefined,
 				// Advisors share the session's live MCP connections, so their
 				// resource frames answer from the same catalog the primary sees.
 				// Not gated on a tool grant: reading what a server advertises is
@@ -1450,6 +1473,12 @@ export class SessionAdvisors {
 			});
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {
+				if (
+					cfgOffline.get(this.#host.settings) &&
+					requestModel.provider !== this.#host.agent.state.model?.provider
+				) {
+					throw new Error("Advisor model is outside the active provider under --offline.");
+				}
 				// Read per request so transport setting changes reach existing advisors.
 				const options = {
 					...streamOptions,
@@ -1701,6 +1730,7 @@ export class SessionAdvisors {
 				agent: advisorAgent,
 				runtime,
 				adviseTool,
+				resetToolState: slate?.resetState,
 				recorder,
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
@@ -2256,6 +2286,8 @@ export class SessionAdvisors {
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
+				if (cfgOffline.get(this.#host.settings) && candidate.provider !== this.#host.agent.state.model?.provider)
+					continue;
 				if (!this.#canReplayAdvisorHistory(advisor, candidate)) continue;
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, { signal });
 				if (!apiKey) continue;
@@ -2914,7 +2946,7 @@ export class SessionAdvisors {
 	 * no servers) is absent.
 	 */
 	getAdvisorAvailableToolNames(): string[] {
-		return (this.#advisorTools ?? []).map(tool => tool.name);
+		return [...(this.#advisorTools?.names() ?? [])];
 	}
 
 	/**

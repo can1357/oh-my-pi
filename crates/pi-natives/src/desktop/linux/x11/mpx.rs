@@ -9,11 +9,17 @@
 //! non-synthetic XI2 events. Core events are disabled: core-protocol WMs
 //! otherwise mistake virtual-device focus for a user activation.
 //!
-//! The pair lives for the whole desktop session: adding and removing masters
-//! churns the `XInput` hierarchy, which crashes mutter 42 and `LibreOffice` VCL
-//! when it happens per action. Masters are named after their owning process
-//! incarnation so a later session can remove the ones a killed process left
-//! behind (an orphaned master keeps drawing a second cursor).
+//! A master pair, once added, stays for the X server's lifetime. Removing a
+//! master makes running Qt 6.5+ xcb clients delete that master's child
+//! devices twice and crash (QTBUG-146876), and adding and removing masters per
+//! action crashes mutter 42 and `LibreOffice` VCL. So a session takes a pair
+//! no live session holds, or adds one up to a two-pair cap, and records itself
+//! as the holder in a property of the master pointer; when it ends it unplugs
+//! its uinput slaves and marks the pair free for the next session. Holders are
+//! named after their process incarnation, so a killed holder's pair is reused.
+//! At the cap, the existing XSendEvent/refusal path handles further sessions.
+//! The pool uses at most eight persistent device slots, rather than growing
+//! into Xorg's 40-slot device limit; active sessions also need uinput slaves.
 
 use std::{
 	fs, io,
@@ -27,12 +33,12 @@ use x11rb::{
 	protocol::{
 		Event,
 		xinput::{
-			self, ChangeMode, ConnectionExt as _, Device, DeviceType, EventMode, HierarchyChange,
+			self, ConnectionExt as _, Device, DeviceType, EventMode, HierarchyChange,
 			HierarchyChangeData, HierarchyChangeDataAddMaster, HierarchyChangeDataAttachSlave,
-			HierarchyChangeDataRemoveMaster, XIChangePropertyAux, XIDeviceInfo, XIEventMask,
-			XIGetPropertyItems,
+			XIChangePropertyAux, XIDeviceInfo, XIEventMask, XIGetPropertyItems,
 		},
-		xproto::{AtomEnum, ConnectionExt as _, PropMode, Window},
+		xkb::{self, ConnectionExt as _},
+		xproto::{Atom, AtomEnum, ConnectionExt as _, ModMask, PropMode, Window},
 	},
 	rust_connection::RustConnection,
 };
@@ -55,7 +61,7 @@ use crate::desktop::{
 const SLAVE_BIND_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the server gets to report an emitted pointer event back.
 const POINTER_CONFIRM_TIMEOUT: Duration = Duration::from_secs(1);
-/// How long the server gets to report the last emitted key back.
+/// How long the server gets to report every key release of a run back.
 const KEY_CONFIRM_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Press → release hold, so toolkits see two distinct frames.
 const PRESS_HOLD: Duration = Duration::from_millis(12);
@@ -76,10 +82,24 @@ const KEY_SETTLE: Duration = Duration::from_millis(30);
 const WARM_UP_KEYCODE: u8 = 240 + X_KEYCODE_OFFSET;
 /// Gives clients time to process the hierarchy change after the warm-up.
 const WARM_UP_SETTLE: Duration = Duration::from_millis(120);
-/// Master names that encode an owner incarnation (see [`Owner`]).
-const OWNER_PREFIX: &str = "OMP MPX v1.";
+/// Master names that encode an owner incarnation (see [`Owner`]). omp
+/// versions that removed pairs also remove every `v1.` master whose creator
+/// has died, which is now a held pair's normal state; new pairs are `v2.`.
+const OWNER_PREFIX: &str = "OMP MPX v2.";
+/// Two pairs leave room for real-device hotplug even after concurrent sessions.
+const MAX_PAIRS: usize = 2;
+/// Master pointer property naming the session that holds the pair.
+#[cfg(test)]
+const HOLDER_PROPERTY: &str = "_OMP_MPX_HOLDER";
+/// How long a session's end waits for the server to drop its unplugged slaves.
+const UNPLUG_TIMEOUT: Duration = Duration::from_secs(1);
+/// Holder property value of a pair no session holds.
+const HOLDER_FREE: &[u8] = b"free";
 
 static NONCE: AtomicU16 = AtomicU16::new(1);
+
+#[cfg(test)]
+type ReleaseEvents = std::cell::RefCell<Box<dyn FnMut() -> Option<Event> + Send>>;
 
 pub(super) struct Mpx {
 	conn:            RustConnection,
@@ -100,6 +120,10 @@ pub(super) struct Mpx {
 	/// Whether the current call already sent a key, button, wheel or motion
 	/// event, which turns a later refusal into a partial delivery.
 	sent:            bool,
+	/// Replaces only raw-event polling in typing regressions; emission, keymap,
+	/// focus, error mapping and the session gate still run normally.
+	#[cfg(test)]
+	release_events:  Option<ReleaseEvents>,
 }
 
 /// The uinput keyboard slave, created on the first keyboard or modifier use
@@ -107,6 +131,43 @@ pub(super) struct Mpx {
 struct VirtualKeyboard {
 	device: UInputDevice,
 	slave:  u16,
+}
+
+/// A slave a call sends through and the master of this pair it must sit on.
+#[derive(Clone, Copy)]
+struct Route {
+	slave:  u16,
+	master: u16,
+	/// The slave's name after the session's: the server gives a freed id to
+	/// the next device plugged in.
+	suffix: &'static str,
+	device: &'static str,
+}
+
+/// Where the server holds a routed slave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seat {
+	Ours,
+	/// Enabled, on another master (`Some`) or floating (`None`).
+	Moved(Option<u16>),
+	Disabled,
+	/// Not listed under its id and name.
+	Gone,
+}
+
+impl Seat {
+	fn describe(self) -> String {
+		match self {
+			Self::Ours => "on omp's master pair".to_owned(),
+			Self::Moved(Some(master)) => format!(
+				"attached to another master (device {master}), such as the user's core pointer or \
+				 keyboard"
+			),
+			Self::Moved(None) => "floating".to_owned(),
+			Self::Disabled => "disabled".to_owned(),
+			Self::Gone => "no longer listed by the X server".to_owned(),
+		}
+	}
 }
 
 /// A raw XI2 event the server reports once it has processed a slave event.
@@ -120,6 +181,35 @@ enum Raw {
 	Wheel,
 	KeyPress(u8),
 	KeyRelease(u8),
+}
+
+/// Counts the server's raw key releases against the releases a run sent, in
+/// order: a release that is not the next one sent is not counted, so a lost
+/// key stops the count however many keys follow it.
+struct ReleaseOrder<'a> {
+	/// The run's steps from the next release still expected on.
+	steps:   &'a [KeyStep],
+	matched: usize,
+}
+
+impl<'a> ReleaseOrder<'a> {
+	const fn new(steps: &'a [KeyStep]) -> Self {
+		Self { steps, matched: 0 }
+	}
+
+	fn observe(&mut self, keycode: u32) {
+		let Some(at) = self.steps.iter().position(|step| !step.press) else {
+			return;
+		};
+		if u32::from(self.steps[at].keycode) == keycode {
+			self.steps = &self.steps[at + 1..];
+			self.matched += 1;
+		}
+	}
+
+	fn done(&self) -> bool {
+		self.steps.iter().all(|step| step.press)
+	}
 }
 
 impl Mpx {
@@ -142,40 +232,37 @@ impl Mpx {
 			)));
 		}
 		let atoms = Atoms::intern(&conn)?;
+		let holder = atoms.mpx_holder;
 		let owner = Owner::current();
-		if let Some(owner) = &owner {
-			reap_orphans(&conn, owner);
-		}
 		let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
 		let name = owner.as_ref().map_or_else(
-			|| format!("OMP MPX {}.{nonce:x}", std::process::id()),
+			|| format!("{OWNER_PREFIX}unidentified.{}.{nonce:x}", std::process::id()),
 			|owner| owner.master_name(nonce),
 		);
-		// The non-X resource first: a late uinput failure must not leave a
-		// fresh master pair behind.
+		// Prove hotplug before touching the hierarchy: a pair once added stays,
+		// so a server that never binds the slave must not get one.
 		let pointer_name = format!("{name} uinput pointer");
-		let pointer = UInputDevice::pointer(&pointer_name)?;
-		add_master(&conn, &name)?;
-		let (master_pointer, master_keyboard) = find_masters(&conn, &name)?;
-		let pointer_slave = match wait_for_slave(&conn, &pointer_name, DeviceType::SLAVE_POINTER)
-			.and_then(|slave| attach(&conn, slave, master_pointer).map(|()| slave))
-			.and_then(|slave| {
-				select_raw(
-					&conn,
-					root,
-					slave,
-					XIEventMask::RAW_BUTTON_PRESS
-						| XIEventMask::RAW_BUTTON_RELEASE
-						| XIEventMask::RAW_MOTION,
-				)
-				.map(|()| slave)
-			}) {
-			Ok(slave) => slave,
-			Err(error) => {
-				remove_master(&conn, master_pointer);
-				return Err(error);
-			},
-		};
+		let mut pointer = UInputDevice::pointer(&pointer_name)?;
+		let pointer_slave = wait_for_slave(&conn, &pointer_name, DeviceType::SLAVE_POINTER)?;
+		let (master_pointer, master_keyboard) =
+			claim_pair(&conn, holder, &name, owner.as_ref(), root, park)?;
+		if let Err(error) = attach(&conn, pointer_slave, master_pointer).and_then(|()| {
+			select_raw(
+				&conn,
+				root,
+				pointer_slave,
+				XIEventMask::RAW_BUTTON_PRESS
+					| XIEventMask::RAW_BUTTON_RELEASE
+					| XIEventMask::RAW_MOTION,
+			)
+		}) {
+			pointer.destroy();
+			release_pair(&conn, holder, root, park, master_pointer, master_keyboard, &[(
+				pointer_slave,
+				&pointer_name,
+			)]);
+			return Err(error);
+		}
 		set_flat_acceleration(&conn, pointer_slave);
 		let mpx = Self {
 			conn,
@@ -190,6 +277,8 @@ impl Mpx {
 			keyboard: None,
 			uncertain: false,
 			sent: false,
+			#[cfg(test)]
+			release_events: None,
 		};
 		mpx.park();
 		Ok(mpx)
@@ -362,23 +451,25 @@ impl Mpx {
 	}
 
 	pub(super) fn type_text(&mut self, target: Window, text: &str) -> CoreResult<()> {
-		self.begin()?;
+		self.begin(false)?;
 		let steps = self.keyboard_keymap()?.plan_text(text)?;
 		self.deliver_keys(target, &steps)
 	}
 
 	pub(super) fn key_chord(&mut self, target: Window, keys: &[KeyName]) -> CoreResult<()> {
-		self.begin()?;
+		self.begin(false)?;
 		let steps = self.keyboard_keymap()?.plan_chord(keys)?;
 		self.deliver_keys(target, &steps)
 	}
 
 	fn deliver_keys(&mut self, target: Window, steps: &[KeyStep]) -> CoreResult<()> {
 		self.focus(target)?;
-		if let Err(error) = self.emit_keys(steps) {
+		let result = self.emit_keys(steps);
+		if result.is_err() {
 			self.uncertain = true;
-			return Err(error);
 		}
+		self.route_held(false)?;
+		result?;
 		control::settle(KEY_SETTLE);
 		Ok(())
 	}
@@ -398,7 +489,7 @@ impl Mpx {
 		park_after: bool,
 		body: impl FnOnce(&mut Self) -> CoreResult<bool>,
 	) -> CoreResult<()> {
-		self.begin()?;
+		self.begin(true)?;
 		self.thaw();
 		let held = self.press_keys(target, modifiers, keys)?;
 		let result = body(self);
@@ -415,13 +506,16 @@ impl Mpx {
 		let result =
 			result.and_then(|confirmed| released_button.map(|()| confirmed && released_keys));
 		self.uncertain = !matches!(result, Ok(true));
+		// Parking warps the virtual master itself, so it stays off the user's
+		// devices even when the route check below finds a slave moved.
+		if park_after && matches!(result, Ok(true)) {
+			self.park();
+		}
+		if self.sent {
+			self.route_held(true)?;
+		}
 		match result {
-			Ok(true) => {
-				if park_after {
-					self.park();
-				}
-				Ok(())
-			},
+			Ok(true) => Ok(()),
 			Ok(false) => Err(DesktopError::input_failed(
 				"the X server did not confirm virtual input or key release; delivery is uncertain, so \
 				 do not retry blindly; inspect the desktop first",
@@ -495,8 +589,12 @@ impl Mpx {
 	}
 
 	/// Emits `steps` through the keyboard slave and waits until the server
-	/// reports the last one. Once the last press is out, a cancel no longer
-	/// fails the call: the releases and the server's report follow anyway.
+	/// reports each release, in order, or with no release the last press.
+	/// Every release is counted: when the server stalls, the kernel drops the
+	/// oldest queued uinput events, and the run's last key, or an earlier
+	/// transition of the same key, still arrives. Once the last press is out,
+	/// a cancel no longer fails the call: the releases and the server's
+	/// report follow anyway.
 	fn emit_keys(&mut self, steps: &[KeyStep]) -> CoreResult<()> {
 		self.drain();
 		self.sent = true;
@@ -518,21 +616,68 @@ impl Mpx {
 			index += 1;
 			keyboard.device.key(step.keycode, step.press)
 		})?;
-		let Some(last) = steps.last() else {
+		let releases = steps.iter().filter(|step| !step.press).count();
+		if releases == 0 {
+			let Some(last) = steps.last() else {
+				return Ok(());
+			};
+			return control::cleanup(|| self.wait_raw(slave, Raw::KeyPress(last.keycode), 1))?
+				.ok_or_else(|| {
+					DesktopError::input_failed(format!(
+						"the X server did not confirm the virtual keyboard's last key within {}ms; the \
+						 keys may not have been delivered",
+						KEY_CONFIRM_TIMEOUT.as_millis()
+					))
+				});
+		}
+		let confirmed = control::cleanup(|| self.wait_releases(slave, steps));
+		if confirmed == releases {
 			return Ok(());
-		};
-		let raw = if last.press {
-			Raw::KeyPress(last.keycode)
-		} else {
-			Raw::KeyRelease(last.keycode)
-		};
-		control::cleanup(|| self.wait_raw(slave, raw, 1))?.ok_or_else(|| {
-			DesktopError::input_failed(format!(
-				"the X server did not confirm the virtual keyboard's last key within {}ms; the keys \
-				 may not have been delivered",
-				KEY_CONFIRM_TIMEOUT.as_millis()
-			))
-		})
+		}
+		Err(DesktopError::input_failed(format!(
+			"the X server confirmed {confirmed} of the virtual keyboard's {releases} key releases \
+			 within {}ms, so keys were lost or are still on their way, and background input stays \
+			 off for this session; read the target before sending more",
+			KEY_CONFIRM_TIMEOUT.as_millis()
+		)))
+	}
+
+	/// How many of the releases in `steps` the server reported from `device`,
+	/// in order, within [`KEY_CONFIRM_TIMEOUT`].
+	fn wait_releases(&self, device: u16, steps: &[KeyStep]) -> usize {
+		let deadline = Instant::now() + KEY_CONFIRM_TIMEOUT;
+		let mut order = ReleaseOrder::new(steps);
+		while !order.done() {
+			if Instant::now() >= deadline {
+				break;
+			}
+			#[cfg(test)]
+			let event = if let Some(events) = &self.release_events {
+				events.borrow_mut()()
+					.ok_or(x11rb::errors::ConnectionError::UnknownError)
+					.map(Some)
+			} else {
+				self.conn.poll_for_event()
+			};
+			#[cfg(not(test))]
+			let event = self.conn.poll_for_event();
+			if Instant::now() >= deadline {
+				break;
+			}
+			match event {
+				Ok(Some(Event::XinputRawKeyRelease(raw)))
+					if raw.deviceid == device || raw.sourceid == device =>
+				{
+					order.observe(raw.detail);
+				},
+				Ok(Some(_)) => {},
+				Ok(None) => {
+					std::thread::sleep(Duration::from_millis(2));
+				},
+				Err(_) => break,
+			}
+		}
+		order.matched
 	}
 
 	/// Points the virtual keyboard's own focus at `window`; the core focus is
@@ -603,8 +748,9 @@ impl Mpx {
 	}
 
 	/// Starts one call: refuses while a prior call left delivery uncertain,
-	/// and clears [`Self::sent`].
-	fn begin(&mut self) -> CoreResult<()> {
+	/// puts the slaves it sends through back on the pair
+	/// ([`Self::restore_route`]), and clears [`Self::sent`].
+	fn begin(&mut self, pointer: bool) -> CoreResult<()> {
 		control::check()?;
 		if self.uncertain {
 			return Err(DesktopError::background_unavailable(
@@ -612,7 +758,135 @@ impl Mpx {
 				 cannot be retargeted; no input was sent",
 			));
 		}
+		self.restore_route(pointer)?;
 		self.sent = false;
+		Ok(())
+	}
+
+	/// The slaves a call sends through: the pointer's for a pointer gesture,
+	/// and the keyboard's once it exists.
+	fn routes(&self, pointer: bool) -> [Option<Route>; 2] {
+		#[cfg(test)]
+		if self.release_events.is_some() {
+			return [None, None];
+		}
+		[
+			pointer.then_some(Route {
+				slave:  self.pointer_slave,
+				master: self.master_pointer,
+				suffix: " uinput pointer",
+				device: "pointer",
+			}),
+			self.keyboard.as_ref().map(|keyboard| Route {
+				slave:  keyboard.slave,
+				master: self.master_keyboard,
+				suffix: " uinput keyboard",
+				device: "keyboard",
+			}),
+		]
+	}
+
+	/// Where the server holds each routed slave, asked in one round trip.
+	fn seats(&self, routes: &[Option<Route>; 2]) -> CoreResult<[Option<Seat>; 2]> {
+		let mut cookies = [None, None];
+		for (cookie, route) in cookies.iter_mut().zip(routes) {
+			if let Some(route) = route {
+				*cookie = Some(
+					self
+						.conn
+						.xinput_xi_query_device(route.slave)
+						.map_err(mpx_failed)?,
+				);
+			}
+		}
+		let mut seats = [None; 2];
+		for ((seat, cookie), route) in seats.iter_mut().zip(cookies).zip(routes) {
+			if let (Some(cookie), Some(route)) = (cookie, route) {
+				// A freed id answers `BadDevice`.
+				let infos = cookie.reply().map_or_default(|reply| reply.infos);
+				*seat = Some(seat_of(infos.first(), &self.name, route));
+			}
+		}
+		Ok(seats)
+	}
+
+	/// Puts the slaves a call sends through back on the pair. Xorg moves them
+	/// on its own: it floats a slave it disables (every device while another
+	/// VT is active, or `xinput disable`) and attaches it to the core pointer
+	/// or keyboard when it enables it again, where its input reaches the
+	/// user's focused window and is still confirmed. Refuses, with nothing
+	/// sent, while a slave is disabled or gone or does not stay attached.
+	fn restore_route(&mut self, pointer: bool) -> CoreResult<()> {
+		let routes = self.routes(pointer);
+		let seats = self.seats(&routes)?;
+		if seats
+			.iter()
+			.all(|seat| matches!(seat, None | Some(Seat::Ours)))
+		{
+			return Ok(());
+		}
+		let mut keyboard_moved = false;
+		for (route, seat) in routes.iter().zip(seats) {
+			let (Some(route), Some(seat)) = (route, seat) else {
+				continue;
+			};
+			let why = match seat {
+				Seat::Ours => continue,
+				Seat::Moved(_) => match attach(&self.conn, route.slave, route.master) {
+					Ok(()) => {
+						keyboard_moved |= route.master == self.master_keyboard;
+						continue;
+					},
+					Err(error) => {
+						format!("is {} and could not be re-attached ({})", seat.describe(), error.message)
+					},
+				},
+				Seat::Disabled => "is disabled: the X server disables every input device while \
+				                   another virtual terminal is active, and `xinput disable` does too"
+					.to_owned(),
+				Seat::Gone => format!("is {}", seat.describe()),
+			};
+			return Err(route_lost(route, &why));
+		}
+		for (route, seat) in routes.iter().zip(self.seats(&routes)?) {
+			if let (Some(route), Some(seat)) = (route, seat)
+				&& seat != Seat::Ours
+			{
+				return Err(route_lost(
+					route,
+					&format!("is {} again right after it was re-attached", seat.describe()),
+				));
+			}
+		}
+		if keyboard_moved && let Some(mut keyboard) = self.keyboard.take() {
+			// The warm-up key would reach the last call's target, and the
+			// call that follows focuses its own.
+			unfocus(&self.conn, self.master_keyboard);
+			let warmed = self.warm_up(&mut keyboard.device, keyboard.slave);
+			self.keyboard = Some(keyboard);
+			warmed?;
+		}
+		Ok(())
+	}
+
+	/// After a call that sent input: its events may all be confirmed, yet a
+	/// slave the server moved off the pair while it ran sent the rest to the
+	/// user's focused window or nowhere, which is no success.
+	fn route_held(&self, pointer: bool) -> CoreResult<()> {
+		let routes = self.routes(pointer);
+		for (route, seat) in routes.iter().zip(self.seats(&routes)?) {
+			if let (Some(route), Some(seat)) = (route, seat)
+				&& seat != Seat::Ours
+			{
+				return Err(DesktopError::input_failed(format!(
+					"omp's virtual {} left its master pair while this action ran (it is now {}), so \
+					 input sent after that may have reached the user's focused window or no window; \
+					 inspect the desktop before retrying",
+					route.device,
+					seat.describe()
+				)));
+			}
+		}
 		Ok(())
 	}
 
@@ -663,8 +937,14 @@ impl Mpx {
 			XIEventMask::RAW_KEY_PRESS | XIEventMask::RAW_KEY_RELEASE,
 		)?;
 		// The first events of a fresh keyboard were observed to vanish while
-		// the master switches to the slave's keymap; push a symbol-less key
-		// through the whole pipeline before real text.
+		// the master switches to the slave's keymap.
+		self.warm_up(&mut device, slave)?;
+		Ok(VirtualKeyboard { device, slave })
+	}
+
+	/// Pushes a symbol-less key through the whole pipeline of a keyboard
+	/// just attached to the pair, before real text.
+	fn warm_up(&self, device: &mut UInputDevice, slave: u16) -> CoreResult<()> {
 		self.drain();
 		let pressed = device
 			.key(WARM_UP_KEYCODE, true)
@@ -674,30 +954,14 @@ impl Mpx {
 		if !self.wait_raw(slave, Raw::KeyRelease(WARM_UP_KEYCODE), 1)? {
 			return Err(DesktopError::input_failed("virtual keyboard warm-up was not confirmed"));
 		}
-		control::wait(WARM_UP_SETTLE)?;
-		Ok(VirtualKeyboard { device, slave })
+		control::wait(WARM_UP_SETTLE)
 	}
 
 	/// Moves only the virtual master; synced so a following uinput event
 	/// (a separate kernel pipeline) cannot overtake it.
 	fn warp(&self, x: i16, y: i16) -> CoreResult<()> {
 		control::check()?;
-		self
-			.conn
-			.xinput_xi_warp_pointer(
-				NONE,
-				self.root,
-				0,
-				0,
-				0,
-				0,
-				i32::from(x) << 16,
-				i32::from(y) << 16,
-				self.master_pointer,
-			)
-			.map_err(mpx_failed)?
-			.check()
-			.map_err(mpx_failed)
+		warp_master(&self.conn, self.root, self.master_pointer, (x, y))
 	}
 
 	fn park(&self) {
@@ -758,13 +1022,27 @@ impl Mpx {
 
 impl Drop for Mpx {
 	fn drop(&mut self) {
-		// Unplug the slaves first so the removal never hands a live slave back
-		// to the user's core devices.
+		// A cancelled or timed-out call can leave events of the slaves in flight;
+		// park and free the pair only once the server has dropped them, so a late
+		// motion or release never lands at the park corner or under the next
+		// holder.
+		let pointer_name = format!("{} uinput pointer", self.name);
+		let keyboard_name = format!("{} uinput keyboard", self.name);
+		let mut slaves = vec![(self.pointer_slave, pointer_name.as_str())];
 		if let Some(mut keyboard) = self.keyboard.take() {
 			keyboard.device.destroy();
+			slaves.push((keyboard.slave, keyboard_name.as_str()));
 		}
 		self.pointer.destroy();
-		remove_master(&self.conn, self.master_pointer);
+		release_pair(
+			&self.conn,
+			self.atoms.mpx_holder,
+			self.root,
+			self.park,
+			self.master_pointer,
+			self.master_keyboard,
+			&slaves,
+		);
 	}
 }
 
@@ -874,13 +1152,7 @@ fn find_masters(conn: &RustConnection, name: &str) -> CoreResult<(u16, u16)> {
 		find("keyboard", DeviceType::MASTER_KEYBOARD),
 	) {
 		(Some(pointer), Some(keyboard)) => Ok((pointer, keyboard)),
-		(Some(pointer), None) => {
-			remove_master(conn, pointer);
-			Err(DesktopError::input_failed("XIChangeHierarchy did not create the MPX master keyboard"))
-		},
-		_ => {
-			Err(DesktopError::input_failed("XIChangeHierarchy did not create the MPX master pointer"))
-		},
+		_ => Err(DesktopError::input_failed("XIChangeHierarchy did not create the MPX master pair")),
 	}
 }
 
@@ -925,30 +1197,32 @@ fn attach(conn: &RustConnection, slave: u16, master: u16) -> CoreResult<()> {
 		.map_err(mpx_failed)
 }
 
-/// Removes a master pair without ever attaching a pending virtual slave to
-/// the user's core devices. Kernel hot-unplug is asynchronous.
-fn remove_master(conn: &RustConnection, master_pointer: u16) {
-	if let Ok(devices) = query_devices(conn)
-		&& let Some(pointer) = devices
-			.iter()
-			.find(|device| device.deviceid == master_pointer)
-		&& let Ok(cookie) = conn.xinput_xi_set_focus(NONE, CURRENT_TIME, pointer.attachment)
-	{
-		let _ = cookie.check();
-	}
-	let change = HierarchyChange {
-		len:  3,
-		data: HierarchyChangeData::RemoveMaster(HierarchyChangeDataRemoveMaster {
-			deviceid:        master_pointer,
-			return_mode:     ChangeMode::FLOAT,
-			return_pointer:  0,
-			return_keyboard: 0,
-		}),
+/// Where `info`, the server's answer for `route`'s slave id, holds it; the
+/// slaves are named after `session`. A device of another name under that id
+/// is a later device the freed id went to.
+fn seat_of(info: Option<&XIDeviceInfo>, session: &str, route: &Route) -> Seat {
+	let Some(info) = info.filter(|info| {
+		info.deviceid == route.slave
+			&& info.name.strip_prefix(session.as_bytes()) == Some(route.suffix.as_bytes())
+	}) else {
+		return Seat::Gone;
 	};
-	if let Ok(cookie) = conn.xinput_xi_change_hierarchy(&[change]) {
-		let _ = cookie.check();
+	if !info.enabled {
+		Seat::Disabled
+	} else if info.type_ == DeviceType::FLOATING_SLAVE {
+		Seat::Moved(None)
+	} else if info.attachment == route.master {
+		Seat::Ours
+	} else {
+		Seat::Moved(Some(info.attachment))
 	}
-	let _ = conn.flush();
+}
+
+fn route_lost(route: &Route, why: &str) -> DesktopError {
+	DesktopError::background_unavailable(format!(
+		"the background input route is lost: omp's virtual {} {why}; no input was sent",
+		route.device
+	))
 }
 
 fn select_raw(
@@ -1020,10 +1294,18 @@ fn set_flat_acceleration(conn: &RustConnection, slave: u16) {
 	}
 }
 
-/// Removes masters left behind by dead incarnations of this user's processes
-/// on this machine. Runs under a server grab so no device id is reused
-/// between enumeration and removal.
-fn reap_orphans(conn: &RustConnection, owner: &Owner) {
+/// Takes a master pair for the session named `name`: one no live session
+/// holds, else a new one. Runs under a server grab, so two sessions never
+/// take the same pair. The other pairs of killed holders are parked, unfocused
+/// and freed on the way, since their cursor and focus stay where they died.
+fn claim_pair(
+	conn: &RustConnection,
+	holder: Atom,
+	name: &str,
+	owner: Option<&Owner>,
+	root: Window,
+	park: (i16, i16),
+) -> CoreResult<(u16, u16)> {
 	struct Grab<'a>(&'a RustConnection);
 	impl Drop for Grab<'_> {
 		fn drop(&mut self) {
@@ -1032,32 +1314,242 @@ fn reap_orphans(conn: &RustConnection, owner: &Owner) {
 			}
 		}
 	}
-	if conn
+	conn
 		.grab_server()
-		.ok()
-		.and_then(|cookie| cookie.check().ok())
-		.is_none()
-	{
-		return;
-	}
+		.map_err(mpx_failed)?
+		.check()
+		.map_err(mpx_failed)?;
 	let _grab = Grab(conn);
-	let Ok(devices) = query_devices(conn) else {
-		return;
-	};
+	let xtest = conn
+		.intern_atom(true, b"XTEST Device")
+		.map_err(mpx_failed)?
+		.reply()
+		.map_err(mpx_failed)?
+		.atom;
+	let mut taken = None;
+	let mut pairs = 0;
+	let devices = query_devices(conn)?;
 	for info in devices
 		.iter()
 		.filter(|info| info.type_ == DeviceType::MASTER_POINTER)
 	{
-		let Some(candidate) = std::str::from_utf8(&info.name)
-			.ok()
-			.and_then(Owner::from_pointer_name)
-		else {
+		let Ok(pointer) = std::str::from_utf8(&info.name) else {
 			continue;
 		};
-		if candidate.is_stale_for(owner, process_start) {
-			remove_master(conn, info.deviceid);
+		// `v1.` pairs belong to older omp releases, which may still remove them:
+		// never taken, and not counted, or two left by killed old processes
+		// would use up the cap until the X server exits.
+		if !pointer.starts_with(OWNER_PREFIX) {
+			continue;
+		}
+		pairs += 1;
+		let value = read_holder(conn, holder, info.deviceid);
+		if !is_claimable(value.as_deref(), pointer, owner, process_start) {
+			continue;
+		}
+		if devices.iter().any(|slave| {
+			[info.deviceid, info.attachment].contains(&slave.attachment)
+				&& matches!(slave.type_, DeviceType::SLAVE_POINTER | DeviceType::SLAVE_KEYBOARD)
+				&& !is_xtest_slave(conn, xtest, slave.deviceid)
+		}) {
+			// A dead holder's focus must not linger while its slaves unplug,
+			// even though that pair is not safe for the next holder yet.
+			if value.as_deref() != Some(HOLDER_FREE) {
+				unfocus(conn, info.attachment);
+			}
+			continue;
+		}
+		if taken.is_none() {
+			taken = Some((info.deviceid, info.attachment));
+		} else if value.as_deref() != Some(HOLDER_FREE) {
+			release_pair(conn, holder, root, park, info.deviceid, info.attachment, &[]);
 		}
 	}
+	let pair = if let Some(pair) = taken {
+		unfocus(conn, pair.1);
+		pair
+	} else {
+		if pairs >= MAX_PAIRS {
+			return Err(DesktopError::input_busy(format!(
+				"XI2-MPX pair limit ({MAX_PAIRS}) reached; no reusable pair is free"
+			)));
+		}
+		add_master(conn, name)?;
+		find_masters(conn, name)?
+	};
+	// Locks and sticky-key latches belong to the previous holder, not this
+	// session. Address the pair's keyboard explicitly, never the core one.
+	if !conn
+		.xkb_use_extension(1, 0)
+		.map_err(mpx_failed)?
+		.reply()
+		.map_err(mpx_failed)?
+		.supported
+	{
+		return Err(mpx_failed("XKB 1.0 is unavailable"));
+	}
+	conn
+		.xkb_latch_lock_state(
+			pair.1,
+			255u8.into(),
+			ModMask::default(),
+			true,
+			xkb::Group::M1,
+			255u8.into(),
+			true,
+			0,
+		)
+		.map_err(mpx_failed)?
+		.check()
+		.map_err(mpx_failed)?;
+	write_holder(conn, holder, pair.0, name.as_bytes())?;
+	Ok(pair)
+}
+
+/// The server marks its XTEST slaves with a read-only property; names do not
+/// distinguish another application's devices from ours.
+fn is_xtest_slave(conn: &RustConnection, xtest: Atom, slave: u16) -> bool {
+	if xtest == NONE {
+		return false;
+	}
+	conn
+		.xinput_xi_get_property(slave, false, xtest, AtomEnum::INTEGER.into(), 0, 1)
+		.ok()
+		.and_then(|cookie| cookie.reply().ok())
+		.is_some_and(|reply| matches!(reply.items, XIGetPropertyItems::Data8(value) if value == [1]))
+}
+
+/// Hands a pair back: its cursor parked, its keyboard focusing nothing, free
+/// for the next session. Removing it instead would crash Qt 6.5+ clients
+/// (module docs).
+fn release_pair(
+	conn: &RustConnection,
+	holder: Atom,
+	root: Window,
+	park: (i16, i16),
+	master_pointer: u16,
+	master_keyboard: u16,
+	slaves: &[(u16, &str)],
+) {
+	if !wait_unplugged(conn, slaves) {
+		// A timed-out teardown must never be reclaimed, even after its holder
+		// dies.
+		unfocus(conn, master_keyboard);
+		let _ = write_holder(conn, holder, master_pointer, b"unplug-timeout");
+		return;
+	}
+	let _ = warp_master(conn, root, master_pointer, park);
+	unfocus(conn, master_keyboard);
+	let _ = write_holder(conn, holder, master_pointer, HOLDER_FREE);
+	let _ = conn.flush();
+}
+
+fn unfocus(conn: &RustConnection, master_keyboard: u16) {
+	if let Ok(cookie) = conn.xinput_xi_set_focus(NONE, CURRENT_TIME, master_keyboard) {
+		let _ = cookie.check();
+	}
+}
+
+fn warp_master(
+	conn: &RustConnection,
+	root: Window,
+	master_pointer: u16,
+	(x, y): (i16, i16),
+) -> CoreResult<()> {
+	conn
+		.xinput_xi_warp_pointer(
+			NONE,
+			root,
+			0,
+			0,
+			0,
+			0,
+			i32::from(x) << 16,
+			i32::from(y) << 16,
+			master_pointer,
+		)
+		.map_err(mpx_failed)?
+		.check()
+		.map_err(mpx_failed)
+}
+
+/// Waits, bounded, until the server no longer lists `slaves`: kernel hot-unplug
+/// is asynchronous, and events written before it may still be delivered. A
+/// slave is the device listed under both its id and its name: the server
+/// gives a freed id to the next device plugged in.
+fn wait_unplugged(conn: &RustConnection, slaves: &[(u16, &str)]) -> bool {
+	let deadline = Instant::now() + UNPLUG_TIMEOUT;
+	loop {
+		let Ok(devices) = query_devices(conn) else {
+			return false;
+		};
+		if !devices.iter().any(|info| {
+			slaves
+				.iter()
+				.any(|&(id, name)| info.deviceid == id && info.name == name.as_bytes())
+		}) {
+			return true;
+		}
+		if Instant::now() >= deadline {
+			return false;
+		}
+		std::thread::sleep(Duration::from_millis(20));
+	}
+}
+
+/// The holder property of a master pointer; `None` when it has none.
+fn read_holder(conn: &RustConnection, holder: Atom, master_pointer: u16) -> Option<Vec<u8>> {
+	let reply = conn
+		.xinput_xi_get_property(master_pointer, false, holder, AtomEnum::ANY.into(), 0, 64)
+		.ok()?
+		.reply()
+		.ok()?;
+	match reply.items {
+		XIGetPropertyItems::Data8(value) if reply.type_ != NONE => Some(value),
+		_ => None,
+	}
+}
+
+fn write_holder(
+	conn: &RustConnection,
+	holder: Atom,
+	master_pointer: u16,
+	value: &[u8],
+) -> CoreResult<()> {
+	conn
+		.xinput_xi_change_property(
+			master_pointer,
+			PropMode::REPLACE,
+			holder,
+			AtomEnum::STRING.into(),
+			value.len() as u32,
+			&XIChangePropertyAux::Data8(value.to_vec()),
+		)
+		.map_err(mpx_failed)?
+		.check()
+		.map_err(mpx_failed)
+}
+
+/// Whether a session of `current` may take a v2 pair. Older omp releases can
+/// remove v1 masters even while held, so those pairs are never adopted.
+/// Holders whose death cannot be proven keep their pair.
+fn is_claimable(
+	holder: Option<&[u8]>,
+	pointer: &str,
+	current: Option<&Owner>,
+	start_of: impl FnOnce(u32) -> io::Result<u64>,
+) -> bool {
+	if !pointer.starts_with(OWNER_PREFIX) {
+		return false;
+	}
+	let holder = match holder {
+		Some(value) if value == HOLDER_FREE => return true,
+		Some(value) => std::str::from_utf8(value).ok().and_then(Owner::from_name),
+		None => Owner::from_pointer_name(pointer),
+	};
+	holder
+		.zip(current)
+		.is_some_and(|(holder, current)| holder.is_stale_for(current, start_of))
 }
 
 /// Process incarnation encoded in a master's name: an identity domain (boot,
@@ -1100,13 +1592,18 @@ impl Owner {
 		format!("{OWNER_PREFIX}{:016x}.{:x}.{:x}.{nonce:x}", self.domain, self.pid, self.start)
 	}
 
-	fn from_pointer_name(name: &str) -> Option<Self> {
-		let mut parts = name.strip_circumfix(OWNER_PREFIX, " pointer")?.split('.');
+	/// The owner a session or master name (`master_name`) encodes.
+	fn from_name(name: &str) -> Option<Self> {
+		let mut parts = name.strip_prefix(OWNER_PREFIX)?.split('.');
 		let domain = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
 		let start = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let _nonce = u16::from_str_radix(parts.next()?, 16).ok()?;
 		(parts.next().is_none() && pid != 0).then_some(Self { domain, pid, start })
+	}
+
+	fn from_pointer_name(name: &str) -> Option<Self> {
+		Self::from_name(name.strip_suffix(" pointer")?)
 	}
 
 	/// Whether this master's owner is provably gone. Foreign domains and
@@ -1149,6 +1646,14 @@ fn process_start(pid: u32) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+	use x11rb::protocol::{
+		xinput::{HierarchyChangeDataDetachSlave, HierarchyMask},
+		xproto::{
+			ChangeWindowAttributesAux, CreateWindowAux, EventMask as CoreEventMask, InputFocus,
+			WindowClass,
+		},
+	};
+
 	use super::*;
 
 	const OWNER: Owner = Owner { domain: 0xfeed_beef, pid: 4242, start: 777 };
@@ -1160,6 +1665,10 @@ mod tests {
 		assert_eq!(Owner::from_pointer_name(&pointer), Some(owner));
 		assert!(format!("{} uinput keyboard", owner.master_name(u16::MAX)).len() < 80);
 		assert_eq!(Owner::from_pointer_name("OMP MPX 4242.1 pointer"), None);
+		// omp versions that removed pairs reap dead creators' `v1.` masters.
+		assert!(!pointer.starts_with("OMP MPX v1."), "new pairs stay out of that reaper");
+		let legacy = pointer.replacen(OWNER_PREFIX, "OMP MPX v1.", 1);
+		assert_eq!(Owner::from_pointer_name(&legacy), None, "v1 pairs are never adopted");
 	}
 
 	#[test]
@@ -1175,6 +1684,614 @@ mod tests {
 		assert!(peer(OWNER.pid, 1).is_stale_for(&OWNER, gone), "earlier incarnation of our pid");
 		let foreign = Owner { domain: 1, ..peer(99, 5) };
 		assert!(!foreign.is_stale_for(&OWNER, gone), "other machine or namespace");
+	}
+
+	#[test]
+	fn a_pair_is_taken_only_when_free_or_its_holder_is_provably_gone() {
+		let gone = |_| Err(io::Error::from(io::ErrorKind::NotFound));
+		let live = |_| Ok(5);
+		let only_peer_lives = |pid| {
+			if pid == 99 {
+				Ok(5)
+			} else {
+				Err(io::ErrorKind::NotFound.into())
+			}
+		};
+		let peer = Owner { pid: 99, start: 5, ..OWNER }.master_name(1);
+		let creator = format!("{} pointer", Owner { pid: 98, start: 5, ..OWNER }.master_name(1));
+		assert!(is_claimable(Some(HOLDER_FREE), &creator, Some(&OWNER), live), "released");
+		assert!(
+			!is_claimable(Some(peer.as_bytes()), &creator, Some(&OWNER), only_peer_lives),
+			"the holder, not the dead creator, decides"
+		);
+		assert!(is_claimable(Some(peer.as_bytes()), &creator, Some(&OWNER), gone), "dead holder");
+		assert!(
+			!is_claimable(Some(b"OMP MPX 7.1"), &creator, Some(&OWNER), gone),
+			"unidentifiable holder"
+		);
+		assert!(!is_claimable(Some(peer.as_bytes()), &creator, None, gone), "we cannot prove death");
+		// An older omp can remove v1 masters even while a new session holds them.
+		let legacy = creator.replacen(OWNER_PREFIX, "OMP MPX v1.", 1);
+		assert!(!is_claimable(None, &legacy, Some(&OWNER), gone), "dead v1 creator");
+		assert!(!is_claimable(Some(HOLDER_FREE), &legacy, Some(&OWNER), gone), "free v1 pair");
+		assert!(!is_claimable(None, &legacy, Some(&OWNER), live), "live v1 creator");
+	}
+
+	/// The server `DISPLAY` names: connection, root and park corner.
+	fn display() -> (RustConnection, Window, (i16, i16)) {
+		let (conn, screen) = x11rb::connect(None).unwrap();
+		let info = &conn.setup().roots[screen];
+		let corner = |size: u16| i16::try_from(size - 1).unwrap();
+		let (root, park) = (info.root, (corner(info.width_in_pixels), corner(info.height_in_pixels)));
+		conn.xinput_xi_query_version(2, 2).unwrap().reply().unwrap();
+		(conn, root, park)
+	}
+
+	#[test]
+	#[ignore = "needs an isolated X server"]
+	fn the_pair_pool_refuses_growth_at_its_limit_but_reuses_a_released_pair() {
+		let (conn, root, park) = display();
+		// Killed older omp processes can leave pairs that they may still reap.
+		// They must neither be adopted nor consume the new pool's slots.
+		for name in ["OMP MPX v1.pool-test-1", "OMP MPX v1.pool-test-2"] {
+			if find_masters(&conn, name).is_err() {
+				add_master(&conn, name).unwrap();
+			}
+		}
+		let holder = conn
+			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let owner = Owner::current().unwrap();
+		let mut pairs = Vec::new();
+		for nonce in 1..=2 {
+			pairs.push(
+				claim_pair(&conn, holder, &owner.master_name(nonce), Some(&owner), root, park).unwrap(),
+			);
+		}
+		let before = query_devices(&conn).unwrap().len();
+		let refused = claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park);
+		assert_eq!(refused.unwrap_err().code, crate::desktop::error::ErrorCode::InputBusy);
+		assert_eq!(query_devices(&conn).unwrap().len(), before, "refusal adds no devices");
+		let pair = pairs[0];
+		release_pair(&conn, holder, root, park, pair.0, pair.1, &[]);
+		let xtest = conn
+			.intern_atom(true, b"XTEST Device")
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let foreign = query_devices(&conn)
+			.unwrap()
+			.into_iter()
+			.find(|info| {
+				info.type_ == DeviceType::SLAVE_KEYBOARD && !is_xtest_slave(&conn, xtest, info.deviceid)
+			})
+			.expect("the isolated server has a non-XTEST keyboard");
+		attach(&conn, foreign.deviceid, pair.1).unwrap();
+		assert!(
+			claim_pair(&conn, holder, &owner.master_name(4), Some(&owner), root, park).is_err(),
+			"a released pair carrying someone else's keyboard is not safe to retarget"
+		);
+		attach(&conn, foreign.deviceid, foreign.attachment).unwrap();
+		assert_eq!(
+			claim_pair(&conn, holder, &owner.master_name(4), Some(&owner), root, park).unwrap(),
+			pair,
+			"a free pair remains usable at the cap"
+		);
+		for (pointer, keyboard) in pairs {
+			release_pair(&conn, holder, root, park, pointer, keyboard, &[]);
+		}
+	}
+
+	#[test]
+	#[ignore = "needs an isolated X server"]
+	fn a_teardown_timeout_does_not_publish_a_reusable_pair() {
+		let (conn, root, park) = display();
+		let holder = conn
+			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let owner = Owner::current().unwrap();
+		let pair =
+			claim_pair(&conn, holder, &owner.master_name(1), Some(&owner), root, park).unwrap();
+		// An XTEST slave stays present until X exits, modeling delayed
+		// hot-unplug.
+		let slave = query_devices(&conn)
+			.unwrap()
+			.into_iter()
+			.find(|info| info.type_ == DeviceType::SLAVE_POINTER && info.attachment == pair.0)
+			.unwrap();
+		let slave_name = String::from_utf8(slave.name.clone()).unwrap();
+		assert!(
+			wait_unplugged(&conn, &[(slave.deviceid, "a device that previously used this id")]),
+			"a replacement with the same id is not the unplugged slave"
+		);
+		conn
+			.xinput_xi_set_focus(root, CURRENT_TIME, pair.1)
+			.unwrap()
+			.check()
+			.unwrap();
+		release_pair(&conn, holder, root, park, pair.0, pair.1, &[(slave.deviceid, &slave_name)]);
+		assert_eq!(
+			conn
+				.xinput_xi_get_focus(pair.1)
+				.unwrap()
+				.reply()
+				.unwrap()
+				.focus,
+			NONE,
+			"a retired pair must not retain its target's virtual focus"
+		);
+		let value = read_holder(&conn, holder, pair.0).unwrap();
+		assert!(
+			!is_claimable(
+				Some(&value),
+				&format!("{} pointer", owner.master_name(1)),
+				Some(&owner),
+				|_| Err(io::ErrorKind::NotFound.into())
+			),
+			"the pair stays unavailable even after its holder dies"
+		);
+		// The XTEST slave belongs to this disposable fixture, not a real
+		// unplugging device; restore the slot for the other live tests.
+		release_pair(&conn, holder, root, park, pair.0, pair.1, &[]);
+	}
+
+	/// Removing a master crashes running Qt 6.5+ clients, so a session hands
+	/// its pair to the next one instead, its slaves gone first. Needs Xorg
+	/// with uinput hotplug and a writable `/dev/uinput`; run with `--ignored`.
+	#[test]
+	#[ignore = "needs Xorg with uinput hotplug"]
+	fn a_session_hands_its_pair_to_the_next_without_removing_it() {
+		let (conn, ..) = display();
+		let devices = || -> Vec<u16> {
+			query_devices(&conn)
+				.unwrap()
+				.iter()
+				.map(|info| info.deviceid)
+				.collect()
+		};
+		let first = Mpx::create().unwrap();
+		let (pair, slave) = (first.master_pointer, first.pointer_slave);
+		assert!(
+			conn
+				.xkb_use_extension(1, 0)
+				.unwrap()
+				.reply()
+				.unwrap()
+				.supported
+		);
+		let core_before = conn
+			.xkb_get_state(xkb::ID::USE_CORE_KBD.into())
+			.unwrap()
+			.reply()
+			.unwrap();
+		conn
+			.xkb_latch_lock_state(
+				first.master_keyboard,
+				255u8.into(),
+				ModMask::LOCK,
+				true,
+				xkb::Group::M1,
+				255u8.into(),
+				true,
+				0,
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+		let locked = conn
+			.xkb_get_state(first.master_keyboard)
+			.unwrap()
+			.reply()
+			.unwrap();
+		assert_eq!(locked.locked_mods, ModMask::LOCK);
+		drop(first);
+		let after = devices();
+		assert!(after.contains(&pair), "the pair outlives its session");
+		assert!(!after.contains(&slave), "its slave is gone before the pair is free");
+		let second = Mpx::create().unwrap();
+		assert_eq!(second.master_pointer, pair, "the next session takes the free pair");
+		let state = conn
+			.xkb_get_state(second.master_keyboard)
+			.unwrap()
+			.reply()
+			.unwrap();
+		assert_eq!(state.locked_mods, ModMask::default());
+		assert_eq!(state.latched_mods, ModMask::default());
+		let core_after = conn
+			.xkb_get_state(xkb::ID::USE_CORE_KBD.into())
+			.unwrap()
+			.reply()
+			.unwrap();
+		assert_eq!(core_after.locked_mods, core_before.locked_mods, "core keyboard is untouched");
+		assert_eq!(core_after.latched_mods, core_before.latched_mods, "core latches are untouched");
+	}
+
+	/// Pairs whose holders were killed get parked and freed by the next claim,
+	/// whichever one it takes. Fixture pairs are reused on subsequent runs.
+	#[test]
+	#[ignore = "needs an isolated X server"]
+	fn a_killed_holders_pair_is_parked_and_freed() {
+		let (conn, root, park) = display();
+		let holder = conn
+			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let owner = Owner::current().unwrap();
+		let dead = Owner { pid: u32::MAX - 1, start: u64::from(std::process::id()), ..owner };
+		let pairs: Vec<(u16, u16)> = (1..=2)
+			.map(|nonce| {
+				claim_pair(&conn, holder, &owner.master_name(nonce), Some(&owner), root, park).unwrap()
+			})
+			.collect();
+		for &(pointer, _) in &pairs {
+			write_holder(&conn, holder, pointer, dead.master_name(1).as_bytes()).unwrap();
+			warp_master(&conn, root, pointer, (100, 100)).unwrap();
+		}
+		// Model a killed holder whose uinput slave has not disappeared yet.
+		let xtest = conn
+			.intern_atom(true, b"XTEST Device")
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let slave = query_devices(&conn)
+			.unwrap()
+			.into_iter()
+			.find(|info| {
+				info.type_ == DeviceType::SLAVE_KEYBOARD && !is_xtest_slave(&conn, xtest, info.deviceid)
+			})
+			.expect("the isolated server has a non-XTEST keyboard");
+		attach(&conn, slave.deviceid, pairs[0].1).unwrap();
+		conn
+			.xinput_xi_set_focus(root, CURRENT_TIME, pairs[0].1)
+			.unwrap()
+			.check()
+			.unwrap();
+		let other =
+			claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park).unwrap();
+		assert_eq!(other, pairs[1], "the lingering slave still prevents reuse");
+		let focus = conn
+			.xinput_xi_get_focus(pairs[0].1)
+			.unwrap()
+			.reply()
+			.unwrap()
+			.focus;
+		attach(&conn, slave.deviceid, slave.attachment).unwrap();
+		release_pair(&conn, holder, root, park, other.0, other.1, &[]);
+		assert_eq!(focus, NONE, "a dead holder's focus clears before its slave disappears");
+		let session =
+			claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park).unwrap();
+		for (pointer, _) in pairs
+			.into_iter()
+			.filter(|&(pointer, _)| pointer != session.0)
+		{
+			assert_eq!(read_holder(&conn, holder, pointer).as_deref(), Some(HOLDER_FREE));
+			let at = conn
+				.xinput_xi_query_pointer(root, pointer)
+				.unwrap()
+				.reply()
+				.unwrap();
+			assert_eq!((at.root_x >> 16, at.root_y >> 16), (i32::from(park.0), i32::from(park.1)));
+		}
+		release_pair(&conn, holder, root, park, session.0, session.1, &[]);
+	}
+
+	/// Without hotplug the slave never binds; `main` added a pair, waited and
+	/// removed it. Needs a server without uinput hotplug, such as Xvfb, and a
+	/// writable `/dev/uinput`.
+	#[test]
+	#[ignore = "needs Xvfb and a writable /dev/uinput"]
+	fn a_server_that_never_binds_the_slave_gets_no_pair() {
+		let (conn, root, _) = display();
+		conn
+			.xinput_xi_select_events(root, &[xinput::EventMask {
+				deviceid: Device::ALL.into(),
+				mask:     vec![XIEventMask::HIERARCHY],
+			}])
+			.unwrap()
+			.check()
+			.unwrap();
+		assert!(Mpx::create().is_err());
+		conn.get_input_focus().unwrap().reply().unwrap();
+		while let Some(event) = conn.poll_for_event().unwrap() {
+			if let Event::XinputHierarchy(event) = event {
+				assert!(
+					!event
+						.flags
+						.intersects(HierarchyMask::MASTER_ADDED | HierarchyMask::MASTER_REMOVED),
+					"hierarchy changed: {:?}",
+					event.flags
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn a_slave_counts_as_routed_only_on_its_own_master_under_its_own_name() {
+		let route = Route { slave: 12, master: 20, suffix: " uinput keyboard", device: "keyboard" };
+		let info = |attachment, type_, enabled, name: &str| XIDeviceInfo {
+			deviceid: 12,
+			type_,
+			attachment,
+			enabled,
+			name: name.as_bytes().to_vec(),
+			classes: Vec::new(),
+		};
+		let ours = "OMP MPX v2.a uinput keyboard";
+		let seat = |info: XIDeviceInfo| seat_of(Some(&info), "OMP MPX v2.a", &route);
+		assert_eq!(seat(info(20, DeviceType::SLAVE_KEYBOARD, true, ours)), Seat::Ours);
+		assert_eq!(
+			seat(info(3, DeviceType::SLAVE_KEYBOARD, true, ours)),
+			Seat::Moved(Some(3)),
+			"re-enabled onto the core keyboard"
+		);
+		assert_eq!(seat(info(0, DeviceType::FLOATING_SLAVE, true, ours)), Seat::Moved(None));
+		assert_eq!(seat(info(0, DeviceType::FLOATING_SLAVE, false, ours)), Seat::Disabled);
+		assert_eq!(
+			seat(info(20, DeviceType::SLAVE_KEYBOARD, true, "OMP MPX v2.b uinput keyboard")),
+			Seat::Gone,
+			"a later device under the freed id"
+		);
+		assert_eq!(seat_of(None, "OMP MPX v2.a", &route), Seat::Gone);
+	}
+
+	/// Two override-redirect windows selecting XI2 key and button presses of
+	/// every master: the target the virtual keyboard focuses, and the user's
+	/// window holding the core keyboard focus.
+	fn input_windows(conn: &RustConnection, root: Window) -> (Window, Window) {
+		let window = |x| {
+			let window = conn.generate_id().unwrap();
+			conn
+				.create_window(
+					0,
+					window,
+					root,
+					x,
+					100,
+					80,
+					80,
+					0,
+					WindowClass::INPUT_OUTPUT,
+					0,
+					&CreateWindowAux::new().override_redirect(1),
+				)
+				.unwrap();
+			conn.map_window(window).unwrap();
+			conn
+				.xinput_xi_select_events(window, &[xinput::EventMask {
+					deviceid: Device::ALL_MASTER.into(),
+					mask:     vec![XIEventMask::KEY_PRESS | XIEventMask::BUTTON_PRESS],
+				}])
+				.unwrap()
+				.check()
+				.unwrap();
+			window
+		};
+		let (target, user) = (window(100), window(300));
+		conn
+			.set_input_focus(InputFocus::PARENT, user, CURRENT_TIME)
+			.unwrap()
+			.check()
+			.unwrap();
+		(target, user)
+	}
+
+	/// Presses since the last call: `(keys at target, keys at user, buttons at
+	/// target)`.
+	fn landed(conn: &RustConnection, target: Window, user: Window) -> (usize, usize, usize) {
+		conn.get_input_focus().unwrap().reply().unwrap();
+		let mut landed = (0, 0, 0);
+		while let Some(event) = conn.poll_for_event().unwrap() {
+			match event {
+				Event::XinputKeyPress(press) if press.event == target => landed.0 += 1,
+				Event::XinputKeyPress(press) if press.event == user => landed.1 += 1,
+				Event::XinputButtonPress(press) if press.event == target => landed.2 += 1,
+				_ => {},
+			}
+		}
+		landed
+	}
+
+	fn core_master(conn: &RustConnection, type_: DeviceType) -> u16 {
+		query_devices(conn)
+			.unwrap()
+			.into_iter()
+			.find(|info| info.type_ == type_ && info.name.starts_with(b"Virtual core "))
+			.unwrap()
+			.deviceid
+	}
+
+	/// What `xinput float` sends.
+	fn float(conn: &RustConnection, slave: u16) {
+		let change = HierarchyChange {
+			len:  2,
+			data: HierarchyChangeData::DetachSlave(HierarchyChangeDataDetachSlave { deviceid: slave }),
+		};
+		conn
+			.xinput_xi_change_hierarchy(&[change])
+			.unwrap()
+			.check()
+			.unwrap();
+	}
+
+	/// What `xinput disable` and `enable` send.
+	fn set_enabled(conn: &RustConnection, slave: u16, enabled: bool) {
+		let property = conn
+			.intern_atom(true, b"Device Enabled")
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		conn
+			.xinput_xi_change_property(
+				slave,
+				PropMode::REPLACE,
+				property,
+				AtomEnum::INTEGER.into(),
+				1,
+				&XIChangePropertyAux::Data8(vec![u8::from(enabled)]),
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+	}
+
+	/// Xorg floats a slave it disables and attaches it to the core devices
+	/// when it enables it again (a VT round trip does both), where its keys
+	/// reach the user's focused window and are still confirmed. Needs Xorg with
+	/// uinput hotplug; run with `--ignored`.
+	#[test]
+	#[ignore = "needs Xorg with uinput hotplug"]
+	fn a_slave_the_server_moved_is_put_back_before_input() {
+		let (conn, root, _) = display();
+		let (target, user) = input_windows(&conn, root);
+		let mut mpx = Mpx::create().unwrap();
+		mpx.type_text(target, "x").unwrap();
+		assert_eq!(landed(&conn, target, user), (1, 0, 0));
+		let keyboard = mpx.keyboard.as_ref().unwrap().slave;
+		let core_keyboard = core_master(&conn, DeviceType::MASTER_KEYBOARD);
+
+		attach(&conn, keyboard, core_keyboard).unwrap();
+		mpx.type_text(target, "x").unwrap();
+		assert_eq!(landed(&conn, target, user), (1, 0, 0), "on the core keyboard");
+
+		float(&conn, keyboard);
+		mpx.type_text(target, "x").unwrap();
+		assert_eq!(landed(&conn, target, user), (1, 0, 0), "floated");
+
+		set_enabled(&conn, keyboard, false);
+		let refused = mpx.type_text(target, "x").unwrap_err();
+		assert_eq!(
+			refused.code,
+			crate::desktop::error::ErrorCode::BackgroundUnavailable,
+			"{}",
+			refused.message
+		);
+		set_enabled(&conn, keyboard, true);
+		assert_eq!(landed(&conn, target, user), (0, 0, 0), "nothing sent while disabled");
+		mpx.type_text(target, "x").unwrap();
+		assert_eq!(landed(&conn, target, user), (1, 0, 0), "enabled again");
+
+		attach(&conn, mpx.pointer_slave, core_master(&conn, DeviceType::MASTER_POINTER)).unwrap();
+		mpx.click(target, (140, 140), MouseButton::Left, 1, Modifiers::default())
+			.unwrap();
+		assert_eq!(landed(&conn, target, user), (0, 0, 1), "pointer on the core pointer");
+	}
+
+	/// Root property whose change tells a [`move_on_first_event`] mover that
+	/// the call it watched has returned.
+	const MOVER_STOP: &[u8] = b"_OMP_TEST_MOVER_STOP";
+
+	/// Another client, standing in for the server's re-enable: attaches
+	/// `slave` to `master` on the first raw event the slave sends, or returns
+	/// `false` once [`stop_mover`] says the call ended without one.
+	fn move_on_first_event(
+		slave: u16,
+		master: u16,
+		mask: XIEventMask,
+	) -> std::thread::JoinHandle<bool> {
+		let (mover, root, _) = display();
+		let stop = mover
+			.intern_atom(false, MOVER_STOP)
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		mover
+			.change_window_attributes(
+				root,
+				&ChangeWindowAttributesAux::new().event_mask(CoreEventMask::PROPERTY_CHANGE),
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+		mover
+			.xinput_xi_select_events(root, &[xinput::EventMask {
+				deviceid: slave,
+				mask:     vec![mask],
+			}])
+			.unwrap()
+			.check()
+			.unwrap();
+		std::thread::spawn(move || {
+			loop {
+				match mover.wait_for_event().unwrap() {
+					Event::XinputRawKeyPress(_)
+					| Event::XinputRawMotion(_)
+					| Event::XinputRawButtonPress(_) => {
+						attach(&mover, slave, master).unwrap();
+						return true;
+					},
+					Event::PropertyNotify(event) if event.atom == stop => return false,
+					_ => {},
+				}
+			}
+		})
+	}
+
+	fn stop_mover(conn: &RustConnection, root: Window) {
+		let stop = conn
+			.intern_atom(false, MOVER_STOP)
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		conn
+			.change_property(PropMode::REPLACE, root, stop, AtomEnum::STRING, 8, 1, b"1")
+			.unwrap()
+			.check()
+			.unwrap();
+	}
+
+	/// A slave moved while a call runs: every event is confirmed, but the ones
+	/// after the move went to the user's devices. Keys through
+	/// `deliver_keys`, wheel detents through `gesture`. Needs Xorg with uinput
+	/// hotplug; run with `--ignored`.
+	#[test]
+	#[ignore = "needs Xorg with uinput hotplug"]
+	fn a_call_whose_slave_moved_while_it_ran_does_not_report_success() {
+		let (conn, root, _) = display();
+		let (target, user) = input_windows(&conn, root);
+		let mut mpx = Mpx::create().unwrap();
+		mpx.type_text(target, "x").unwrap();
+		landed(&conn, target, user);
+		let keyboard = mpx.keyboard.as_ref().unwrap().slave;
+		let core_keyboard = core_master(&conn, DeviceType::MASTER_KEYBOARD);
+		let mover = move_on_first_event(keyboard, core_keyboard, XIEventMask::RAW_KEY_PRESS);
+		let result = mpx.type_text(target, &"x".repeat(40));
+		stop_mover(&conn, root);
+		assert!(mover.join().unwrap(), "the keyboard was moved during the call");
+		let (at_target, at_user, _) = landed(&conn, target, user);
+		assert!(
+			at_user > 0,
+			"the keys after the move reached the user's window: {at_target}/{at_user}"
+		);
+		let error = result.unwrap_err();
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::InputFailed, "{}", error.message);
+		mpx.type_text(target, "x").unwrap();
+		assert_eq!(landed(&conn, target, user), (1, 0, 0), "the next call puts it back");
+
+		let core_pointer = core_master(&conn, DeviceType::MASTER_POINTER);
+		let mover = move_on_first_event(
+			mpx.pointer_slave,
+			core_pointer,
+			XIEventMask::RAW_MOTION | XIEventMask::RAW_BUTTON_PRESS,
+		);
+		let result = mpx.scroll(target, (140, 140), 0.0, 10.0);
+		stop_mover(&conn, root);
+		assert!(mover.join().unwrap(), "the pointer was moved during the call");
+		let error = result.unwrap_err();
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::InputFailed, "{}", error.message);
+		mpx.scroll(target, (140, 140), 0.0, 1.0).unwrap();
 	}
 
 	#[test]
@@ -1196,6 +2313,142 @@ mod tests {
 			.iter()
 			.fold((10, 10), |(x, y), &(dx, dy)| (x + dx, y + dy));
 		assert_eq!(end, (58, 22));
+	}
+
+	/// Uses an isolated X server for real keymap planning and XI focus. Only
+	/// the kernel write endpoint and the server's raw-event stream are replaced.
+	fn typing_fixture() -> Mpx {
+		// Xvfb resets when its last client disconnects. Keep one connection
+		// across fixtures so a new case cannot race that reset.
+		static SERVER: std::sync::LazyLock<RustConnection> =
+			std::sync::LazyLock::new(|| x11rb::connect(None).unwrap().0);
+		std::sync::LazyLock::force(&SERVER);
+		let (conn, screen) = x11rb::connect(None).unwrap();
+		let root = conn.setup().roots[screen].root;
+		let atoms = Atoms::intern(&conn).unwrap();
+		let keyboard = conn
+			.xinput_xi_query_device(Device::ALL_MASTER)
+			.unwrap()
+			.reply()
+			.unwrap()
+			.infos
+			.into_iter()
+			.find(|info| info.type_ == DeviceType::MASTER_KEYBOARD)
+			.unwrap()
+			.deviceid;
+		Mpx {
+			conn,
+			root,
+			atoms,
+			park: (0, 0),
+			name: String::new(),
+			master_pointer: 0,
+			master_keyboard: keyboard,
+			pointer: UInputDevice::test_sink(),
+			pointer_slave: 0,
+			keyboard: Some(VirtualKeyboard { device: UInputDevice::test_sink(), slave: keyboard }),
+			uncertain: false,
+			sent: false,
+			release_events: None,
+		}
+	}
+
+	fn release(deviceid: u16, sourceid: u16, detail: u32) -> Event {
+		Event::XinputRawKeyRelease(xinput::RawKeyReleaseEvent {
+			deviceid,
+			sourceid,
+			detail,
+			..Default::default()
+		})
+	}
+
+	#[test]
+	#[ignore = "requires an isolated X11 display (run under xvfb-run)"]
+	fn typing_loss_fails_and_inhibits_the_next_call() {
+		use crate::desktop::error::ErrorCode;
+		// Complete delivery, resync noise, lost repeat, middle/first loss, and
+		// another slave's matching release must all reach the caller correctly.
+		for (text, indices, foreign, succeeds) in [
+			("abc", vec![0, 1, 2], false, true),
+			("abc", vec![0, 0, 1, 2], false, true),
+			("aa", vec![0], false, false),
+			("abc", vec![0, 2], false, false),
+			("abc", vec![1, 2], false, false),
+			("abc", vec![0, 1, 2], true, false),
+		] {
+			let mut mpx = typing_fixture();
+			let codes: Vec<u32> = mpx
+				.keyboard_keymap()
+				.unwrap()
+				.plan_text(text)
+				.unwrap()
+				.iter()
+				.filter(|step| !step.press)
+				.map(|step| u32::from(step.keycode))
+				.collect();
+			let device = mpx.master_keyboard;
+			let mut events: std::collections::VecDeque<_> = indices
+				.into_iter()
+				.enumerate()
+				.map(|(at, index)| {
+					if foreign && at == 1 {
+						release(device + 100, device + 100, codes[index])
+					} else if at % 2 == 0 {
+						release(device, device + 100, codes[index])
+					} else {
+						release(device + 100, device, codes[index])
+					}
+				})
+				.collect();
+			mpx.release_events = Some(std::cell::RefCell::new(Box::new(move || events.pop_front())));
+			let result = mpx.type_text(mpx.root, text);
+			if succeeds {
+				result.unwrap();
+				assert!(!mpx.uncertain);
+			} else {
+				let error = result.unwrap_err();
+				assert_eq!(error.code, ErrorCode::InputFailed);
+				assert!(error.message.contains("key releases"));
+				assert!(mpx.uncertain);
+				assert_eq!(
+					mpx.type_text(mpx.root, text).unwrap_err().code,
+					ErrorCode::BackgroundUnavailable
+				);
+			}
+		}
+	}
+
+	#[test]
+	#[ignore = "requires an isolated X11 display (run under xvfb-run)"]
+	fn typing_deadline_bounds_busy_events_and_rejects_late_releases() {
+		use crate::desktop::error::ErrorCode;
+		let mut mpx = typing_fixture();
+		let code = mpx
+			.keyboard_keymap()
+			.unwrap()
+			.plan_text("a")
+			.unwrap()
+			.into_iter()
+			.find(|step| !step.press)
+			.unwrap()
+			.keycode;
+		let device = mpx.master_keyboard;
+		let mut started = None;
+		mpx.release_events = Some(std::cell::RefCell::new(Box::new(move || {
+			let started = started.get_or_insert_with(Instant::now);
+			// Never an empty queue: even the right key from another slave
+			// must not extend the deadline. The real release arrives too late.
+			let source = if started.elapsed() < KEY_CONFIRM_TIMEOUT + Duration::from_millis(100) {
+				device + 100
+			} else {
+				device
+			};
+			Some(release(source, source, u32::from(code)))
+		})));
+		let started = Instant::now();
+		assert_eq!(mpx.type_text(mpx.root, "a").unwrap_err().code, ErrorCode::InputFailed);
+		assert!(started.elapsed() < KEY_CONFIRM_TIMEOUT + Duration::from_secs(1));
+		assert_eq!(mpx.type_text(mpx.root, "a").unwrap_err().code, ErrorCode::BackgroundUnavailable);
 	}
 
 	#[test]

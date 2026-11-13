@@ -24,7 +24,7 @@ use super::{
 };
 use crate::bash::{
 	fs::{PwEntry, PwQuery, Stat, StatKind},
-	ids::IntrinsicId,
+	ids::{IntrinsicId, Platform},
 	vm::{
 		fsprobe::{FsAns, FsErr, FsReq, FsResult},
 		probe::absolute,
@@ -184,8 +184,30 @@ pub(super) fn host_path(ctx: &Ctx<'_, '_>, name: &[u8]) -> BString {
 	if crate::bash::fs::url_root_len(&abs).is_some() {
 		return abs;
 	}
-	let mut out = BString::from("/");
-	for part in abs.split(|&c| c == b'/') {
+	normalize_on(
+		&abs,
+		if cfg!(windows) {
+			Platform::Windows
+		} else {
+			Platform::Linux
+		},
+	)
+}
+
+/// [`host_path`]'s cleanup of an absolute name for `platform`. The root is
+/// `/`, or on Windows a drive (`C:/`) or UNC (`//`) root; either slash
+/// separates there.
+fn normalize_on(abs: &[u8], platform: Platform) -> BString {
+	let windows = platform == Platform::Windows;
+	let is_sep = |c: &u8| *c == b'/' || (windows && *c == b'\\');
+	let (mut out, rest) = match abs {
+		[drive, b':', sep, rest @ ..] if windows && drive.is_ascii_alphabetic() && is_sep(sep) => {
+			(BString::from([*drive, b':', b'/'].as_slice()), rest)
+		},
+		[a, b, rest @ ..] if windows && is_sep(a) && is_sep(b) => (BString::from("//"), rest),
+		_ => (BString::from("/"), abs),
+	};
+	for part in rest.split(is_sep) {
 		if part.is_empty() || part == b"." {
 			continue;
 		}
@@ -194,7 +216,7 @@ pub(super) fn host_path(ctx: &Ctx<'_, '_>, name: &[u8]) -> BString {
 		}
 		out.extend_from_slice(part);
 	}
-	if abs.ends_with(b"/") && !out.ends_with(b"/") {
+	if abs.last().is_some_and(is_sep) && !out.ends_with(b"/") {
 		out.push(b'/');
 	}
 	out
@@ -357,12 +379,12 @@ fn domkdir(
 	Ok(1)
 }
 
-/// `EEXIST` (0 off Unix, where errors carry no errno).
+/// `EEXIST`.
 const fn eexist() -> i32 {
 	#[cfg(unix)]
 	return libc::EEXIST;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::EEXIST;
 }
 
 /// `ENOENT` (as [`eexist`]).
@@ -370,7 +392,7 @@ const fn enoent() -> i32 {
 	#[cfg(unix)]
 	return libc::ENOENT;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::ENOENT;
 }
 
 /// zsh `bin_rmdir`.
@@ -1012,5 +1034,15 @@ mod tests {
 		assert_eq!(safe_split(b"d/x"), Some(("d".into(), "x".into())));
 		assert_eq!(safe_split(b"/x"), Some(("/".into(), "x".into())));
 		assert_eq!(safe_split(b"dir/"), Some(("/".into(), "ir".into())));
+	}
+
+	#[test]
+	fn host_paths_keep_windows_roots() {
+		let win = |p: &str| normalize_on(p.as_bytes(), Platform::Windows);
+		assert_eq!(win("C:/Users/me/./a//b/"), "C:/Users/me/a/b/");
+		assert_eq!(win("C:\\Users\\me\\a"), "C:/Users/me/a");
+		assert_eq!(win("//srv/share/./x"), "//srv/share/x");
+		assert_eq!(win("/tmp//x"), "/tmp/x");
+		assert_eq!(normalize_on(b"/tmp/./a//b/", Platform::Linux), "/tmp/a/b/");
 	}
 }

@@ -12,18 +12,19 @@ import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
-import type {
-	DocumentBuildStatus,
-	LspClient,
-	LspJsonRpcId,
-	LspJsonRpcNotification,
-	LspJsonRpcRequest,
-	LspJsonRpcResponse,
-	LspTransport,
-	LspWriteSink,
-	PublishDiagnosticsParams,
-	ServerConfig,
-	WorkspaceEdit,
+import {
+	type DocumentBuildStatus,
+	FileChangeType,
+	type LspClient,
+	type LspJsonRpcId,
+	type LspJsonRpcNotification,
+	type LspJsonRpcRequest,
+	type LspJsonRpcResponse,
+	type LspTransport,
+	type LspWriteSink,
+	type PublishDiagnosticsParams,
+	type ServerConfig,
+	type WorkspaceEdit,
 } from "./types";
 import {
 	detectLanguageId,
@@ -33,6 +34,7 @@ import {
 	readTextFromDisk,
 	uriToFile,
 } from "./utils";
+import { WATCHED_FILES_METHOD, WatchedFilesForwarder } from "./watched-files";
 
 /**
  * A JSON-RPC error response to one of our requests. The message keeps the code, so
@@ -375,12 +377,20 @@ const CLIENT_CAPABILITIES = {
 	},
 };
 
-/** LSP `FileChangeType` values for workspace/didChangeWatchedFiles notifications. */
-export enum FileChangeType {
-	Created = 1,
-	Changed = 2,
-	Deleted = 3,
-}
+/**
+ * Capabilities for servers that hand file watching to the client (every server
+ * unless configured with `watchFiles: false`): the client watches the files
+ * they register (see watched-files.ts) instead of their own watcher, which can
+ * fail in ways the client cannot contain (tsgo re-arms in a tight loop on SMB
+ * drives, and does not watch at all on Linux).
+ */
+const WATCHING_CLIENT_CAPABILITIES = {
+	...CLIENT_CAPABILITIES,
+	workspace: {
+		...CLIENT_CAPABILITIES.workspace,
+		didChangeWatchedFiles: { dynamicRegistration: true, relativePatternSupport: true },
+	},
+};
 
 /** Filesystem change authored by the harness and announced to active LSP clients. */
 export interface WatchedFileChange {
@@ -789,6 +799,7 @@ async function addWorkspaceFolders(
 		undoLoad();
 		throw err;
 	}
+	void client.watchedFiles?.refresh();
 	rustAnalyzerReadyClients.delete(client);
 }
 
@@ -950,12 +961,34 @@ export async function applyWorkspaceEditWithLsp(
 interface DynamicCapabilityRegistration {
 	id?: unknown;
 	method?: unknown;
+	registerOptions?: unknown;
 }
 
 interface DynamicCapabilityParams {
 	registrations?: DynamicCapabilityRegistration[];
 	unregisterations?: DynamicCapabilityRegistration[];
 	unregistrations?: DynamicCapabilityRegistration[];
+}
+
+/**
+ * The watcher of a server this client spawned and asked to hand watching over
+ * (`watchFiles`). A mux-shared server's watcher belongs to the mux, which
+ * outlives and is shared by every attached client.
+ */
+function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
+	// `watchFiles` is on unless configured `false`.
+	if (client.proc.sharedMux || client.config.watchFiles === false) return undefined;
+	client.watchedFiles ??= new WatchedFilesForwarder({
+		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
+		send: changes =>
+			sendNotification(
+				client,
+				WATCHED_FILES_METHOD,
+				{ changes },
+				AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
+			),
+	});
+	return client.watchedFiles;
 }
 
 function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest): void {
@@ -970,6 +1003,9 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 		for (const registration of params.registrations) {
 			if (typeof registration.id === "string" && typeof registration.method === "string") {
 				registrations.set(registration.id, registration.method);
+				if (registration.method === WATCHED_FILES_METHOD) {
+					void ownWatchedFiles(client)?.register(registration.id, registration.registerOptions);
+				}
 			}
 		}
 		return;
@@ -982,6 +1018,7 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 	for (const registration of unregistrations) {
 		if (typeof registration.id === "string") {
 			registrations.delete(registration.id);
+			void client.watchedFiles?.unregister(registration.id);
 		}
 	}
 }
@@ -1461,6 +1498,7 @@ export async function getOrCreateClient(
 			maybeStopIdleChecker();
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
+			client.watchedFiles?.close();
 
 			// Reject any pending requests — the server is gone, they will never complete.
 			if (client.pendingRequests.size > 0) {
@@ -1496,7 +1534,7 @@ export async function getOrCreateClient(
 					processId: process.pid,
 					rootUri: fileToUri(cwd),
 					rootPath: cwd,
-					capabilities: CLIENT_CAPABILITIES,
+					capabilities: client.config.watchFiles === false ? CLIENT_CAPABILITIES : WATCHING_CLIENT_CAPABILITIES,
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
@@ -2092,7 +2130,10 @@ export async function notifyWorkspaceWatchedFiles(
 					return { uri, type: change.type };
 				});
 			if (clientChanges.length === 0) return;
-			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			const params = { changes: clientChanges };
+			// The watcher sees these writes too; it skips echoing them (the mux does this for shared servers).
+			client.watchedFiles?.announced(params);
+			await sendNotification(client, WATCHED_FILES_METHOD, params, sendSignal);
 			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
 			await refreshOpenFiles(client, sendSignal);
 		}),

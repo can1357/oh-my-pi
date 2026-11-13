@@ -4,8 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { getCurrentThemeName, initTheme, setTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -213,16 +212,15 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(renderTodos(mode)).not.toContain("done task");
 	});
 
-	it("marks reconciled todos complete and auto-dismisses the durable plan", async () => {
+	it("keeps a matching todo open and the plan visible when its subagent completes", async () => {
 		await replaceMode();
 		setTodoClearDelay(0);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		session.sessionManager.appendCustomEntry("user_todo_edit", {
-			phases: [{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] }],
-		});
-		session.setTodoPhases([
+		const phases: TodoPhase[] = [
 			{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] },
-		]);
+		];
+		const planEntryId = session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
 		mode.setTodos(session.getTodoPhases());
 		await mode.init();
 		vi.useFakeTimers();
@@ -238,138 +236,16 @@ describe("InteractiveMode todo HUD persistence", () => {
 		vi.advanceTimersByTime(0);
 		await session.settleInFlightMessagePersistence();
 		await session.sessionManager.flush();
-		expect(session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
-		expect(renderTodos(mode)).toBe("");
-	});
-
-	it("reconciles focused worker todos without overwriting the main session", async () => {
-		await replaceMode();
-		setTodoClearDelay(-1);
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		const mainPhases: TodoPhase[] = [
-			{ name: "Main plan", tasks: [{ content: "orchestrate the main work", status: "in_progress" }] },
-		];
-		session.setTodoPhases(mainPhases);
-		mode.setTodos(session.getTodoPhases());
-		await mode.init();
-
-		const focusedDir = TempDir.createSync("@pi-focused-reconcile-");
-		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
-		const focusedSession = new AgentSession({
-			agent: new Agent({
-				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			}),
-			sessionManager: SessionManager.create(focusedDir.path(), focusedDir.path()),
-			settings: Settings.isolated(),
-			modelRegistry,
-		});
-		focusedSession.setTodoPhases([
-			{
-				name: "Worker plan",
-				tasks: [
-					{ content: "apply nested review fixes", status: "pending" },
-					{ content: "verify worker changes", status: "in_progress" },
-				],
-			},
-		]);
-		const registry = AgentRegistry.global();
-		// Registration schedules a coalesced observer UI flush; own that timer so the
-		// lifecycle event below gets its own flush window.
-		vi.useFakeTimers();
-		const agentId = "FocusedTodoParent";
-		const ref = registry.register({
-			id: agentId,
-			displayName: agentId,
-			kind: "sub",
-			parentId: MAIN_AGENT_ID,
-			session: focusedSession,
-			status: "running",
-		});
-		try {
-			await mode.focusAgentSession(agentId);
-			expect(renderTodos(mode)).toContain("apply nested review fixes");
-			vi.advanceTimersByTime(100);
-
-			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-				id: `${agentId}/NestedFixer`,
-				index: 0,
-				agent: "task",
-				description: "apply nested review fixes",
-				status: "completed",
-				detached: true,
-			});
-			vi.advanceTimersByTime(100);
-
-			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
-			expect(session.getTodoPhases()).toEqual(mainPhases);
-			expect(renderTodos(mode)).toContain("1/2");
-
-			await mode.unfocusSession();
-			expect(renderTodos(mode)).toContain("orchestrate the main work");
-			expect(renderTodos(mode)).not.toContain("apply nested review fixes");
-		} finally {
-			vi.useRealTimers();
-			if (mode.focusedAgentId) await mode.unfocusSession();
-			registry.unregister(agentId, ref);
-			await focusedSession.dispose();
-			focusedDir.removeSync();
-		}
-	});
-
-	it("reconciles into the snapshot's owning session even when viewSession has moved on", async () => {
-		// Reproduces the focus-attach window deterministically: the HUD snapshot is
-		// reloaded from the worker (making it the owner) while viewSession is still
-		// the main session. A subagent completing here must land in the worker, not
-		// be written over the main session's canonical plan (#9575 review).
-		await replaceMode();
-		setTodoClearDelay(-1);
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		const mainPhases: TodoPhase[] = [
-			{ name: "Main plan", tasks: [{ content: "orchestrate the main work", status: "in_progress" }] },
-		];
-		session.setTodoPhases(mainPhases);
-		mode.setTodos(session.getTodoPhases());
-		await mode.init();
-
-		const workerDir = TempDir.createSync("@pi-owner-reconcile-");
-		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
-		const workerSession = new AgentSession({
-			agent: new Agent({
-				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			}),
-			sessionManager: SessionManager.create(workerDir.path(), workerDir.path()),
-			settings: Settings.isolated(),
-			modelRegistry,
-		});
-		workerSession.setTodoPhases([
-			{ name: "Worker plan", tasks: [{ content: "run the delegated fix", status: "in_progress" }] },
-		]);
-		try {
-			// Owner := worker, viewSession still := main.
-			await mode.reloadTodos(workerSession);
-			expect(renderTodos(mode)).toContain("run the delegated fix");
-
-			vi.useFakeTimers();
-			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-				id: "DelegatedFixer",
-				index: 0,
-				agent: "task",
-				description: "run the delegated fix",
-				status: "completed",
-				detached: true,
-			});
-			vi.advanceTimersByTime(100);
-
-			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
-			expect(session.getTodoPhases()).toEqual(mainPhases);
-			expect(renderTodos(mode)).toContain("1/1");
-		} finally {
-			vi.useRealTimers();
-			await workerSession.dispose();
-			workerDir.removeSync();
-		}
+		// A finished subagent is not a `todo done`: the plan stays open, so even
+		// instant auto-clear has nothing to dismiss and nothing is persisted.
+		expect(session.getTodoPhases()).toEqual(phases);
+		expect(
+			session.sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "custom")
+				.map(entry => entry.id),
+		).toEqual([planEntryId]);
+		expect(renderTodos(mode)).toContain("Fix review comments");
 	});
 
 	it("does not persist a stale reveal after the owning snapshot changes", async () => {
@@ -688,6 +564,81 @@ describe("InteractiveMode todo HUD anchor", () => {
 		// Hidden stages do not change the compact title.
 		const root = lines.find(line => line.includes("TODO"));
 		expect(root?.trim()).toBe("TODO");
+	});
+
+	it("wraps a row wider than the panel beneath its own content instead of the panel edge", () => {
+		mode.setTodos([
+			{
+				name: "A stage whose name is far too long to fit on one sixty column row, stage-end",
+				tasks: [
+					{ content: "finished", status: "completed" },
+					{
+						content: "a branch task described at such length that it has to wrap, branch-end",
+						status: "in_progress",
+					},
+					{
+						content: "the last task, also described at such length that it wraps, last-end",
+						status: "pending",
+					},
+				],
+			},
+		]);
+
+		const styled = mode.todoContainer.render(60);
+		const rows = styled.map(row => Bun.stripANSI(row).trimEnd());
+		const pad = " ".repeat(rows.find(row => row.trim() === "TODO")!.indexOf("TODO"));
+		// Rows after the first of the logical row that starts at `head` and ends at `end`.
+		const continuations = (head: string, end: string): string[] =>
+			rows.slice(rows.findIndex(row => row.includes(head)) + 1, rows.findIndex(row => row.includes(end)) + 1);
+		const { branch, last, vertical } = theme.tree;
+		const spine = `${pad} ${vertical}  `;
+
+		// A stage name hangs beneath itself, the progress spine running on beside it.
+		const stage = continuations("A stage whose", "stage-end");
+		expect(stage.length).toBeGreaterThan(0);
+		for (const row of stage) expect(row).toMatch(new RegExp(`^${spine}\\S`));
+		// The name is bold; the spine beside its continuation is styled like the
+		// stage's own connector instead of inheriting that weight.
+		const stageRow = rows.findIndex(row => row.includes("A stage whose"));
+		expect(styled[stageRow + 1]!.split(vertical)[0]).toBe(styled[stageRow]!.split(branch)[0]!);
+
+		// A task hangs beneath its checkbox: the spine and the task rail both continue.
+		expect(rows.find(row => row.includes("a branch task"))).toStartWith(`${spine}${branch} `);
+		const branchTask = continuations("a branch task", "branch-end");
+		expect(branchTask.length).toBeGreaterThan(0);
+		for (const row of branchTask) expect(row).toMatch(new RegExp(`^${spine}${vertical}  \\S`));
+
+		// Nothing follows the last task, so its rail ends while the spine continues.
+		expect(rows.find(row => row.includes("the last task"))).toStartWith(`${spine}${last} `);
+		const lastTask = continuations("the last task", "last-end");
+		expect(lastTask.length).toBeGreaterThan(0);
+		for (const row of lastTask) expect(row).toMatch(new RegExp(`^${spine}   \\S`));
+	});
+
+	it("keeps a wrapped task hanging when a theme switch re-renders the panel", async () => {
+		mode.setTodos([
+			{
+				name: "Stage",
+				tasks: [
+					{
+						content:
+							"a task described at such length that it cannot fit on one row of the panel even at one hundred and twenty columns, so it wraps",
+						status: "in_progress",
+					},
+					{ content: "short", status: "pending" },
+				],
+			},
+		]);
+		const before = renderTodos(mode);
+		const original = getCurrentThemeName() ?? "dark";
+		try {
+			await setTheme(original === "light" ? "dark" : "light");
+			// A theme switch invalidates components without rebuilding the todo rows.
+			mode.todoContainer.invalidate();
+			expect(renderTodos(mode)).toBe(before);
+		} finally {
+			await setTheme(original);
+		}
 	});
 
 	it("expands and collapses the complete todo HUD through /todo", async () => {

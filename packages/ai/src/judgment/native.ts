@@ -5,8 +5,10 @@
  * Each judgment API is one wire dialect: TypeSafe's System One route
  * (`POST /v1/systemone`), OpenRouter Decisions (`POST /api/alpha/decisions`,
  * same body), Cloudflare Workers AI (`POST /ai/run/{model}`, same body plus
- * top-level data URL images; `systemone.ts`), and OpenAI Decisions
- * (`POST /v1/decisions`, translated both ways; `openai-decisions.ts`).
+ * top-level data URL images; `systemone.ts`), OpenAI Decisions
+ * (`POST /v1/decisions`, translated both ways; `openai-decisions.ts`), and
+ * Gemini Decisions (`POST /v1beta/decisions`, positional question keys and an
+ * `x-goog-api-key` credential; `google-decisions.ts`).
  * Credentials flow through {@link withAuth}, so a stored key rotates on
  * 401/403 exactly like chat providers; transient 429/5xx responses retry with
  * bounded, `retry-after`-aware backoff. Endpoints that cap the questions per
@@ -35,8 +37,16 @@ import { withInferenceUserAgent } from "../providers/inference-headers";
 import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { googleDecisionsWire } from "./google-decisions";
 import { openaiDecisionsWire } from "./openai-decisions";
-import { liquidWire, openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
+import {
+	liquidWire,
+	naceWire,
+	openrouterDecisionsWire,
+	referencedImageAssets,
+	typesafeWire,
+	workersAiWire,
+} from "./systemone";
 import {
 	type Answer,
 	type Judge,
@@ -58,7 +68,9 @@ const JUDGMENT_WIRES = {
 	"openrouter-decisions": openrouterDecisionsWire,
 	"workers-ai-systemone": workersAiWire,
 	"openai-decisions": openaiDecisionsWire,
+	"google-decisions": googleDecisionsWire,
 	"liquid-systemone": liquidWire,
+	"nace-systemone": naceWire,
 } as const satisfies Partial<Record<Api, JudgmentWire>>;
 
 /** APIs {@link NativeJudge} can serve. */
@@ -487,7 +499,7 @@ export class NativeJudge implements Judge {
 		const requestHeaders = hasImages ? this.#wire.imageHeaders : undefined;
 		const signal = options?.signal;
 		const payload = await withAuth(this.#apiKey, key => this.#attempt(body, key, signal, requestHeaders), { signal });
-		const decoded = this.#wire.decode(payload);
+		const decoded = this.#wire.decode(payload, request);
 		if (!decoded) {
 			throw new AIError.ProviderResponseError(`${this.label} returned a malformed judgment response`, {
 				provider: this.provider,
@@ -532,7 +544,9 @@ export class NativeJudge implements Judge {
 		const headers: Record<string, string> = {
 			...this.#headers,
 			...requestHeaders,
-			Authorization: `Bearer ${target.token}`,
+			...(target.tokenHeader === undefined
+				? { Authorization: `Bearer ${target.token}` }
+				: { [target.tokenHeader]: target.token }),
 			Accept: "application/json",
 			"Content-Type": "application/json",
 		};

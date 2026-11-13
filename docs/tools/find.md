@@ -34,6 +34,8 @@ Internal URLs are searched in place: the native listing and lexical scan and the
 
 `find.enabled` is `auto` by default: `find` is enabled only when the `judge` model role resolves first to a native System One model (TypeSafe `typesafe/jev-1.14.0`, directly or through OpenRouter), not a prompted on-device or chat model. `on` enables it whichever model judges; `off` disables it. Once enabled it is an essential (top-level) tool, never mounted under `xd://`.
 
+`find.hitThreshold` (a number above 0, up to 1; unset keeps `0.20`) sets τ, the verified-passage probability a file needs before it is reported as a hit, which is also the floor for the line ranges listed. It applies to the tool and to `omp find`. The default suits TypeSafe Jev. Decision models calibrate differently, and a judge whose probabilities run higher on unrelated passages needs a higher τ to keep the same precision.
+
 Use `find` first when the implementing location is unknown. Use `grep` for known literals, regexes, or symbols, and `glob` for names. Scope a known subsystem and batch related questions. Scores below about `0.4` are weak evidence: widen the description or use `grep` before concluding absence. The tool has no hidden-file option; the CLI's `--hidden` is not a tool parameter.
 
 ## Outputs
@@ -60,6 +62,8 @@ Use `find` first when the implementing location is unknown. Use `grep` for known
 
 Each judged phase drains through a dispatcher with 16 requests in flight before the next begins, so the critical path is three dependent waves.
 
+`find.verifyModel` (unset by default) takes a model role value, for example `openrouter/liquid/d1-ultra` or `nace/drex-max-v1.1`. Only verification uses it; filename and sketch routing stay on `judge`. The selector resolves against the judge role's candidates and is tried first as an explicit candidate, then the `judge` chain without duplicates, under the same fallback rules: a native-only tail after the first native candidate, an attempt timeout while a configured fallback remains, and cooldowns. A selector matching nothing logs a warning and the plain `judge` chain verifies; empty or whitespace-only values are unset. Native decision models are recommended because τ assumes calibrated probabilities. Footer stats and coverage span both judges, while `find.enabled: auto` still gates on `judge` alone. `omp find` reads the setting from the same project settings as the judge role. A slower verifier makes the tool's 20 s partial timeout more likely.
+
 ## Side Effects
 
 - Filesystem: reads up to 20 candidate files (4 MB each); never writes.
@@ -68,7 +72,7 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 
 ## Limits & Caps
 
-- Candidates judged by name: 128; files read: 20; windows per file: 24; window size: 8 KB; sketch: 384 B; passages verified: 40; sketch cutoff 0.45; hit threshold 0.20 (`packages/coding-agent/src/tools/jfind/cascade.ts`).
+- Candidates judged by name: 128; files read: 20; windows per file: 24; window size: 8 KB; sketch: 384 B; passages verified: 40; sketch cutoff 0.45; hit threshold 0.20, or `find.hitThreshold` (`packages/coding-agent/src/tools/jfind/cascade.ts`).
 - Native lexical scan timeout: 30 s. Native judgments use `NativeJudge` (10 s per attempt, up to three attempts); the tool's 20 s wall budget can abort them earlier.
 - Per-call wall-clock budget: `20_000ms` (`FIND_TIMEOUT_MS` in `packages/coding-agent/src/tools/jfind/index.ts`), so a stalled judge never blocks the turn. Running out during verification returns the hits verified so far, marked partial; running out earlier, or before any hit was verified, raises a timeout error. The `omp find` CLI is not bounded this way.
 - Files over 4 MB are scanned by the lexical pass only up to the native grep cap and read only up to 4 MB (trimmed to the last full line).
@@ -84,3 +88,4 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 - Scores are absolute yes/no probabilities from the judge, so they are comparable across calls and batches.
 - Keyword extraction lowercases, drops tokens shorter than three bytes, stopwords, and pure numbers, and stems `-ing`/`-ed`/`-es`/`-s` when the stem keeps at least four characters.
 - Directory folders are never judged; the tree shown to the judge is structure only, which is why the filename batch carries `criteria.folder` for parity with the reference request shape.
+- The lexical scan lists the tree through native `glob()`, so below an ovnfs checkout the ovnfs daemon serving it answers the listing instead of a walk of its NFS mount (`crates/pi-walker/src/ovnfs.rs`), falling back to the native walk on any daemon failure.
