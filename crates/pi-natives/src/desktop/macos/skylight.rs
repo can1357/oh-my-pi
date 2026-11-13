@@ -36,10 +36,7 @@ use super::{
 
 const EVENT_RECORD_LENGTH: usize = 248;
 const EVENT_RECORD_LENGTH_BYTE: u8 = 0xf8;
-const EVENT_RECORD_KIND: u8 = 0x0d;
 const WINDOW_ID_OFFSET: usize = 0x3c;
-const FOCUS_MARKER_OFFSET: usize = 0x8a;
-const FOCUS_MARKER: u8 = 0x01;
 /// `kCPSUserGenerated`: lets `AppKit` install the requested native key window.
 const CPS_USER_GENERATED: u32 = 0x200;
 /// `kCPSNoWindows`: changes the front process without raising its windows.
@@ -383,16 +380,6 @@ pub(super) fn sender_connection() -> CoreResult<i64> {
 	// SAFETY: The no-argument connection query was resolved with its exact
 	// signature.
 	Ok(i64::from(unsafe { (spi.main_connection)() }))
-}
-
-/// The 248-byte focus event record addressed to window `wid`.
-fn focus_record(wid: u32) -> [u8; EVENT_RECORD_LENGTH] {
-	let mut record = [0u8; EVENT_RECORD_LENGTH];
-	record[0x04] = EVENT_RECORD_LENGTH_BYTE;
-	record[0x08] = EVENT_RECORD_KIND;
-	record[WINDOW_ID_OFFSET..WINDOW_ID_OFFSET + 4].copy_from_slice(&wid.to_le_bytes());
-	record[FOCUS_MARKER_OFFSET] = FOCUS_MARKER;
-	record
 }
 
 /// One of the paired records (`kind` 0x01, then 0x02) that make window `wid`
@@ -1329,9 +1316,10 @@ trait GuardedDesktop {
 	/// Puts the user's app back in front unless they pressed a key or clicked
 	/// after `since` ([`set_front_unless_user_acted`]).
 	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest>;
-	/// Makes `key` the user's key window again; false if `WindowServer` rejected
-	/// it.
-	fn restore_key(&self, key: u32) -> bool;
+	/// Makes `key` the user's key window again. Their app's hand-back
+	/// (`kCPSNoWindows`) leaves it with no key window, which nothing outside the
+	/// app can see, so this always sends the make-key records.
+	fn restore_key(&self, key: u32) -> CoreResult<()>;
 	/// The name and pid of the app `psn`, for an error message.
 	fn describe(&self, psn: ProcessSerialNumber) -> String;
 	/// Whether the action and its settle are over.
@@ -1375,8 +1363,8 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 		set_front_unless_user_acted(self.spi, self.previous.psn, self.key.unwrap_or(0), since)
 	}
 
-	fn restore_key(&self, key: u32) -> bool {
-		post_record(self.spi.post_record, self.previous.psn, &focus_record(key))
+	fn restore_key(&self, key: u32) -> CoreResult<()> {
+		make_exact_window_key(self.spi, self.previous.psn, key)
 	}
 
 	fn describe(&self, psn: ProcessSerialNumber) -> String {
@@ -1468,11 +1456,12 @@ fn guard_focus(
 					// in their app it is the one their app reports now that it is in
 					// front again: that click may have picked another of its
 					// windows, which is then the one the lease keeps. That read can
-					// block, so the window is put back only while their app is still
-					// in front and the lease armed, and the click is used up only
-					// then. Otherwise the re-check observed instead (a disarm it
-					// recorded stops the hand-backs from the next poll), or
-					// `WindowServer` refused.
+					// block, so the window is put back only while the lease is still
+					// armed, and the click is used up only then. Either way the
+					// make-key records carry a front request for their app, so they
+					// go out only while it is still in front. Otherwise the re-check
+					// observed instead (a disarm it recorded stops the hand-backs
+					// from the next poll), or `WindowServer` refused.
 					if handed_back == Some(FrontRequest::Done) {
 						let (kept, own_click) = {
 							let lease = lease.lock();
@@ -1480,13 +1469,9 @@ fn guard_focus(
 						};
 						let fresh = if own_click { desktop.user_key() } else { None };
 						let current =
-							!own_click || (!lease.lock().disarmed && desktop.front() == Some(previous));
+							(!own_click || !lease.lock().disarmed) && desktop.front() == Some(previous);
 						if current && let Some(key) = fresh.or(kept) {
-							if !desktop.restore_key(key) {
-								return Err(DesktopError::input_failed(
-									"background key-window restoration was rejected",
-								));
-							}
+							desktop.restore_key(key)?;
 							let mut lease = lease.lock();
 							lease.key = Some(key);
 							if own_click {
@@ -3452,9 +3437,9 @@ mod tests {
 			Ok(FrontRequest::Done)
 		}
 
-		fn restore_key(&self, key: u32) -> bool {
+		fn restore_key(&self, key: u32) -> CoreResult<()> {
 			self.keys.borrow_mut().push(key);
-			true
+			Ok(())
 		}
 
 		fn describe(&self, psn: ProcessSerialNumber) -> String {
