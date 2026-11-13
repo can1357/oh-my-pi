@@ -692,6 +692,7 @@ export interface ResetCreditRedeemOutcome {
 	 * Result code. Backend codes: `reset` (success), `already_redeemed`,
 	 * `no_credit`, `nothing_to_reset`. Locally-synthesized: `no_account`
 	 * (target not found), `account_unavailable` (token refresh failed),
+	 * `reauth_required` (z.ai login JWTs rejected — sign in again),
 	 * `credit_list_failed` (transport/auth failure while listing credits —
 	 * retryable, unlike a genuine `no_credit`), `http_<status>` (unexpected
 	 * HTTP).
@@ -707,6 +708,25 @@ export interface ResetCreditRedeemOutcome {
 	cleared?: string[];
 	/** The credit that was spent (when one was). */
 	creditId?: string;
+}
+
+/** Outcome of {@link AuthStorage.resets.claimOpportunity} (z.ai coding-plan reset claim). */
+export interface ResetOpportunityOutcome {
+	/** true when the claim request completed (granted or politely refused). */
+	ok: boolean;
+	granted?: boolean;
+	/** Server-stated earliest next claim attempt (epoch ms), when refused with 3301. */
+	nextTryAtMs?: number;
+	/**
+	 * Result code. `"granted"` / `"not_granted"` cover completed requests;
+	 * failures: `throttled` (HTTP 429), `unsupported_provider`, `no_account`,
+	 * `account_unavailable`, `missing_tokens`, `http_<status>`,
+	 * `invalid_response`, `business_<code>` (e.g. `business_3001`).
+	 */
+	code: string;
+	reason?: string;
+	provider?: string;
+	credentialId?: number;
 }
 
 /** One stored account's live saved-reset status, from {@link AuthStorage.resets.list}. */
@@ -827,6 +847,12 @@ export type RedeemResetCreditOptions = {
 	target: ResetCreditTarget;
 	baseUrlResolver?: (provider: string) => string | undefined;
 	signal?: AbortSignal;
+	/**
+	 * Stable UUID for this spend attempt; the caller generates it once and
+	 * reuses it across retries of the SAME attempt (Z.AI honors it; other
+	 * providers ignore it).
+	 */
+	idempotencyKey?: string;
 };
 
 /** Controller accepted by {@link OAuthApi.login}; onAuth/onPrompt are required. */
@@ -1430,6 +1456,11 @@ export interface ResetsApi {
 	 * Business refusals return a code; transport errors may throw without losing Claude's request ID.
 	 */
 	redeem(options: RedeemResetCreditOptions): Promise<ResetCreditRedeemOutcome>;
+	/**
+	 * Claim a provider's next reset *opportunity* (the bank-before-spend stage,
+	 * currently only the z.ai coding plan), without spending anything.
+	 */
+	claimOpportunity(options: RedeemResetCreditOptions): Promise<ResetOpportunityOutcome>;
 }
 
 /** Persisted credential rate-limit block operations. */

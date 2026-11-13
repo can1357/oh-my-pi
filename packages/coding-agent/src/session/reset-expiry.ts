@@ -4,12 +4,14 @@
  * warn about the accounts the salvage planners would act on.
  */
 import type {
+	ResetCreditAccountStatus,
 	UsageLimit,
 	UsageReport,
 	UsageResetCredit,
 	UsageResetCreditDetail,
 	UsageResetCredits,
 } from "@oh-my-pi/pi-ai";
+import { zaiResetTypeFromCreditId, zaiResetUsageCredit } from "@oh-my-pi/pi-ai/usage/zai-reset";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { bankedResetCreditExpiryMs } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -36,6 +38,7 @@ import {
 	resetWindowMode,
 	SALVAGE_MIN_USED_FRACTION,
 } from "./codex-auto-reset";
+import { fullestZaiTokenWindow, type ZaiResetAction, type ZaiResetSkip, planZaiResetClaims } from "./zai-auto-reset";
 import {
 	cfgClaudeResets,
 	cfgCodexResets,
@@ -45,6 +48,9 @@ import {
 	resetWindowSettings,
 } from "./settings";
 
+/** A Z.AI planner action that spends a banked offer (opportunity claims carry no expiry). */
+type ZaiResetUseAction = Extract<ZaiResetAction, { kind: "use" }>;
+
 const SOON_MS = 7 * 24 * 3_600_000;
 const IMMINENT_MS = 24 * 3_600_000;
 /** The TUI warns about a saved reset only in its final hours; the status line and `omp usage` flag it from 24h out. */
@@ -53,7 +59,7 @@ const NOTICE_LABEL_MAX = 80;
 
 /** Saved resets close to expiry on an account whose fullest chat window is worth restoring. */
 export interface ResetExpiryWarning {
-	provider: "openai-codex" | "anthropic";
+	provider: "openai-codex" | "anthropic" | "zai";
 	/** `soon`: the soonest reset expires within 7 days; `imminent`: within 24 hours. */
 	tier: "soon" | "imminent";
 	/** Banked resets that expire within the tier's horizon, usable now or not. */
@@ -77,7 +83,7 @@ export interface ResetExpiryWarning {
  */
 export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetExpiryWarning | undefined {
 	const provider = report.provider;
-	if (provider !== "openai-codex" && provider !== "anthropic") return undefined;
+	if (provider !== "openai-codex" && provider !== "anthropic" && provider !== "zai") return undefined;
 	const credits: { credit: UsageResetCreditDetail; expiresAtMs: number }[] = [];
 	for (const credit of report.resetCredits?.credits ?? []) {
 		const expiresAtMs = bankedResetCreditExpiryMs(credit);
@@ -86,14 +92,24 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 	if (credits.length === 0) return undefined;
 	credits.sort((a, b) => a.expiresAtMs - b.expiresAtMs);
 
-	// Codex measures one account-wide chat window; each Claude grant clears its own windows,
-	// so only Claude grants whose covered windows are worth restoring warn and count.
+	// Codex measures one account-wide chat window; each Claude grant and Z.AI
+	// offer clears its own windows, so only grants whose covered windows are
+	// worth restoring warn and count.
 	const codexWindow = provider === "openai-codex" ? fullestCodexChatWindow(report) : undefined;
 	const worth = (credit: UsageResetCreditDetail): { limit: UsageLimit; usedFraction: number } | undefined => {
 		if (provider === "openai-codex") {
 			return codexWindow?.usedFraction !== undefined && codexWindow.usedFraction >= SALVAGE_MIN_USED_FRACTION
 				? { limit: codexWindow.limit, usedFraction: codexWindow.usedFraction }
 				: undefined;
+		}
+		if (provider === "zai") {
+			// Measure only the token windows the offer clears, exactly as the
+			// planner does; with none present, the fullest token window.
+			const cleared = report.limits.filter(
+				limit => limit.id.startsWith("zai:tokens:") && (credit.clears ?? []).includes(limit.id),
+			);
+			const window = fullestZaiTokenWindow(cleared.length > 0 ? { ...report, limits: cleared } : report);
+			return window && window.usedFraction >= SALVAGE_MIN_USED_FRACTION ? window : undefined;
 		}
 		const covered = fullestClaudeLimit(claudeCoveredLimits(report.limits, credit), credit);
 		return covered && covered.used >= SALVAGE_MIN_USED_FRACTION
@@ -115,8 +131,12 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 
 	const tier = remainingMs <= IMMINENT_MS ? "imminent" : "soon";
 	const horizonMs = tier === "imminent" ? IMMINENT_MS : SOON_MS;
-	const windowOf = (credit: UsageResetCreditDetail, limit: UsageLimit): ResetWindow | undefined =>
-		provider === "openai-codex" ? codexWindow?.window : claudeResetWindow(credit, [limit.id]);
+	const windowOf = (credit: UsageResetCreditDetail, limit: UsageLimit): ResetWindow | undefined => {
+		if (provider === "openai-codex") return codexWindow?.window;
+		// A Z.AI offer's credit id names the window it clears (`five_hour:*` / `week:*`).
+		if (provider === "zai") return zaiResetTypeFromCreditId(credit.id ?? "") === "WEEK" ? "weekly" : "5h";
+		return claudeResetWindow(credit, [limit.id]);
+	};
 	const window = windowOf(warned.credit, fullest.limit);
 	// Count only resets the warned one's setting decides, so the count and the verdict agree.
 	let count = 0;
@@ -130,7 +150,7 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 		tier,
 		count,
 		expiresAtMs: warned.expiresAtMs,
-		usableNow: spendableNow(provider, report.resetCredits, warned.credit),
+		usableNow: spendableNow(provider, report.resetCredits, warned.credit, nowMs),
 		...fullest,
 		window,
 	};
@@ -138,18 +158,27 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 
 /**
  * Whether `/usage reset` would spend this grant now: the account must be eligible with a
- * redeemable count, the grant itself available, and for Claude the provider must have
- * selected this very grant (the reset command only spends the server-selected one).
+ * redeemable count, the grant itself available, and for Claude or Z.AI the provider-side
+ * pick must name this very grant (the reset command spends only that one).
  */
 function spendableNow(
 	provider: ResetExpiryWarning["provider"],
 	inventory: UsageResetCredits | undefined,
 	credit: UsageResetCreditDetail,
+	nowMs: number,
 ): boolean {
 	if (!inventory || inventory.eligible === false) return false;
 	if ((inventory.redeemableCount ?? inventory.availableCount) <= 0) return false;
 	if ((credit.status ?? "available") !== "available" || credit.usable === false) return false;
-	return provider !== "anthropic" || (inventory.nextCreditId !== undefined && inventory.nextCreditId === credit.id);
+	if (provider === "anthropic") {
+		return inventory.nextCreditId !== undefined && inventory.nextCreditId === credit.id;
+	}
+	if (provider === "zai") {
+		// `/usage reset` spends the soonest-expiring available Z.AI offer.
+		const chosen = zaiResetUsageCredit(inventory.credits ?? [], nowMs);
+		return chosen !== undefined && chosen.id !== undefined && chosen.id === credit.id;
+	}
+	return true;
 }
 
 /**
@@ -179,8 +208,10 @@ export function resetSpendVerdict(
 	const setting = windows.map(window => resetWindowSettings[warning.provider][window]?.id).join(" + ");
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
+	// Z.AI plans can open with an opportunity claim, so any planned use answers.
+	const imminent = IMMINENT_RESET_EXPIRY_MS;
 	const eligibleNow =
-		plan.actions[0]?.expiresInMs === IMMINENT_RESET_EXPIRY_MS || plan.skipped[0]?.reason === "stale-report";
+		plan.actions.some(action => action.expiresInMs === imminent) || plan.skipped[0]?.reason === "stale-report";
 	return { kind, setting, mode, eligibleNow };
 }
 
@@ -196,8 +227,8 @@ function planAsLastChance(
 	settings: Settings,
 	nowMs: number,
 ): {
-	actions: readonly (CodexResetAction | ClaudeResetAction)[];
-	skipped: readonly (CodexResetSkip | ClaudeResetSkip)[];
+	actions: readonly (CodexResetAction | ClaudeResetAction | ZaiResetUseAction)[];
+	skipped: readonly (CodexResetSkip | ClaudeResetSkip | ZaiResetSkip)[];
 } {
 	const shiftMs = warning.expiresAtMs - (nowMs + IMMINENT_RESET_EXPIRY_MS);
 	const credits = (report.resetCredits?.credits ?? []).map(credit => {
@@ -228,6 +259,35 @@ function planAsLastChance(
 		});
 	}
 	const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+	const status: ResetCreditAccountStatus = {
+		...inventory,
+		provider: warning.provider,
+		credentialId,
+		accountId: text(report.metadata?.accountId),
+		email: text(report.metadata?.email),
+		orgId: text(report.metadata?.orgId),
+		credits: credits.filter((credit): credit is UsageResetCredit => typeof credit.id === "string"),
+		active: false,
+		report: lastChance,
+	};
+	if (warning.provider === "zai") {
+		// Park the opportunity claim so only banked-offer uses can answer.
+		const accountKey = resetAccountLockKey(status) ?? "zai";
+		const plan = planZaiResetClaims({
+			nowMs,
+			trigger: "sweep",
+			settings: { enabled: true },
+			reports: [lastChance],
+			statuses: [status],
+			nextTryAtByAccount: new Map<string, number>([[accountKey, nowMs + 1]]),
+			lastOpportunityAtByAccount: new Map<string, number>([[accountKey, nowMs]]),
+			...episodes,
+		});
+		return {
+			actions: plan.actions.filter((action): action is ZaiResetUseAction => action.kind === "use"),
+			skipped: plan.skipped,
+		};
+	}
 	return planClaudeResetRedemptions({
 		nowMs,
 		trigger: "sweep",
@@ -235,19 +295,7 @@ function planAsLastChance(
 		modelId: "",
 		settings: resetPlanSettings({ "5h": "yes", weekly: "yes", fable: "yes" }, cfgClaudeResets.get(settings)),
 		reports: [lastChance],
-		statuses: [
-			{
-				...inventory,
-				provider: warning.provider,
-				credentialId,
-				accountId: text(report.metadata?.accountId),
-				email: text(report.metadata?.email),
-				orgId: text(report.metadata?.orgId),
-				credits: credits.filter((credit): credit is UsageResetCredit => typeof credit.id === "string"),
-				active: false,
-				report: lastChance,
-			},
-		],
+		statuses: [status],
 		...episodes,
 	});
 }

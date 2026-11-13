@@ -3,6 +3,15 @@ import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { UsageReport } from "../usage";
 import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeResetCredits } from "../usage/claude-reset";
 import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "../usage/openai-codex-reset";
+import {
+	listZaiResetStatus,
+	requestZaiResetOpportunity,
+	useZaiReset,
+	zaiResetCreditId,
+	zaiResetStatusToCredits,
+	zaiResetTypeFromCreditId,
+	type ZaiResetAuth,
+} from "../usage/zai-reset";
 import type { CredentialBlocks } from "./blocks";
 import { providerTypeKey } from "./blocks";
 import { raceSignal } from "./abort";
@@ -16,6 +25,7 @@ import type {
 	OAuthAccountSummary,
 	RedeemResetCreditOptions,
 	ResetCreditAccountStatus,
+	ResetOpportunityOutcome,
 	ResetCreditRedeemOutcome,
 	ResetsApi,
 } from "./types";
@@ -32,7 +42,7 @@ export interface ResetCreditsDeps {
 	blocks: CredentialBlocks;
 }
 
-/** Saved rate-limit resets (Codex / Claude): list offers and redeem one per account. */
+/** Saved rate-limit resets (Codex / Claude / Z.AI coding plan): list offers, claim opportunities, redeem one per account. */
 export class ResetCredits implements ResetsApi {
 	#deps: ResetCreditsDeps;
 	/** Manual and automatic attempts on one stored account share a mutation. */
@@ -51,9 +61,9 @@ export class ResetCredits implements ResetsApi {
 	/** List live saved-reset balances and eligibility for one provider's stored OAuth accounts. */
 	async list(options?: ListResetCreditsOptions): Promise<ResetCreditAccountStatus[]> {
 		const provider = options?.provider ?? "openai-codex";
-		if (provider !== "openai-codex" && provider !== "anthropic") return [];
+		if (provider !== "openai-codex" && provider !== "anthropic" && provider !== "zai") return [];
 		const baseUrl = options?.baseUrlResolver?.(provider);
-		if (provider !== "anthropic") return this.#listAccounts(provider, baseUrl, options);
+		if (provider !== "anthropic" && provider !== "zai") return this.#listAccounts(provider, baseUrl, options);
 		options?.signal?.throwIfAborted();
 		const activeId = this.#deps.oauth
 			.accounts(provider, options?.sessionId)
@@ -63,9 +73,11 @@ export class ResetCredits implements ResetsApi {
 		const key = JSON.stringify([provider, baseUrl, activeId]);
 		let pending = this.#listInFlight.get(key);
 		if (!pending) {
-			pending = this.#listAccounts(provider, baseUrl, { ...options, signal: undefined }).finally(() =>
-				this.#listInFlight.delete(key),
-			);
+			const accounts =
+				provider === "anthropic"
+					? this.#listAccounts(provider, baseUrl, { ...options, signal: undefined })
+					: this.#listZaiAccounts({ ...options, signal: undefined });
+			pending = accounts.finally(() => this.#listInFlight.delete(key));
 			this.#listInFlight.set(key, pending);
 		}
 		return raceSignal(pending, options?.signal, "Reset discovery aborted");
@@ -121,6 +133,53 @@ export class ResetCredits implements ResetsApi {
 	}
 
 	/**
+	 * Z.AI accounts authenticate reset calls with the two durable login JWTs,
+	 * not the stored API key and not a refreshable access token — so listing
+	 * reads the stored rows directly instead of the access resolver.
+	 */
+	async #listZaiAccounts(options?: ListResetCreditsOptions): Promise<ResetCreditAccountStatus[]> {
+		const now = Date.now();
+		return Promise.all(
+			this.#deps.oauth
+				.accounts("zai", options?.sessionId)
+				.map(async (account): Promise<ResetCreditAccountStatus> => {
+					const base = { ...account, provider: "zai" };
+					const auth = this.#zaiResetAuth(account.credentialId);
+					if (!auth) return { ...base, availableCount: 0, credits: [], error: "missing_tokens" };
+					const status = await listZaiResetStatus(auth, {
+						fetchImpl: this.#deps.usage.fetch,
+						signal: options?.signal,
+					});
+					if (!status.ok)
+						return {
+							...base,
+							availableCount: 0,
+							credits: [],
+							// A 401/403 means the login JWTs died: say so instead of
+							// implying the account simply has no banked resets.
+							error: status.code === "unauthorized" ? "reauth_required" : "credit_list_failed",
+						};
+					const credits = zaiResetStatusToCredits(status.status, now);
+					return {
+						...base,
+						availableCount: credits.length,
+						redeemableCount: credits.length,
+						eligible: true,
+						credits,
+						...(credits[0] ? { nextCreditId: credits[0].id } : {}),
+					};
+				}),
+		);
+	}
+
+	/** Sign-in JWTs a z.ai stored row captured at login, when both survived. */
+	#zaiResetAuth(credentialId: number): ZaiResetAuth | undefined {
+		const credential = this.#deps.pool.entries("zai").find(entry => entry.id === credentialId)?.credential;
+		if (credential?.type !== "oauth" || !credential.zcodeJwt || !credential.zaiOauthJwt) return undefined;
+		return { zcodeJwt: credential.zcodeJwt, zaiOauthJwt: credential.zaiOauthJwt };
+	}
+
+	/**
 	 * Redeem a stored account's saved reset after checking its live offer.
 	 * Business refusals return a code; transport errors may throw without losing Claude's request ID.
 	 */
@@ -128,7 +187,7 @@ export class ResetCredits implements ResetsApi {
 		const { target } = options;
 		const { provider, creditId } = target;
 		const identity = { provider, accountId: target.accountId, email: target.email, orgId: target.orgId };
-		if (provider !== "openai-codex" && provider !== "anthropic") {
+		if (provider !== "openai-codex" && provider !== "anthropic" && provider !== "zai") {
 			return { ...identity, ok: false, code: "unsupported_provider" };
 		}
 		const baseUrl = options.baseUrlResolver?.(provider);
@@ -150,6 +209,7 @@ export class ResetCredits implements ResetsApi {
 		const promise = this.#redeemAccountReset(provider, match, accountKey, {
 			creditId,
 			baseUrl,
+			idempotencyKey: options.idempotencyKey,
 			signal: options.signal,
 		}).finally(() => this.#resetInFlight.delete(accountKey));
 		this.#resetInFlight.set(accountKey, { creditId, promise });
@@ -160,7 +220,7 @@ export class ResetCredits implements ResetsApi {
 		provider: string,
 		access: OAuthAccess,
 		accountKey: string,
-		options: { creditId?: string; baseUrl?: string; signal?: AbortSignal },
+		options: { creditId?: string; baseUrl?: string; idempotencyKey?: string; signal?: AbortSignal },
 	): Promise<ResetCreditRedeemOutcome> {
 		const identity = { provider, accountId: access.accountId, email: access.email, orgId: access.orgId };
 		const auth = { ...access, baseUrl: options.baseUrl, fetch: this.#deps.usage.fetch, signal: options.signal };
@@ -246,6 +306,46 @@ export class ResetCredits implements ResetsApi {
 				cleared: consumed.cleared,
 				creditId,
 			};
+		} else if (provider === "zai") {
+			const resetType = creditId ? zaiResetTypeFromCreditId(creditId) : undefined;
+			if (!creditId || !resetType) {
+				return { ...identity, ok: false, code: "no_credit", creditId };
+			}
+			const resetAuth = this.#zaiResetAuth(access.credentialId ?? -1);
+			if (!resetAuth) return { ...identity, ok: false, code: "missing_tokens", creditId };
+			const status = await listZaiResetStatus(resetAuth, {
+				fetchImpl: this.#deps.usage.fetch,
+				signal: options.signal,
+			});
+			if (!status.ok)
+				return {
+					...identity,
+					ok: false,
+					code: status.code === "unauthorized" ? "reauth_required" : "credit_list_failed",
+					creditId,
+				};
+			const offers =
+				resetType === "FIVE_HOUR" ? status.status.availableFiveHourResets : status.status.availableWeekResets;
+			// The offer must still be banked and unexpired; a spend or an expiry
+			// since listing is a terminal no-credit, never a silent re-pick.
+			const offer = offers.find(candidate => zaiResetCreditId(resetType, candidate.expireAtMs) === creditId);
+			if (!offer || offer.expireAtMs <= Date.now()) {
+				return { ...identity, ok: false, code: "no_credit", creditId };
+			}
+			const credit = zaiResetStatusToCredits(status.status, Date.now()).find(entry => entry.id === creditId);
+			const used = await useZaiReset(resetAuth, {
+				// The executor passes one stable UUID per attempt so a lost-response
+				// retry dedupes server-side; /use names only the reset_type, so the
+				// server picks the offer within that type — the creditId re-check
+				// above only verifies an offer of that id was banked at listing time.
+				idempotencyKey: options.idempotencyKey ?? crypto.randomUUID(),
+				resetType,
+				fetchImpl: this.#deps.usage.fetch,
+				signal: options.signal,
+			});
+			result = used.ok
+				? { ...identity, ok: true, code: "reset", cleared: credit?.clears ?? [creditId], creditId }
+				: { ...identity, ok: false, code: used.code, reason: used.reason, creditId };
 		} else {
 			if (!creditId) {
 				const list = await listCodexResetCredits(auth);
@@ -316,5 +416,38 @@ export class ResetCredits implements ResetsApi {
 			}
 		}
 		return result;
+	}
+
+	/**
+	 * Claim a z.ai coding-plan reset opportunity (bank an offer, spend nothing).
+	 * The idempotency key stays a fresh UUID per attempt — the caller's stable
+	 * spend key is deliberately not forwarded: opportunity refusals are not
+	 * ambiguous spends, and server-side offer state is what makes retries safe.
+	 */
+	async claimOpportunity(options: RedeemResetCreditOptions): Promise<ResetOpportunityOutcome> {
+		const { target } = options;
+		const identity = { provider: target.provider, credentialId: target.credentialId };
+		if (target.provider !== "zai") {
+			return { ...identity, ok: false, code: "unsupported_provider" };
+		}
+		const match = await this.#deps.oauth.accessById("zai", target.credentialId, { signal: options.signal });
+		if (!match) return { ...identity, ok: false, code: "no_account" };
+		const resolved = { ...identity, accountId: match.accountId, email: match.email };
+		if (!match.ok) return { ...resolved, ok: false, code: "account_unavailable" };
+		const resetAuth = this.#zaiResetAuth(target.credentialId);
+		if (!resetAuth) return { ...resolved, ok: false, code: "missing_tokens" };
+		const outcome = await requestZaiResetOpportunity(resetAuth, {
+			idempotencyKey: crypto.randomUUID(),
+			fetchImpl: this.#deps.usage.fetch,
+			signal: options.signal,
+		});
+		if (!outcome.ok)
+			return { ...resolved, ok: false, code: outcome.code, ...(outcome.reason ? { reason: outcome.reason } : {}) };
+		if (!outcome.granted) {
+			return { ...resolved, ok: true, granted: false, code: "not_granted", nextTryAtMs: outcome.nextTryAtMs };
+		}
+		// A banked offer changes the reset inventory on the next usage read.
+		this.#deps.usageCache.invalidate("zai");
+		return { ...resolved, ok: true, granted: true, code: "granted" };
 	}
 }

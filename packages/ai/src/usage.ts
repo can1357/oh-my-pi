@@ -391,6 +391,9 @@ export interface UsageCredential {
 	activeOrganizationId?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
+	/** Z.AI coding-plan reset JWTs (see OAuthCredentials.zcodeJwt / zaiOauthJwt). */
+	zcodeJwt?: string;
+	zaiOauthJwt?: string;
 }
 
 /** Parameters provided to a usage fetcher. */

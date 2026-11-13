@@ -1601,9 +1601,43 @@ export const cfgClaudeResets = combine({
 	salvageHorizonHours: cfgClaudeResetsSalvageHorizonHours,
 });
 
+// Z.AI coding-plan resets (independent auto-claim consent)
+export const cfgZaiResetsAutoRedeem = register({
+	id: "zaiResets.autoRedeem",
+	type: "enum",
+	values: ["unset", "yes", "no"] as const,
+	default: "unset" as const,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Z.AI Auto-Claim Coding-Plan Resets",
+		description:
+			"Claim Z.AI coding-plan reset opportunities automatically and spend granted resets before they expire: when the token window they clear is meaningfully used, when a turn is blocked by an exhausted window, or in the last 5 minutes before expiry. unset asks before the first claim and the first spend (with no prompt UI, it claims nothing and spends only a reset expiring within 5 minutes), yes claims and spends without prompting, and no disables both claiming and spending.",
+		options: [
+			{
+				value: "unset",
+				label: "Unset",
+				description:
+					"Ask before claiming the first opportunity and spending the first Z.AI reset. With no prompt UI, claim nothing and spend only a reset expiring within 5 minutes.",
+			},
+			{
+				value: "yes",
+				label: "Yes",
+				description: "Claim opportunities and spend eligible Z.AI resets without prompting.",
+			},
+			{ value: "no", label: "No", description: "Do not claim or spend Z.AI coding-plan resets." },
+		],
+	},
+});
+
+/** Z.AI coding-plan reset auto-claim policy (`zaiResets.*`), independent of {@link cfgCodexResets}. */
+export const cfgZaiResets = combine({
+	autoRedeem: cfgZaiResetsAutoRedeem,
+});
+
 /** Each provider's saved-reset window settings: the only keys a consent answer is saved to. */
 export const resetWindowSettings: Record<
-	"openai-codex" | "anthropic",
+	"openai-codex" | "anthropic" | "zai",
 	Partial<Record<ResetWindow, Setting<ResetAutoRedeemMode>>>
 > = {
 	"openai-codex": { "5h": cfgCodexResetsAutoRedeem5h, weekly: cfgCodexResetsAutoRedeemWeekly },
@@ -1612,13 +1646,14 @@ export const resetWindowSettings: Record<
 		weekly: cfgClaudeResetsAutoRedeemWeekly,
 		fable: cfgClaudeResetsAutoRedeemFable,
 	},
+	zai: { "5h": cfgZaiResetsAutoRedeem, weekly: cfgZaiResetsAutoRedeem },
 };
 
 /** Each saved-reset window's consent; a window a provider lacks reads as `no`. */
 export type ResetWindowModes = Partial<Record<ResetWindow, ResetAutoRedeemMode>>;
 
 /** The current consent of every saved-reset window `provider` has. */
-export function resetWindowModes(provider: "openai-codex" | "anthropic", scope: ScopeLike): ResetWindowModes {
+export function resetWindowModes(provider: "openai-codex" | "anthropic" | "zai", scope: ScopeLike): ResetWindowModes {
 	const modes: ResetWindowModes = {};
 	for (const [window, setting] of Object.entries(resetWindowSettings[provider])) {
 		modes[window as ResetWindow] = setting.get(scope);

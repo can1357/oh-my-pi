@@ -59,6 +59,7 @@ import type {
 	RedeemResetCreditOptions,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
+	ResetOpportunityOutcome,
 	ResetsApi,
 	ResolvedApiKey,
 	RotateCredentialOptions,
@@ -608,6 +609,13 @@ class RemoteResets implements ResetsApi {
 	redeem(options: RedeemResetCreditOptions): Promise<ResetCreditRedeemOutcome> {
 		const { baseUrlResolver, ...rest } = options;
 		return this.#remote.call("resets.redeem", {
+			...rest,
+			baseUrls: baseUrlTable(this.#availability, baseUrlResolver, options.target.provider),
+		});
+	}
+	claimOpportunity(options: RedeemResetCreditOptions): Promise<ResetOpportunityOutcome> {
+		const { baseUrlResolver, ...rest } = options;
+		return this.#remote.call("resets.claimOpportunity", {
 			...rest,
 			baseUrls: baseUrlTable(this.#availability, baseUrlResolver, options.target.provider),
 		});

@@ -51,7 +51,7 @@ export default class Usage extends Command {
 		"# Usage-limit trend over the last 30 days\n  omp usage --history --days 30",
 		"# Per-client token burn (which machine/app spent what) over the last 30 days\n  omp usage clients --days 30",
 		"# OAuth identity keys for task.agentAccountPools (no tokens)\n  omp usage accounts",
-		"# Saved Codex and Claude rate-limit resets per account, with each account's credential id\n  omp usage reset",
+		"# Saved Codex, Claude, and Z.AI rate-limit resets per account, with each account's credential id\n  omp usage reset",
 		"# Spend one saved reset on a listed account\n  omp usage reset codex/3",
 		"# Invalidate cached usage reports for all providers\n  omp usage invalidate",
 		"# Invalidate cached usage reports for a specific provider\n  omp usage invalidate --provider anthropic",

@@ -70,6 +70,7 @@ import type {
 	ProviderSessionState,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
+	ResetOpportunityOutcome,
 	ResetCreditTarget,
 	ServiceTier,
 	ServiceTierByFamily,
@@ -110,6 +111,7 @@ import {
 	stringProperty,
 	toError,
 	untilAborted,
+	sanitizeText,
 	withTimeout,
 	withFileLock,
 } from "@oh-my-pi/pi-utils";
@@ -362,6 +364,8 @@ import {
 	claudeResetStatusesFromReports,
 	planClaudeResetRedemptions,
 } from "./claude-auto-reset";
+import { zaiResetTypeFromCreditId } from "@oh-my-pi/pi-ai/usage/zai-reset";
+import { type ZaiResetAction, type ZaiResetTrigger, planZaiResetClaims } from "./zai-auto-reset";
 import {
 	type CodexAutoRedeemCoordinator,
 	type CodexResetAction,
@@ -756,6 +760,43 @@ const noOpUIContext: ExtensionUIContext = {
 	getToolsExpanded: () => false,
 	setToolsExpanded: () => {},
 };
+/** A Z.AI planner action that spends a banked offer (opportunity claims carry no expiry). */
+type ZaiResetUseAction = Extract<ZaiResetAction, { kind: "use" }>;
+
+/** A Z.AI planner action that asks the server to grant a reset offer (spends nothing). */
+type ZaiResetOpportunityAction = Extract<ZaiResetAction, { kind: "opportunity" }>;
+
+/** A planned saved-reset spend: a Codex or Claude planner action, or a Z.AI banked-offer use. */
+type ResetSpendAction = CodexResetAction | ClaudeResetAction | ZaiResetUseAction;
+
+/** Providers with a saved-reset planner sharing the consent, fence and executor machinery. */
+type ResetSpendProvider = "openai-codex" | "anthropic" | "zai";
+
+/** Labels and notice source per {@link ResetSpendProvider}; consent keys live in `resetWindowSettings`. */
+const resetSpendProviderInfo = {
+	"openai-codex": { label: "Codex", source: "codex-auto-reset" },
+	anthropic: { label: "Claude", source: "claude-auto-reset" },
+	zai: { label: "Z.AI", source: "zai-auto-reset" },
+} as const;
+
+/** Whether an action spends its reset to unblock a turn: only restores are dropped when the account leaves the session's pool. */
+function isResetRestoreAction(action: ResetSpendAction): boolean {
+	return "kind" in action ? action.reason === "blocked" : action.reason === "blocked-account";
+}
+/** Human label for a Z.AI spend/claim notice; Z.AI planner actions carry none of their own. */
+function zaiResetActionLabel(action: {
+	target: Pick<ResetCreditTarget, "email" | "accountId">;
+	accountKey: string;
+}): string {
+	return sanitizeText(
+		(action.target.email ?? action.target.accountId ?? action.accountKey).replace(/[\r\n\t]+/g, " "),
+	);
+}
+
+/** The Z.AI window a credit id spends: `five_hour:<ms>` clears the 5h window, `week:<ms>` the weekly one. */
+function zaiResetWindowLabel(creditId: string | undefined): string {
+	return zaiResetTypeFromCreditId(creditId ?? "") === "WEEK" ? "weekly" : "5-hour";
+}
 
 // ============================================================================
 // AgentSession Class
@@ -15371,7 +15412,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * List live saved-reset eligibility. An explicit provider lists only that
-	 * provider; the public default aggregates Codex and Claude independently.
+	 * provider; the public default aggregates Codex, Claude, and Z.AI independently.
 	 */
 	async listResetCredits(signal?: AbortSignal, provider?: string): Promise<ResetCreditAccountStatus[]> {
 		const options = {
@@ -15382,11 +15423,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (provider) {
 			return this.#modelRegistry.authStorage.resets.list({ ...options, provider });
 		}
-		const [codex, claude] = await Promise.all([
+		const [codex, claude, zai] = await Promise.all([
 			this.#modelRegistry.authStorage.resets.list({ ...options, provider: "openai-codex" }),
 			this.#modelRegistry.authStorage.resets.list({ ...options, provider: "anthropic" }),
+			this.#modelRegistry.authStorage.resets.list({ ...options, provider: "zai" }),
 		]);
-		return [...codex, ...claude];
+		return [...codex, ...claude, ...zai];
 	}
 	/**
 	 * Ask before spending resets whose governing window is unset and return the
@@ -15396,13 +15438,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * nothing and gets a one-shot notice instead.
 	 */
 	async #confirmAutoRedeem(
-		provider: "openai-codex" | "anthropic",
-		actions: (CodexResetAction | ClaudeResetAction)[],
+		provider: ResetSpendProvider,
+		actions: ResetSpendAction[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<readonly (CodexResetAction | ClaudeResetAction)[]> {
+	): Promise<readonly ResetSpendAction[]> {
 		if (actions.length === 0) return [];
-		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
-		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
+		const { label: providerLabel, source } = resetSpendProviderInfo[provider];
 		const windowSettings = resetWindowSettings[provider];
 		const keys = [
 			...new Set(
@@ -15428,6 +15469,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		const lines = actions.map(action => {
+			if ("kind" in action) {
+				const window = zaiResetWindowLabel(action.target.creditId);
+				const why =
+					action.reason === "blocked"
+						? " Its token window is exhausted while a turn is blocked."
+						: action.reason === "salvage"
+							? " Its token window is meaningfully used."
+							: "";
+				return `${zaiResetActionLabel(action)}: a granted Z.AI ${window} reset expires in ${formatDuration(action.expiresInMs ?? 0)}.${why}`;
+			}
 			if (!("program" in action)) {
 				const codex = action;
 				return codex.reason === "blocked-account"
@@ -15466,8 +15517,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Spend what each governing window allows outright, then ask about the unset ones. */
 	async #redeemConsentedResets(
-		provider: "openai-codex" | "anthropic",
-		actions: (CodexResetAction | ClaudeResetAction)[],
+		provider: ResetSpendProvider,
+		actions: ResetSpendAction[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
 		const modes = resetWindowModes(provider, this.settings);
@@ -15584,25 +15635,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
-	 * process-wide set before mutation, while nonterminal outcomes release and
-	 * defer the episode so a still-banked grant is not buried permanently.
-	 * Returns the credentials whose reset was spent or adopted from a peer, and
-	 * whether the session's account pool dropped a planned restore.
+	 * Shared consume executor for Codex, Claude, and Z.AI plans. Attempt keys
+	 * enter the process-wide set before mutation, while nonterminal outcomes
+	 * release and defer the episode so a still-banked grant is not buried
+	 * permanently. Returns the credentials whose reset was spent or adopted
+	 * from a peer, and whether the session's account pool dropped a planned
+	 * restore.
 	 */
 	async #executeResetActions(
-		provider: "openai-codex" | "anthropic",
-		actions: readonly (CodexResetAction | ClaudeResetAction)[],
+		provider: ResetSpendProvider,
+		actions: readonly ResetSpendAction[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
 		const authStorage = this.#modelRegistry.authStorage;
-		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
-		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
+		const { label: providerLabel, source } = resetSpendProviderInfo[provider];
 		// Consent, earlier actions, the fence and the live listing all wait after
 		// planning: a restore the session's account pool no longer allows is dropped.
 		// Checked with no await before the redeem call.
-		const outsidePool = (action: CodexResetAction | ClaudeResetAction): boolean =>
-			action.reason === "blocked-account" &&
+		const outsidePool = (action: ResetSpendAction): boolean =>
+			isResetRestoreAction(action) &&
 			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
 		const restored: number[] = [];
 		let poolLimited = false;
@@ -15620,6 +15671,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					baseUrlResolver: (candidate: string) => this.#modelRegistry.getProviderBaseUrl?.(candidate),
 					// Caller cancellation must not leave an ambiguous consume in flight.
 					signal: AbortSignal.timeout(15_000),
+					// Z.AI spends are idempotent by key: one stable UUID per action
+					// execution, so a lost-response retry of the SAME attempt (the
+					// fence path reuses this object) cannot double-reset. Other
+					// providers ignore the key.
+					idempotencyKey: "kind" in action ? crypto.randomUUID() : undefined,
 				};
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
@@ -15637,11 +15693,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							return undefined;
 						},
 						async markedRedeem => {
-							// Claude's redeem revalidates its exact offer. Codex needs its
-							// balance rechecked after acquiring the cross-process fence.
+							// Claude's and Z.AI's redeem revalidates its exact offer. Codex
+							// needs its balance rechecked after acquiring the cross-process fence.
 							if (provider === "openai-codex") {
 								const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
-								const balance = checkCodexBalance(statuses, action.target.credentialId, action.availableCount);
+								const balance = checkCodexBalance(
+									statuses,
+									action.target.credentialId,
+									"availableCount" in action ? action.availableCount : undefined,
+								);
 								if (balance === "spent") return undefined;
 								if (balance) return { ok: false, code: balance, provider } satisfies ResetCreditRedeemOutcome;
 							}
@@ -15682,13 +15742,29 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				continue;
 			}
-			if (!isTerminalRedeemOutcome(outcome.code)) {
+			// `reauth_required` is terminal for Z.AI: the retained login JWTs are
+			// durable, so a dead token cannot heal inside the retry defer — a
+			// 30-minute retry loop against it is noise, not recovery.
+			const terminal =
+				isTerminalRedeemOutcome(outcome.code) || ("kind" in action && outcome.code === "reauth_required");
+			if (!terminal) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
 				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
 			}
+			const actionLabel = "label" in action ? action.label : zaiResetActionLabel(action);
 			switch (outcome.code) {
 				case "reset": {
 					restored.push(action.target.credentialId);
+					if ("kind" in action) {
+						this.emitNotice(
+							"info",
+							`Auto-used a Z.AI ${zaiResetWindowLabel(outcome.creditId ?? action.target.creditId)} reset for ${actionLabel}; ${
+								action.reason === "blocked" ? "retrying now" : "the offer was set to expire"
+							}.`,
+							source,
+						);
+						break;
+					}
 					const left =
 						action.availableCount === undefined ? undefined : ` (${Math.max(0, action.availableCount - 1)} left)`;
 					const detail =
@@ -15699,7 +15775,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 								: "retrying now";
 					this.emitNotice(
 						"info",
-						`Auto-redeemed a saved ${providerLabel} rate-limit reset for ${action.label}${left ?? ""}; ${detail}.`,
+						`Auto-redeemed a saved ${providerLabel} rate-limit reset for ${actionLabel}${left ?? ""}; ${detail}.`,
 						source,
 					);
 					break;
@@ -15707,18 +15783,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				case "already_redeemed":
 					this.emitNotice(
 						"warning",
-						`A saved ${providerLabel} reset for ${action.label} was already redeemed elsewhere.`,
+						`A saved ${providerLabel} reset for ${actionLabel} was already redeemed elsewhere.`,
 						source,
 					);
 					break;
 				case "no_credit":
 					logger.debug(`${source}: no_credit (snapshot/live mismatch)`, { account: action.accountKey });
 					break;
+				case "reauth_required":
+					this.emitNotice(
+						"warning",
+						`${providerLabel} reset for ${actionLabel} needs a fresh sign-in — run \`/login ${provider}\` again.`,
+						source,
+					);
+					break;
 				case "nothing_to_reset":
-					if (action.reason === "blocked-account") {
+					if (isResetRestoreAction(action)) {
 						this.emitNotice(
 							"warning",
-							`${providerLabel} reset for ${action.label} reported nothing to reset; will retry later.`,
+							`${providerLabel} reset for ${actionLabel} reported nothing to reset; will retry later.`,
 							source,
 						);
 					} else {
@@ -15726,10 +15809,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}
 					break;
 				default:
-					if (action.reason === "blocked-account") {
+					if (isResetRestoreAction(action)) {
 						this.emitNotice(
 							"warning",
-							`${providerLabel} auto-redeem for ${action.label} failed (${outcome.code}); will retry later.`,
+							`${providerLabel} auto-redeem for ${actionLabel} failed (${outcome.code}); will retry later.`,
 							source,
 						);
 					} else {
@@ -15747,7 +15830,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
 		const provider = this.model?.provider;
-		if (provider !== "anthropic" && provider !== "openai-codex") return { restored: false };
+		if (provider !== "anthropic" && provider !== "openai-codex" && provider !== "zai") return { restored: false };
 		const modes = resetWindowModes(provider, this.settings);
 		if (!resetWindowsEnabled(modes)) return { restored: false };
 		const coordinator = this.#resetCoordinator;
@@ -15770,6 +15853,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		const run = (async (): Promise<ResetRecoveryResult> => {
+			if (provider === "zai") return this.#recoverBlockedZaiReset();
 			let reports: UsageReport[] | null = null;
 			if (provider === "openai-codex") {
 				await authStorage.usage.invalidate(provider);
@@ -15820,22 +15904,221 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * One process-wide salvage sweep handles both providers, but plans and asks
-	 * consent independently. Last-chance expiry checks remain active even with
-	 * the broader salvage horizon disabled. Every candidate is refreshed through
-	 * its live listing before spend; a failed listing cannot fall back to stale usage.
-	 * Claude finds its candidates in the usage reports' reset inventory first, so a
-	 * sweep with nothing to salvage lists no Claude account.
+	 * Blocked-turn recovery for Z.AI: refresh usage, claim pending
+	 * opportunities, and spend banked offers through the shared consent,
+	 * fence and executor machinery. When nothing restored, a peer's just
+	 * confirmed reset of this provider's account can still serve the retry.
+	 */
+	async #recoverBlockedZaiReset(): Promise<ResetRecoveryResult> {
+		const coordinator = this.#resetCoordinator;
+		const authStorage = this.#modelRegistry.authStorage;
+		// The cached snapshot predates the 429; the planner needs a fresh report.
+		await authStorage.usage.invalidate("zai");
+		const reports = await this.fetchUsageReports();
+		const executed = await this.#runZaiResetPass("blocked", reports ?? []);
+		if (executed.restoredCredentialIds.length > 0) {
+			return {
+				restored: true,
+				restoredCredentialIds: executed.restoredCredentialIds,
+				poolLimited: executed.poolLimited,
+			};
+		}
+		const adoptedId = await this.#adoptRecentReset(
+			await this.listResetCredits(AbortSignal.timeout(10_000), "zai"),
+			coordinator,
+		);
+		if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
+		return { restored: false, poolLimited: executed.poolLimited };
+	}
+
+	/** Plan one Z.AI pass from live listings against the shared coordinator maps. */
+	#planZaiResets(
+		trigger: ZaiResetTrigger,
+		reports: readonly UsageReport[],
+		statuses: readonly ResetCreditAccountStatus[],
+	) {
+		const coordinator = this.#resetCoordinator;
+		const plan = planZaiResetClaims({
+			nowMs: Date.now(),
+			trigger,
+			settings: { enabled: true },
+			reports,
+			statuses,
+			attemptedKeys: coordinator.attemptedKeys,
+			deferredUntilByKey: coordinator.deferredUntilByKey,
+			lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
+			nextTryAtByAccount: coordinator.nextTryAtByAccount,
+			lastOpportunityAtByAccount: coordinator.lastOpportunityAtByAccount,
+		});
+		if (plan.skipped.length > 0) {
+			logger.debug("zai-auto-reset: plan", { trigger, actions: plan.actions.length, skipped: plan.skipped });
+		}
+		return plan;
+	}
+
+	/**
+	 * Claim the Z.AI reset opportunities a plan asked for. The attempt key is
+	 * recorded before the request; a completed claim remembers its timestamp, a
+	 * refusal the server's next-try time, and anything non-terminal releases the
+	 * key and defers, so a refused or failed claim is retried later, not buried.
+	 */
+	async #executeZaiResetOpportunities(actions: readonly ZaiResetOpportunityAction[]): Promise<boolean> {
+		const coordinator = this.#resetCoordinator;
+		const authStorage = this.#modelRegistry.authStorage;
+		let granted = false;
+		for (const action of actions) {
+			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+			coordinator.attemptedKeys.add(action.attemptKey);
+			let outcome: ResetOpportunityOutcome;
+			try {
+				outcome = await authStorage.resets.claimOpportunity({
+					target: action.target,
+					baseUrlResolver: candidate => this.#modelRegistry.getProviderBaseUrl?.(candidate),
+					signal: AbortSignal.timeout(15_000),
+				});
+			} catch (error) {
+				coordinator.attemptedKeys.delete(action.attemptKey);
+				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
+				logger.warn("zai-auto-reset: opportunity claim threw, deferred", {
+					account: action.accountKey,
+					error: String(error),
+				});
+				continue;
+			}
+			coordinator.lastOpportunityAtByAccount.set(action.accountKey, Date.now());
+			if (outcome.granted) {
+				granted = true;
+				this.emitNotice(
+					"info",
+					`Claimed a Z.AI coding-plan reset opportunity for ${zaiResetActionLabel(action)}.`,
+					"zai-auto-reset",
+				);
+			} else {
+				if (outcome.nextTryAtMs !== undefined && Number.isFinite(outcome.nextTryAtMs)) {
+					coordinator.nextTryAtByAccount.set(action.accountKey, outcome.nextTryAtMs);
+				} else {
+					coordinator.attemptedKeys.delete(action.attemptKey);
+					coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
+				}
+				logger.debug("zai-auto-reset: opportunity not granted", {
+					account: action.accountKey,
+					code: outcome.code,
+				});
+			}
+		}
+		return granted;
+	}
+	/**
+	 * One Z.AI planning pass: gate the planned opportunity claims on consent,
+	 * claim the approved ones, then spend banked offers through the shared
+	 * consent, fence and terminal-code executor. A granted claim re-lists and
+	 * re-plans immediately so the fresh offer can be spent in the same pass
+	 * instead of waiting for the next one.
+	 */
+	async #runZaiResetPass(
+		trigger: ZaiResetTrigger,
+		reports: readonly UsageReport[],
+	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
+		const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "zai");
+		let plan = this.#planZaiResets(trigger, reports, statuses);
+		if (plan.actions.some(action => action.kind === "opportunity")) {
+			const approved = await this.#consentZaiOpportunityClaims(
+				this.#resetCoordinator,
+				plan.actions.filter((action): action is ZaiResetOpportunityAction => action.kind === "opportunity"),
+			);
+			const granted = await this.#executeZaiResetOpportunities(approved);
+			if (granted) {
+				plan = this.#planZaiResets(
+					trigger,
+					reports,
+					await this.listResetCredits(AbortSignal.timeout(10_000), "zai"),
+				);
+			}
+		}
+		const uses = plan.actions.filter((action): action is ZaiResetUseAction => action.kind === "use");
+		return this.#redeemConsentedResets("zai", uses, this.#resetCoordinator);
+	}
+
+	/**
+	 * Ask before claiming Z.AI reset opportunities when `zaiResets.autoRedeem`
+	 * is unset and return the approved actions. The answer is saved to every
+	 * still-unset zai window key (both windows share the one setting). A host
+	 * that cannot prompt claims nothing and gets a one-shot notice per account
+	 * instead. Each account is asked at most once per process: a declined or
+	 * failed prompt is not re-asked every sweep.
+	 */
+	async #consentZaiOpportunityClaims(
+		coordinator: CodexAutoRedeemCoordinator,
+		actions: readonly ZaiResetOpportunityAction[],
+	): Promise<readonly ZaiResetOpportunityAction[]> {
+		if (actions.length === 0) return [];
+		// Both zai windows read the same zaiResets.autoRedeem key, so either
+		// window carries the claim consent.
+		const modes = resetWindowModes("zai", this.settings);
+		const mode = resetWindowMode(modes, "5h");
+		if (mode === "yes") return actions;
+		if (mode === "no") return [];
+		const keys = [...new Set((["5h", "weekly"] as const).flatMap(window => resetWindowSettings.zai[window] ?? []))];
+		const approved: ZaiResetOpportunityAction[] = [];
+		for (const action of actions) {
+			const consentKey = `zai-claim-consent|${action.accountKey}`;
+			if (coordinator.notifiedKeys.has(consentKey)) continue;
+			coordinator.notifiedKeys.add(consentKey);
+			const runner = this.#extensionRunner;
+			if (!runner?.hasUI() || !this.#interactivePrompts) {
+				this.emitNotice(
+					"warning",
+					"Z.AI reset opportunities are available to claim, but auto-claim is unset and no prompt UI is available. Run `/usage reset` or set `zaiResets.autoRedeem`.",
+					"zai-auto-reset",
+				);
+				continue;
+			}
+			try {
+				const choice = await runner
+					.getUIContext()
+					.select(
+						`Claim Z.AI coding-plan reset opportunities for ${zaiResetActionLabel(action)}? omp would check about every 10 minutes and spend granted resets before they expire.`,
+						[
+							{ label: "Yes", description: "Claim now and set zaiResets.autoRedeem to yes." },
+							{ label: "No", description: "Do not claim, and set zaiResets.autoRedeem to no." },
+						],
+					);
+				if (choice === "Yes" || choice === "No") {
+					for (const key of keys) {
+						if (key.get(this.settings) === "unset") key.set(this.settings, choice === "Yes" ? "yes" : "no");
+					}
+					if (choice === "Yes") approved.push(action);
+				}
+			} catch (error) {
+				logger.warn("zai-auto-reset: claim-consent prompt failed", { error: String(error) });
+			}
+		}
+		return approved;
+	}
+
+	/**
+	 * One process-wide salvage sweep handles all three providers, but plans and
+	 * asks consent independently. Last-chance expiry checks remain active even
+	 * with the broader salvage horizon disabled. Every candidate is refreshed
+	 * through its live listing before spend; a failed listing cannot fall back
+	 * to stale usage. Claude finds its candidates in the usage reports' reset
+	 * inventory first, so a sweep with nothing to salvage lists no Claude
+	 * account. Z.AI claims opportunities on the zcode poll cadence and spends
+	 * banked offers; a sweep with only Z.AI enabled still runs.
 	 */
 	#maybeScheduleResetSweep(reports: UsageReport[]): void {
 		const coordinator = this.#resetCoordinator;
+
 		const codexEnabled =
 			resetWindowsEnabled(resetWindowModes("openai-codex", this.settings)) &&
 			reports.some(report => report.provider === "openai-codex");
 		const claudeEnabled =
 			resetWindowsEnabled(resetWindowModes("anthropic", this.settings)) &&
 			reports.some(report => report.provider === "anthropic");
-		if (!codexEnabled && !claudeEnabled) return;
+		const zaiEnabled =
+			resetWindowsEnabled(resetWindowModes("zai", this.settings)) &&
+			reports.some(report => report.provider === "zai");
+		if (!codexEnabled && !claudeEnabled && !zaiEnabled) return;
 		if (coordinator.sweepInFlight || coordinator.inFlightByAccount.size > 0) return;
 		const now = Date.now();
 		if (now - coordinator.lastSweepAt < SWEEP_MIN_INTERVAL_MS) return;
@@ -15876,6 +16159,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}
 				} catch (error) {
 					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
+				}
+			}
+			if (zaiEnabled) {
+				try {
+					await this.#runZaiResetPass("sweep", reports);
+				} catch (error) {
+					logger.warn("zai-auto-reset: salvage listing failed", { error: String(error) });
 				}
 			}
 		})()

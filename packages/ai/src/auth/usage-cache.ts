@@ -88,6 +88,8 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		region: credential.region,
 		inferenceRegion: credential.inferenceRegion,
 		activeOrganizationId: credential.activeOrganizationId,
+		zcodeJwt: credential.zcodeJwt,
+		zaiOauthJwt: credential.zaiOauthJwt,
 	};
 }
 

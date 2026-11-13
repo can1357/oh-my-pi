@@ -812,6 +812,10 @@ export interface CodexAutoRedeemCoordinator {
 	attemptedKeys: Set<string>;
 	deferredUntilByKey: Map<string, number>;
 	lastAttemptAtByAccount: Map<string, number>;
+	/** Server `next_try_at` (epoch ms) from Z.AI opportunity refusals, per account. */
+	nextTryAtByAccount: Map<string, number>;
+	/** Last completed Z.AI opportunity claim (epoch ms), per account. */
+	lastOpportunityAtByAccount: Map<string, number>;
 	/** Alternate lock root for isolated sessions (production uses the shared agent database path). */
 	resetLockPath?: string;
 	inFlightByAccount: Map<string, Promise<ResetRecoveryResult>>;
@@ -828,6 +832,8 @@ export function createCodexAutoRedeemCoordinator(): CodexAutoRedeemCoordinator {
 		attemptedKeys: new Set(),
 		deferredUntilByKey: new Map(),
 		lastAttemptAtByAccount: new Map(),
+		nextTryAtByAccount: new Map(),
+		lastOpportunityAtByAccount: new Map(),
 		inFlightByAccount: new Map(),
 		sweepInFlight: false,
 		lastSweepAt: 0,
