@@ -2372,6 +2372,39 @@ describe("InteractiveMode plan review rendering", () => {
 			reentry: true,
 		});
 	});
+
+	it.each([
+		{ noTitle: undefined, expected: "Release notes cleanup" },
+		{ noTitle: "1", expected: undefined },
+	])(
+		"seeds the session name from the approved plan title only when titling is enabled (PI_NO_TITLE=$noTitle)",
+		async ({ noTitle, expected }) => {
+			const previousNoTitle = Bun.env.PI_NO_TITLE;
+			if (noTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = noTitle;
+			try {
+				const planFilePath = "local://PLAN.md";
+				const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+					getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+					getSessionId: () => session.sessionManager.getSessionId(),
+				});
+				await Bun.write(resolvedPlanPath, "# Plan\n\nClean up the release notes.");
+
+				await mode.handlePlanModeCommand();
+
+				vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and execute");
+				vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+				vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+				await mode.handlePlanApproval({ planFilePath, planExists: true, title: "release-notes-cleanup" });
+
+				expect(session.sessionManager.getSessionName()).toBe(expected);
+			} finally {
+				if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+				else Bun.env.PI_NO_TITLE = previousNoTitle;
+			}
+		},
+	);
 	it("autosaves the approved plan when plan.autosave is enabled", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {

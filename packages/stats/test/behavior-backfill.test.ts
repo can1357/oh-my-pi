@@ -78,9 +78,6 @@ describe("behavior backfill", () => {
 			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 			.run("user_messages_v10", "1778589361860");
 		database
-			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-			.run("user_message_links_v1", "1778589361862");
-		database
 			.prepare("INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified) VALUES (?, ?, ?)")
 			.run(sessionFile, stats.size, stats.mtimeMs);
 		database.close();
@@ -138,9 +135,6 @@ describe("behavior backfill", () => {
 
 		const database = new Database(getStatsDbPath());
 		database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run("user_messages_v10", "pending");
-		database
-			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-			.run("user_message_links_v1", "pending");
 		database.close();
 
 		await initDb();
@@ -156,7 +150,7 @@ describe("behavior backfill", () => {
 		const database = new Database(getStatsDbPath(), { readonly: true });
 		const rows = database
 			.query(
-				"SELECT key, value FROM meta WHERE key IN ('user_messages_v10', 'tool_calls_v3', 'user_message_links_v1', 'premium_requests_priority_v2') ORDER BY key",
+				"SELECT key, value FROM meta WHERE key IN ('user_messages_v10', 'tool_calls_v3', 'premium_requests_priority_v2') ORDER BY key",
 			)
 			.all() as { key: string; value: string }[];
 		database.close();
@@ -164,7 +158,6 @@ describe("behavior backfill", () => {
 		expect(rows).toEqual([
 			{ key: "premium_requests_priority_v2", value: "complete" },
 			{ key: "tool_calls_v3", value: "complete" },
-			{ key: "user_message_links_v1", value: "complete" },
 			{ key: "user_messages_v10", value: "complete" },
 		]);
 	});

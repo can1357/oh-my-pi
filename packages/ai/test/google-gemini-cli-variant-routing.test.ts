@@ -250,16 +250,27 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 	});
 
 	it("discovers one model per Gemini 4 family and sends each thinking level to that family's served SKU", async () => {
-		const tiers = [Effort.Low, Effort.Medium, Effort.High] as const;
-		const families = ["gemini-4-argon", "gemini-4-carbon"];
+		const threeTiers = [Effort.Low, Effort.Medium, Effort.High] as const;
+		const families: Record<string, readonly Effort[]> = {
+			"gemini-4-argon": threeTiers,
+			"gemini-4-carbon": threeTiers,
+			"gemini-4-hydrogen": [...threeTiers, Effort.XHigh],
+		};
+		// `fetchAvailableModels` numbers the SKU levels; Hydrogen's `-xhigh` SKU reports 100.
+		const advertisedLevel: Partial<Record<Effort, number>> = {
+			[Effort.Low]: 1,
+			[Effort.Medium]: 2,
+			[Effort.High]: 3,
+			[Effort.XHigh]: 100,
+		};
 		const result = await fetchAntigravityDiscoveryModels({
 			token: "token",
 			userAgent: "test",
 			fetcher: async () =>
 				Response.json({
 					models: Object.fromEntries(
-						families.flatMap(family =>
-							tiers.map((tier, index) => [
+						Object.entries(families).flatMap(([family, tiers]) =>
+							tiers.map(tier => [
 								`${family}-${tier}`,
 								{
 									supportsThinking: true,
@@ -268,7 +279,7 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 									maxOutputTokens: 65_536,
 									// Gemini 4 advertises both; the level wins like in the native client.
 									thinkingBudget: -1,
-									thinkingLevel: index + 1,
+									thinkingLevel: advertisedLevel[tier],
 								},
 							]),
 						),
@@ -276,9 +287,9 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 				}),
 		});
 		if (!result || result.rejectedStatus !== undefined) throw new Error("discovery failed");
-		expect(result.models.map(spec => spec.id).sort()).toEqual(families);
+		expect(result.models.map(spec => spec.id).sort()).toEqual(Object.keys(families));
 
-		for (const family of families) {
+		for (const [family, tiers] of Object.entries(families)) {
 			const model = buildModel(result.models.find(spec => spec.id === family)!);
 			for (const tier of tiers) {
 				expect(resolveVariantSelector("google-antigravity", `${family}-${tier}`)).toBe(family);
@@ -287,7 +298,8 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 				expect(request.attributedModel).toBe(family);
 				expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
 					includeThoughts: true,
-					thinkingLevel: tier.toUpperCase(),
+					// Google documents the extra level in lowercase (`xhigh`).
+					thinkingLevel: tier === Effort.XHigh ? "xhigh" : tier.toUpperCase(),
 				});
 			}
 
