@@ -360,6 +360,72 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		expect(argonKey).toBe("api-acct-recovered");
 	});
 
+	for (const { name, fiveHourLeft, healed } of [
+		{ name: "heals", fiveHourLeft: 0.98, healed: true },
+		{ name: "keeps", fiveHourLeft: 0, healed: false },
+	]) {
+		test(`${name} a stale Argon block when the quota summary drops the Argon bucket and shared Gemini quota is ${healed ? "left" : "exhausted"}`, async () => {
+			if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
+				throw new Error("test setup failed");
+			}
+
+			await authStorage.credentials.set("google-antigravity", [
+				{
+					type: "oauth",
+					...createCredential("acct-upgraded", "proj-upgraded", "upgraded@example.com"),
+				},
+			]);
+			const row = store.listAuthCredentials("google-antigravity")[0];
+			if (!row) throw new Error("expected credential row");
+
+			// The Argon weekly bucket ran out and a 429 blocked Argon until its
+			// reset. The plan then changed, and the quota summary stopped
+			// reporting a separate Argon bucket.
+			const weekAhead = Date.now() + 6 * 24 * HOUR_MS;
+			store.upsertCredentialBlock({
+				credentialId: row.id,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "counter:google-argon",
+				blockedUntilMs: weekAhead,
+			});
+			ageCredentialBlockRows(dbPath);
+			store.cleanExpiredCredentialBlocks?.(Date.now() + STALE_BLOCK_GUARD_MS);
+
+			const summary = {
+				groups: [
+					{
+						displayName: "Gemini Models",
+						buckets: [
+							{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.98 },
+							{ bucketId: "gemini-5h", window: "5h", remainingFraction: fiveHourLeft },
+						],
+					},
+				],
+			};
+			const report = await antigravityUsageProvider.fetchUsage!(
+				{
+					provider: "google-antigravity",
+					credential: {
+						type: "oauth",
+						accessToken: "token",
+						projectId: "proj-upgraded",
+						email: "upgraded@example.com",
+						accountId: "acct-upgraded",
+					},
+				},
+				{ fetch: async () => new Response(JSON.stringify(summary), { status: 200 }) },
+			);
+			if (!report) throw new Error("expected usage report");
+			usageByAccount.set("acct-upgraded", report);
+
+			await authStorage.usage.reports();
+
+			expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon")).toBe(
+				healed ? undefined : weekAhead,
+			);
+		});
+	}
+
 	test("prefers less-pressured antigravity account when neither is exhausted", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

@@ -205,7 +205,8 @@ impl fmt::Display for GlobError {
 
 impl std::error::Error for GlobError {}
 
-/// Finds the entries below `root` matching `opts.pattern`.
+/// Finds the entries below `root` matching `opts.pattern`. Below an ovnfs
+/// checkout its daemon answers when it can mirror `opts`.
 ///
 /// # Errors
 /// A malformed pattern or an unreadable root.
@@ -217,6 +218,9 @@ pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMa
 	let selector = Selector::new(pattern, opts.recursive).map_err(GlobError::Pattern)?;
 	if opts.max_results == Some(0) {
 		return Ok(Vec::new());
+	}
+	if let Some(found) = crate::ovnfs::glob(fs, root, pattern, &selector, opts).await {
+		return Ok(found);
 	}
 	let depth = match (selector.max_depth(), opts.walk.max_depth) {
 		(Some(a), Some(b)) => Some(a.min(b)),
