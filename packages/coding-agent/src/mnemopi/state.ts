@@ -48,6 +48,8 @@ interface RecallBlock {
 
 /** Bound optional context selection so an unavailable judge cannot hold the user turn indefinitely. */
 const AUTOMATIC_RECALL_TIMEOUT_MS = 10_000;
+/** After a failed relevance check, skip automatic recall this long instead of re-paying the timeout every turn. */
+const AUTOMATIC_RECALL_FAILURE_COOLDOWN_MS = 5 * 60_000;
 
 // The mnemopi package pulls the embeddings stack; keep it off the CLI startup
 // module graph by loading it lazily at the async boundaries that need it.
@@ -334,6 +336,8 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 	#retentionCursorLoaded = false;
 	#recallGeneration = 0;
 	readonly #automaticRecallJudge?: Pick<ChainJudge, "withCandidate">;
+	/** Until when automatic recall stays off after a failed relevance check; the next attempt retries the judge. */
+	#relevanceRetryAt = 0;
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -692,6 +696,9 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		if (!this.#relevanceFilterActive()) return candidates;
 		const { settings, modelRegistry } = this.session;
 		if (candidates.length === 0) return candidates;
+		// Inside the cooldown the outcome is already known: skip silently (the first failure warned), so the
+		// same turn's background agent_start recall and the turns after it neither wait nor warn again.
+		if (Date.now() < this.#relevanceRetryAt) return undefined;
 		try {
 			const judge =
 				this.#automaticRecallJudge ??
@@ -715,10 +722,11 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 			);
 		} catch (error) {
 			if (!signal?.aborted) {
+				this.#relevanceRetryAt = Date.now() + AUTOMATIC_RECALL_FAILURE_COOLDOWN_MS;
 				logger.warn("Mnemopi: automatic recall relevance check failed", { error: toError(error).message });
 				this.session.emitNotice(
 					"warning",
-					"Automatic memory recall skipped: the task relevance check failed or exceeded 10 seconds. Explicit memory search is still available.",
+					"Automatic memory recall paused for 5 minutes: the task relevance check failed or exceeded 10 seconds. Explicit memory search is still available.",
 					"mnemopi",
 				);
 			}

@@ -625,20 +625,37 @@ describe("Mnemopi automatic recall across sessions sharing a bank", () => {
 		expect((await firstTurn(await resume(dir, sessionFile, dir))).block).toContain(FOREIGN_FACT);
 	});
 
-	it("retries the first turn's recall on the next turn after a failed relevance check", async () => {
+	it("pauses automatic recall after a failed relevance check, then retries the judge once the pause ends", async () => {
 		const { dir, foreign } = sharedStore();
 		await retainTranscript(foreign, `The deploy host is ${FOREIGN_FACT}.`);
 		const available = memoryRelevanceJudge();
 		let failing = true;
+		let calls = 0;
 		const flaky: Judge = {
 			label: "flaky",
-			judge: (request, options) =>
-				failing ? unavailable.judge(request, options) : available.judge(request, options),
+			judge: (request, options) => {
+				calls++;
+				return failing ? unavailable.judge(request, options) : available.judge(request, options);
+			},
 		};
 		const live = startProcess(dir, newSession(dir), {}, judgeChain(flaky));
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
 		expect(await live.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
 		expect(live.hasRecalledForFirstTurn).toBe(false);
+		expect(live.session.emitNotice).toHaveBeenCalledTimes(1);
+		const failedCalls = calls;
+
+		// The same turn's background recall and the next turn inside the pause neither call the judge nor warn.
+		await live.maybeRecallOnAgentStart();
+		clock.mockReturnValue(now + 60_000);
+		expect(await live.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+		expect(calls).toBe(failedCalls);
+		expect(live.session.emitNotice).toHaveBeenCalledTimes(1);
+		expect(live.hasRecalledForFirstTurn).toBe(false);
+
 		failing = false;
+		clock.mockReturnValue(now + 5 * 60_000);
 		const retried = await live.beforeAgentStartPrompt(PROMPT);
 		expect(retried?.context).toContain(FOREIGN_FACT);
 		expect(retried?.commit()).toBe(true);
