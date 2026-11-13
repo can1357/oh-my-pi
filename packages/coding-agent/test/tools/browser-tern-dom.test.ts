@@ -49,6 +49,7 @@ async function nativeTab(
 function actionBudget(tab: TernTab, actionMs: number): void {
 	tab.setRunContext({
 		timeoutMs: actionMs + 1_000,
+		deadline: Date.now() + actionMs + 1_000,
 		signal: new AbortController().signal,
 		session: { cwd: os.tmpdir() },
 		output: new RunOutput(),

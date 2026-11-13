@@ -540,10 +540,11 @@ const observeValue = (el, role) => {
 		return el.selectedOptions[0] ? normalizeSpace(el.selectedOptions[0].text) : undefined;
 	}
 	if (role === "slider" || role === "spinbutton" || role === "progressbar" || role === "meter") {
-		const raw = el.getAttribute("aria-valuenow") || (tag === "input" || tag === "progress" || tag === "meter" ? String(el.value) : "");
+		const raw = el.getAttribute("aria-valuenow") || ((tag === "input" && inputType(el) !== "password") || tag === "progress" || tag === "meter" ? String(el.value) : "");
 		const number = Number(raw);
 		return raw !== "" && Number.isFinite(number) ? number : undefined;
 	}
+	if (tag === "input" && inputType(el) === "password") return el.value ? "•".repeat(String(el.value).length) : undefined;
 	if ((tag === "input" || tag === "textarea") && (role === "textbox" || role === "searchbox" || role === "combobox")) {
 		return el.value ? String(el.value) : undefined;
 	}

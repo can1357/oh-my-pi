@@ -316,7 +316,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await modeService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${content}` }],
-				details: { proc: { action: "mode", daemon: updated, mode: content } },
+				details: { proc: { action: "mode", daemon: updated, mode: content }, touchesNoFiles: true },
 			};
 		}
 		if (action === "stdin") {
@@ -324,7 +324,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await sendService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],
-				details: { proc: { action: "stdin", daemon: updated, input: content } },
+				details: { proc: { action: "stdin", daemon: updated, input: content }, touchesNoFiles: true },
 			};
 		}
 		if (service) {

@@ -166,6 +166,9 @@ const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Obje
 const MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(MODELS_DEV_CATALOG_PROVIDER_IDS.map(providerId => [providerId, true as const])),
 );
+const SPECIAL_MODEL_MANAGER_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
+	Object.fromEntries(SPECIAL_MODEL_MANAGER_PROVIDER_IDS.map(providerId => [providerId, true as const])),
+);
 const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(
 		MODELS_DEV_CATALOG_PROVIDER_IDS.filter(
@@ -1686,21 +1689,29 @@ export class ModelRegistry {
 	} {
 		const modelsByProvider = new Map<string, Model<Api>[]>();
 		const authoritativeFreshProviders = new Set<string>();
+		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerId of providerIds) {
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 			const additiveSharedCatalogProvider = ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
+			// An enabled, authenticated special provider runs its own discovery after startup.
+			const specialDiscovery =
+				SPECIAL_MODEL_MANAGER_PROVIDER_ID_LOOKUP[providerId] === true &&
+				!disabledProviders.has(providerId) &&
+				this.authStorage.keys.source(providerId) !== undefined;
 			if (!cache) {
 				const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
 				const discoveryExpected =
-					sharedCatalogProvider ||
-					(descriptor !== undefined &&
-						(this.authStorage.keys.source(providerId) !== undefined ||
-							descriptor.allowUnauthenticated === true ||
-							this.#keylessProviders.has(providerId)));
-				if (discoveryExpected) {
+					!disabledProviders.has(providerId) &&
+					(sharedCatalogProvider ||
+						(descriptor !== undefined &&
+							(this.authStorage.keys.source(providerId) !== undefined ||
+								descriptor.allowUnauthenticated === true ||
+								this.#keylessProviders.has(providerId))) ||
+						specialDiscovery);
+				if (discoveryExpected && !this.#providerDiscoveryStates.has(providerId)) {
 					this.#providerDiscoveryStates.set(providerId, {
 						provider: providerId,
 						status: "idle",
@@ -1806,6 +1817,18 @@ export class ModelRegistry {
 					stale,
 					...(cacheContributed ? { fetchedAt: cache.updatedAt } : {}),
 					source: cacheContributed ? "cache" : "bundled",
+					models: cachedModels.map(model => model.id),
+				});
+			} else if (specialDiscovery && !this.#providerDiscoveryStates.has(providerId)) {
+				const hasCachedModels = cachedModels.length > 0;
+				const stale = !cache.fresh || !cache.authoritative || !hasCachedModels;
+				this.#providerDiscoveryStates.set(providerId, {
+					provider: providerId,
+					status: hasCachedModels ? "cached" : "unavailable",
+					optional: false,
+					stale,
+					...(hasCachedModels ? { fetchedAt: cache.updatedAt } : {}),
+					source: hasCachedModels ? "cache" : "bundled",
 					models: cachedModels.map(model => model.id),
 				});
 			}
