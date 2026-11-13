@@ -153,8 +153,11 @@ export async function resolveSeanceSource(
 	if (options.includeGlobal) {
 		const matchGlobal = chooseId(await SessionManager.listAll(storage), source);
 		if (matchGlobal) return validateSourceFile(matchGlobal.path, storage);
+		throw new Error(`Session "${label}" was not found.`);
 	}
-	throw new Error(`Session "${label}" was not found.`);
+	throw new Error(
+		`Session "${label}" was not found in this project's sessions. To consult a session from another project, pass its .jsonl file path.`,
+	);
 }
 const modelSelectorInputSchema = type("string | string[]");
 export const seanceTaskSchemaFields = {
