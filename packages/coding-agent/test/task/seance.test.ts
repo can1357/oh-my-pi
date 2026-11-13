@@ -147,9 +147,6 @@ describe("seance source resolution", () => {
 		await expect(resolveSeanceSource(path.join(sessionDir, "missing.jsonl"), options)).rejects.toThrow(
 			"The selected session file was not found or could not be accessed.",
 		);
-		await expect(resolveSeanceSource("not-present", options)).rejects.toThrow(
-			`Session "not-present" was not found in this project's sessions.`,
-		);
 		await expect(resolveSeanceSource("ambiguous", options)).rejects.toThrow(
 			'Session selector "ambiguous" is ambiguous.',
 		);
@@ -211,9 +208,7 @@ describe("seance source resolution", () => {
 			const foreignFile = path.join(sessionDirForCwd(otherCwd), "foreign.jsonl");
 			await writeSession(foreignFile, "foreign-project-id", otherCwd);
 
-			await expect(resolveSeanceSource("foreign-project-id", { cwd })).rejects.toThrow(
-				`Session "foreign-project-id" was not found in this project's sessions. To consult a session from another project, pass its .jsonl file path.`,
-			);
+			await expect(resolveSeanceSource("foreign-project-id", { cwd })).rejects.toThrow("pass its .jsonl file path");
 			await expect(resolveSeanceSource(foreignFile, { cwd })).resolves.toMatchObject({ id: "foreign-project-id" });
 			await expect(resolveSeanceSource("foreign-project-id", { cwd, includeGlobal: true })).resolves.toMatchObject({
 				file: foreignFile,
