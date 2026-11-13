@@ -177,6 +177,7 @@ await win.click(120, 48, button="right")
   - on macOS `perform("AXOpen")`, which can bring an Open panel's app forward
   - on macOS every call that opens a menu or names a `menu` item (right-click, Control-click, `perform("AXShowMenu")`, `menu:`,
     `press()` or a click, hold or drag on a popup button or menu button, `setValue` on a popup button), since an open menu takes the user's keyboard
+    Space/Up/Down keys on those controls are still sent; a menu they open is closed before the call returns.
 - `raise()` and `apps.open(…, { activate: true })` bring the app forward and take the user's keyboard.
   NEVER call them to make input work; launching, reopening and window input work in the background.
 - macOS background routes cover left-button drags and `holdMouse` that start on a slider, scroll bar, splitter or stepper,
@@ -193,7 +194,8 @@ await win.click(120, 48, button="right")
     - To use a menu item, name its path in the same call: `win.click(x, y, {button: "right", menu: ["Add to", "Fonts"]})`,
       `el.click({button: "right", menu: […]})`, `el.press({menu: ["New Folder"]})`; labels match like `win.menu.select`.
     - Without `menu` the menu closes and the call throws a partial-delivery `InputFailed` listing its items; inspect, then repeat with `menu`.
-      Keys take no `menu`: press or click the control with it instead.
+      Keys take no `menu`: press or click the control with it instead, unless takeover is refused;
+      then use `win.menu.select` if the menu bar has the command, or tell the user the step needs their screen.
   - A right-button or Control drag, `holdMouse` or multi-click has no background route,
     nor does a drag, `holdMouse` or multi-click on a menu button or popup button: click it once with `menu` instead.
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.
