@@ -41,6 +41,13 @@ describe("hasTerminalMultiplexerSession", () => {
 		}
 	});
 
+	it("recognizes only a nonblank Herdr Core terminal identity", () => {
+		expect(hasTerminalMultiplexerSession("herdr-core", { HC_TERMINAL_ID: "terminal-1" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("herdr-core", {})).toBe(false);
+		expect(hasTerminalMultiplexerSession("herdr-core", { HC_TERMINAL_ID: "" })).toBe(false);
+		expect(hasTerminalMultiplexerSession("herdr-core", { HC_TERMINAL_ID: "  " })).toBe(false);
+	});
+
 	it("matches explicit provider markers and excludes TERM fallbacks", () => {
 		expect(hasTerminalMultiplexerSession("tmux", { TMUX: "/tmp/tmux,1,0" })).toBe(true);
 		expect(hasTerminalMultiplexerSession("screen", { STY: "1234.pts-0.host" })).toBe(true);
@@ -89,6 +96,30 @@ describe("terminal multiplexer classification", () => {
 		expect(classifyTerminalMultiplexer({ TMUX: "session", STY: "screen" })).toBe("tmux");
 		expect(classifyTerminalMultiplexer({ STY: "screen", ZELLIJ: "session" })).toBe("screen");
 		expect(classifyTerminalMultiplexer({ TERM: "screen-256color" })).toBe("screen");
+	});
+
+	it("keeps Core behind nested multiplexers and off the multiplexer render path", () => {
+		const core = { HC_TERMINAL_ID: "terminal-1" };
+		expect(classifyTerminalMultiplexer(core)).toBe("herdr-core");
+		expect(isInsideTerminalMultiplexer(core)).toBe(false);
+		expect(classifyTerminalMultiplexer({ ...core, HERDR_PANE_ID: "p1" })).toBe("herdr");
+		expect(classifyTerminalMultiplexer({ ...core, TMUX: "session" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ ...core, STY: "session" })).toBe("screen");
+		expect(classifyTerminalMultiplexer({ ...core, ZELLIJ: "session" })).toBe("zellij");
+		expect(classifyTerminalMultiplexer({ ...core, TERM: "tmux-256color" })).toBe("tmux");
+	});
+
+	it("prefers a valid nested Orca session over its Core host", () => {
+		const env = {
+			HC_TERMINAL_ID: "terminal-1",
+			ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc",
+			ORCA_WORKTREE_ID: "worktree-1",
+		};
+		expect(classifyTerminalMultiplexer(env)).toBe("orca");
+		expect(isInsideTerminalMultiplexer(env)).toBe(false);
+		expect(classifyTerminalMultiplexer({ ...env, ORCA_WORKTREE_ID: " " })).toBe("herdr-core");
+		expect(classifyTerminalMultiplexer({ ...env, TMUX: "session" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ ...env, TERM: "screen-256color" })).toBe("screen");
 	});
 
 	it("classifies Orca after nested multiplexers without moving it off the direct render path", () => {
@@ -706,6 +737,17 @@ describe("Herdr image protocol mask", () => {
 
 		expect(terminalId).toBe("ghostty");
 		expect(resolveImageProtocol(terminalId, env, true)).toBeNull();
+	});
+});
+
+describe("Herdr Core viewer capabilities", () => {
+	it("defers images, hyperlinks, and synchronized output to the attached terminal", () => {
+		const env = { HC_TERMINAL_ID: "terminal-1" };
+		expect(resolveImageProtocol("ghostty", env, true)).toBe(ImageProtocol.Kitty);
+		expect(shouldEnableHyperlinksByDefault(env, "base")).toBe(false);
+		expect(shouldEnableHyperlinksByDefault(env, "ghostty")).toBe(true);
+		expect(shouldEnableSynchronizedOutputByDefault(env, "base")).toBe(false);
+		expect(shouldEnableSynchronizedOutputByDefault(env, "ghostty")).toBe(true);
 	});
 });
 

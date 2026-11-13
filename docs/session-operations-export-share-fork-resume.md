@@ -30,7 +30,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/clear`                                  | Interactive slash command    | Yes (clears live/model conversation context)  | Retains identity/file/history; a lazy session still follows the normal persistence gate                                                                                      | Appends `reset_boundary`                                                            |
 | `/delete`                                 | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a lazy successor (no empty file until content)                                              | None                                                                                |
 | `/fork`                                   | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)                                                                                           | Copies artifact directory to new session namespace when present                     |
-| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command    | No (parent session retained)                  | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca tab, or CMUX workspace)                            | Child receives a separate forked session                                            |
+| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command    | No (parent session retained)                  | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group, or a background Herdr Core terminal when no Desktop pane is available              | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                       | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir                                                                                             | Copies source artifacts recursively by default                                      |
 | `/seance [id\|path] [--model sel]`        | Interactive slash command    | No (active session and model unchanged)       | Forks the source transcript into a read-only consultant subagent under the current session                                                                                   | None; the consultant reads the source's artifacts in place                          |
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
@@ -291,17 +291,22 @@ for keyboard controls, follow-ups, persistence, and migration safety.
 Bare `/fork` creates a new session from the current one and switches the active
 session identity. `/fork pane` opens a separate OMP process in a new pane;
 `/fork window` and `/fork tab` open it in a new multiplexer group (a tmux
-window, Zellij/Herdr/Orca tab, or CMUX workspace). The child starts from the current
-persisted transcript, while the parent session stays active and continues
-running.
+window, Zellij/Herdr/Orca tab, or CMUX workspace). In headless Herdr Core,
+the child starts in a background terminal instead, with a warning that no pane
+or tab is visible. The child starts from the current persisted transcript, while
+the parent session stays active and continues running.
 
 Typing `/fork ` shows `[pane|window|tab]` as dim inline text, and Enter still
 runs the bare in-place fork. Typing a prefix (`/fork w`) opens the suggestions
 with the rest of the selected argument as dim inline text; Tab accepts it.
 
-Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the terminal;
-`/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
-`tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
+Placement commands autodetect tmux, Zellij, legacy Herdr, Herdr Core, CMUX, or
+Orca from the terminal; `/fork auto` is not a subcommand (valid arguments are
+`pane`, `window`, and `tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca
+tab, or a CMUX workspace. Herdr Core placement is supported only on Unix; Windows
+placement forks depend on a Unix environment wrapper and are not supported.
+Herdr Core checks whether the current terminal belongs to a Herdr Desktop pane
+at launch; it does not use the focused pane as a proxy.
 Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
 an explicit error; use bare `/fork` there instead.
 
@@ -330,7 +335,9 @@ it reads the cache the parent populated. The child also receives the effective
 agent/config directories, the resolved config overlays (which retain their
 original paths after `/move`), and the parent's session-dir and XDG base
 directories; scope variables the parent does not set are unset rather than
-exported empty. It starts with `--fork` and the absolute path of the current transcript. The
+exported empty. Other environment variables in a Herdr Core child come from Core's
+environment, which may differ from the calling OMP process's current environment.
+It starts with `--fork` and the absolute path of the current transcript. The
 generic terminal launcher handles provider-specific execution and reports
 capability or launch failures in the TUI. CMUX and Orca launches require
 explicit confirmation that the destination's configured interactive shell

@@ -635,6 +635,484 @@ describe("terminal launch dispatcher", () => {
 		expect(result).toEqual({ multiplexer: "zellij", placement: "window", id: "7" });
 	});
 
+	describe("Herdr Core launches", () => {
+		const listing = JSON.stringify({
+			spaces: [
+				{
+					id: "remote-space",
+					machine: "server",
+					tabs: [{ id: "remote-tab", terminals: [{ terminal: "server/t7", pane: "remote-pane" }] }],
+				},
+				{
+					id: "source-space",
+					machine: null,
+					tabs: [{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] }],
+				},
+			],
+			recent: [],
+		});
+		const cwd = "/repo with spaces/$(not-a-command)";
+		const command = ["omp", "--resume", "", "quotes ' and \"", "$(touch injected)", "line\nbreak"];
+
+		it("splits the pane containing the exact local terminal with literal argv and cwd", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result).toEqual({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				id: "new-pane",
+				warning: expect.stringContaining("startup was not confirmed"),
+			});
+			expect(calls).toEqual([
+				{ argv: ["herdr-app", "ls"], cwd },
+				{
+					argv: [
+						"herdr-app",
+						"do",
+						"pane.split",
+						JSON.stringify({
+							pane: "source-pane",
+							direction: "right",
+							argv: [
+								"/bin/sh",
+								"-c",
+								'CDPATH= cd -P -- "$1" || exit; shift; exec -- "$@"',
+								"herdr-core",
+								cwd,
+								...command,
+							],
+						}),
+					],
+					cwd,
+				},
+			]);
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"runs a Desktop pane in the requested directory without env -C",
+			async () => {
+				const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "herdr-core-")));
+				try {
+					const paneCwd = path.join(tempRoot, "cwd spaces ' $(literal)");
+					await fs.mkdir(paneCwd);
+					const recorder = path.join(tempRoot, "recorder.js");
+					await Bun.write(
+						recorder,
+						"process.stdout.write(JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }));\n",
+					);
+					const env = path.join(tempRoot, "env");
+					await Bun.write(env, '#!/bin/sh\nif [ "$1" = "-C" ]; then exit 1; fi\nexec /usr/bin/env "$@"\n');
+					await fs.chmod(env, 0o755);
+					const args = ["spaces and 'quotes'", "$(printf injected); *", "", "line\nbreak"];
+					const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+						{ stdout: listing, exitCode: 0 },
+						{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+					]);
+					await launch({
+						multiplexer: "herdr-core",
+						placement: "pane",
+						command: [process.execPath, recorder, ...args],
+						cwd: paneCwd,
+					});
+					const paneArgv: string[] = JSON.parse(calls[1]!.argv[3]!).argv;
+					if (paneArgv[0] === "/usr/bin/env") paneArgv[0] = env;
+					const executed = await processCli(paneArgv, tempRoot);
+					expect(executed.exitCode).toBe(0);
+					expect(JSON.parse(executed.stdout)).toEqual({ cwd: paneCwd, args });
+				} finally {
+					await fs.rm(tempRoot, { recursive: true, force: true });
+				}
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"resolves a Desktop pane cwd physically through a symlink and ..",
+			async () => {
+				const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "herdr-physical-")));
+				try {
+					const physicalParent = path.join(tempRoot, "physical");
+					await fs.mkdir(path.join(physicalParent, "child"), { recursive: true });
+					await fs.symlink(path.join(physicalParent, "child"), path.join(tempRoot, "link"));
+					const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+						{ stdout: listing, exitCode: 0 },
+						{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+					]);
+					await launch({
+						multiplexer: "herdr-core",
+						placement: "pane",
+						command: ["/bin/pwd", "-P"],
+						cwd: `${tempRoot}/link/..`,
+					});
+					const paneArgv: string[] = JSON.parse(calls[1]!.argv[3]!).argv;
+					const executed = await processCli(paneArgv, tempRoot);
+					expect(executed.exitCode).toBe(0);
+					expect(executed.stdout.trim()).toBe(physicalParent);
+				} finally {
+					await fs.rm(tempRoot, { recursive: true, force: true });
+				}
+			},
+		);
+
+		it.skipIf(process.platform === "win32")("runs a PATH-resolved Desktop pane executable named -c", async () => {
+			const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "herdr-dash-command-")));
+			try {
+				const executable = path.join(tempRoot, "-c");
+				await Bun.write(executable, "#!/bin/sh\nprintf 'dash-command-ran\\n'\n");
+				await fs.chmod(executable, 0o755);
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: listing, exitCode: 0 },
+					{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+				]);
+				await launch({ multiplexer: "herdr-core", placement: "pane", command: ["-c"], cwd: tempRoot });
+				const paneArgv: string[] = JSON.parse(calls[1]!.argv[3]!).argv;
+				const executed = Bun.spawnSync(paneArgv, {
+					cwd: tempRoot,
+					env: { ...process.env, PATH: tempRoot },
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				expect(executed.exitCode).toBe(0);
+				expect(executed.stdout.toString()).toBe("dash-command-ran\n");
+			} finally {
+				await fs.rm(tempRoot, { recursive: true, force: true });
+			}
+		});
+
+		it("creates a tab in the terminal's own space with the requested folder and literal argv", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"tab":"new-tab","terminal":"t8"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "window", command, cwd });
+			expect(result).toEqual({
+				multiplexer: "herdr-core",
+				placement: "window",
+				id: "new-tab",
+				warning: expect.stringContaining("startup was not confirmed"),
+			});
+			expect(calls[1]).toEqual({
+				argv: ["herdr-app", "do", "tab.new", JSON.stringify({ space: "source-space", folder: cwd, argv: command })],
+				cwd,
+			});
+		});
+
+		it.each(["pane", "window"] as const)(
+			"launches a headless %s request outliving its parent and warns it is not visible",
+			async placement => {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: '{"spaces":[]}', exitCode: 0 },
+					{ stdout: '{"address":"t8"}', exitCode: 0 },
+				]);
+				const result = await launch({ multiplexer: "herdr-core", placement, command, cwd });
+				expect(result.warning).toContain("no visible");
+				expect(result.warning).toContain("t8");
+				expect(result.warning).toContain("hc attach t8");
+				expect(result.warning).toContain("startup was not confirmed");
+				expect(calls[1]).toEqual({
+					argv: [
+						"hc",
+						"run",
+						"--json",
+						"--bg",
+						"--no-notify",
+						"--outlive-parent",
+						"--cwd",
+						cwd,
+						"--",
+						"/usr/bin/env",
+						"--",
+						...command,
+					],
+					cwd,
+				});
+			},
+		);
+
+		it("treats the documented missing Desktop window as headless", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{
+					stdout: "",
+					stderr: "herdr-app: no Herdr window at /path/herdr-app.sock: No such file or directory",
+					exitCode: 2,
+				},
+				{ stdout: '{"address":"t8"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result.warning).toContain("no visible");
+			expect(calls[1]?.argv[0]).toBe("hc");
+		});
+
+		it("treats the observed refused Desktop socket as headless", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{
+					stdout: "",
+					stderr:
+						"herdr-app: no Herdr window at /Users/user/.config/herdr-app/herdr-app.sock: Connection refused (os error 61)",
+					exitCode: 2,
+				},
+				{ stdout: '{"address":"t8"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result.warning).toContain("no visible");
+			expect(calls[1]?.argv[0]).toBe("hc");
+		});
+
+		it("treats a refused Linux Desktop socket as headless", async () => {
+			const { calls, launch } = createHarness(
+				{ HC_TERMINAL_ID: "t7" },
+				[
+					{
+						stdout: "",
+						stderr:
+							"herdr-app: no Herdr window at /home/user/.config/herdr-app/herdr-app.sock: Connection refused (os error 111)",
+						exitCode: 2,
+					},
+					{ stdout: '{"address":"t8"}', exitCode: 0 },
+				],
+				"linux",
+			);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result.warning).toContain("no visible");
+			expect(calls[1]?.argv[0]).toBe("hc");
+		});
+
+		it("treats a refused FreeBSD Desktop socket as headless", async () => {
+			const { calls, launch } = createHarness(
+				{ HC_TERMINAL_ID: "t7" },
+				[
+					{
+						stdout: "",
+						stderr: "herdr-app: no Herdr window at /tmp/herdr-app.sock: Connection refused (os error 61)",
+						exitCode: 2,
+					},
+					{ stdout: '{"address":"t8"}', exitCode: 0 },
+				],
+				"freebsd",
+			);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result.warning).toContain("no visible");
+			expect(calls[1]?.argv[0]).toBe("hc");
+		});
+
+		it.each([
+			["Permission denied (os error 13)", "permission denied"],
+			["Connection refused (os error 13)", "connection refused"],
+			["unexpected transport error", "Inspect Herdr Desktop"],
+		])("does not treat Desktop discovery %s as a missing window", async (detail, message) => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: "", stderr: `herdr-app: no Herdr window at /private/socket: ${detail}`, exitCode: 2 },
+			]);
+			await expect(launch({ multiplexer: "herdr-core", placement: "pane", command, cwd })).rejects.toThrow(message);
+			expect(calls).toHaveLength(1);
+		});
+
+		it("accepts a lowercase alphanumeric headless terminal address", async () => {
+			const { launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: '{"spaces":[]}', exitCode: 0 },
+				{ stdout: '{"address":"t12q"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result.id).toBe("t12q");
+			expect(result.warning).toContain("hc attach t12q");
+		});
+
+		it("rejects an option-like terminal address", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: '{"spaces":[]}', exitCode: 0 },
+				{ stdout: '{"address":"--help"}', exitCode: 0 },
+			]);
+			await expect(launch({ multiplexer: "herdr-core", placement: "pane", command, cwd })).rejects.toThrow(
+				"invalid terminal address",
+			);
+			expect(calls).toHaveLength(2);
+		});
+
+		it("rejects an unsafe terminal address without attempting another launch", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: '{"spaces":[]}', exitCode: 0 },
+				{ stdout: '{"address":"t8\\u001b[31m"}', exitCode: 0 },
+			]);
+			await expect(launch({ multiplexer: "herdr-core", placement: "pane", command, cwd })).rejects.toThrow(
+				"invalid terminal address",
+			);
+			expect(calls).toHaveLength(2);
+		});
+
+		it.each(["pane", "window"] as const)(
+			"accepts an executable path containing equals in a headless %s",
+			async placement => {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: '{"spaces":[]}', exitCode: 0 },
+					{ stdout: '{"address":"t8"}', exitCode: 0 },
+				]);
+				await launch({ multiplexer: "herdr-core", placement, command: ["/path/name=value", "arg"], cwd });
+				expect(calls[1].argv.slice(-6)).toEqual([
+					"/bin/sh",
+					"-c",
+					'exec "$@"',
+					"herdr-core",
+					"/path/name=value",
+					"arg",
+				]);
+			},
+		);
+
+		it("preserves a pane executable containing equals without shell interpolation", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+			]);
+			await launch({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				command: ["/path/name=value", "$(literal)"],
+				cwd,
+			});
+			expect(JSON.parse(calls[1].argv[3]).argv).toEqual([
+				"/bin/sh",
+				"-c",
+				'CDPATH= cd -P -- "$1" || exit; shift; exec -- "$@"',
+				"herdr-core",
+				cwd,
+				"/path/name=value",
+				"$(literal)",
+			]);
+		});
+
+		it.each(["pane", "window"] as const)(
+			"rejects unsupported Windows %s launches before creating anything",
+			async placement => {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [], "win32");
+				await expect(launch({ multiplexer: "herdr-core", placement, command, cwd })).rejects.toThrow(
+					"not supported on Windows",
+				);
+				expect(calls).toEqual([]);
+			},
+		);
+
+		it("reports actionable Desktop mutation failure without exposing its output", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"error":"pane not found: PRIVATE_RESPONSE"}', exitCode: 1 },
+			]);
+			let error: unknown;
+			try {
+				await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			} catch (caught) {
+				error = caught;
+			}
+			expect((error as Error).message).toContain("pane");
+			expect((error as Error).message).toContain("no longer exists");
+			expect((error as Error).message).not.toContain("PRIVATE_RESPONSE");
+			expect(calls).toHaveLength(2);
+		});
+
+		it.each([
+			["pane", "pane.split"],
+			["window", "tab.new"],
+		] as const)("exposes a failed Desktop %s mutation without another launch", async (placement, operation) => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: "PRIVATE_RESPONSE", stderr: "PRIVATE_ERROR", exitCode: 17 },
+			]);
+			await expect(launch({ multiplexer: "herdr-core", placement, command, cwd })).rejects.toMatchObject({
+				name: "TerminalLaunchError",
+				operation,
+				exitCode: 17,
+				message: expect.stringContaining(`herdr-core ${operation} failed (exit 17).`),
+			});
+			expect(calls.map(call => call.argv.slice(0, 3))).toEqual([
+				["herdr-app", "ls"],
+				["herdr-app", "do", operation],
+			]);
+		});
+
+		it.each([
+			["pane", "pane.split", "not-json", "invalid JSON"],
+			["pane", "pane.split", '{"terminal":"t8"}', "incomplete IDs"],
+			["pane", "pane.split", '{"pane":"new-pane"}', "incomplete IDs"],
+			["window", "tab.new", '{"terminal":"t8"}', "incomplete IDs"],
+			["window", "tab.new", '{"tab":"new-tab"}', "incomplete IDs"],
+		] as const)(
+			"rejects an unconfirmed Desktop %s mutation without another launch",
+			async (placement, operation, stdout, message) => {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: listing, exitCode: 0 },
+					{ stdout, exitCode: 0 },
+				]);
+				await expect(launch({ multiplexer: "herdr-core", placement, command, cwd })).rejects.toMatchObject({
+					name: "TerminalLaunchError",
+					operation,
+					message: expect.stringContaining(message),
+				});
+				expect(calls.map(call => call.argv.slice(0, 3))).toEqual([
+					["herdr-app", "ls"],
+					["herdr-app", "do", operation],
+				]);
+			},
+		);
+
+		it.each([
+			[{ stdout: "PRIVATE_RESPONSE", stderr: "PRIVATE_ERROR", exitCode: 23 }, "failed (exit 23)"],
+			[{ stdout: "not-json", exitCode: 0 }, "invalid JSON"],
+			[{ stdout: "{}", exitCode: 0 }, "no terminal address"],
+		] as const)("exposes a failed or unconfirmed headless launch without retrying", async (response, message) => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: '{"spaces":[]}', exitCode: 0 },
+				response,
+			]);
+			await expect(launch({ multiplexer: "herdr-core", placement: "pane", command, cwd })).rejects.toMatchObject({
+				name: "TerminalLaunchError",
+				operation: "core run",
+				message: expect.stringContaining(message),
+			});
+			expect(calls.map(call => call.argv.slice(0, 2))).toEqual([
+				["herdr-app", "ls"],
+				["hc", "run"],
+			]);
+		});
+
+		it("does not launch when Desktop listing fails unexpectedly or is malformed", async () => {
+			for (const response of [
+				{ stdout: "PRIVATE_RESPONSE", stderr: "PRIVATE_ERROR", exitCode: 9 },
+				{ stdout: "not-json", exitCode: 0 },
+				{ stdout: '{"spaces":[{"id":"s","machine":null,"tabs":"bad"}]}', exitCode: 0 },
+			]) {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [response]);
+				let error: unknown;
+				try {
+					await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+				} catch (caught) {
+					error = caught;
+				}
+				expect(error).toBeInstanceOf(TerminalLaunchError);
+				expect((error as Error).message).not.toContain("PRIVATE");
+				expect(calls).toHaveLength(1);
+			}
+		});
+
+		it("fails closed when the same local terminal occurs in multiple panes", async () => {
+			const ambiguous =
+				'{"spaces":[{"id":"s","machine":null,"tabs":[{"id":"t","terminals":[{"terminal":"t7","pane":"p1"},{"terminal":"t7","pane":"p2"}]}]}]}';
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [{ stdout: ambiguous, exitCode: 0 }]);
+			await expect(launch({ multiplexer: "herdr-core", placement: "pane", command, cwd })).rejects.toThrow(
+				"multiple",
+			);
+			expect(calls).toHaveLength(1);
+		});
+
+		it("rejects missing terminal identity before starting a CLI", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "" }, []);
+			await expect(launch({ multiplexer: "herdr-core", placement: "pane", command, cwd })).rejects.toThrow(
+				"HC_TERMINAL_ID",
+			);
+			expect(calls).toEqual([]);
+		});
+	});
+
 	// Herdr is POSIX-only and the launch script lives under the real temp dir, whose
 	// Windows path (drive letter, backslashes) is not a shell-neutral word.
 	it.skipIf(process.platform === "win32")(

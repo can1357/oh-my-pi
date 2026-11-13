@@ -6,6 +6,7 @@
 
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Detect Herdr Core terminal sessions ([#19201](https://github.com/can1357/oh-my-pi/pull/19201) by [@sapran](https://github.com/sapran))
 
 ## [18.20.0] - 2026-11-12
 

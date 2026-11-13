@@ -119,6 +119,7 @@ export interface TerminalLaunchResult {
 
 export interface TerminalLaunchCliResult {
 	stdout: string;
+	stderr?: string;
 	exitCode: number | null;
 }
 

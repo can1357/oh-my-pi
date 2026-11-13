@@ -196,6 +196,7 @@ describe("/fork terminal placement", () => {
 		await controller.handleForkCommand("pane");
 		expect(ctx.showStatus).not.toHaveBeenCalled();
 		expect(ctx.showWarning).toHaveBeenCalledTimes(1);
+		expect(ctx.showWarning).toHaveBeenCalledWith(expect.stringContaining("it started in the background."));
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
 
