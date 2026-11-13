@@ -19,7 +19,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
 
-import { cfgLaunchEnabled } from "./settings";
+import { cfgLaunchEnabled, cfgWaitWindowMs } from "./settings";
 
 const waitSchema = type({});
 /**
@@ -145,10 +145,11 @@ function noReplyText(replies: PendingReplies): string {
  * The line an elapsed wait reports: the window it spent and the one a
  * back-to-back wait gets. A bare still-running snapshot reads as an empty
  * result, and agents then start `sleep` jobs to block for longer.
+ * `fixedMs` is a window `wait.windowMs` set, and a back-to-back wait gets the same one.
  */
-function elapsedReport(what: string, rung: number): string {
-	const next = WAIT_LADDER_MS[Math.min(rung + 1, WAIT_LADDER_MS.length - 1)];
-	return `${what} within ${formatDuration(WAIT_LADDER_MS[rung])}; a back-to-back wait allows up to ${formatDuration(next)}.`;
+function elapsedReport(what: string, rung: number, fixedMs?: number): string {
+	const next = fixedMs ?? WAIT_LADDER_MS[Math.min(rung + 1, WAIT_LADDER_MS.length - 1)];
+	return `${what} within ${formatDuration(fixedMs ?? WAIT_LADDER_MS[rung])}; a back-to-back wait allows up to ${formatDuration(next)}.`;
 }
 
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
@@ -163,7 +164,8 @@ export function hasWaitTool(session: ToolSession): boolean {
  * still answer soon: each one finished its turn, is blocked on the caller
  * itself (the cycle that would park both sides), or is waiting on the user.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
- * that climbs across back-to-back idle waits. A direct message arriving
+ * that climbs across back-to-back idle waits or, for a wait on its own jobs,
+ * after the fixed window `wait.windowMs` sets (0: none). A direct message arriving
  * mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
  * Broadcast legs and progress notes ask the caller nothing, so they never end
@@ -269,7 +271,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}
 
 	/**
-	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the ladder window elapses, or the call aborts.
+	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the window elapses (none when `wait.windowMs` is 0 for a wait on jobs), or the call aborts.
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 */
 	async #blockUntilWake(args: {
@@ -288,6 +290,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
 		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : 0;
+		// A configured window replaces the ladder for a wait on owned jobs; 0 arms none.
+		const fixedMs = jobs.length > 0 ? cfgWaitWindowMs.get(this.session.settings) : undefined;
+		const windowMs = fixedMs ?? WAIT_LADDER_MS[rung];
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
@@ -339,7 +344,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
 				: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, WAIT_LADDER_MS[rung]);
+		const timer = windowMs > 0 ? setTimeout(timedOut, windowMs) : undefined;
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
@@ -411,8 +416,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				if (wake === "timeout") {
 					// The report is one text block (`buildJobResult`); the timeout line joins it.
 					const report = result.content.find(block => block.type === "text")?.text ?? "";
-					const text = `${report}\n\n${elapsedReport("No job finished", rung)}`;
-					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, rung, streak);
+					const text = `${report}\n\n${elapsedReport("No job finished", rung, fixedMs)}`;
+					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, rung, streak, windowMs);
 				}
 				// A finished service is news even while every watched job still runs.
 				if (wake !== "service") return result;
@@ -429,7 +434,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					details: { op: "wait", jobs: [] },
 					useless: true,
 				};
-				return this.#elapsed(result, rung, streak);
+				return this.#elapsed(result, rung, streak, windowMs);
 			}
 			return {
 				content: [
@@ -457,8 +462,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		result: AgentToolResult<CoordinationDetails>,
 		rung: number,
 		streak: IdleStreak | undefined,
+		windowMs: number,
 	): AgentToolResult<CoordinationDetails> {
-		const waitedMs = (streak?.waitedMs ?? 0) + WAIT_LADDER_MS[rung];
+		const waitedMs = (streak?.waitedMs ?? 0) + windowMs;
 		this.#idle = { rung, endedAt: Date.now(), waitedMs };
 		if (rung < WAIT_NOTICE_RUNG) return result;
 		const notice = prompt.render(waitIdleTemplate, { waited: formatDuration(waitedMs) });
