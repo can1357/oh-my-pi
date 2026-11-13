@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `write` no longer fails with "content is required" on strict-mode providers such as Wafer and Fireworks, where models sent `content: null` for an ordinary file write
 - A seance `task` whose `sourceSession` id belongs to another project now fails with a hint to pass that session's `.jsonl` path, which works from any project, instead of only "was not found" ([#19095](https://github.com/can1357/oh-my-pi/pull/19095) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - On Windows, a `mnemopi.dbPath` of `~/…` now resolves to a native path (`C:\Users\you\mnemopi\custom.db`) instead of mixing `\` and `/` ([#19106](https://github.com/can1357/oh-my-pi/pull/19106) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
@@ -25,6 +26,7 @@
 - ACP `usage_update` cost now includes what background subagents spend ([#19102](https://github.com/can1357/oh-my-pi/issues/19102)) ([#19113](https://github.com/can1357/oh-my-pi/pull/19113) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 ### Changed
 
+- `write proc://<id>/kill` now takes `content` like every other write (send `""`; it is ignored)
 - The install script now prints the exact command for your shell (zsh, bash, fish, or sh) to add the install directory to your PATH ([#19099](https://github.com/can1357/oh-my-pi/pull/19099) by [@wescopeland](https://github.com/wescopeland))
 
 ## [18.20.0] - 2026-11-12
