@@ -174,7 +174,10 @@ describe("fetchBuild", () => {
 
 	describe("from a fork's GitHub releases", () => {
 		const saved = Object.fromEntries(
-			["PI_UPDATE_REPO", "PI_BUILD_URL", "GITHUB_TOKEN", "GH_TOKEN"].map(key => [key, process.env[key]]),
+			["PI_UPDATE_REPO", "PI_DEFAULT_UPDATE_REPO", "PI_BUILD_URL", "GITHUB_TOKEN", "GH_TOKEN"].map(key => [
+				key,
+				process.env[key],
+			]),
 		);
 		afterEach(() => {
 			for (const [key, value] of Object.entries(saved)) {
@@ -272,13 +275,20 @@ describe("fetchBuild", () => {
 			await expect(ask({ tag_name: "v18.20.0", assets: [] })).rejects.toThrow("has no omp-darwin-arm64");
 		});
 
-		it("reads PI_UPDATE_REPO as owner/repo", () => {
-			process.env.PI_UPDATE_REPO = " fork/omp ";
+		it("uses the baked default unless a runtime PI_UPDATE_REPO overrides or clears it", () => {
+			// Compiled binaries replace `process.env.PI_DEFAULT_UPDATE_REPO` with the baked value.
+			process.env.PI_DEFAULT_UPDATE_REPO = "fork/omp";
+			delete process.env.PI_UPDATE_REPO;
 			expect(updateRepo()).toBe("fork/omp");
+			process.env.PI_UPDATE_REPO = " other/omp ";
+			expect(updateRepo()).toBe("other/omp");
 			process.env.PI_UPDATE_REPO = "";
 			expect(updateRepo()).toBeUndefined();
 			process.env.PI_UPDATE_REPO = "fork/omp/../x";
 			expect(() => updateRepo()).toThrow("PI_UPDATE_REPO must be owner/repo");
+			delete process.env.PI_DEFAULT_UPDATE_REPO;
+			delete process.env.PI_UPDATE_REPO;
+			expect(updateRepo()).toBeUndefined();
 		});
 
 		it("keeps every request without `repo` on the build service while PI_UPDATE_REPO is set", async () => {

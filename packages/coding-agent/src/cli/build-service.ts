@@ -28,7 +28,8 @@
  * file still installs. `404 {"error":"no_build"}` means nothing is published
  * for the target (on the channel, or at the version).
  *
- * A fork that publishes its own GitHub releases sets `PI_UPDATE_REPO`
+ * A fork that publishes its own GitHub releases sets `PI_UPDATE_REPO` (or bakes
+ * a default at compile time)
  * ({@link updateRepo}): `omp update` on a binary install and the compiled
  * startup check pass it as `repo`, so omp's own binary comes from that repo's
  * latest release ({@link parseGithubRelease}) instead, without patches.
@@ -265,11 +266,13 @@ export function parseBuildAnswer(
 
 /**
  * GitHub `owner/repo` whose releases replace the build service for omp's
- * binary updates: `PI_UPDATE_REPO`, which a fork's compile bakes in, else
- * undefined. Read as `process.env` so the compile's `define` can replace it.
+ * binary updates. A runtime `PI_UPDATE_REPO` wins, and set empty it clears the
+ * default (back to the build service); unset, the default a fork's compile
+ * baked in as `process.env.PI_DEFAULT_UPDATE_REPO` applies; else undefined.
  */
 export function updateRepo(): string | undefined {
-	return parseUpdateRepo(process.env.PI_UPDATE_REPO);
+	const runtime = process.env.PI_UPDATE_REPO;
+	return parseUpdateRepo(runtime ?? process.env.PI_DEFAULT_UPDATE_REPO);
 }
 
 /**

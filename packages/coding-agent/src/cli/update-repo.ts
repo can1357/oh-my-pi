@@ -1,6 +1,6 @@
 /**
  * `PI_UPDATE_REPO` value check, shared by the runtime ({@link updateRepo} in
- * `build-service.ts`) and the compile that bakes it in. Imports nothing, so
+ * `build-service.ts`) and the compile that bakes it in as the default. Imports nothing, so
  * the compile script can load it without the host native addon.
  */
 

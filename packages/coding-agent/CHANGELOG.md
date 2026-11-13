@@ -4,7 +4,7 @@
 
 ### Added
 
-- `PI_UPDATE_REPO=<owner>/<repo>` makes `omp update` and the startup update check of a standalone binary use that GitHub repo's latest release instead of the build service, so a fork that publishes its own binaries updates from them; package-manager installs keep the build service, the canary channel is refused, and `GITHUB_TOKEN`/`GH_TOKEN` is sent when set. A compile with it set checks it and bakes it in, after which it cannot be overridden at runtime ([#19138](https://github.com/can1357/oh-my-pi/pull/19138) by [@andrebrait](https://github.com/andrebrait))
+- `PI_UPDATE_REPO=<owner>/<repo>` makes `omp update` and the startup update check of a standalone binary use that GitHub repo's latest release instead of the build service, so a fork that publishes its own binaries updates from them; package-manager installs keep the build service, the canary channel is refused, and `GITHUB_TOKEN`/`GH_TOKEN` is sent when set. A compile with it set checks it and bakes it in as the binary's default, which a runtime `PI_UPDATE_REPO` overrides and an empty one clears ([#19138](https://github.com/can1357/oh-my-pi/pull/19138) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.20.0] - 2026-11-12
 
