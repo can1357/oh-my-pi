@@ -7712,8 +7712,7 @@ mod tests {
 	fn a_menu_key_lists_no_menus_off_a_menu_control_or_with_its_app_in_front() {
 		let window = background_window("Fixture");
 		// The focused element opens no menu, or the user's app is not in front.
-		for (background, focused) in [(true, Some("AXTextField")), (false, Some("AXPopUpButton"))]
-		{
+		for (background, focused) in [(true, Some("AXTextField")), (false, Some("AXPopUpButton"))] {
 			let role = || {
 				assert!(background, "the role is read only behind the user's app");
 				focused.map(str::to_string)
