@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, a `mnemopi.dbPath` of `~/…` now resolves to a native path (`C:\Users\you\mnemopi\custom.db`) instead of mixing `\` and `/`
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

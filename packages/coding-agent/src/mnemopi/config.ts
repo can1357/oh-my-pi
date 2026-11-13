@@ -72,7 +72,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const cwd = settings.getCwd();
 	const scoping = cfgMnemopiScoping.get(settings);
 	const dbPath = configuredDbPath?.trim()
-		? expandTilde(configuredDbPath.trim())
+		? path.normalize(expandTilde(configuredDbPath.trim()))
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
 	const scope = computeMnemopiBankScope(cfgMnemopiBank.get(settings), cwd, scoping);
 	const recallBanks =
