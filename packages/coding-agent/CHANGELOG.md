@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `task.agentCatalogDescriptionBudgetChars` to bound how many characters of agent descriptions reach the task tool prompt ([#10115](https://github.com/can1357/oh-my-pi/pull/10115) by [@listellm](https://github.com/listellm)).
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
