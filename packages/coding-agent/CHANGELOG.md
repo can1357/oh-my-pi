@@ -89,6 +89,7 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
+- SDK hosts can explicitly authorize an extension tool to invoke the enabled native task with its own approval. ([#19049](https://github.com/can1357/oh-my-pi/pull/19049) by [@raiscui](https://github.com/raiscui))
 
 ## [18.20.0] - 2026-11-12
 
@@ -340,9 +341,6 @@
 - On Windows, cmd-style command lines such as `dir | find /c /v ""`, `sort /r`, `timeout /t 5` and `whoami /all` in the bash tool run the Windows programs they were written for, instead of pi's GNU-style `find`/`sort`/`timeout`/`whoami` (which read `/c` as drive C: and could walk the whole drive)
 - Changing or unsetting `PATH` in the bash tool's shell now forgets remembered command locations, as bash does, so a command no longer runs from a directory that has left `PATH`
 - One slow or flooding collab guest no longer ends sharing for the room: the host drops that guest's backlog and asks it to rejoin, sessions larger than the send budget can be joined, and guest questions nobody received settle as unavailable ([#18629](https://github.com/can1357/oh-my-pi/pull/18629) by [@iliaal](https://github.com/iliaal))
-### Added
-
-- SDK hosts can explicitly authorize an extension tool to invoke the enabled native task with its own approval. ([#19049](https://github.com/can1357/oh-my-pi/pull/19049) by [@raiscui](https://github.com/raiscui))
 
 ## [18.18.6] - 2026-11-09
 
