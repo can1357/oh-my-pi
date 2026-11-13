@@ -8523,6 +8523,8 @@ mod tests {
 		// It took the press and none of the moves: steps start from there,
 		// once the value holds.
 		assert_eq!(run(0.0, &[Some(0.0), Some(2.0)]), (AfterWebDrag::Short(2.0), 3));
+		// A partial pointer move past the midpoint still needs steps.
+		assert_eq!(run(0.0, &[Some(40.0)]), (AfterWebDrag::Short(40.0), 2));
 		// The pointer moved it, to the step nearest the end or past it: done,
 		// even when the first changed read caught it at the press.
 		assert_eq!(run(0.0, &[Some(75.0)]), (AfterWebDrag::Done, 2));
@@ -8637,6 +8639,32 @@ mod tests {
 		assert_eq!((code, value, steps.len()), ("InputFailed", 2.0, 2));
 		assert!(message.contains("AXIncrement' failed"), "{message}");
 		assert!(message.contains("now reads 2"), "{message}");
+	}
+
+	#[test]
+	fn a_web_slider_that_ignores_the_corrective_step_reports_where_it_stopped() {
+		use std::cell::Cell;
+		let at = Cell::new(0.0);
+		let outcome = step_slider(
+			&background_window("Electron"),
+			"AXSlider",
+			(0.0, 2.0),
+			(0.0, 100.0),
+			|| Ok(()),
+			|up| {
+				if up {
+					at.set(5.0);
+				}
+				Ok(())
+			},
+			|| Some(at.get()),
+			|_| {},
+		);
+		let error = outcome.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert_eq!(at.get(), 5.0);
+		assert!(error.message.contains("went from 0 to 5"), "{}", error.message);
+		assert!(error.message.contains("where the steps lead to 0"), "{}", error.message);
 	}
 
 	#[test]
