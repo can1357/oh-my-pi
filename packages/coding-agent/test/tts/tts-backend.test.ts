@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { resolveSpeechCandidates, ttsTool } from "@oh-my-pi/pi-coding-agent/tools/tts";
+import { createTtsTool, resolveSpeechCandidates } from "@oh-my-pi/pi-coding-agent/tools/tts";
 import { ttsClient } from "@oh-my-pi/pi-coding-agent/tts/tts-client";
 
 function requireModel(provider: GeneratedProvider, id: string): Model {
@@ -90,7 +90,7 @@ describe("tts speech chain execution", () => {
 			throw new Error("Cloud fetch must not run for default WAV output");
 		};
 
-		const result = await ttsTool.execute(
+		const result = await createTtsTool({ cwd: tempDir }).execute(
 			"tts-local",
 			{ text: "Hello locally", language: "en", output_path: "voice.wav" },
 			undefined,
@@ -123,7 +123,7 @@ describe("tts speech chain execution", () => {
 			return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
 		};
 
-		const result = await ttsTool.execute(
+		const result = await createTtsTool({ cwd: tempDir }).execute(
 			"tts-cloud",
 			{ text: "Hello cloud", voice_id: "sky", language: "en", output_path: "voice.mp3" },
 			undefined,
@@ -152,7 +152,7 @@ describe("tts speech chain execution", () => {
 			return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
 		};
 
-		const result = await ttsTool.execute(
+		const result = await createTtsTool({ cwd: tempDir }).execute(
 			"tts-xai-language",
 			{ text: "Bonjour", voice_id: "ara", language: "fr", output_path: "voice.mp3" },
 			undefined,
@@ -177,7 +177,7 @@ describe("tts speech chain execution", () => {
 		});
 		const fetchImpl: FetchImpl = async () => new Response("temporarily unavailable", { status: 503 });
 
-		const result = await ttsTool.execute(
+		const result = await createTtsTool({ cwd: tempDir }).execute(
 			"tts-explicit",
 			{ text: "No fallback", language: "en", output_path: "voice.mp3" },
 			undefined,
@@ -198,7 +198,7 @@ describe("tts speech chain execution", () => {
 		});
 		const fetchImpl: FetchImpl = async () => new Response("rate limited", { status: 429 });
 
-		const result = await ttsTool.execute(
+		const result = await createTtsTool({ cwd: tempDir }).execute(
 			"tts-fallback",
 			{ text: "Fall back locally", language: "en", output_path: "voice.mp3" },
 			undefined,

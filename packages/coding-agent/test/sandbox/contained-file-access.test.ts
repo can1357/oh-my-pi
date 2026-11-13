@@ -9,8 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { releaseShellSessions } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import {
 	containedFileAccess,
@@ -28,9 +31,13 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sandbox/settings";
 import { sandboxHostPoolSize } from "@oh-my-pi/pi-coding-agent/sandbox/shell-client";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { deleteFileWithFallback, isPermissionDeniedError } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { createTtsTool } from "@oh-my-pi/pi-coding-agent/tools/tts";
+import { ttsClient } from "@oh-my-pi/pi-coding-agent/tts/tts-client";
 import * as natives from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { CONTAINED_SOURCE_RUNS, SANDBOX_UNAVAILABLE } from "../helpers/sandbox-test-state";
@@ -157,6 +164,54 @@ describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("contained file access", (
 		const error = await failure(write);
 		expect(isPermissionDeniedError(error) || isPermissionDeniedError((error as Error | undefined)?.cause)).toBe(true);
 		expect(fs.existsSync(path.join(outside, "escaped.txt"))).toBe(false);
+	});
+
+	it("refuses an edit through a workspace symlink that leads outside", async () => {
+		// The edit's writes reach omp through a native callback; they must still run in the host.
+		fs.symlinkSync(outside, path.join(workspace, "link"));
+		const input = "*** Begin Patch\n*** Add File: link/escaped.txt\n+x\n*** End Patch\n";
+		const edit = new EditTool(toolSession(), "apply_patch").execute("call-edit-escape", { input } as never);
+		const outcome = await edit.then(
+			result => ({ result, error: undefined }),
+			(error: unknown) => ({ result: undefined, error }),
+		);
+		if (outcome.result) {
+			expect(outcome.result.isError).toBe(true);
+			const text = outcome.result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+			expect(text).toMatch(/EACCES|EPERM|EROFS|permission denied|read-only file system/i);
+		} else {
+			const { error } = outcome;
+			const cause = error instanceof Error ? error.cause : undefined;
+			expect(isPermissionDeniedError(error) || isPermissionDeniedError(cause)).toBe(true);
+		}
+		expect(fs.existsSync(path.join(outside, "escaped.txt"))).toBe(false);
+	});
+
+	it("refuses tts audio saved through a workspace symlink that leads outside", async () => {
+		vi.spyOn(ttsClient, "synthesize").mockResolvedValue({ pcm: new Float32Array([0, 0.25]), sampleRate: 24_000 });
+		fs.symlinkSync(outside, path.join(workspace, "link"));
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			const ttsSettings = Settings.isolated();
+			const context: CustomToolContext = {
+				sessionManager: SessionManager.inMemory(workspace),
+				modelRegistry: new ModelRegistry(auth, path.join(workspace, "models.yml"), { settings: ttsSettings }),
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort() {},
+				settings: ttsSettings,
+			};
+			const tts = createTtsTool(toolSession());
+			const error = await failure(
+				tts.execute("call-tts-escape", { text: "hi", output_path: "link/out.wav" }, undefined, context),
+			);
+			const cause = error instanceof Error ? error.cause : undefined;
+			expect(isPermissionDeniedError(error) || isPermissionDeniedError(cause)).toBe(true);
+			expect(fs.existsSync(path.join(outside, "out.wav"))).toBe(false);
+		} finally {
+			auth.close();
+		}
 	});
 
 	it("refuses to delete a file outside the writable roots", async () => {

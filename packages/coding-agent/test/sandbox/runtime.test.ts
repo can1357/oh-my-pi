@@ -459,6 +459,28 @@ describe.skipIf(!backend.supported || process.platform === "win32")("SandboxRunt
 		expect(instance.resultMeta({ output: result.stderr })?.denied).toBe(true);
 	});
 
+	it.skipIf(!backend.proxy)(
+		"replaces the parent's proxy variables with the egress proxy in allowlist mode",
+		async () => {
+			cfgSandboxNetworkMode.set(settings, "allowlist");
+			const instance = await runtime();
+			const corp = "http://corp-proxy.invalid:3128";
+			const child = await instance.spawn({
+				argv: ["/bin/sh", "-c", 'printf "%s\\n%s\\n%s\\n" "$HTTP_PROXY" "$all_proxy" "$NO_PROXY"'],
+				cwd: workspace,
+				env: { ...childEnv(), HTTP_PROXY: corp, all_proxy: corp, NO_PROXY: "*" },
+			});
+			child.stdin.end();
+			const [stdout] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+			const [httpProxy, allProxy, noProxy] = stdout.split("\n");
+			// A parent proxy would route traffic past the egress proxy into the denied network. MXC names
+			// the egress proxy by address: loopback, or slirp's host gateway on bubblewrap.
+			expect(httpProxy).toMatch(/^http:\/\/\d+\.\d+\.\d+\.\d+:\d+/);
+			expect(allProxy).not.toBe(corp);
+			expect(noProxy).not.toBe("*");
+		},
+	);
+
 	it.skipIf(!Bun.which("git"))(
 		"commits from a linked worktree but cannot plant a hook in the shared common dir",
 		async () => {

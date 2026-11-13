@@ -26,6 +26,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { AstEditTool } from "@oh-my-pi/pi-coding-agent/tools/ast-edit";
+import { createTtsTool } from "@oh-my-pi/pi-coding-agent/tools/tts";
 import { applyWorkspaceEditWithLsp } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 import { SANDBOX_SUPPORTED } from "../helpers/sandbox-test-state";
@@ -145,6 +146,16 @@ describe("sandbox policy on in-process file tools", () => {
 		const args = (paths: string[]) => ({ ops: [{ pat: "a", out: "b" }], paths });
 		expect(await denial(astEdit, args(["src/**/*.ts"]), "write")).toBeUndefined();
 		expect(await denial(astEdit, args([`${outside}/**/*.ts`]), "write")).toContain("writable roots");
+	});
+
+	it("tts is checked where it saves the audio", async () => {
+		const tts = createTtsTool({ cwd: workspace }) as unknown as AgentTool;
+		expect(await denial(tts, { text: "hi", output_path: "speech.mp3" }, "write")).toBeUndefined();
+		expect(await denial(tts, { text: "hi", output_path: path.join(outside, "speech.mp3") }, "write")).toContain(
+			"writable roots",
+		);
+		// A directory `output_path` saves `<dir>.wav` beside it: here, outside the workspace.
+		expect(await denial(tts, { text: "hi", output_path: "." }, "write")).toContain("writable roots");
 	});
 
 	it("an LSP workspace edit outside the writable roots changes nothing", async () => {
