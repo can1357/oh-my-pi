@@ -45,6 +45,7 @@
 - Fixed the shell's `cp` builtin so `-L`, `-H`, `-P`, and `-d` after `-a` or `-d` override only symlink following instead of dropping recursion or preserved attributes ([#19215](https://github.com/can1357/oh-my-pi/pull/19215) by [@eggpeat](https://github.com/eggpeat))
 - Fixed a crash in the built-in shell when a `[` or `test` expression chained tens of thousands of terms with `-a` or `-o`: the chain is now evaluated iteratively, and parentheses nested past the shell's nesting limit are reported as an error instead. ([#18498](https://github.com/can1357/oh-my-pi/pull/18498) by [@sjawhar](https://github.com/sjawhar))
 - Fixed macOS background drags returning as done when the slider, scroll bar or splitter they started on did not move, and a drag on a web page's slider doing nothing: such a drag now throws `InputFailed` saying no change was observed, and a web slider the drag left short is stepped on to the value under the drag's end.
+- Fixed macOS background drags returning as done when the slider, scroll bar or splitter they started on did not move, and a drag on a web page's slider doing nothing: such a drag now throws `InputFailed` saying no change was observed, and a web slider the drag left short is stepped on to the value under the drag's end ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.20.0] - 2026-11-12
 

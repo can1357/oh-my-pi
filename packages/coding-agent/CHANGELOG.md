@@ -132,6 +132,7 @@
 - Fixed skill descriptions that already fit the 100-character preview budget being rewritten by model compression; they are now used verbatim, so exclusions like "not running existing tests" survive ([#19219](https://github.com/can1357/oh-my-pi/pull/19219) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Hide Secrets now redacts agent-attributed notices (background job results, hook and extension messages), so a background bash job's command and output no longer reach the provider with saved secret values in plain text ([#18967](https://github.com/can1357/oh-my-pi/issues/18967))
 - A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, and a drag whose slider, scroll bar or splitter did not move now fails with `InputFailed` instead of reporting success
+- A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, and a drag whose slider, scroll bar or splitter did not move now fails with `InputFailed` instead of reporting success ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Removed
 
