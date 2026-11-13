@@ -876,6 +876,35 @@ describe("Spotlight session scope", () => {
 			workers.mockRestore();
 		}
 	});
+
+	it("builds one dashboard view at a time", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		await write("main.jsonl", b);
+		await syncAllSessions({ workers: 1 });
+
+		const RealWorker = globalThis.Worker;
+		let building = 0;
+		let most = 0;
+		const workers = vi.spyOn(globalThis, "Worker").mockImplementation((...args) => {
+			const worker = new RealWorker(...args);
+			most = Math.max(most, ++building);
+			worker.addEventListener("message", () => building--);
+			return worker;
+		});
+		try {
+			const responses = await Promise.all(
+				["24h", "7d"].map(range =>
+					handleApi(new Request(`http://stats.test/api/stats/spotlight?range=${range}&agent=main`)),
+				),
+			);
+			expect(responses.map(response => response.status)).toEqual([200, 200]);
+			expect(most).toBe(1);
+		} finally {
+			workers.mockRestore();
+		}
+	});
 });
 
 describe("Spotlight ingest", () => {
