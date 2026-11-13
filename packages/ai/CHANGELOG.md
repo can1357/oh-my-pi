@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Usage reporting now covers every configured credential independently of inference session restrictions.
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

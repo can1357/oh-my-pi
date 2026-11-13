@@ -9,12 +9,12 @@
  * headroom, which is biased *away* from the account that just served the
  * session (it has the highest recent burn), cold-missing the entire prefix.
  *
- * These helpers close the loop through the session file itself: after each
- * assistant turn the serving account is recorded as a `credential_pin` entry,
- * and on session adoption the pin is matched against the stored accounts and
- * seeded back into the auth store with the session's effective last-use
- * timestamp, so the provider's warm-window semantics still decide whether to
- * stick or re-rank.
+ * These helpers close the loop through the session file itself: an explicit
+ * account selection is recorded immediately, and the serving account is
+ * recorded after each assistant turn. On session adoption, the pin is matched
+ * against stored accounts and seeded back into the auth store with the
+ * session's effective last-use timestamp, so the provider's warm-window
+ * semantics still decide whether to stick or re-rank.
  */
 
 import type { AuthStorage } from "./auth-storage";
@@ -54,7 +54,8 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
 }
 
 /**
- * Record the account that served the latest assistant turn for `provider`.
+ * Record the account selected for `provider`. Called immediately for an
+ * explicit `/session pin` and after assistant turns for automatic routing.
  * Appends a `credential_pin` entry only when the account differs from the
  * branch's latest pin, so steady-state sessions add a single entry; the
  * effective last-use time is derived from later assistant turns on read

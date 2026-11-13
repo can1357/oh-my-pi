@@ -66,6 +66,7 @@ import type {
 	MessageAttribution,
 	Model,
 	OAuthAccountIdentity,
+	OAuthLoginIdentity,
 	ProviderResponseMetadata,
 	ProviderSessionState,
 	ResetCreditAccountStatus,
@@ -82,7 +83,7 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import { resolveCredentialIdentityKey, type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -123,7 +124,7 @@ import { planParallel } from "../auto-parallel/planner";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import type { SessionAccountPoolScope } from "../config/account-pools";
+import { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -15326,11 +15327,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return [...selectors].sort((left, right) => left.localeCompare(right));
 	}
 
+	/** Permit an OAuth identity explicitly added through `/login` for this session scope only. */
+	allowLoggedInOAuthAccount(provider: string, identity: OAuthLoginIdentity | undefined): boolean {
+		if (!this.#accountPoolScope || identity?.type !== "oauth") return false;
+		if (!identity.email && !identity.accountId && !identity.orgId) return false;
+		for (const row of this.#modelRegistry.authStorage.credentials.list(provider)) {
+			const credential = row.credential;
+			if (credential.type !== "oauth") continue;
+			if (identity.email !== undefined && credential.email !== identity.email) continue;
+			if (identity.accountId !== undefined && credential.accountId !== identity.accountId) continue;
+			if (identity.orgId !== undefined && credential.orgId !== identity.orgId) continue;
+			const identityKey = resolveCredentialIdentityKey(provider, credential);
+			if (identityKey) return this.#accountPoolScope.allow(provider, identityKey);
+		}
+		return false;
+	}
+
 	/** List stored OAuth accounts for the current model provider and mark this session's active account. */
 	async listCurrentProviderOAuthAccounts(): Promise<SessionOAuthAccountList | undefined> {
 		const provider = this.model?.provider;
 		if (!provider) return undefined;
 		const authStorage = this.#modelRegistry.authStorage;
+		this.#accountPoolScope?.restrictProvider(this.sessionId, provider);
 		await authStorage.credentials.reload();
 		return {
 			provider,
@@ -15338,14 +15356,54 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
+	/** Whether this stored OAuth account remains selectable for the current provider. */
+	isCurrentProviderOAuthAccountPermitted(credentialId: number): boolean {
+		const provider = this.model?.provider;
+		if (!provider) return false;
+		const row = this.#modelRegistry.authStorage.credentials
+			.list(provider)
+			.find(candidate => candidate.id === credentialId);
+		if (row?.credential.type !== "oauth") return false;
+		if (!this.#accountPoolScope) return true;
+		const identityKey = resolveCredentialIdentityKey(provider, row.credential);
+		return identityKey !== null && this.#accountPoolScope.allows(provider, identityKey);
+	}
+
 	/**
-	 * Pin a stored OAuth account to the current model provider for this session.
-	 * Returns false while streaming or when the credential is no longer available.
+	 * Hard-pin a stored OAuth account to the current provider.
+	 * Returns false while streaming or when the credential is no longer selectable.
 	 */
 	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
+		const authStorage = this.#modelRegistry.authStorage;
+		const rows = authStorage.credentials.list(provider);
+		const row = rows.find(candidate => candidate.id === credentialId);
+		if (row?.credential.type !== "oauth") return false;
+		const identityKey = resolveCredentialIdentityKey(provider, row.credential);
+		if (!identityKey) return false;
+
+		if (!this.#accountPoolScope) {
+			const identityKeys = rows.flatMap(candidate => {
+				const key = resolveCredentialIdentityKey(provider, candidate.credential);
+				return candidate.credential.type === "oauth" && key ? [key] : [];
+			});
+			this.#accountPoolScope = new SessionAccountPoolScope(
+				authStorage,
+				{ [provider]: identityKeys },
+				this.sessionId,
+			);
+		} else {
+			for (const candidate of rows) {
+				if (candidate.credential.type !== "oauth") continue;
+				const key = resolveCredentialIdentityKey(provider, candidate.credential);
+				if (key) this.#accountPoolScope.allow(provider, key);
+			}
+		}
+		if (!this.#accountPoolScope.pin(provider, identityKey)) return false;
+		const pinned = authStorage.sessions.pin(provider, this.sessionId, credentialId);
+		if (pinned) recordCredentialPin(authStorage, this.sessionManager, this.sessionId, provider);
+		return pinned;
 	}
 
 	/**

@@ -46,6 +46,7 @@ import { applyStartupCwd } from "./cli/startup-cwd";
 import { runAutoUpdate } from "./cli/auto-update";
 import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
 import { findConfigFile } from "./config";
+import { resolveSessionAccountPool } from "./config/account-pools";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
@@ -198,7 +199,7 @@ import {
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
+import { cfgAuthSessionAccountPools, cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -1459,7 +1460,35 @@ export async function buildSessionOptions(
 	if (parsed.systemPrompt !== undefined && parsed.systemPromptTemplate !== undefined) {
 		throw new Error("--system-prompt and --system-prompt-template cannot be combined");
 	}
-	const cwd = options.cwd;
+	const cwd = options.cwd ?? getProjectDir();
+	const protocolOwnsCredentialPolicy = parsed.mode === "rpc" || parsed.mode === "rpc-ui" || parsed.mode === "acp";
+	if (protocolOwnsCredentialPolicy) {
+		if (parsed.accountPool !== undefined) {
+			throw new CliUsageError(`--account-pool does not apply to ${parsed.mode} mode.`);
+		}
+	} else {
+		const namedPools = cfgAuthSessionAccountPools.get(activeSettings);
+		const names = Object.keys(namedPools);
+		let selectedName = parsed.accountPool;
+		if (selectedName === undefined) {
+			if (names.length > 1) {
+				throw new CliUsageError(
+					`auth.sessionAccountPools defines multiple named pools; select one with --account-pool <name> (${names.join(", ")}).`,
+				);
+			}
+			selectedName = names[0];
+			if (selectedName !== undefined) parsed.accountPool = selectedName;
+		}
+		if (selectedName !== undefined) {
+			const selected = resolveSessionAccountPool(namedPools, selectedName);
+			if (!selected) {
+				const available = names.length > 0 ? ` Available pools: ${names.join(", ")}.` : "";
+				throw new CliUsageError(`Unknown account pool ${JSON.stringify(selectedName)}.${available}`);
+			}
+			options.oauthAccountPools = selected;
+			options.oauthAccountPoolsDenyUnlistedProviders = true;
+		}
+	}
 	const discoveredOverride =
 		parsed.systemPrompt === undefined && parsed.systemPromptTemplate === undefined
 			? await discoverSystemPromptOverride(cwd)
@@ -2414,6 +2443,8 @@ export async function runRootCommand(
 			return options;
 		};
 		let sessionOptions = await buildStartupSessionOptions(sessionManager);
+		if (parsedArgs.accountPool !== undefined) process.env.OMP_ACCOUNT_POOL = parsedArgs.accountPool;
+		else delete process.env.OMP_ACCOUNT_POOL;
 		const marketplaceAutoUpdateOptions: MarketplaceAutoUpdateOptions = {
 			autoUpdate: cfgMarketplaceAutoUpdate.get(settingsInstance),
 			resolveActiveProjectRegistryPath,

@@ -78,6 +78,7 @@ import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpe
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { reportMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
@@ -442,10 +443,10 @@ export class SelectorController {
 			provider: account.provider,
 			label: accountIdentityLabel(account),
 		}));
-		const currentProvider = this.ctx.session.model?.provider;
-		const activeAccount = currentProvider
-			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
-			: undefined;
+		const activeAccountFor = (provider: string) =>
+			provider === this.ctx.session.model?.provider
+				? authStorage.oauth.identity(provider, this.ctx.session.sessionId)
+				: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
 		const done = () => {
 			menu.handle?.hide();
@@ -456,13 +457,14 @@ export class SelectorController {
 		const dashboard = new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
+			isActiveAccount: report => reportMatchesActiveAccount(report, activeAccountFor(report.provider)),
 			renderDetail: (width, current) =>
 				renderUsageReports(
 					current,
 					theme,
 					Date.now(),
 					width,
-					provider => (provider === currentProvider ? activeAccount : undefined),
+					activeAccountFor,
 					usageModelSelectors,
 					unavailableAccounts,
 				),
@@ -2290,6 +2292,7 @@ export class SelectorController {
 							)
 					: undefined,
 			});
+			this.ctx.session.allowLoggedInOAuthAccount(providerId, identity);
 			// Scope the post-login refresh to the just-authenticated provider with an
 			// `online` strategy: the default all-provider `online-if-uncached` reuses
 			// a fresh authoritative cache row (e.g. an empty result fetched before
@@ -2504,6 +2507,12 @@ export class SelectorController {
 				accounts,
 				account => {
 					done();
+					if (!session.isCurrentProviderOAuthAccountPermitted(account.credentialId)) {
+						this.ctx.showWarning(
+							`${account.label} is outside this session's OAuth account pool and cannot be pinned.`,
+						);
+						return;
+					}
 					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
 						this.ctx.showWarning(`${account.label} is no longer available to pin.`);
 						return;

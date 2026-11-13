@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -130,6 +131,40 @@ describe("AgentSession account pools after a dispose deadline", () => {
 		}
 		return { session, released: released.promise };
 	}
+
+	it("hard-pins and persists an account even when the session did not start with a configured pool", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("expected bundled model");
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+		});
+		sessions.push(session);
+		const rows = authStorage.credentials.list("anthropic");
+		const accountA = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-a");
+		const accountC = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-c");
+		if (!accountA || !accountC) throw new Error("expected OAuth fixtures");
+
+		expect(session.pinCurrentProviderOAuthAccount(accountC.id)).toBe(true);
+		expect(session.isCurrentProviderOAuthAccountPermitted(accountA.id)).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountA.id)).toBe(false);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountC.id)).toBe(true);
+		expect(await authStorage.keys.get("anthropic", session.sessionId)).toBe("access-c");
+		expect(sessionManager.getCredentialPins().get("anthropic")?.hash).toBe(
+			credentialPinHash("anthropic", accountC.credential),
+		);
+
+		expect(session.pinCurrentProviderOAuthAccount(accountA.id)).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountA.id)).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountC.id)).toBe(false);
+		expect(await authStorage.keys.get("anthropic", session.sessionId)).toBe("access-a");
+		expect(sessionManager.getCredentialPins().get("anthropic")?.hash).toBe(
+			credentialPinHash("anthropic", accountA.credential),
+		);
+	});
 
 	it("lifts the pool once a run that outlived the deadline settles", async () => {
 		const release = Promise.withResolvers<void>();

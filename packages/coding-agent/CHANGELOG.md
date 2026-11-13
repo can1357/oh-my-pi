@@ -6,6 +6,12 @@
 
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
 
+### Changed
+
+- Usage Details now shows every stored account even when inference is restricted to a session account pool.
+- Interactive `/login` now permits the added OAuth account in the current session pool without changing the saved pool or other sessions.
+- `/session pin` now hard-restricts every session to the selected provider account instead of rotating to a sibling when it becomes unavailable.
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes

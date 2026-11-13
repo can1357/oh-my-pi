@@ -1255,7 +1255,7 @@ export interface SessionsApi {
 
 /** Usage reporting, observation, and provider configuration. */
 export interface UsageApi {
-	/** Fetch usage reports for configured providers, optionally restricted to one provider. */
+	/** Fetch usage reports for every configured credential, optionally restricted to one provider. */
 	reports(options?: {
 		provider?: Provider;
 		baseUrlResolver?: (provider: Provider) => string | undefined;
