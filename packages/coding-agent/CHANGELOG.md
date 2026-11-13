@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `/settings` now names the model Mnemopi's `llmMode: smol` uses (the MEMORY role from `/models`, else TINY, else `@smol`; local or online) and labels the option `Memory role` instead of `Online (tiny)`
+- `/settings` now names the model Mnemopi's `llmMode: smol` uses (the MEMORY role from `/models`, else TINY, else `@smol`; local or online) and labels the option `Memory role` instead of `Online (tiny)` ([#19097](https://github.com/can1357/oh-my-pi/pull/19097) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 
 ## [18.20.0] - 2026-11-12
 
