@@ -803,19 +803,10 @@ export class TranscriptContainer extends Container {
 			// emergency layout consults them only where it must.
 			return this.#renderEmergency(shown, live.slice(0, unrendered), width, capacity, frame);
 		}
-		// A cut through an image the terminal cannot draw in part (iTerm2 draws
-		// the whole picture upward from its image row) would paint it over the
-		// rows above the viewport, so that block shows blank rows until its
-		// split retires the image into scrollback. `filled` excludes the
-		// separator history owes the head, so the overflow is exactly the head
-		// rows clipped off the top.
-		const headClipped = filled - capacity;
-		const blankHead =
-			clip && headClipped > 0 && measuredImages[0]! && cutBelowWholeImage(blocks[0]!, headClipped) !== headClipped;
 		// The walk ran newest-first, so the images it measured claimed no
 		// display slot (see #measure). Render those blocks again oldest-first:
 		// the image budget keeps the newest images live by observation order.
-		for (let blockIndex = blankHead ? 1 : 0; blockIndex < shown.length; blockIndex++) {
+		for (let blockIndex = 0; blockIndex < shown.length; blockIndex++) {
 			if (!measuredImages[blockIndex]) continue;
 			const { entry, index } = shown[blockIndex]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, frame);
@@ -842,14 +833,22 @@ export class TranscriptContainer extends Container {
 					output.push("");
 					owners.push(undefined);
 				}
-				const blank = blankHead && blockIndex === 0;
-				const component = blank ? undefined : shown[blockIndex]!.entry.component;
+				const component = shown[blockIndex]!.entry.component;
 				for (const line of blocks[blockIndex]!) {
-					output.push(blank ? "" : line);
+					output.push(line);
 					owners.push(component);
 				}
 			}
 			const drop = Math.max(0, output.length - capacity);
+			// A terminal that cannot draw part of an image (iTerm2) draws the whole
+			// picture upward from its image row, so a clip through its reserved rows
+			// would paint it over whatever sits above the viewport. Blank that row
+			// until the split retires the image whole into scrollback.
+			const headClipped = drop - gaps[0]!;
+			if (headClipped > 0) {
+				const below = cutBelowWholeImage(blocks[0]!, headClipped);
+				if (below > headClipped) output[gaps[0]! + below - 1] = "";
+			}
 			this.#commitViewportSpans(owners.slice(drop), output.length - drop);
 			return drop > 0 ? output.slice(drop) : output;
 		}

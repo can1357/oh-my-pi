@@ -7,7 +7,6 @@ import {
 	type TranscriptStableRow,
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
@@ -880,36 +879,24 @@ describe("TranscriptContainer", () => {
 			"below 1",
 			"below 2",
 		];
-		/** Observes a budgeted image while rendering, as an `Image` child does. */
-		class BudgetedImageBlock extends Block {
-			readonly #budget = new ImageBudget();
-			override render(): readonly string[] {
-				this.#budget.observe(1);
-				return super.render();
-			}
-		}
 
 		for (const [protocol, capacity, painted] of [
-			// The cut lands inside an image iTerm2 would draw over the rows above the viewport.
-			[ImageProtocol.Iterm2, 7, ["", "", "", "", "", "", "tail"]],
+			// The cut lands inside an image iTerm2 would draw over the rows above the viewport: only its row blanks.
+			[ImageProtocol.Iterm2, 7, [...imageRows.slice(3, 5), "", ...imageRows.slice(6), "", "tail"]],
 			// The image sits wholly below the cut, so nothing draws above the viewport.
 			[ImageProtocol.Iterm2, 9, [...imageRows.slice(1), "", "tail"]],
 			// Kitty draws the visible part of a cut image.
 			[ImageProtocol.Kitty, 7, [...imageRows.slice(3), "", "tail"]],
 		] as const) {
-			it(`blanks the head only for a cut inside an image the terminal cannot draw in part (${protocol}, ${capacity} rows)`, () => {
+			it(`blanks a clipped image row only where the terminal cannot draw it in part (${protocol}, ${capacity} rows)`, () => {
 				const previous = TERMINAL.imageProtocol;
 				setTerminalImageProtocol(protocol);
 				try {
 					const transcript = new TranscriptContainer();
-					const head = new BudgetedImageBlock([...imageRows], true);
-					transcript.addChild(head);
+					transcript.addChild(new Block([...imageRows], true));
 					transcript.addChild(new Block(["tail"], true));
 
 					expect(transcript.renderViewport(80, capacity, frame)).toEqual(painted);
-					// A blanked head draws nothing, so clicks on its rows must not resolve to it.
-					const owners = transcript.getLastViewportSpans().map(span => span.component);
-					expect(owners.includes(head)).toBe(painted[0] !== "");
 				} finally {
 					setTerminalImageProtocol(previous);
 				}
