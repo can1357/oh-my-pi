@@ -363,7 +363,7 @@ impl MacInput {
 									post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
 								})
 							};
-							guard_key_menu(window, keys, (pid, to), element, press)
+							guard_key_menu(window, keys, (pid, to), press)
 						})
 					},
 				)?;
@@ -2190,21 +2190,19 @@ fn menu_watch(
 }
 
 /// Runs `press`, background keys for `window` of `pid` that go to process
-/// `to` ([`key_process`]), with the element holding keyboard focus (`element`
-/// when the call names one) as the guard for a menu they open
-/// ([`key_menu_guarded`]).
+/// `to` ([`key_process`]), with the element holding keyboard focus as the
+/// guard for a menu they open ([`key_menu_guarded`]).
 fn guard_key_menu(
 	window: &DesktopWindow,
 	keys: &[KeyName],
 	(pid, to): (libc::pid_t, libc::pid_t),
-	element: Option<&AXUIElement>,
 	press: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
 	key_menu_guarded(
 		window,
 		keys,
 		|| skylight::front_pid() != Some(pid),
-		|| element.map_or_else(|| ax::open_menu::focused_role(to), ax::open_menu::role_of),
+		|| ax::open_menu::focused_role(to),
 		|| capture::menu_windows(to),
 		press,
 		|before| {
@@ -2232,6 +2230,7 @@ fn key_menu_guarded(
 	press: impl FnOnce() -> CoreResult<()>,
 	settle: impl FnOnce(&[u32]) -> CoreResult<ax::open_menu::Settled>,
 ) -> CoreResult<()> {
+	// A missing focus or unreadable role is not proof that no menu can open.
 	if !ax::open_menu::keys_may_open(keys, || {
 		background().then(|| role().unwrap_or_else(|| "AXPopUpButton".to_string()))
 	}) {

@@ -99,6 +99,9 @@ pub(crate) fn role_of(element: &AXUIElement) -> Option<String> {
 pub(crate) fn focused_role(pid: libc::pid_t) -> Option<String> {
 	let app: CFRetained<AXUIElement> = probe_application(pid)?;
 	let focused: CFRetained<AXUIElement> = copy_element(&app, "AXFocusedUIElement")?;
+	// The timeout on the application does not apply to returned elements.
+	// SAFETY: The retained focused element is valid for the timeout update.
+	let _ = unsafe { focused.set_messaging_timeout(super::PROBE_TIMEOUT_SECONDS) };
 	role_of(&focused)
 }
 
