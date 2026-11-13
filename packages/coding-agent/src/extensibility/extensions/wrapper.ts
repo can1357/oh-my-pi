@@ -119,6 +119,26 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		onUpdate?: AgentToolUpdateCallback<any>,
 		context?: AgentToolContext,
 	) {
+		const taskPrincipal =
+			this.registeredTool.extensionPath === "<sdk>"
+				? `<sdk>:${this.registeredTool.definition.name}`
+				: this.registeredTool.extensionPath;
+		// Without a controlled-task grant this adapter must behave exactly like the upstream
+		// baseline: pass the result (including undefined) and any thrown error through untouched.
+		if (!this.runner.canInvokeRegisteredTask(taskPrincipal)) {
+			return this.registeredTool.definition.execute(
+				toolCallId,
+				params,
+				signal,
+				onUpdate,
+				this.runner.createContext(undefined, {
+					toolName: this.registeredTool.definition.name,
+					context,
+					signal,
+					onUpdate,
+				}),
+			);
+		}
 		// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
 		// native built-in of the same name (present only when this tool re-registers a built-in). The
 		// wrapper's own context, abort signal, and progress callback are inherited by the delegated
@@ -136,31 +156,26 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		let taskPending = false;
 		let taskPromise: Promise<{ toolCallId: string; result: AgentToolResult }> | undefined;
 		const taskAbort = new AbortController();
-		const taskPrincipal =
-			this.registeredTool.extensionPath === "<sdk>"
-				? `<sdk>:${this.registeredTool.definition.name}`
-				: this.registeredTool.extensionPath;
-		if (this.runner.canInvokeRegisteredTask(taskPrincipal)) {
-			extensionContext.invokeRegisteredTask = params => {
-				if (!available) throw new Error("受控 task 调用已使用或已结束");
-				available = false;
-				taskPending = true;
-				const taskSignal = signal ? AbortSignal.any([signal, taskAbort.signal]) : taskAbort.signal;
-				taskPromise = this.runner
-					.invokeRegisteredTask(taskPrincipal, toolCallId, params, taskSignal)
-					.finally(() => {
-						taskPending = false;
-					});
-				void taskPromise.catch(() => undefined);
-				return taskPromise;
-			};
-			extensionContext.queryRegisteredTask = outerToolCallId => {
-				if (!active) throw new Error("受控 task 查询已结束");
-				return this.runner.queryRegisteredTask(taskPrincipal, outerToolCallId);
-			};
-		}
+		extensionContext.invokeRegisteredTask = params => {
+			if (!available) throw new Error("Controlled task invocation has already been used or ended");
+			available = false;
+			taskPending = true;
+			const taskSignal = signal ? AbortSignal.any([signal, taskAbort.signal]) : taskAbort.signal;
+			taskPromise = this.runner.invokeRegisteredTask(taskPrincipal, toolCallId, params, taskSignal).finally(() => {
+				taskPending = false;
+			});
+			void taskPromise.catch(() => undefined);
+			return taskPromise;
+		};
+		extensionContext.queryRegisteredTask = outerToolCallId => {
+			if (!active) throw new Error("Controlled task queries have ended");
+			return this.runner.queryRegisteredTask(taskPrincipal, outerToolCallId);
+		};
+		// `threw` is a dedicated flag (not truthiness of the error) so falsy throws such as
+		// `throw undefined` or `throw 0` still propagate.
 		let executionResult: AgentToolResult | undefined;
-		let executionError: unknown;
+		let threw = false;
+		let thrownError: unknown;
 		try {
 			executionResult = await this.registeredTool.definition.execute(
 				toolCallId,
@@ -170,7 +185,8 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 				extensionContext,
 			);
 		} catch (error) {
-			executionError = error;
+			threw = true;
+			thrownError = error;
 		}
 		available = false;
 		active = false;
@@ -178,16 +194,17 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 			taskAbort.abort();
 			try {
 				const receipt = await taskPromise;
-				executionError = new RegisteredTaskInvocationError(
+				threw = true;
+				thrownError = new RegisteredTaskInvocationError(
 					receipt.toolCallId,
-					new Error("外层工具未等待受控 task"),
+					new Error("outer tool finished without awaiting the controlled task"),
 				);
 			} catch (error) {
-				executionError = error;
+				threw = true;
+				thrownError = error;
 			}
 		}
-		if (executionError) throw executionError;
-		if (!executionResult) throw new Error("扩展工具未返回结果");
+		if (threw) throw thrownError;
 		return executionResult;
 	}
 }

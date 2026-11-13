@@ -354,7 +354,7 @@ describe("SDK async task guidance", () => {
 		await session.prompt("Delegate two inspections");
 		expect(receipts).toHaveLength(2);
 		expect(repeated).toHaveLength(2);
-		expect(repeated.every(message => message.includes("已使用"))).toBe(true);
+		expect(repeated.every(message => message.includes("has already been used or ended"))).toBe(true);
 		expect(receipts[0]?.toolCallId).not.toBe(receipts[1]?.toolCallId);
 		expect(observations).toHaveLength(2);
 		expect(
