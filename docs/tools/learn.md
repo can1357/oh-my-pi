@@ -14,7 +14,7 @@
 
 - `loadMode = "essential"` and `strict = true`, so the tool remains top-level rather than mounting under `xd://`.
 - Approval is dynamic: a call containing `skill` or `scope: "global"`, or any call while `memory.backend = "local"`, has `approval = "write"`; any other memory-only Hindsight/Mnemopi call has `approval = "read"`.
-- Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, `"supermemory"`, or `"local"`. Hindsight and Supermemory additionally require a configured backend (`isHindsightConfigured(...)` / `isSupermemoryConfigured(...)`); Supermemory stores the lesson as one document in the session container.
+- Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, `"supermemory"`, or `"local"`. Hindsight and Supermemory additionally require a configured backend (`isHindsightConfigured(...)` / `isSupermemoryConfigured(...)`); Supermemory stores the lesson as one document in the session namespace.
 - Enabled top-level sessions auto-include `learn` in an ordinary explicit tool list. Subagents do not discover or auto-receive it, but may use it when their requested-tools/frontmatter list explicitly includes it.
 - Execution is single-shot and emits no progress updates.
 
@@ -59,7 +59,7 @@
 
 ### Supermemory
 
-- The lesson is queued through the [durable outbox](./retain.md) under `<agent-dir>/supermemory-outbox/` (secret-redacted, `source: "coding-agent-learn"`) and reported as `Lesson queued for retention`; delivery is a `POST /v3/documents` upsert keyed by the event id. `scope: "global"` is never offered.
+- The lesson is queued through the [durable outbox](./retain.md) under `<agent-dir>/supermemory-outbox/` (secret-redacted, `source: "coding-agent-learn"`) and reported as `Lesson queued for retention`; delivery is a `POST /ns/{namespace}/document` with the event id as the document `id`. `scope: "global"` is never offered.
 - Errors: `Supermemory backend is not initialised for this session.` without state; `Supermemory outbox full (...)` / `Supermemory outbox write failed; memory NOT queued.` before any skill is written.
 - See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 

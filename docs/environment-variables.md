@@ -553,13 +553,15 @@ Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips 
 
 ### Supermemory memory backend
 
-The API key and origin are read from the process environment only; there is no `supermemory.*` setting for
-them, so a project-local config file cannot redirect the key to another origin or replace the account.
+The API key, origin and namespace override are read from the process environment only; there is no
+`supermemory.*` setting for them, so a project-local config file cannot redirect the key to another origin,
+replace the account, or point the session at another namespace of your account.
 
-| Variable               | Accepted value / built-in default                                                                                      |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `SUPERMEMORY_API_KEY`  | Non-empty API key; unset leaves the backend inert                                                                      |
-| `SUPERMEMORY_BASE_URL` | `https:` URL, or `http:` on `localhost`/`127.0.0.1`/`[::1]`; default `https://api.supermemory.ai`; other URLs are rejected |
+| Variable                | Accepted value / built-in default                                                                                                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SUPERMEMORY_API_KEY`   | Non-empty API key; unset leaves the backend inert                                                                                                                                                  |
+| `SUPERMEMORY_BASE_URL`  | `https:` URL, or `http:` on `localhost`/`127.0.0.1`/`[::1]`; default `https://api.supermemory.ai`; other URLs are rejected                                                                          |
+| `SUPERMEMORY_NAMESPACE` | Namespace for every session, overriding `supermemory.scoping` (the variable Supermemory's own CLI uses); 1–100 of `A-Z a-z 0-9 _ : -`; unset uses scoping; an invalid value leaves the backend inert |
 
 ### Hindsight memory backend
 

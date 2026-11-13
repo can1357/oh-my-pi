@@ -101,14 +101,13 @@ const serveMnemopiState: RpcServe<MnemopiSessionState, MnemopiSessionStateProtoc
 };
 
 const serveSupermemoryState: RpcServe<SupermemorySessionState, SupermemorySessionStateProtocol> = {
-	containerTag: state => state.containerTag,
+	namespace: state => state.namespace,
 	aliasOf: state => state.aliasOf,
 	lastRecallSnippet: state => state.lastRecallSnippet,
 	search: (state, query, limit, signal) => state.search(query, limit, signal),
 	enqueueRetain: (state, toolCallId, items) => state.enqueueRetain(toolCallId, items),
-	save: (state, content, metadata, customId) => state.save(content, metadata, customId),
-	updateMemory: (state, id, content, signal) => state.updateMemory(id, content, signal),
-	forgetMemory: (state, id, reason, signal) => state.forgetMemory(id, reason, signal),
+	save: (state, content, metadata, id) => state.save(content, metadata, id),
+	forgetMemory: (state, id, signal) => state.forgetMemory(id, signal),
 };
 
 let memoryErrorsRegistered = false;

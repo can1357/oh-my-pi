@@ -8,6 +8,7 @@ import {
 	MemoryOutbox,
 	type MemoryOutboxEvent,
 	MemoryOutboxQueue,
+	type OutboxSendOutcome,
 	outboxEventId,
 	sendFailure,
 } from "../memory-backend/outbox";
@@ -18,6 +19,7 @@ import type { AgentSession } from "../session/agent-session";
 import {
 	type SupermemoryClient,
 	type SupermemoryDocument,
+	type SupermemoryForgetResult,
 	SupermemoryHttpError,
 	type SupermemorySearchItem,
 } from "./client";
@@ -38,7 +40,7 @@ const RETENTION_CURSOR_ENTRY_TYPE = "supermemory_retention";
 /** Custom transcript entry recording a `/memory clear`, so a resume does not restore the cleared recall. */
 const RECALL_CLEAR_ENTRY_TYPE = "supermemory_recall_clear";
 
-/** A tool-initiated write in `<agentDir>/supermemory-outbox/<destination>/`; `id` is its `customId`. */
+/** A tool-initiated write in `<agentDir>/supermemory-outbox/<destination>/`; `id` is its document id. */
 interface SupermemoryOutboxEvent extends MemoryOutboxEvent {
 	content: string;
 	metadata: Record<string, string>;
@@ -54,7 +56,7 @@ export interface SupermemoryRetainInput {
 
 interface RetentionCursorData {
 	version: 1;
-	/** Server, account and container (see `#scope`); a cursor only applies to the same ones. */
+	/** Server, account and namespace (see `#scope`); a cursor only applies to the same ones. */
 	scope: string;
 	/** Transcript the turns were counted in; a branched copy has a new id and must not adopt it. */
 	transcriptId: string;
@@ -62,7 +64,7 @@ interface RetentionCursorData {
 	turn: number;
 	/** Messages covered by the last retained window; a manual continuation that adds an answer without a user turn grows past it. */
 	messages: number;
-	/** First user turn of the last retained window, so a continuation re-upserts that window's customId under any cadence. */
+	/** First user turn of the last retained window, so a continuation re-sends that window's document id under any cadence. */
 	windowStart: number;
 }
 
@@ -78,6 +80,15 @@ interface SettledHistory {
 /** A write through a state that was disposed (e.g. a subagent's alias after a settings change). */
 function closedError(): Error {
 	return new Error("Supermemory state is closed after a settings change; memory NOT stored. Restart the subagent.");
+}
+
+/**
+ * Outcome of a failed write: 410 Gone (retired route or namespace) is as permanent as a refused body.
+ * Mapped here, not in the shared `sendFailure`, which Hindsight also uses.
+ */
+function writeFailure(error: unknown): OutboxSendOutcome {
+	const status = error instanceof SupermemoryHttpError ? error.status : undefined;
+	return status === 410 ? "rejected" : sendFailure(error, status);
 }
 
 function isRetentionCursor(data: unknown): data is RetentionCursorData {
@@ -103,7 +114,7 @@ export interface SupermemorySessionStateOptions {
 	session: AgentSession;
 	client: SupermemoryClient;
 	config: ConfiguredSupermemoryConfig;
-	containerTag: string;
+	namespace: string;
 	/** False for subagents: the tools work, automatic recall and retention never run. */
 	automatic: boolean;
 	/** Holds `supermemory-outbox/`. */
@@ -117,12 +128,12 @@ export interface SupermemoryAliasOptions {
 }
 
 /**
- * What a subagent alias routes to its parent: container, recall snippet, and every
+ * What a subagent alias routes to its parent: namespace, recall snippet, and every
  * tool read, write and edit. A subagent worker holds a remote implementation whose calls run
  * on main's state, so writes land in the parent's outbox.
  */
 export interface SupermemorySessionStateApi {
-	readonly containerTag: string;
+	readonly namespace: string;
 	readonly aliasOf?: SupermemorySessionStateApi;
 	readonly lastRecallSnippet?: string;
 	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]>;
@@ -130,10 +141,9 @@ export interface SupermemorySessionStateApi {
 	save(
 		content: string,
 		metadata: Record<string, string | number | boolean>,
-		customId?: string,
+		id?: string,
 	): Promise<SupermemoryDocument>;
-	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined>;
-	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void>;
+	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult>;
 }
 
 /** Config, client and outbox a primary state owns. */
@@ -159,10 +169,10 @@ function renderLines(items: readonly string[], budget: number): string {
 /** Per-session Supermemory runtime state owned by its AgentSession. */
 export class SupermemorySessionState implements SupermemorySessionStateApi {
 	readonly session: AgentSession;
-	readonly containerTag: string;
+	readonly namespace: string;
 	readonly automatic: boolean;
 	/**
-	 * Parent state of a subagent alias: every tool read, write and edit runs there (its container,
+	 * Parent state of a subagent alias: every tool read, write and edit runs there (its namespace,
 	 * outbox and notices). An alias never auto-recalls, auto-retains, or writes retention cursors.
 	 */
 	readonly aliasOf?: SupermemorySessionStateApi;
@@ -191,16 +201,16 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.session = options.session;
 		if ("aliasOf" in options) {
 			this.aliasOf = options.aliasOf;
-			this.containerTag = options.aliasOf.containerTag;
+			this.namespace = options.aliasOf.namespace;
 			this.automatic = false;
 			return;
 		}
 		const { client, config } = options;
-		this.containerTag = options.containerTag;
+		this.namespace = options.namespace;
 		this.automatic = options.automatic;
 		const outbox = new MemoryOutboxQueue<SupermemoryOutboxEvent, SupermemoryRetainInput>({
 			label: "Supermemory",
-			destination: this.containerTag,
+			destination: this.namespace,
 			// One document per request: drain as soon as a write lands.
 			flushBatchSize: 1,
 			notice: message => this.session.emitNotice("warning", message, SUPERMEMORY_NOTICE_SOURCE),
@@ -230,15 +240,14 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 						Object.values(event.metadata).every(value => typeof value === "string"),
 					send: async ([event]) => {
 						try {
-							await client.createDocument({
+							await client.addDocument(this.namespace, {
 								content: event.content,
-								containerTag: this.containerTag,
-								customId: event.id,
+								id: event.id,
 								metadata: event.metadata,
 							});
 							return "accepted";
 						} catch (error) {
-							return sendFailure(error, error instanceof SupermemoryHttpError ? error.status : undefined);
+							return writeFailure(error);
 						}
 					},
 				}),
@@ -249,10 +258,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	/**
 	 * Resumes automatic retention at this transcript's latest retention cursor, so a window that
-	 * failed or was cut by the dispose timeout is retried; its customId makes the retry an upsert.
-	 * A transcript without a cursor predates them: its complete windows are assumed retained and
-	 * retention starts at the open window, so resuming an old session never bulk-uploads it. An
-	 * open window keeps its start-based customId, so completing it later upserts a superset.
+	 * failed or was cut by the dispose timeout is retried; its document id makes the retry add to the
+	 * same document. A transcript without a cursor predates them: its complete windows are assumed
+	 * retained and retention starts at the open window, so resuming an old session never bulk-uploads
+	 * it. An open window keeps its start-based document id, so completing it later re-sends a superset
+	 * into that document.
 	 */
 	#resumeRetention(): void {
 		const scope = this.#scope();
@@ -349,19 +359,18 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		return this.#track(this.#local().outbox.flush());
 	}
 
-	/** Stores one document in this state's container (redacted); tracked so {@link flush} awaits it. */
+	/** Stores one document in this state's namespace (redacted); tracked so {@link flush} awaits it. */
 	save(
 		content: string,
 		metadata: Record<string, string | number | boolean>,
-		customId?: string,
+		id?: string,
 	): Promise<SupermemoryDocument> {
-		if (this.aliasOf) return this.aliasOf.save(content, metadata, customId);
+		if (this.aliasOf) return this.aliasOf.save(content, metadata, id);
 		if (this.#disposed) return Promise.reject(closedError());
 		return this.#track(
-			this.#local().client.createDocument({
+			this.#local().client.addDocument(this.namespace, {
 				content: this.#redact(content),
-				containerTag: this.containerTag,
-				customId,
+				id,
 				metadata: Object.fromEntries(
 					Object.entries(metadata).map(([key, value]) => [
 						key,
@@ -372,28 +381,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		);
 	}
 
-	/** `memory_edit update`: new version of memory `id` in this state's container (redacted). */
-	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined> {
-		if (this.aliasOf) return this.aliasOf.updateMemory(id, content, signal);
+	/** `memory_edit`: soft-forgets memory `id` in this state's namespace; tracked so {@link flush} awaits it. */
+	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult> {
+		if (this.aliasOf) return this.aliasOf.forgetMemory(id, signal);
 		if (this.#disposed) return Promise.reject(closedError());
-		return this.#track(
-			this.#local().client.updateMemory(
-				{ id, containerTag: this.containerTag, newContent: this.#redact(content) },
-				signal,
-			),
-		);
-	}
-
-	/** `memory_edit forget`/`invalidate`: soft-forgets memory `id` in this state's container. */
-	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void> {
-		if (this.aliasOf) return this.aliasOf.forgetMemory(id, reason, signal);
-		if (this.#disposed) return Promise.reject(closedError());
-		return this.#track(
-			this.#local().client.forgetMemory(
-				{ id, containerTag: this.containerTag, reason: reason === undefined ? undefined : this.#redact(reason) },
-				signal,
-			),
-		);
+		return this.#track(this.#local().client.forgetMemories(this.namespace, [id], signal));
 	}
 
 	async search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
@@ -401,9 +393,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		const config = this.#config;
 		const resultLimit = Math.max(1, Math.min(limit ?? config.recallLimit, config.recallLimit));
 		const results = await this.#local().client.search(
+			this.namespace,
 			{
-				q: this.#redact(query),
-				containerTag: this.containerTag,
+				query: this.#redact(query),
 				searchMode: config.searchMode,
 				// The search API rejects limit < 2; ask for at least 2 and trim locally.
 				limit: Math.max(2, resultLimit),
@@ -432,7 +424,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		}
 
 		const [profile, memories] = await Promise.allSettled([
-			this.#local().client.profile(this.containerTag, signal),
+			this.#local().client.profile(this.namespace, signal),
 			// Redact before cutting, as for retention: a cut inside a token defeats the redactor.
 			this.search(this.#redact(query).slice(0, MAX_RECALL_QUERY_CHARS), undefined, signal),
 		]);
@@ -500,13 +492,13 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		return clears === 0 ? scope : JSON.stringify([scope, clears]);
 	}
 
-	/** Server, account (hashed key) and container; a persisted recall or retention cursor applies only to the same ones. */
+	/** Server, account (hashed key) and namespace; a persisted recall or retention cursor applies only to the same ones. */
 	#scope(): string {
 		return JSON.stringify([
 			"supermemory",
 			this.#config.baseUrl,
 			Bun.hash(this.#config.apiKey).toString(16),
-			this.containerTag,
+			this.namespace,
 		]);
 	}
 
@@ -564,7 +556,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			if (!(await this.#retainWindow(messages, userStarts, start, start + every, history))) return;
 		}
 		// A continuation (`.`/`c`) answered after the last full window without a new user turn:
-		// upsert that window again under its customId so the answer is kept.
+		// re-send that window under its document id so the answer is added to it.
 		if (
 			!history.openTail &&
 			settledTurns === this.lastRetainedTurn &&
@@ -575,7 +567,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		}
 	}
 
-	/** Upserts user turns `[startTurn, endTurn)`; resolves whether {@link lastRetainedTurn} advanced. */
+	/** Sends user turns `[startTurn, endTurn)` under the window's document id; resolves whether {@link lastRetainedTurn} advanced. */
 	async #retainWindow(
 		messages: HindsightMessage[],
 		userStarts: number[],
@@ -610,15 +602,15 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 						turnEnd: endTurn,
 						...(omittedChars > 0 ? { transcriptTruncated: true, omittedChars } : {}),
 					},
-					this.#windowCustomId(startTurn),
+					this.#windowDocumentId(startTurn),
 				);
 			} catch (error) {
-				const status = error instanceof SupermemoryHttpError ? error.status : undefined;
-				if (sendFailure(error, status) !== "rejected") {
+				if (writeFailure(error) !== "rejected") {
 					logger.warn("Supermemory: auto-retain failed", { error: String(error) });
 					return false;
 				}
 				// Refused for good: retrying it forever would block every later window.
+				const status = error instanceof SupermemoryHttpError ? error.status : undefined;
 				logger.warn("Supermemory: auto-retain refused", { error: String(error) });
 				this.session.emitNotice(
 					"warning",
@@ -631,8 +623,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			return false;
 		}
 		// A `/memory enqueue` tail is an open window: it stays the next window's start, so a later
-		// enqueue or the completed window upserts over it under the same customId.
-		// Re-upserting an already retained window (`endTurn === lastRetainedTurn`) refreshes its cursor whatever its size.
+		// enqueue or the completed window re-sends a superset into the same document.
+		// Re-sending an already retained window (`endTurn === lastRetainedTurn`) refreshes its cursor whatever its size.
 		if (endTurn - startTurn < this.#config.retainEveryNTurns && endTurn > this.lastRetainedTurn) return true;
 		this.lastRetainedTurn = endTurn;
 		this.#windowStart = startTurn;
@@ -654,12 +646,13 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	}
 
 	/**
-	 * Supermemory upserts by `customId`. Keying on the window's first turn lets a retry or
-	 * resume update the same window while later windows never overwrite earlier ones.
+	 * Supermemory adds content sent under the same document `id` to that document. Keying on the
+	 * window's first turn lets a retry or resume extend the same window's document while later
+	 * windows never touch earlier ones.
 	 */
-	#windowCustomId(startTurn: number): string {
+	#windowDocumentId(startTurn: number): string {
 		const digest = new Bun.CryptoHasher("sha256")
-			.update(`${this.transcriptId}\u0000${this.containerTag}\u0000${startTurn}`)
+			.update(`${this.transcriptId}\u0000${this.namespace}\u0000${startTurn}`)
 			.digest("hex");
 		return `omp-${digest}`;
 	}

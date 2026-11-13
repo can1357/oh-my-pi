@@ -35,9 +35,9 @@ beforeEach(() => {
 			const { pathname } = new URL(request.url);
 			const body = (await request.json()) as Record<string, unknown>;
 			requests.push({ method: request.method, path: pathname, body });
-			if (pathname === "/v3/documents") return Response.json({ error: "unavailable" }, { status: 503 });
-			if (pathname === "/v4/search") return Response.json({ results: [{ id: "m1", memory: "uses bun" }] });
-			return Response.json({ id: "m1" });
+			if (pathname.endsWith("/document")) return Response.json({ error: "unavailable" }, { status: 503 });
+			if (pathname.endsWith("/search")) return Response.json({ results: [{ id: "m1", memory: "uses bun" }] });
+			return Response.json({ count: 1, matches: [{ id: "m1", memory: "uses bun" }], errors: [] });
 		},
 	});
 	Bun.env.SUPERMEMORY_API_KEY = "sm-synthetic-subagent-key";
@@ -135,13 +135,13 @@ async function outboxFiles(agentDir: string): Promise<string[]> {
 }
 
 describe("Supermemory subagent alias", () => {
-	it("routes a child's recall, retain and memory_edit to the parent's container, outbox and notices", async () => {
+	it("routes a child's recall, retain and memory_edit to the parent's namespace, outbox and notices", async () => {
 		const parent = await startSession("parent", "/tmp", 0);
 		parent.state.lastRecallSnippet = "<supermemory>parent recall</supermemory>";
-		// A child in another directory would resolve another container on its own.
+		// A child in another directory would resolve another namespace on its own.
 		const child = await startSession("child", temp.path(), 1, parent.state);
-		const tag = parent.state.containerTag;
-		expect(child.state.containerTag).toBe(tag);
+		const tag = parent.state.namespace;
+		expect(child.state.namespace).toBe(tag);
 
 		const recalled = await child.recall.execute("recall", { query: "bun" });
 		expect(recalled.content[0]).toMatchObject({ text: expect.stringContaining("uses bun (id: m1)") });
@@ -150,8 +150,8 @@ describe("Supermemory subagent alias", () => {
 		await parent.state.drainOutbox();
 
 		// The drain may retry the undelivered document; each distinct request counts once.
-		const sent = new Set(requests.map(request => `${request.method} ${request.path} ${request.body.containerTag}`));
-		expect([...sent]).toEqual([`POST /v4/search ${tag}`, `DELETE /v4/memories ${tag}`, `POST /v3/documents ${tag}`]);
+		const sent = new Set(requests.map(request => `${request.method} ${request.path}`));
+		expect([...sent]).toEqual([`POST /ns/${tag}/search`, `DELETE /ns/${tag}/memories`, `POST /ns/${tag}/document`]);
 		expect(requests[2]?.body).toMatchObject({ content: "child fact", metadata: { source: "coding-agent-retain" } });
 		// One destination: the undelivered write waits in the parent's outbox, reported to the parent.
 		expect(await outboxFiles(parent.agentDir)).toHaveLength(1);

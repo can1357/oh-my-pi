@@ -11,7 +11,7 @@ import { memoryToolRefs } from "../memory-backend/tool-names";
 import type { MemoryBackend, MemoryBackendSearchResult, MemoryBackendStartOptions } from "../memory-backend/types";
 import supermemoryInstructions from "../prompts/system/supermemory-instructions.md" with { type: "text" };
 import { SupermemoryClient } from "./client";
-import { isSupermemoryConfigured, loadSupermemoryConfig, resolveSupermemoryContainerTag } from "./config";
+import { isSupermemoryConfigured, loadSupermemoryConfig, resolveSupermemoryNamespace } from "./config";
 import { SupermemorySessionState } from "./state";
 
 const NOT_INITIALISED = "Supermemory backend is not initialised for this session.";
@@ -22,7 +22,7 @@ export const supermemoryBackend: MemoryBackend = {
 	async start(options: MemoryBackendStartOptions): Promise<void> {
 		const { session, settings } = options;
 		// Subagents alias the parent's state so tool recalls, retains and edits reach the same
-		// container and the parent's outbox. Auto-recall and auto-retain stay with the parent.
+		// namespace and the parent's outbox. Auto-recall and auto-retain stay with the parent.
 		const parent = options.taskDepth > 0 ? options.parentSupermemorySessionState : undefined;
 		if (parent) {
 			await session
@@ -34,7 +34,7 @@ export const supermemoryBackend: MemoryBackend = {
 		if (!isSupermemoryConfigured(config)) {
 			if (options.taskDepth === 0) {
 				logger.warn(
-					"Supermemory: memory.backend=supermemory but the API key or base URL is missing or rejected; backend inert.",
+					"Supermemory: memory.backend=supermemory but the API key or base URL is missing or rejected, or SUPERMEMORY_NAMESPACE is invalid; backend inert.",
 				);
 			}
 			return;
@@ -46,7 +46,7 @@ export const supermemoryBackend: MemoryBackend = {
 				session,
 				client: new SupermemoryClient(config.baseUrl, config.apiKey),
 				config,
-				containerTag: resolveSupermemoryContainerTag(session.sessionManager.getCwd(), config.scoping),
+				namespace: resolveSupermemoryNamespace(session.sessionManager.getCwd(), config),
 				automatic: options.taskDepth === 0,
 				agentDir: options.agentDir,
 			});
@@ -112,7 +112,7 @@ export const supermemoryBackend: MemoryBackend = {
 			active: true,
 			writable: true,
 			searchable: true,
-			scope: state.containerTag,
+			scope: state.namespace,
 			lastRecall: (state.aliasOf ?? state).lastRecallSnippet !== undefined,
 		};
 	},

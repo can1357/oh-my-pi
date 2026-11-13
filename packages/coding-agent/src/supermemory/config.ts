@@ -1,10 +1,11 @@
 /**
  * Resolved Supermemory runtime configuration.
  *
- * The API key and origin come from `SUPERMEMORY_API_KEY` / `SUPERMEMORY_BASE_URL` only, never
- * from settings: project-local config files merge into settings, so a cloned repository could
- * otherwise point the user's bearer token at another origin, or swap in its own key and collect
- * the user's transcripts. Tuning fields read the `supermemory.*` setting handles.
+ * The API key, origin and namespace override come from `SUPERMEMORY_API_KEY` /
+ * `SUPERMEMORY_BASE_URL` / `SUPERMEMORY_NAMESPACE` only, never from settings: project-local config
+ * files merge into settings, so a cloned repository could otherwise point the user's bearer token
+ * at another origin, swap in its own key and collect the user's transcripts, or read and write
+ * another namespace of the user's account. Tuning fields read the `supermemory.*` setting handles.
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { clamp } from "@oh-my-pi/pi-utils";
@@ -29,6 +30,8 @@ export interface SupermemoryConfig {
 	/** Validated API origin without a trailing slash; `null` when unset or rejected. */
 	baseUrl: string | null;
 	apiKey: string | null;
+	/** `SUPERMEMORY_NAMESPACE`: overrides {@link scoping} when set; `null` when set but rejected. */
+	namespace: string | null | undefined;
 	scoping: SupermemoryScoping;
 	autoRecall: boolean;
 	autoRetain: boolean;
@@ -38,7 +41,19 @@ export interface SupermemoryConfig {
 	searchMode: SupermemorySearchMode;
 }
 
-export type ConfiguredSupermemoryConfig = SupermemoryConfig & { baseUrl: string; apiKey: string };
+export type ConfiguredSupermemoryConfig = SupermemoryConfig & {
+	baseUrl: string;
+	apiKey: string;
+	namespace: string | undefined;
+};
+
+const NAMESPACE_PATTERN = /^[A-Za-z0-9_:-]{1,100}$/;
+
+function validateNamespace(raw: string | undefined): string | null | undefined {
+	const trimmed = raw?.trim();
+	if (!trimmed) return undefined;
+	return NAMESPACE_PATTERN.test(trimmed) ? trimmed : null;
+}
 
 /**
  * The API key travels as a bearer token, so only a plain `https:` origin, or `http:` on a
@@ -59,6 +74,7 @@ export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
 	return {
 		baseUrl: validateBaseUrl(Bun.env.SUPERMEMORY_BASE_URL?.trim() || DEFAULT_BASE_URL),
 		apiKey: Bun.env.SUPERMEMORY_API_KEY?.trim() || null,
+		namespace: validateNamespace(Bun.env.SUPERMEMORY_NAMESPACE),
 		scoping: cfgSupermemoryScoping.get(settings),
 		autoRecall: cfgSupermemoryAutoRecall.get(settings),
 		autoRetain: cfgSupermemoryAutoRetain.get(settings),
@@ -69,18 +85,22 @@ export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
 	};
 }
 
-/** Whether there is an API key and an accepted base URL to send it to. */
+/** Whether there is an API key, an accepted base URL to send it to, and no rejected namespace override. */
 export function isSupermemoryConfigured(config: SupermemoryConfig): config is ConfiguredSupermemoryConfig {
-	return config.apiKey !== null && config.baseUrl !== null;
+	return config.apiKey !== null && config.baseUrl !== null && config.namespace !== null;
 }
 
 /**
- * Opaque, stable container tag for `cwd`. Per-project scoping hashes the primary
- * repository root (so subdirectories and linked worktrees share one container),
- * falling back to `cwd` outside a repository; Supermemory never sees a local path.
+ * Namespace for `cwd`: `SUPERMEMORY_NAMESPACE` when set, else an opaque, stable one. Per-project
+ * scoping hashes the primary repository root (so subdirectories and linked worktrees share one
+ * namespace), falling back to `cwd` outside a repository; Supermemory never sees a local path.
  */
-export function resolveSupermemoryContainerTag(cwd: string, scoping: SupermemoryScoping): string {
-	if (scoping === "global") return "omp-global";
+export function resolveSupermemoryNamespace(
+	cwd: string,
+	config: Pick<ConfiguredSupermemoryConfig, "namespace" | "scoping">,
+): string {
+	if (config.namespace) return config.namespace;
+	if (config.scoping === "global") return "omp-global";
 	const identity = resolveEquivalentPath(vcs.repo(cwd)?.primaryRoot() ?? cwd).replace(/\\/g, "/");
 	const digest = new Bun.CryptoHasher("sha256").update(identity).digest("hex");
 	return `omp-project-${digest.slice(0, 24)}`;

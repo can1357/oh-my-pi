@@ -5,7 +5,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { supermemoryBackend } from "@oh-my-pi/pi-coding-agent/supermemory/backend";
-import { SupermemoryClient, SupermemoryHttpError } from "@oh-my-pi/pi-coding-agent/supermemory/client";
+import {
+	SupermemoryClient,
+	type SupermemoryForgetResult,
+	SupermemoryHttpError,
+} from "@oh-my-pi/pi-coding-agent/supermemory/client";
 import type { SupermemorySessionState } from "@oh-my-pi/pi-coding-agent/supermemory/state";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
@@ -117,15 +121,16 @@ function spyRecall() {
 	return { profile, search };
 }
 
-const ENV = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL"] as const;
+const ENV = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL", "SUPERMEMORY_NAMESPACE"] as const;
 const savedEnv = new Map(ENV.map(name => [name, Bun.env[name]]));
 
-/** Answers every request with `status`/`body` and records method, URL and JSON body. */
-function serve(status: number, body: unknown) {
+/** Answers requests with `[status, body]` pairs in order (the last repeats) and records method, URL and JSON body. */
+function serve(...responses: Array<[number, unknown]>) {
 	const requests: Array<{ url: string; method?: string; body: unknown }> = [];
 	const fetchMock: typeof globalThis.fetch = Object.assign(
 		async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
 			requests.push({ url: String(input), method: init?.method, body: JSON.parse(String(init?.body ?? "null")) });
+			const [status, body] = responses[Math.min(requests.length, responses.length) - 1];
 			return Response.json(body, { status });
 		},
 		{ preconnect: globalThis.fetch.preconnect },
@@ -139,7 +144,7 @@ async function startedTools() {
 	await start(session);
 	const edit = MemoryEditTool.createIf(session as never);
 	const recall = MemoryRecallTool.createIf(session as never);
-	const tag = session.getSupermemorySessionState()?.containerTag;
+	const tag = session.getSupermemorySessionState()?.namespace;
 	if (!edit || !recall || !tag) throw new Error("Supermemory tools unavailable");
 	return { edit, recall, tag };
 }
@@ -164,6 +169,7 @@ describe("supermemoryBackend", () => {
 		temp = TempDir.createSync("@supermemory-backend-test-");
 		Bun.env.SUPERMEMORY_API_KEY = "sm-synthetic-key";
 		Bun.env.SUPERMEMORY_BASE_URL = "http://127.0.0.1:1";
+		delete Bun.env.SUPERMEMORY_NAMESPACE;
 	});
 	afterEach(async () => {
 		vi.restoreAllMocks();
@@ -184,6 +190,22 @@ describe("supermemoryBackend", () => {
 			await supermemoryBackend.buildDeveloperInstructions("/tmp", "/tmp", session.settings, session as never),
 		).toBeUndefined();
 		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("SUPERMEMORY_NAMESPACE overrides scoping for every request; an invalid one leaves Supermemory unconfigured", async () => {
+		Bun.env.SUPERMEMORY_NAMESPACE = "team:notes";
+		const requests = serve([200, { results: [] }]);
+		const { recall, tag } = await startedTools();
+		await recall.execute("call", { query: "bun" });
+		expect(tag).toBe("team:notes");
+		expect(requests.map(request => request.url)).toEqual(["http://127.0.0.1:1/ns/team%3Anotes/search"]);
+
+		Bun.env.SUPERMEMORY_NAMESPACE = "../other";
+		const session = makeSession();
+		await start(session);
+		expect(session.getSupermemorySessionState()).toBeUndefined();
+		expect(MemoryEditTool.createIf(session as never)).toBeNull();
+		expect(MemoryRecallTool.createIf(session as never)).toBeNull();
 	});
 
 	it("stages first-turn recall, commits it once, and rejects a superseded preparation", async () => {
@@ -239,7 +261,7 @@ describe("supermemoryBackend", () => {
 
 	it("a transcript that exits before its first window keeps its completed turns for the next process", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
 		await start(session);
@@ -253,12 +275,12 @@ describe("supermemoryBackend", () => {
 
 		await start(session);
 		await session.endTurn();
-		expect(create.mock.calls.map(call => call[0]?.metadata?.turnStart)).toEqual([0]);
+		expect(create.mock.calls.map(call => call[1]?.metadata?.turnStart)).toEqual([0]);
 	});
 
 	it("leaves an unanswered aborted turn open so its later answer is retained", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -285,12 +307,12 @@ describe("supermemoryBackend", () => {
 		} as never);
 		await session.endTurn();
 		expect(create).toHaveBeenCalledTimes(2);
-		expect(create.mock.calls[1]?.[0]?.content).toContain("resumed answer");
+		expect(create.mock.calls[1]?.[1]?.content).toContain("resumed answer");
 	});
 
 	it("leaves an interrupted, partly answered turn open so /retry's answer is retained", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -316,7 +338,7 @@ describe("supermemoryBackend", () => {
 		});
 		await session.endTurn();
 		expect(create).toHaveBeenCalledTimes(1);
-		expect(create.mock.calls[0]?.[0]?.content).toContain("retried answer");
+		expect(create.mock.calls[0]?.[1]?.content).toContain("retried answer");
 	});
 
 	it("/memory clear revokes a recall that was still being prepared", async () => {
@@ -332,7 +354,7 @@ describe("supermemoryBackend", () => {
 	it("/memory clear waits for a queued retain that is still uploading", async () => {
 		const reply = Promise.withResolvers<{ id: string; status: string }>();
 		const sent = Promise.withResolvers<void>();
-		vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+		vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
 			sent.resolve();
 			return reply.promise;
 		});
@@ -354,9 +376,9 @@ describe("supermemoryBackend", () => {
 	});
 
 	it("the pending-write barrier that /memory clear and dispose wait on includes in-flight memory edits", async () => {
-		const reply = Promise.withResolvers<void>();
+		const reply = Promise.withResolvers<SupermemoryForgetResult>();
 		const sent = Promise.withResolvers<void>();
-		vi.spyOn(SupermemoryClient.prototype, "forgetMemory").mockImplementation(() => {
+		vi.spyOn(SupermemoryClient.prototype, "forgetMemories").mockImplementation(() => {
 			sent.resolve();
 			return reply.promise;
 		});
@@ -366,7 +388,7 @@ describe("supermemoryBackend", () => {
 		// Settle the start-up outbox drain so the edit is the only pending write.
 		await state?.flush();
 		// A subagent's `memory_edit forget` runs through the parent state.
-		const forgetting = state?.forgetMemory("m1", undefined);
+		const forgetting = state?.forgetMemory("m1");
 		await sent.promise;
 		let flushed = false;
 		const flushing = state?.flush().then(() => {
@@ -375,14 +397,14 @@ describe("supermemoryBackend", () => {
 		// One macrotask turn lets an unblocked barrier settle while the edit is still pending.
 		await Bun.sleep(0);
 		expect(flushed).toBe(false);
-		reply.resolve();
+		reply.resolve({ matches: ["m1"], errors: [] });
 		await Promise.all([flushing, forgetting]);
 		expect(flushed).toBe(true);
 	});
 
-	it("re-upserts the last window when a manual continuation adds an answer without a new user turn", async () => {
+	it("re-sends the last window when a manual continuation adds an answer without a new user turn", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -402,9 +424,9 @@ describe("supermemoryBackend", () => {
 			},
 		} as never);
 		await session.endTurn();
-		const docs = create.mock.calls.map(call => call[0]);
+		const docs = create.mock.calls.map(call => call[1]);
 		expect(docs).toHaveLength(2);
-		expect(docs[1]?.customId).toBe(docs[0]?.customId);
+		expect(docs[1]?.id).toBe(docs[0]?.id);
 		expect(docs[1]?.content).toContain("continued answer");
 		// A further settle with nothing new sends nothing.
 		await session.endTurn();
@@ -413,7 +435,7 @@ describe("supermemoryBackend", () => {
 
 	it("a continuation after a cadence change updates the original window, not a new one", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
 		await start(session);
@@ -437,15 +459,15 @@ describe("supermemoryBackend", () => {
 			},
 		} as never);
 		await session.endTurn();
-		const docs = create.mock.calls.map(call => call[0]);
+		const docs = create.mock.calls.map(call => call[1]);
 		expect(docs).toHaveLength(2);
-		expect(docs[1]?.customId).toBe(docs[0]?.customId);
+		expect(docs[1]?.id).toBe(docs[0]?.id);
 		expect(docs[1]?.content).toContain("continued");
 	});
 
 	it("a continuation after the cadence grows re-sends the shorter saved window once", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -468,15 +490,15 @@ describe("supermemoryBackend", () => {
 		} as never);
 		await session.endTurn();
 		await session.endTurn();
-		const docs = create.mock.calls.map(call => call[0]);
+		const docs = create.mock.calls.map(call => call[1]);
 		expect(docs).toHaveLength(2);
-		expect(docs[1]?.customId).toBe(docs[0]?.customId);
+		expect(docs[1]?.id).toBe(docs[0]?.id);
 		expect(docs[1]?.content).toContain("continued");
 	});
 
 	it("redacts a long window before cutting it, so a cut after a secret's prefix leaks no suffix", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const suffix = "abcdefghijklmnopqrstuvwxyz0123";
 		const secret = `ghp_${suffix}`;
@@ -519,7 +541,7 @@ describe("supermemoryBackend", () => {
 
 		await session.endTurn();
 		expect(create).toHaveBeenCalledTimes(1);
-		expect(create.mock.calls[0]?.[0]?.content).not.toContain(suffix);
+		expect(create.mock.calls[0]?.[1]?.content).not.toContain(suffix);
 	});
 
 	it("redacts the recall query before cutting it to the query limit", async () => {
@@ -529,7 +551,7 @@ describe("supermemoryBackend", () => {
 		// The 1,000-character query cut lands inside the token, past the redactor's minimum length.
 		const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
 		await supermemoryBackend.beforeAgentStartPrompt!(session as never, `${"q".repeat(980)}${secret}`, undefined);
-		const sent = search.mock.calls[0]?.[0]?.q ?? "";
+		const sent = search.mock.calls[0]?.[1]?.query ?? "";
 		expect(sent).not.toContain("ghp_abcdefghijklmnop");
 	});
 
@@ -550,9 +572,9 @@ describe("supermemoryBackend", () => {
 		expect(await supermemoryBackend.beforeAgentStartPrompt!(session as never, "q", undefined)).toBeUndefined();
 	});
 
-	it("retains every N user turns with a distinct customId per window", async () => {
+	it("retains every N user turns with a distinct document id per window", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 2 } });
 		await start(session);
@@ -569,9 +591,9 @@ describe("supermemoryBackend", () => {
 		await session.endTurn();
 		expect(create).toHaveBeenCalledTimes(2);
 
-		const [first, second] = create.mock.calls.map(call => call[0]);
-		expect(first?.customId).toMatch(/^omp-[0-9a-f]{64}$/);
-		expect(second?.customId).not.toBe(first?.customId);
+		const [first, second] = create.mock.calls.map(call => call[1]);
+		expect(first?.id).toMatch(/^omp-[0-9a-f]{64}$/);
+		expect(second?.id).not.toBe(first?.id);
 		expect(first?.content).toContain("turn two");
 		expect(first?.content).not.toContain("turn three");
 		expect(second?.content).toContain("turn three");
@@ -579,7 +601,7 @@ describe("supermemoryBackend", () => {
 
 	it("never re-sends old windows across resumed processes", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		for (const text of ["one", "two", "three"]) session.addTurn(text);
@@ -590,19 +612,19 @@ describe("supermemoryBackend", () => {
 			await session.endTurn();
 			await session.getSupermemorySessionState()?.dispose();
 		}
-		const docs = create.mock.calls.map(call => call[0]);
+		const docs = create.mock.calls.map(call => call[1]);
 		expect(docs.map(doc => doc?.metadata)).toMatchObject([
 			{ turnStart: 3, turnEnd: 4 },
 			{ turnStart: 4, turnEnd: 5 },
 		]);
-		expect(new Set(docs.map(doc => doc?.customId)).size).toBe(2);
+		expect(new Set(docs.map(doc => doc?.id)).size).toBe(2);
 		expect(docs[0]?.content).toContain("four");
 		expect(docs[0]?.content).not.toContain("three");
 	});
 
 	it("after an in-place transcript reset, retains only turns added since the reset", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -614,15 +636,15 @@ describe("supermemoryBackend", () => {
 		session.getSupermemorySessionState()?.resetConversationTracking();
 		session.addTurn("after reset");
 		await session.endTurn();
-		expect(create.mock.calls.map(call => call[0]?.metadata)).toMatchObject([{ turnStart: 4, turnEnd: 5 }]);
-		expect(create.mock.calls[0]?.[0]?.content).toContain("after reset");
-		expect(create.mock.calls[0]?.[0]?.content).not.toContain("four");
+		expect(create.mock.calls.map(call => call[1]?.metadata)).toMatchObject([{ turnStart: 4, turnEnd: 5 }]);
+		expect(create.mock.calls[0]?.[1]?.content).toContain("after reset");
+		expect(create.mock.calls[0]?.[1]?.content).not.toContain("four");
 	});
 
 	it("lets the shutdown flush finish every queued due window", async () => {
 		const pending = Promise.withResolvers<{ id: string; status: string }>();
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockReturnValueOnce(pending.promise)
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
@@ -634,13 +656,13 @@ describe("supermemoryBackend", () => {
 		const disposed = state?.dispose();
 		pending.resolve({ id: "d0", status: "queued" });
 		await disposed;
-		expect(create.mock.calls.map(call => call[0]?.metadata?.turnStart)).toEqual([0, 1]);
+		expect(create.mock.calls.map(call => call[1]?.metadata?.turnStart)).toEqual([0, 1]);
 	});
 
 	it("gives subagents tool-only state with no automatic recall or retention", async () => {
 		const { profile } = spyRecall();
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "done" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session, 1);
@@ -669,13 +691,13 @@ describe("supermemoryBackend", () => {
 
 	it("keeps the newest part of an oversized window and records the truncation", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
 		session.addTurn(`OLDEST ${"x".repeat(70_000)} NEWEST`);
 		await session.endTurn();
-		const doc = create.mock.calls[0]?.[0];
+		const doc = create.mock.calls[0]?.[1];
 		expect(doc?.content.length).toBe(60_000);
 		expect(doc?.content).toContain("NEWEST");
 		expect(doc?.content).not.toContain("OLDEST");
@@ -683,9 +705,9 @@ describe("supermemoryBackend", () => {
 		expect(Number(doc?.metadata?.omittedChars)).toBeGreaterThan(10_000);
 	});
 
-	it("lets a resumed window upsert over an earlier /memory enqueue tail", async () => {
+	it("lets a resumed window re-send into an earlier /memory enqueue tail", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 2 } });
 		await start(session);
@@ -694,15 +716,15 @@ describe("supermemoryBackend", () => {
 		await start(session);
 		session.addTurn("two");
 		await session.endTurn();
-		const [tail, window] = create.mock.calls.map(call => call[0]);
+		const [tail, window] = create.mock.calls.map(call => call[1]);
 		expect(tail?.metadata).toMatchObject({ turnStart: 0, turnEnd: 1 });
 		expect(window?.metadata).toMatchObject({ turnStart: 0, turnEnd: 2 });
-		expect(window?.customId).toBe(tail?.customId);
+		expect(window?.id).toBe(tail?.id);
 	});
 
 	it("retries a window that failed before exit on resume, without re-sending completed ones", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -712,25 +734,25 @@ describe("supermemoryBackend", () => {
 		session.addTurn("two");
 		await session.endTurn();
 		await session.getSupermemorySessionState()?.dispose();
-		const failed = create.mock.calls[1]?.[0];
+		const failed = create.mock.calls[1]?.[1];
 		create.mockClear();
 
 		// A resumed process starts a fresh state on the persisted transcript.
 		await start(session);
 		session.addTurn("three");
 		await session.endTurn();
-		const docs = create.mock.calls.map(call => call[0]);
+		const docs = create.mock.calls.map(call => call[1]);
 		expect(docs.map(doc => doc?.metadata)).toMatchObject([
 			{ turnStart: 1, turnEnd: 2 },
 			{ turnStart: 2, turnEnd: 3 },
 		]);
-		expect(docs[0]?.customId).toBe(failed?.customId);
+		expect(docs[0]?.id).toBe(failed?.id);
 		expect(docs[0]?.content).toContain("two");
 	});
 
 	it("retries a session's very first window on resume when it failed before exit", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 503."))
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
@@ -738,48 +760,53 @@ describe("supermemoryBackend", () => {
 		session.addTurn("first");
 		await session.endTurn();
 		await session.getSupermemorySessionState()?.dispose();
-		const failed = create.mock.calls[0]?.[0];
+		const failed = create.mock.calls[0]?.[1];
 		create.mockClear();
 
 		await start(session);
 		session.addTurn("second");
 		await session.endTurn();
-		const docs = create.mock.calls.map(call => call[0]);
+		const docs = create.mock.calls.map(call => call[1]);
 		expect(docs.map(doc => doc?.metadata)).toMatchObject([
 			{ turnStart: 0, turnEnd: 1 },
 			{ turnStart: 1, turnEnd: 2 },
 		]);
-		expect(docs[0]?.customId).toBe(failed?.customId);
+		expect(docs[0]?.id).toBe(failed?.id);
 	});
 
-	it("skips a window the server refuses for good, keeps retaining later ones, and never retries it", async () => {
-		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
-			.mockRejectedValueOnce(new SupermemoryHttpError(422))
-			.mockResolvedValue({ id: "d", status: "queued" });
-		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
-		await start(session);
-		session.addTurn("refused");
-		await session.endTurn();
-		session.addTurn("accepted");
-		await session.endTurn();
-		await session.getSupermemorySessionState()?.dispose();
-		expect(create.mock.calls.map(call => call[0]?.metadata)).toMatchObject([
-			{ turnStart: 0, turnEnd: 1 },
-			{ turnStart: 1, turnEnd: 2 },
-		]);
-		expect(session.notices).toHaveLength(1);
-		create.mockClear();
+	it.each([422, 410])(
+		"skips a window the server refuses for good (HTTP %d), keeps retaining later ones, and never retries it",
+		async status => {
+			const create = vi
+				.spyOn(SupermemoryClient.prototype, "addDocument")
+				.mockRejectedValueOnce(new SupermemoryHttpError(status))
+				.mockResolvedValue({ id: "d", status: "queued" });
+			const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+			await start(session);
+			session.addTurn("refused");
+			await session.endTurn();
+			session.addTurn("accepted");
+			await session.endTurn();
+			await session.getSupermemorySessionState()?.dispose();
+			expect(create.mock.calls.map(call => call[1]?.metadata)).toMatchObject([
+				{ turnStart: 0, turnEnd: 1 },
+				{ turnStart: 1, turnEnd: 2 },
+			]);
+			expect(session.notices).toEqual([
+				`Memory retention skipped turns 1-1: the server refused them (HTTP ${status}).`,
+			]);
+			create.mockClear();
 
-		await start(session);
-		session.addTurn("resumed");
-		await session.endTurn();
-		expect(create.mock.calls.map(call => call[0]?.metadata)).toMatchObject([{ turnStart: 2, turnEnd: 3 }]);
-	});
+			await start(session);
+			session.addTurn("resumed");
+			await session.endTurn();
+			expect(create.mock.calls.map(call => call[1]?.metadata)).toMatchObject([{ turnStart: 2, turnEnd: 3 }]);
+		},
+	);
 
 	it("redacts the API key and recognizable secrets in stored content and search queries", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const search = vi.spyOn(SupermemoryClient.prototype, "search").mockResolvedValue([]);
 		const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
@@ -791,8 +818,8 @@ describe("supermemoryBackend", () => {
 			context: `ctx ${secret} sm-synthetic-key`,
 		});
 		await supermemoryBackend.search!(memory, `find ${secret}`);
-		const doc = create.mock.calls[0]?.[0];
-		const sent = `${doc?.content} ${JSON.stringify(doc?.metadata)} ${search.mock.calls[0]?.[0]?.q}`;
+		const doc = create.mock.calls[0]?.[1];
+		const sent = `${doc?.content} ${JSON.stringify(doc?.metadata)} ${search.mock.calls[0]?.[1]?.query}`;
 		expect(sent).not.toContain(secret);
 		expect(sent).not.toContain("sm-synthetic-key");
 		expect(sent).toContain("[REDACTED]");
@@ -800,7 +827,7 @@ describe("supermemoryBackend", () => {
 
 	it("a branched copy of a transcript ignores the source's retention cursor", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -819,7 +846,7 @@ describe("supermemoryBackend", () => {
 		await start(session);
 		session.addTurn("three");
 		await session.endTurn();
-		const docs = create.mock.calls.map(call => call[0]);
+		const docs = create.mock.calls.map(call => call[1]);
 		expect(docs.map(doc => doc?.metadata)).toMatchObject([{ sessionId: "t2", turnStart: 1, turnEnd: 2 }]);
 		expect(docs[0]?.content).toContain("three");
 	});
@@ -827,7 +854,7 @@ describe("supermemoryBackend", () => {
 	it("a window that completes after the session moves to a new transcript records no cursor there", async () => {
 		const reply = Promise.withResolvers<{ id: string; status: string }>();
 		const sent = Promise.withResolvers<void>();
-		vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+		vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
 			sent.resolve();
 			return reply.promise;
 		});
@@ -848,7 +875,7 @@ describe("supermemoryBackend", () => {
 		try {
 			const reply = Promise.withResolvers<{ id: string; status: string }>();
 			const sent = Promise.withResolvers<void>();
-			const create = vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+			const create = vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
 				sent.resolve();
 				return reply.promise;
 			});
@@ -877,7 +904,7 @@ describe("supermemoryBackend", () => {
 
 	it("keeps a window open across a non-terminal settle so the continuation's answer is retained", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
 		await start(session);
@@ -895,14 +922,14 @@ describe("supermemoryBackend", () => {
 		} as never);
 		await session.endTurn();
 		expect(create).toHaveBeenCalledTimes(1);
-		expect(create.mock.calls[0]?.[0]?.content).toContain("continuation answer");
+		expect(create.mock.calls[0]?.[1]?.content).toContain("continuation answer");
 	});
 
 	it("a job queued behind a slow upload retains only turns settled when it was queued", async () => {
 		// Only the first upload is slow; later ones answer at once.
 		const first = Promise.withResolvers<{ id: string; status: string }>();
 		const sent = Promise.withResolvers<void>();
-		const create = vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+		const create = vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
 			if (create.mock.calls.length > 1) return Promise.resolve({ id: "d", status: "queued" });
 			sent.resolve();
 			return first.promise;
@@ -924,14 +951,14 @@ describe("supermemoryBackend", () => {
 		} as never);
 		first.resolve({ id: "d", status: "queued" });
 		await session.getSupermemorySessionState()?.flush();
-		expect(create.mock.calls.map(call => call[0]?.metadata?.turnStart)).toEqual([0, 1]);
+		expect(create.mock.calls.map(call => call[1]?.metadata?.turnStart)).toEqual([0, 1]);
 		expect(cursors(session).at(-1)?.[1]).toBe(2);
 	});
 
 	it("a job queued before the transcript changes uploads nothing and records no cursor for the new one", async () => {
 		const first = Promise.withResolvers<{ id: string; status: string }>();
 		const sent = Promise.withResolvers<void>();
-		const create = vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+		const create = vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
 			if (create.mock.calls.length > 1) return Promise.resolve({ id: "d", status: "queued" });
 			sent.resolve();
 			return first.promise;
@@ -953,7 +980,7 @@ describe("supermemoryBackend", () => {
 
 	it("/memory enqueue stops at a failed complete window instead of uploading the rest as one tail", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 503."))
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({
@@ -962,29 +989,27 @@ describe("supermemoryBackend", () => {
 		await start(session);
 		for (const turn of ["one", "two", "three", "four"]) session.addTurn(turn);
 		await supermemoryBackend.enqueue!(temp.path(), "/tmp", session as never);
-		expect(create.mock.calls.map(call => [call[0]?.metadata?.turnStart, call[0]?.metadata?.turnEnd])).toEqual([
+		expect(create.mock.calls.map(call => [call[1]?.metadata?.turnStart, call[1]?.metadata?.turnEnd])).toEqual([
 			[0, 2],
 		]);
 		expect(cursors(session).map(([, turn]) => turn)).not.toContain(4);
 	});
 
-	it("a disposed state refuses new saves and edits instead of writing to its old container", async () => {
-		const create = vi.spyOn(SupermemoryClient.prototype, "createDocument");
-		const update = vi.spyOn(SupermemoryClient.prototype, "updateMemory");
-		const forget = vi.spyOn(SupermemoryClient.prototype, "forgetMemory");
+	it("a disposed state refuses new saves and edits instead of writing to its old namespace", async () => {
+		const create = vi.spyOn(SupermemoryClient.prototype, "addDocument");
+		const forget = vi.spyOn(SupermemoryClient.prototype, "forgetMemories");
 		const session = makeSession();
 		await start(session);
 		const state = session.getSupermemorySessionState();
 		await state?.dispose();
 		await expect(state!.save("x", { source: "t" })).rejects.toThrow("memory NOT stored");
-		await expect(state!.updateMemory("m1", "y")).rejects.toThrow("memory NOT stored");
-		await expect(state!.forgetMemory("m1", undefined)).rejects.toThrow("memory NOT stored");
-		expect([create, update, forget].map(spy => spy.mock.calls.length)).toEqual([0, 0, 0]);
+		await expect(state!.forgetMemory("m1")).rejects.toThrow("memory NOT stored");
+		expect([create, forget].map(spy => spy.mock.calls.length)).toEqual([0, 0]);
 	});
 
-	it("repeated /memory enqueue tails upsert one open window instead of adding documents", async () => {
+	it("repeated /memory enqueue tails re-send one open window instead of adding documents", async () => {
 		const create = vi
-			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
 		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
 		await start(session);
@@ -995,18 +1020,21 @@ describe("supermemoryBackend", () => {
 		await supermemoryBackend.enqueue!(memory.agentDir, memory.cwd, memory.session);
 		session.addTurn("three");
 		await session.endTurn();
-		const ids = new Set(create.mock.calls.map(call => call[0]?.customId));
+		const ids = new Set(create.mock.calls.map(call => call[1]?.id));
 		expect(create).toHaveBeenCalledTimes(3);
 		expect(ids.size).toBe(1);
 	});
 
 	it("recall lists editable memory ids and marks document chunks", async () => {
-		serve(200, {
-			results: [
-				{ id: "m1", memory: "uses bun" },
-				{ id: "c1", chunk: "doc text" },
-			],
-		});
+		serve([
+			200,
+			{
+				results: [
+					{ id: "m1", memory: "uses bun" },
+					{ id: "c1", chunk: "doc text" },
+				],
+			},
+		]);
 		const { recall } = await startedTools();
 		const output = text(await recall.execute("call", { query: "bun" }));
 		expect(output).toContain("- uses bun (id: m1)");
@@ -1014,8 +1042,8 @@ describe("supermemoryBackend", () => {
 		expect(output).not.toContain("c1");
 	});
 
-	it("memory_edit update PATCHes a redacted new version in the session container", async () => {
-		const requests = serve(200, { id: "m2", memory: "new", version: 2 });
+	it("memory_edit update stores the redacted text as a document first, then forgets the old memory", async () => {
+		const requests = serve([200, { id: "d2", status: "queued" }], [200, { count: 1, matches: [{ id: "m1" }] }]);
 		const { edit, tag } = await startedTools();
 		const output = text(
 			await edit.execute("call", {
@@ -1027,38 +1055,62 @@ describe("supermemoryBackend", () => {
 		);
 		expect(requests).toEqual([
 			{
-				url: "http://127.0.0.1:1/v4/memories",
-				method: "PATCH",
-				body: { id: "m1", containerTag: tag, newContent: "uses bun; key [REDACTED]" },
+				url: `http://127.0.0.1:1/ns/${tag}/document`,
+				method: "POST",
+				body: {
+					content: "uses bun; key [REDACTED]",
+					metadata: { source: "coding-agent-memory-edit", replaces: "m1" },
+				},
 			},
+			{ url: `http://127.0.0.1:1/ns/${tag}/memories`, method: "DELETE", body: { ids: ["m1"] } },
 		]);
-		expect(output).toContain("new version id m2");
+		expect(output).toContain("stored as document d2");
+		expect(output).toContain("appears after Supermemory processes the document");
 		expect(output).toContain("no importance; it was ignored");
 	});
 
-	it("memory_edit forget and invalidate soft-forget with DELETE", async () => {
-		const requests = serve(200, { id: "m1", forgotten: true });
-		const { edit, tag } = await startedTools();
-		await edit.execute("call", { op: "forget", id: "m1" });
-		await edit.execute("call", { op: "invalidate", id: "m1", replacement_id: "m2" });
-		await edit.execute("call", { op: "invalidate", id: "m3" });
-		expect(requests.map(request => [request.method, request.url, request.body])).toEqual([
-			["DELETE", "http://127.0.0.1:1/v4/memories", { id: "m1", containerTag: tag }],
-			["DELETE", "http://127.0.0.1:1/v4/memories", { id: "m1", containerTag: tag, reason: "superseded by m2" }],
-			["DELETE", "http://127.0.0.1:1/v4/memories", { id: "m3", containerTag: tag, reason: "invalidated" }],
-		]);
+	it("memory_edit update forgets nothing when storing the corrected text fails", async () => {
+		const requests = serve([503, {}]);
+		const { edit } = await startedTools();
+		await expect(edit.execute("call", { op: "update", id: "m1", content: "x" })).rejects.toThrow("HTTP 503");
+		expect(requests.map(request => request.method)).toEqual(["POST"]);
 	});
 
-	it("memory_edit maps 404 and 409 to clear errors", async () => {
+	it("memory_edit update reports a stored correction whose old memory could not be forgotten", async () => {
+		serve([200, { id: "d2", status: "queued" }], [500, {}]);
+		const { edit } = await startedTools();
+		const error = await edit.execute("call", { op: "update", id: "m1", content: "x" }).catch((e: Error) => e);
+		expect(String(error)).toContain("Stored the corrected text as document d2");
+		expect(String(error)).toContain("memory m1 remains");
+		expect(String(error)).toContain("HTTP 500");
+	});
+
+	it("memory_edit forget and invalidate soft-forget the id with DELETE and no reason", async () => {
+		const requests = serve([200, { count: 1, matches: [{ id: "m1" }], errors: [] }]);
 		const { edit, tag } = await startedTools();
-		serve(404, { error: "not found" });
-		await expect(edit.execute("call", { op: "update", id: "m1", content: "x" })).rejects.toThrow(
-			`Memory m1 was not found in container ${tag}.`,
+		const forgot = text(await edit.execute("call", { op: "forget", id: "m1" }));
+		const invalidated = text(await edit.execute("call", { op: "invalidate", id: "m1", replacement_id: "m2" }));
+		expect(requests.map(request => [request.method, request.url, request.body])).toEqual([
+			["DELETE", `http://127.0.0.1:1/ns/${tag}/memories`, { ids: ["m1"] }],
+			["DELETE", `http://127.0.0.1:1/ns/${tag}/memories`, { ids: ["m1"] }],
+		]);
+		expect(forgot).toBe(`Memory m1 forgotten in namespace ${tag}.`);
+		expect(invalidated).toBe(`Memory m1 invalidated in namespace ${tag}.`);
+	});
+
+	it("memory_edit maps per-id forget errors to clear messages", async () => {
+		const { edit, tag } = await startedTools();
+		const forget = (error: string) => {
+			vi.restoreAllMocks();
+			serve([200, { count: 0, matches: [], errors: [{ id: "m1", error }] }]);
+			return edit.execute("call", { op: "forget", id: "m1" });
+		};
+		await expect(forget("Memory not found")).rejects.toThrow(`Memory m1 was not found in namespace ${tag}.`);
+		await expect(forget("Memory already forgotten")).rejects.toThrow(
+			`Memory m1 is already forgotten in namespace ${tag}.`,
 		);
-		vi.restoreAllMocks();
-		serve(409, { error: "already forgotten" });
-		await expect(edit.execute("call", { op: "forget", id: "m1" })).rejects.toThrow(
-			`Memory m1 is already forgotten in container ${tag}.`,
+		await expect(forget("Memory is in another namespace")).rejects.toThrow(
+			`Memory m1 was not forgotten in namespace ${tag}: Memory is in another namespace.`,
 		);
 	});
 

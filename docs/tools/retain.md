@@ -26,7 +26,7 @@
 ## Registration / Visibility
 
 - Tool metadata: `strict = true`, `loadMode = "discoverable"`. Approval is dynamic: a call with any `scope: "global"` item has `approval = "write"`, because the write reaches every project's recall; otherwise `approval = "read"`, even though successful calls enqueue or perform memory writes.
-- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key and an accepted base URL (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key, an accepted base URL and no invalid `SUPERMEMORY_NAMESPACE` (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
 - Execution returns one final result and has no progress callback or cancellation parameter.
@@ -95,9 +95,9 @@ Mnemopi:
 ### Supermemory
 
 - Reads `session.getSupermemorySessionState()`; throws `Supermemory backend is not initialised for this session.` when it is missing. `scope` is never offered.
-- The whole call goes through the same durable outbox as Hindsight, under `<agentDir>/supermemory-outbox/<destination>/` (destination = hash of the base URL origin and path, a hash of the API key, and the container tag; the key itself is never stored, and writes queued under one key are delivered only by a session using that key), all or none, before the tool returns `N memories queued.`. Content and `context` are stripped of terminal controls, the API key, and recognizable secrets; metadata records `source: "coding-agent-retain"`, the transcript id, and optional `context`.
-- Each event is delivered as one `POST /v3/documents` whose `customId` is the event id (hash of transcript id, tool call id, item index, content and metadata), so a retried call or a resend upserts instead of duplicating. Delivery starts right after enqueue and also runs at primary-session start, agent end, and disposal (bounded by the 2 s shutdown flush). HTTP 400/413/422 quarantine the event; every other failure keeps it for the same backoff retry, with the same notices, as Hindsight. Capacity, TTL and quarantine limits match Hindsight's.
-- Subagents write to the same container. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
+- The whole call goes through the same durable outbox as Hindsight, under `<agentDir>/supermemory-outbox/<destination>/` (destination = hash of the base URL origin and path, a hash of the API key, and the namespace; the key itself is never stored, and writes queued under one key are delivered only by a session using that key), all or none, before the tool returns `N memories queued.`. Content and `context` are stripped of terminal controls, the API key, and recognizable secrets; metadata records `source: "coding-agent-retain"`, the transcript id, and optional `context`.
+- Each event is delivered as one `POST /ns/{namespace}/document` whose document `id` is the event id (hash of transcript id, tool call id, item index, content and metadata); Supermemory adds a resend under the same `id` to the same document, so a retried call or a resend never duplicates it. Delivery starts right after enqueue and also runs at primary-session start, agent end, and disposal (bounded by the 2 s shutdown flush). HTTP 400/410/413/422 quarantine the event; every other failure keeps it for the same backoff retry, with the same notices, as Hindsight. Capacity, TTL and quarantine limits match Hindsight's.
+- Subagents write to the same namespace. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
 ## Side Effects
 

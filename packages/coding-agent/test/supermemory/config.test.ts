@@ -5,12 +5,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	isSupermemoryConfigured,
 	loadSupermemoryConfig,
-	resolveSupermemoryContainerTag,
+	resolveSupermemoryNamespace,
 } from "@oh-my-pi/pi-coding-agent/supermemory/config";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
-const TOUCHED = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL"] as const;
+const TOUCHED = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL", "SUPERMEMORY_NAMESPACE"] as const;
 const saved = new Map(TOUCHED.map(name => [name, Bun.env[name]]));
 
 beforeEach(() => {
@@ -73,16 +73,31 @@ describe("loadSupermemoryConfig", () => {
 		);
 		expect([config.retainEveryNTurns, config.recallLimit, config.threshold]).toEqual([1, 50, 1]);
 	});
+
+	it("SUPERMEMORY_NAMESPACE overrides scoping when valid and leaves Supermemory unconfigured when not", () => {
+		const valid = configWith(
+			{ SUPERMEMORY_API_KEY: "k", SUPERMEMORY_NAMESPACE: "team_a:notes-1" },
+			{ "supermemory.scoping": "global" },
+		);
+		if (!isSupermemoryConfigured(valid)) throw new Error("expected a configured Supermemory");
+		expect(resolveSupermemoryNamespace("/tmp", valid)).toBe("team_a:notes-1");
+
+		for (const namespace of ["a/b", "has space", "x".repeat(101), "a%2Fb"]) {
+			const config = configWith({ SUPERMEMORY_API_KEY: "k", SUPERMEMORY_NAMESPACE: namespace });
+			expect(config.namespace).toBeNull();
+			expect(isSupermemoryConfigured(config)).toBe(false);
+		}
+	});
 });
 
-describe("resolveSupermemoryContainerTag", () => {
+describe("resolveSupermemoryNamespace", () => {
 	let dir: TempDir | undefined;
 	afterEach(async () => {
 		await dir?.remove();
 		dir = undefined;
 	});
 
-	it("shares one opaque tag across a repo subdirectory and a linked worktree", async () => {
+	it("shares one opaque namespace across a repo subdirectory and a linked worktree", async () => {
 		dir = TempDir.createSync("@supermemory-tag-");
 		const repo = path.join(dir.path(), "secret-project");
 		await fs.mkdir(path.join(repo, "nested"), { recursive: true });
@@ -92,12 +107,13 @@ describe("resolveSupermemoryContainerTag", () => {
 		const worktree = path.join(dir.path(), "wt");
 		await $`git -c core.hooksPath=/dev/null worktree add -q ${worktree}`.cwd(repo).quiet();
 
-		const tag = resolveSupermemoryContainerTag(repo, "per-project");
+		const perProject = { namespace: undefined, scoping: "per-project" } as const;
+		const tag = resolveSupermemoryNamespace(repo, perProject);
 		expect(tag).toMatch(/^omp-project-[0-9a-f]{24}$/);
-		expect(resolveSupermemoryContainerTag(path.join(repo, "nested"), "per-project")).toBe(tag);
-		expect(resolveSupermemoryContainerTag(worktree, "per-project")).toBe(tag);
+		expect(resolveSupermemoryNamespace(path.join(repo, "nested"), perProject)).toBe(tag);
+		expect(resolveSupermemoryNamespace(worktree, perProject)).toBe(tag);
 		expect(tag).not.toContain("secret-project");
-		expect(resolveSupermemoryContainerTag(dir.path(), "per-project")).not.toBe(tag);
-		expect(resolveSupermemoryContainerTag(repo, "global")).toBe("omp-global");
+		expect(resolveSupermemoryNamespace(dir.path(), perProject)).not.toBe(tag);
+		expect(resolveSupermemoryNamespace(repo, { namespace: undefined, scoping: "global" })).toBe("omp-global");
 	});
 });

@@ -19,7 +19,7 @@
 ## Registration / Visibility
 
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key and an accepted base URL (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key, an accepted base URL and no invalid `SUPERMEMORY_NAMESPACE` (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://recall`; an explicitly requested tool remains top-level.
 - Execution is single-shot. The tool does not emit streaming argument/result updates.
@@ -92,10 +92,10 @@ When no matches exist:
 ### Supermemory
 
 - Reads `session.getSupermemorySessionState()`; throws `Supermemory backend is not initialised for this session.` when it is missing.
-- `POST /v4/search` on the session container with `supermemory.searchMode`, `supermemory.threshold` and `supermemory.recallLimit` (the request asks for at least 2 and trims locally). The query is secret-redacted first.
+- `POST /ns/{namespace}/search` on the session namespace with `query`, `supermemory.searchMode`, `supermemory.threshold` and `supermemory.recallLimit` all sent explicitly (v5's defaults differ), and `rewriteQuery: false`; the request asks for at least 2 and trims locally. The query is secret-redacted first.
 - Results render through `formatMemories(...)` like Hindsight; empty results return `No relevant memories found.` with `useless: true`. Memory results carry `(id: <id>)`, the memory id `memory_edit` accepts; document-chunk results (`supermemory.searchMode: hybrid`) are marked `[document chunk]` and show no id, because chunk ids are not memory ids. Content is shown in full, not clipped.
 - HTTP, timeout (15 s) and invalid-JSON failures throw messages that never include the API key or response body.
-- Subagents get their own state on the same container. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
+- Subagents alias the parent's state on the same namespace. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
 ## Side Effects
 

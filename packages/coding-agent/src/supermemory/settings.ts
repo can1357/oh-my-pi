@@ -4,8 +4,8 @@
  */
 import { register } from "../config/registry";
 
-// Supermemory (https://supermemory.ai). The API key and origin are deliberately not settings:
-// they come from SUPERMEMORY_API_KEY / SUPERMEMORY_BASE_URL only (see supermemory/config.ts).
+// Supermemory (https://supermemory.ai). The API key, origin and namespace override are deliberately not settings:
+// they come from SUPERMEMORY_API_KEY / SUPERMEMORY_BASE_URL / SUPERMEMORY_NAMESPACE only (see supermemory/config.ts).
 
 export const cfgSupermemoryScoping = register({
 	id: "supermemory.scoping",
@@ -16,17 +16,18 @@ export const cfgSupermemoryScoping = register({
 		tab: "memory",
 		group: "Supermemory",
 		label: "Supermemory Scoping",
-		description: "global = one container for every project; per-project = one container per repository",
+		description:
+			"global = one namespace for every project; per-project = one namespace per repository (SUPERMEMORY_NAMESPACE overrides both)",
 		options: [
 			{
 				value: "global",
 				label: "Global",
-				description: "One shared container — every project sees the same memories",
+				description: "One shared namespace — every project sees the same memories",
 			},
 			{
 				value: "per-project",
 				label: "Per project",
-				description: "One container per repository (shared by its worktrees), keyed by an opaque hash",
+				description: "One namespace per repository (shared by its worktrees), keyed by an opaque hash",
 			},
 		],
 		condition: "supermemoryActive",

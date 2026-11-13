@@ -13,12 +13,13 @@ const API_KEY = "sm-synthetic-outbox-key";
 
 interface WireDocument {
 	content: string;
-	customId: string;
-	containerTag: string;
+	id: string;
 	metadata: Record<string, string>;
+	/** Request path, not part of the body. */
+	path: string;
 }
 
-const ENV = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL"] as const;
+const ENV = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL", "SUPERMEMORY_NAMESPACE"] as const;
 const savedEnv = new Map(ENV.map(name => [name, Bun.env[name]]));
 
 let temp: TempDir;
@@ -35,12 +36,13 @@ beforeEach(() => {
 		hostname: "127.0.0.1",
 		port: 0,
 		async fetch(request) {
-			requests.push((await request.json()) as WireDocument);
+			requests.push({ ...((await request.json()) as WireDocument), path: new URL(request.url).pathname });
 			return Response.json({ id: "doc", status: "queued" }, { status });
 		},
 	});
 	Bun.env.SUPERMEMORY_API_KEY = API_KEY;
 	Bun.env.SUPERMEMORY_BASE_URL = server.url.origin;
+	Bun.env.SUPERMEMORY_NAMESPACE = "omp-outbox-test";
 });
 
 afterEach(async () => {
@@ -108,7 +110,7 @@ async function eventFiles(): Promise<string[]> {
 }
 
 describe("Supermemory retain outbox", () => {
-	it("keeps a memory through a failing server and delivers it once, under one customId, from a later session", async () => {
+	it("keeps a memory through a failing server and delivers it once, under one document id, from a later session", async () => {
 		status = 503;
 		const first = await startSession();
 		const args = { items: [{ content: `durable fact with ${API_KEY}`, context: "review" }] };
@@ -128,8 +130,9 @@ describe("Supermemory retain outbox", () => {
 		await next.state.drainOutbox();
 		expect(await eventFiles()).toEqual([]);
 		const delivered = requests.at(-1)!;
-		expect(new Set(requests.map(request => request.customId))).toEqual(new Set([delivered.customId]));
-		expect(delivered.customId).toBe(path.basename(file, ".json"));
+		expect(new Set(requests.map(request => request.id))).toEqual(new Set([delivered.id]));
+		expect(delivered.id).toBe(path.basename(file, ".json"));
+		expect(delivered.path).toBe("/ns/omp-outbox-test/document");
 		expect(delivered.content).not.toContain(API_KEY);
 		expect(delivered.metadata).toMatchObject({ source: "coding-agent-retain", context: "review" });
 		const sent = requests.length;
@@ -137,8 +140,8 @@ describe("Supermemory retain outbox", () => {
 		expect(requests).toHaveLength(sent);
 	});
 
-	it("quarantines a memory the server refuses and never resends it", async () => {
-		status = 422;
+	it.each([422, 410])("quarantines a memory the server refuses (HTTP %d) and never resends it", async refused => {
+		status = refused;
 		const { tool, state, notices } = await startSession();
 		await tool.execute("refused", { items: [{ content: "invalid server input" }] });
 		await state.drainOutbox();

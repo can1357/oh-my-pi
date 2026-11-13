@@ -5,9 +5,19 @@ import memoryEditDescription from "../prompts/tools/memory-edit.md" with { type:
 import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
 
+import { noticeErrorText } from "../memory-backend/outbox";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { SupermemoryHttpError } from "../supermemory/client";
+import type { SupermemoryForgetResult } from "../supermemory/client";
 import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
+
+/** Why memory `id` was not forgotten, from a forget result's per-id `errors`; `undefined` when it was. */
+function forgetFailure(id: string, result: SupermemoryForgetResult, location: string): string | undefined {
+	if (result.matches.includes(id)) return undefined;
+	const error = result.errors.find(item => item.id === id)?.error ?? "";
+	if (/not found/i.test(error)) return `Memory ${id} was not found ${location}.`;
+	if (/already forgotten/i.test(error)) return `Memory ${id} is already forgotten ${location}.`;
+	return `Memory ${id} was not forgotten ${location}: ${noticeErrorText(error) || "no reason given"}.`;
+}
 
 const memoryEditSchema = type({
 	op: type("'update' | 'forget' | 'invalidate'").describe("memory edit operation"),
@@ -75,8 +85,9 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 	}
 
 	/**
-	 * `update` → PATCH (new version, content redacted); `forget`/`invalidate` → DELETE, a soft forget
-	 * that hides the memory from search and keeps it server-side. Supermemory has no hard delete or importance.
+	 * `forget`/`invalidate` → soft forget by id (hidden from search, kept server-side). Supermemory has
+	 * no memory update, hard delete, importance, or forget reason: `update` stores the corrected text
+	 * as a document first, so a failure never loses the fact, then forgets the old memory.
 	 */
 	async #editSupermemory(params: MemoryEditParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		const state = this.session.getSupermemorySessionState?.();
@@ -90,38 +101,43 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 					: "memory_edit update requires content: Supermemory memories have no importance.",
 			);
 		}
-		const location = `in container ${state.containerTag}`;
-		try {
-			if (params.op === "update") {
-				const newId = await state.updateMemory(params.id, params.content ?? "", signal);
-				const version = newId ? `; new version id ${newId}` : "";
-				const ignored =
-					params.importance === undefined ? "" : " Supermemory memories have no importance; it was ignored.";
-				return {
-					content: [{ type: "text", text: `Memory ${params.id} updated ${location}${version}.${ignored}` }],
-					details: { status: "updated", container: state.containerTag, newId },
-				};
+		const { namespace } = state;
+		const location = `in namespace ${namespace}`;
+		if (params.op === "update") {
+			const document = await state.save(params.content ?? "", {
+				source: "coding-agent-memory-edit",
+				replaces: params.id,
+			});
+			const pending = "The new memory appears after Supermemory processes the document.";
+			let failure: string | undefined;
+			try {
+				failure = forgetFailure(params.id, await state.forgetMemory(params.id, signal), location);
+			} catch (error) {
+				failure = error instanceof Error ? error.message : String(error);
 			}
-			const reason =
-				params.op === "forget"
-					? undefined
-					: params.replacement_id
-						? `superseded by ${params.replacement_id}`
-						: "invalidated";
-			await state.forgetMemory(params.id, reason, signal);
-			const status = params.op === "forget" ? "forgotten" : "invalidated";
+			if (failure) {
+				throw new Error(
+					`Stored the corrected text as document ${document.id} ${location}, but memory ${params.id} remains: it could not be forgotten. ${failure} ${pending}`,
+				);
+			}
+			const ignored =
+				params.importance === undefined ? "" : " Supermemory memories have no importance; it was ignored.";
 			return {
-				content: [{ type: "text", text: `Memory ${params.id} ${status} ${location}.` }],
-				details: { status, container: state.containerTag },
+				content: [
+					{
+						type: "text",
+						text: `Memory ${params.id} replaced ${location}: the corrected text was stored as document ${document.id} and the old memory forgotten. ${pending}${ignored}`,
+					},
+				],
+				details: { status: "updated", namespace, documentId: document.id },
 			};
-		} catch (error) {
-			if (error instanceof SupermemoryHttpError && error.status === 404) {
-				throw new Error(`Memory ${params.id} was not found ${location}.`);
-			}
-			if (error instanceof SupermemoryHttpError && error.status === 409 && params.op !== "update") {
-				throw new Error(`Memory ${params.id} is already forgotten ${location}.`);
-			}
-			throw error;
 		}
+		const failure = forgetFailure(params.id, await state.forgetMemory(params.id, signal), location);
+		if (failure) throw new Error(failure);
+		const status = params.op === "forget" ? "forgotten" : "invalidated";
+		return {
+			content: [{ type: "text", text: `Memory ${params.id} ${status} ${location}.` }],
+			details: { status, namespace },
+		};
 	}
 }

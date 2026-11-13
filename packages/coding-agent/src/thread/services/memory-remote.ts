@@ -48,7 +48,7 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
-import type { SupermemoryDocument, SupermemorySearchItem } from "../../supermemory/client";
+import type { SupermemoryDocument, SupermemoryForgetResult, SupermemorySearchItem } from "../../supermemory/client";
 import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RemoteObject } from "../rpc";
 import type {
@@ -298,8 +298,8 @@ export class RemoteSupermemorySessionState implements SupermemorySessionStateApi
 		this.#remote = remote;
 	}
 
-	get containerTag(): string {
-		return this.#remote.callSync("containerTag");
+	get namespace(): string {
+		return this.#remote.callSync("namespace");
 	}
 
 	get aliasOf(): SupermemorySessionStateApi | undefined {
@@ -321,16 +321,12 @@ export class RemoteSupermemorySessionState implements SupermemorySessionStateApi
 	save(
 		content: string,
 		metadata: Record<string, string | number | boolean>,
-		customId?: string,
+		id?: string,
 	): Promise<SupermemoryDocument> {
-		return this.#remote.call("save", content, metadata, customId);
+		return this.#remote.call("save", content, metadata, id);
 	}
 
-	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined> {
-		return this.#remote.call("updateMemory", id, content, signal);
-	}
-
-	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void> {
-		return this.#remote.call("forgetMemory", id, reason, signal);
+	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult> {
+		return this.#remote.call("forgetMemory", id, signal);
 	}
 }

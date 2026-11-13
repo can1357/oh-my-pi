@@ -192,7 +192,7 @@ describe("memory thread service", () => {
 		}
 	});
 
-	it("lands a worker Supermemory alias's retain in main's outbox and maps a remote 404", async () => {
+	it("lands a worker Supermemory alias's retain in main's outbox and maps a remote per-id forget error", async () => {
 		const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
 		using server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -201,8 +201,9 @@ describe("memory thread service", () => {
 				const { pathname } = new URL(request.url);
 				const body = (await request.json()) as Record<string, unknown>;
 				requests.push({ method: request.method, path: pathname, body });
-				// Documents stay undelivered so the write is observable in the outbox; edits find nothing.
-				return Response.json({}, { status: pathname === "/v3/documents" ? 503 : 404 });
+				// Documents stay undelivered so the write is observable in the outbox; forgets find nothing.
+				if (pathname.endsWith("/document")) return Response.json({}, { status: 503 });
+				return Response.json({ count: 0, matches: [], errors: [{ id: "missing", error: "Memory not found" }] });
 			},
 		});
 		const notices: string[] = [];
@@ -216,6 +217,7 @@ describe("memory thread service", () => {
 			config: {
 				baseUrl: server.url.origin,
 				apiKey,
+				namespace: undefined,
 				scoping: "global",
 				autoRecall: false,
 				autoRetain: false,
@@ -224,7 +226,7 @@ describe("memory thread service", () => {
 				threshold: 0.5,
 				searchMode: "hybrid",
 			},
-			containerTag: "omp-global",
+			namespace: "omp-global",
 			automatic: true,
 			agentDir: tempDir,
 		});
@@ -234,15 +236,13 @@ describe("memory thread service", () => {
 
 			expect(report).toEqual({
 				aliasesRemoteParent: true,
-				containerTag: "omp-global",
+				namespace: "omp-global",
 				retained: "1 memory queued.",
-				editError: "Memory missing was not found in container omp-global.",
+				editError: "Memory missing was not found in namespace omp-global.",
 			});
 			// Delivery runs in the background and the drain retries it, so dedupe and ignore order.
-			const sent = new Set(
-				requests.map(request => `${request.method} ${request.path} ${request.body.containerTag}`),
-			);
-			expect([...sent].sort()).toEqual(["PATCH /v4/memories omp-global", "POST /v3/documents omp-global"]);
+			const sent = new Set(requests.map(request => `${request.method} ${request.path}`));
+			expect([...sent].sort()).toEqual(["DELETE /ns/omp-global/memories", "POST /ns/omp-global/document"]);
 			expect(requests.find(request => request.method === "POST")?.body).toMatchObject({
 				content: "worker fact",
 				metadata: { source: "coding-agent-retain" },

@@ -6,25 +6,25 @@
 
 - Entry: `packages/coding-agent/src/tools/memory-edit.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/memory-edit.md`
-- Backend collaborators: `packages/coding-agent/src/mnemopi/state.ts` (`editScopedMemory(...)`); `packages/coding-agent/src/supermemory/state.ts` (`updateMemory(...)`) and `packages/coding-agent/src/supermemory/client.ts` (`updateMemory`/`forgetMemory`)
+- Backend collaborators: `packages/coding-agent/src/mnemopi/state.ts` (`editScopedMemory(...)`); `packages/coding-agent/src/supermemory/state.ts` (`save(...)`, `forgetMemory(...)`) and `packages/coding-agent/src/supermemory/client.ts` (`addDocument`/`forgetMemories`)
 
 ## Registration / Visibility
 
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`, even though successful calls mutate local memory.
-- Registration requires `memory.backend = "mnemopi"`, or `"supermemory"` with an API key and accepted base URL (`isSupermemoryConfigured(...)`, the same gate as `recall`/`retain`); the tool is absent for `"off"`, `"local"`, `"hindsight"`, and an unconfigured Supermemory.
+- Registration requires `memory.backend = "mnemopi"`, or `"supermemory"` with an API key, an accepted base URL and no invalid `SUPERMEMORY_NAMESPACE` (`isSupermemoryConfigured(...)`, the same gate as `recall`/`retain`); the tool is absent for `"off"`, `"local"`, `"hindsight"`, and an unconfigured Supermemory.
 - In an unrestricted session with an explicit tool list, registration auto-includes `memory_edit` for Mnemopi and Supermemory. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://memory_edit`; an explicitly requested tool remains top-level.
-- Mnemopi execution is synchronous and single-shot. Supermemory execution is one HTTP request that honours the tool call's abort signal.
+- Mnemopi execution is synchronous and single-shot. Supermemory `forget`/`invalidate` is one HTTP request and `update` is two (add, then forget); the forget honours the tool call's abort signal.
 
 ## Inputs
 
-| Field            | Type                                   | Required | Description                                             |
-| ---------------- | -------------------------------------- | -------: | ------------------------------------------------------- |
-| `op`             | `"update" \| "forget" \| "invalidate"` |      Yes | Edit operation to apply.                                |
-| `id`             | `string`                               |      Yes | Memory id returned by `recall`.                         |
-| `content`        | `string`                               |       No | Replacement memory text for `update`.                   |
-| `importance`     | `number`                               |       No | Replacement importance for `update`; clamped to `0..1`. |
-| `replacement_id` | `string`                               |       No | Superseding memory id recorded for `invalidate`.        |
+| Field            | Type                                   | Required | Description                                                                                         |
+| ---------------- | -------------------------------------- | -------: | --------------------------------------------------------------------------------------------------- |
+| `op`             | `"update" \| "forget" \| "invalidate"` |      Yes | Edit operation to apply.                                                                            |
+| `id`             | `string`                               |      Yes | Memory id returned by `recall`.                                                                     |
+| `content`        | `string`                               |       No | Replacement memory text for `update`.                                                               |
+| `importance`     | `number`                               |       No | Replacement importance for `update`; clamped to `0..1`.                                             |
+| `replacement_id` | `string`                               |       No | Superseding memory id recorded for `invalidate` (Mnemopi only; Supermemory accepts and ignores it). |
 
 ## Outputs
 
@@ -49,11 +49,10 @@
 ### Supermemory
 
 1. `execute(...)` fetches `session.getSupermemorySessionState()` and fails if the backend is not initialized.
-2. Every request is scoped to the session's container tag (`containerTag`), the same one recall and retain use.
-3. `update` → `PATCH /v4/memories` `{ id, containerTag, newContent }`. `content` is required and secret-redacted like other Supermemory writes. Supermemory creates a new memory version (the old one is kept as non-latest) and the output names the new version id. `importance` has no Supermemory equivalent: alone it is rejected; next to `content` it is ignored and the output says so.
-4. `forget` → `DELETE /v4/memories` `{ id, containerTag }`.
-5. `invalidate` → `DELETE /v4/memories` `{ id, containerTag, reason }`, where `reason` is `superseded by <replacement_id>` or `invalidated`.
-6. Output: `Memory <id> updated|forgotten|invalidated in container <tag>.`; `details` is `{ status, container, newId? }`.
+2. Every request goes to the session's namespace (`/ns/{namespace}/…`), the same one recall and retain use.
+3. `forget` and `invalidate` → `DELETE /ns/{namespace}/memories` `{ ids: [id] }`. HTTP success does not mean the id changed: the tool succeeds only when the id is in the response's `matches`, and otherwise maps its per-id `errors` entry (see Errors). v5 has no forget reason, so `replacement_id` is accepted but not recorded.
+4. `update`: v5 has no memory update. The tool first stores `content` (required, secret-redacted like other Supermemory writes) as a new document, `POST /ns/{namespace}/document` `{ content, metadata: { source: "coding-agent-memory-edit", replaces: <id> } }`, then forgets the old id as in step 3. Adding first means a failure never loses the fact: if the add fails nothing changed and the tool throws; if the forget fails after it, the tool throws saying the corrected text was stored (naming the document id) but the old memory remains, with the reason. The new memory appears after Supermemory processes the document. `importance` has no Supermemory equivalent: alone it is rejected; next to `content` it is ignored and the output says so. Both requests are tracked by the state's pending-write barrier (`/memory clear` and dispose wait for them).
+5. Output: `Memory <id> forgotten|invalidated in namespace <ns>.`, or for `update` `Memory <id> replaced in namespace <ns>: the corrected text was stored as document <docId> and the old memory forgotten. …`; `details` is `{ status, namespace, documentId? }`.
 
 ## Modes / Variants
 
@@ -62,12 +61,12 @@
 - `invalidate` softly supersedes working or episodic rows and may record `replacement_id`.
 - Fact rows are readable but immutable; every operation returns `not_editable`.
 - `update`/`forget` against an episodic id returns `not_found` with its bank/store location because those operations only support working memory.
-- Supermemory: the API's forget is a soft delete (excluded from search, preserved server-side), which is exactly Mnemopi's `invalidate` semantics, so `invalidate` maps to it and records the replacement in the forget reason. The API has no hard delete, so `forget` is the same soft forget without a reason; it differs from Mnemopi's permanent delete. Only memory ids are editable: recall shows document-chunk results without an id.
+- Supermemory: the API's forget is a soft delete (excluded from search, preserved server-side), which is exactly Mnemopi's `invalidate` semantics, so `invalidate` maps to it. The API has no hard delete and no forget reason, so `forget` and `invalidate` send the same request; `forget` differs from Mnemopi's permanent delete. Only memory ids are editable: recall shows document-chunk results without an id.
 
 ## Side Effects
 
 - Filesystem (Mnemopi): mutates the local Mnemopi SQLite database containing the resolved row, which may be a retain, recall, shared, or safely discovered legacy bank.
-- Network: none for Mnemopi; edit operations do not invoke embedding or extraction providers. Supermemory sends one `PATCH` or `DELETE /v4/memories` request.
+- Network: none for Mnemopi; edit operations do not invoke embedding or extraction providers. Supermemory sends `DELETE /ns/{namespace}/memories`, preceded for `update` by `POST /ns/{namespace}/document`.
 - Session state: reads the active session's scoped Mnemopi state; it does not rewrite already injected `<memories>` context.
 
 ## Limits & Caps
@@ -82,7 +81,7 @@
 
 - Throws `Mnemopi backend is not initialised for this session.` when the tool is exposed but session state is missing.
 - Throws `memory_edit update requires content or importance.` for an empty update.
-- Supermemory throws `Supermemory backend is not initialised for this session.` when state is missing; `memory_edit update requires content.` (or `… requires content: Supermemory memories have no importance.` for an importance-only update) before any request; `Memory <id> was not found in container <tag>.` for HTTP 404; `Memory <id> is already forgotten in container <tag>.` for HTTP 409. Other HTTP, timeout and invalid-JSON failures throw the client's messages, which never include the API key or response body.
+- Supermemory throws `Supermemory backend is not initialised for this session.` when state is missing; `memory_edit update requires content.` (or `… requires content: Supermemory memories have no importance.` for an importance-only update) before any request; `Memory <id> was not found in namespace <ns>.` when the id's forget error says not found; `Memory <id> is already forgotten in namespace <ns>.` when it says already forgotten; otherwise `Memory <id> was not forgotten in namespace <ns>: <server error>.` (control characters stripped, bounded). A failed `update` forget is reported as `Stored the corrected text as document <docId> in namespace <ns>, but memory <id> remains: …`. HTTP, timeout and invalid-JSON failures throw the client's messages, which never include the API key or response body.
 - Missing, episodic-for-update/forget, and fact ids are normal results rather than thrown errors; inspect `details.status`.
 - `read memory://<id>` throws `Mnemopi memory <id> not found in the calling session's scoped bank` when that session's banks do not contain the row; a row held only by another live session is not reachable.
 

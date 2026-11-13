@@ -50,7 +50,7 @@ export interface MnemopiChildReport {
 /** What a worker-hosted Supermemory child saw and did through its alias. */
 export interface SupermemoryChildReport {
 	aliasesRemoteParent: boolean;
-	containerTag: string;
+	namespace: string;
 	retained: string;
 	editError: string;
 }
@@ -168,15 +168,13 @@ function buildProbe(): MemoryProbe {
 			if (!alias) throw new Error("supermemory alias was not installed");
 			const tools = { settings, getSupermemorySessionState: () => alias } as unknown as ToolSession;
 			const retained = await new MemoryRetainTool(tools).execute("worker-retain", { items: [{ content: fact }] });
-			const editError = await new MemoryEditTool(tools)
-				.execute("worker-edit", { op: "update", id: "missing", content: "new" })
-				.then(
-					() => "no error",
-					(error: unknown) => (error instanceof Error ? error.message : String(error)),
-				);
+			const editError = await new MemoryEditTool(tools).execute("worker-edit", { op: "forget", id: "missing" }).then(
+				() => "no error",
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
 			const report: SupermemoryChildReport = {
 				aliasesRemoteParent: alias.aliasOf === parent && parent instanceof RemoteSupermemorySessionState,
-				containerTag: alias.containerTag,
+				namespace: alias.namespace,
 				retained: retained.content.map(part => (part.type === "text" ? part.text : "")).join(""),
 				editError,
 			};

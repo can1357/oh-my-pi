@@ -49,7 +49,7 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
-import type { SupermemoryDocument, SupermemorySearchItem } from "../../supermemory/client";
+import type { SupermemoryDocument, SupermemoryForgetResult, SupermemorySearchItem } from "../../supermemory/client";
 import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RpcMethod } from "../rpc";
 
@@ -135,15 +135,14 @@ export type MnemopiSessionStateProtocol = {
 
 /** A parent Supermemory state's fields (read live) and the tool reads, writes and edits it runs. */
 export type SupermemorySessionStateProtocol = {
-	containerTag: RpcMethod<[], string>;
+	namespace: RpcMethod<[], string>;
 	aliasOf: RpcMethod<[], SupermemorySessionStateApi | undefined>;
 	lastRecallSnippet: RpcMethod<[], string | undefined>;
 	search: RpcMethod<[query: string, limit: number | undefined, signal?: AbortSignal], SupermemorySearchItem[]>;
 	enqueueRetain: RpcMethod<[toolCallId: string, items: SupermemoryRetainInput[]], void>;
 	save: RpcMethod<
-		[content: string, metadata: Record<string, string | number | boolean>, customId?: string],
+		[content: string, metadata: Record<string, string | number | boolean>, id?: string],
 		SupermemoryDocument
 	>;
-	updateMemory: RpcMethod<[id: string, content: string, signal?: AbortSignal], string | undefined>;
-	forgetMemory: RpcMethod<[id: string, reason: string | undefined, signal?: AbortSignal], void>;
+	forgetMemory: RpcMethod<[id: string, signal?: AbortSignal], SupermemoryForgetResult>;
 };
