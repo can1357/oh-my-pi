@@ -5,6 +5,7 @@ import {
 	type AgentToolResult,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
 import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -26,15 +27,23 @@ function session(
 	manager?: AsyncJobManager,
 	agentId = "Main",
 	launch = false,
-	overrides: Record<string, unknown> = {},
+	extra: Partial<ToolSession> = {},
 ): ToolSession {
 	return {
 		cwd: process.cwd(),
-		settings: Settings.isolated({ "launch.enabled": launch, ...overrides }),
+		settings: Settings.isolated({ "launch.enabled": launch }),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => agentId,
+		...extra,
 	} as unknown as ToolSession;
+}
+
+/** A caller context whose latest turn made `elapse`'s wait call plus one call to each of `otherTools`. */
+function latestTurn(...otherTools: string[]): () => Message[] {
+	const calls = [{ id: "idle-wait", name: "wait" }, ...otherTools.map((name, i) => ({ id: `${name}-${i}`, name }))];
+	const message = { role: "assistant", content: calls.map(call => ({ type: "toolCall", ...call, arguments: {} })) };
+	return () => [message as unknown as Message];
 }
 
 // Lets every pending continuation run, so the wait reaches its next block before the test acts.
@@ -154,13 +163,13 @@ describe("wait", () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager));
+		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn("read") }));
 		const first = await elapse(tool, 5_000);
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
 		expect(notice(first)).toBeUndefined();
 		expect(report(first)).toContain("within 5.0s");
-		expect(report(first)).toContain("up to 10.0s");
+		expect(report(first)).toContain("Call `wait` with no other tool call: it then blocks up to 5m.");
 		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
 		await elapse(tool, 60_000);
@@ -194,65 +203,37 @@ describe("wait", () => {
 		build.resolve("done");
 	});
 
-	test("a configured window replaces the ladder for a wait on jobs, and back-to-back waits still get the reminder", async () => {
-		vi.useFakeTimers();
-		const manager = new AsyncJobManager({ onJobComplete: () => {} });
-		const build = Promise.withResolvers<string>();
-		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager, "Main", false, { "wait.windowMs": 600_000 }));
-		const first = await elapse(tool, 600_000);
-		expect(first.useless).toBe(true);
-		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
-		expect(notice(first)).toBeUndefined();
-		const second = await elapse(tool, 600_000);
-		expect(notice(second)).toContain("20m");
-		const third = await elapse(tool, 600_000);
-		expect(notice(third)).toContain("30m");
-		for (const result of [first, second, third]) {
-			expect(report(result)).toContain("No job finished within 10m");
-			expect(report(result)).toContain("up to 10m");
-		}
-		build.resolve("done");
-	});
-
-	test("a zero window never returns idle and hands over the job's result when it settles", async () => {
-		vi.useFakeTimers();
-		const manager = new AsyncJobManager({ onJobComplete: () => {} });
-		const build = Promise.withResolvers<string>();
-		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager, "Main", false, { "wait.windowMs": 0 }));
-		let settled = false;
-		const waiting = tool.execute("zero-window", {}).finally(() => {
-			settled = true;
-		});
-		await flushMicrotasks();
-		vi.advanceTimersByTime(3_600_000);
-		await flushMicrotasks();
-		expect(settled).toBe(false);
-		build.resolve("build complete");
-		const result = await waiting;
-		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "build complete" });
-		expect(result.useless).toBeUndefined();
-		expect(notice(result)).toBeUndefined();
-		expect(report(result)).not.toContain("back-to-back");
-	});
-
-	test("the largest window the setting accepts is the wait's deadline", async () => {
+	test("a back-to-back wait that is the only call of its turn takes the top rung at once", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager, "Main", false, { "wait.windowMs": 2_147_483_647 }));
-		const result = await elapse(tool, 2_147_483_647);
-		expect(result.useless).toBe(true);
-		expect(report(result)).toContain("No job finished within 24d20h");
+		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn() }));
+		// The first wait of a streak keeps the floor: the agent has not yet shown it has nothing else to do.
+		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
+		const top = await elapse(tool, 300_000);
+		expect(report(top)).toContain("within 5m");
+		expect(notice(top)).toContain("5m5s");
 		build.resolve("done");
 	});
 
-	test("rejects a configured window outside 0 to 2147483647", () => {
-		for (const bad of [-1, 2_147_483_648, NaN, Infinity, "600000"]) {
-			expect(() => Settings.isolated({ "wait.windowMs": bad })).toThrow(/Invalid wait\.windowMs/);
-		}
+	test("only the top-level interactive session is told to end its turn instead of waiting again", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const interactive = new WaitTool(session(manager, "Main", false, { tuiTranscript: true }));
+		expect(interactive.description).toContain("End your turn instead");
+		expect(report(await elapse(interactive, 5_000))).toContain(
+			"End your turn: results and messages start your next one.",
+		);
+		// Print mode exits and cancels the jobs when the turn ends; ACP holds results until the client's next prompt.
+		const headless = new WaitTool(session(manager));
+		expect(headless.description).not.toContain("End your turn");
+		const headlessReport = report(await elapse(headless, 5_000));
+		expect(headlessReport).not.toContain("End your turn");
+		expect(headlessReport).toContain("Call `wait` with no other tool call");
+		build.resolve("done");
 	});
 
 	test("labels a job that finished during the wait as delivered by it", async () => {
@@ -948,18 +929,6 @@ describe("wait", () => {
 			const tool = new WaitTool(session(new AsyncJobManager({}), "Child"));
 			expect(await idleText(elapse(tool, 5_000))).toContain("No reply within 5.0s");
 			expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
-		});
-
-		test("keeps the ladder floor under a configured window", async () => {
-			registerParentAndChild();
-			await ask();
-			vi.useFakeTimers();
-			for (const windowMs of [600_000, 0]) {
-				const tool = new WaitTool(session(new AsyncJobManager({}), "Child", false, { "wait.windowMs": windowMs }));
-				expect(await idleText(elapse(tool, 5_000))).toContain(
-					"No reply within 5.0s; a back-to-back wait allows up to 10.0s",
-				);
-			}
 		});
 
 		test("returns at once while the agent asked waits on the user, and blocks again once they answer", async () => {

@@ -1051,28 +1051,6 @@ export const cfgAsyncWidgets = register({
 	},
 });
 
-/**
- * Fixed window (ms) a `wait` on the caller's own background jobs blocks before it returns with nothing
- * new, in place of the built-in 5s to 5m ladder. Unset keeps the ladder. `0` arms no window: such a wait
- * ends only on a settled job, a finished service, a direct message or an interrupt. Reply waits and
- * waits on a service alone always keep the ladder. 2147483647 is the timer limit; a longer delay would
- * fire after 1 ms.
- */
-export const cfgWaitWindowMs = register({
-	id: "wait.windowMs",
-	type: "number",
-	default: undefined,
-	// The registry reads a non-number config value as the default, so quoted text must fail here.
-	validate: raw => {
-		if (raw === undefined || raw === null) return;
-		if (typeof raw !== "number" || !(raw >= 0 && raw <= 2_147_483_647)) {
-			throw new Error(
-				`Invalid wait.windowMs: expected a number of milliseconds from 0 to 2147483647, got ${Bun.inspect(raw)}.`,
-			);
-		}
-	},
-});
-
 export const cfgToolsXdev = register({
 	id: "tools.xdev",
 	type: "boolean",
